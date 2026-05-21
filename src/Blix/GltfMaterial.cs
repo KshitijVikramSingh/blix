@@ -20,4 +20,11 @@ public sealed record GltfMaterial(
     // drive the BRDF.
     GltfTexture? MetallicRoughnessTexture,
     float MetallicFactor,
-    float RoughnessFactor);
+    float RoughnessFactor,
+    // Emissive channel: light the surface emits on its own, additive over the
+    // BRDF result. Per the glTF spec the texture is sRGB-encoded (decoder's
+    // responsibility) and the factor is a linear-space multiplier in [0, inf).
+    // EmissiveTexture is null for materials that don't author one; the factor
+    // alone still drives uniform emission if non-zero.
+    GltfTexture? EmissiveTexture,
+    Vector3 EmissiveFactor);

@@ -189,6 +189,18 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             metallicRoughnessTexture = ExtractTexture(metallicChannel.Value.Texture, textureCache);
         }
 
+        var emissiveChannel = material.FindChannel("Emissive");
+        var emissiveFactor = Vector3.Zero;
+        GltfTexture? emissiveTexture = null;
+        if (emissiveChannel.HasValue)
+        {
+            // glTF Emissive channel exposes a vec3 factor under .Color (XYZ).
+            // FindChannel returns the texture in .Texture when one is bound.
+            var c = emissiveChannel.Value.Color;
+            emissiveFactor = new Vector3(c.X, c.Y, c.Z);
+            emissiveTexture = ExtractTexture(emissiveChannel.Value.Texture, textureCache);
+        }
+
         var result = new GltfMaterial(
             material.Name ?? $"material_{material.LogicalIndex}",
             baseColorFactor,
@@ -196,7 +208,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             normalTexture,
             metallicRoughnessTexture,
             metallic,
-            roughness);
+            roughness,
+            emissiveTexture,
+            emissiveFactor);
         materialCache[material.LogicalIndex] = result;
         return result;
     }
