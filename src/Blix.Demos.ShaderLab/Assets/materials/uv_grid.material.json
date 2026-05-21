@@ -1,0 +1,8 @@
+{
+  "pipeline": "scene.lit",
+  "uniforms": {
+    "uNormalScale": 0.0,
+    "uMetallicFactor": 0.0,
+    "uRoughnessFactor": 0.5
+  }
+}

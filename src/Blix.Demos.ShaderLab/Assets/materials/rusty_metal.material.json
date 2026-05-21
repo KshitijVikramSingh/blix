@@ -1,0 +1,18 @@
+{
+  "pipeline": "scene.lit",
+  "uniforms": {
+    "uNormalScale": 0.9,
+    "uMetallicFactor": 0.85,
+    "uRoughnessFactor": 0.45
+  },
+  "textures": {
+    "uTexture": {
+      "asset": "textures/rusty_metal",
+      "slot": 0
+    },
+    "uNormalMap": {
+      "asset": "textures/rusty_metal_n",
+      "slot": 3
+    }
+  }
+}

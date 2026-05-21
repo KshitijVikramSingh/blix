@@ -1,0 +1,18 @@
+{
+  "pipeline": "scene.lit",
+  "uniforms": {
+    "uNormalScale": 1.0,
+    "uMetallicFactor": 0.0,
+    "uRoughnessFactor": 0.85
+  },
+  "textures": {
+    "uTexture": {
+      "asset": "textures/stone_floor",
+      "slot": 0
+    },
+    "uNormalMap": {
+      "asset": "textures/stone_floor_n",
+      "slot": 3
+    }
+  }
+}

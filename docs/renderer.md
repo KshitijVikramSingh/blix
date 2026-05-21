@@ -1,0 +1,620 @@
+# Renderer
+
+The renderer is split into three layers below the game code:
+
+- **`Blix.Render`** — the engine-facing API. Game code talks to `Mesh`, `Material`, `MaterialResolver`, `SpriteBatch`, `Font`, `DebugDraw`. Low-level GL handles never leak into draw sites.
+- **`Blix.Graphics`** — the graphics command language. Typed handles (`PipelineHandle`, `VertexBufferHandle`, etc.), pipeline state, render surfaces, render passes, vertex layouts, shader sources, the GLSL include preprocessor.
+- **`Blix.Graphics.OpenGL`** — the OpenGL backend. Owns context lifetime, shader compilation, command execution, framebuffer setup, resource registry.
+
+Plus two helpers and the runtime adapter:
+- **`Blix.Graphics.Images`** — PNG/JPEG decode (StbImageSharp) and `ImageData → TextureHandle` upload.
+- **`Blix.Diagnostics`** — contribution-based debug system. Game code implements `IDebuggable`; the runtime hands it a `DebugContext` per frame; the OpenTK adapter renders the contributions through ImGui.
+- **`Blix.Runtime.OpenTK`** — OpenTK window, GL context, ImGui-backed diagnostics adapter. Implements `IRenderHost`, `IAudioHost`, `IDebugHost`.
+
+See [`architecture.md`](architecture.md) for the project graph and host contracts. See [`blix.md`](blix.md) for what lives above the renderer.
+
+## Engine-facing API (Blix.Render)
+
+The renderer's typed entry points. Game code rarely sees `Blix.Graphics` directly — it constructs `Mesh` + `Material` once at load, then calls `pass.DrawMesh(...)` per frame.
+
+### Mesh
+
+```csharp
+public sealed class Mesh
+{
+    public string Name { get; }
+    public VertexBufferHandle VertexBuffer { get; }
+    public IndexBufferHandle IndexBuffer { get; }
+    public int IndexCount { get; }
+    public Bounds3 Bounds { get; }
+}
+```
+
+Bundles vertex + index + count + mesh-local AABB under a name. Bounds are carried for downstream consumers (debug draw, culling) so they don't rescan vertex data.
+
+Construct from a `MeshData` (the asset-pipeline intermediate) via the `IGraphicsDevice.CreateMesh(MeshData, name)` extension in `Blix.Render`. Demo procedural geometry constructs `Mesh` directly from primitives in `Blix.Graphics/Primitives/`.
+
+### Material
+
+```csharp
+var material = new Material("scene.lit", litPipeline)
+    .SetTexture("uTexture", cubeTexture, slot: 0)
+    .SetTexture("uShadowMap", shadowMapTexture, slot: 1)
+    .SetUniform("uLightDirection", new Vector3Uniform(lightDirection));
+```
+
+Binds a pipeline to a fluent bag of shared uniforms and texture bindings. `Set*` upserts by name and returns `this`. Materials are intentionally mutable but conceptually frozen after construction — `Set*` exists for setup-time fluency, not per-frame mutation. Per-frame state goes through `perDrawUniforms` / `perDrawTextures` at the draw site.
+
+### MaterialResolver
+
+```csharp
+var resolver = new MaterialResolver(graphicsDevice, assets, SamplerDescription.LinearClamp)
+    .RegisterPipeline("scene.lit", litPipeline)
+    .RegisterPipeline("glass", glassPipeline);
+
+var concrete = resolver.Resolve(AssetId.Parse("materials/concrete"), m =>
+{
+    m.SetTexture("uShadowMap", shadowMapTexture, slot: 1);
+    m.SetTexture("uEnvMap", environmentCubemap, slot: 2);
+    m.SetTexture("uNormalMap", flatNormalTexture, slot: 3);  // runtime fallback
+});
+```
+
+Turns a `MaterialData` (loaded by `MaterialImporter` from a JSON material) into a runtime `Material`. Pipelines are referenced by name; the resolver knows them via `RegisterPipeline`. Texture asset references are resolved against the supplied `AssetDatabase` and cached: two materials referencing the same `AssetId` upload that image once.
+
+Runtime-only bindings (provided through the `Resolve(id, customize)` callback) apply *before* the JSON's bindings, so the JSON cleanly overrides defaults while leaving shared bindings (shadow map, env cubemap) in place.
+
+### DrawMesh
+
+```csharp
+pass.DrawMesh(cubeMesh, sceneMaterial, perDrawUniforms:
+[
+    new ShaderUniform("uModel", new Matrix4x4Uniform(cubeModel)),
+    viewUniform,
+    projectionUniform,
+]);
+```
+
+The extension on `RenderPassBuilder` (defined in `Blix.Render`). Merges material state with per-draw overrides — material first, then per-draw. The same uniform set twice means per-draw wins (`glUniform` call order: second wins, which gives intuitive precedence). Texture bindings follow the same rule.
+
+### SpriteBatch + Font + DebugDraw
+
+Covered below in their own sections. All three are `Blix.Render` types built on top of `IGraphicsDevice`.
+
+## Graphics command language (Blix.Graphics)
+
+`IGraphicsDevice` is the device interface (`Create*` / `Destroy*` for every resource type, `Execute(RenderCommandList)`, `SnapshotResources()`). The OpenGL backend implements it; the API stays byte-oriented (`ReadOnlySpan<byte>`) so no file I/O crosses the device boundary.
+
+### Handles
+
+Every resource is referenced through an opaque handle: `VertexBufferHandle`, `IndexBufferHandle`, `TextureHandle`, `ShaderProgramHandle`, `PipelineHandle`, `RenderSurfaceHandle`. Backend-owned; consumers see only the integer id.
+
+### Render commands + passes
+
+`RenderCommandList` is the per-frame submission unit. Inside `IGameLoop.OnRender` the game builds one:
+
+```csharp
+commandList.Pass("scene",
+    new RenderPassDescription(
+        sceneSurface.Handle,
+        ClearColors: [bgColor],
+        ClearDepth: true),
+    pass =>
+    {
+        foreach (var obj in opaqueObjects)
+            pass.DrawMesh(obj.Mesh, obj.Material, perDrawUniforms: [...]);
+    });
+```
+
+`Pass(name, description, record)` creates a named pass that records `DrawIndexed` commands. Pass names appear in `FrameDebugPacket` for diagnostics. The OpenGL backend executes passes sequentially.
+
+`RenderPassDescription.ClearColors` is `IReadOnlyList<GraphicsColor?>` with one ergonomic rule:
+- **Empty list**: no color clear.
+- **1 element**: broadcast to every color attachment.
+- **N elements** (N > 1): per-attachment — `ClearColors[i]` either clears attachment `i` to that color or preserves it (`null`).
+
+Clears use `glClearBufferfv(GL_COLOR, i, value)` per attachment. Depth clears use `glClearBufferfv(GL_DEPTH, 0, [1.0])` with `glDepthMask(true)` first so the clear isn't masked by a previous pipeline's `WriteEnabled = false`.
+
+### Pipelines
+
+```csharp
+var pipeline = device.CreatePipeline(
+    new PipelineDescription(
+        shaderProgram: shader,
+        vertexLayout: VertexPosition3NormalTexture.Layout,
+        topology: PrimitiveTopology.Triangles,
+        depth: DepthState.LessEqualWrite,
+        rasterizer: RasterizerState.BackFaceCulling,
+        blend: BlendState.Disabled),
+    name: "lit");
+```
+
+`PipelineDescription.ColorBlends` is `IReadOnlyList<BlendState>` for MRT support — convenience constructors wrap a single `BlendState` for the common case. The backend applies `state[i]` to color attachment `i` via `glEnable/glDisable(IndexedEnableCap.Blend, i)`. Color attachments beyond the list default to `BlendState.Disabled`.
+
+`RasterizerState.NoCulling` and `RasterizerState.BackFaceCulling` cover the two common cases. `DepthState` has `Disabled`, `LessEqualWrite`, and `LessEqualNoWrite` (skybox-style). `BlendState` has `Disabled` and `AlphaBlend`.
+
+### Vertex types
+
+Built-in vertex layouts (in `Blix.Graphics`):
+
+| Type | Stride | For |
+| --- | --- | --- |
+| `VertexPositionColor` | 28 | Plain coloured lines/wires |
+| `VertexPositionTexture` | 20 | Simple textured quads (legacy) |
+| `VertexPosition3Color` | 28 | Coloured 3D lines (DebugDraw) |
+| `VertexPosition3Texture` | 20 | Textured 3D without normals |
+| `VertexPosition3TextureColor` | 36 | SpriteBatch + UI text |
+| `VertexPosition3NormalTexture` | 32 | Static lit meshes (OBJ assets) |
+| `VertexPosition3NormalTextureSkin4Tangent` | 80 | Skinned meshes with per-vertex tangents (glTF) |
+
+Each layout has `Layout` (static `VertexLayout`), `Pack(vertices)` (bytes for `VertexBufferData`), and `WriteVertex(span, v)` helpers.
+
+### Uniforms
+
+`ShaderUniformValue` discriminates:
+- `FloatUniform`, `Vector2Uniform`, `Vector3Uniform`, `Vector4Uniform`
+- `Matrix4x4Uniform`, `Matrix4x4ArrayUniform` (the latter drives bone palettes)
+
+Pass to `Material.SetUniform` or as per-draw overrides. The OpenGL backend's matrix upload uses a pre-sized buffer (64 mat4 = 1024 floats, sufficient for any practical bone count).
+
+### Primitives
+
+Reusable mesh data in `Blix.Graphics.Primitives.{Icosphere, Cylinder, Torus, TorusKnot, CapsuleMesh, FullscreenQuad, PlaneMesh}`. Each exposes `Vertices` (`VertexPosition3NormalTexture[]`) and `Indices` (`ushort[]`). The demo loads `cube.obj` from disk (so the asset pipeline gets exercised); the other primitives are constructed in code.
+
+### Shader sources
+
+`ShaderSources(VertexSource, FragmentSource, VertexName, FragmentName)` carries text + optional labels. Names flow into the resource registry and into OpenGL object labels (`glObjectLabel` when `GL_KHR_debug` is available — typically on Windows/Linux; macOS uses the labels internally but they don't surface to GL debuggers).
+
+The OpenGL backend reports compile failures with the stage, source name, the GL info log, and the full source dumped with line numbers. Link failures include both stage labels.
+
+### GLSL include preprocessor
+
+`Blix.Graphics.GlslPreprocessor.Preprocess(source, readInclude)` inlines `#include "filename"` directives. Recursive; cycle-detected via a visiting set. The file-system access stays in the caller via the `readInclude` callback so the engine layer remains FS-free. The demo wires its shaders through it; `pbr_core.glsl` is `#include`d by both `cube.frag` (static lit) and `skin.lit.frag` (skinned lit) so they share the entire PBR/lighting core.
+
+Limits: double-quoted `#include "name"` form only. No `#line` directives output, so compile errors in inlined files report line numbers from the inlined-position perspective.
+
+## Render surfaces + attachments
+
+Render passes target either `RenderSurfaceHandle.Default` (the window framebuffer) or an offscreen `RenderSurface` created by `IGraphicsDevice.CreateRenderSurface`. Surfaces declare one or more color attachments and an optional depth attachment.
+
+```csharp
+var scene = graphicsDevice.CreateRenderSurface(new RenderSurfaceDescription(
+    Name: "scene",
+    Size: new MatchDefaultRenderSurfaceSize(),
+    ColorAttachments:
+    [
+        new ColorAttachmentDescription(TextureFormat.Rgba16F, SamplerDescription.LinearClamp), // HDR
+        new ColorAttachmentDescription(TextureFormat.Rgba8,    SamplerDescription.LinearClamp), // luminance
+        new ColorAttachmentDescription(TextureFormat.Rgba8,    SamplerDescription.LinearClamp), // normals
+    ],
+    Depth: new DepthTexture(SamplerDescription.LinearClamp)));
+```
+
+`MatchDefaultRenderSurfaceSize` follows the runtime-owned framebuffer size — the backend preserves the `RenderSurfaceHandle` and every attachment `TextureHandle` across resize by rebuilding the underlying GL framebuffer + attachment textures. `FixedRenderSurfaceSize(w, h)` opts out.
+
+Fragment shaders write to color attachments via explicit `layout (location = N) out` declarations. The backend emits `glDrawBuffers([...N])` so every attachment receives writes; for depth-only surfaces (0 color attachments) it emits `glDrawBuffer(NONE)`.
+
+### Depth attachments
+
+Three forms:
+- `DepthTexture(sampler)` — sampleable depth, `sampler2D` or `sampler2DShadow` (the latter when `sampler.Compare = true`).
+- `DepthCubeFace(cube, face)` — one face of an existing cube depth texture, used for omnidirectional shadow mapping.
+- `DepthRenderbuffer` — write-only, no sampling; faster but unused in the current demo.
+
+### Cubemaps
+
+| API | For |
+| --- | --- |
+| `CreateTextureCube(faceSize, sampler, [...face data])` | RGBA8 environment cubemap (legacy LDR path) |
+| `CreateTextureCubeHdr(faceSize, sampler, [...face Half data])` | Rgba16F linear HDR environment cubemap with mip chain |
+| `CreateTextureCubeDepth(faceSize, sampler)` | Depth cubemap for point-light shadow mapping (sampled as `samplerCubeShadow`) |
+
+### Attachment naming
+
+User-created resources accept an optional `string? name`; when omitted the backend synthesizes `"texture#7"` etc. Render-surface attachment textures get derived names from the parent: `"{surfaceName}.color[i]"` and `"{surfaceName}.depth"`. `TextureKind` (in `ResourceRegistrySnapshot`) distinguishes `UserUploaded`, `RenderSurfaceColor`, `RenderSurfaceDepth` for diagnostics filtering.
+
+## Frame pipeline (the demo's spine)
+
+Every pass in `Blix.Demos.ShaderLab`, in execution order. The ShaderLab demo is the single best place to see how the renderer is exercised end-to-end.
+
+| # | Pass name | Target | Reads | What it does |
+| --- | --- | --- | --- | --- |
+| 1 | `shadow` | `shadowSurface` (2048², depth) | `lightViewProjection` | Sun directional shadow map. Back-face cull. Skinned + static casters. |
+| 2 | `shadow.point.{i}.face{j}` | `pointShadowFaceSurfaces[i, j]` (512², depth) | point light VP per face | Per-shadow-casting point light, six per-face passes into one depth cubemap. Up to 2 casters. |
+| 3 | `shadow.spot.{i}` | `spotShadowSurfaces[i]` (1024², depth) | spot light VP | One pass per shadow-casting spot. Up to 4 casters. |
+| 4 | `scene` | `sceneSurface` MRT (HDR/luminance/normals + depth) | sun + spot + point shadow maps, env cubemap | Skybox + opaque PBR lit pass + skinned PBR lit pass. |
+| 5 | `fur` | `sceneSurface` | scene | Multi-shell fur on demo's bunny. |
+| 6 | `hologram` | `sceneSurface` | scene | Rim-lit hologram + scanlines + glitch on demo's suzanne. |
+| 7 | `scene.copy` | `sceneCopySurface` (HDR) | `sceneSurface.color[0]` | Snapshots the opaque HDR scene for glass refraction sampling. |
+| 8 | `glass` | `sceneSurface.color[0]` | `sceneCopySurface`, env cubemap | Refractive/reflective torus knot rendered back into HDR scene. |
+| 9 | `bloom.bright[i]` × 3 | per-level bright (HDR, half/quarter/eighth) | `sceneSurface.color[0]` | Three-level bloom bright-pass extraction. |
+| 10 | `bloom.blurH[i]` × 3, `bloom.blurV[i]` × 3 | bright + temp ping-pong | per-level bright | Separable Gaussian per level. |
+| 11 | `present` *or* `present.bloom` | Default framebuffer | `sceneSurface`, bloom levels | Composite + tone map + linear→sRGB. The `present.bloom` variant sums the three bloom levels; `present` is the no-bloom debug path. |
+| 12 | `debug` | Default framebuffer | — | Appended by `Window` when diagnostics are enabled. Lines/AABBs/grid/frustum from `debug.Draw.*` commands. |
+| 13 | `hud` | Default framebuffer | — | SpriteBatch + Font HUD overlay (FPS, camera position, keys hint). |
+
+The `present` mode is driven by the diagnostics UI's view dropdown — selecting "shadow map" or "normals" or "bloom 0" routes that surface to the present pass instead of the composited scene.
+
+## PBR shading
+
+The lit pipeline (`cube.frag` for static, `skin.lit.frag` for skinned, both `#include`-ing `pbr_core.glsl`) runs Cook-Torrance with:
+
+- **GGX (Trowbridge-Reitz) normal distribution** with `α = roughness²` for perceptual-linear roughness.
+- **Smith geometry** with Schlick-GGX masking-shadowing (`k = (roughness + 1)² / 8` for direct lighting).
+- **Schlick fresnel** with `F0 = mix(0.04, baseColor, metallic)` — dielectrics get the standard 4% reflectance, metals use their albedo as F0.
+- **Energy-conserving Lambertian diffuse**: `(1 - F) × (1 - metallic) × albedo / π`.
+
+### Material inputs (glTF metallic-roughness convention)
+
+| Uniform | Source |
+| --- | --- |
+| `uTexture` (sRGB → linear at sample) | baseColor texture or white fallback |
+| `uMetallicRoughnessMap` | G channel = roughness, B channel = metallic. 1×1 `(0, 255, 255)` neutral when no texture. |
+| `uNormalMap` + `uNormalScale` | Tangent-space normal map (sRGB-flat fallback when no texture; `uNormalScale = 0` disables sampling). |
+| `uBaseColorFactor` | `Vector4` multiplier on sampled baseColor. |
+| `uMetallicFactor`, `uRoughnessFactor` | Scalar multipliers on the MR texture samples. |
+| `uEnvMap` + `uEnvMapMipCount` | Cubemap for IBL specular (textureLod-driven by roughness). |
+
+### IBL (image-based lighting)
+
+The env cubemap is auto-mipmapped (linear box filter). Specular IBL samples at `lod = roughness × (mipCount - 1)`; diffuse irradiance samples at the highest mip (most blurred). Visually correct in trend (roughness blurs reflections) but not physically exact — the proper split-sum approximation (GGX-pre-filtered specular cubemap + 2D BRDF LUT) is a documented follow-up that would replace the simple mip-LOD heuristic without restructuring anything.
+
+### sRGB and linear space
+
+`uTexture` and `uEnvMap` samples are decoded from sRGB to linear before lighting math. All lighting runs in linear space. The final composite/tone-map shader does linear → sRGB encode for display.
+
+### Tangent-space normal mapping
+
+For static meshes (`cube.frag`), the tangent frame is synthesised per-fragment from screen-space derivatives (`dFdx` / `dFdy`) of world position + UV. Cheap and works for low-frequency normal-map detail. The trade-off is constant-per-triangle TBN; very high-frequency normal-map detail can show faint triangle boundaries.
+
+For skinned meshes (`skin.lit.frag`), tangents come from the glTF `TANGENT` accessor (vec4: XYZ direction + W bitangent sign, baked by the asset's authoring tool — typically MikkTSpace). When an asset doesn't provide them, the importer emits `(0, 0, 0, 0)` as a sentinel and the fragment shader falls back to derivative synthesis.
+
+## Shadows
+
+Three shadow paths, all sampled in `pbr_core.glsl` via PCSS.
+
+### Directional sun
+
+One 2048² depth render surface, sampled as `sampler2DShadow` with `Compare: true`. The shadow pass uses back-face culling and a slope-scaled bias.
+
+The light frustum is hand-sized to the demo scene (7×7 ortho, near 0.1, far 16). A real engine would fit to scene bounds or use cascades.
+
+### Point cubemap
+
+Up to **2** shadow-casting point lights. Each gets a depth cubemap (`CreateTextureCubeDepth`) with `samplerCubeShadow` sampling. Per-frame work: 6 passes per caster (one per cube face), each with the standard OpenGL cubemap orientation matrix. Far plane = `light.Range` so the cubemap depth and the shader's normalised reference depth agree.
+
+### Spot
+
+Up to **4** shadow-casting spot lights. Each gets a 1024² depth surface. Per-frame: one pass per caster with the spot's view-projection.
+
+### PCSS sampling
+
+`pbr_core.glsl` implements three-stage PCSS for the directional + spot paths:
+
+1. **Blocker search** — 8 Poisson taps at a fixed search radius. Count how many are shadowed.
+2. **Penumbra estimation** — use the blocker fraction as a proxy for occluder proximity, scale a per-fragment kernel radius from it.
+3. **PCF with the variable-width kernel** — 16 Poisson taps at the per-fragment radius.
+
+Result: shadows close to their occluder are sharp; shadows farther away widen and soften naturally.
+
+Point cubemap shadows use a direction-space PCSS analog: per-fragment tangent basis perpendicular to the light-to-fragment direction, Poisson disk offsets projected onto that tangent plane, blocker search + variable-kernel PCF.
+
+Back-facing fragments (`dot(N, L) ≤ 0`) skip the shadow lookup and use `shadow = 1`. Reason: with front-face culling in the shadow pass, the shadow map records the back-of-geometry from the light's POV. A back-facing fragment sits *at* that recorded depth, so the depth compare is borderline-stable and produces noise. Back-faces can't be cast-shadowed anyway, so the gate is physically correct and removes the noise source.
+
+### Limits
+
+- Per-spot and per-cubemap shadow-map sampling uses fixed-index unrolling in the shader (`if (i == 0) ... else if (i == 1) ...`) because dynamic indexing of sampler arrays isn't portable across drivers. Easy to extend; just adds branches.
+- Single sun caster (no cascades, no atlasing).
+- Bias is shader-tuned for the demo; no backend-level `glPolygonOffset` wrapper yet.
+- PCSS blocker search uses the compare-result proxy, not true blocker depth. The textbook fix is a parallel `sampler2D` binding to the same shadow texture; deferred.
+
+## HDR pipeline
+
+The scene color attachment is `Rgba16F` because lit-pass output routinely exceeds 1.0 on specular highlights and bright reflective surfaces. Luminance and normal debug attachments stay `Rgba8`.
+
+### Environment cubemap
+
+`CreateTextureCubeHdr` allocates a `Rgba16F` cubemap and uploads `Half`-typed face data. The demo's `GenerateProceduralCubemapHdr` writes six 256² faces with a linear HDR sky + sun spot at ~12× (no clamp). Auto-mipmapped via `SamplerDescription.LinearClampMipmap` so `log2(256) + 1 = 9` mip levels are available for the IBL roughness-LOD path.
+
+Two consumers:
+1. The **skybox pass**, drawn inside `scene`. Pipeline uses `DepthState.LessEqualNoWrite` and `RasterizerState.NoCulling`; the skybox vertex shader forces `clip.z = clip.w` so every fragment lands at the far plane and only paints where depth is still 1.
+2. **PBR IBL** in the lit pass — `SampleEnvSpecular(R, roughness)` uses `textureLod` with roughness-driven mip selection.
+
+The cubemap doesn't follow `lightDirection` at runtime. A living-light environment would need per-frame regeneration; deferred.
+
+### Bloom
+
+Three-level Gaussian chain. Each level has two surfaces (bright + temp), both `Rgba16F` at half / quarter / eighth of the default surface size.
+
+1. **Bright pass** per level: reads the full-resolution HDR scene, writes to that level's bright surface, applying a soft >1.0 threshold. Bilinear filtering handles the resolution reduction.
+2. **Separable Gaussian** per level: horizontal writes to temp, vertical reads temp and writes back to bright. After both passes, the bright surface holds the fully blurred bloom for that level.
+3. **Composite** in `present.bloom`: HDR scene + scaled bloom levels (`uBloomStrength`), then tone-map with `uExposure`, then linear→sRGB.
+
+The diagnostics UI exposes bloom debug levels (`bloom0`, `bloom1`, `bloom2`) — when those modes are selected, the bloom chain still runs and one intermediate level is presented directly instead of the composite.
+
+## Glass refraction
+
+The glass torus knot is the demo's hero refractive surface. It can't sample the HDR scene buffer while writing to it, so the renderer takes a snapshot via the `scene.copy` pass between `scene` and `glass`. The glass shader:
+
+- Samples the opaque scene snapshot offset by a screen-space refraction vector derived from surface normal and `uThickness`.
+- Samples the environment cubemap reflection along the reflected view vector.
+- Mixes refraction and reflection using Schlick's Fresnel approximation with base reflectance `uF0`.
+- Applies a slight `uTint` to the refracted contribution for a faint bluish-green glass look.
+
+The glass pass writes back into the HDR scene buffer so bloom and the final composite see glass highlights naturally. It also writes depth — the torus knot self-overlaps heavily while rotating, and without depth writes the self-overlapping fragments would draw in submission order and appear to cut through their own surface.
+
+The torus knot is intentionally excluded from the shadow pass; its refractive, self-overlapping geometry made the shadow map noisier than useful. A future glass-on-opaque shadow pass would render the silhouette only.
+
+## Sprite batching, text, and UI
+
+### SpriteBatch
+
+`Blix.Render.SpriteBatch` is the 2D drawing primitive. MonoGame-shaped: no `Sprite` type — `Draw(TextureHandle, ...)` is the API. Sprites are textured quads parameterised by texture, position, size, optional source rect, color tint, depth, and a `flipV` knob.
+
+```csharp
+spriteBatch.Begin(uiCamera.GetViewProjection(frame.Width, frame.Height), SpriteSortMode.Deferred);
+spriteBatch.Draw(cubeTexture, position: new Vector2(-64, -64), size: new Vector2(128, 128));
+spriteBatch.Draw(otherTexture, position, size, sourceRect: new Rect(0, 0, 32, 32), color: tint, depth: 0.5f);
+spriteBatch.End(pass);
+```
+
+`Begin` takes a precomputed view-projection rather than a camera so SpriteBatch can live in `Blix.Render` without depending on the `Blix` layer above it (where `Camera2D` lives). The caller (typically owning a `Camera2D`) resolves the matrix and hands it in.
+
+Capacity is 4 096 sprites per `Begin/End` (16 384 vertices, 24 576 indices — pre-baked sequential quad index buffer). Vertex format is `VertexPosition3TextureColor` (36-byte stride).
+
+#### Sort modes
+
+`SpriteSortMode` controls draw order and batch grouping:
+- `Deferred` *(default)* — preserves submission order. Batching breaks every time the texture changes between consecutive draws.
+- `BackToFront` — sort by depth descending. Correct for alpha-blended sprites that overlap.
+- `FrontToBack` — sort by depth ascending. Early-Z-friendly for opaque sprites.
+- `Texture` — sort by `TextureHandle.Id`. Minimises batch breaks at the cost of submission order.
+
+After sorting, `End` walks the list partitioning by `TextureHandle` — each partition becomes one `DrawIndexed` call with `perDrawTextures: [currentTexture]`.
+
+#### flipV
+
+`Draw(..., flipV: true)` (the default) matches textures pre-flipped by `ImageLoader.LoadRgba32` (the stb_image default). The font baker doesn't pre-flip its atlas (the bitmap is authored directly in code with rows ordered top-to-bottom), so the HUD path uses `flipV: false`.
+
+### Font + text
+
+`Blix.Assets.FontImporter` is an `IAssetImporter<FontData>` (dispatch key `font.json`). It reads a small `font.json` spec file that points at a TTF + the pixel sizes to bake:
+
+```json
+{ "ttf": "Roboto-Regular.ttf", "sizes": [14, 20, 28, 40, 56] }
+```
+
+The TTF path resolves relative to the spec file. Each requested size gets its own square atlas baked via StbTrueTypeSharp (auto-sized from 128 up to 4096 via power-of-two retry). The result is `FontData` — CPU-side: per-size alpha bitmaps + glyph table (atlas rect, offset, advance) + scaled v-metrics. Game code loads it like any other asset: `assets.Load<FontData>(AssetId.Parse("fonts/roboto"))`.
+
+`Blix.Render.Font.Upload(device, fontData)` allocates one `TextureHandle` per baked size. Alpha is expanded to RGBA8 = `(255, 255, 255, a)` on upload so the existing sprite shader tints text via vertex color with no new shader. `Font.NearestSize(pixelSize)` picks the closest baked size for HiDPI selection.
+
+`SpriteBatchUiExtensions` adds `DrawText` (newline-aware), `MeasureText`, `DrawSolidRect`, and `DrawNineSlice`. All route through `SpriteBatch.Draw`; the partition-by-texture batching collapses a HUD with text + panel + 9-slice frame to one draw per unique texture.
+
+#### HiDPI conventions
+
+Screen-space ortho is `GraphicsMatrices.CreateOrthographicOffCenter(0, width, height, 0, -1, 1)` — origin top-left, Y growing down. Pass *logical* width/height (`Host.LogicalSize`), not framebuffer pixels — units stay in points across DPI scales.
+
+`DrawText` / `MeasureText` take a `dpiScale` (= framebuffer / logical width). The atlas pick uses `pixelSize × dpiScale` so retina lands on a higher-res baked size; the quad still renders at logical size, giving 1:1 atlas-pixel to physical-pixel mapping. The demo bakes Roboto at `[14, 20, 28, 40, 56]` to cover 1× + 2× DPI of the three nominal display sizes.
+
+#### Limits
+
+- ASCII 32–126 only. No CJK, no emoji, no Latin-1 supplement, no shaping. Promoting to Unicode-aware would replace `BakeFontBitmap` with `PackFontRange` over multiple codepoint ranges.
+- No kerning, no ligatures, no complex shaping. Pen advance is straight `xadvance`.
+- One `Font` value per font face. Multi-font fallback would compose `Font` instances per codepoint at draw time.
+- No retained-mode UI tree, no layout solver, no theming.
+- One `TextureHandle` per baked size. A custom shelf packer could pack every size into one mega-atlas; SpriteBatch's per-texture batching makes the per-size approach OK.
+- Bitmap-only. No SDF / MSDF.
+- No text wrapping / alignment / RTL. `\n` wraps but there's no width-based auto-wrap.
+- Atlas is RGBA8 not R8 (3× memory cost). Adding `TextureFormat.R8` + a font-specific shader sampling `r` is a small follow-up.
+
+## Diagnostics
+
+`Blix.Diagnostics` is a *contribution* system, not a second engine lifecycle. A runtime object implements `IDebuggable` and contributes to a per-frame `DebugContext`:
+
+```csharp
+public interface IDebuggable
+{
+    string DebugName { get; }
+    void Debug(DebugContext debug);
+}
+```
+
+The context has scoped channels:
+
+```csharp
+using (debug.Scope("Lighting"))
+{
+    debug.Values.Value("Direction", lightDirection);
+    lightIntensity = debug.Controls.Float("Direct", lightIntensity, 0.0f, 3.0f);
+}
+
+using (debug.Scope("Post"))
+{
+    presentMode = debug.Controls.Enum("Present", presentMode, PresentModeLabels);
+}
+```
+
+`DebugSystem` owns `DebugState`, pending control values, and the current frame's collected entries. Scoped paths such as `ShaderLab/Lighting/Direct` are stable keys — the current ImGui UI uses them, and the same keys would feed any future editor/debugger packet format.
+
+### Channels
+
+- **`Values`** — read-only state (positions, vectors, scalars).
+- **`Controls`** — writable toggles, floats, enums, one-frame buttons.
+- **`Draw`** — line, AABB, grid, frustum commands collected into a runtime-appended pass.
+
+### Lifecycle
+
+`Blix.Runtime.OpenTK.Window` creates a `DebugSystem` when the game loop implements `IDebuggable`. Per frame:
+
+1. Begin the debug frame and run contributors.
+2. Let the game render normally.
+3. Append one runtime-owned `debug` pass if `debug.Draw` contains commands.
+4. Render the ImGui diagnostics UI after command execution and before buffer swap.
+
+The OpenTK ImGui adapter is intentionally thin. Game code does not call ImGui directly — it contributes generic controls and state through `DebugContext`.
+
+### IDebugHost
+
+`Window` implements `IDebugHost`, exposing `CurrentDebug` (the active `DebugContext`). Game code reads it to gate per-frame `debug.Draw.*` calls behind dev mode:
+
+```csharp
+if ((Host as IDebugHost)?.CurrentDebug is { State.ShowDebugDraw: true } debug)
+{
+    debug.Draw.Grid("World Grid", Vector3.Zero, 4.0f, 8, gray);
+    debug.Draw.Aabb("Bunny", worldBounds.Min, worldBounds.Max, green);
+}
+```
+
+### Frame debug packets
+
+`IRenderer.Execute(RenderCommandList)` returns a `FrameDebugPacket` describing what the backend just executed: pass names + resolved sizes + target render surfaces + clear flags + per-draw pipeline/buffer/uniform/texture metadata. `Window` forwards each packet — along with a `ResourceRegistrySnapshot` from `IGraphicsDevice.SnapshotResources()` — to an optional `IRuntimeDiagnosticsSink` (in `Blix.Core`). `ConsoleFrameDebugSink` is a minimal sink that prints a per-frame summary at a configurable cadence, resolving target render-surface names through the snapshot.
+
+### Resource registry
+
+Every backend resource is named at creation time. `IGraphicsDevice.SnapshotResources()` returns a `ResourceRegistrySnapshot` with entries for vertex buffers, index buffers, textures, shader programs, pipelines, and render surfaces, plus `Find*(handle)` lookups for diagnostic correlation. Snapshots are built on demand and never cached.
+
+Names are propagated to OpenGL as object labels via `glObjectLabel` (when `GL_KHR_debug` is available — typically not on macOS, but on Windows/Linux they surface in RenderDoc / Nsight / `KHR_debug` callbacks). Labels are re-applied on framebuffer-resize rebuilds so they survive viewport changes.
+
+## Debug draw
+
+`Blix.Render.DebugDraw` is the renderer-side line batch. Construction allocates a dynamic vertex buffer at max capacity (64 000 vertices = 32 000 lines), a pre-baked sequential index buffer, an embedded debug shader/pipeline, and a `Material` wrapping them.
+
+Game code rarely owns a `DebugDraw` directly — it contributes commands through diagnostics, and the runtime's `Window` owns the actual `DebugDraw` instance:
+
+```csharp
+debug.Draw.ViewProjection = viewProjection;
+debug.Draw.Grid("World Grid", Vector3.Zero, 4.0f, 8, gray);
+debug.Draw.Frustum("Light Frustum", lightViewProjection, yellow);
+debug.Draw.Aabb("Bunny", worldBounds.Min, worldBounds.Max, green);
+```
+
+`Window` converts collected commands into one appended `debug` pass and submits through its runtime-owned `DebugDraw`.
+
+`Submit` uploads accumulated vertices via `IGraphicsDevice.UpdateVertexBuffer(handle, bytes, byteOffset)`, issues one `DrawIndexed`, and clears the buffer for next frame.
+
+Available primitives: `Line`, `Aabb`, `Grid`, `Frustum`. Wireframe sphere and shapes-with-fill are deferred until something needs them.
+
+`DebugDraw` runs **depth-disabled** by default — lines always render on top of the scene. This is the right default for camera/frustum/bounds debugging where occluded geometry still needs to be visible.
+
+### Derived bounds
+
+Imported mesh bounds are computed by `ObjImporter` into `MeshData.Bounds`; `IGraphicsDevice.CreateMesh(MeshData)` carries those into `Blix.Render.Mesh`. World-space debug AABBs are derived per frame:
+
+```csharp
+var worldBounds = BoundsTransform.Transform(mesh.Bounds, model);
+debug.Draw.Aabb(name, worldBounds.Min, worldBounds.Max, color);
+```
+
+`BoundsTransform` (in `Blix.Diagnostics`) transforms the 8 local AABB corners and rebuilds the enclosing world AABB. Intentionally conservative for rotating meshes; avoids hand-authored demo-specific boxes.
+
+## Asset pipeline
+
+Source assets (`.png`, `.jpg`, `.obj`, `.glb`, `.gltf`, `.wav`, `.ttf`, `.json`) are converted to runtime intermediates by importers, then uploaded to the device. The engine deliberately doesn't let runtime code load every source format directly — that gets harder to manage once a half-dozen asset types exist.
+
+### Three layers
+
+1. **Source** — what an artist or tool produces.
+2. **Importer** — `IAssetImporter<TOutput>.Import(AssetImportContext) → TOutput`. Pure decode.
+3. **Runtime intermediate** — plain data records (`ImageData`, `MeshData`, `MaterialData`, `FontData`, `AudioClipData`, `GltfModel`). The device or `Blix.Render` turns them into resource handles.
+
+**Convention:** runtime-intermediate types live with their *consumer* subsystem, not with the importer. `ImageData` lives in `Blix.Graphics.Images`, `AudioClipData` lives in `Blix.Audio`, `GltfModel` lives in `Blix` (where the skinned-rendering layer consumes it). `MeshData`, `MaterialData`, and `FontData` happen to live in `Blix.Assets` because their consumers (`Blix.Render`) reference `Blix.Assets` directly.
+
+### AssetDatabase
+
+```csharp
+var assets = new AssetDatabase()
+    .RegisterImporter(new TextureImporter())
+    .RegisterImporter(new ObjImporter())
+    .RegisterImporter(new MaterialImporter())
+    .RegisterImporter(new GltfImporter())
+    .RegisterImporter(new WavImporter())
+    .RegisterImporter(new FontImporter())
+    .LoadManifest(Path.Combine(AppContext.BaseDirectory, "Assets", "manifest.json"));
+
+var concrete = assets.Load<MaterialData>(AssetId.Parse("materials/concrete"));
+var ambient  = assets.Load<AudioClipData>(AssetId.Parse("audio/ambient_chord"));
+var hudFont  = assets.Load<FontData>(AssetId.Parse("fonts/roboto"));
+```
+
+`AssetId.Parse` validates at construction (rejects empty, leading/trailing slashes, `..`, whitespace). Type safety: a method taking `AssetId` can't accept a stray string.
+
+Caching is deferred at the database layer — every `Load` re-invokes the importer. Texture caching lives at the `MaterialResolver` layer (one upload per `AssetId`) — a separate responsibility from "loaded the source file" because GPU upload is what's expensive to repeat.
+
+The asset database is intentionally GPU-free — it knows about disk → data, not data → GPU. There's no `Register<T>` direct-registration path either; every asset is declared in the manifest. Programmatically-generated runtime resources (procedural textures, env cubemap) bypass the asset pipeline entirely and become `TextureHandle`s directly via the device.
+
+### Importers
+
+| Name (dispatch key) | Output | Notes |
+| --- | --- | --- |
+| `texture.rgba8` | `ImageData` | PNG/JPEG via StbImageSharp. |
+| `static-mesh.obj` | `MeshData` | OBJ parser. Position, normal (synthesized if missing), UV (spherical fallback). Indices `ushort`. |
+| `material.json` | `MaterialData` | Pipeline-by-name + uniforms (float, Vector2/3/4) + texture bindings (by AssetId). |
+| `audio.wav` | `AudioClipData` | RIFF/WAVE PCM. 8-bit unsigned + 16-bit signed, mono + stereo, any rate. Rejects float/24-bit/ADPCM. |
+| `font.json` | `FontData` | TTF + per-font baked pixel sizes via StbTrueTypeSharp. Source file is a small JSON spec pointing at the TTF; see "Font + text" above. |
+| `rigged-model.gltf` | `GltfModel` | Skinned mesh + skeleton + animations + materials + textures. SharpGLTF-backed. |
+
+### Manifest
+
+```json
+{
+  "assets": [
+    { "id": "textures/cube",       "importer": "texture.rgba8",     "source": "cube_texture.png" },
+    { "id": "models/cube",         "importer": "static-mesh.obj",   "source": "cube.obj" },
+    { "id": "models/fox",          "importer": "rigged-model.gltf", "source": "models/fox.glb" },
+    { "id": "materials/glass",     "importer": "material.json",     "source": "materials/glass.material.json" },
+    { "id": "audio/ambient_chord", "importer": "audio.wav",         "source": "audio/ambient_chord.wav" },
+    { "id": "fonts/roboto",        "importer": "font.json",         "source": "fonts/Roboto-Regular.font.json" }
+  ]
+}
+```
+
+Each entry's `importer` field selects from the importers registered via `RegisterImporter` — the importer's `Name` property is the dispatch key. `source` paths resolve relative to the manifest file. The manifest is the only registration path.
+
+### Importer error format
+
+Importer errors raise `AssetImportException(SourcePath, LineNumber?, Message)`. The exception's `ToString()` formats as `path:line: message` (or `path: message` when no line is relevant), and structured fields are available for tooling. `ObjImporter` throws a private `ObjFormatException` internally and wraps it at the `Import` boundary so source-path threading doesn't pollute every helper signature. `WavImporter` validates chunk sizes against the file length before reading them so malformed files raise a structured error instead of looping forever or throwing from `Array.Copy`.
+
+### Material asset
+
+`MaterialData(PipelineName, IReadOnlyList<ShaderUniform> Uniforms, IReadOnlyList<MaterialTextureBinding> Textures)` is the runtime intermediate.
+
+```json
+{
+  "pipeline": "scene.lit",
+  "uniforms": {
+    "uMetallicFactor": 0.0,
+    "uRoughnessFactor": 0.7,
+    "uNormalScale": 1.0,
+    "uTint": [0.91, 0.97, 1.0]
+  },
+  "textures": {
+    "uTexture":   { "asset": "textures/concrete",   "slot": 0 },
+    "uNormalMap": { "asset": "textures/concrete_n", "slot": 3 }
+  }
+}
+```
+
+Uniform values are typed by JSON shape: a number becomes `FloatUniform`, a 2-element array `Vector2Uniform`, 3-element `Vector3Uniform`, 4-element `Vector4Uniform`. Anything else throws an `AssetImportException`. Texture entries always carry an explicit `slot` so the JSON matches the sampler binding the pipeline's shader expects.
+
+`MaterialResolver` (see "Engine-facing API" above) is what turns `MaterialData` into a runtime `Material`.
+
+### Outstanding limits
+
+- No caching at the `AssetDatabase` layer — every `Load` re-imports.
+- No cooked binary formats; runtime parses source files directly.
+- No hot reload.
+- Sibling-asset lookup (an importer requesting another asset by ID) is not wired. `MaterialImporter` produces `MaterialTextureBinding(name, AssetId, slot)` and the consumer (`MaterialResolver`) resolves the asset reference. Works because the resolver is the right place to cache textures.
+
+## Outstanding renderer work
+
+Not in priority order; each lands when there's a real consumer.
+
+- `IndexFormat.UInt32` — enables imported meshes >65 535 vertices.
+- Configurable blend factors on `BlendState` — currently fixed `SrcAlpha / OneMinusSrcAlpha`.
+- Depth-tested debug-draw mode for occlusion-aware overlays.
+- `Sprite` runtime type + texture cache so `SpriteData` resolves to GPU handles without manual bridging (the `SpriteImporter` was removed; sprite asset story is open).
+- Per-material sampler control on textures (resolver currently uses one `defaultSampler` for every cached texture).
+- Cooked binary mesh format (offline import → `.meshbin` for fast load).
+- Split-sum IBL approximation (pre-filtered specular cubemap + 2D BRDF LUT).
+- Cascaded shadow maps.
+- Pipeline definitions as assets (the material JSON references pipelines by name; pipelines themselves are still constructed in code).

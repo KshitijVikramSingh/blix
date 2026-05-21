@@ -1,0 +1,9 @@
+{
+  "pipeline": "glass",
+  "uniforms": {
+    "uIor": 1.50,
+    "uThickness": 0.22,
+    "uF0": 0.07,
+    "uTint": [0.91, 0.97, 1.0]
+  }
+}

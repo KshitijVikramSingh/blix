@@ -1,0 +1,14 @@
+{
+  "pipeline": "scene.lit",
+  "uniforms": {
+    "uNormalScale": 0.0,
+    "uMetallicFactor": 0.0,
+    "uRoughnessFactor": 0.55
+  },
+  "textures": {
+    "uTexture": {
+      "asset": "textures/cube",
+      "slot": 0
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "pipeline": "scene.lit",
+  "uniforms": {
+    "uNormalScale": 0.7,
+    "uMetallicFactor": 0.0,
+    "uRoughnessFactor": 0.75
+  },
+  "textures": {
+    "uTexture": {
+      "asset": "textures/wood_planks",
+      "slot": 0
+    },
+    "uNormalMap": {
+      "asset": "textures/wood_planks_n",
+      "slot": 3
+    }
+  }
+}
