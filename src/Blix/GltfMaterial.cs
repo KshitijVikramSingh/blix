@@ -2,29 +2,54 @@ using System.Numerics;
 
 namespace Blix;
 
-// glTF PBR-metallic-roughness material decoded into the subset the engine consumes.
-// BaseColor (factor + optional texture), normal map, and metallic-roughness texture
-// + factors all feed into the Cook-Torrance lit pipeline.
-//
-// Other glTF material channels (occlusion, emissive, alpha mode) aren't extracted —
-// they need a richer fragment shader to consume.
+// glTF 2.0 PBR-metallic-roughness material, decoded into the subset the engine
+// consumes. The renderer doesn't get the full glTF surface (KHR_materials_*
+// extension grab-bag is large), but it covers the fields the current PBR lit
+// shader can actually act on plus the ones a downstream shader is likely to.
 public sealed record GltfMaterial(
     string Name,
+    // BaseColor: linear-space tint multiplied with the sampled albedo texture.
     Vector4 BaseColorFactor,
     GltfTexture? BaseColorTexture,
+    // Tangent-space normal map. Null when the material has none -- the lit
+    // shader's NormalScale uniform doubles as "use this map at all" gate.
     GltfTexture? NormalTexture,
     // glTF packs metallic + roughness into one texture: G channel = roughness,
     // B channel = metallic. The PBR fragment shader samples this and multiplies
-    // by the factors below to get final per-fragment values. Materials without
-    // an explicit MR texture use a default (R=0, G=128, B=0) so factors alone
-    // drive the BRDF.
+    // by the factors below. Materials without an explicit MR texture use a
+    // default (R=0, G=128, B=0) so factors alone drive the BRDF.
     GltfTexture? MetallicRoughnessTexture,
     float MetallicFactor,
     float RoughnessFactor,
-    // Emissive channel: light the surface emits on its own, additive over the
-    // BRDF result. Per the glTF spec the texture is sRGB-encoded (decoder's
-    // responsibility) and the factor is a linear-space multiplier in [0, inf).
-    // EmissiveTexture is null for materials that don't author one; the factor
-    // alone still drives uniform emission if non-zero.
+    // Ambient-occlusion: glTF-spec R channel of the occlusion-roughness-metallic
+    // texture (often the same texture as MR with R=AO). When the channel author
+    // packed AO into the MR texture, OcclusionTexture and MetallicRoughnessTexture
+    // point at the same GltfTexture and shaders should sample once. Strength is
+    // the multiplier on `(1.0 - sample)` before applying.
+    GltfTexture? OcclusionTexture,
+    float OcclusionStrength,
+    // Emissive: additive radiance from the surface, in linear HDR. EmissiveTexture
+    // is sRGB-encoded per spec (loader decodes); EmissiveFactor is linear-space.
+    // EmissiveStrength is KHR_materials_emissive_strength -- multiplier on the
+    // EmissiveFactor that lets authors push emission >1.0 for visible-bloom
+    // emissives. 1.0 is the spec default (no extension or factor=1).
     GltfTexture? EmissiveTexture,
-    Vector3 EmissiveFactor);
+    Vector3 EmissiveFactor,
+    float EmissiveStrength,
+    // Alpha handling: OPAQUE (no test), MASK (binary discard at AlphaCutoff),
+    // BLEND (alpha blend, depth-test-no-write, back-to-front sort). The renderer
+    // picks a pipeline per material based on this; AlphaCutoff is only used in
+    // MASK mode.
+    GltfAlphaMode AlphaMode,
+    float AlphaCutoff,
+    // Whether to draw both faces. Foliage, curtains, and decals typically need
+    // this; back-face culling stays the default everywhere else. The renderer
+    // picks a no-cull pipeline variant for materials with this set.
+    bool DoubleSided);
+
+public enum GltfAlphaMode
+{
+    Opaque = 0,
+    Mask,
+    Blend,
+}

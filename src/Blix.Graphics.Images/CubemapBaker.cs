@@ -1,18 +1,20 @@
 using System.Numerics;
 
-// CPU-bakes a 6-face HDR procedural sky cubemap. Output is a flat Half[] in the
-// face order CreateTextureCubeHdr expects (+X, -X, +Y, -Y, +Z, -Z), each face
-// packed as faceSize*faceSize*4 Halfs (Rgba16F).
+namespace Blix.Graphics.Images;
+
+// CPU-bakes a 6-face HDR procedural sky cubemap. Output is a flat Half[] in
+// the face order CreateTextureCubeHdr expects (+X, -X, +Y, -Y, +Z, -Z), each
+// face packed as faceSize*faceSize*4 Halfs (Rgba16F).
 //
 // Why CPU-side: the engine doesn't have a colour-attachment cube-face target
-// (only depth-cube-face for shadow rendering). Baking at startup is fast — a
-// 256-face cube is ~390K texels, each evaluating a closed-form sky function in
-// a few math ops. Tens of ms, once.
+// (only depth-cube-face for shadow rendering). Baking at startup is fast --
+// a 256-face cube is ~390K texels, each evaluating a closed-form sky
+// function in a few math ops. Tens of ms, once.
 //
-// The baked cube serves both as the visible skybox AND as the IBL source: the
-// auto-generated mip chain on the cubemap provides a free GGX-prefilter
-// approximation, with mip N showing roughness ~ N / (mipCount - 1).
-internal static class CubemapBaker
+// Used by EnvironmentBaker when the EnvironmentProfile selects the procedural
+// source. Demos that want a different procedural sky can substitute their
+// own baker that produces Half[] in the same face order.
+public static class CubemapBaker
 {
     public static Half[] BakeSky(int faceSize, Vector3 sunDirection)
     {

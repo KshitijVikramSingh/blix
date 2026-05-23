@@ -189,8 +189,21 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             metallicRoughnessTexture = ExtractTexture(metallicChannel.Value.Texture, textureCache);
         }
 
+        var occlusionChannel = material.FindChannel("Occlusion");
+        var occlusionStrength = 1.0f;
+        GltfTexture? occlusionTexture = null;
+        if (occlusionChannel.HasValue)
+        {
+            foreach (var p in occlusionChannel.Value.Parameters)
+            {
+                if (p.Name == "Strength") occlusionStrength = (float)Convert.ToDouble(p.Value);
+            }
+            occlusionTexture = ExtractTexture(occlusionChannel.Value.Texture, textureCache);
+        }
+
         var emissiveChannel = material.FindChannel("Emissive");
         var emissiveFactor = Vector3.Zero;
+        var emissiveStrength = 1.0f;
         GltfTexture? emissiveTexture = null;
         if (emissiveChannel.HasValue)
         {
@@ -199,7 +212,19 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             var c = emissiveChannel.Value.Color;
             emissiveFactor = new Vector3(c.X, c.Y, c.Z);
             emissiveTexture = ExtractTexture(emissiveChannel.Value.Texture, textureCache);
+            foreach (var p in emissiveChannel.Value.Parameters)
+            {
+                if (p.Name == "EmissiveStrength") emissiveStrength = (float)Convert.ToDouble(p.Value);
+            }
         }
+
+        var alphaMode = material.Alpha switch
+        {
+            SharpGLTF.Schema2.AlphaMode.OPAQUE => GltfAlphaMode.Opaque,
+            SharpGLTF.Schema2.AlphaMode.MASK   => GltfAlphaMode.Mask,
+            SharpGLTF.Schema2.AlphaMode.BLEND  => GltfAlphaMode.Blend,
+            _                                  => GltfAlphaMode.Opaque,
+        };
 
         var result = new GltfMaterial(
             material.Name ?? $"material_{material.LogicalIndex}",
@@ -209,8 +234,14 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             metallicRoughnessTexture,
             metallic,
             roughness,
+            occlusionTexture,
+            occlusionStrength,
             emissiveTexture,
-            emissiveFactor);
+            emissiveFactor,
+            emissiveStrength,
+            alphaMode,
+            material.AlphaCutoff,
+            material.DoubleSided);
         materialCache[material.LogicalIndex] = result;
         return result;
     }

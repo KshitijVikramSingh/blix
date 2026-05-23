@@ -201,8 +201,13 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
     // Cached scene resources -------------------------------------------------
     // IsFloor: tagged at load via a flat-and-wide heuristic so we can push
     // override uniforms only onto those materials each frame.
-    private record SpongeSubmesh(Mesh Mesh, Material LitMaterial, bool IsFloor, Vector4 OriginalBaseColor);
-    private readonly List<SpongeSubmesh> sceneSubmeshes = new();
+    // Built scene + the indices of submeshes flagged as "floor" by the
+    // bounds heuristic below. floorIndices is intentionally separate from
+    // GltfSceneInstance -- the heuristic is Sponza-specific (the marble
+    // floor has a distinctive thin/wide bounds signature), and we don't
+    // want that pattern smuggled into the generic scene type.
+    private GltfSceneInstance scene = null!;
+    private readonly List<int> floorIndices = new();
 
     private PipelineHandle litPipeline;
     private Material shadowMaterial = null!;
@@ -211,26 +216,21 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
     private TextureHandle whitePixel;
     private TextureHandle flatNormal;
     private TextureHandle neutralMetallicRoughness;
+    private TextureHandle fullOcclusion;
     // CSM: per-cascade depth textures + render surfaces + light VPs.
     private TextureHandle[] cascadeShadowMaps = null!;
     // Legacy single-shadow alias (for the fog pass which still uses one
     // sampler2DShadow). Pointed at the far cascade (covers the most depth
     // so god-ray sampling looks right at the camera's distance).
     private TextureHandle shadowMapTexture;
-    private TextureHandle envCubemap;
-    private TextureHandle diffuseIrradianceCubemap;
-    // Split-sum IBL specular: prefiltered roughness chain (one mip per
-    // roughness level) and the 2D Karis BRDF LUT. When no HDR source is
-    // available, prefilteredSpecularCubemap is just the env cube and
-    // prefilteredMipCount is set to the env's auto-generated mip count.
-    private TextureHandle prefilteredSpecularCubemap;
+    // Environment subsystem -- the profile (data) drives EnvironmentBaker
+    // to produce a probe (baked GPU resources). Rebake-on-slider-change
+    // mutates the profile and re-bakes. The BRDF LUT is env-independent
+    // and lives outside the probe so slider rebakes don't redo the
+    // expensive 1024-sample LUT integration on every tick.
+    private EnvironmentProfile envProfile = null!;
+    private EnvironmentProbe envProbe = null!;
     private TextureHandle brdfLut;
-    private int prefilteredMipCount;
-    private float envCubeMipCount;
-    // When true the env probe is a baked HDR equirect; skip the procedural
-    // rebake-on-sun-change so we don't overwrite the HDR with the analytic
-    // sky on the first slider tick.
-    private bool usingHdrEnv = false;
     // The sun direction extracted from the HDR equirect at load time, kept
     // so the "Sync sun to HDR" button can re-apply it without re-scanning.
     private Vector3? hdrSunDirectionFromEquirect = null;
@@ -382,122 +382,60 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
             new byte[] { 0, 255, 0, 255 },
             name: "walk.neutral_mr");
+        // AO = 1.0 (no occlusion). Gate uniform uHasOcclusionMap toggles
+        // sampling on/off in the lit shader; the texture is always bound.
+        fullOcclusion = GraphicsDevice.CreateTexture2D(
+            new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
+            new byte[] { 255, 255, 255, 255 },
+            name: "walk.full_ao");
 
-        // --- HDR env cubemap (baked once at startup) -------------------
-        // Two sources:
-        //   A. Real HDR file (Assets/textures/sky_hdr.hdr) -- if present,
-        //      load the equirectangular HDR, convert to cubemap on the CPU,
-        //      upload as an Rgba16F cube. Replaces the procedural sky and
-        //      drives both the skybox (visible backdrop) and IBL (lit shader).
-        //   B. Procedural CubemapBaker -- fallback when no HDR is present,
-        //      or when the user explicitly wants the analytic sky (the
-        //      time-of-day presets work best here since they rebake on
-        //      sun-direction change).
-        // GenerateMipmaps on the sampler means the GL driver auto-builds the
-        // mip chain after upload -- those mips serve as our cheap
-        // roughness-prefilter approximation for specular IBL.
+        // --- Environment (HDR sky probe + IBL bakes) -------------------
+        // Profile is the data-only authoring side: which source, sizes,
+        // firefly clamp. EnvironmentBaker turns it into a probe with the
+        // env cube + IBL probes; the BRDF LUT lives outside the probe
+        // because it's env-independent and re-baking it on every sun-
+        // direction slider tick would cost ~100ms per change for nothing.
         var hdrPath = Path.Combine(AppContext.BaseDirectory, "Assets", "textures", "sky_hdr.hdr");
-        HdrImageData? hdrSource = null;
         if (File.Exists(hdrPath))
         {
             Console.WriteLine($"Loading HDR sky: {hdrPath}");
-            hdrSource = ImageLoader.LoadRgba32F(hdrPath);
-            Console.WriteLine($"  equirect {hdrSource.Width}x{hdrSource.Height} -> converting to {EnvCubeFaceSize}^2 cubemap...");
-            var cubePixels = EquirectangularToCubemap.Convert(hdrSource, EnvCubeFaceSize);
-            envCubemap = GraphicsDevice.CreateTextureCubeHdr(
-                EnvCubeFaceSize, cubePixels,
-                SamplerDescription.LinearClampMipmap,
-                name: "walk.env_cube.hdr");
-            usingHdrEnv = true;
-
-            // Auto-align the directional sun to wherever the HDR's brightest
-            // pixel sits in the sky. Without this, the visible sun in the
-            // backdrop and the directional-light direction disagree, and
-            // shadows fall in visually-wrong directions for any HDRI the
-            // user drops in.
-            var hdrSunDir = HdrSunFinder.FindSunDirection(hdrSource);
-            if (hdrSunDir.HasValue)
+            var hdrSource = ImageLoader.LoadRgba32F(hdrPath);
+            Console.WriteLine($"  equirect {hdrSource.Width}x{hdrSource.Height}");
+            envProfile = new EnvironmentProfile
             {
-                hdrSunDirectionFromEquirect = hdrSunDir.Value;
-                sunDirection = hdrSunDir.Value;
-                bakedSunDirection = sunDirection;
-                // Reverse-derive yaw/pitch sliders so they read the auto-aligned
-                // value when the user opens the Sun debug scope.
-                sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1.0f, 1.0f));
-                sunYaw = MathF.Atan2(sunDirection.Z, sunDirection.X);
-                Console.WriteLine($"  auto-aligned sun direction to HDR's brightest pixel: {sunDirection}");
-            }
+                Source = new HdrEnvironmentSource(hdrSource),
+                EnvCubeFaceSize = EnvCubeFaceSize,
+            };
         }
         else
         {
-            Console.WriteLine($"Baking {EnvCubeFaceSize}x{EnvCubeFaceSize} procedural sky cubemap...");
-            var cubePixels = CubemapBaker.BakeSky(EnvCubeFaceSize, bakedSunDirection);
-            envCubemap = GraphicsDevice.CreateTextureCubeHdr(
-                EnvCubeFaceSize, cubePixels,
-                SamplerDescription.LinearClampMipmap,
-                name: "walk.env_cube.procedural");
-        }
-        envCubeMipCount = MathF.Floor(MathF.Log2(EnvCubeFaceSize)) + 1.0f;
-
-        // --- PBR IBL: BRDF LUT (env-independent) ------------------------
-        // Karis split-sum 2D LUT. R=scale, G=bias. Lit shader does
-        // F * scale + bias to get the GGX-integrated specular term.
-        Console.WriteLine("Baking 256x256 BRDF LUT (1024 samples per texel)...");
-        const int BrdfLutSize = 256;
-        var brdfLutBytes = PbrIblBaker.BakeBrdfLut(BrdfLutSize);
-        brdfLut = GraphicsDevice.CreateTexture2D(
-            new TextureDescription(BrdfLutSize, BrdfLutSize, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
-            brdfLutBytes,
-            name: "walk.brdf_lut");
-
-        // --- PBR IBL: diffuse irradiance cubemap ------------------------
-        // 32^2 per face is plenty for the convolved diffuse probe -- the
-        // cosine-weighted hemispherical convolution is very smooth, so high
-        // resolution is wasted. If we have a real HDR source, integrate
-        // against it; otherwise reuse the procedural env cube and accept
-        // that the diffuse term is less directional in the fallback case.
-        const int IrradianceFaceSize = 32;
-        if (hdrSource is not null)
-        {
-            Console.WriteLine($"Baking {IrradianceFaceSize}^2 diffuse irradiance cube from HDR...");
-            var irradiancePixels = PbrIblBaker.BakeDiffuseIrradiance(hdrSource, IrradianceFaceSize);
-            diffuseIrradianceCubemap = GraphicsDevice.CreateTextureCubeHdr(
-                IrradianceFaceSize, irradiancePixels,
-                SamplerDescription.LinearClampMipmap,
-                name: "walk.env_irradiance");
-        }
-        else
-        {
-            // No HDR source -- the lit shader will sample the env cube for
-            // diffuse, which loses directional variation but avoids a black
-            // diffuse term. Bind the env cube to the irradiance slot too.
-            diffuseIrradianceCubemap = envCubemap;
+            Console.WriteLine("No HDR sky found; falling back to procedural sky.");
+            envProfile = new EnvironmentProfile
+            {
+                Source = new ProceduralEnvironmentSource(bakedSunDirection),
+                EnvCubeFaceSize = EnvCubeFaceSize,
+            };
         }
 
-        // --- PBR IBL: roughness-prefiltered specular cubemap -----------
-        // Multi-mip cube: each mip K stores the env convolved with GGX at
-        // roughness K/(N-1). The lit shader samples this via textureLod
-        // with lod = roughness * (mipCount - 1) to get the right blur.
-        if (hdrSource is not null)
+        Console.WriteLine("Baking environment probe (env cube + IBL)...");
+        envProbe = EnvironmentBaker.Bake(GraphicsDevice, envProfile, "walk");
+
+        // Auto-align the directional sun to wherever the HDR's brightest
+        // pixel sits in the sky. Without this the visible sun in the
+        // backdrop and the directional-light direction disagree, and
+        // shadows fall in visually-wrong directions for any HDRI dropped in.
+        if (envProbe.SunDirectionFromEquirect is { } hdrSun)
         {
-            const int PrefilterBase = 128;
-            const int PrefilterMips = 5;     // 128, 64, 32, 16, 8
-            Console.WriteLine($"Baking {PrefilterBase}^2 x {PrefilterMips}-mip GGX-prefiltered specular cube from HDR...");
-            var prefilteredMips = PbrIblBaker.BakeSpecularPrefilteredMips(hdrSource, PrefilterBase, PrefilterMips);
-            prefilteredSpecularCubemap = GraphicsDevice.CreateTextureCubeHdrMipped(
-                PrefilterBase, prefilteredMips,
-                SamplerDescription.LinearClampMipmap,
-                name: "walk.env_prefilter");
-            prefilteredMipCount = PrefilterMips;
+            hdrSunDirectionFromEquirect = hdrSun;
+            sunDirection = hdrSun;
+            bakedSunDirection = sunDirection;
+            sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1.0f, 1.0f));
+            sunYaw = MathF.Atan2(sunDirection.Z, sunDirection.X);
+            Console.WriteLine($"  auto-aligned sun direction to HDR brightest pixel: {sunDirection}");
         }
-        else
-        {
-            // Fallback: env cube with its auto-generated mips. Not a true
-            // GGX prefilter but at least the lit shader's split-sum lookup
-            // returns sensible values.
-            prefilteredSpecularCubemap = envCubemap;
-            prefilteredMipCount = (int)envCubeMipCount;
-        }
+
+        Console.WriteLine("Baking 256x256 BRDF LUT...");
+        brdfLut = EnvironmentBaker.BakeBrdfLut(GraphicsDevice, 256, "walk.brdf_lut");
 
         var litShader = GraphicsDevice.CreateShaderProgram(LoadShader("lit.vert", "lit.frag"));
         // Two ColorBlends entries because hdrSceneSurface has two attachments
@@ -768,7 +706,7 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
                 new[] { BlendState.Disabled, BlendState.Disabled }),
             name: "walk.sky");
         skyboxMaterial = new Material("walk.sky", skyPipeline);
-        skyboxMaterial.SetTexture("uEnvMap", envCubemap, 0);
+        skyboxMaterial.SetTexture("uEnvMap", envProbe.EnvCubemap, 0);
         var skyVerts = GraphicsDevice.CreateVertexBuffer(
             VertexPositionTexture.CreateBufferData(FullscreenQuad.Vertices),
             name: "walk.sky.verts");
@@ -910,107 +848,67 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
         fogMaterial.SetTexture("uShadowMap", shadowMapTexture, 1);
 
         // --- Upload Sponza primitives + build materials -----------------
-        // Texture cache keyed by reference identity so an albedo image
-        // referenced by N primitives only uploads once.
-        var textureCache = new Dictionary<GltfTexture, TextureHandle>(ReferenceEqualityComparer.Instance);
-
-        TextureHandle UploadOrFallback(GltfTexture? tex, TextureHandle fallback, string nameHint)
+        // GltfSceneInstance does the per-primitive Mesh upload + per-material
+        // construction; the OnMaterialBuilt hook is where this demo's shared
+        // scene-wide bindings (cascade shadow maps, point cube shadows, IBL
+        // probes, env cube, BRDF LUT) get attached. The hook lets the demo
+        // hold all of that without GltfSceneInstance needing to know.
+        scene = GltfSceneInstance.Build(GraphicsDevice, sponza, new GltfSceneOptions
         {
-            if (tex is null) return fallback;
-            if (textureCache.TryGetValue(tex, out var existing)) return existing;
-            var handle = GraphicsDevice.CreateTexture2D(
-                new TextureDescription(tex.Width, tex.Height, TextureFormat.Rgba8,
-                    new SamplerDescription(
-                        MinFilter: TextureFilter.Linear,
-                        MagFilter: TextureFilter.Linear,
-                        WrapU: TextureWrap.Repeat,
-                        WrapV: TextureWrap.Repeat,
-                        GenerateMipmaps: true,
-                        Compare: false)),
-                tex.RgbaPixels,
-                name: $"sponza.{nameHint}.{tex.Name}");
-            textureCache[tex] = handle;
-            return handle;
-        }
+            Opaque = litPipeline,
+            Defaults = new GltfDefaultTextures(
+                WhitePixel: whitePixel,
+                FlatNormal: flatNormal,
+                NeutralMetallicRoughness: neutralMetallicRoughness,
+                FullOcclusion: fullOcclusion),
+            Sampler = new SamplerDescription(
+                MinFilter: TextureFilter.Linear,
+                MagFilter: TextureFilter.Linear,
+                WrapU: TextureWrap.Repeat,
+                WrapV: TextureWrap.Repeat,
+                GenerateMipmaps: true,
+                Compare: false),
+            Prefix = "sponza",
+            OnMaterialBuilt = (material, _) =>
+            {
+                // CSM: bind all three cascade shadow maps. Slot 4 = cascade 0
+                // (closest), slot 13 = cascade 1, slot 14 = cascade 2.
+                material.SetTexture("uShadowMap", cascadeShadowMaps[0], 4);
+                material.SetTexture("uShadowMap1", cascadeShadowMaps[1], 13);
+                material.SetTexture("uShadowMap2", cascadeShadowMaps[2], 14);
+                material.SetTexture("uEnvMap", envProbe.EnvCubemap, 5);
+                // Slots 6..9 are the four point-light cube shadow maps. Bound on
+                // every lit material; the shader's MAX_POINT_SHADOWS gate
+                // decides which ones contribute per fragment.
+                material.SetTexture("uPointShadowMap0", pointShadowCubes[0], 6);
+                material.SetTexture("uPointShadowMap1", pointShadowCubes[1], 7);
+                material.SetTexture("uPointShadowMap2", pointShadowCubes[2], 8);
+                material.SetTexture("uPointShadowMap3", pointShadowCubes[3], 9);
+                material.SetTexture("uDiffuseIrradiance", envProbe.DiffuseIrradiance, 10);
+                material.SetTexture("uSpecularPrefilter", envProbe.PrefilteredSpecular, 11);
+                material.SetTexture("uBrdfLut", brdfLut, 12);
+                material.SetUniform("uEnvMapMipCount", new FloatUniform((float)envProbe.EnvCubeMipCount));
+            },
+        });
 
-        foreach (var prim in sponza.Primitives)
+        // Sponza-specific floor detection: thin Y span, wide XZ footprint,
+        // near y=0. Catches the marble floor primitives and nothing else.
+        // Recorded indices have per-frame uniform overrides applied below
+        // (roughness/metallic/baseColor from the Floor debug sliders).
+        for (var i = 0; i < scene.Submeshes.Count; i++)
         {
-            var vb = GraphicsDevice.CreateVertexBuffer(
-                new VertexBufferData(
-                    new VertexBufferDescription(prim.Mesh.Layout, prim.Mesh.VertexCount, GraphicsBufferUsage.Static),
-                    prim.Mesh.VertexBytes),
-                name: $"sponza.vb.{prim.Mesh.Name}");
-            var ib = GraphicsDevice.CreateIndexBuffer(prim.Mesh.Indices, name: $"sponza.ib.{prim.Mesh.Name}");
-            var mesh = new Mesh(prim.Mesh.Name, vb, ib, prim.Mesh.Indices.Length, prim.Mesh.Bounds);
-
-            var matName = prim.Material?.Name ?? "default";
-            var material = new Material($"sponza.mat.{matName}", litPipeline);
-
-            var baseColor = prim.Material?.BaseColorFactor ?? new Vector4(1, 1, 1, 1);
-            var metallicFactor = prim.Material?.MetallicFactor ?? 1.0f;
-            var roughnessFactor = prim.Material?.RoughnessFactor ?? 1.0f;
-            // Raw glTF emissive factor — global boost lives in the shader so
-            // it can be tuned live via the debug slider without rebinding.
-            var emissiveFactor = prim.Material?.EmissiveFactor ?? Vector3.Zero;
-            var albedoTex = UploadOrFallback(prim.Material?.BaseColorTexture, whitePixel, "albedo");
-            var normalTex = UploadOrFallback(prim.Material?.NormalTexture, flatNormal, "normal");
-            var mrTex = UploadOrFallback(prim.Material?.MetallicRoughnessTexture, neutralMetallicRoughness, "mr");
-            // White fallback (not black) — glTF spec: when no emissive texture
-            // is bound, all texture components default to 1.0, so the factor
-            // alone drives emission. A black fallback would zero out factor-
-            // only emissive materials (Sponza's hanging lamps).
-            var emissiveTex = UploadOrFallback(prim.Material?.EmissiveTexture, whitePixel, "emissive");
-            var hasNormal = prim.Material?.NormalTexture is null ? 0.0f : 1.0f;
-            var hasMR = prim.Material?.MetallicRoughnessTexture is null ? 0.0f : 1.0f;
-
-            material.SetUniform("uBaseColorFactor", new Vector4Uniform(baseColor));
-            material.SetUniform("uMetallicFactor", new FloatUniform(metallicFactor));
-            material.SetUniform("uRoughnessFactor", new FloatUniform(roughnessFactor));
-            material.SetUniform("uEmissiveFactor", new Vector3Uniform(emissiveFactor));
-            material.SetUniform("uNormalScale", new FloatUniform(hasNormal));
-            material.SetUniform("uHasMetallicMap", new FloatUniform(hasMR));
-            material.SetTexture("uAlbedo", albedoTex, 0);
-            material.SetTexture("uNormalMap", normalTex, 1);
-            material.SetTexture("uMetallicRoughness", mrTex, 2);
-            material.SetTexture("uEmissive", emissiveTex, 3);
-            // CSM: bind all three cascade shadow maps. Slot 4 = cascade 0
-            // (closest), slot 13 = cascade 1, slot 14 = cascade 2. (4 stayed
-            // for cascade 0 to keep the legacy uShadowMap name working in
-            // any shader that still expects it.)
-            material.SetTexture("uShadowMap", cascadeShadowMaps[0], 4);
-            material.SetTexture("uShadowMap1", cascadeShadowMaps[1], 13);
-            material.SetTexture("uShadowMap2", cascadeShadowMaps[2], 14);
-            material.SetTexture("uEnvMap", envCubemap, 5);
-            // Slots 6..9 are the four point-light cube shadow maps. Bound on
-            // every lit material; the shader's MAX_POINT_SHADOWS gate decides
-            // which ones contribute per fragment.
-            material.SetTexture("uPointShadowMap0", pointShadowCubes[0], 6);
-            material.SetTexture("uPointShadowMap1", pointShadowCubes[1], 7);
-            material.SetTexture("uPointShadowMap2", pointShadowCubes[2], 8);
-            material.SetTexture("uPointShadowMap3", pointShadowCubes[3], 9);
-            material.SetTexture("uDiffuseIrradiance", diffuseIrradianceCubemap, 10);
-            material.SetTexture("uSpecularPrefilter", prefilteredSpecularCubemap, 11);
-            material.SetTexture("uBrdfLut", brdfLut, 12);
-            material.SetUniform("uEnvMapMipCount", new FloatUniform(envCubeMipCount));
-
-            // Floor heuristic in scene-meters: thin Y span, wide XZ footprint,
-            // sitting near y=0. Catches Sponza's marble floor (mesh[0].prim[45/46])
-            // and nothing else. Tagged prims get their roughness/metallic
-            // overridden each frame from the Floor debug sliders.
-            var b = prim.Mesh.Bounds;
+            var b = scene.Submeshes[i].WorldBounds;
             var ySpan = b.Max.Y - b.Min.Y;
             var xSpan = b.Max.X - b.Min.X;
             var zSpan = b.Max.Z - b.Min.Z;
-            var isFloor = ySpan < 0.2f && b.Min.Y < 0.5f &&
-                          (xSpan > 4.0f || zSpan > 4.0f);
+            var isFloor = ySpan < 0.2f && b.Min.Y < 0.5f && (xSpan > 4.0f || zSpan > 4.0f);
             if (isFloor)
             {
-                Console.WriteLine($"  Floor: {prim.Mesh.Name} y=[{b.Min.Y:0.00}..{b.Max.Y:0.00}] x=[{b.Min.X:0.0}..{b.Max.X:0.0}] z=[{b.Min.Z:0.0}..{b.Max.Z:0.0}] (xspan={xSpan:0.0}m zspan={zSpan:0.0}m)");
+                floorIndices.Add(i);
+                Console.WriteLine($"  Floor: {scene.Submeshes[i].Name} y=[{b.Min.Y:0.00}..{b.Max.Y:0.00}] x=[{b.Min.X:0.0}..{b.Max.X:0.0}] z=[{b.Min.Z:0.0}..{b.Max.Z:0.0}] (xspan={xSpan:0.0}m zspan={zSpan:0.0}m)");
             }
-
-            sceneSubmeshes.Add(new SpongeSubmesh(mesh, material, isFloor, baseColor));
         }
-        Console.WriteLine($"Uploaded {sceneSubmeshes.Count} submeshes, {textureCache.Count} textures.");
+        Console.WriteLine($"Uploaded {scene.Submeshes.Count} submeshes, {scene.Materials.All.Count} unique materials.");
 
         // --- Camera -----------------------------------------------------
         camera = new Camera3D
@@ -1086,14 +984,15 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
         // Visualize: solid magenta on detected floor prims so they're
         // unmistakable in the viewport. Off: restore the asset's authored
         // baseColorFactor (mat[5] is 0.588 gray, not white).
-        foreach (var sub in sceneSubmeshes)
+        foreach (var i in floorIndices)
         {
-            if (!sub.IsFloor) continue;
-            sub.LitMaterial.SetUniform("uRoughnessFactor", new FloatUniform(floorRough));
-            sub.LitMaterial.SetUniform("uMetallicFactor", new FloatUniform(floorMetal));
-            sub.LitMaterial.SetUniform("uHasMetallicMap", new FloatUniform(floorUseMap));
-            var albedo = floorVisualize ? new Vector4(1.0f, 0.0f, 1.0f, 1.0f) : sub.OriginalBaseColor;
-            sub.LitMaterial.SetUniform("uBaseColorFactor", new Vector4Uniform(albedo));
+            var sub = scene.Submeshes[i];
+            sub.Material.SetUniform("uRoughnessFactor", new FloatUniform(floorRough));
+            sub.Material.SetUniform("uMetallicFactor", new FloatUniform(floorMetal));
+            sub.Material.SetUniform("uHasMetallicMap", new FloatUniform(floorUseMap));
+            var original = sub.Source?.BaseColorFactor ?? new Vector4(1.0f);
+            var albedo = floorVisualize ? new Vector4(1.0f, 0.0f, 1.0f, 1.0f) : original;
+            sub.Material.SetUniform("uBaseColorFactor", new Vector4Uniform(albedo));
         }
 
         // Per-cascade VPs are computed in OnRender (we need view aspect),
@@ -1197,7 +1096,7 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
                         new("uLightViewProjection", new Matrix4x4Uniform(cascadeVP)),
                         new("uModel", new Matrix4x4Uniform(Matrix4x4.Identity))
                     };
-                    foreach (var sub in sceneSubmeshes)
+                    foreach (var sub in scene.Submeshes)
                     {
                         pass.DrawMesh(sub.Mesh, shadowMaterial,
                             perDrawUniforms: shadowUniforms, perDrawTextures: null);
@@ -1254,8 +1153,8 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             new("uCameraPosition", new Vector3Uniform(camera.Transform.Position)),
             new("uSunDirection", new Vector3Uniform(sunDirection)),
             new("uSunColor", new Vector3Uniform(new Vector3(1.0f, 0.94f, 0.82f) * sunStrength)),
-            new("uEnvMapMipCount", new FloatUniform(envCubeMipCount)),
-            new("uSpecularPrefilterMipCount", new FloatUniform(prefilteredMipCount)),
+            new("uEnvMapMipCount", new FloatUniform((float)envProbe.EnvCubeMipCount)),
+            new("uSpecularPrefilterMipCount", new FloatUniform((float)envProbe.PrefilteredSpecularMipCount)),
             new("uExposure", new FloatUniform(exposure)),
             new("uModel", new Matrix4x4Uniform(Matrix4x4.Identity)),
             new("uNormalMatrix", new Matrix4x4Uniform(Matrix4x4.Identity)),
@@ -1304,9 +1203,9 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
                 ClearDepth: true),
             pass =>
             {
-                foreach (var sub in sceneSubmeshes)
+                foreach (var sub in scene.Submeshes)
                 {
-                    pass.DrawMesh(sub.Mesh, sub.LitMaterial,
+                    pass.DrawMesh(sub.Mesh, sub.Material,
                         perDrawUniforms: sharedUniforms, perDrawTextures: null);
                 }
                 // Sky fills the un-drawn pixels (depth=1 from the clear) using
@@ -1823,7 +1722,7 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
                         ClearDepth: true),
                     pass =>
                     {
-                        foreach (var sub in sceneSubmeshes)
+                        foreach (var sub in scene.Submeshes)
                         {
                             pass.DrawMesh(sub.Mesh, cubeShadowMaterial,
                                 perDrawUniforms: perDraw, perDrawTextures: null);
@@ -1837,31 +1736,26 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
         pointShadowsBaked = true;
     }
 
-    // Re-bake the IBL cubemap from the current bakedSunDirection and rebind it
-    // on every material that samples uEnvMap. Called by the debug "Rebake Sky"
-    // button. The old cube handle is left to leak — it's a debug action, and
-    // the engine doesn't expose a public texture-delete on the device.
+    // Re-bake the environment probe from the current sun direction and
+    // rebind every material's IBL slot. Called by the debug "Rebake Sky"
+    // button and by time-of-day presets. No-op for HDR sources (the HDR is
+    // authoritative). Old probe handles are left to leak -- this is a debug
+    // action; the engine doesn't expose public texture-delete on the device.
     private void RebakeSky()
     {
-        if (usingHdrEnv)
-        {
-            // HDR sky is the authoritative probe; don't overwrite it with the
-            // analytic CubemapBaker output. (Time-of-day presets call this
-            // unconditionally; that's a no-op while the HDR is active.)
-            return;
-        }
+        if (envProfile.Source is HdrEnvironmentSource) return;
         bakedSunDirection = sunDirection;
-        Console.WriteLine("Rebaking sky cubemap...");
-        var pixels = CubemapBaker.BakeSky(EnvCubeFaceSize, bakedSunDirection);
-        envCubemap = GraphicsDevice.CreateTextureCubeHdr(
-            EnvCubeFaceSize, pixels,
-            SamplerDescription.LinearClampMipmap,
-            name: "walk.env_cube");
-        foreach (var sub in sceneSubmeshes)
+        envProfile = envProfile with { Source = new ProceduralEnvironmentSource(bakedSunDirection) };
+        Console.WriteLine("Rebaking environment probe...");
+        envProbe = EnvironmentBaker.Bake(GraphicsDevice, envProfile, "walk");
+        foreach (var mat in scene.Materials.All)
         {
-            sub.LitMaterial.SetTexture("uEnvMap", envCubemap, 5);
+            mat.SetTexture("uEnvMap", envProbe.EnvCubemap, 5);
+            mat.SetTexture("uDiffuseIrradiance", envProbe.DiffuseIrradiance, 10);
+            mat.SetTexture("uSpecularPrefilter", envProbe.PrefilteredSpecular, 11);
+            mat.SetUniform("uEnvMapMipCount", new FloatUniform((float)envProbe.EnvCubeMipCount));
         }
-        skyboxMaterial.SetTexture("uEnvMap", envCubemap, 0);
+        skyboxMaterial.SetTexture("uEnvMap", envProbe.EnvCubemap, 0);
     }
 
     public void Debug(DebugContext debug)
@@ -1876,7 +1770,8 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             debug.Values.Value("Position", camera.Transform.Position);
             debug.Values.Value("Yaw deg", yaw * 180.0f / MathF.PI);
             debug.Values.Value("Pitch deg", pitch * 180.0f / MathF.PI);
-            debug.Values.Value("Submeshes", sceneSubmeshes.Count);
+            debug.Values.Value("Submeshes", scene.Submeshes.Count);
+            debug.Values.Value("Materials", scene.Materials.All.Count);
         }
 
         using (debug.Scope("Camera"))
@@ -2067,7 +1962,8 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             indirectShadowRange = debug.Controls.Float("Shadow range", indirectShadowRange, 0.0f, 1.0f);
             horizonFadeStrength = debug.Controls.Float("Horizon fade", horizonFadeStrength, 0.0f, 1.0f);
             horizonFadeStart = debug.Controls.Float("Horizon fade start", horizonFadeStart, 0.01f, 0.5f);
-            debug.Values.Value("Env mip count", envCubeMipCount);
+            debug.Values.Value("Env mip count", envProbe.EnvCubeMipCount);
+            debug.Values.Value("Prefilter mips", envProbe.PrefilteredSpecularMipCount);
         }
 
         using (debug.Scope("Emissive"))
@@ -2134,9 +2030,7 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             floorVisualize = debug.Controls.Toggle("Visualize (magenta)", floorVisualize);
             floorRoughness = debug.Controls.Float("Roughness", floorRoughness, 0.0f, 1.0f);
             floorMetallic = debug.Controls.Float("Metallic", floorMetallic, 0.0f, 1.0f);
-            var floorCount = 0;
-            foreach (var sub in sceneSubmeshes) if (sub.IsFloor) floorCount++;
-            debug.Values.Value("Tagged prims", floorCount);
+            debug.Values.Value("Tagged prims", floorIndices.Count);
         }
     }
 

@@ -88,7 +88,12 @@ public static class PbrIblBaker
     public static Half[] BakeDiffuseIrradiance(
         HdrImageData equirect,
         int faceSize,
-        int sampleCount = 64)
+        int sampleCount = 64,
+        // Firefly clamp magnitude. Polyhaven HDRIs' single-pixel suns
+        // otherwise produce speckle alias on normal-mapped surfaces; ~50
+        // is empirically safe (preserves visible sun in the sky AND clean
+        // probes). Set to PositiveInfinity to disable.
+        float sampleClampMagnitude = 50.0f)
     {
         ArgumentNullException.ThrowIfNull(equirect);
         if (faceSize <= 0) throw new ArgumentOutOfRangeException(nameof(faceSize));
@@ -140,7 +145,7 @@ public static class PbrIblBaker
                         // peak HDR detail in exchange for a stable, smooth
                         // diffuse cube. 50 is a reasonable cap for the
                         // Polyhaven HDRIs we ship with.
-                        li = Vector3.Min(li, new Vector3(50.0f));
+                        li = Vector3.Min(li, new Vector3(sampleClampMagnitude));
                         // For cosine-weighted sampling the PDF is cos/PI, which
                         // cancels the cos in the integrand, so we just average.
                         irradiance += li;
@@ -175,7 +180,9 @@ public static class PbrIblBaker
     public static Half[][] BakeSpecularPrefilteredMips(
         HdrImageData equirect,
         int baseFaceSize,
-        int mipCount)
+        int mipCount,
+        // Firefly clamp magnitude. Same role as BakeDiffuseIrradiance.
+        float sampleClampMagnitude = 50.0f)
     {
         ArgumentNullException.ThrowIfNull(equirect);
         if (baseFaceSize <= 0) throw new ArgumentOutOfRangeException(nameof(baseFaceSize));
@@ -189,12 +196,12 @@ public static class PbrIblBaker
             // More samples at higher roughness. Mip 0 needs none -- it's a
             // mirror, just sample the env directly.
             int sampleCount = mip == 0 ? 1 : 32 + mip * 32;
-            mips[mip] = BakeSpecularMip(equirect, mipSize, roughness, sampleCount);
+            mips[mip] = BakeSpecularMip(equirect, mipSize, roughness, sampleCount, sampleClampMagnitude);
         }
         return mips;
     }
 
-    private static Half[] BakeSpecularMip(HdrImageData equirect, int faceSize, float roughness, int sampleCount)
+    private static Half[] BakeSpecularMip(HdrImageData equirect, int faceSize, float roughness, int sampleCount, float sampleClampMagnitude)
     {
         int pixelsPerFace = faceSize * faceSize * 4;
         var output = new Half[pixelsPerFace * 6];
@@ -229,7 +236,7 @@ public static class PbrIblBaker
                             var li = SampleEquirect(equirect, L);
                             // Same firefly clamp as the diffuse cube; see
                             // BakeDiffuseIrradiance for rationale.
-                            li = Vector3.Min(li, new Vector3(50.0f));
+                            li = Vector3.Min(li, new Vector3(sampleClampMagnitude));
                             prefilter += li * NdotL;
                             weight += NdotL;
                         }
