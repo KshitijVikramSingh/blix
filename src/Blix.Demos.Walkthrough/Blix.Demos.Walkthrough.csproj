@@ -16,6 +16,12 @@
   <ItemGroup>
     <None Include="Assets/**/*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Shaders/**/*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Engine-level shader library, shared across demos. Copied into
+         Shaders/lib/ in the output so a #include "lib/tonemap.glsl"
+         resolves the same way at runtime as it would at edit time. -->
+    <None Include="..\Blix.Shaders\**\*.glsl"
+          Link="Shaders\lib\%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <PropertyGroup>

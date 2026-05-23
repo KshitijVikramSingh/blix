@@ -1,0 +1,33 @@
+fire_atlas.tga
+==============
+
+Source:    Unity Labs Paris VFX flipbook release ("Free VFX Image Sequences
+           and Flipbooks") -- Houdini-rendered flame simulations published
+           under a Creative Commons license. Original asset name:
+           Flame02-temperature_16x4.tga.
+
+License:   Unity Labs released these flipbooks for free use including
+           commercial. Original publication treated the release as CC0;
+           some redistributions list CC-BY. Either way the author is
+           credited here as a courtesy.
+
+Author:    Unity Technologies / Unity Labs Paris VFX team
+URL:       https://unity.com/blog/engine-platform/free-vfx-image-sequences-flipbooks
+           (page accessed via labs.unity.com -- now redirects; archive
+            mirrors still carry the file pack)
+
+Layout:    2048 x 1024 pixels. The filename's "16x4" is WRONG -- the actual
+           sim grid is 16 columns x 5 rows of 128 x 204.8 (= 1024/5) pixels
+           per frame, 80 frames total. Sampling at 16x4 (256-tall cells)
+           straddles consecutive vertical frames and shows two flames per
+           cell -- spent half a debug session learning that. Frame 0 is
+           top-left; row-major left-to-right, top-to-bottom.
+
+Format:    24-bit RGB TGA. The three channels are *equal* per pixel -- the
+           atlas is a grayscale TEMPERATURE field, not a pre-coloured fire.
+           The walkthrough demo's flame_atlas.frag samples the red channel
+           and runs it through a blackbody-style colour ramp at runtime, so
+           we get full control over the fire's hue without re-authoring.
+
+If you redistribute this asset elsewhere, please keep the attribution
+above with the file.

@@ -65,6 +65,18 @@ public sealed partial class OpenGLGraphicsDevice
         builder.Append(label);
         builder.AppendLine(" compilation failed:");
 
+        // Print the source-id map first so the user can decode messages
+        // like "0:42: ..." (where 0 is the source-string number set by
+        // GlslPreprocessor's #line directives).
+        if (source.SourceMap is { Count: > 0 } map)
+        {
+            builder.AppendLine("--- Source map ---");
+            for (var i = 0; i < map.Count; i++)
+            {
+                builder.Append("  [").Append(i).Append("] ").AppendLine(map[i]);
+            }
+        }
+
         if (!string.IsNullOrWhiteSpace(infoLog))
         {
             builder.AppendLine(infoLog.TrimEnd());

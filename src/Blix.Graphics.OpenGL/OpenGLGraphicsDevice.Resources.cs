@@ -120,7 +120,9 @@ public sealed partial class OpenGLGraphicsDevice
             sources.VertexShader,
             sources.FragmentShader,
             sources.VertexName,
-            sources.FragmentName));
+            sources.FragmentName,
+            sources.VertexSourceMap,
+            sources.FragmentSourceMap));
     }
 
     public ShaderProgramHandle CreateShaderProgram(ShaderProgramDescription description)
@@ -229,6 +231,83 @@ public sealed partial class OpenGLGraphicsDevice
             description.Format,
             resolvedName,
             TextureKind.UserUploaded));
+        return new TextureHandle(handleId);
+    }
+
+    public TextureHandle CreateTexture3D(
+        int width, int height, int depth,
+        TextureFormat format,
+        SamplerDescription sampler,
+        ReadOnlySpan<byte> pixels,
+        string? name = null)
+    {
+        ThrowIfDisposed();
+
+        if (format == TextureFormat.Depth24)
+        {
+            throw new ArgumentException(
+                "Depth textures must be created through CreateRenderSurface, not as 3D textures.",
+                nameof(format));
+        }
+
+        if (width <= 0 || height <= 0 || depth <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(width),
+                $"Texture3D dimensions must be > 0; got {width}x{height}x{depth}.");
+        }
+
+        var expectedByteCount = width * height * depth * GetBytesPerPixel(format);
+        if (pixels.Length != expectedByteCount)
+        {
+            throw new ArgumentException(
+                $"Texture3D pixel data length must be {expectedByteCount} bytes (got {pixels.Length}).",
+                nameof(pixels));
+        }
+
+        var texture = GL.GenTexture();
+        GL.BindTexture(TextureTarget.Texture3D, texture);
+
+        // R8 single-channel uploads default to row alignment 4 in OpenGL; for
+        // odd-width textures (e.g., 33-wide voxel slices) this would mis-read
+        // the source buffer. Force tight packing for the duration of the
+        // upload, then restore.
+        GL.PixelStore(PixelStoreParameter.UnpackAlignment, 1);
+        GL.TexImage3D(
+            TextureTarget.Texture3D,
+            level: 0,
+            MapPixelInternalFormat(format),
+            width,
+            height,
+            depth,
+            border: 0,
+            MapPixelFormat(format),
+            MapPixelType(format),
+            ref System.Runtime.InteropServices.MemoryMarshal.GetReference(pixels));
+        GL.PixelStore(PixelStoreParameter.UnpackAlignment, 4);
+
+        GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMinFilter, (int)MapMinFilter(sampler.MinFilter, sampler.GenerateMipmaps));
+        GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMagFilter, (int)MapMagFilter(sampler.MagFilter));
+        GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapS, (int)MapTextureWrap(sampler.WrapU));
+        GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapT, (int)MapTextureWrap(sampler.WrapV));
+        GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapR, (int)MapTextureWrap(sampler.WrapW));
+        if (sampler.GenerateMipmaps)
+        {
+            GL.GenerateMipmap(GenerateMipmapTarget.Texture3D);
+        }
+        GL.BindTexture(TextureTarget.Texture3D, 0);
+
+        var handleId = NextHandle();
+        var resolvedName = name ?? $"texture3d#{handleId}";
+        ApplyDebugLabel(ObjectLabelIdentifier.Texture, texture, resolvedName);
+        textures.Add(handleId, new TextureResource(
+            texture,
+            width,
+            height,
+            format,
+            resolvedName,
+            TextureKind.UserUploaded,
+            TextureTarget.Texture3D));
         return new TextureHandle(handleId);
     }
 
@@ -356,6 +435,80 @@ public sealed partial class OpenGLGraphicsDevice
             texture,
             faceSize,
             faceSize,
+            TextureFormat.Rgba16F,
+            resolvedName,
+            TextureKind.UserUploaded,
+            TextureTarget.TextureCubeMap));
+        return new TextureHandle(handleId);
+    }
+
+    public TextureHandle CreateTextureCubeHdrMipped(
+        int baseFaceSize,
+        IReadOnlyList<Half[]> mipFaces,
+        SamplerDescription sampler,
+        string? name = null)
+    {
+        ThrowIfDisposed();
+        if (baseFaceSize <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(baseFaceSize), "Base face size must be > 0.");
+        }
+        if (mipFaces is null || mipFaces.Count == 0)
+        {
+            throw new ArgumentException("mipFaces must contain at least one mip level.", nameof(mipFaces));
+        }
+
+        var texture = GL.GenTexture();
+        GL.BindTexture(TextureTarget.TextureCubeMap, texture);
+
+        for (var mip = 0; mip < mipFaces.Count; mip++)
+        {
+            int mipSize = Math.Max(1, baseFaceSize >> mip);
+            int halfsPerFace = mipSize * mipSize * 4;
+            var mipData = mipFaces[mip];
+            if (mipData.Length != halfsPerFace * 6)
+            {
+                throw new ArgumentException(
+                    $"Mip {mip} expected {halfsPerFace * 6} Halfs (6 faces of {mipSize}x{mipSize} RGBA16F); got {mipData.Length}.",
+                    nameof(mipFaces));
+            }
+            for (var face = 0; face < 6; face++)
+            {
+                var faceTarget = TextureTarget.TextureCubeMapPositiveX + face;
+                var faceSpan = new ReadOnlySpan<Half>(mipData, face * halfsPerFace, halfsPerFace);
+                var byteSpan = System.Runtime.InteropServices.MemoryMarshal.AsBytes(faceSpan);
+                GL.TexImage2D(
+                    faceTarget,
+                    level: mip,
+                    PixelInternalFormat.Rgba16f,
+                    mipSize, mipSize,
+                    border: 0,
+                    PixelFormat.Rgba,
+                    PixelType.HalfFloat,
+                    ref System.Runtime.InteropServices.MemoryMarshal.GetReference(byteSpan));
+            }
+        }
+
+        // Filter: trilinear across mips so textureLod with a non-integer lod
+        // interpolates between roughness levels smoothly.
+        GL.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
+        GL.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        GL.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        GL.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        GL.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapR, (int)TextureWrapMode.ClampToEdge);
+        // Clamp base/max level so the sampler doesn't try to read undefined
+        // mips above what we uploaded.
+        GL.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureBaseLevel, 0);
+        GL.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMaxLevel, mipFaces.Count - 1);
+        GL.BindTexture(TextureTarget.TextureCubeMap, 0);
+
+        var handleId = NextHandle();
+        var resolvedName = name ?? $"textureCubeHdrMipped#{handleId}";
+        ApplyDebugLabel(ObjectLabelIdentifier.Texture, texture, resolvedName);
+        textures.Add(handleId, new TextureResource(
+            texture,
+            baseFaceSize,
+            baseFaceSize,
             TextureFormat.Rgba16F,
             resolvedName,
             TextureKind.UserUploaded,

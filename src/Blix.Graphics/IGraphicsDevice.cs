@@ -31,6 +31,18 @@ public interface IGraphicsDevice : IDisposable
 
     TextureHandle CreateTexture2D(TextureDescription description, ReadOnlySpan<byte> pixels, string? name = null);
 
+    // Creates a 3D texture from a contiguous voxel array. Data layout is
+    // x-major within rows, y-major within slices, z-major across slices --
+    // i.e. voxel (x, y, z) is at byte offset (z*H*W + y*W + x) * bytesPerVoxel
+    // for an unpacked single-channel format. Intended use is volumetric
+    // rendering: ray-marched volume passes sample with a sampler3D uniform.
+    TextureHandle CreateTexture3D(
+        int width, int height, int depth,
+        TextureFormat format,
+        SamplerDescription sampler,
+        ReadOnlySpan<byte> pixels,
+        string? name = null);
+
     // Creates a cubemap texture from six square face images, laid out in GL face order:
     // [+X, -X, +Y, -Y, +Z, -Z]. Each face is RGBA8, face*4 bytes long. The resulting
     // texture is sampled in shaders via a samplerCube uniform with a 3D direction.
@@ -49,6 +61,18 @@ public interface IGraphicsDevice : IDisposable
     // PBR specular reflecting a bright sun, IBL diffuse irradiance with proper
     // dynamic range, and pre-tonemap input that isn't already clipped.
     TextureHandle CreateTextureCubeHdr(int faceSize, ReadOnlySpan<Half> faces, SamplerDescription sampler, string? name = null);
+
+    // HDR cubemap with caller-supplied mip chain. Used by the PBR specular
+    // prefilter: each mip is pre-integrated at a specific roughness (mip K
+    // has roughness K/(N-1)), so sampling with textureLod(R, roughness * (N-1))
+    // returns the GGX-convolved env for that surface roughness -- the "split
+    // sum" approximation's prefiltered colour term. mipFaces[k] must be
+    // 6 * size * size * 4 Half values where size = baseFaceSize >> k.
+    TextureHandle CreateTextureCubeHdrMipped(
+        int baseFaceSize,
+        IReadOnlyList<Half[]> mipFaces,
+        SamplerDescription sampler,
+        string? name = null);
 
     void DestroyTexture(TextureHandle handle);
 

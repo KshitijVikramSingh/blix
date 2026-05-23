@@ -77,7 +77,7 @@ internal sealed class MyGame : Game, IInputHandler, IDebuggable
 }
 ```
 
-See `Blix.Demos.ShaderLab/Program.cs` for the full demo — it exercises every subsystem.
+See `Blix.Demos.ShaderLab/Program.cs` for a full game-layer reference — it exercises every subsystem (multi-light PCSS, glass, fur, hologram, skinned glTF, picking, audio). For the higher-end rendering path (HDR + IBL, cascade shadows, SSR, volumetric fire/fog, dual-filter bloom, tonemap pickers), see `Blix.Demos.Walkthrough/Program.cs` and [`walkthrough.md`](walkthrough.md).
 
 ## Project dependencies
 
@@ -1083,6 +1083,6 @@ In approximate priority order. Each item is a feature direction, not a structura
 
 - **Forces / impulses / mass + multi-body solver.** Real physics-gameplay. Kinematic depenetration covers the demo; full N-body iterative resolution is a multi-week commitment that isn't justified by current content.
 - **Pathfinding.** Graph / navmesh / grid representations. No autonomous-AI content motivates it.
-- **Split-sum IBL.** Pre-filtered specular cubemap + BRDF LUT. The simple mip-LOD approximation is "good enough" until rough-specular reflections look obviously wrong.
 - **Convex hull collider.** No specific content needs it; OBB covers the tilted-prop case.
 - **Hot-reload / cooked binary assets / asset cache.** All asset loads re-import every time; texture caching lives at `MaterialResolver`. Each becomes a follow-up when iteration speed becomes a bottleneck.
+- **Particle system.** Generic GPU/CPU emitter with sorted billboards + soft-particle depth fade. Planned next; the Walkthrough's fire is currently hand-rolled per use site, and a real particle system would replace it (plus enable sparks, embers, dust motes, debris).

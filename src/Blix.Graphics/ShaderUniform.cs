@@ -19,6 +19,14 @@ public sealed record Vector4Uniform(Vector4 Value) : ShaderUniformValue;
 
 public sealed record Vector3Uniform(Vector3 Value) : ShaderUniformValue;
 
+// Uniform array of vec3s. Shader declares `uniform vec3 uName[N]`; a single upload
+// fills the whole array. Caller sizes Value to the shader's array length or smaller
+// (untouched tail elements stay at GL default initialisation).
+public sealed record Vector3ArrayUniform(Vector3[] Value) : ShaderUniformValue;
+
 public sealed record Vector2Uniform(Vector2 Value) : ShaderUniformValue;
 
 public sealed record FloatUniform(float Value) : ShaderUniformValue;
+
+// Uniform array of floats. Same contract as Vector3ArrayUniform.
+public sealed record FloatArrayUniform(float[] Value) : ShaderUniformValue;

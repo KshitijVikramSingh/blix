@@ -50,7 +50,16 @@ public sealed partial class OpenGLGraphicsDevice
             if (state.Enabled)
             {
                 GL.Enable(IndexedEnableCap.Blend, (uint)i);
-                GL.BlendFunc(i, BlendingFactorSrc.SrcAlpha, BlendingFactorDest.OneMinusSrcAlpha);
+                switch (state.Mode)
+                {
+                    case BlendMode.Additive:
+                        GL.BlendFunc(i, BlendingFactorSrc.One, BlendingFactorDest.One);
+                        break;
+                    case BlendMode.Alpha:
+                    default:
+                        GL.BlendFunc(i, BlendingFactorSrc.SrcAlpha, BlendingFactorDest.OneMinusSrcAlpha);
+                        break;
+                }
             }
             else
             {
@@ -106,12 +115,31 @@ public sealed partial class OpenGLGraphicsDevice
                 GL.Uniform3(location, vector.Value.X, vector.Value.Y, vector.Value.Z);
                 break;
 
+            case Vector3ArrayUniform v3a:
+            {
+                // Flatten to a contiguous float[] — OpenTK's Uniform3 array overload
+                // takes the *vec3 count*, not the float count, and reads 3*count floats.
+                var flat = new float[v3a.Value.Length * 3];
+                for (var i = 0; i < v3a.Value.Length; i++)
+                {
+                    flat[i * 3 + 0] = v3a.Value[i].X;
+                    flat[i * 3 + 1] = v3a.Value[i].Y;
+                    flat[i * 3 + 2] = v3a.Value[i].Z;
+                }
+                GL.Uniform3(location, v3a.Value.Length, flat);
+                break;
+            }
+
             case Vector2Uniform v2:
                 GL.Uniform2(location, v2.Value.X, v2.Value.Y);
                 break;
 
             case FloatUniform f:
                 GL.Uniform1(location, f.Value);
+                break;
+
+            case FloatArrayUniform fa:
+                GL.Uniform1(location, fa.Value.Length, fa.Value);
                 break;
 
             default:

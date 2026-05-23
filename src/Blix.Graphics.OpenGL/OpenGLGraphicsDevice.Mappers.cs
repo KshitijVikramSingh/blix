@@ -10,6 +10,7 @@ public sealed partial class OpenGLGraphicsDevice
         return format switch
         {
             TextureFormat.Rgba8 => 4,
+            TextureFormat.R8 => 1,
             // Depth24 / Rgba16F are not user-uploadable; surfaces create them through
             // CreateRenderSurface as empty attachments.
             _ => throw new NotSupportedException($"Texture format {format} is not byte-uploadable.")
@@ -117,6 +118,7 @@ public sealed partial class OpenGLGraphicsDevice
             TextureFormat.Rgba8 => PixelInternalFormat.Rgba8,
             TextureFormat.Depth24 => PixelInternalFormat.DepthComponent24,
             TextureFormat.Rgba16F => PixelInternalFormat.Rgba16f,
+            TextureFormat.R8 => PixelInternalFormat.R8,
             _ => throw new NotSupportedException($"Unsupported texture format: {format}")
         };
     }
@@ -128,6 +130,7 @@ public sealed partial class OpenGLGraphicsDevice
             TextureFormat.Rgba8 => PixelFormat.Rgba,
             TextureFormat.Depth24 => PixelFormat.DepthComponent,
             TextureFormat.Rgba16F => PixelFormat.Rgba,
+            TextureFormat.R8 => PixelFormat.Red,
             _ => throw new NotSupportedException($"Unsupported texture format: {format}")
         };
     }
@@ -141,6 +144,7 @@ public sealed partial class OpenGLGraphicsDevice
             TextureFormat.Rgba8 => PixelType.UnsignedByte,
             TextureFormat.Depth24 => PixelType.UnsignedInt,
             TextureFormat.Rgba16F => PixelType.HalfFloat,
+            TextureFormat.R8 => PixelType.UnsignedByte,
             _ => throw new NotSupportedException($"Unsupported texture format: {format}")
         };
     }

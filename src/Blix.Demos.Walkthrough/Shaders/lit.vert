@@ -7,13 +7,15 @@ layout (location = 2) in vec2 aTexCoord;
 out vec3 worldPosition;
 out vec3 worldNormal;
 out vec2 texCoord;
-out vec4 shadowCoord;
+// View-space depth (positive going forward) for the lit frag's cascade
+// selection. Saves having to invert the projection or sample depth in the
+// frag shader -- we already have it here for free.
+out float viewDepth;
 
 uniform mat4 uModel;
 uniform mat4 uNormalMatrix;
 uniform mat4 uView;
 uniform mat4 uProjection;
-uniform mat4 uLightViewProjection;
 
 void main()
 {
@@ -21,6 +23,7 @@ void main()
     worldPosition = world.xyz;
     worldNormal = normalize(mat3(uNormalMatrix) * aNormal);
     texCoord = aTexCoord;
-    shadowCoord = uLightViewProjection * world;
-    gl_Position = uProjection * uView * world;
+    vec4 viewPos = uView * world;
+    viewDepth = -viewPos.z;  // -z because camera looks down -Z in OpenGL view
+    gl_Position = uProjection * viewPos;
 }

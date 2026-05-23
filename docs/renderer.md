@@ -163,15 +163,67 @@ Reusable mesh data in `Blix.Graphics.Primitives.{Icosphere, Cylinder, Torus, Tor
 
 ### Shader sources
 
-`ShaderSources(VertexSource, FragmentSource, VertexName, FragmentName)` carries text + optional labels. Names flow into the resource registry and into OpenGL object labels (`glObjectLabel` when `GL_KHR_debug` is available — typically on Windows/Linux; macOS uses the labels internally but they don't surface to GL debuggers).
+`ShaderSources(VertexSource, FragmentSource, VertexName, FragmentName, VertexSourceMap?, FragmentSourceMap?)` carries text + optional labels + an optional source-id-to-filename map (populated by the preprocessor; consumed by the compile-error formatter). Names flow into the resource registry and into OpenGL object labels (`glObjectLabel` when `GL_KHR_debug` is available — typically on Windows/Linux; macOS uses the labels internally but they don't surface to GL debuggers).
 
-The OpenGL backend reports compile failures with the stage, source name, the GL info log, and the full source dumped with line numbers. Link failures include both stage labels.
+The OpenGL backend reports compile failures with the stage, source name, the GL info log, and the full source dumped with line numbers. When a source map is present, a `--- Source map ---` block prints before the info log so error messages of the form `1:42: ...` decode to a real filename. Link failures include both stage labels.
 
 ### GLSL include preprocessor
 
-`Blix.Graphics.GlslPreprocessor.Preprocess(source, readInclude)` inlines `#include "filename"` directives. Recursive; cycle-detected via a visiting set. The file-system access stays in the caller via the `readInclude` callback so the engine layer remains FS-free. The demo wires its shaders through it; `pbr_core.glsl` is `#include`d by both `cube.frag` (static lit) and `skin.lit.frag` (skinned lit) so they share the entire PBR/lighting core.
+`Blix.Graphics.GlslPreprocessor.PreprocessDetailed(source, sourceName, readInclude)` returns a `GlslPreprocessResult(ExpandedSource, SourceMap)`:
 
-Limits: double-quoted `#include "name"` form only. No `#line` directives output, so compile errors in inlined files report line numbers from the inlined-position perspective.
+- Resolves `#include "filename"` directives. Recursive; cycle-detected via a visiting set.
+- Honors `#pragma once` — a file that declares it is inlined once across sibling include sites; files without the pragma inline every time (matches C preprocessor semantics, lets non-idempotent snippets work).
+- Emits `#line N <source-id>` directives around every inclusion so GLSL compile errors report the original file's line number, not the post-expansion counter. `<source-id>` is an integer that maps to a filename via `SourceMap`.
+- Skips the leading `#line` on the top-level source so a leading `#version` directive isn't preceded by another directive — Apple's GLSL parser rejects that.
+- File-system access stays in the caller via the `readInclude` callback so the engine layer remains FS-free.
+
+The simpler `Preprocess(source, readInclude)` overload returns just the expanded text for callers that don't need the source map.
+
+Library files start with `#pragma once` and use `blix_`-prefixed symbol names; the convention is described in [Shader library](#shader-library).
+
+Limits: only the double-quoted `#include "name"` form is recognised. Angle-bracket `#include <name>` is reserved for a future library search-path resolution.
+
+### ShaderLoader
+
+`Blix.Graphics.ShaderLoader.LoadVertexFragment(vertexPath, fragmentPath, includeDirs?, defines?)` bundles the common load flow:
+
+```csharp
+var sources = ShaderLoader.LoadVertexFragment(
+    Path.Combine(shadersDir, "lit.vert"),
+    Path.Combine(shadersDir, "lit.frag"),
+    defines: new Dictionary<string, string> { ["BLIX_PBR_LITE"] = "1" });
+var program = device.CreateShaderProgram(sources);
+```
+
+- Reads both files from disk, runs the preprocessor on each, returns a `ShaderSources` with the source maps populated.
+- Resolves `#include "name"` first next to the requesting file, then through the optional `includeDirs`.
+- The optional `defines` dictionary is injected as `#define KEY VALUE` lines right after `#version`, before any other content. Same defines apply to both stages — call twice with different sources if you need stage-specific defines.
+
+Demos place the engine shader library in `Shaders/lib/<file>.glsl` of their bin output (copied from `src/Blix.Shaders` at build time), so `#include "lib/tonemap.glsl"` resolves correctly with no `includeDirs` argument.
+
+### Shader library
+
+Engine-shared GLSL lives at `src/Blix.Shaders/*.glsl`. It isn't a code project — the files are copied into each demo's `bin/.../Shaders/lib/` at build time via `<None Include="..\Blix.Shaders\**\*.glsl" Link="Shaders\lib\%(RecursiveDir)%(Filename)%(Extension)">` in the demo csproj.
+
+Current library files:
+
+| File | What's in it |
+| --- | --- |
+| `tonemap.glsl` | ACES Filmic (Narkowicz), AgX (Sobotka), Reinhard, Neutral; mode selector; saturation + contrast grade. |
+| `noise.glsl` | 2D/3D Inigo-Quilez hashes; screen-space hash for jitter; value noise 2D/3D; 4-octave FBM 2D/3D (2D rotates between octaves to break axis alignment). |
+| `pbr.glsl` | GGX distribution, Smith geometry, Schlick + Lazarov roughness-aware Fresnel, Cook-Torrance BRDF, Karis windowed inverse-square attenuation. |
+
+Conventions:
+- Every library symbol gets a `blix_` prefix (functions and `BLIX_*` for macros). Keeps the library composable with third-party GLSL.
+- Each file starts with `#pragma once`.
+- One concept per file. No `utils.glsl` grab-bag.
+- Demo shaders that pre-date the prefix sometimes `#define short_name blix_full_name` at the include site so existing call sites stay readable.
+
+Demo consumption examples:
+- `composite.frag` — `#include "lib/tonemap.glsl"`; calls `blix_tonemap`, `blix_saturate`, `blix_contrast`.
+- `lit.frag` — `#include "lib/pbr.glsl"`; calls `blix_distributionGGX`, `blix_geometrySmith`, `blix_fresnelSchlick`, `blix_fresnelLazarov`.
+- `volume.frag` / `flame.frag` — `#include "lib/noise.glsl"`; call `blix_vnoise3`, `blix_fbm3`, etc.
+- `ssr.frag` — `#include "lib/noise.glsl"`; calls `blix_screenHash` for per-pixel jitter.
 
 ## Render surfaces + attachments
 
@@ -213,9 +265,13 @@ Three forms:
 
 User-created resources accept an optional `string? name`; when omitted the backend synthesizes `"texture#7"` etc. Render-surface attachment textures get derived names from the parent: `"{surfaceName}.color[i]"` and `"{surfaceName}.depth"`. `TextureKind` (in `ResourceRegistrySnapshot`) distinguishes `UserUploaded`, `RenderSurfaceColor`, `RenderSurfaceDepth` for diagnostics filtering.
 
-## Frame pipeline (the demo's spine)
+## Frame pipelines (the demos' spines)
 
-Every pass in `Blix.Demos.ShaderLab`, in execution order. The ShaderLab demo is the single best place to see how the renderer is exercised end-to-end.
+The two demos exercise the renderer in different shapes. The Walkthrough demo's pipeline is documented in [`walkthrough.md`](walkthrough.md). ShaderLab's pipeline below covers the multi-light PCSS / glass / fur / hologram path.
+
+### ShaderLab
+
+Every pass in `Blix.Demos.ShaderLab`, in execution order.
 
 | # | Pass name | Target | Reads | What it does |
 | --- | --- | --- | --- | --- |
@@ -257,7 +313,28 @@ The lit pipeline (`cube.frag` for static, `skin.lit.frag` for skinned, both `#in
 
 ### IBL (image-based lighting)
 
-The env cubemap is auto-mipmapped (linear box filter). Specular IBL samples at `lod = roughness × (mipCount - 1)`; diffuse irradiance samples at the highest mip (most blurred). Visually correct in trend (roughness blurs reflections) but not physically exact — the proper split-sum approximation (GGX-pre-filtered specular cubemap + 2D BRDF LUT) is a documented follow-up that would replace the simple mip-LOD heuristic without restructuring anything.
+Two IBL paths coexist:
+
+**Simple mip-LOD path (ShaderLab).** The env cubemap is auto-mipmapped (linear box filter). Specular IBL samples at `lod = roughness × (mipCount - 1)`; diffuse irradiance samples at the highest mip. Cheap, visually correct in trend, not physically exact.
+
+**Karis split-sum (Walkthrough).** Full PBR pipeline:
+- A **GGX-prefiltered specular cubemap** generated by `Blix.Graphics.Images.PbrIblBaker.BakeSpecularPrefilteredMips`. Each mip is convolved with a GGX lobe at progressively higher roughness via importance sampling. Sampled in the lit shader with `textureLod(prefiltered, R, roughness * (mipCount - 1))`.
+- A **cos-weighted diffuse irradiance cubemap** generated by `BakeDiffuseIrradiance`. Sampled directly (no LOD).
+- A **2D BRDF LUT** generated by `BakeBrdfLut` — pre-integrated `(F0 * scale + bias)` for any `(NdotV, roughness)` pair. The split-sum specular contribution is `prefilteredColor * (F0 * brdf.x + brdf.y)`.
+
+`PbrIblBaker` clamps each environment sample's magnitude (firefly suppression) before integration. Polyhaven HDRIs' single-pixel suns otherwise produce visible speckle on normal-mapped surfaces; the clamp at ~50 cleans this up without affecting the perceptual look.
+
+### HDR IBL bake pipeline
+
+`Blix.Graphics.Images` houses the offline IBL bake. Three pieces:
+
+| Type | Purpose |
+| --- | --- |
+| `ImageLoader.LoadRgba32F(path)` | Loads `.hdr` (RGBE) into a `HdrImageData` with float32 pixels. Uses StbImageSharp's HDR decoder. |
+| `EquirectangularToCubemap.Convert(equirect, faceSize)` | Reprojects an equirectangular HDR (Polyhaven et al.) into 6 cubemap faces. CPU-side: per-face inverse mapping with bilinear filtering. |
+| `PbrIblBaker.BakeSpecularPrefilteredMips`, `BakeDiffuseIrradiance`, `BakeBrdfLut` | Importance-sampled GGX convolution, cos-weighted hemisphere convolution, and the 2D pre-integrated BRDF LUT. |
+
+Plus the convenience `HdrSunFinder.FindSunDirection(hdrImage)` — scans the upper hemisphere of an equirect for the brightest pixel cluster and returns the world direction the sun lives at. The Walkthrough demo uses it to auto-align the directional light to whatever HDR the user drops in; without it the visible sky and the directional shadows disagree on where the sun is.
 
 ### sRGB and linear space
 
@@ -271,21 +348,29 @@ For skinned meshes (`skin.lit.frag`), tangents come from the glTF `TANGENT` acce
 
 ## Shadows
 
-Three shadow paths, all sampled in `pbr_core.glsl` via PCSS.
+Four shadow paths.
 
-### Directional sun
+### Directional sun (simple)
 
-One 2048² depth render surface, sampled as `sampler2DShadow` with `Compare: true`. The shadow pass uses back-face culling and a slope-scaled bias.
+One 2048² depth render surface, sampled as `sampler2DShadow` with `Compare: true`. The shadow pass uses back-face culling and a slope-scaled bias. ShaderLab's hand-sized 7×7 ortho is fine for a small scene.
 
-The light frustum is hand-sized to the demo scene (7×7 ortho, near 0.1, far 16). A real engine would fit to scene bounds or use cascades.
+### Cascade shadow maps (CSM)
+
+The Walkthrough demo uses three 2048² cascades to cover Sponza's ~40m view distance without one giant low-resolution shadow. Each cascade has its own depth surface; the lit shader picks one per fragment from the linearised view-space depth (`viewDepth`) via the `cascadeSplits[]` boundary array.
+
+Cascade fitting uses a **stable sphere bound**: per cascade, take the view-space sub-frustum's 8 corners, compute their bounding sphere, snap the centre to texel boundaries in light space. The sphere bound's radius is view-space-only (independent of light direction) so cascades don't "swing" as the sun rotates. Texel-snap eliminates the per-frame jitter that would otherwise visible-flicker shadow boundaries.
+
+`Visualize CSM (R/G/B by cascade)` in the debug UI tints each fragment by which cascade it sampled — handy when tuning splits.
 
 ### Point cubemap
 
-Up to **2** shadow-casting point lights. Each gets a depth cubemap (`CreateTextureCubeDepth`) with `samplerCubeShadow` sampling. Per-frame work: 6 passes per caster (one per cube face), each with the standard OpenGL cubemap orientation matrix. Far plane = `light.Range` so the cubemap depth and the shader's normalised reference depth agree.
+Up to **2** shadow-casting point lights in ShaderLab, **4** in the Walkthrough demo. Each gets a depth cubemap (`CreateTextureCubeDepth`) with `samplerCubeShadow` sampling. Per-frame work: 6 passes per caster (one per cube face), each with the standard OpenGL cubemap orientation matrix. Far plane = `light.Range` so the cubemap depth and the shader's normalised reference depth agree.
+
+Point cube shadows are **incrementally re-baked**: the demo tracks each light's last-baked position and only re-renders that light's six faces when the position drifts past a small epsilon. Static lighting in the steady state costs zero per frame.
 
 ### Spot
 
-Up to **4** shadow-casting spot lights. Each gets a 1024² depth surface. Per-frame: one pass per caster with the spot's view-projection.
+Up to **4** shadow-casting spot lights (ShaderLab). Each gets a 1024² depth surface. Per-frame: one pass per caster with the spot's view-projection.
 
 ### PCSS sampling
 
@@ -310,27 +395,74 @@ Back-facing fragments (`dot(N, L) ≤ 0`) skip the shadow lookup and use `shadow
 
 ## HDR pipeline
 
-The scene color attachment is `Rgba16F` because lit-pass output routinely exceeds 1.0 on specular highlights and bright reflective surfaces. Luminance and normal debug attachments stay `Rgba8`.
+Scene lighting runs in linear HDR; post-process passes consume the HDR scene buffer and the final composite tonemaps + gamma encodes to the swapchain. The scene color attachment is `Rgba16F` because lit-pass output routinely exceeds 1.0 on specular highlights, bright reflective surfaces, and emissive volumetrics.
 
 ### Environment cubemap
 
-`CreateTextureCubeHdr` allocates a `Rgba16F` cubemap and uploads `Half`-typed face data. The demo's `GenerateProceduralCubemapHdr` writes six 256² faces with a linear HDR sky + sun spot at ~12× (no clamp). Auto-mipmapped via `SamplerDescription.LinearClampMipmap` so `log2(256) + 1 = 9` mip levels are available for the IBL roughness-LOD path.
+`CreateTextureCubeHdr` allocates a `Rgba16F` cubemap and uploads `Half`-typed face data. Two sources feed it:
 
-Two consumers:
-1. The **skybox pass**, drawn inside `scene`. Pipeline uses `DepthState.LessEqualNoWrite` and `RasterizerState.NoCulling`; the skybox vertex shader forces `clip.z = clip.w` so every fragment lands at the far plane and only paints where depth is still 1.
-2. **PBR IBL** in the lit pass — `SampleEnvSpecular(R, roughness)` uses `textureLod` with roughness-driven mip selection.
+- **Procedural sky** (`CubemapBaker.BakeSky` in the Walkthrough demo, similar inline code in ShaderLab) — generates six faces from a sun direction + horizon tint. Cheap, no HDR file required.
+- **HDR equirect → cube** via `EquirectangularToCubemap.Convert` (see [HDR IBL bake pipeline](#hdr-ibl-bake-pipeline)). Drop a `.hdr` into the demo's assets and it auto-aligns the sun direction via `HdrSunFinder`.
 
-The cubemap doesn't follow `lightDirection` at runtime. A living-light environment would need per-frame regeneration; deferred.
+Auto-mipmapped via `SamplerDescription.LinearClampMipmap` so the IBL roughness-LOD path has 9 mip levels at 256² face size. The Walkthrough demo's full PBR pipeline replaces the simple mip-LOD heuristic with the Karis split-sum baked probes (see [IBL](#ibl-image-based-lighting)).
+
+The skybox pass uses `DepthState.LessEqualNoWrite` and `RasterizerState.NoCulling`; the skybox vertex shader forces `clip.z = clip.w` so every fragment lands at the far plane and only paints where depth is still 1.
+
+### Material G-buffer (MRT)
+
+The Walkthrough demo's `hdrSceneSurface` has **two** color attachments:
+
+- **Attachment 0** (`Rgba16F`): the HDR scene color. Sampled by bloom, SSR, fog, and the final composite.
+- **Attachment 1** (`Rgba8`): per-fragment material info. R = roughness; GBA spare. Sampled by SSR to gate matte surfaces (cloth, plaster, brick) so reflection rays only fire from genuinely-smooth materials.
+
+Every shader that draws to `hdrSceneSurface` declares `layout(location = 1) out vec4 fragMaterial` and writes a value appropriate to its blend mode:
+- **Lit**: writes the actual roughness used by the PBR pipeline; blend disabled on both attachments (overwrite).
+- **Skybox / volume / flame**: writes 1.0 (matte) so SSR rays hitting those pixels get gated out.
+- **Fog**: writes 0 with additive blend so the underlying surface's roughness is preserved.
+
+Pipelines targeting `hdrSceneSurface` declare a length-2 `ColorBlends` array (the API supports per-attachment blend states; `PipelineDescription.ColorBlends[i]` applies to attachment `i`).
+
+This is **the** way to keep SSR honest: a geometric gate (upward normal + below camera) cannot distinguish marble from cloth and ends up reflecting balcony rails draped in fabric. A material G-buffer is the right level at which to filter.
+
+### Screen-space reflections (SSR)
+
+The Walkthrough demo's SSR pass marches a reflection ray in NDC/screen space:
+
+1. **Gate**: reconstructed normal must point up (smoothstep over `dot(N, +Y)`); fragment must sit below the camera by ≥ 0.3m; roughness sampled from the material G-buffer must be below `uRoughnessCutoff` (default 0.4).
+2. **Ray-march**: project ray start and end into clip space, perspective-divide to NDC, march `uSteps` (default 40) linearly between `uvStart` and `uvEnd` in screen space — natural pixel-sized steps that match the depth buffer's precision. Per-pixel hash jitter on the step offset breaks step boundaries into noise rather than visible bands.
+3. **Binary-search refinement**: when a sample crosses the depth surface, do 5 bisections between the last-no-hit and first-hit positions for sub-step precision. Without this you see step quantisation as the camera moves.
+4. **HDR clamp on the sample**: cap the reflected colour at 2.0 per channel so a fire volume's white-hot core (~3.5 HDR) doesn't show as over-saturated blobs in the marble.
+5. **Edge + distance fades**: smoothly fade contribution near screen edges and at the end of the marched segment.
+
+Normal reconstruction uses screen-space derivatives only for the upward-mask gate; the actual reflection vector uses a hardcoded `(0, 1, 0)` because depth-derivative normals are too noisy at typical scene distances on 24-bit depth and produce kaleidoscope artefacts otherwise.
+
+Output goes to a separate `ssrSurface` (no read-write hazard with `hdrSceneSurface`); the composite combines them.
+
+### Volumetric fog
+
+Full-screen pass that, per pixel:
+1. Reconstructs the scene's world-space far point from sampled depth.
+2. Marches the view ray from camera to that point in `uFogSteps` (16-48).
+3. Per step samples the directional shadow map to gate visibility — unshadowed steps accumulate sun in-scatter (this is what makes god-rays appear).
+4. Accumulates inscatter with a Henyey-Greenstein phase function (`g = 0.6`, forward-peaked).
+5. **Point-light scatter** is added analytically without per-step march: for each lamp, the closest distance from the ray to the lamp determines a bounded smooth halo. Smoothstep over the marched-segment endpoints prevents hard edges where the lamp's projection crosses the camera or the scene far. Uses the lamp's *hue* (not its intensity) modulated by fog density; otherwise any non-zero scatter blasts the scene.
+
+Output is additive over the HDR scene buffer (so bloom picks up the god-rays).
 
 ### Bloom
 
-Three-level Gaussian chain. Each level has two surfaces (bright + temp), both `Rgba16F` at half / quarter / eighth of the default surface size.
+Dual-filter bloom in the Walkthrough demo: a 4-level downsample chain (`bloom_down.frag`) followed by a tent-filter upsample (`bloom_up.frag`) with additive blend. Each mip is `Rgba16F` at half-resolution-per-level. ShaderLab keeps the simpler 3-level Gaussian chain — the same composite handles both.
 
-1. **Bright pass** per level: reads the full-resolution HDR scene, writes to that level's bright surface, applying a soft >1.0 threshold. Bilinear filtering handles the resolution reduction.
-2. **Separable Gaussian** per level: horizontal writes to temp, vertical reads temp and writes back to bright. After both passes, the bright surface holds the fully blurred bloom for that level.
-3. **Composite** in `present.bloom`: HDR scene + scaled bloom levels (`uBloomStrength`), then tone-map with `uExposure`, then linear→sRGB.
+### Composite + tonemap
 
-The diagnostics UI exposes bloom debug levels (`bloom0`, `bloom1`, `bloom2`) — when those modes are selected, the bloom chain still runs and one intermediate level is presented directly instead of the composite.
+`composite.frag` is the final swapchain pass:
+
+1. Samples HDR scene, bloom upsample mip 0, and SSR contribution.
+2. **Grade in linear HDR**: temperature multiplier, saturation, contrast. Grading runs *before* tonemap so the curve sees punchy values; post-tonemap grading just shifts already-clipped LDR.
+3. **Tonemap operator selectable via uniform**: ACES Filmic / AgX (approximated) / Reinhard / Neutral (clamp). All four live in `lib/tonemap.glsl`.
+4. Gamma encode (`x^(1/2.2)`); write to swapchain.
+
+Debug toggles: `Show SSR only` isolates the SSR contribution; `Flip V` A/B-tests the SSR vertical convention.
 
 ## Glass refraction
 
@@ -609,12 +741,16 @@ Uniform values are typed by JSON shape: a number becomes `FloatUniform`, a 2-ele
 
 Not in priority order; each lands when there's a real consumer.
 
-- `IndexFormat.UInt32` — enables imported meshes >65 535 vertices.
-- Configurable blend factors on `BlendState` — currently fixed `SrcAlpha / OneMinusSrcAlpha`.
-- Depth-tested debug-draw mode for occlusion-aware overlays.
-- `Sprite` runtime type + texture cache so `SpriteData` resolves to GPU handles without manual bridging (the `SpriteImporter` was removed; sprite asset story is open).
-- Per-material sampler control on textures (resolver currently uses one `defaultSampler` for every cached texture).
-- Cooked binary mesh format (offline import → `.meshbin` for fast load).
-- Split-sum IBL approximation (pre-filtered specular cubemap + 2D BRDF LUT).
-- Cascaded shadow maps.
-- Pipeline definitions as assets (the material JSON references pipelines by name; pipelines themselves are still constructed in code).
+- **Particles** — generic GPU/CPU emitter with sorted billboards, soft-particle depth fade, HDR + bloom integration. First consumer of the new shader library; will use `lib/noise.glsl` for procedural detail and follow the MRT G-buffer pattern.
+- **Planar reflection probe** for ground-floor marble. Cleaner than SSR for hero floors (re-renders the scene flipped-Y at low resolution and samples it in the lit shader's marble path). ~150 LOC. SSR stays the general fallback.
+- **Stencil support** — would let SSR / fog / volume passes mask via stencil bits instead of (or alongside) the material G-buffer.
+- **Pipeline definitions as assets** — material JSON references pipelines by name; pipelines themselves are still constructed in code.
+- **Configurable blend factors on `BlendState`** — currently fixed `SrcAlpha / OneMinusSrcAlpha` and `One / One`. Per-attachment write-masking would also live here.
+- **`IndexFormat.UInt32`** — enables imported meshes >65 535 vertices.
+- **Cooked binary mesh format** (offline import → `.meshbin` for fast load).
+- **Per-material sampler control** on textures (resolver currently uses one `defaultSampler` for every cached texture).
+- **`Sprite` runtime type + texture cache** so `SpriteData` resolves to GPU handles without manual bridging.
+- **Depth-tested debug-draw mode** for occlusion-aware overlays.
+- **Hot reload** for shaders. The preprocessor returns a stable source map, so the diagnostic story is in place; the missing piece is a watcher + rebuild path.
+
+Done since the initial doc pass: GGX-prefiltered specular IBL + BRDF LUT (Karis split-sum), cascade shadow maps, screen-space reflections, dual-filter bloom, ACES/AgX/Reinhard/Neutral tonemap, material G-buffer, GLSL `#include` preprocessor with `#pragma once` + `#line` directives, `ShaderLoader`, the `Blix.Shaders` library.

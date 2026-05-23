@@ -5,6 +5,7 @@ using Blix.Core;
 using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
+using Blix.Graphics.Images;
 using Blix.Graphics.Primitives;
 using Blix.Render;
 using Blix.Runtime.OpenTK;
@@ -19,6 +20,21 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
     private const float PitchClamp = MathF.PI * 0.49f;   // just under 90 degrees
     private const int EnvCubeFaceSize = 256;
     private const int ShadowMapSize = 2048;
+    private const int CascadeCount = 3;
+    // View-space split distances. shadowSurfaces[i] covers depth
+    // [cascadeSplits[i], cascadeSplits[i+1]]. Beyond cascadeSplits[N] no
+    // shadow is applied (lit shader returns 1.0). Tuned to Sponza's
+    // ~25m atrium plus some margin.
+    private static readonly float[] cascadeSplits = { 0.1f, 4.0f, 15.0f, 40.0f };
+    // Debug: tint fragments by cascade in the lit shader output.
+    private bool visualizeCascades = false;
+    // Debug: bypass CSM and use a single big ortho frustum that wraps the
+    // whole atrium. Diagnostic A/B against cascades -- if shadows are correct
+    // here but wrong with cascades, the bug is in cascade VP construction;
+    // if wrong both ways, the bug is elsewhere.
+    private bool disableCascades = false;
+    private const int PointShadowFaceSize = 512;
+    private const int MaxPointShadows = 4;
     private static readonly Vector3 SceneCenter = new(0.0f, 5.5f, 0.0f);
 
     // --- Tunable fields (backing debug sliders) ----------------------------
@@ -53,12 +69,139 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
     private float metalFloor = 0.18f;
     private float indirectShadowBase = 0.60f;
     private float indirectShadowRange = 0.40f;
+    // Horizon fade kills the white-halo rim at silhouette edges of shiny /
+    // metallic surfaces (Schlick/Lazarov Fresnel pushing F -> 1 as
+    // NdotV -> 0). Strength 0 = off; 1 = full silhouette specular kill.
+    private float horizonFadeStrength = 0.85f;
+    private float horizonFadeStart = 0.15f;
+    // Sky tint multiplier. Applied to the visible skybox AND to the
+    // lit shader's IBL samples so the env probe agrees with the backdrop.
+    // White = identity (procedural sky as baked); deep blue = night;
+    // cool gray = overcast/storm.
+    private Vector3 skyTint = Vector3.One;
 
     // Pending rebake — set by the Debug button, consumed in OnUpdate.
     private bool rebakeRequested;
 
+    // Floor override (the asset authors Sponza's marble as semi-rough ~0.66,
+    // which reads as matte under IBL. Override on detected floor prims so we
+    // can dial in polished-marble looks without re-authoring textures.)
+    private float floorRoughness = 0.18f;
+    private float floorMetallic = 0.0f;
+    private bool floorOverrideEnabled = true;
+    // Diagnostic: when on, force tagged floor prims to bright magenta albedo
+    // and zero roughness so they're visually unmistakable. Catches detection
+    // misses (floor not tagged) and false positives (curtains tagged).
+    private bool floorVisualize = false;
+
+    // Point lights. Defaults: 4 warm hanging-lamp lights along the atrium
+    // centerline at chain-height. Shader has MAX_POINT_LIGHTS=8; the
+    // remaining 4 slots are spare for later (e.g., the fountain). Uniforms
+    // are repacked each frame from these arrays so the debug sliders take
+    // effect live.
+    private const int MaxPointLights = 8;
+    // Default positions sit on the four standing braziers identified in the
+    // Sponza glTF by metallic-material analysis (mat[20]/mat[21] centroids,
+    // see python diagnostic). Y is bumped slightly above the lamp body so the
+    // light "sits in the flame" rather than buried in the geometry.
+    private readonly Vector3[] pointLightPositions =
+    {
+        new(-4.95f, 1.10f, -1.76f),
+        new(-4.95f, 1.10f,  1.15f),
+        new( 3.90f, 1.10f, -1.76f),
+        new( 3.90f, 1.10f,  1.15f),
+    };
+    private float pointLightIntensity = 10.0f;
+    private float pointLightRange = 6.5f;
+    private Vector3 pointLightColor = new(1.0f, 0.55f, 0.25f);  // warm amber
+    private bool pointLightsEnabled = true;
+    // Flicker drives a per-lamp time-varying multiplier on intensity so the
+    // warm pools waver with the flame instead of reading as static spots.
+    // Three octaves of sine -> "candle-y" feel without needing a noise texture.
+    private float pointLightFlickerAmount = 0.18f;
+    private float pointLightFlickerSpeed = 1.0f;
+    // Tone down the point lights' specular term separately from diffuse.
+    // View-dependent specular on small metallic lantern geometry migrates
+    // across the surface as the camera moves and reads as "the geometry
+    // is swinging" -- dropping this kills the migration without losing
+    // the warm diffuse pools the lights cast.
+    private float pointLightSpecScale = 0.35f;
+
+    // Volumetric flame (phase A). Ray-marched analytic 3D noise inside a
+    // unit-cube bounding box per lamp. Validates the volume-rendering
+    // pipeline so volume.frag's density function can later be swapped for a
+    // sampler3D lookup against EmberGen/Houdini-baked data with no other
+    // plumbing changes.
+    private Material volumeMaterial = null!;
+    private Mesh volumeCubeMesh = null!;
+    private TextureHandle volumeVdbTexture;
+    private int volumeVdbFrames = 0;       // populated when .bvol loads
+    private bool useFlameVolume = false;
+    // Two-layer mix: VDB campfire-style sim at the cube's base + analytic
+    // narrow teardrop on top. Both layers contribute to density+temperature
+    // with smooth vertical weighting in the [-0.2, 0.3] local-y band.
+    private float volumeVdbWeight = 1.0f;
+    private float volumeProcWeight = 1.2f;
+    private float volumeSize = 0.75f;
+    private float volumeSteps = 36.0f;
+    private float volumeDensity = 9.0f;    // VDB temperatures are 0..1 but typical voxel ~0.2; needs boost for visible opacity
+    private float volumeRise = 0.85f;
+    private float volumeIntensity = 2.2f;
+    private float volumeFps = 24.0f;
+    // Temperature boost: VDB peak ~1.013 was global-max normalised to 1.0
+    // before quantisation, so a typical hot voxel comes back as ~0.2 -- well
+    // below the fire colour ramp's orange threshold. 3x lifts the body into
+    // visible orange/yellow without pumping low-density wisps into hot core.
+    private float volumeTempBoost = 3.0f;
+
+    // Flame quads -- one per active point light. Two materials share the same
+    // billboard vertex shader; the toggle picks between them at render time.
+    //   atlas:      samples BenHickling's CC0 64x64x60-frame fire atlas. Looks
+    //               like real fire because it *is* real (well, rendered) fire.
+    //   procedural: the FBM-based hand-written shader. Free of texture deps;
+    //               handy fallback / comparison; stylised look.
+    private Material flameMaterial = null!;
+    private Material flameAtlasMaterial = null!;
+    private TextureHandle flameAtlasTexture;
+    private Mesh flameMesh = null!;
+    private float flameSize = 0.45f;
+    private float flameIntensity = 1.4f;
+    private bool flamesEnabled = true;
+    private bool useFlameAtlas = true;
+    private float flameAtlasFps = 30.0f;
+    // The Unity Flame02 atlas's 64 frames are a continuous sim where a flame
+    // rises out the top of the cell while a new source forms at the bottom.
+    // Reading as "two stacked flames" on a short brazier quad. Toggle this
+    // on to fall back to playing only row 0 (16-frame clean candle loop).
+    private bool flameAtlasSingleRow = false;
+    // Flame's billboard origin sits at the BOTTOM of the quad (y=0..1 in
+    // local coords), so to put the visible flame at absolute y=1 while
+    // the light source sits at y=1.10, we anchor the quad at world y=1.0
+    // -- an offset of -0.10 from the light position.
+    private float flameYOffset = -0.10f;
+
+    // Cube shadow maps for the first MaxPointShadows point lights. Static
+    // scene, static lights -- bake once and only re-bake when a light moves
+    // or the user mashes the Rebake button. Stored as one cube per light
+    // plus six render surfaces (one per cube face) per light.
+    private TextureHandle[] pointShadowCubes = Array.Empty<TextureHandle>();
+    private RenderSurface[][] pointShadowSurfaces = Array.Empty<RenderSurface[]>();
+    private Material cubeShadowMaterial = null!;
+    private float pointShadowFarPlane = 12.0f;
+    private float pointShadowBias = 0.005f;
+    // PCF filter radius in world units. 0 = single-tap hard shadows.
+    // Around 0.08 m gives a soft penumbra that matches the directional
+    // shadow's 9-tap PCF feel.
+    private float pointShadowFilterRadius = 0.08f;
+    // Cached positions at last bake. A mismatch with the live array triggers
+    // a re-bake at the top of the next frame.
+    private Vector3[] bakedShadowLightPositions = Array.Empty<Vector3>();
+    private bool pointShadowsBaked;
+
     // Cached scene resources -------------------------------------------------
-    private record SpongeSubmesh(Mesh Mesh, Material LitMaterial);
+    // IsFloor: tagged at load via a flat-and-wide heuristic so we can push
+    // override uniforms only onto those materials each frame.
+    private record SpongeSubmesh(Mesh Mesh, Material LitMaterial, bool IsFloor, Vector4 OriginalBaseColor);
     private readonly List<SpongeSubmesh> sceneSubmeshes = new();
 
     private PipelineHandle litPipeline;
@@ -68,17 +211,95 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
     private TextureHandle whitePixel;
     private TextureHandle flatNormal;
     private TextureHandle neutralMetallicRoughness;
+    // CSM: per-cascade depth textures + render surfaces + light VPs.
+    private TextureHandle[] cascadeShadowMaps = null!;
+    // Legacy single-shadow alias (for the fog pass which still uses one
+    // sampler2DShadow). Pointed at the far cascade (covers the most depth
+    // so god-ray sampling looks right at the camera's distance).
     private TextureHandle shadowMapTexture;
     private TextureHandle envCubemap;
+    private TextureHandle diffuseIrradianceCubemap;
+    // Split-sum IBL specular: prefiltered roughness chain (one mip per
+    // roughness level) and the 2D Karis BRDF LUT. When no HDR source is
+    // available, prefilteredSpecularCubemap is just the env cube and
+    // prefilteredMipCount is set to the env's auto-generated mip count.
+    private TextureHandle prefilteredSpecularCubemap;
+    private TextureHandle brdfLut;
+    private int prefilteredMipCount;
     private float envCubeMipCount;
+    // When true the env probe is a baked HDR equirect; skip the procedural
+    // rebake-on-sun-change so we don't overwrite the HDR with the analytic
+    // sky on the first slider tick.
+    private bool usingHdrEnv = false;
+    // The sun direction extracted from the HDR equirect at load time, kept
+    // so the "Sync sun to HDR" button can re-apply it without re-scanning.
+    private Vector3? hdrSunDirectionFromEquirect = null;
 
     private RenderSurface sceneSurface = null!;
-    private RenderSurface shadowSurface = null!;
+    // Offscreen Rgba16F target the lit/skybox/flame/volume passes draw into.
+    // A final composite pass (composite.frag) tonemaps from here to the
+    // default swap-chain surface, which lets us do alpha-blended flame and
+    // volume passes in linear HDR space (correct) and centralises ACES +
+    // gamma encoding into a single place.
+    private RenderSurface hdrSceneSurface = null!;
+    private Material compositeMaterial = null!;
+    private Mesh compositeMesh = null!;
+    // Bloom mip chain. 4 levels at 1/2, 1/4, 1/8, 1/16 of default resolution.
+    // Downsample reads from previous level (or HDR scene for the first one);
+    // upsample reads from next-coarser level and ADDITIVELY blends into the
+    // current level's existing content. Final bloom = bloomMips[0] (half-
+    // res), upsampled by the composite shader's bilinear sampler.
+    private const int BloomMipCount = 4;
+    private RenderSurface[] bloomMips = null!;
+    private Material bloomDownMaterial = null!;
+    private Material bloomUpMaterial = null!;
+    private bool bloomEnabled = true;
+    private float bloomStrength = 0.10f;
+
+    // Composite-stage colour grading + tonemap selector. Operates in linear
+    // HDR space before the tonemap so adjustments have access to the full
+    // dynamic range. Defaults are identity-ish.
+    private int tonemapMode = 0;            // 0=ACES, 1=AgX, 2=Reinhard, 3=Neutral
+    private Vector3 colorTemp = Vector3.One;
+    private float saturation = 1.0f;
+    private float contrast = 1.0f;
+
+    // Screen-space reflections. Renders to a separate Rgba16F surface so
+    // the SSR shader can sample the HDR scene buffer freely without a
+    // read-write hazard. Composite reads ssrSurface alongside bloom and
+    // adds it into the final result.
+    private RenderSurface ssrSurface = null!;
+    private Material ssrMaterial = null!;
+    private bool ssrEnabled = true;
+    private bool ssrShowOnly = false;
+    private bool ssrFlipV = false;
+    private float ssrIntensity = 0.6f;
+    private float ssrMaxDistance = 30.0f;
+    private float ssrSteps = 40.0f;
+    private float ssrThickness = 0.005f;  // NDC.z units now, not world units
+    private float ssrRoughnessCutoff = 0.4f;
+
+    // Volumetric fog. Full-screen ray-march that samples the directional
+    // shadow map at each step, accumulating Henyey-Greenstein-weighted
+    // sun in-scatter into a per-pixel god-ray contribution. Additively
+    // blended into hdrSceneSurface so it bloos properly.
+    private Material fogMaterial = null!;
+    private bool fogEnabled = true;
+    private float fogDensity = 0.04f;
+    private float fogScatter = 0.20f;
+    private float fogSteps = 28.0f;
+    private float fogMaxDistance = 40.0f;
+    // Volumetric point-light in-scatter through the fog. Scales by lamp
+    // HUE (not intensity) and by fog density, so the slider expresses
+    // "warm haze strength" in roughly [0, 1] -- 0.5 is moderate, 1.0 is
+    // dense atmospheric tint.
+    private float fogPointScatter = 0.5f;
+    private RenderSurface[] cascadeShadowSurfaces = null!;
     private Camera3D camera = null!;
     private SpriteBatch spriteBatch = null!;
     private Font? hudFont;
 
-    private Matrix4x4 lightViewProjection = Matrix4x4.Identity;
+    private Matrix4x4[] cascadeLightVPs = new Matrix4x4[CascadeCount];
 
     // Input state ------------------------------------------------------------
     private readonly HashSet<Key> heldKeys = new();
@@ -129,13 +350,21 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             WrapV: TextureWrap.ClampToEdge,
             GenerateMipmaps: false,
             Compare: true);
-        shadowSurface = GraphicsDevice.CreateRenderSurface(new RenderSurfaceDescription(
-            Name: "walk.shadow",
-            Size: new FixedRenderSurfaceSize(ShadowMapSize, ShadowMapSize),
-            ColorAttachments: Array.Empty<ColorAttachmentDescription>(),
-            Depth: new DepthTexture(shadowSampler)));
-        shadowMapTexture = shadowSurface.DepthTexture
-            ?? throw new InvalidOperationException("Shadow surface has no depth texture.");
+        cascadeShadowSurfaces = new RenderSurface[CascadeCount];
+        cascadeShadowMaps = new TextureHandle[CascadeCount];
+        for (int c = 0; c < CascadeCount; c++)
+        {
+            cascadeShadowSurfaces[c] = GraphicsDevice.CreateRenderSurface(new RenderSurfaceDescription(
+                Name: $"walk.shadow.cascade{c}",
+                Size: new FixedRenderSurfaceSize(ShadowMapSize, ShadowMapSize),
+                ColorAttachments: Array.Empty<ColorAttachmentDescription>(),
+                Depth: new DepthTexture(shadowSampler)));
+            cascadeShadowMaps[c] = cascadeShadowSurfaces[c].DepthTexture
+                ?? throw new InvalidOperationException($"Cascade {c} shadow surface has no depth texture.");
+        }
+        // The fog pass still uses a single sampler2DShadow; alias the farthest
+        // cascade so its rays through the atrium hit a sensible shadow lookup.
+        shadowMapTexture = cascadeShadowMaps[CascadeCount - 1];
 
         // --- Pipeline + fallback textures -------------------------------
         whitePixel = GraphicsDevice.CreateTexture2D(
@@ -154,25 +383,127 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             new byte[] { 0, 255, 0, 255 },
             name: "walk.neutral_mr");
 
-        // --- HDR procedural cubemap (baked once at startup) -------------
-        // CPU-bake the sky into a Half-float cubemap. Used by both the
-        // skybox shader (visible backdrop) and the lit shader (IBL source).
+        // --- HDR env cubemap (baked once at startup) -------------------
+        // Two sources:
+        //   A. Real HDR file (Assets/textures/sky_hdr.hdr) -- if present,
+        //      load the equirectangular HDR, convert to cubemap on the CPU,
+        //      upload as an Rgba16F cube. Replaces the procedural sky and
+        //      drives both the skybox (visible backdrop) and IBL (lit shader).
+        //   B. Procedural CubemapBaker -- fallback when no HDR is present,
+        //      or when the user explicitly wants the analytic sky (the
+        //      time-of-day presets work best here since they rebake on
+        //      sun-direction change).
         // GenerateMipmaps on the sampler means the GL driver auto-builds the
-        // mip chain after upload — those mips serve as our cheap
+        // mip chain after upload -- those mips serve as our cheap
         // roughness-prefilter approximation for specular IBL.
-        Console.WriteLine($"Baking {EnvCubeFaceSize}x{EnvCubeFaceSize} HDR sky cubemap...");
-        var cubePixels = CubemapBaker.BakeSky(EnvCubeFaceSize, bakedSunDirection);
-        envCubemap = GraphicsDevice.CreateTextureCubeHdr(
-            EnvCubeFaceSize, cubePixels,
-            SamplerDescription.LinearClampMipmap,
-            name: "walk.env_cube");
+        var hdrPath = Path.Combine(AppContext.BaseDirectory, "Assets", "textures", "sky_hdr.hdr");
+        HdrImageData? hdrSource = null;
+        if (File.Exists(hdrPath))
+        {
+            Console.WriteLine($"Loading HDR sky: {hdrPath}");
+            hdrSource = ImageLoader.LoadRgba32F(hdrPath);
+            Console.WriteLine($"  equirect {hdrSource.Width}x{hdrSource.Height} -> converting to {EnvCubeFaceSize}^2 cubemap...");
+            var cubePixels = EquirectangularToCubemap.Convert(hdrSource, EnvCubeFaceSize);
+            envCubemap = GraphicsDevice.CreateTextureCubeHdr(
+                EnvCubeFaceSize, cubePixels,
+                SamplerDescription.LinearClampMipmap,
+                name: "walk.env_cube.hdr");
+            usingHdrEnv = true;
+
+            // Auto-align the directional sun to wherever the HDR's brightest
+            // pixel sits in the sky. Without this, the visible sun in the
+            // backdrop and the directional-light direction disagree, and
+            // shadows fall in visually-wrong directions for any HDRI the
+            // user drops in.
+            var hdrSunDir = HdrSunFinder.FindSunDirection(hdrSource);
+            if (hdrSunDir.HasValue)
+            {
+                hdrSunDirectionFromEquirect = hdrSunDir.Value;
+                sunDirection = hdrSunDir.Value;
+                bakedSunDirection = sunDirection;
+                // Reverse-derive yaw/pitch sliders so they read the auto-aligned
+                // value when the user opens the Sun debug scope.
+                sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1.0f, 1.0f));
+                sunYaw = MathF.Atan2(sunDirection.Z, sunDirection.X);
+                Console.WriteLine($"  auto-aligned sun direction to HDR's brightest pixel: {sunDirection}");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"Baking {EnvCubeFaceSize}x{EnvCubeFaceSize} procedural sky cubemap...");
+            var cubePixels = CubemapBaker.BakeSky(EnvCubeFaceSize, bakedSunDirection);
+            envCubemap = GraphicsDevice.CreateTextureCubeHdr(
+                EnvCubeFaceSize, cubePixels,
+                SamplerDescription.LinearClampMipmap,
+                name: "walk.env_cube.procedural");
+        }
         envCubeMipCount = MathF.Floor(MathF.Log2(EnvCubeFaceSize)) + 1.0f;
 
-        var litShader = GraphicsDevice.CreateShaderProgram(new ShaderSources(
-            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Shaders", "lit.vert")),
-            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Shaders", "lit.frag")),
-            VertexName: "walk.lit.vert",
-            FragmentName: "walk.lit.frag"));
+        // --- PBR IBL: BRDF LUT (env-independent) ------------------------
+        // Karis split-sum 2D LUT. R=scale, G=bias. Lit shader does
+        // F * scale + bias to get the GGX-integrated specular term.
+        Console.WriteLine("Baking 256x256 BRDF LUT (1024 samples per texel)...");
+        const int BrdfLutSize = 256;
+        var brdfLutBytes = PbrIblBaker.BakeBrdfLut(BrdfLutSize);
+        brdfLut = GraphicsDevice.CreateTexture2D(
+            new TextureDescription(BrdfLutSize, BrdfLutSize, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
+            brdfLutBytes,
+            name: "walk.brdf_lut");
+
+        // --- PBR IBL: diffuse irradiance cubemap ------------------------
+        // 32^2 per face is plenty for the convolved diffuse probe -- the
+        // cosine-weighted hemispherical convolution is very smooth, so high
+        // resolution is wasted. If we have a real HDR source, integrate
+        // against it; otherwise reuse the procedural env cube and accept
+        // that the diffuse term is less directional in the fallback case.
+        const int IrradianceFaceSize = 32;
+        if (hdrSource is not null)
+        {
+            Console.WriteLine($"Baking {IrradianceFaceSize}^2 diffuse irradiance cube from HDR...");
+            var irradiancePixels = PbrIblBaker.BakeDiffuseIrradiance(hdrSource, IrradianceFaceSize);
+            diffuseIrradianceCubemap = GraphicsDevice.CreateTextureCubeHdr(
+                IrradianceFaceSize, irradiancePixels,
+                SamplerDescription.LinearClampMipmap,
+                name: "walk.env_irradiance");
+        }
+        else
+        {
+            // No HDR source -- the lit shader will sample the env cube for
+            // diffuse, which loses directional variation but avoids a black
+            // diffuse term. Bind the env cube to the irradiance slot too.
+            diffuseIrradianceCubemap = envCubemap;
+        }
+
+        // --- PBR IBL: roughness-prefiltered specular cubemap -----------
+        // Multi-mip cube: each mip K stores the env convolved with GGX at
+        // roughness K/(N-1). The lit shader samples this via textureLod
+        // with lod = roughness * (mipCount - 1) to get the right blur.
+        if (hdrSource is not null)
+        {
+            const int PrefilterBase = 128;
+            const int PrefilterMips = 5;     // 128, 64, 32, 16, 8
+            Console.WriteLine($"Baking {PrefilterBase}^2 x {PrefilterMips}-mip GGX-prefiltered specular cube from HDR...");
+            var prefilteredMips = PbrIblBaker.BakeSpecularPrefilteredMips(hdrSource, PrefilterBase, PrefilterMips);
+            prefilteredSpecularCubemap = GraphicsDevice.CreateTextureCubeHdrMipped(
+                PrefilterBase, prefilteredMips,
+                SamplerDescription.LinearClampMipmap,
+                name: "walk.env_prefilter");
+            prefilteredMipCount = PrefilterMips;
+        }
+        else
+        {
+            // Fallback: env cube with its auto-generated mips. Not a true
+            // GGX prefilter but at least the lit shader's split-sum lookup
+            // returns sensible values.
+            prefilteredSpecularCubemap = envCubemap;
+            prefilteredMipCount = (int)envCubeMipCount;
+        }
+
+        var litShader = GraphicsDevice.CreateShaderProgram(LoadShader("lit.vert", "lit.frag"));
+        // Two ColorBlends entries because hdrSceneSurface has two attachments
+        // (HDR colour + material/roughness G-buffer). Both disabled: the lit
+        // pass overwrites whatever was there. Same for every other pipeline
+        // targeting hdrSceneSurface below -- they all need len-2 ColorBlends.
         litPipeline = GraphicsDevice.CreatePipeline(
             new PipelineDescription(
                 litShader,
@@ -180,17 +511,13 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
                 PrimitiveTopology.Triangles,
                 DepthState.LessEqualWrite,
                 RasterizerState.BackFaceCulling,
-                BlendState.Disabled),
+                new[] { BlendState.Disabled, BlendState.Disabled }),
             name: "walk.lit");
 
         // Depth-only pipeline for the shadow pass. Uses the same vertex layout
         // (Sponza primitives are bound with this layout) but the shadow.vert
         // only reads aPosition; normal/uv slots are silently ignored.
-        var shadowShader = GraphicsDevice.CreateShaderProgram(new ShaderSources(
-            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Shaders", "shadow.vert")),
-            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Shaders", "shadow.frag")),
-            VertexName: "walk.shadow.vert",
-            FragmentName: "walk.shadow.frag"));
+        var shadowShader = GraphicsDevice.CreateShaderProgram(LoadShader("shadow.vert", "shadow.frag"));
         var shadowPipeline = GraphicsDevice.CreatePipeline(
             new PipelineDescription(
                 shadowShader,
@@ -202,15 +529,235 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             name: "walk.shadow");
         shadowMaterial = new Material("walk.shadow", shadowPipeline);
 
+        // --- Point-light cube shadow infra -----------------------------
+        // One depth cubemap per shadow-casting point light, plus six render
+        // surfaces per cube (one per face). All six surfaces share the same
+        // underlying cube via DepthCubeFace -- attaching a single face as the
+        // depth target of an otherwise color-less framebuffer.
+        var cubeShadowSampler = new SamplerDescription(
+            MinFilter: TextureFilter.Linear,
+            MagFilter: TextureFilter.Linear,
+            WrapU: TextureWrap.ClampToEdge,
+            WrapV: TextureWrap.ClampToEdge,
+            GenerateMipmaps: false,
+            Compare: true);
+        pointShadowCubes = new TextureHandle[MaxPointShadows];
+        pointShadowSurfaces = new RenderSurface[MaxPointShadows][];
+        for (var i = 0; i < MaxPointShadows; i++)
+        {
+            pointShadowCubes[i] = GraphicsDevice.CreateTextureCubeDepth(
+                PointShadowFaceSize, cubeShadowSampler, name: $"walk.pshadow.cube{i}");
+            pointShadowSurfaces[i] = new RenderSurface[6];
+            for (var face = 0; face < 6; face++)
+            {
+                pointShadowSurfaces[i][face] = GraphicsDevice.CreateRenderSurface(
+                    new RenderSurfaceDescription(
+                        Name: $"walk.pshadow.cube{i}.f{face}",
+                        Size: new FixedRenderSurfaceSize(PointShadowFaceSize, PointShadowFaceSize),
+                        ColorAttachments: Array.Empty<ColorAttachmentDescription>(),
+                        Depth: new DepthCubeFace(pointShadowCubes[i], face)));
+            }
+        }
+
+        var cubeShadowShader = GraphicsDevice.CreateShaderProgram(
+            LoadShader("shadow_cube.vert", "shadow_cube.frag"));
+        var cubeShadowPipeline = GraphicsDevice.CreatePipeline(
+            new PipelineDescription(
+                cubeShadowShader,
+                VertexPosition3NormalTexture.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualWrite,
+                // Same culling as the directional shadow pass. Sponza has
+                // single-sided drapes/arches that would self-occlude badly
+                // under front-face culling; we rely on uPointShadowBias to
+                // hide self-shadow acne instead.
+                RasterizerState.BackFaceCulling,
+                BlendState.Disabled),
+            name: "walk.shadow_cube");
+        cubeShadowMaterial = new Material("walk.shadow_cube", cubeShadowPipeline);
+
+        // --- Flame quad + pipeline --------------------------------------
+        // Single 1x1 quad rebuilt as a billboard in flame.vert. Alpha-blended,
+        // depth-tested but no depth write so flames don't write occluder depth
+        // for geometry behind them. NoCulling because the billboard normal is
+        // computed in the vertex shader and we don't want orientation gotchas.
+        var flameShader = GraphicsDevice.CreateShaderProgram(
+            LoadShader("flame.vert", "flame.frag"));
+        var flamePipeline = GraphicsDevice.CreatePipeline(
+            new PipelineDescription(
+                flameShader,
+                VertexPositionTexture.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualNoWrite,
+                RasterizerState.NoCulling,
+                new[] { BlendState.AlphaBlend, BlendState.AlphaBlend }),
+            name: "walk.flame");
+        flameMaterial = new Material("walk.flame", flamePipeline);
+
+        // Quad corners in local pos.xy in [-0.5..0.5], uv in [0..1]. Y up so
+        // the noise scrolls toward the top of the flame.
+        var flameVerts = new[]
+        {
+            new VertexPositionTexture(new(-0.5f, 0.0f), new(0.0f, 0.0f)),
+            new VertexPositionTexture(new( 0.5f, 0.0f), new(1.0f, 0.0f)),
+            new VertexPositionTexture(new( 0.5f, 1.0f), new(1.0f, 1.0f)),
+            new VertexPositionTexture(new(-0.5f, 1.0f), new(0.0f, 1.0f)),
+        };
+        var flameIndices = new ushort[] { 0, 1, 2, 0, 2, 3 };
+        var flameVb = GraphicsDevice.CreateVertexBuffer(
+            VertexPositionTexture.CreateBufferData(flameVerts), name: "walk.flame.verts");
+        var flameIb = GraphicsDevice.CreateIndexBuffer(flameIndices, name: "walk.flame.indices");
+        flameMesh = new Mesh("walk.flame", flameVb, flameIb, flameIndices.Length, Bounds3.Empty);
+
+        // --- Fire atlas + atlas-flavoured flame pipeline ----------------
+        // Load Unity Labs Paris's CC-licensed Flame02-temperature atlas
+        // (2048x1024, 16x4 grid of 128x256 frames; grayscale temperature
+        // scalar). The atlas shader maps temperature through a blackbody
+        // colour ramp at runtime so we keep the simulation's energy and
+        // pick the hue ourselves. See LICENSE.txt next to the TGA for
+        // provenance.
+        var flameAtlasPath = Path.Combine(AppContext.BaseDirectory, "Assets", "textures", "fire_atlas.tga");
+        var flameAtlasImage = ImageLoader.LoadRgba32(flameAtlasPath);
+        flameAtlasTexture = GraphicsDevice.CreateTexture2D(
+            new TextureDescription(
+                flameAtlasImage.Width,
+                flameAtlasImage.Height,
+                TextureFormat.Rgba8,
+                SamplerDescription.LinearClamp),
+            flameAtlasImage.Pixels,
+            name: "walk.flame.atlas");
+
+        var flameAtlasShader = GraphicsDevice.CreateShaderProgram(
+            LoadShader("flame.vert", "flame_atlas.frag"));
+        var flameAtlasPipeline = GraphicsDevice.CreatePipeline(
+            new PipelineDescription(
+                flameAtlasShader,
+                VertexPositionTexture.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualNoWrite,
+                RasterizerState.NoCulling,
+                new[] { BlendState.AlphaBlend, BlendState.AlphaBlend }),
+            name: "walk.flame_atlas");
+        flameAtlasMaterial = new Material("walk.flame_atlas", flameAtlasPipeline);
+        flameAtlasMaterial.SetTexture("uFlameAtlas", flameAtlasTexture, 0);
+
+        // --- Volumetric flame (ray-marched bounding box) ----------------
+        // Unit cube in local [-0.5, 0.5]. Front-face-culled so we render the
+        // BACK of the box -- guarantees a fragment to shade whether the
+        // camera is outside (sees back through front) or inside (sees back
+        // directly with front behind). Depth test LessEqual no-write so the
+        // box is occluded by closer geometry but doesn't write its own
+        // depth (volumes don't have a single Z; ray-march decides per-pixel).
+        var cubeVerts = new VertexPosition3NormalTexture[]
+        {
+            new(new(-0.5f, -0.5f, -0.5f), new(0,0,0), new(0,0)),
+            new(new( 0.5f, -0.5f, -0.5f), new(0,0,0), new(0,0)),
+            new(new( 0.5f,  0.5f, -0.5f), new(0,0,0), new(0,0)),
+            new(new(-0.5f,  0.5f, -0.5f), new(0,0,0), new(0,0)),
+            new(new(-0.5f, -0.5f,  0.5f), new(0,0,0), new(0,0)),
+            new(new( 0.5f, -0.5f,  0.5f), new(0,0,0), new(0,0)),
+            new(new( 0.5f,  0.5f,  0.5f), new(0,0,0), new(0,0)),
+            new(new(-0.5f,  0.5f,  0.5f), new(0,0,0), new(0,0)),
+        };
+        // CCW winding from OUTSIDE the cube. With CullMode.Front, the faces
+        // pointing toward camera get culled, leaving back faces visible.
+        var cubeIndices = new ushort[]
+        {
+            0, 1, 2,  0, 2, 3,    // -Z (front)
+            5, 4, 7,  5, 7, 6,    // +Z (back)
+            4, 0, 3,  4, 3, 7,    // -X
+            1, 5, 6,  1, 6, 2,    // +X
+            4, 5, 1,  4, 1, 0,    // -Y
+            3, 2, 6,  3, 6, 7,    // +Y
+        };
+        var cubeVb = GraphicsDevice.CreateVertexBuffer(
+            new VertexBufferData(
+                new VertexBufferDescription(
+                    VertexPosition3NormalTexture.Layout,
+                    cubeVerts.Length,
+                    GraphicsBufferUsage.Static),
+                VertexPosition3NormalTexture.Pack(cubeVerts)),
+            name: "walk.volume.cube.verts");
+        var cubeIb = GraphicsDevice.CreateIndexBuffer(cubeIndices, name: "walk.volume.cube.indices");
+        volumeCubeMesh = new Mesh("walk.volume.cube", cubeVb, cubeIb, cubeIndices.Length, Bounds3.Empty);
+
+        var volumeShader = GraphicsDevice.CreateShaderProgram(
+            LoadShader("volume.vert", "volume.frag"));
+        var volumePipeline = GraphicsDevice.CreatePipeline(
+            new PipelineDescription(
+                volumeShader,
+                VertexPosition3NormalTexture.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualNoWrite,
+                new RasterizerState(CullMode.Front, FrontFace.CounterClockwise),
+                new[] { BlendState.AlphaBlend, BlendState.AlphaBlend }),
+            name: "walk.volume");
+        volumeMaterial = new Material("walk.volume", volumePipeline);
+
+        // --- Load baked VDB volume (BVOL format) ------------------------
+        // tools/vdb_to_blix_volume.py renders the JangaFX Small Campfire
+        // VDB pack down to a single packed R8 3D texture: width x height
+        // x (depth_per_frame * frame_count). Header is 40 bytes; body is
+        // the raw voxel data laid out X-fastest.
+        var bvolPath = Path.Combine(AppContext.BaseDirectory, "Assets", "textures", "fire_volume.bvol");
+        if (File.Exists(bvolPath))
+        {
+            var bvolBytes = File.ReadAllBytes(bvolPath);
+            // BVOL header is 32 bytes: 4-byte magic + 7 x uint32 fields
+            // (version, width, height, depth_per_frame, frame_count,
+            // channels, reserved).
+            if (bvolBytes.Length < 32 ||
+                bvolBytes[0] != (byte)'B' || bvolBytes[1] != (byte)'V' ||
+                bvolBytes[2] != (byte)'O' || bvolBytes[3] != (byte)'L')
+            {
+                throw new InvalidDataException("fire_volume.bvol header is not 'BVOL'.");
+            }
+            uint version = BitConverter.ToUInt32(bvolBytes, 4);
+            int vw   = (int)BitConverter.ToUInt32(bvolBytes, 8);
+            int vh   = (int)BitConverter.ToUInt32(bvolBytes, 12);
+            int vd   = (int)BitConverter.ToUInt32(bvolBytes, 16);   // depth per frame
+            int vfr  = (int)BitConverter.ToUInt32(bvolBytes, 20);   // frame count
+            int vch  = (int)BitConverter.ToUInt32(bvolBytes, 24);
+            if (version != 1u)
+                throw new InvalidDataException($"fire_volume.bvol version {version} unsupported (expected 1).");
+            if (vch != 1)
+                throw new InvalidDataException($"fire_volume.bvol channel count {vch} unsupported (expected 1).");
+            int expectedBytes = vw * vh * vd * vfr * vch;
+            int bodyBytes = bvolBytes.Length - 32;
+            if (bodyBytes != expectedBytes)
+                throw new InvalidDataException(
+                    $"fire_volume.bvol body is {bodyBytes} bytes; expected {expectedBytes}.");
+            // Sampler: linear in all 3 axes, clamp on every edge (the flame
+            // shouldn't repeat across cube boundaries), no mipmaps.
+            var volumeSampler = new SamplerDescription(
+                MinFilter: TextureFilter.Linear,
+                MagFilter: TextureFilter.Linear,
+                WrapU: TextureWrap.ClampToEdge,
+                WrapV: TextureWrap.ClampToEdge,
+                GenerateMipmaps: false,
+                WrapW: TextureWrap.ClampToEdge);
+            volumeVdbTexture = GraphicsDevice.CreateTexture3D(
+                vw, vh, vd * vfr,
+                TextureFormat.R8,
+                volumeSampler,
+                new ReadOnlySpan<byte>(bvolBytes, 32, bodyBytes),
+                name: "walk.volume.vdb");
+            volumeVdbFrames = vfr;
+            volumeMaterial.SetTexture("uVolumeData", volumeVdbTexture, 0);
+            Console.WriteLine($"Loaded VDB volume: {vw}x{vh}x{vd} per frame, {vfr} frames.");
+        }
+        else
+        {
+            Console.WriteLine($"WARN: {bvolPath} not found; volumetric flame will fall back to analytic noise only.");
+            // volumeVdbFrames stays 0 -> effectiveVdbWeight drops to 0 at draw time.
+        }
+
         // --- Skybox pipeline + mesh -------------------------------------
         // Rendered AFTER geometry inside the scene pass with LessEqual depth +
         // no depth write. The vertex shader puts the quad at NDC z = 1, so
         // only pixels that geometry didn't already cover get the sky shader.
-        var skyShader = GraphicsDevice.CreateShaderProgram(new ShaderSources(
-            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Shaders", "skybox.vert")),
-            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Shaders", "skybox.frag")),
-            VertexName: "walk.sky.vert",
-            FragmentName: "walk.sky.frag"));
+        var skyShader = GraphicsDevice.CreateShaderProgram(
+            LoadShader("skybox.vert", "skybox.frag"));
         var skyPipeline = GraphicsDevice.CreatePipeline(
             new PipelineDescription(
                 skyShader,
@@ -218,7 +765,7 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
                 PrimitiveTopology.Triangles,
                 DepthState.LessEqualNoWrite,
                 RasterizerState.NoCulling,
-                BlendState.Disabled),
+                new[] { BlendState.Disabled, BlendState.Disabled }),
             name: "walk.sky");
         skyboxMaterial = new Material("walk.sky", skyPipeline);
         skyboxMaterial.SetTexture("uEnvMap", envCubemap, 0);
@@ -228,6 +775,139 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
         var skyIndices = GraphicsDevice.CreateIndexBuffer(FullscreenQuad.Indices, name: "walk.sky.indices");
         skyMesh = new Mesh("walk.sky", skyVerts, skyIndices,
             FullscreenQuad.Indices.Length, Bounds3.Empty);
+
+        // --- HDR scene render target + composite pipeline ---------------
+        // Scene passes now render into hdrSceneSurface (Rgba16F + depth) so
+        // alpha blending happens in linear HDR space. The composite pass
+        // samples this surface, applies ACES + gamma, and writes to the
+        // default surface. Tonemap was previously baked into lit.frag and
+        // skybox.frag; those now output raw HDR.
+        // Depth is a SAMPLEABLE texture (Compare=false) rather than a
+        // renderbuffer so the volumetric fog pass can read it to find each
+        // pixel's scene-space far point for the ray march.
+        var sceneDepthSampler = new SamplerDescription(
+            MinFilter: TextureFilter.Nearest,
+            MagFilter: TextureFilter.Nearest,
+            WrapU: TextureWrap.ClampToEdge,
+            WrapV: TextureWrap.ClampToEdge,
+            GenerateMipmaps: false,
+            Compare: false);
+        hdrSceneSurface = GraphicsDevice.CreateRenderSurface(new RenderSurfaceDescription(
+            Name: "walk.hdr_scene",
+            Size: new MatchDefaultRenderSurfaceSize(1.0f),
+            ColorAttachments: new[]
+            {
+                new ColorAttachmentDescription(TextureFormat.Rgba16F, SamplerDescription.LinearClamp),
+                // Attachment 1: per-fragment material info. R = roughness;
+                // GBA spare for future material/ID writes. Sampled by SSR
+                // to gate matte surfaces (cloth, plaster). Lit pass writes
+                // roughness directly; sky/volume/fog/flame passes write a
+                // value that combines correctly with their blend mode so
+                // the lit-pass roughness is preserved where appropriate.
+                new ColorAttachmentDescription(TextureFormat.Rgba8, SamplerDescription.LinearClamp),
+            },
+            Depth: new DepthTexture(sceneDepthSampler)));
+
+        var compositeShader = GraphicsDevice.CreateShaderProgram(
+            LoadShader("composite.vert", "composite.frag"));
+        var compositePipeline = GraphicsDevice.CreatePipeline(
+            new PipelineDescription(
+                compositeShader,
+                VertexPositionTexture.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualNoWrite,
+                RasterizerState.NoCulling,
+                BlendState.Disabled),
+            name: "walk.composite");
+        compositeMaterial = new Material("walk.composite", compositePipeline);
+        // Reuse the fullscreen-quad mesh we already built above; allocate
+        // a separate Mesh handle just so the name/lifetime is clean.
+        compositeMesh = new Mesh("walk.composite", skyVerts, skyIndices,
+            FullscreenQuad.Indices.Length, Bounds3.Empty);
+
+        // --- Bloom mip chain --------------------------------------------
+        bloomMips = new RenderSurface[BloomMipCount];
+        for (int i = 0; i < BloomMipCount; i++)
+        {
+            var scale = 1.0f / MathF.Pow(2.0f, i + 1);  // 1/2, 1/4, 1/8, 1/16
+            bloomMips[i] = GraphicsDevice.CreateRenderSurface(new RenderSurfaceDescription(
+                Name: $"walk.bloom.mip{i}",
+                Size: new MatchDefaultRenderSurfaceSize(scale),
+                ColorAttachments: new[]
+                {
+                    new ColorAttachmentDescription(TextureFormat.Rgba16F, SamplerDescription.LinearClamp)
+                },
+                Depth: null));
+        }
+
+        var bloomDownShader = GraphicsDevice.CreateShaderProgram(
+            LoadShader("composite.vert", "bloom_down.frag"));
+        var bloomDownPipeline = GraphicsDevice.CreatePipeline(
+            new PipelineDescription(
+                bloomDownShader,
+                VertexPositionTexture.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualNoWrite,
+                RasterizerState.NoCulling,
+                BlendState.Disabled),
+            name: "walk.bloom.down");
+        bloomDownMaterial = new Material("walk.bloom.down", bloomDownPipeline);
+
+        var bloomUpShader = GraphicsDevice.CreateShaderProgram(
+            LoadShader("composite.vert", "bloom_up.frag"));
+        var bloomUpPipeline = GraphicsDevice.CreatePipeline(
+            new PipelineDescription(
+                bloomUpShader,
+                VertexPositionTexture.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualNoWrite,
+                RasterizerState.NoCulling,
+                BlendState.Additive),
+            name: "walk.bloom.up");
+        bloomUpMaterial = new Material("walk.bloom.up", bloomUpPipeline);
+
+        // --- Screen-space reflections ----------------------------------
+        ssrSurface = GraphicsDevice.CreateRenderSurface(new RenderSurfaceDescription(
+            Name: "walk.ssr",
+            Size: new MatchDefaultRenderSurfaceSize(1.0f),
+            ColorAttachments: new[]
+            {
+                new ColorAttachmentDescription(TextureFormat.Rgba16F, SamplerDescription.LinearClamp)
+            },
+            Depth: null));
+        var ssrShader = GraphicsDevice.CreateShaderProgram(
+            LoadShader("composite.vert", "ssr.frag"));
+        var ssrPipeline = GraphicsDevice.CreatePipeline(
+            new PipelineDescription(
+                ssrShader,
+                VertexPositionTexture.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualNoWrite,
+                RasterizerState.NoCulling,
+                BlendState.Disabled),
+            name: "walk.ssr");
+        ssrMaterial = new Material("walk.ssr", ssrPipeline);
+
+        // --- Volumetric fog ---------------------------------------------
+        var fogShader = GraphicsDevice.CreateShaderProgram(
+            LoadShader("composite.vert", "fog.frag"));
+        var fogPipeline = GraphicsDevice.CreatePipeline(
+            new PipelineDescription(
+                fogShader,
+                VertexPositionTexture.Layout,
+                PrimitiveTopology.Triangles,
+                // No depth read/write -- fog is full-screen, takes scene depth as a
+                // texture input rather than via the FBO's depth attachment.
+                DepthState.LessEqualNoWrite,
+                RasterizerState.NoCulling,
+                new[] { BlendState.Additive, BlendState.Additive }),
+            name: "walk.fog");
+        fogMaterial = new Material("walk.fog", fogPipeline);
+        // Shadow map binding stays static (single directional light). Scene
+        // depth gets rebound each frame because the surface's depth texture
+        // is technically a fresh handle each frame in theory (it's stable
+        // in practice but the rebind is cheap).
+        fogMaterial.SetTexture("uShadowMap", shadowMapTexture, 1);
 
         // --- Upload Sponza primitives + build materials -----------------
         // Texture cache keyed by reference identity so an albedo image
@@ -293,11 +973,42 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             material.SetTexture("uNormalMap", normalTex, 1);
             material.SetTexture("uMetallicRoughness", mrTex, 2);
             material.SetTexture("uEmissive", emissiveTex, 3);
-            material.SetTexture("uShadowMap", shadowMapTexture, 4);
+            // CSM: bind all three cascade shadow maps. Slot 4 = cascade 0
+            // (closest), slot 13 = cascade 1, slot 14 = cascade 2. (4 stayed
+            // for cascade 0 to keep the legacy uShadowMap name working in
+            // any shader that still expects it.)
+            material.SetTexture("uShadowMap", cascadeShadowMaps[0], 4);
+            material.SetTexture("uShadowMap1", cascadeShadowMaps[1], 13);
+            material.SetTexture("uShadowMap2", cascadeShadowMaps[2], 14);
             material.SetTexture("uEnvMap", envCubemap, 5);
+            // Slots 6..9 are the four point-light cube shadow maps. Bound on
+            // every lit material; the shader's MAX_POINT_SHADOWS gate decides
+            // which ones contribute per fragment.
+            material.SetTexture("uPointShadowMap0", pointShadowCubes[0], 6);
+            material.SetTexture("uPointShadowMap1", pointShadowCubes[1], 7);
+            material.SetTexture("uPointShadowMap2", pointShadowCubes[2], 8);
+            material.SetTexture("uPointShadowMap3", pointShadowCubes[3], 9);
+            material.SetTexture("uDiffuseIrradiance", diffuseIrradianceCubemap, 10);
+            material.SetTexture("uSpecularPrefilter", prefilteredSpecularCubemap, 11);
+            material.SetTexture("uBrdfLut", brdfLut, 12);
             material.SetUniform("uEnvMapMipCount", new FloatUniform(envCubeMipCount));
 
-            sceneSubmeshes.Add(new SpongeSubmesh(mesh, material));
+            // Floor heuristic in scene-meters: thin Y span, wide XZ footprint,
+            // sitting near y=0. Catches Sponza's marble floor (mesh[0].prim[45/46])
+            // and nothing else. Tagged prims get their roughness/metallic
+            // overridden each frame from the Floor debug sliders.
+            var b = prim.Mesh.Bounds;
+            var ySpan = b.Max.Y - b.Min.Y;
+            var xSpan = b.Max.X - b.Min.X;
+            var zSpan = b.Max.Z - b.Min.Z;
+            var isFloor = ySpan < 0.2f && b.Min.Y < 0.5f &&
+                          (xSpan > 4.0f || zSpan > 4.0f);
+            if (isFloor)
+            {
+                Console.WriteLine($"  Floor: {prim.Mesh.Name} y=[{b.Min.Y:0.00}..{b.Max.Y:0.00}] x=[{b.Min.X:0.0}..{b.Max.X:0.0}] z=[{b.Min.Z:0.0}..{b.Max.Z:0.0}] (xspan={xSpan:0.0}m zspan={zSpan:0.0}m)");
+            }
+
+            sceneSubmeshes.Add(new SpongeSubmesh(mesh, material, isFloor, baseColor));
         }
         Console.WriteLine($"Uploaded {sceneSubmeshes.Count} submeshes, {textureCache.Count} textures.");
 
@@ -364,7 +1075,30 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
         camera.NearPlane = cameraNearPlane;
         camera.FarPlane = cameraFarPlane;
 
-        lightViewProjection = ComputeLightViewProjection(sunDirection);
+        // Push floor overrides onto tagged materials. Sponza's floor MR
+        // texture averages roughness ~0.66 — multiplying by a factor can't
+        // get us truly polished, so when override is on we also flip
+        // uHasMetallicMap to 0, which makes the shader read the factors
+        // directly and ignore the texture entirely.
+        var floorRough = floorOverrideEnabled ? floorRoughness : 1.0f;
+        var floorMetal = floorOverrideEnabled ? floorMetallic : 1.0f;
+        var floorUseMap = floorOverrideEnabled ? 0.0f : 1.0f;
+        // Visualize: solid magenta on detected floor prims so they're
+        // unmistakable in the viewport. Off: restore the asset's authored
+        // baseColorFactor (mat[5] is 0.588 gray, not white).
+        foreach (var sub in sceneSubmeshes)
+        {
+            if (!sub.IsFloor) continue;
+            sub.LitMaterial.SetUniform("uRoughnessFactor", new FloatUniform(floorRough));
+            sub.LitMaterial.SetUniform("uMetallicFactor", new FloatUniform(floorMetal));
+            sub.LitMaterial.SetUniform("uHasMetallicMap", new FloatUniform(floorUseMap));
+            var albedo = floorVisualize ? new Vector4(1.0f, 0.0f, 1.0f, 1.0f) : sub.OriginalBaseColor;
+            sub.LitMaterial.SetUniform("uBaseColorFactor", new Vector4Uniform(albedo));
+        }
+
+        // Per-cascade VPs are computed in OnRender (we need view aspect),
+        // not here. ComputeLightViewProjection is still used as a legacy
+        // single-frustum fallback for the fog pass.
 
         // Yaw rotates around world-Y so the camera's "forward" stays horizontal
         // when WASD-walking. Pitch is applied on top for mouse-look. WASD moves
@@ -405,37 +1139,123 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
         var view = camera.GetView();
         var proj = camera.GetProjection(aspect);
 
-        // Shadow pass: render every primitive depth-only from the sun's POV
-        // into the shadow surface. lit.frag samples this in the scene pass.
-        var shadowUniforms = new ShaderUniform[]
+        // Point-light cube shadow re-bake (lazy: only when light positions
+        // differ from the last bake, or on first frame). Sponza is a static
+        // scene with static lights, so this typically runs once at startup
+        // and only again on user-driven changes.
+        var activeLights = pointLightsEnabled
+            ? Math.Min(pointLightPositions.Length, MaxPointLights)
+            : 0;
+        var shadowCount = Math.Min(activeLights, MaxPointShadows);
+        if (PointShadowsDirty(shadowCount))
         {
-            new("uLightViewProjection", new Matrix4x4Uniform(lightViewProjection)),
-            new("uModel", new Matrix4x4Uniform(Matrix4x4.Identity))
-        };
-        commandList.Pass(
-            "walk.shadow",
-            new RenderPassDescription(
-                shadowSurface.Handle,
-                ClearColors: Array.Empty<GraphicsColor?>(),
-                ClearDepth: true),
-            pass =>
+            BakePointShadows(commandList, shadowCount);
+        }
+
+        // --- Per-cascade light VPs --------------------------------------
+        // Each cascade fits its view-frustum slice in light space, snug,
+        // independent of the others. Recomputed each frame because they
+        // depend on camera position/orientation. With disableCascades, all
+        // three cascades use the single legacy single-frustum VP -- a
+        // diagnostic A/B for narrowing down whether shadow issues live in
+        // the cascade code or elsewhere.
+        if (disableCascades)
+        {
+            var legacyVP = ComputeLightViewProjection(sunDirection);
+            for (int c = 0; c < CascadeCount; c++) cascadeLightVPs[c] = legacyVP;
+        }
+        else
+        {
+            for (int c = 0; c < CascadeCount; c++)
             {
-                foreach (var sub in sceneSubmeshes)
+                cascadeLightVPs[c] = ComputeCascadeLightViewProjection(
+                    sunDirection,
+                    camera.Transform.Position,
+                    camera.Transform.Rotation,
+                    camera.VerticalFieldOfView,
+                    aspect,
+                    cascadeSplits[c],
+                    cascadeSplits[c + 1]);
+            }
+        }
+
+        // --- Shadow passes: one per cascade -----------------------------
+        for (int c = 0; c < CascadeCount; c++)
+        {
+            var cascadeIndex = c;       // capture for closure
+            var cascadeVP = cascadeLightVPs[c];
+            commandList.Pass(
+                $"walk.shadow.cascade{cascadeIndex}",
+                new RenderPassDescription(
+                    cascadeShadowSurfaces[cascadeIndex].Handle,
+                    ClearColors: Array.Empty<GraphicsColor?>(),
+                    ClearDepth: true),
+                pass =>
                 {
-                    pass.DrawMesh(sub.Mesh, shadowMaterial,
-                        perDrawUniforms: shadowUniforms, perDrawTextures: null);
-                }
-            });
+                    var shadowUniforms = new ShaderUniform[]
+                    {
+                        new("uLightViewProjection", new Matrix4x4Uniform(cascadeVP)),
+                        new("uModel", new Matrix4x4Uniform(Matrix4x4.Identity))
+                    };
+                    foreach (var sub in sceneSubmeshes)
+                    {
+                        pass.DrawMesh(sub.Mesh, shadowMaterial,
+                            perDrawUniforms: shadowUniforms, perDrawTextures: null);
+                    }
+                });
+        }
+
+        // Pack point lights into uniform arrays sized to the shader's
+        // MAX_POINT_LIGHTS. Slots past the active count are filled with zeros
+        // for safety but the shader's count gate skips them anyway.
+        var plPositions = new Vector3[MaxPointLights];
+        var plColors = new Vector3[MaxPointLights];
+        var plRanges = new float[MaxPointLights];
+        var activeCount = pointLightsEnabled
+            ? Math.Min(pointLightPositions.Length, MaxPointLights)
+            : 0;
+        var packedColor = pointLightColor * pointLightIntensity;
+        var flickerTime = (float)time.Total * pointLightFlickerSpeed;
+        for (var i = 0; i < activeCount; i++)
+        {
+            // Per-lamp phase offset so the four braziers don't flicker in
+            // lockstep. Three octaves of sine compose into a "candle-y" 1D
+            // signal in roughly [1 - amount, 1 + 0.6 * amount]; we clamp
+            // to keep extreme dips/spikes bounded.
+            var phase = i * 1.73f;
+            var f = MathF.Sin(flickerTime *  7.3f + phase)
+                  + MathF.Sin(flickerTime * 13.7f + phase * 0.6f) * 0.6f
+                  + MathF.Sin(flickerTime * 27.0f + phase * 1.4f) * 0.35f;
+            // f is now in roughly [-2.0, 2.0]; normalise to a centred
+            // multiplier around 1.0 weighted by amount.
+            var flicker = 1.0f + (f / 2.0f) * pointLightFlickerAmount;
+            flicker = Math.Clamp(flicker, 0.55f, 1.35f);
+
+            plPositions[i] = pointLightPositions[i];
+            plColors[i] = packedColor * flicker;
+            plRanges[i] = pointLightRange;
+        }
+
+        var cascadeVpArray = new Matrix4x4[CascadeCount];
+        for (int c = 0; c < CascadeCount; c++) cascadeVpArray[c] = cascadeLightVPs[c];
+        // Float-array splits sized [CascadeCount + 1] so the lit shader can
+        // do simple `if (viewDepth < splits[i+1])` lookups. Splits beyond
+        // CascadeCount cascadeSplits[N] return no shadow (lit returns 1.0).
+        var splitFloats = new float[CascadeCount + 1];
+        Array.Copy(cascadeSplits, splitFloats, CascadeCount + 1);
 
         var sharedUniforms = new ShaderUniform[]
         {
             new("uView", new Matrix4x4Uniform(view)),
             new("uProjection", new Matrix4x4Uniform(proj)),
-            new("uLightViewProjection", new Matrix4x4Uniform(lightViewProjection)),
+            new("uCascadeLightVPs", new Matrix4x4ArrayUniform(cascadeVpArray)),
+            new("uCascadeSplits", new FloatArrayUniform(splitFloats)),
+            new("uVisualizeCascades", new FloatUniform(visualizeCascades ? 1.0f : 0.0f)),
             new("uCameraPosition", new Vector3Uniform(camera.Transform.Position)),
             new("uSunDirection", new Vector3Uniform(sunDirection)),
             new("uSunColor", new Vector3Uniform(new Vector3(1.0f, 0.94f, 0.82f) * sunStrength)),
             new("uEnvMapMipCount", new FloatUniform(envCubeMipCount)),
+            new("uSpecularPrefilterMipCount", new FloatUniform(prefilteredMipCount)),
             new("uExposure", new FloatUniform(exposure)),
             new("uModel", new Matrix4x4Uniform(Matrix4x4.Identity)),
             new("uNormalMatrix", new Matrix4x4Uniform(Matrix4x4.Identity)),
@@ -445,7 +1265,18 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             new("uIblDiffuseBoost", new FloatUniform(iblDiffuseBoost)),
             new("uMetalFloor", new FloatUniform(metalFloor)),
             new("uIndirectShadowBase", new FloatUniform(indirectShadowBase)),
-            new("uIndirectShadowRange", new FloatUniform(indirectShadowRange))
+            new("uIndirectShadowRange", new FloatUniform(indirectShadowRange)),
+            new("uHorizonFadeStrength", new FloatUniform(horizonFadeStrength)),
+            new("uHorizonFadeStart", new FloatUniform(horizonFadeStart)),
+            new("uSkyTint", new Vector3Uniform(skyTint)),
+            new("uPointLightPositions", new Vector3ArrayUniform(plPositions)),
+            new("uPointLightColors", new Vector3ArrayUniform(plColors)),
+            new("uPointLightRanges", new FloatArrayUniform(plRanges)),
+            new("uPointLightCount", new FloatUniform(activeCount)),
+            new("uPointLightSpecScale", new FloatUniform(pointLightSpecScale)),
+            new("uPointShadowFarPlane", new FloatUniform(pointShadowFarPlane)),
+            new("uPointShadowBias", new FloatUniform(pointShadowBias)),
+            new("uPointShadowFilterRadius", new FloatUniform(pointShadowFilterRadius))
         };
 
         // Inverse view-projection for the skybox: lets its vertex shader
@@ -458,13 +1289,14 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
         {
             new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),
             new("uCameraPosition", new Vector3Uniform(camera.Transform.Position)),
-            new("uExposure", new FloatUniform(exposure))
+            new("uExposure", new FloatUniform(exposure)),
+            new("uSkyTint", new Vector3Uniform(skyTint))
         };
 
         commandList.Pass(
             "walk.scene",
             new RenderPassDescription(
-                RenderSurfaceHandle.Default,
+                hdrSceneSurface.Handle,
                 // Clear colour is overwritten by the skybox fill pass at the
                 // end. Kept as a sane sky-blue so the very first frame before
                 // the skybox draws doesn't flash black.
@@ -482,14 +1314,301 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
                 // doesn't waste fragment work behind opaque geometry.
                 pass.DrawMesh(skyMesh, skyboxMaterial,
                     perDrawUniforms: skyUniforms, perDrawTextures: null);
+
+                // Flame quads OR volumes -- one per active point light.
+                // Alpha-blended, depth-tested but no depth write, so they sit
+                // on top of the lamp body while still being occluded by
+                // columns/walls in front. Drawn after the sky so the sky
+                // never overwrites a flame pixel.
+                if (flamesEnabled && useFlameVolume)
+                {
+                    var volumeTime = (float)time.Total;
+                    for (var i = 0; i < activeLights; i++)
+                    {
+                        var perFlamePhaseSeconds = i * 0.57f;
+                        // Place the volume centred on the lamp position plus
+                        // half the volumeSize upward so the box's BASE sits
+                        // at the lamp's anchor world Y (matching how flame
+                        // quads anchor at base).
+                        var lampPos = pointLightPositions[i] + new Vector3(0, flameYOffset, 0);
+                        var volumeCenter = lampPos + new Vector3(0, volumeSize * 0.5f, 0);
+                        // VDB playback: per-lamp phase offset puts each
+                        // brazier at a different point in the 34-frame loop
+                        // so they don't pulse in sync.
+                        var vdbHasData = volumeVdbFrames > 0;
+                        var vdbFrameCount = vdbHasData ? (float)volumeVdbFrames : 1.0f;
+                        var vdbPhase = perFlamePhaseSeconds * volumeFps;
+                        var effectiveVdbWeight = vdbHasData ? volumeVdbWeight : 0.0f;
+                        var perDrawV = new ShaderUniform[]
+                        {
+                            new("uView", new Matrix4x4Uniform(view)),
+                            new("uProjection", new Matrix4x4Uniform(proj)),
+                            new("uCameraPosition", new Vector3Uniform(camera.Transform.Position)),
+                            new("uVolumeCenter", new Vector3Uniform(volumeCenter)),
+                            new("uVolumeSize", new FloatUniform(volumeSize)),
+                            new("uTime", new FloatUniform(volumeTime + perFlamePhaseSeconds)),
+                            new("uFlameColor", new Vector3Uniform(pointLightColor)),
+                            new("uFlameIntensity", new FloatUniform(volumeIntensity)),
+                            new("uExposure", new FloatUniform(exposure)),
+                            new("uVolumeSteps", new FloatUniform(volumeSteps)),
+                            new("uVolumeDensity", new FloatUniform(volumeDensity)),
+                            new("uVolumeRise", new FloatUniform(volumeRise)),
+                            new("uVolumeFrames", new FloatUniform(vdbFrameCount)),
+                            new("uVolumeFps", new FloatUniform(volumeFps)),
+                            new("uFramePhase", new FloatUniform(vdbPhase)),
+                            new("uVolumeVdbWeight", new FloatUniform(effectiveVdbWeight)),
+                            new("uVolumeProcWeight", new FloatUniform(volumeProcWeight)),
+                            new("uVolumeTempBoost", new FloatUniform(volumeTempBoost))
+                        };
+                        pass.DrawMesh(volumeCubeMesh, volumeMaterial,
+                            perDrawUniforms: perDrawV, perDrawTextures: null);
+                    }
+                }
+                else if (flamesEnabled)
+                {
+                    var flameTime = (float)time.Total;
+                    var chosenMat = useFlameAtlas ? flameAtlasMaterial : flameMaterial;
+                    for (var i = 0; i < activeLights; i++)
+                    {
+                        // Per-flame phase offset so the four braziers don't
+                        // animate in lockstep. Multiplied by atlas-fps for the
+                        // atlas path so the integer-frame offset translates
+                        // into a meaningful time-domain offset for procedural.
+                        var perFlamePhaseSeconds = i * 0.57f;
+                        var atlasPhaseFrames = perFlamePhaseSeconds * flameAtlasFps;
+                        // Atlas frames are 128x204.8 in a 16x5 layout (the
+                        // file's "16x4" name is wrong -- straddling rows in a
+                        // 16x4 sampler picks up the top of the next frame as
+                        // a second bright region per cell). Aspect = 128/204.8.
+                        // Procedural uses square (1.0) -- it was tuned that way.
+                        var aspect = useFlameAtlas ? 0.625f : 1.0f;
+                        var perDraw = new List<ShaderUniform>
+                        {
+                            new("uView", new Matrix4x4Uniform(view)),
+                            new("uProjection", new Matrix4x4Uniform(proj)),
+                            new("uFlamePosition", new Vector3Uniform(
+                                pointLightPositions[i] + new Vector3(0.0f, flameYOffset, 0.0f))),
+                            new("uFlameSize", new FloatUniform(flameSize)),
+                            new("uFlameAspect", new FloatUniform(aspect)),
+                            new("uFlameColor", new Vector3Uniform(pointLightColor)),
+                            new("uFlameIntensity", new FloatUniform(flameIntensity)),
+                            new("uExposure", new FloatUniform(exposure)),
+                            new("uTime", new FloatUniform(flameTime + perFlamePhaseSeconds * 30.0f))
+                        };
+                        if (useFlameAtlas)
+                        {
+                            // Real layout is 16 cols x 5 rows, 80 frames total.
+                            // Each frame is 128 x 204.8 pixels (1024/5). The
+                            // file's "16x4" name is wrong and produced the
+                            // "two flames per cell" artefact -- sampling 256-
+                            // tall cells straddled two real frames vertically.
+                            // 80 = play the full loop; 16 = first-row fallback.
+                            var totalFrames = flameAtlasSingleRow ? 16.0f : 80.0f;
+                            perDraw.Add(new("uAtlasCols", new FloatUniform(16.0f)));
+                            perDraw.Add(new("uAtlasRows", new FloatUniform(5.0f)));
+                            perDraw.Add(new("uAtlasFrames", new FloatUniform(totalFrames)));
+                            perDraw.Add(new("uAtlasFps", new FloatUniform(flameAtlasFps)));
+                            perDraw.Add(new("uFramePhase", new FloatUniform(atlasPhaseFrames)));
+                        }
+                        pass.DrawMesh(flameMesh, chosenMat,
+                            perDrawUniforms: perDraw, perDrawTextures: null);
+                    }
+                }
+            });
+
+        // --- Volumetric fog (god-rays from directional sun) -------------
+        // Full-screen pass that ray-marches each pixel from camera to the
+        // scene's depth, sampling the directional shadow map at each step
+        // and accumulating in-scattered sun light. Additive into the HDR
+        // scene buffer so the fog is part of what bloom processes.
+        if (fogEnabled && hdrSceneSurface.DepthTexture is { } sceneDepthHandle)
+        {
+            Matrix4x4.Invert(proj * view, out var invVP);
+            fogMaterial.SetTexture("uSceneDepth", sceneDepthHandle, 0);
+            var fogUniforms = new ShaderUniform[]
+            {
+                new("uInvViewProj", new Matrix4x4Uniform(invVP)),
+                new("uLightViewProjection", new Matrix4x4Uniform(cascadeLightVPs[CascadeCount - 1])),
+                new("uCameraPosition", new Vector3Uniform(camera.Transform.Position)),
+                new("uSunDirection", new Vector3Uniform(sunDirection)),
+                new("uSunColor", new Vector3Uniform(new Vector3(1.0f, 0.94f, 0.82f) * sunStrength)),
+                new("uFogDensity", new FloatUniform(fogDensity)),
+                new("uFogScatter", new FloatUniform(fogScatter)),
+                new("uFogSteps", new FloatUniform(fogSteps)),
+                new("uFogMaxDistance", new FloatUniform(fogMaxDistance)),
+                // Reuse the same packed point-light arrays the lit pass uses;
+                // they're already filled in earlier in OnRender.
+                new("uPointLightPositions", new Vector3ArrayUniform(plPositions)),
+                new("uPointLightColors", new Vector3ArrayUniform(plColors)),
+                new("uPointLightRanges", new FloatArrayUniform(plRanges)),
+                new("uPointLightCount", new FloatUniform(activeCount)),
+                new("uFogPointScatter", new FloatUniform(fogPointScatter))
+            };
+            commandList.Pass(
+                "walk.fog",
+                new RenderPassDescription(
+                    hdrSceneSurface.Handle,
+                    ClearColors: Array.Empty<GraphicsColor?>(),  // keep scene contents
+                    ClearDepth: false),
+                pass =>
+                {
+                    pass.DrawMesh(compositeMesh, fogMaterial,
+                        perDrawUniforms: fogUniforms, perDrawTextures: null);
+                });
+        }
+
+        // --- Screen-space reflections -----------------------------------
+        // Runs after fog so its god-rays end up reflected too. Reads the
+        // (now fog-augmented) HDR scene buffer and depth; writes into a
+        // separate ssrSurface so we dodge the read-write hazard of writing
+        // to a buffer we're also sampling. Composite pulls ssrSurface into
+        // the final result.
+        var hdrColorTex = hdrSceneSurface.ColorAttachments[0];
+        var hdrRoughnessTex = hdrSceneSurface.ColorAttachments[1];
+        if (ssrEnabled && hdrSceneSurface.DepthTexture is { } ssrDepthHandle)
+        {
+            Matrix4x4.Invert(proj * view, out var ssrInvVP);
+            ssrMaterial.SetTexture("uHdrScene", hdrColorTex, 0);
+            ssrMaterial.SetTexture("uSceneDepth", ssrDepthHandle, 1);
+            ssrMaterial.SetTexture("uRoughnessMap", hdrRoughnessTex, 2);
+            commandList.Pass(
+                "walk.ssr",
+                new RenderPassDescription(
+                    ssrSurface.Handle,
+                    ClearColors: new GraphicsColor?[] { new(0, 0, 0, 0) },
+                    ClearDepth: false),
+                pass =>
+                {
+                    pass.DrawMesh(compositeMesh, ssrMaterial,
+                        perDrawUniforms: new ShaderUniform[]
+                        {
+                            new("uView", new Matrix4x4Uniform(view)),
+                            new("uProjection", new Matrix4x4Uniform(proj)),
+                            new("uInvViewProj", new Matrix4x4Uniform(ssrInvVP)),
+                            new("uCameraPosition", new Vector3Uniform(camera.Transform.Position)),
+                            new("uMaxDistance", new FloatUniform(ssrMaxDistance)),
+                            new("uSteps", new FloatUniform(ssrSteps)),
+                            new("uThickness", new FloatUniform(ssrThickness)),
+                            new("uIntensity", new FloatUniform(ssrIntensity)),
+                            new("uRoughnessCutoff", new FloatUniform(ssrRoughnessCutoff))
+                        },
+                        perDrawTextures: null);
+                });
+        }
+
+        // --- Bloom: downsample chain then upsample chain ----------------
+        // Downsample: mip0 ← HDR scene; mip(n+1) ← down(mip(n)). Each pass
+        // overwrites its destination (no blend). Upsample: starting from
+        // the coarsest mip, additively blend a tent-filtered copy of it
+        // into the next-finer mip. After the upsample chain, mip0 contains
+        // the sum of all mip contributions and is sampled by composite.
+        if (bloomEnabled)
+        {
+            // Down: mip[0] ← downsample(HDR), then chain.
+            for (int i = 0; i < BloomMipCount; i++)
+            {
+                var src = (i == 0) ? hdrColorTex : bloomMips[i - 1].ColorAttachments[0];
+                // Source texel size for the kernel offsets. Source resolution
+                // is the previous step's resolution.
+                var srcScale = (i == 0) ? 1.0f : (1.0f / MathF.Pow(2.0f, i));
+                var srcW = frame.Width * srcScale;
+                var srcH = frame.Height * srcScale;
+                var srcTexel = new Vector2(1.0f / srcW, 1.0f / srcH);
+                var localBloomMip = bloomMips[i];
+                var localSrc = src;
+                var localTexel = srcTexel;
+                commandList.Pass(
+                    $"walk.bloom.down{i}",
+                    new RenderPassDescription(
+                        localBloomMip.Handle,
+                        ClearColors: new GraphicsColor?[] { new(0.0f, 0.0f, 0.0f, 0.0f) },
+                        ClearDepth: false),
+                    pass =>
+                    {
+                        bloomDownMaterial.SetTexture("uSrc", localSrc, 0);
+                        pass.DrawMesh(compositeMesh, bloomDownMaterial,
+                            perDrawUniforms: new ShaderUniform[]
+                            {
+                                new("uSrcTexel", new Vector2Uniform(localTexel))
+                            },
+                            perDrawTextures: null);
+                    });
+            }
+            // Up: from coarsest to finest, additively blend up(mip(n+1)) into mip(n).
+            // No clear -- the additive blend needs the existing downsample
+            // contents to remain so the upsample tap accumulates onto it.
+            for (int i = BloomMipCount - 2; i >= 0; i--)
+            {
+                var srcMip = bloomMips[i + 1];
+                var srcScale = 1.0f / MathF.Pow(2.0f, i + 2);  // mip i+1's scale
+                var srcW = frame.Width * srcScale;
+                var srcH = frame.Height * srcScale;
+                var srcTexel = new Vector2(1.0f / srcW, 1.0f / srcH);
+                var localDstMip = bloomMips[i];
+                var localSrcTex = srcMip.ColorAttachments[0];
+                var localTexel = srcTexel;
+                commandList.Pass(
+                    $"walk.bloom.up{i}",
+                    new RenderPassDescription(
+                        localDstMip.Handle,
+                        ClearColors: Array.Empty<GraphicsColor?>(),  // keep dst contents
+                        ClearDepth: false),
+                    pass =>
+                    {
+                        bloomUpMaterial.SetTexture("uSrc", localSrcTex, 0);
+                        pass.DrawMesh(compositeMesh, bloomUpMaterial,
+                            perDrawUniforms: new ShaderUniform[]
+                            {
+                                new("uSrcTexel", new Vector2Uniform(localTexel))
+                            },
+                            perDrawTextures: null);
+                    });
+            }
+        }
+
+        // --- Composite + tonemap pass -----------------------------------
+        // Samples the HDR scene buffer + the half-res bloom mip and writes
+        // ACES-tonemapped sRGB to the swap chain.
+        compositeMaterial.SetTexture("uHdrScene", hdrColorTex, 0);
+        compositeMaterial.SetTexture("uBloom",
+            bloomEnabled ? bloomMips[0].ColorAttachments[0] : hdrColorTex,
+            1);
+        compositeMaterial.SetTexture("uSsr",
+            ssrEnabled ? ssrSurface.ColorAttachments[0] : hdrColorTex,
+            2);
+        var bloomStrengthValue = bloomEnabled ? bloomStrength : 0.0f;
+        var ssrStrengthValue = ssrEnabled ? 1.0f : 0.0f;
+        commandList.Pass(
+            "walk.composite",
+            new RenderPassDescription(
+                RenderSurfaceHandle.Default,
+                ClearColors: new GraphicsColor?[] { new(0.0f, 0.0f, 0.0f, 1.0f) },
+                ClearDepth: true),
+            pass =>
+            {
+                pass.DrawMesh(compositeMesh, compositeMaterial,
+                    perDrawUniforms: new ShaderUniform[]
+                    {
+                        new("uBloomStrength", new FloatUniform(bloomStrengthValue)),
+                        new("uSsrStrength", new FloatUniform(ssrStrengthValue)),
+                        new("uSsrOnly", new FloatUniform(ssrShowOnly ? 1.0f : 0.0f)),
+                        new("uSsrFlipV", new FloatUniform(ssrFlipV ? 1.0f : 0.0f)),
+                        new("uTonemapMode", new FloatUniform(tonemapMode)),
+                        new("uColorTemp", new Vector3Uniform(colorTemp)),
+                        new("uSaturation", new FloatUniform(saturation)),
+                        new("uContrast", new FloatUniform(contrast))
+                    },
+                    perDrawTextures: null);
             });
 
         DrawHud(time, frame, commandList);
     }
 
     // Light view-projection from the current sun direction. Eye sits opposite
-    // sunDirection from the scene centre; ortho frustum is sized to contain
-    // Sponza with margin. Up vector picks +Y unless the sun is near vertical.
+    // Legacy single-frustum light VP (kept for the fog pass which still
+    // wants one sun matrix). Sized to wrap the whole scene around
+    // SceneCenter; the cascade-aware version below is what the lit pass
+    // actually consumes.
     private Matrix4x4 ComputeLightViewProjection(Vector3 sunDir)
     {
         var L = Vector3.Normalize(-sunDir);
@@ -500,6 +1619,117 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             shadowOrthoExtent * 2.0f, shadowOrthoExtent * 2.0f,
             shadowNearPlane, shadowFarPlane);
         return projection * view;
+    }
+
+    // Per-cascade light view-projection -- "stable cascade" formulation.
+    // Bounds each slice with a SPHERE (centroid + max-radius) rather than an
+    // AABB in light space. The sphere is view-direction-independent: the
+    // radius only depends on the slice's near/far distances and the camera
+    // FoV, not on how the camera is oriented. That means the ortho extent
+    // stays constant as the camera rotates, eliminating the AABB-stretching
+    // artefacts that produce wrong-looking shadow projections at oblique
+    // angles. Texel-snapping the projection (rounding centroid translation
+    // to a whole-texel grid in light space) also stops the shadow edges
+    // shimmering as the camera moves -- a property the AABB version had
+    // no way to achieve.
+    private Matrix4x4 ComputeCascadeLightViewProjection(
+        Vector3 sunDir,
+        Vector3 cameraPos,
+        Quaternion cameraRotation,
+        float verticalFov,
+        float aspect,
+        float nearDist,
+        float farDist)
+    {
+        // 8 view-space frustum corners for the slice.
+        float tanHalf = MathF.Tan(verticalFov * 0.5f);
+        float nearTop = nearDist * tanHalf, nearRight = nearTop * aspect;
+        float farTop  = farDist  * tanHalf, farRight  = farTop  * aspect;
+        var cornersView = new Vector3[]
+        {
+            new(-nearRight, -nearTop, -nearDist),
+            new( nearRight, -nearTop, -nearDist),
+            new(-nearRight,  nearTop, -nearDist),
+            new( nearRight,  nearTop, -nearDist),
+            new(-farRight,  -farTop,  -farDist),
+            new( farRight,  -farTop,  -farDist),
+            new(-farRight,   farTop,  -farDist),
+            new( farRight,   farTop,  -farDist),
+        };
+
+        // Compute centroid + sphere radius in VIEW SPACE first. The
+        // frustum slice's shape is rotation-invariant: it has the same
+        // 8 corners at the same relative distances regardless of where
+        // the camera points. Running the radius calc on view-space
+        // corners gives a value that's truly constant per cascade,
+        // unlike the same calc in world space (which floating-point-
+        // drifts as the rotated corners shuffle around and breaks the
+        // texel snap below, producing visible per-frame swings on
+        // small objects).
+        var viewCentroid = Vector3.Zero;
+        for (int i = 0; i < 8; i++) viewCentroid += cornersView[i];
+        viewCentroid /= 8.0f;
+
+        float radius = 0.0f;
+        for (int i = 0; i < 8; i++)
+        {
+            var d = (cornersView[i] - viewCentroid).Length();
+            if (d > radius) radius = d;
+        }
+        radius = MathF.Ceiling(radius);
+
+        // Transform the view-space centroid to world. World corners aren't
+        // needed beyond this; the snug-sphere bound has all the info we
+        // need.
+        var centroid = cameraPos + Vector3.Transform(viewCentroid, cameraRotation);
+
+        var L = Vector3.Normalize(-sunDir);
+        var up = MathF.Abs(L.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
+        // Eye sits behind the centroid in the sun direction, far enough that
+        // tall occluders above the slice still get rasterised into the
+        // shadow map. shadowSunDistance + radius is a safe bound.
+        var eye = centroid + L * (shadowSunDistance + radius);
+        var view = GraphicsMatrices.CreateLookAt(eye, centroid, up);
+
+        // Texel snap: round the centroid's light-space position to whole-texel
+        // increments so the shadow texel grid stays aligned with the world
+        // grid as the camera moves. Without this, edges of shadow occluders
+        // would shimmer pixel-by-pixel under tiny camera motions.
+        var centroidLight = GraphicsMatrices.TransformPoint(view, centroid);
+        float texelSize = (2.0f * radius) / ShadowMapSize;
+        centroidLight.X = MathF.Round(centroidLight.X / texelSize) * texelSize;
+        centroidLight.Y = MathF.Round(centroidLight.Y / texelSize) * texelSize;
+        // Reconstruct snapped centroid in world; build a fresh view from it.
+        var snappedCentroid = GraphicsMatrices.TransformPoint(InvertOrIdentity(view), centroidLight);
+        eye = snappedCentroid + L * (shadowSunDistance + radius);
+        view = GraphicsMatrices.CreateLookAt(eye, snappedCentroid, up);
+
+        // Square ortho sized to the slice's sphere. Far plane goes well past
+        // the centroid so anything behind the slice (in light-Z) still casts.
+        var projection = GraphicsMatrices.CreateOrthographic(
+            2.0f * radius, 2.0f * radius,
+            nearPlane: 0.1f,
+            farPlane: 2.0f * (shadowSunDistance + radius) + 60.0f);
+        return projection * view;
+    }
+
+    private static Matrix4x4 InvertOrIdentity(Matrix4x4 m)
+    {
+        return Matrix4x4.Invert(m, out var inv) ? inv : Matrix4x4.Identity;
+    }
+
+    // Resolves a (vert, frag) pair under Shaders/ into a preprocessed
+    // ShaderSources. Library includes resolve next to the .frag itself
+    // (Shaders/lib/* lands next to the .frag at build time -- see csproj),
+    // so callers just write `#include "lib/tonemap.glsl"` with no extra
+    // search-path config. Use this in place of raw File.ReadAllText calls
+    // so the GLSL preprocessor + source-map plumbing kicks in.
+    private static ShaderSources LoadShader(string vertName, string fragName)
+    {
+        var shadersDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        return ShaderLoader.LoadVertexFragment(
+            Path.Combine(shadersDir, vertName),
+            Path.Combine(shadersDir, fragName));
     }
 
     // Spherical-coords sun direction. Yaw = azimuth around +Y axis, pitch =
@@ -515,12 +1745,111 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             cp * MathF.Sin(yawRad)));
     }
 
+    // Has any tracked point-light position drifted from its last-baked value?
+    // Also true if we haven't baked yet, or the active shadow count changed.
+    private bool PointShadowsDirty(int shadowCount)
+    {
+        if (!pointShadowsBaked) return true;
+        if (bakedShadowLightPositions.Length != shadowCount) return true;
+        for (var i = 0; i < shadowCount; i++)
+        {
+            var diff = bakedShadowLightPositions[i] - pointLightPositions[i];
+            if (diff.LengthSquared() > 1e-6f) return true;
+        }
+        return false;
+    }
+
+    // Re-bake the cube shadow maps for the first `shadowCount` point lights.
+    // For each light, render six depth-only passes (one per cube face) at
+    // 90-degree perspective into PointShadowFaceSize^2 surfaces. shadow_cube.frag
+    // writes linear distance-to-light so the lit shader's samplerCubeShadow
+    // compare matches regardless of face.
+    private void BakePointShadows(RenderCommandList commandList, int shadowCount)
+    {
+        if (shadowCount <= 0)
+        {
+            // Even with zero shadow-casters, mark baked so we don't spin on
+            // dirty checks. The cube textures retain whatever was there.
+            bakedShadowLightPositions = Array.Empty<Vector3>();
+            pointShadowsBaked = true;
+            return;
+        }
+
+        var projection = GraphicsMatrices.CreatePerspective(
+            MathF.PI * 0.5f, 1.0f, 0.1f, pointShadowFarPlane);
+
+        // OpenGL cubemap face order: +X, -X, +Y, -Y, +Z, -Z. Y-axis faces use
+        // a Z-axis "up" because the cube's vertical axis is the look direction.
+        Span<Vector3> faceForward = stackalloc Vector3[]
+        {
+            new( 1.0f,  0.0f,  0.0f),
+            new(-1.0f,  0.0f,  0.0f),
+            new( 0.0f,  1.0f,  0.0f),
+            new( 0.0f, -1.0f,  0.0f),
+            new( 0.0f,  0.0f,  1.0f),
+            new( 0.0f,  0.0f, -1.0f),
+        };
+        Span<Vector3> faceUp = stackalloc Vector3[]
+        {
+            new(0.0f, -1.0f,  0.0f),
+            new(0.0f, -1.0f,  0.0f),
+            new(0.0f,  0.0f,  1.0f),
+            new(0.0f,  0.0f, -1.0f),
+            new(0.0f, -1.0f,  0.0f),
+            new(0.0f, -1.0f,  0.0f),
+        };
+
+        for (var li = 0; li < shadowCount; li++)
+        {
+            var lightPos = pointLightPositions[li];
+            for (var face = 0; face < 6; face++)
+            {
+                var faceView = GraphicsMatrices.CreateLookAt(
+                    lightPos, lightPos + faceForward[face], faceUp[face]);
+                var faceVP = projection * faceView;
+                var perDraw = new ShaderUniform[]
+                {
+                    new("uLightViewProjection", new Matrix4x4Uniform(faceVP)),
+                    new("uModel", new Matrix4x4Uniform(Matrix4x4.Identity)),
+                    new("uPointLightPosition", new Vector3Uniform(lightPos)),
+                    new("uPointLightFarPlane", new FloatUniform(pointShadowFarPlane))
+                };
+                var surface = pointShadowSurfaces[li][face];
+                commandList.Pass(
+                    $"walk.pshadow.l{li}.f{face}",
+                    new RenderPassDescription(
+                        surface.Handle,
+                        ClearColors: Array.Empty<GraphicsColor?>(),
+                        ClearDepth: true),
+                    pass =>
+                    {
+                        foreach (var sub in sceneSubmeshes)
+                        {
+                            pass.DrawMesh(sub.Mesh, cubeShadowMaterial,
+                                perDrawUniforms: perDraw, perDrawTextures: null);
+                        }
+                    });
+            }
+        }
+
+        bakedShadowLightPositions = new Vector3[shadowCount];
+        for (var i = 0; i < shadowCount; i++) bakedShadowLightPositions[i] = pointLightPositions[i];
+        pointShadowsBaked = true;
+    }
+
     // Re-bake the IBL cubemap from the current bakedSunDirection and rebind it
     // on every material that samples uEnvMap. Called by the debug "Rebake Sky"
     // button. The old cube handle is left to leak — it's a debug action, and
     // the engine doesn't expose a public texture-delete on the device.
     private void RebakeSky()
     {
+        if (usingHdrEnv)
+        {
+            // HDR sky is the authoritative probe; don't overwrite it with the
+            // analytic CubemapBaker output. (Time-of-day presets call this
+            // unconditionally; that's a no-op while the HDR is active.)
+            return;
+        }
         bakedSunDirection = sunDirection;
         Console.WriteLine("Rebaking sky cubemap...");
         var pixels = CubemapBaker.BakeSky(EnvCubeFaceSize, bakedSunDirection);
@@ -564,6 +1893,96 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             mouseLookSensitivity = debug.Controls.Float("Mouse sens", mouseLookSensitivity, 0.0005f, 0.01f);
         }
 
+        using (debug.Scope("Presets"))
+        {
+            // One-click cinematic lighting: low warm golden-hour sun raking
+            // down the atrium's long axis, deeper shadows (IBL diffuse cut),
+            // brighter lanterns so they compete with the sun, slightly
+            // underexposed for richer blacks. Triggers a sky rebake so IBL
+            // reflections track the new sun position.
+            if (debug.Controls.Button("Golden hour (dramatic)"))
+            {
+                sunYaw = 0.15f;
+                sunPitch = -0.32f;
+                sunStrength = 4.2f;
+                iblDiffuseBoost = 0.35f;
+                iblSpecAttenuation = 0.55f;
+                indirectShadowBase = 0.45f;
+                indirectShadowRange = 0.55f;
+                exposure = 0.85f;
+                emissiveBoost = 3.5f;
+                pointLightIntensity = 22.0f;
+                pointLightRange = 8.0f;
+                pointLightColor = new Vector3(1.0f, 0.48f, 0.18f);
+                skyTint = new Vector3(1.0f, 0.85f, 0.65f);   // warm sunset wash
+                horizonFadeStrength = 0.85f;
+                rebakeRequested = true;
+            }
+            // Night: sun is essentially extinguished and the sky is a deep
+            // moonlit blue. Lanterns become the dominant light source --
+            // intensity and range crank up, IBL contribution collapses,
+            // exposure floats up to read the dim scene without losing the
+            // lanterns' HDR core.
+            if (debug.Controls.Button("Night (lanterns dominate)"))
+            {
+                sunYaw = 0.20f;
+                sunPitch = -0.95f;                            // sun below horizon
+                sunStrength = 0.12f;                          // hint of moonlight
+                iblDiffuseBoost = 0.18f;
+                iblSpecAttenuation = 0.95f;
+                indirectShadowBase = 0.20f;
+                indirectShadowRange = 0.55f;
+                exposure = 1.30f;
+                emissiveBoost = 6.0f;
+                pointLightIntensity = 38.0f;
+                pointLightRange = 10.5f;
+                pointLightColor = new Vector3(1.0f, 0.50f, 0.20f);
+                skyTint = new Vector3(0.04f, 0.07f, 0.16f);  // deep moonlit blue
+                horizonFadeStrength = 0.85f;
+                rebakeRequested = true;
+            }
+            // Storm: heavy overcast. Sun is occluded -> diffuse sky-light
+            // only, cool-gray cast. No specular sparkle (atten cranked up),
+            // emissives muted, lanterns just barely glow. Reads cold and
+            // moody.
+            if (debug.Controls.Button("Storm (cold overcast)"))
+            {
+                sunYaw = -0.40f;
+                sunPitch = -0.55f;
+                sunStrength = 1.10f;                          // diffuse-only feel
+                iblDiffuseBoost = 1.50f;                      // sky is the light
+                iblSpecAttenuation = 1.00f;
+                indirectShadowBase = 0.65f;
+                indirectShadowRange = 0.35f;
+                exposure = 0.75f;
+                emissiveBoost = 1.80f;
+                pointLightIntensity = 12.0f;
+                pointLightRange = 5.5f;
+                pointLightColor = new Vector3(0.95f, 0.60f, 0.35f);
+                skyTint = new Vector3(0.55f, 0.60f, 0.65f);  // cool desaturated
+                horizonFadeStrength = 0.85f;
+                rebakeRequested = true;
+            }
+            if (debug.Controls.Button("Reset (midday default)"))
+            {
+                sunYaw = MathF.Atan2(-0.30f, -0.45f);
+                sunPitch = MathF.Asin(-0.85f);
+                sunStrength = 3.2f;
+                iblDiffuseBoost = 1.0f;
+                iblSpecAttenuation = 0.8f;
+                indirectShadowBase = 0.60f;
+                indirectShadowRange = 0.40f;
+                exposure = 1.0f;
+                emissiveBoost = 2.5f;
+                pointLightIntensity = 10.0f;
+                pointLightRange = 6.5f;
+                pointLightColor = new Vector3(1.0f, 0.55f, 0.25f);
+                skyTint = Vector3.One;
+                horizonFadeStrength = 0.85f;
+                rebakeRequested = true;
+            }
+        }
+
         using (debug.Scope("Sun"))
         {
             // Yaw is wrapped; pitch clamped to keep the sun above the horizon
@@ -578,6 +1997,19 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             {
                 rebakeRequested = true;
             }
+            // With HDR loaded, the IBL probes and visible sky are baked from
+            // the HDR's actual sun position; the slider sun is independent
+            // and drifts out of alignment once touched. This button snaps
+            // the sliders back to the HDR-extracted direction so direct
+            // light + visible sky agree again.
+            if (hdrSunDirectionFromEquirect.HasValue
+                && debug.Controls.Button("Sync sun to HDR"))
+            {
+                var d = hdrSunDirectionFromEquirect.Value;
+                sunDirection = d;
+                sunPitch = MathF.Asin(Math.Clamp(d.Y, -1.0f, 1.0f));
+                sunYaw = MathF.Atan2(d.Z, d.X);
+            }
         }
 
         using (debug.Scope("Shadow"))
@@ -586,11 +2018,44 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             shadowSunDistance = debug.Controls.Float("Sun distance", shadowSunDistance, 5.0f, 80.0f);
             shadowNearPlane = debug.Controls.Float("Near", shadowNearPlane, 0.01f, 1.0f);
             shadowFarPlane = debug.Controls.Float("Far", shadowFarPlane, 10.0f, 200.0f);
+            visualizeCascades = debug.Controls.Toggle("Visualize CSM (R/G/B by cascade)", visualizeCascades);
+            disableCascades = debug.Controls.Toggle("Disable cascades (single VP fallback)", disableCascades);
         }
 
         using (debug.Scope("Tonemap"))
         {
             exposure = debug.Controls.Float("Exposure", exposure, 0.1f, 4.0f);
+            bloomEnabled = debug.Controls.Toggle("Bloom", bloomEnabled);
+            bloomStrength = debug.Controls.Float("Bloom strength", bloomStrength, 0.0f, 0.5f);
+            tonemapMode = debug.Controls.Enum("Operator", tonemapMode,
+                new[] { "ACES", "AgX", "Reinhard", "Neutral" });
+            saturation = debug.Controls.Float("Saturation", saturation, 0.0f, 2.0f);
+            contrast = debug.Controls.Float("Contrast", contrast, 0.5f, 2.0f);
+            colorTemp.X = debug.Controls.Float("Temp R", colorTemp.X, 0.5f, 1.5f);
+            colorTemp.Y = debug.Controls.Float("Temp G", colorTemp.Y, 0.5f, 1.5f);
+            colorTemp.Z = debug.Controls.Float("Temp B", colorTemp.Z, 0.5f, 1.5f);
+        }
+
+        using (debug.Scope("SSR"))
+        {
+            ssrEnabled = debug.Controls.Toggle("Enabled", ssrEnabled);
+            ssrShowOnly = debug.Controls.Toggle("Show SSR only", ssrShowOnly);
+            ssrFlipV = debug.Controls.Toggle("Flip V", ssrFlipV);
+            ssrIntensity = debug.Controls.Float("Intensity", ssrIntensity, 0.0f, 3.0f);
+            ssrMaxDistance = debug.Controls.Float("Max distance", ssrMaxDistance, 1.0f, 80.0f);
+            ssrSteps = debug.Controls.Float("Steps", ssrSteps, 4.0f, 64.0f);
+            ssrThickness = debug.Controls.Float("Hit thickness (NDC.z)", ssrThickness, 0.0005f, 0.05f);
+            ssrRoughnessCutoff = debug.Controls.Float("Roughness cutoff", ssrRoughnessCutoff, 0.0f, 1.0f);
+        }
+
+        using (debug.Scope("Fog"))
+        {
+            fogEnabled = debug.Controls.Toggle("Enabled", fogEnabled);
+            fogDensity = debug.Controls.Float("Density", fogDensity, 0.0f, 0.2f);
+            fogScatter = debug.Controls.Float("Scatter strength (sun)", fogScatter, 0.0f, 1.0f);
+            fogPointScatter = debug.Controls.Float("Scatter strength (point)", fogPointScatter, 0.0f, 2.0f);
+            fogSteps = debug.Controls.Float("Steps", fogSteps, 8.0f, 64.0f);
+            fogMaxDistance = debug.Controls.Float("Max distance", fogMaxDistance, 5.0f, 100.0f);
         }
 
         using (debug.Scope("IBL"))
@@ -600,12 +2065,78 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             metalFloor = debug.Controls.Float("Metal floor", metalFloor, 0.0f, 1.0f);
             indirectShadowBase = debug.Controls.Float("Shadow base", indirectShadowBase, 0.0f, 1.0f);
             indirectShadowRange = debug.Controls.Float("Shadow range", indirectShadowRange, 0.0f, 1.0f);
+            horizonFadeStrength = debug.Controls.Float("Horizon fade", horizonFadeStrength, 0.0f, 1.0f);
+            horizonFadeStart = debug.Controls.Float("Horizon fade start", horizonFadeStart, 0.01f, 0.5f);
             debug.Values.Value("Env mip count", envCubeMipCount);
         }
 
         using (debug.Scope("Emissive"))
         {
             emissiveBoost = debug.Controls.Float("Boost", emissiveBoost, 0.0f, 10.0f);
+        }
+
+        using (debug.Scope("Lights"))
+        {
+            pointLightsEnabled = debug.Controls.Toggle("Enabled", pointLightsEnabled);
+            pointLightIntensity = debug.Controls.Float("Intensity", pointLightIntensity, 0.0f, 80.0f);
+            pointLightRange = debug.Controls.Float("Range", pointLightRange, 1.0f, 20.0f);
+            pointLightFlickerAmount = debug.Controls.Float("Flicker amount", pointLightFlickerAmount, 0.0f, 0.6f);
+            pointLightFlickerSpeed = debug.Controls.Float("Flicker speed", pointLightFlickerSpeed, 0.1f, 4.0f);
+            pointLightSpecScale = debug.Controls.Float("Specular scale", pointLightSpecScale, 0.0f, 2.0f);
+            // Warmth as RGB sliders — cheap; a color-temperature mapping
+            // is a future polish if we want fewer knobs.
+            pointLightColor.X = debug.Controls.Float("R", pointLightColor.X, 0.0f, 1.0f);
+            pointLightColor.Y = debug.Controls.Float("G", pointLightColor.Y, 0.0f, 1.0f);
+            pointLightColor.Z = debug.Controls.Float("B", pointLightColor.Z, 0.0f, 1.0f);
+            // Per-light Y so we can dial chain height. Positions x/z are
+            // baked defaults — easy to add sliders if we need them.
+            for (var i = 0; i < pointLightPositions.Length; i++)
+            {
+                var p = pointLightPositions[i];
+                p.Y = debug.Controls.Float($"L{i} Y", p.Y, 0.5f, 10.0f);
+                pointLightPositions[i] = p;
+            }
+            pointShadowFarPlane = debug.Controls.Float("Shadow far", pointShadowFarPlane, 2.0f, 30.0f);
+            pointShadowBias = debug.Controls.Float("Shadow bias", pointShadowBias, 0.0f, 0.05f);
+            pointShadowFilterRadius = debug.Controls.Float("Shadow PCF radius", pointShadowFilterRadius, 0.0f, 0.3f);
+            if (debug.Controls.Button("Rebake Shadows"))
+            {
+                pointShadowsBaked = false;
+            }
+            flamesEnabled = debug.Controls.Toggle("Flames", flamesEnabled);
+            useFlameAtlas = debug.Controls.Toggle("Atlas (vs procedural)", useFlameAtlas);
+            flameSize = debug.Controls.Float("Flame size", flameSize, 0.05f, 1.5f);
+            flameIntensity = debug.Controls.Float("Flame brightness", flameIntensity, 0.1f, 8.0f);
+            flameYOffset = debug.Controls.Float("Flame Y offset", flameYOffset, -0.5f, 0.5f);
+            flameAtlasFps = debug.Controls.Float("Atlas fps", flameAtlasFps, 5.0f, 60.0f);
+            flameAtlasSingleRow = debug.Controls.Toggle("Atlas single row (row 0)", flameAtlasSingleRow);
+            // Volumetric flame (phase A: procedural noise ray-march).
+            // Overrides the quad path entirely when on.
+            useFlameVolume = debug.Controls.Toggle("Volume flame (override)", useFlameVolume);
+            volumeVdbWeight = debug.Controls.Float("VDB base weight", volumeVdbWeight, 0.0f, 3.0f);
+            volumeProcWeight = debug.Controls.Float("Procedural tongue weight", volumeProcWeight, 0.0f, 3.0f);
+            volumeSize = debug.Controls.Float("Volume size", volumeSize, 0.2f, 2.0f);
+            volumeSteps = debug.Controls.Float("Volume steps", volumeSteps, 8.0f, 64.0f);
+            volumeDensity = debug.Controls.Float("Volume density", volumeDensity, 0.2f, 24.0f);
+            volumeTempBoost = debug.Controls.Float("Volume temp boost (VDB)", volumeTempBoost, 0.5f, 8.0f);
+            volumeRise = debug.Controls.Float("Volume rise (procedural)", volumeRise, 0.0f, 3.0f);
+            volumeFps = debug.Controls.Float("Volume fps (VDB)", volumeFps, 4.0f, 60.0f);
+            volumeIntensity = debug.Controls.Float("Volume intensity", volumeIntensity, 0.1f, 6.0f);
+            debug.Values.Value("VDB frames", volumeVdbFrames);
+        }
+
+        using (debug.Scope("Floor"))
+        {
+            // The marble floor's authored roughness is ~0.66 — too matte to
+            // catch reflections. Override toggles MR texture sampling off on
+            // detected floor prims and uses these factors directly.
+            floorOverrideEnabled = debug.Controls.Toggle("Override", floorOverrideEnabled);
+            floorVisualize = debug.Controls.Toggle("Visualize (magenta)", floorVisualize);
+            floorRoughness = debug.Controls.Float("Roughness", floorRoughness, 0.0f, 1.0f);
+            floorMetallic = debug.Controls.Float("Metallic", floorMetallic, 0.0f, 1.0f);
+            var floorCount = 0;
+            foreach (var sub in sceneSubmeshes) if (sub.IsFloor) floorCount++;
+            debug.Values.Value("Tagged prims", floorCount);
         }
     }
 

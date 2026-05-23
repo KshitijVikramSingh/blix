@@ -13,7 +13,10 @@ public enum TextureFormat
     // 16-bit floating-point per channel. Allows values >1 in render targets, which is
     // the prerequisite for HDR pipelines (bloom bright-pass, tone mapping). Not
     // user-uploadable from byte arrays; create via render-surface attachments.
-    Rgba16F
+    Rgba16F,
+    // Single-channel 8-bit unsigned, GL_R8. Used by volumetric textures storing a
+    // density scalar per voxel; sampled in GLSL as the .r component of a vec4.
+    R8
 }
 
 public sealed record SamplerDescription(
@@ -26,7 +29,11 @@ public sealed record SamplerDescription(
     // with GL_LEQUAL). Required for sampler2DShadow lookups — the GPU then performs a
     // free 2x2 bilinear PCF compare on each texture() call. Only meaningful on depth
     // textures; ignored for color textures.
-    bool Compare = false)
+    bool Compare = false,
+    // Wrap mode for the third (W) axis. Only consumed by 3D textures via
+    // CreateTexture3D; ignored by 2D/Cube paths. Defaults to ClampToEdge so
+    // existing 2D-only call sites stay unaffected.
+    TextureWrap WrapW = TextureWrap.ClampToEdge)
 {
     public static SamplerDescription PixelatedRepeat { get; } = new(
         TextureFilter.Nearest,

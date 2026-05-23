@@ -1,0 +1,25 @@
+sky_hdr.hdr
+===========
+
+Source:    "Kloppenheim 06 Puresky" CC0 HDRI from Poly Haven, 2k variant.
+URL:       https://polyhaven.com/a/kloppenheim_06_puresky
+Direct:    https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/kloppenheim_06_puresky_2k.hdr
+
+License:   CC0 1.0 Universal (Public Domain Dedication)
+           https://creativecommons.org/publicdomain/zero/1.0/
+
+Format:    Radiance .hdr (RGBE), equirectangular layout, 2:1 aspect.
+           2k variant is 2048 x 1024 px, ~4.2 MB on disk. Clean blue daytime
+           sky, sun visible but spatially broad enough that the IBL bake
+           doesn't firefly the way the previous Venice Sunset HDRI did.
+
+Usage:     Blix demo's WalkthroughGame loads this at startup if present,
+           converts equirect -> cubemap via EquirectangularToCubemap.Convert,
+           bakes diffuse irradiance + GGX-prefiltered specular + BRDF LUT,
+           uses the result as the skybox AND the PBR IBL probe. Falls back
+           to the procedural CubemapBaker if the file is missing.
+
+Replaces:  "Venice Sunset" (formerly here), which had a pinpoint sun that
+           speckled normal-mapped surfaces with HDR fireflies even after
+           clamping. Kloppenheim 06's sun is broader and produces a cleaner
+           bake.

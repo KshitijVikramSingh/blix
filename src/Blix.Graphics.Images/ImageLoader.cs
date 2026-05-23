@@ -48,4 +48,31 @@ public static class ImageLoader
             Blix.Graphics.TextureFormat.Rgba8,
             result.Data);
     }
+
+    // HDR (Radiance .hdr / RGBE) loader. Returns linear float RGBA per pixel; the
+    // alpha channel is always 1.0 since .hdr is RGB-only. Pixels are in the
+    // image's natural top-to-bottom order (v=0 = sky for equirect HDRIs).
+    // Unlike LoadRgba32 we do NOT y-flip on load -- equirect math
+    // (phi = acos(y), v = phi/pi) assumes the canonical layout where the
+    // first scanline is the upward pole. Flipping here would put the ground
+    // above the camera and the sky below.
+    public static HdrImageData LoadRgba32F(string path)
+    {
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException($"HDR image file not found: {path}", path);
+        }
+
+        StbImage.stbi_set_flip_vertically_on_load(0);
+        using var stream = File.OpenRead(path);
+        var result = ImageResultFloat.FromStream(stream, ColorComponents.RedGreenBlueAlpha);
+        // Restore the flip-on-load flag for callers that follow (LoadRgba32
+        // relies on it being set; the global flag is sticky across calls).
+        StbImage.stbi_set_flip_vertically_on_load(1);
+        if (result.Width <= 0 || result.Height <= 0 || result.Data is null)
+        {
+            throw new InvalidDataException($"HDR file is not a valid decodable image: {path}");
+        }
+        return new HdrImageData(result.Width, result.Height, result.Data);
+    }
 }
