@@ -47,12 +47,28 @@ Lower-key acceptance demo exercising the rest of the engine: multi-light PCSS sh
 # First time: populate the Assets/ dir from your local Khronos Sponza download.
 tools/setup-sponza-modern.sh
 
+# Cook PNG/JPEG -> .blixtex, sky HDR -> .blixprobe, glTF -> .blixmesh. One-shot;
+# rerun only when sources change. ~6s startup -> ~0.5s startup.
+tools/cook-sponza-modern.sh
+
 dotnet run --project src/Blix.Demos.SponzaModern/Blix.Demos.SponzaModern.csproj
 ```
 
 The Khronos Intel Sponza PBR-MR scene plus the optional curtains / ivy / trees add-on packs. Validates the engine subsystems that grew out of the original Walkthrough — `GltfSceneInstance` for the per-pack import, `EnvironmentProbe` for HDR sky + IBL bake, `PbrSceneRenderer` for the lit + cascade-shadow draws, `PostProcessStack` for fog + SSR + bloom + composite — on a scene with foliage, double-sided geometry, and alpha-test cutouts the classic Sponza didn't exercise.
 
 Source assets are multi-GB and not committed; the setup script copies just the runtime-needed `.gltf` + `.bin` + textures from your `~/Downloads`. Source: <https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/IntelSponza>.
+
+#### Cooked asset pipeline
+
+Three sibling binary formats let the runtime skip the slow paths (PNG decode, equirect → IBL convolution, glTF JSON+`.bin` parse + accessor walk). All cookers live in `src/Blix.Tools.Cook` (`blix-cook textures|probe|mesh`).
+
+| Format | Cook input | What it skips at load | Code |
+| --- | --- | --- | --- |
+| `.blixtex` | PNG / JPEG | StbImage decode + glGenerateMipmap; supports BC7/BC5 | `src/Blix.Graphics.Images/BlixTex.cs` |
+| `.blixprobe` | HDR equirect | Equirect → cube + diffuse irradiance + GGX prefilter + BRDF LUT bake | `src/Blix.Graphics.Images/BlixProbe.cs` |
+| `.blixmesh` | `.gltf` / `.glb` | SharpGLTF `.bin` validation + per-accessor walk + vertex packing | `src/Blix.Assets/BlixMesh.cs` |
+
+When a `.blixmesh` sibling exists, the importer also switches `ModelRoot.Load` to a lite path (`ReadContext.Create` + `ValidationMode.Skip` + an empty buffer reader) — the JSON still parses for material descriptors, but the multi-megabyte `.bin` validation is skipped entirely. Textures upload progressively through `ResourceUploader`, smallest mip first, so materials bind a usable-if-blurry texture within a frame and sharpen over the next few.
 
 ## Build
 

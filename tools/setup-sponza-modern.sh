@@ -38,13 +38,18 @@ copy_pack() {
         return 0
     fi
     mkdir -p "$dest"
-    # glTF + .bin from the pack root
-    find "$src" -maxdepth 1 \( -name '*.gltf' -o -name '*.bin' \) -exec cp -p {} "$dest/" \;
+    # glTF + .bin from the pack root. Use rsync instead of cp because
+    # APFS-on-Mac's cp does clonefile-style metadata copies for large files
+    # that can land as zero-byte sparse artefacts on the destination volume.
+    # rsync's default "fully read source, fully write dest" copy is slower
+    # but reliable.
+    rsync -a --no-links "$src"/*.gltf "$src"/*.bin "$dest/" 2>/dev/null || true
     # textures subdirectory if present
     if [[ -d "$src/textures" ]]; then
         mkdir -p "$dest/textures"
-        find "$src/textures" -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \) \
-            -exec cp -p {} "$dest/textures/" \;
+        rsync -a --no-links \
+            --include="*.png" --include="*.jpg" --include="*.jpeg" --exclude="*" \
+            "$src/textures/" "$dest/textures/"
     fi
     echo "  copied: $(basename "$src") -> $(basename "$dest")"
 }

@@ -34,28 +34,101 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             throw new FileNotFoundException($"glTF file not found: {context.SourcePath}", context.SourcePath);
         }
 
-        var model = ModelRoot.Load(context.SourcePath);
+        // When a cooked .blixmesh sibling exists, the runtime only needs the
+        // material descriptors + image URIs from the .gltf -- not the .bin
+        // buffer data that SharpGLTF's default ModelRoot.Load eagerly reads
+        // and validates against (for ~95% of a big scene's parse time).
+        // ReadContext.Create + ValidationMode.Skip + a callback that returns
+        // empty bytes for non-.gltf resources skips the buffer reads
+        // entirely: 4500ms -> 11ms on Sponza main. Per-accessor reads would
+        // fail under this model, but BlixMeshReader.Read replaces them.
+        var blixmeshPath = Path.ChangeExtension(context.SourcePath, ".blixmesh");
+        var useCookedMesh = File.Exists(blixmeshPath);
+        var gltfFullPath = Path.GetFullPath(context.SourcePath);
+        var gltfDirInfo = Path.GetDirectoryName(gltfFullPath) ?? string.Empty;
+        var gltfFileName = Path.GetFileName(gltfFullPath);
+        ModelRoot model;
+        if (useCookedMesh)
+        {
+            var settings = new ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip };
+            ArraySegment<byte> Reader(string assetName)
+            {
+                // SharpGLTF asks for the .gltf JSON first; supply it. Then
+                // asks for any external .bin / image files; return empty so
+                // the parser stops short of reading them. Material + image
+                // metadata stays intact since it all lives in the JSON.
+                var full = Path.Combine(gltfDirInfo, assetName);
+                if (Path.GetExtension(full).Equals(".gltf", StringComparison.OrdinalIgnoreCase))
+                {
+                    return new ArraySegment<byte>(File.ReadAllBytes(full));
+                }
+                return ArraySegment<byte>.Empty;
+            }
+            model = SharpGLTF.Schema2.ReadContext.Create(Reader)
+                .WithSettingsFrom(settings)
+                .ReadSchema2(gltfFileName);
+        }
+        else
+        {
+            model = ModelRoot.Load(context.SourcePath);
+        }
 
         var textureCache = new Dictionary<int, GltfTexture>();
         var materialCache = new Dictionary<int, GltfMaterial>();
         var primitives = new List<GltfPrimitive>();
 
-        foreach (var node in model.LogicalNodes)
-        {
-            if (node.Mesh is null) continue;
-            // SharpGLTF's WorldMatrix is row-vector form; transpose to the engine's
-            // column-vector convention before consuming it for vertex transforms.
-            var worldRowVector = node.WorldMatrix;
-            var world = Matrix4x4.Transpose(worldRowVector);
-            var normalMatrix = ComputeNormalMatrix(world);
+        // Parallel texture decode. PNG/JPEG decode via StbImageSharp is the
+        // dominant cost for heavy assets (Modern Sponza spends most of its
+        // multi-minute load here), and StbImageSharp doesn't share state
+        // across calls, so we can decode every unique source image in
+        // parallel and pre-populate the textureCache. Cooked .blixtex
+        // siblings (see tools/Blix.Tools.Cook + BlixTex format) skip the
+        // decode entirely; PreDecodeImages prefers them when present.
+        var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
+        PreDecodeImages(model, textureCache, gltfDir);
 
-            for (var i = 0; i < node.Mesh.Primitives.Count; i++)
+        // Cooked-mesh fast path. The blixmesh sibling was detected above
+        // (used to short-circuit ModelRoot.Load's buffer reads); now read
+        // its cooked vertex + index bytes instead of walking glTF accessors.
+        // Material resolution still uses the lite (JSON-only) model.
+        if (useCookedMesh)
+        {
+            var cooked = BlixMeshReader.Read(blixmeshPath);
+            foreach (var p in cooked.Primitives)
             {
-                var prim = node.Mesh.Primitives[i];
-                var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
-                var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix);
-                var material = ExtractMaterial(prim.Material, materialCache, textureCache);
+                var meshData = new MeshData(
+                    p.Name,
+                    p.VertexBytes,
+                    p.Indices16,
+                    cooked.Layout,
+                    p.Bounds,
+                    Indices32: p.Indices32);
+                var gltfMat = p.MaterialIndex >= 0 && p.MaterialIndex < model.LogicalMaterials.Count
+                    ? model.LogicalMaterials[p.MaterialIndex]
+                    : null;
+                var material = ExtractMaterial(gltfMat, materialCache, textureCache);
                 primitives.Add(new GltfPrimitive(meshData, material));
+            }
+        }
+        else
+        {
+            foreach (var node in model.LogicalNodes)
+            {
+                if (node.Mesh is null) continue;
+                // SharpGLTF's WorldMatrix is row-vector form; transpose to the engine's
+                // column-vector convention before consuming it for vertex transforms.
+                var worldRowVector = node.WorldMatrix;
+                var world = Matrix4x4.Transpose(worldRowVector);
+                var normalMatrix = ComputeNormalMatrix(world);
+
+                for (var i = 0; i < node.Mesh.Primitives.Count; i++)
+                {
+                    var prim = node.Mesh.Primitives[i];
+                    var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
+                    var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix);
+                    var material = ExtractMaterial(prim.Material, materialCache, textureCache);
+                    primitives.Add(new GltfPrimitive(meshData, material));
+                }
             }
         }
 
@@ -74,7 +147,49 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             Matrix4x4.Identity);
     }
 
-    private static MeshData BuildStaticMeshData(string name, MeshPrimitive primitive, Matrix4x4 world, Matrix4x4 normalMatrix)
+    // Cook a .gltf/.glb to its .blixmesh sibling. CPU-only -- no GraphicsDevice
+    // required; safe to invoke from the offline cook tool. Walks the same
+    // node/primitive structure the runtime importer does, packs vertices via
+    // BuildStaticMeshData, and serialises each primitive's
+    // (name, materialIndex, bounds, vertexBytes, indices) to disk.
+    public static int CookToBlixMesh(string gltfPath, string outPath)
+    {
+        ArgumentNullException.ThrowIfNull(gltfPath);
+        ArgumentNullException.ThrowIfNull(outPath);
+
+        var model = ModelRoot.Load(gltfPath);
+        var primitives = new List<BlixMeshPrimitive>();
+        foreach (var node in model.LogicalNodes)
+        {
+            if (node.Mesh is null) continue;
+            var worldRowVector = node.WorldMatrix;
+            var world = Matrix4x4.Transpose(worldRowVector);
+            var normalMatrix = ComputeNormalMatrix(world);
+            for (var i = 0; i < node.Mesh.Primitives.Count; i++)
+            {
+                var prim = node.Mesh.Primitives[i];
+                var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
+                var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix);
+                var materialIndex = prim.Material?.LogicalIndex ?? BlixMesh.NoMaterial;
+                primitives.Add(new BlixMeshPrimitive(
+                    Name: meshData.Name,
+                    MaterialIndex: materialIndex,
+                    Bounds: meshData.Bounds,
+                    VertexCount: meshData.VertexCount,
+                    VertexBytes: meshData.VertexBytes,
+                    IndexFormat: meshData.IndexFormat,
+                    Indices16: meshData.Indices,
+                    Indices32: meshData.Indices32));
+            }
+        }
+
+        BlixMeshWriter.Write(outPath, new BlixMeshFile(
+            VertexPosition3NormalTexture.Layout,
+            primitives));
+        return primitives.Count;
+    }
+
+    public static MeshData BuildStaticMeshData(string name, MeshPrimitive primitive, Matrix4x4 world, Matrix4x4 normalMatrix)
     {
         var positions = primitive.GetVertexAccessor("POSITION")?.AsVector3Array()
             ?? throw new InvalidOperationException("glTF mesh primitive missing required POSITION accessor.");
@@ -105,25 +220,149 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         }
 
         var indicesSrc = primitive.GetIndices();
-        var indices = new ushort[indicesSrc.Count];
-        for (var i = 0; i < indicesSrc.Count; i++)
+        // Pick the narrowest width that fits. UInt16 covers virtually every
+        // authored asset; UInt32 kicks in for large packs like Khronos
+        // Sponza Modern's curtains (66k vertices in a single primitive).
+        var needsUInt32 = vertexCount > ushort.MaxValue;
+        ushort[] indices16;
+        uint[]? indices32;
+        if (needsUInt32)
         {
-            var idx = indicesSrc[i];
-            if (idx > ushort.MaxValue)
+            indices16 = Array.Empty<ushort>();
+            indices32 = new uint[indicesSrc.Count];
+            for (var i = 0; i < indicesSrc.Count; i++)
             {
-                throw new InvalidOperationException(
-                    $"glTF mesh primitive '{name}' uses index {idx} > ushort.MaxValue; uint indices not supported.");
+                indices32[i] = indicesSrc[i];
             }
-            indices[i] = (ushort)idx;
+        }
+        else
+        {
+            indices32 = null;
+            indices16 = new ushort[indicesSrc.Count];
+            for (var i = 0; i < indicesSrc.Count; i++)
+            {
+                indices16[i] = (ushort)indicesSrc[i];
+            }
         }
 
         var bounds = vertexCount == 0 ? Bounds3.Empty : new Bounds3(minB, maxB);
         return new MeshData(
             name,
             VertexPosition3NormalTexture.Pack(vertices),
-            indices,
+            indices16,
             VertexPosition3NormalTexture.Layout,
-            bounds);
+            bounds,
+            Indices32: indices32);
+    }
+
+    // PBR channels we sample per material. Match the set ExtractMaterial walks
+    // below; if a new channel is added there, mirror it here so the pre-walk
+    // catches its image references.
+    private static readonly string[] PreDecodeChannels =
+    {
+        "BaseColor", "Normal", "MetallicRoughness", "Occlusion", "Emissive",
+    };
+
+    private static void PreDecodeImages(
+        ModelRoot model,
+        Dictionary<int, GltfTexture> textureCache,
+        string gltfDir)
+    {
+        var imageRefs = new HashSet<int>();
+        foreach (var mat in model.LogicalMaterials)
+        {
+            foreach (var channelName in PreDecodeChannels)
+            {
+                var channel = mat.FindChannel(channelName);
+                if (!channel.HasValue) continue;
+                var img = channel.Value.Texture?.PrimaryImage;
+                if (img is null) continue;
+                imageRefs.Add(img.LogicalIndex);
+            }
+        }
+        if (imageRefs.Count == 0) return;
+
+        var imagesToConsider = model.LogicalImages
+            .Where(i => imageRefs.Contains(i.LogicalIndex))
+            .ToArray();
+
+        // Split: images that have a cooked .blixtex sibling go through the
+        // fast no-decode reader; the rest run through PNG/JPEG decode in
+        // parallel. The cooked sideload is so cheap relative to PNG decode
+        // that even sequential reads stay well under decode time.
+        var cookedSourcePaths = new Dictionary<int, string>();
+        var sourceImages = new List<SharpGLTF.Schema2.Image>();
+        foreach (var image in imagesToConsider)
+        {
+            var blixTexPath = TryResolveBlixTex(image, gltfDir);
+            if (blixTexPath is not null)
+            {
+                cookedSourcePaths[image.LogicalIndex] = blixTexPath;
+            }
+            else
+            {
+                sourceImages.Add(image);
+            }
+        }
+
+        var cookedWatch = System.Diagnostics.Stopwatch.StartNew();
+        foreach (var (idx, path) in cookedSourcePaths)
+        {
+            // Lazy handle: parses just the 32-byte header + per-mip
+            // (offset, length) table. The pixel bytes stay on disk until
+            // the upload pump pulls them mip-by-mip at GL upload time.
+            // This drops the per-pack import-time memory peak from
+            // "all mip data for all textures" (multi-GB) to ~hundreds of
+            // bytes per texture.
+            var handle = BlixTexReader.ReadHandle(path);
+            textureCache[idx] = new GltfTexture(
+                Path.GetFileNameWithoutExtension(path), handle);
+        }
+        cookedWatch.Stop();
+        if (cookedSourcePaths.Count > 0)
+        {
+            Console.WriteLine(
+                $"  indexed {cookedSourcePaths.Count} cooked .blixtex images in {cookedWatch.ElapsedMilliseconds} ms (lazy)");
+        }
+
+        if (sourceImages.Count == 0) return;
+
+        var decoded = new System.Collections.Concurrent.ConcurrentDictionary<int, GltfTexture>();
+        var decodeWatch = System.Diagnostics.Stopwatch.StartNew();
+        System.Threading.Tasks.Parallel.ForEach(sourceImages, image =>
+        {
+            var bytes = image.Content.Content.ToArray();
+            using var stream = new MemoryStream(bytes);
+            var d = ImageLoader.LoadRgba32(stream);
+            decoded[image.LogicalIndex] = GltfTexture.Rgba8Single(
+                image.Name ?? $"image_{image.LogicalIndex}",
+                d.Pixels, d.Width, d.Height);
+        });
+        foreach (var kv in decoded) textureCache[kv.Key] = kv.Value;
+        Console.WriteLine(
+            $"  decoded {sourceImages.Count} images in {decodeWatch.ElapsedMilliseconds} ms");
+    }
+
+    // Returns the absolute path to a cooked .blixtex sibling for the image
+    // if one exists, else null. glTF images carry either an embedded byte
+    // blob (no source URI) or a file URI; we can only sideload .blixtex
+    // for the URI case. SharpGLTF stashes the loaded URI in
+    // MemoryImage.SourcePath -- absolute when an external URI was
+    // resolved, null for embedded buffer-view images.
+    private static string? TryResolveBlixTex(SharpGLTF.Schema2.Image image, string gltfDir)
+    {
+        var sourcePath = image.Content.SourcePath;
+        if (string.IsNullOrEmpty(sourcePath)) return null;
+        // SourcePath is absolute when the full ModelRoot.Load resolved URIs
+        // against the glTF dir; relative (e.g. "textures/foo.png") under the
+        // lite-load path where the buffer reader returns empty for non-.gltf
+        // assets. Resolve against gltfDir so File.Exists hits either way.
+        if (!Path.IsPathRooted(sourcePath))
+        {
+            sourcePath = Path.Combine(gltfDir, sourcePath);
+        }
+        var blixTexPath = Path.ChangeExtension(sourcePath, ".blixtex");
+        return File.Exists(blixTexPath) ? blixTexPath : null;
     }
 
     private static Matrix4x4 ComputeNormalMatrix(Matrix4x4 model)
@@ -239,11 +478,9 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         using var stream = new MemoryStream(bytes.ToArray());
         var decoded = ImageLoader.LoadRgba32(stream);
 
-        var result = new GltfTexture(
+        var result = GltfTexture.Rgba8Single(
             image.Name ?? texture.Name ?? $"image_{image.LogicalIndex}",
-            decoded.Pixels,
-            decoded.Width,
-            decoded.Height);
+            decoded.Pixels, decoded.Width, decoded.Height);
         textureCache[image.LogicalIndex] = result;
         return result;
     }

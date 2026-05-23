@@ -78,6 +78,14 @@ public sealed class EnvironmentProbe
     public Vector3? SunDirectionFromEquirect { get; init; }
 }
 
+// Full IBL bundle returned by the cooked-probe load path: the on-GPU
+// EnvironmentProbe plus the BRDF LUT that the lit shader's split-sum
+// integration needs. Convenient single-return for demos that previously
+// called Bake + BakeBrdfLut sequentially.
+public sealed record BakedEnvironment(
+    EnvironmentProbe Probe,
+    TextureHandle BrdfLut);
+
 public static class EnvironmentBaker
 {
     // Bakes the env cube + IBL probes from a profile. The BRDF LUT is
@@ -108,6 +116,93 @@ public static class EnvironmentBaker
         return device.CreateTexture2D(
             new TextureDescription(size, size, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
             bytes, name);
+    }
+
+    // CPU-only bake. Runs the equirect-to-cube + diffuse irradiance +
+    // GGX prefilter + BRDF LUT integrations and packs the results into a
+    // BlixProbeData blob suitable for BlixProbeWriter. Only HDR sources
+    // are supported -- procedural skies depend on a runtime sun direction
+    // and are cheap enough to bake every frame anyway.
+    public static BlixProbeData CookHdrProbeData(
+        EnvironmentProfile profile,
+        int brdfLutSize = 256)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        if (profile.Source is not HdrEnvironmentSource hdr)
+        {
+            throw new ArgumentException(
+                "Only HDR environment sources can be cooked. Procedural skies depend on a runtime sun direction.",
+                nameof(profile));
+        }
+
+        var envPixels = EquirectangularToCubemap.Convert(hdr.Equirect, profile.EnvCubeFaceSize);
+        var sun = HdrSunFinder.FindSunDirection(hdr.Equirect);
+        var irrPixels = PbrIblBaker.BakeDiffuseIrradiance(
+            hdr.Equirect, profile.IrradianceFaceSize,
+            sampleClampMagnitude: profile.SampleClampMagnitude);
+        var prefilter = PbrIblBaker.BakeSpecularPrefilteredMips(
+            hdr.Equirect, profile.SpecularPrefilterBaseSize,
+            profile.SpecularPrefilterMipCount,
+            sampleClampMagnitude: profile.SampleClampMagnitude);
+        var brdfLut = PbrIblBaker.BakeBrdfLut(brdfLutSize);
+
+        return new BlixProbeData(
+            EnvFaceSize: profile.EnvCubeFaceSize,
+            IrradianceFaceSize: profile.IrradianceFaceSize,
+            PrefilterBaseSize: profile.SpecularPrefilterBaseSize,
+            PrefilterMipCount: profile.SpecularPrefilterMipCount,
+            BrdfLutSize: brdfLutSize,
+            SunDirection: sun,
+            EnvCube: envPixels,
+            IrradianceCube: irrPixels,
+            PrefilteredSpecular: prefilter,
+            BrdfLut: brdfLut);
+    }
+
+    // Upload a previously-cooked BlixProbeData blob into a BakedEnvironment.
+    // No HDR sampling, no integration -- pure memcpy from CPU arrays to GL
+    // texture storage.
+    public static BakedEnvironment UploadCookedProbe(
+        IGraphicsDevice device,
+        BlixProbeData data,
+        string namePrefix)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        ArgumentNullException.ThrowIfNull(data);
+        ArgumentNullException.ThrowIfNull(namePrefix);
+
+        var envCube = device.CreateTextureCubeHdr(
+            data.EnvFaceSize, data.EnvCube,
+            SamplerDescription.LinearClampMipmap,
+            name: $"{namePrefix}.env_cube.hdr");
+        var envMipCount = (int)MathF.Floor(MathF.Log2(data.EnvFaceSize)) + 1;
+
+        var irrCube = device.CreateTextureCubeHdr(
+            data.IrradianceFaceSize, data.IrradianceCube,
+            SamplerDescription.LinearClampMipmap,
+            name: $"{namePrefix}.env_irradiance");
+
+        var prefilterCube = device.CreateTextureCubeHdrMipped(
+            data.PrefilterBaseSize, data.PrefilteredSpecular,
+            SamplerDescription.LinearClampMipmap,
+            name: $"{namePrefix}.env_prefilter");
+
+        var brdfLut = device.CreateTexture2D(
+            new TextureDescription(data.BrdfLutSize, data.BrdfLutSize,
+                TextureFormat.Rgba8, SamplerDescription.LinearClamp),
+            data.BrdfLut,
+            name: $"{namePrefix}.brdf_lut");
+
+        var probe = new EnvironmentProbe
+        {
+            EnvCubemap = envCube,
+            EnvCubeMipCount = envMipCount,
+            DiffuseIrradiance = irrCube,
+            PrefilteredSpecular = prefilterCube,
+            PrefilteredSpecularMipCount = data.PrefilterMipCount,
+            SunDirectionFromEquirect = data.SunDirection,
+        };
+        return new BakedEnvironment(probe, brdfLut);
     }
 
     private static EnvironmentProbe BakeFromHdr(IGraphicsDevice device, EnvironmentProfile profile, HdrEnvironmentSource hdr, string namePrefix)

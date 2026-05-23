@@ -17,6 +17,15 @@ public interface IGraphicsDevice : IDisposable
         GraphicsBufferUsage usage = GraphicsBufferUsage.Static,
         string? name = null);
 
+    // 32-bit index buffer. Use for meshes with >65535 vertices in a single
+    // primitive (large authored scenes -- some Sponza Modern packs hit this).
+    // The backend records the format per handle; DrawElements picks the
+    // matching GL element type at draw time without caller involvement.
+    IndexBufferHandle CreateIndexBuffer(
+        IReadOnlyList<uint> indices,
+        GraphicsBufferUsage usage = GraphicsBufferUsage.Static,
+        string? name = null);
+
     void DestroyIndexBuffer(IndexBufferHandle handle);
 
     ShaderProgramHandle CreateShaderProgram(ShaderSources sources);
@@ -30,6 +39,44 @@ public interface IGraphicsDevice : IDisposable
     void DestroyPipeline(PipelineHandle handle);
 
     TextureHandle CreateTexture2D(TextureDescription description, ReadOnlySpan<byte> pixels, string? name = null);
+
+    // Multi-mip texture upload. Each entry of `mipBytes` is one mip level's
+    // packed pixel/block data; mip 0 (full size) first, then half, quarter,
+    // etc. Required for compressed formats (BC7/BC5/BC6h) since GL can't
+    // glGenerateMipmap on a compressed texture -- mips must be pre-baked
+    // at cook time. Uncompressed formats accept this path too if the caller
+    // wants pre-baked mips instead of GL-side generation.
+    //
+    // When mipBytes.Count == 1, this collapses to the single-mip case --
+    // identical to CreateTexture2D for uncompressed; for compressed it
+    // uploads just mip 0 and the GL sampler's MAX_LEVEL gets clamped to 0.
+    TextureHandle CreateTexture2DMipped(
+        TextureDescription description,
+        IReadOnlyList<byte[]> mipBytes,
+        string? name = null);
+
+    // Uploads bytes to a specific mip level of an existing texture. Pairs
+    // with CreateTexture2DMipped used in "create with smallest mip, then
+    // stream the larger mips in over multiple frames" flows. The texture
+    // must already exist; mipLevel must be < the level count derivable
+    // from the texture's recorded width/height (mip0 = full size).
+    //
+    // Also widens the GL sampler's MIN_FILTER to a mipmap mode once 2+
+    // levels have been uploaded so trilinear sampling actually picks up
+    // the new finer mip. BASE_LEVEL is adjusted so sampling sees the
+    // highest-quality mip available so far.
+    void UploadTextureMip(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes);
+
+    // Allocates a multi-mip texture with all storage reserved but no real
+    // pixel data uploaded. The smallest mip is set as BASE_LEVEL = MAX_LEVEL
+    // initially so samplers return from it (returns garbage until something
+    // is uploaded to that level via UploadTextureMip). Used by the streamed-
+    // upload path -- ResourceUploader allocates upfront, then drips real
+    // mip data in over multiple frames.
+    TextureHandle AllocateTexture2DMips(
+        TextureDescription description,
+        int mipCount,
+        string? name = null);
 
     // Creates a 3D texture from a contiguous voxel array. Data layout is
     // x-major within rows, y-major within slices, z-major across slices --

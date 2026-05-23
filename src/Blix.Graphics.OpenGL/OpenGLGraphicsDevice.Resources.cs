@@ -98,7 +98,33 @@ public sealed partial class OpenGLGraphicsDevice
         var handleId = NextHandle();
         var resolvedName = name ?? $"indexBuffer#{handleId}";
         ApplyDebugLabel(ObjectLabelIdentifier.Buffer, indexBuffer, resolvedName);
-        indexBuffers.Add(handleId, new IndexBufferResource(indexBuffer, indices.Count, resolvedName));
+        indexBuffers.Add(handleId, new IndexBufferResource(indexBuffer, indices.Count, IndexFormat.UInt16, resolvedName));
+        return new IndexBufferHandle(handleId);
+    }
+
+    public IndexBufferHandle CreateIndexBuffer(
+        IReadOnlyList<uint> indices,
+        GraphicsBufferUsage usage = GraphicsBufferUsage.Static,
+        string? name = null)
+    {
+        ThrowIfDisposed();
+
+        if (indices.Count == 0)
+        {
+            throw new ArgumentException("An index buffer must contain at least one index.", nameof(indices));
+        }
+
+        var indexBuffer = GL.GenBuffer();
+        var packedIndices = indices.ToArray();
+
+        GL.BindBuffer(BufferTarget.ElementArrayBuffer, indexBuffer);
+        GL.BufferData(BufferTarget.ElementArrayBuffer, packedIndices.Length * sizeof(uint), packedIndices, MapBufferUsage(usage));
+        GL.BindBuffer(BufferTarget.ElementArrayBuffer, 0);
+
+        var handleId = NextHandle();
+        var resolvedName = name ?? $"indexBuffer#{handleId}";
+        ApplyDebugLabel(ObjectLabelIdentifier.Buffer, indexBuffer, resolvedName);
+        indexBuffers.Add(handleId, new IndexBufferResource(indexBuffer, indices.Count, IndexFormat.UInt32, resolvedName));
         return new IndexBufferHandle(handleId);
     }
 
@@ -179,7 +205,19 @@ public sealed partial class OpenGLGraphicsDevice
 
     public TextureHandle CreateTexture2D(TextureDescription description, ReadOnlySpan<byte> pixels, string? name = null)
     {
+        // Route through the multi-mip path with a single-entry list. The
+        // shared implementation handles the format validation + GL call
+        // selection (TexImage2D vs CompressedTexImage2D).
+        return CreateTexture2DMipped(description, new[] { pixels.ToArray() }, name);
+    }
+
+    public TextureHandle CreateTexture2DMipped(
+        TextureDescription description,
+        IReadOnlyList<byte[]> mipBytes,
+        string? name = null)
+    {
         ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(mipBytes);
 
         if (description.Format == TextureFormat.Depth24)
         {
@@ -187,38 +225,72 @@ public sealed partial class OpenGLGraphicsDevice
                 "Depth textures must be created through CreateRenderSurface with a DepthTexture attachment.",
                 nameof(description));
         }
-
-        if (description.Width <= 0)
+        if (description.Width <= 0 || description.Height <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(description), "Texture width must be greater than zero.");
+            throw new ArgumentOutOfRangeException(nameof(description),
+                "Texture width and height must be greater than zero.");
+        }
+        if (mipBytes.Count == 0)
+        {
+            throw new ArgumentException("At least one mip level must be supplied.", nameof(mipBytes));
         }
 
-        if (description.Height <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(description), "Texture height must be greater than zero.");
-        }
-
-        var expectedByteCount = description.Width * description.Height * GetBytesPerPixel(description.Format);
-
-        if (pixels.Length != expectedByteCount)
-        {
-            throw new ArgumentException($"Texture pixel data length must be {expectedByteCount} bytes.", nameof(pixels));
-        }
-
+        var isCompressed = description.Format.IsCompressed();
         var texture = GL.GenTexture();
-
         GL.BindTexture(TextureTarget.Texture2D, texture);
-        GL.TexImage2D(
-            TextureTarget.Texture2D,
-            level: 0,
-            MapPixelInternalFormat(description.Format),
-            description.Width,
-            description.Height,
-            border: 0,
-            MapPixelFormat(description.Format),
-            PixelType.UnsignedByte,
-            ref System.Runtime.InteropServices.MemoryMarshal.GetReference(pixels));
-        ApplySampler(description.Sampler);
+
+        var internalFormat = MapPixelInternalFormat(description.Format);
+        for (var mip = 0; mip < mipBytes.Count; mip++)
+        {
+            var mipWidth = Math.Max(1, description.Width >> mip);
+            var mipHeight = Math.Max(1, description.Height >> mip);
+            var expected = description.Format.MipByteCount(mipWidth, mipHeight);
+            var bytes = mipBytes[mip];
+            if (bytes.Length != expected)
+            {
+                throw new ArgumentException(
+                    $"Mip {mip} of texture '{name ?? "<unnamed>"}' has {bytes.Length} bytes; expected {expected} for {description.Format} at {mipWidth}x{mipHeight}.",
+                    nameof(mipBytes));
+            }
+            if (isCompressed)
+            {
+                GL.CompressedTexImage2D(
+                    TextureTarget.Texture2D, mip,
+                    (InternalFormat)internalFormat,
+                    mipWidth, mipHeight, border: 0,
+                    bytes.Length, bytes);
+            }
+            else
+            {
+                GL.TexImage2D(
+                    TextureTarget.Texture2D, mip,
+                    internalFormat, mipWidth, mipHeight, border: 0,
+                    MapPixelFormat(description.Format), MapPixelType(description.Format),
+                    ref bytes[0]);
+            }
+        }
+
+        // GL needs to know which mip levels are valid -- otherwise the
+        // sampler may try to read beyond the levels we uploaded and
+        // produce black or driver-defined garbage.
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureBaseLevel, 0);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMaxLevel, mipBytes.Count - 1);
+
+        // Apply sampler params WITHOUT mipgen -- ApplySampler's built-in
+        // glGenerateMipmap would regenerate the chain from level 0 and
+        // clobber any extra mips the caller supplied. Mipgen needs to be
+        // a deliberate decision below, not a side effect of sampler setup.
+        ApplySamplerNoMipGen(description.Sampler);
+
+        // Run-time mip generation only kicks in for UNCOMPRESSED textures
+        // with sampler.GenerateMipmaps when caller didn't supply the full
+        // chain. Compressed formats can't glGenerateMipmap; cook-time
+        // pre-baked mips are mandatory there.
+        if (description.Sampler.GenerateMipmaps && !isCompressed && mipBytes.Count == 1)
+        {
+            GL.GenerateMipmap(GenerateMipmapTarget.Texture2D);
+        }
+
         GL.BindTexture(TextureTarget.Texture2D, 0);
 
         var handleId = NextHandle();
@@ -232,6 +304,131 @@ public sealed partial class OpenGLGraphicsDevice
             resolvedName,
             TextureKind.UserUploaded));
         return new TextureHandle(handleId);
+    }
+
+    public TextureHandle AllocateTexture2DMips(
+        TextureDescription description,
+        int mipCount,
+        string? name = null)
+    {
+        ThrowIfDisposed();
+        if (description.Width <= 0 || description.Height <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(description),
+                "Texture width and height must be greater than zero.");
+        }
+        if (mipCount < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(mipCount));
+        }
+        if (description.Format == TextureFormat.Depth24)
+        {
+            throw new ArgumentException(
+                "Depth textures must be created through CreateRenderSurface.", nameof(description));
+        }
+
+        var isCompressed = description.Format.IsCompressed();
+        var texture = GL.GenTexture();
+        GL.BindTexture(TextureTarget.Texture2D, texture);
+        var internalFormat = MapPixelInternalFormat(description.Format);
+
+        // Allocate storage for every mip level with no real data uploaded.
+        // glTexImage2D with IntPtr.Zero for uncompressed leaves contents
+        // undefined; for compressed we pass a zero-filled buffer (driver
+        // requires a buffer of exactly the expected block-count size).
+        for (var mip = 0; mip < mipCount; mip++)
+        {
+            var mipWidth = Math.Max(1, description.Width >> mip);
+            var mipHeight = Math.Max(1, description.Height >> mip);
+            if (isCompressed)
+            {
+                var size = description.Format.MipByteCount(mipWidth, mipHeight);
+                var stub = new byte[size];
+                GL.CompressedTexImage2D(
+                    TextureTarget.Texture2D, mip,
+                    (InternalFormat)internalFormat,
+                    mipWidth, mipHeight, border: 0,
+                    size, stub);
+            }
+            else
+            {
+                GL.TexImage2D(
+                    TextureTarget.Texture2D, mip,
+                    internalFormat, mipWidth, mipHeight, border: 0,
+                    MapPixelFormat(description.Format), MapPixelType(description.Format),
+                    IntPtr.Zero);
+            }
+        }
+
+        // Initially sample only from the smallest mip. As UploadTextureMip
+        // adds finer levels, BASE_LEVEL gets walked down so the sampler
+        // sees the highest-quality mip available.
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureBaseLevel, mipCount - 1);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMaxLevel, mipCount - 1);
+        // Apply sampler settings WITHOUT the GenerateMipmaps step -- we
+        // already have the chain via the per-level UploadTextureMip flow,
+        // and calling glGenerateMipmap here would regenerate from level 0
+        // whose storage is still undefined, blasting garbage across the
+        // chain.
+        ApplySamplerNoMipGen(description.Sampler);
+        GL.BindTexture(TextureTarget.Texture2D, 0);
+
+        var handleId = NextHandle();
+        var resolvedName = name ?? $"texture#{handleId}";
+        ApplyDebugLabel(ObjectLabelIdentifier.Texture, texture, resolvedName);
+        textures.Add(handleId, new TextureResource(
+            texture, description.Width, description.Height,
+            description.Format, resolvedName, TextureKind.UserUploaded));
+        return new TextureHandle(handleId);
+    }
+
+    public void UploadTextureMip(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes)
+    {
+        ThrowIfDisposed();
+        if (mipLevel < 0) throw new ArgumentOutOfRangeException(nameof(mipLevel));
+        if (!textures.TryGetValue(handle.Id, out var res))
+        {
+            throw new ArgumentException($"Texture handle {handle.Id} not found.", nameof(handle));
+        }
+        var mipWidth = Math.Max(1, res.Width >> mipLevel);
+        var mipHeight = Math.Max(1, res.Height >> mipLevel);
+        var expected = res.Format.MipByteCount(mipWidth, mipHeight);
+        if (bytes.Length != expected)
+        {
+            throw new ArgumentException(
+                $"Mip {mipLevel} of '{res.Name}' expects {expected} bytes; got {bytes.Length}.",
+                nameof(bytes));
+        }
+        var isCompressed = res.Format.IsCompressed();
+        var internalFormat = MapPixelInternalFormat(res.Format);
+
+        GL.BindTexture(res.Target, res.Texture);
+        if (isCompressed)
+        {
+            GL.CompressedTexImage2D(
+                res.Target, mipLevel, (InternalFormat)internalFormat,
+                mipWidth, mipHeight, border: 0,
+                bytes.Length,
+                ref System.Runtime.InteropServices.MemoryMarshal.GetReference(bytes));
+        }
+        else
+        {
+            GL.TexImage2D(
+                res.Target, mipLevel, internalFormat,
+                mipWidth, mipHeight, border: 0,
+                MapPixelFormat(res.Format), MapPixelType(res.Format),
+                ref System.Runtime.InteropServices.MemoryMarshal.GetReference(bytes));
+        }
+
+        // Walk BASE_LEVEL down so the sampler sees the highest-quality mip
+        // available so far. MAX_LEVEL stays at whatever was set originally
+        // (typically mipCount-1) -- we only ever ADD mips, never invalidate.
+        GL.GetTexParameter(res.Target, GetTextureParameter.TextureBaseLevel, out int currentBase);
+        if (mipLevel < currentBase)
+        {
+            GL.TexParameter(res.Target, TextureParameterName.TextureBaseLevel, mipLevel);
+        }
+        GL.BindTexture(res.Target, 0);
     }
 
     public TextureHandle CreateTexture3D(
@@ -973,6 +1170,29 @@ public sealed partial class OpenGLGraphicsDevice
         }
     }
 
+    // Sampler config without the trailing glGenerateMipmap. Used by paths
+    // that pre-provide mip data (CreateTexture2DMipped multi-mip,
+    // AllocateTexture2DMips streamed path). Calling glGenerateMipmap there
+    // would clobber the supplied mips with regenerated-from-level-0 garbage.
+    private static void ApplySamplerNoMipGen(SamplerDescription sampler)
+    {
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)MapMinFilter(sampler.MinFilter, sampler.GenerateMipmaps));
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)MapMagFilter(sampler.MagFilter));
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)MapTextureWrap(sampler.WrapU));
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)MapTextureWrap(sampler.WrapV));
+        GL.TexParameter(
+            TextureTarget.Texture2D,
+            TextureParameterName.TextureCompareMode,
+            sampler.Compare ? (int)TextureCompareMode.CompareRefToTexture : (int)TextureCompareMode.None);
+        if (sampler.Compare)
+        {
+            GL.TexParameter(
+                TextureTarget.Texture2D,
+                TextureParameterName.TextureCompareFunc,
+                (int)DepthFunction.Lequal);
+        }
+    }
+
     private static void ApplySampler(SamplerDescription sampler)
     {
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)MapMinFilter(sampler.MinFilter, sampler.GenerateMipmaps));
@@ -1013,7 +1233,7 @@ public sealed partial class OpenGLGraphicsDevice
 
     private sealed record VertexBufferResource(int Buffer, int Count, int Stride, string Name);
 
-    private sealed record IndexBufferResource(int Buffer, int Count, string Name);
+    private sealed record IndexBufferResource(int Buffer, int Count, IndexFormat Format, string Name);
 
     private sealed record TextureResource(
         int Texture,

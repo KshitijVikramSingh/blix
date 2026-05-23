@@ -119,9 +119,12 @@ public sealed partial class OpenGLGraphicsDevice
         GL.BindBuffer(BufferTarget.ArrayBuffer, vertexBuffer.Buffer);
         BindVertexLayout(pipeline.VertexLayout);
         GL.BindBuffer(BufferTarget.ElementArrayBuffer, indexBuffer.Buffer);
-        // GL.DrawElements offset is a byte offset into the bound index buffer.
-        // sizeof(ushort) == 2; the byte offset is IndexOffset * 2.
-        GL.DrawElements(MapPrimitiveTopology(pipeline.Topology), command.IndexCount, DrawElementsType.UnsignedShort, command.IndexOffset * sizeof(ushort));
+        // DrawElements byte-offset is element-offset * sizeof(element); the
+        // element type + element width come from the buffer's recorded format.
+        var (elementType, elementBytes) = indexBuffer.Format == IndexFormat.UInt32
+            ? (DrawElementsType.UnsignedInt, sizeof(uint))
+            : (DrawElementsType.UnsignedShort, sizeof(ushort));
+        GL.DrawElements(MapPrimitiveTopology(pipeline.Topology), command.IndexCount, elementType, command.IndexOffset * elementBytes);
         GL.BindBuffer(BufferTarget.ElementArrayBuffer, 0);
         GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
         GL.BindVertexArray(0);

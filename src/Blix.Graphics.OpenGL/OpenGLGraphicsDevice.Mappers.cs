@@ -119,6 +119,19 @@ public sealed partial class OpenGLGraphicsDevice
             TextureFormat.Depth24 => PixelInternalFormat.DepthComponent24,
             TextureFormat.Rgba16F => PixelInternalFormat.Rgba16f,
             TextureFormat.R8 => PixelInternalFormat.R8,
+            // BPTC family. NOTE: both Bc7Srgb and Bc7Unorm currently map to
+            // the NON-sRGB internal format (GL_COMPRESSED_RGBA_BPTC_UNORM).
+            // Reason: the lit shader still does pow(c, 2.2) on base colour
+            // for the source-PNG (Rgba8) code path, and using GL's sRGB
+            // sampler decode here would cause double-decode (washed-out
+            // textures). The Srgb variant is a label for the cook side
+            // ("this data came from sRGB-encoded PNG") -- when the shader
+            // pipeline gets a proper sRGB sampler-side path, switch this
+            // to CompressedSrgbAlphaBptcUnorm and drop the shader pow.
+            TextureFormat.Bc7Srgb => (PixelInternalFormat)All.CompressedRgbaBptcUnorm,
+            TextureFormat.Bc7Unorm => (PixelInternalFormat)All.CompressedRgbaBptcUnorm,
+            TextureFormat.Bc5Unorm => (PixelInternalFormat)All.CompressedRgRgtc2,
+            TextureFormat.Bc6hUf16 => (PixelInternalFormat)All.CompressedRgbBptcUnsignedFloat,
             _ => throw new NotSupportedException($"Unsupported texture format: {format}")
         };
     }
@@ -131,6 +144,13 @@ public sealed partial class OpenGLGraphicsDevice
             TextureFormat.Depth24 => PixelFormat.DepthComponent,
             TextureFormat.Rgba16F => PixelFormat.Rgba,
             TextureFormat.R8 => PixelFormat.Red,
+            // Compressed formats don't take a separate client-side PixelFormat;
+            // these values are only consumed when the path goes through
+            // glTexImage2D (uncompressed upload). Compressed uploads use
+            // glCompressedTexImage2D which takes the internal format directly.
+            TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm
+                or TextureFormat.Bc5Unorm or TextureFormat.Bc6hUf16
+                    => PixelFormat.Rgba,
             _ => throw new NotSupportedException($"Unsupported texture format: {format}")
         };
     }
@@ -145,6 +165,11 @@ public sealed partial class OpenGLGraphicsDevice
             TextureFormat.Depth24 => PixelType.UnsignedInt,
             TextureFormat.Rgba16F => PixelType.HalfFloat,
             TextureFormat.R8 => PixelType.UnsignedByte,
+            // Compressed formats: PixelType is unused by glCompressedTexImage2D.
+            // Return a sane default for the rare path that asks anyway.
+            TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm
+                or TextureFormat.Bc5Unorm or TextureFormat.Bc6hUf16
+                    => PixelType.UnsignedByte,
             _ => throw new NotSupportedException($"Unsupported texture format: {format}")
         };
     }

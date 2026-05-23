@@ -16,7 +16,54 @@ public enum TextureFormat
     Rgba16F,
     // Single-channel 8-bit unsigned, GL_R8. Used by volumetric textures storing a
     // density scalar per voxel; sampled in GLSL as the .r component of a vec4.
-    R8
+    R8,
+    // BC7 (BPTC) compressed RGBA, sRGB-encoded. The workhorse compressed colour
+    // format -- 8 bits per pixel (4x compression vs Rgba8), high quality.
+    // Pixel data is uploaded via glCompressedTexImage2D as 16-byte blocks per
+    // 4x4 texel region. Width + height should be multiples of 4; smaller
+    // edge-mips pad up to 4.
+    Bc7Srgb,
+    // BC7 (BPTC) compressed RGBA, linear-space. For non-colour data like
+    // metallic-roughness, occlusion, or roughness-only packed channels.
+    Bc7Unorm,
+    // BC5 (RGTC2) compressed two-channel signed/unsigned. The canonical normal-
+    // map format: stores X + Y, reconstructs Z = sqrt(1 - x*x - y*y) in shader.
+    // 8 bpp (4x compression vs Rgba8); higher quality than BC7 for normals
+    // because the encoder isn't trying to preserve a B channel.
+    Bc5Unorm,
+    // BC6h (BPTC) compressed RGB half-float, unsigned. For HDR sources
+    // (env probes, baked irradiance). 8 bpp; preserves >1.0 values that BC7
+    // would clamp.
+    Bc6hUf16,
+}
+
+// Helpers for the compressed-format family. Centralised so the backend +
+// cook tool + .blixtex format agree on byte-layout math.
+public static class TextureFormatExtensions
+{
+    public static bool IsCompressed(this TextureFormat format) => format switch
+    {
+        TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm
+            or TextureFormat.Bc5Unorm or TextureFormat.Bc6hUf16 => true,
+        _ => false,
+    };
+
+    // Bytes required to store one mip level at the given size. For
+    // uncompressed formats: width*height*bpp. For BCn: 16 bytes per 4x4
+    // block, padded -- so a 1x1 mip still costs 16 bytes.
+    public static int MipByteCount(this TextureFormat format, int width, int height) => format switch
+    {
+        TextureFormat.Rgba8 => width * height * 4,
+        TextureFormat.Rgba16F => width * height * 8,
+        TextureFormat.R8 => width * height,
+        // BC7 / BC5 / BC6h are all 16 bytes per 4x4 block.
+        TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm
+            or TextureFormat.Bc5Unorm or TextureFormat.Bc6hUf16
+                => ((width + 3) / 4) * ((height + 3) / 4) * 16,
+        TextureFormat.Depth24 => throw new ArgumentException(
+            "Depth formats don't have a fixed mip byte count.", nameof(format)),
+        _ => throw new ArgumentOutOfRangeException(nameof(format), format, null),
+    };
 }
 
 public sealed record SamplerDescription(

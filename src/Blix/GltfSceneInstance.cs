@@ -51,6 +51,15 @@ public sealed class GltfSceneInstance
         ArgumentNullException.ThrowIfNull(options);
 
         var textureCache = new Dictionary<GltfTexture, TextureHandle>(ReferenceEqualityComparer.Instance);
+        // Tracks textures currently being uploaded but whose handle hasn't
+        // landed yet. Subsequent bindings of the same GltfTexture attach
+        // their `apply` callback to the existing upload instead of starting
+        // a duplicate one (which would also fail since the CPU mip bytes
+        // were released after the first enqueue). The dictionary value is
+        // a mutable list because more than two materials can share one
+        // texture (e.g. a normal map reused by several wall variants).
+        var pendingTextures = new Dictionary<GltfTexture, List<Action<TextureHandle>>>(
+            ReferenceEqualityComparer.Instance);
         var materialCache = new Dictionary<GltfMaterial, Material>(ReferenceEqualityComparer.Instance);
         var submeshes = new SubmeshInstance[model.Primitives.Length];
 
@@ -67,8 +76,10 @@ public sealed class GltfSceneInstance
                     new VertexBufferDescription(prim.Mesh.Layout, prim.Mesh.VertexCount, GraphicsBufferUsage.Static),
                     prim.Mesh.VertexBytes),
                 name: $"{meshName}.vb");
-            var ib = device.CreateIndexBuffer(prim.Mesh.Indices, name: $"{meshName}.ib");
-            var mesh = new Mesh(meshName, vb, ib, prim.Mesh.Indices.Length, prim.Mesh.Bounds);
+            var ib = prim.Mesh.IndexFormat == IndexFormat.UInt32
+                ? device.CreateIndexBuffer(prim.Mesh.Indices32!, name: $"{meshName}.ib")
+                : device.CreateIndexBuffer(prim.Mesh.Indices, name: $"{meshName}.ib");
+            var mesh = new Mesh(meshName, vb, ib, prim.Mesh.IndexCount, prim.Mesh.Bounds);
 
             var alphaMode = prim.Material?.AlphaMode ?? GltfAlphaMode.Opaque;
             var doubleSided = prim.Material?.DoubleSided ?? false;
@@ -79,7 +90,7 @@ public sealed class GltfSceneInstance
             {
                 if (!materialCache.TryGetValue(gm, out material))
                 {
-                    material = BuildMaterial(device, gm, pipeline, options, textureCache);
+                    material = BuildMaterial(device, gm, pipeline, options, textureCache, pendingTextures);
                     options.OnMaterialBuilt?.Invoke(material, gm);
                     materialCache[gm] = material;
                 }
@@ -96,7 +107,7 @@ public sealed class GltfSceneInstance
                     OcclusionTexture: null, OcclusionStrength: 1.0f,
                     EmissiveTexture: null, EmissiveFactor: Vector3.Zero, EmissiveStrength: 1.0f,
                     AlphaMode: GltfAlphaMode.Opaque, AlphaCutoff: 0.5f, DoubleSided: false);
-                material = BuildMaterial(device, defaultKey, pipeline, options, textureCache);
+                material = BuildMaterial(device, defaultKey, pipeline, options, textureCache, pendingTextures);
                 options.OnMaterialBuilt?.Invoke(material, null);
             }
 
@@ -149,14 +160,9 @@ public sealed class GltfSceneInstance
 
     private static Material BuildMaterial(
         IGraphicsDevice device, GltfMaterial gm, PipelineHandle pipeline,
-        GltfSceneOptions options, Dictionary<GltfTexture, TextureHandle> textureCache)
+        GltfSceneOptions options, Dictionary<GltfTexture, TextureHandle> textureCache,
+        Dictionary<GltfTexture, List<Action<TextureHandle>>> pendingTextures)
     {
-        var albedo = UploadOrFallback(device, gm.BaseColorTexture, options, textureCache, options.Defaults.WhitePixel, "albedo");
-        var normal = UploadOrFallback(device, gm.NormalTexture, options, textureCache, options.Defaults.FlatNormal, "normal");
-        var mr = UploadOrFallback(device, gm.MetallicRoughnessTexture, options, textureCache, options.Defaults.NeutralMetallicRoughness, "mr");
-        var occlusion = UploadOrFallback(device, gm.OcclusionTexture, options, textureCache, options.Defaults.FullOcclusion, "ao");
-        var emissive = UploadOrFallback(device, gm.EmissiveTexture, options, textureCache, options.Defaults.WhitePixel, "emissive");
-
         var material = new Material($"{options.Prefix}.mat.{gm.Name}", pipeline);
         material.SetUniform("uBaseColorFactor", new Vector4Uniform(gm.BaseColorFactor));
         material.SetUniform("uMetallicFactor", new FloatUniform(gm.MetallicFactor));
@@ -166,32 +172,138 @@ public sealed class GltfSceneInstance
         // isn't present, so this stays correct for vanilla glTF.
         material.SetUniform("uEmissiveFactor", new Vector3Uniform(gm.EmissiveFactor * gm.EmissiveStrength));
         material.SetUniform("uOcclusionStrength", new FloatUniform(gm.OcclusionStrength));
-        material.SetUniform("uAlphaCutoff", new FloatUniform(gm.AlphaCutoff));
+        // Effective cutoff: glTF spec says alphaCutoff is only used when
+        // alphaMode == MASK. Force 0 for OPAQUE + BLEND so the lit shader's
+        // `if (uAlphaCutoff > 0 && a < cutoff) discard;` never fires --
+        // OPAQUE materials with low-alpha textures (Modern Sponza authors
+        // some that way) would otherwise discard every fragment and the
+        // scene renders empty.
+        var effectiveCutoff = gm.AlphaMode == GltfAlphaMode.Mask ? gm.AlphaCutoff : 0.0f;
+        material.SetUniform("uAlphaCutoff", new FloatUniform(effectiveCutoff));
         // Existing lit shader uses uNormalScale as a "has normal map" gate.
         material.SetUniform("uNormalScale", new FloatUniform(gm.NormalTexture is null ? 0.0f : 1.0f));
         material.SetUniform("uHasMetallicMap", new FloatUniform(gm.MetallicRoughnessTexture is null ? 0.0f : 1.0f));
         material.SetUniform("uHasOcclusionMap", new FloatUniform(gm.OcclusionTexture is null ? 0.0f : 1.0f));
+        // Lit shader uses this to negate the geometric normal on back-faces
+        // so doubleSided foliage (leaves, fabric) lights correctly from both
+        // sides. The derivative-based cotangentFrame naturally inherits the
+        // flip via its cross(dp, N) terms, so no separate TBN handedness
+        // adjustment is needed.
+        material.SetUniform("uDoubleSided", new FloatUniform(gm.DoubleSided ? 1.0f : 0.0f));
 
-        material.SetTexture("uAlbedo", albedo, 0);
-        material.SetTexture("uNormalMap", normal, 1);
-        material.SetTexture("uMetallicRoughness", mr, 2);
-        material.SetTexture("uEmissive", emissive, 3);
-        material.SetTexture("uOcclusion", occlusion, 15);
+        // Bind defaults FIRST. When an uploader is set, the real textures
+        // pop in over the next few frames as Drain runs (see ResourceUploader);
+        // until then the lit shader samples the default which keeps the
+        // material valid for rendering. When no uploader, uploads happen
+        // synchronously here and the final SetTexture wins immediately.
+        material.SetTexture("uAlbedo", options.Defaults.WhitePixel, 0);
+        material.SetTexture("uNormalMap", options.Defaults.FlatNormal, 1);
+        material.SetTexture("uMetallicRoughness", options.Defaults.NeutralMetallicRoughness, 2);
+        material.SetTexture("uEmissive", options.Defaults.WhitePixel, 3);
+        material.SetTexture("uOcclusion", options.Defaults.FullOcclusion, 15);
+
+        BindMaterialTexture(device, options, textureCache, pendingTextures, gm.BaseColorTexture, "albedo",
+            real => material.SetTexture("uAlbedo", real, 0));
+        BindMaterialTexture(device, options, textureCache, pendingTextures, gm.NormalTexture, "normal",
+            real => material.SetTexture("uNormalMap", real, 1));
+        BindMaterialTexture(device, options, textureCache, pendingTextures, gm.MetallicRoughnessTexture, "mr",
+            real => material.SetTexture("uMetallicRoughness", real, 2));
+        BindMaterialTexture(device, options, textureCache, pendingTextures, gm.EmissiveTexture, "emissive",
+            real => material.SetTexture("uEmissive", real, 3));
+        BindMaterialTexture(device, options, textureCache, pendingTextures, gm.OcclusionTexture, "ao",
+            real => material.SetTexture("uOcclusion", real, 15));
+
         return material;
     }
 
-    private static TextureHandle UploadOrFallback(
-        IGraphicsDevice device, GltfTexture? source, GltfSceneOptions options,
-        Dictionary<GltfTexture, TextureHandle> cache, TextureHandle fallback, string slotHint)
+    // Per-slot binder. If the source is null, leaves the default placeholder
+    // alone (already bound by the caller). If the source has been uploaded
+    // before, binds the cached handle immediately. Otherwise either uploads
+    // synchronously (no uploader provided) or enqueues for deferred upload
+    // (uploader present), invoking apply with the real handle when ready.
+    private static void BindMaterialTexture(
+        IGraphicsDevice device, GltfSceneOptions options,
+        Dictionary<GltfTexture, TextureHandle> textureCache,
+        Dictionary<GltfTexture, List<Action<TextureHandle>>> pendingTextures,
+        GltfTexture? source, string slotHint,
+        Action<TextureHandle> apply)
     {
-        if (source is null) return fallback;
-        if (cache.TryGetValue(source, out var existing)) return existing;
-        var handle = device.CreateTexture2D(
-            new TextureDescription(source.Width, source.Height, TextureFormat.Rgba8, options.Sampler),
-            source.RgbaPixels,
+        if (source is null) return;
+        if (textureCache.TryGetValue(source, out var cached))
+        {
+            apply(cached);
+            return;
+        }
+        // An upload is already in flight for this source -- piggyback on
+        // it instead of starting another. Happens when the same image
+        // backs more than one glTF material (e.g. a normal map reused
+        // across wall variants). Without this, the second BuildMaterial
+        // call would crash on the released CPU bytes.
+        if (pendingTextures.TryGetValue(source, out var pendingList))
+        {
+            pendingList.Add(apply);
+            return;
+        }
+
+        if (options.Uploader is { } uploader)
+        {
+            var subscribers = new List<Action<TextureHandle>> { apply };
+            pendingTextures[source] = subscribers;
+            var name = $"{options.Prefix}.{slotHint}.{source.Name}";
+            void OnUploaded(TextureHandle h)
+            {
+                textureCache[source] = h;
+                pendingTextures.Remove(source);
+                foreach (var sub in subscribers) sub(h);
+            }
+
+            if (source.LazyHandle is { } lazy)
+            {
+                // Lazy path: bytes stay on disk until the uploader's pump
+                // hits each mip. Captures `lazy` so the mip reads happen
+                // at process-time, not enqueue-time.
+                uploader.EnqueueLazy(
+                    source.Format, source.Width, source.Height, source.MipCount,
+                    mipReader: level => BlixTexReader.ReadMip(lazy, level),
+                    options.Sampler, name, OnUploaded);
+                return;
+            }
+
+            // Eager path: source.MipBytes is populated (PNG-decode case).
+            // After enqueue we drop OUR reference; the uploader's work
+            // items hold theirs only until each mip is processed.
+            var mipBytes = source.MipBytes
+                ?? throw new InvalidOperationException(
+                    $"GltfTexture '{source.Name}' has neither lazy handle nor CPU mip bytes.");
+            uploader.Enqueue(
+                source.Format, source.Width, source.Height, mipBytes, options.Sampler,
+                name, OnUploaded);
+            source.ReleaseCpuMipBytes();
+            return;
+        }
+
+        // Synchronous path (no uploader). Lazy textures need to materialise
+        // bytes here too.
+        IReadOnlyList<byte[]> bytesForSync;
+        if (source.LazyHandle is { } syncLazy)
+        {
+            var loaded = new byte[syncLazy.MipCount][];
+            for (var i = 0; i < syncLazy.MipCount; i++) loaded[i] = BlixTexReader.ReadMip(syncLazy, i);
+            bytesForSync = loaded;
+        }
+        else
+        {
+            bytesForSync = source.MipBytes
+                ?? throw new InvalidOperationException(
+                    $"GltfTexture '{source.Name}' has neither lazy handle nor CPU mip bytes.");
+        }
+        var handle = device.CreateTexture2DMipped(
+            new TextureDescription(source.Width, source.Height, source.Format, options.Sampler),
+            bytesForSync,
             name: $"{options.Prefix}.{slotHint}.{source.Name}");
-        cache[source] = handle;
-        return handle;
+        textureCache[source] = handle;
+        source.ReleaseCpuMipBytes();
+        apply(handle);
     }
 }
 
@@ -229,7 +341,7 @@ public sealed class MaterialSet
 // Designed so a minimal demo only has to populate `Opaque` + `Defaults` +
 // `Sampler`; richer demos opt into MASK / BLEND / DOUBLE_SIDED pipelines
 // only for the variants their scene actually uses.
-public sealed class GltfSceneOptions
+public sealed record GltfSceneOptions
 {
     public required PipelineHandle Opaque { get; init; }
     public PipelineHandle? OpaqueDoubleSided { get; init; }
@@ -245,6 +357,15 @@ public sealed class GltfSceneOptions
     // (null for primitives with no material reference). Bind any scene-wide
     // textures (shadow maps, IBL probes, BRDF LUT, env cube) here.
     public Action<Material, GltfMaterial?>? OnMaterialBuilt { get; init; }
+
+    // When set, per-material texture uploads are queued through the uploader
+    // instead of running synchronously inside Build. Materials get the
+    // default placeholder texture for each slot up front; the uploader
+    // swaps in the real texture over the next few frames as Drain processes
+    // its queue. Build still returns synchronously with a fully-constructed
+    // scene graph -- only the GL upload work is deferred, not the structural
+    // work. When null, all uploads happen inline (legacy behaviour).
+    public ResourceUploader? Uploader { get; init; }
 
     public string Prefix { get; init; } = "gltf";
 }

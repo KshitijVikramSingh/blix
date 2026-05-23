@@ -60,8 +60,27 @@ uniform vec4  uBaseColorFactor;
 uniform vec3  uEmissiveFactor;
 uniform float uMetallicFactor;
 uniform float uRoughnessFactor;
+// glTF alphaMode handling. > 0 = MASK (discard when albedo.a < cutoff);
+// 0 = OPAQUE or BLEND (no discard, alpha is either irrelevant or
+// consumed by the alpha-blend pipeline downstream). GltfSceneInstance
+// sets this per-material based on the source alphaMode.
+uniform float uAlphaCutoff;
 uniform float uNormalScale;
 uniform float uHasMetallicMap;
+// glTF doubleSided gate: when > 0.5, fragments on the back face (i.e.
+// !gl_FrontFacing) flip the geometric normal so two-sided geometry like
+// foliage and fabric lights correctly from the inside. Set per-material
+// from GltfMaterial.DoubleSided.
+uniform float uDoubleSided;
+
+// Baked ambient-occlusion. uOcclusion stores AO in the R channel
+// (glTF spec). uOcclusionStrength scales between "AO ignored" (0) and
+// "full AO" (1). uHasOcclusionMap gates the sample so materials without
+// an occlusion texture fall back to ao = 1 without sampling whatever
+// default placeholder is bound.
+uniform sampler2D uOcclusion;
+uniform float     uHasOcclusionMap;
+uniform float     uOcclusionStrength;
 
 uniform vec3  uCameraPosition;
 uniform vec3  uSunDirection;
@@ -320,7 +339,7 @@ void main()
     vec2 uv = vec2(texCoord.x, 1.0 - texCoord.y);
 
     vec4 albedoSample = texture(uAlbedo, uv) * uBaseColorFactor;
-    if (albedoSample.a < 0.5) discard;
+    if (uAlphaCutoff > 0.0 && albedoSample.a < uAlphaCutoff) discard;
     vec3 albedo = pow(albedoSample.rgb, vec3(2.2));
 
     vec3 mrSample = texture(uMetallicRoughness, uv).rgb;
@@ -328,7 +347,18 @@ void main()
     float roughness = mix(uRoughnessFactor, mrSample.g * uRoughnessFactor, uHasMetallicMap);
     roughness = clamp(roughness, 0.05, 1.0);
 
-    vec3 N = perturbNormal(normalize(worldNormal), worldPosition, uv);
+    float aoSample = texture(uOcclusion, uv).r;
+    float ao = mix(1.0, mix(1.0, aoSample, uOcclusionStrength), uHasOcclusionMap);
+
+    // Flip the geometric normal on back faces of doubleSided geometry so
+    // the lighting math sees the surface from the correct side. Done
+    // BEFORE perturbNormal because the derivative-based cotangentFrame
+    // builds T and B from cross products with N; flipping N first means
+    // the whole tangent frame mirrors consistently, so normal-map data
+    // lands the right way up on the back face.
+    vec3 N0 = normalize(worldNormal);
+    if (uDoubleSided > 0.5 && !gl_FrontFacing) N0 = -N0;
+    vec3 N = perturbNormal(N0, worldPosition, uv);
     vec3 V = normalize(uCameraPosition - worldPosition);
     vec3 L = normalize(-uSunDirection);
     vec3 H = normalize(V + L);
@@ -354,7 +384,16 @@ void main()
     specular *= horizon;
     vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
     float shadow = sampleShadowCsm(NdotL);
-    vec3 direct = (kD * albedo / PI + specular) * uSunColor * NdotL * shadow;
+    // Direct-lighting micro-shadowing (Drobot-style). max(ao, 1 - NdotL)
+    // means AO only modulates direct light on surfaces facing the light
+    // (NdotL high -> 1-NdotL low -> ao wins, creases darken); surfaces
+    // facing away (NdotL ~ 0 -> 1-NdotL ~ 1 -> 1 wins, no extra darken)
+    // are already shadowed by the cosine term, so layering AO there would
+    // just gray them out. Spec-correct AO is indirect-only; this is the
+    // Frostbite/Marmoset-style extension that gives crevices realistic
+    // contact darkening under direct light too.
+    float aoMicroSun = max(ao, 1.0 - NdotL);
+    vec3 direct = (kD * albedo / PI + specular) * uSunColor * NdotL * shadow * aoMicroSun;
 
     // --- Point lights ----------------------------------------------------
     int plCount = int(uPointLightCount);
@@ -393,7 +432,8 @@ void main()
             shadowP = samplePointShadow(i, -toLight, dist);
         }
 
-        direct += (kDp * albedo / PI + specP) * uPointLightColors[i] * NdotLp * att * shadowP;
+        float aoMicroP = max(ao, 1.0 - NdotLp);
+        direct += (kDp * albedo / PI + specP) * uPointLightColors[i] * NdotLp * att * shadowP * aoMicroP;
     }
 
     // --- Indirect (IBL) --------------------------------------------------
@@ -432,7 +472,10 @@ void main()
     indirectDiffuse *= uIblDiffuseBoost;
 
     float indirectMix = uIndirectShadowBase + uIndirectShadowRange * shadow;
-    vec3 indirect = (indirectDiffuse + indirectSpecular) * indirectMix;
+    // Baked AO modulates the indirect (ambient) term in full per glTF spec.
+    // Crevices that occlude the sky stay dark even when no direct light
+    // reaches them; flat surfaces sample ao ~ 1 and are unaffected.
+    vec3 indirect = (indirectDiffuse + indirectSpecular) * indirectMix * ao;
 
     vec3 emissive = pow(texture(uEmissive, uv).rgb, vec3(2.2))
         * uEmissiveFactor * uEmissiveBoost;

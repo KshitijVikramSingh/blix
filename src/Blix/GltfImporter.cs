@@ -110,8 +110,13 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         // Decode every primitive across every skinned-mesh node. Each gets its
         // own MeshData (skinned vertex stream) and the material it references.
         // Textures are deduped across materials via a shared cache so an image
-        // referenced by two primitives only decodes once.
+        // referenced by two primitives only decodes once. We pre-decode every
+        // unique source image in parallel before walking primitives -- PNG/JPEG
+        // decode is the dominant cost for heavy assets. Same pattern as the
+        // static importer; see GltfStaticImporter.PreDecodeImages for rationale.
         var textureCache = new Dictionary<int, GltfTexture>();
+        var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
+        PreDecodeImages(model, textureCache, gltfDir);
         var materialCache = new Dictionary<int, GltfMaterial>();
         var primitivesList = new List<GltfPrimitive>();
         foreach (var node in skinnedMeshNodes)
@@ -148,6 +153,92 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     // optional texture), normal map, and metallic-roughness texture + factors;
     // other channels (occlusion, emissive, alpha mode) are skipped.
     //
+    // Mirror of GltfStaticImporter.PreDecodeChannels. See that file for the
+    // rationale; in short: walk every material once, collect every image,
+    // decode them in parallel, pre-populate the textureCache.
+    private static readonly string[] PreDecodeChannels =
+    {
+        "BaseColor", "Normal", "MetallicRoughness", "Occlusion", "Emissive",
+    };
+
+    private static void PreDecodeImages(
+        ModelRoot model,
+        Dictionary<int, GltfTexture> textureCache,
+        string gltfDir)
+    {
+        var imageRefs = new HashSet<int>();
+        foreach (var mat in model.LogicalMaterials)
+        {
+            foreach (var channelName in PreDecodeChannels)
+            {
+                var channel = mat.FindChannel(channelName);
+                if (!channel.HasValue) continue;
+                var img = channel.Value.Texture?.PrimaryImage;
+                if (img is null) continue;
+                imageRefs.Add(img.LogicalIndex);
+            }
+        }
+        if (imageRefs.Count == 0) return;
+
+        var imagesToConsider = model.LogicalImages
+            .Where(i => imageRefs.Contains(i.LogicalIndex))
+            .ToArray();
+
+        var cookedSourcePaths = new Dictionary<int, string>();
+        var sourceImages = new List<SharpGLTF.Schema2.Image>();
+        foreach (var image in imagesToConsider)
+        {
+            var blixTexPath = TryResolveBlixTex(image, gltfDir);
+            if (blixTexPath is not null)
+            {
+                cookedSourcePaths[image.LogicalIndex] = blixTexPath;
+            }
+            else
+            {
+                sourceImages.Add(image);
+            }
+        }
+
+        var cookedWatch = System.Diagnostics.Stopwatch.StartNew();
+        foreach (var (idx, path) in cookedSourcePaths)
+        {
+            var handle = BlixTexReader.ReadHandle(path);
+            textureCache[idx] = new GltfTexture(
+                Path.GetFileNameWithoutExtension(path), handle);
+        }
+        cookedWatch.Stop();
+        if (cookedSourcePaths.Count > 0)
+        {
+            Console.WriteLine(
+                $"  indexed {cookedSourcePaths.Count} cooked .blixtex images in {cookedWatch.ElapsedMilliseconds} ms (lazy)");
+        }
+
+        if (sourceImages.Count == 0) return;
+
+        var decoded = new System.Collections.Concurrent.ConcurrentDictionary<int, GltfTexture>();
+        var decodeWatch = System.Diagnostics.Stopwatch.StartNew();
+        System.Threading.Tasks.Parallel.ForEach(sourceImages, image =>
+        {
+            var bytes = image.Content.Content.ToArray();
+            using var stream = new MemoryStream(bytes);
+            var d = ImageLoader.LoadRgba32(stream);
+            decoded[image.LogicalIndex] = GltfTexture.Rgba8Single(
+                image.Name ?? $"image_{image.LogicalIndex}",
+                d.Pixels, d.Width, d.Height);
+        });
+        foreach (var kv in decoded) textureCache[kv.Key] = kv.Value;
+        Console.WriteLine(
+            $"  decoded {sourceImages.Count} images in {decodeWatch.ElapsedMilliseconds} ms");
+    }
+
+    private static string? TryResolveBlixTex(SharpGLTF.Schema2.Image image, string gltfDir)
+    {
+        var sourcePath = image.Content.SourcePath;
+        if (string.IsNullOrEmpty(sourcePath)) return null;
+        var blixTexPath = Path.ChangeExtension(sourcePath, ".blixtex");
+        return File.Exists(blixTexPath) ? blixTexPath : null;
+    }
+
     // materialCache deduplicates: two primitives referencing the same glTF material
     // get the same GltfMaterial instance. textureCache does the same a layer
     // deeper — two materials referencing the same image only decode that image
@@ -262,11 +353,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         using var stream = new MemoryStream(bytes.ToArray());
         var decoded = ImageLoader.LoadRgba32(stream);
 
-        var result = new GltfTexture(
+        var result = GltfTexture.Rgba8Single(
             image.Name ?? texture.Name ?? $"image_{image.LogicalIndex}",
-            decoded.Pixels,
-            decoded.Width,
-            decoded.Height);
+            decoded.Pixels, decoded.Width, decoded.Height);
         textureCache[image.LogicalIndex] = result;
         return result;
     }
@@ -414,35 +503,48 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 new GraphicsVector4(t.X, t.Y, t.Z, t.W));
         }
 
-        // Indices: glTF supports unsigned byte / short / int; our MeshData uses
-        // ushort. Mesh primitives without an index buffer (rare for skinned
-        // content) get a sequential index list synthesised.
+        // Indices: glTF supports unsigned byte / short / int. We pick UInt16
+        // when the vertex count fits, UInt32 otherwise. Mesh primitives
+        // without an index buffer (rare for skinned content) get a
+        // sequential index list synthesised.
         var rawIndices = primitive.GetIndices();
-        ushort[] indices;
+        var needsUInt32 = vertexCount > ushort.MaxValue;
+        ushort[] indices16;
+        uint[]? indices32;
         if (rawIndices is null || rawIndices.Count == 0)
         {
-            indices = new ushort[vertexCount];
-            for (var i = 0; i < vertexCount; i++) indices[i] = checked((ushort)i);
+            if (needsUInt32)
+            {
+                indices16 = Array.Empty<ushort>();
+                indices32 = new uint[vertexCount];
+                for (var i = 0; i < vertexCount; i++) indices32[i] = (uint)i;
+            }
+            else
+            {
+                indices32 = null;
+                indices16 = new ushort[vertexCount];
+                for (var i = 0; i < vertexCount; i++) indices16[i] = (ushort)i;
+            }
+        }
+        else if (needsUInt32)
+        {
+            indices16 = Array.Empty<ushort>();
+            indices32 = new uint[rawIndices.Count];
+            for (var i = 0; i < rawIndices.Count; i++) indices32[i] = rawIndices[i];
         }
         else
         {
-            indices = new ushort[rawIndices.Count];
-            for (var i = 0; i < rawIndices.Count; i++)
-            {
-                if (rawIndices[i] > ushort.MaxValue)
-                {
-                    throw new InvalidOperationException(
-                        $"glTF mesh primitive has index {rawIndices[i]} > 65535; engine MeshData uses ushort indices.");
-                }
-                indices[i] = (ushort)rawIndices[i];
-            }
+            indices32 = null;
+            indices16 = new ushort[rawIndices.Count];
+            for (var i = 0; i < rawIndices.Count; i++) indices16[i] = (ushort)rawIndices[i];
         }
 
         var bytes = VertexPosition3NormalTextureSkin4Tangent.Pack(vertices);
         return new MeshData(
-            name, bytes, indices,
+            name, bytes, indices16,
             VertexPosition3NormalTextureSkin4Tangent.Layout,
-            new Bounds3(min, max));
+            new Bounds3(min, max),
+            Indices32: indices32);
     }
 
     // Convert one glTF animation into one engine AnimationClip. Channels targeting

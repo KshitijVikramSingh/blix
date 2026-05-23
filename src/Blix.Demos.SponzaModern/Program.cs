@@ -55,17 +55,40 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
     private float sunYaw = 0.6f;
     private float sunPitch = -1.0f;
     private float sunStrength = 4.0f;
-    private float exposure = 1.0f;
+    // Modern Sponza is brighter than classic Sponza -- whiter textures,
+    // bigger open atrium, full HDR sky bouncing everywhere. Default
+    // exposure 1.0 (Walkthrough's value) puts most fragments above the
+    // ACES knee and reads as washed-out white. 0.3 lands the scene in
+    // the operator's mid-tone range; user can slide it back up if they
+    // want a brighter look.
+    private float exposure = 0.3f;
     private RenderSurface[] cascadeShadowSurfaces = null!;
     private TextureHandle[] cascadeShadowMaps = null!;
     private Matrix4x4[] cascadeLightVPs = new Matrix4x4[CascadeCount];
     private float shadowSunDistance = 40.0f;
 
     // Scene geometry. One GltfSceneInstance per pack (main + opt-in add-ons).
+    // Loaded asynchronously: each pack's glTF parse + texture decode runs on
+    // a background thread (Task.Run inside OnLoad), and OnUpdate promotes the
+    // task result into a GltfSceneInstance on the main thread when ready.
+    // This keeps OnLoad fast (~3s of env-probe + shader compile) so the
+    // window can render the sky immediately while the rest streams in.
     private GltfSceneInstance? mainScene;
     private GltfSceneInstance? curtainsScene;
     private GltfSceneInstance? ivyScene;
     private GltfSceneInstance? treesScene;
+    private readonly List<PendingPack> pendingPacks = new();
+    // Set once after the main pack finishes building, so we move the camera
+    // to the scene centre exactly once.
+    private bool cameraReseatedToMain = false;
+
+    private sealed record PendingPack(
+        string Name,
+        Task<GltfModel> Import,
+        // Called on the main thread when Import completes. Runs the GL-side
+        // GltfSceneInstance.Build using the loaded model + assigns it to
+        // the demo's scene field.
+        Action BuildAndAssign);
 
     // Fallback textures + lit pipelines.
     private TextureHandle whitePixel;
@@ -74,11 +97,18 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
     private TextureHandle fullOcclusion;
     private PipelineHandle litOpaquePipeline;
     private PipelineHandle litDoubleSidedPipeline;
+    private PipelineHandle litAlphaBlendPipeline;
     private Material shadowMaterial = null!;
     private Material cubeShadowMaterial = null!;
     private Material skyboxMaterial = null!;
     private Mesh skyMesh = null!;
     private PbrSceneRenderer pbrRenderer = null!;
+    // Deferred GPU texture uploader. GltfSceneInstance enqueues per-material
+    // texture uploads here at Build time; we drain a few ms each frame so
+    // the scene renders immediately with placeholder textures and real ones
+    // pop in over ~1-2 seconds.
+    private ResourceUploader uploader = null!;
+    private const double UploadBudgetMillis = 4.0;
 
     // Post-process.
     private RenderSurface hdrSceneSurface = null!;
@@ -102,6 +132,21 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
     private Vector3 colorTemp = Vector3.One;
 
     private float fpsSmoothed = 60.0f;
+
+    // Lit shader debug view selector. Index must match the lit.frag switch.
+    private int debugView = 0;
+    private static readonly string[] DebugViewNames =
+    {
+        "PBR (real)",
+        "Albedo",
+        "Emissive",
+        "Indirect diffuse",
+        "Indirect specular",
+        "Direct sun",
+        "Roughness",
+        "Metallic",
+        "World normal",
+    };
 
     protected override void OnLoad()
     {
@@ -149,38 +194,81 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             new byte[] { 255, 255, 255, 255 }, name: "sm.full_ao");
 
         // --- Environment probe ------------------------------------------
+        // Preferred path: load a pre-cooked .blixprobe sibling of the HDR.
+        // Bypasses ~2s of equirect convolution + ~1.6s BRDF LUT integration
+        // by reading the already-baked cube + LUT blobs straight into GL
+        // textures. Falls back to a live bake when no cooked file is found
+        // or when the source is procedural.
         var hdrPath = Path.Combine(assetsDir, "textures", "sky_hdr.hdr");
-        if (File.Exists(hdrPath))
+        var probePath = Path.ChangeExtension(hdrPath, ".blixprobe");
+        if (File.Exists(probePath) && File.Exists(hdrPath))
         {
-            Console.WriteLine($"Loading HDR sky: {hdrPath}");
-            var hdrImage = ImageLoader.LoadRgba32F(hdrPath);
+            Console.WriteLine($"Loading cooked probe: {probePath}");
+            var probeSw = System.Diagnostics.Stopwatch.StartNew();
+            var data = BlixProbeReader.Read(probePath);
+            var baked = EnvironmentBaker.UploadCookedProbe(GraphicsDevice, data, "sm");
+            envProbe = baked.Probe;
+            brdfLut = baked.BrdfLut;
             envProfile = new EnvironmentProfile
             {
-                Source = new HdrEnvironmentSource(hdrImage),
-                EnvCubeFaceSize = EnvCubeFaceSize,
+                // Profile is retained for HUD/debug readouts; runtime bake
+                // is never triggered through it once we've loaded a cooked
+                // probe. HDR image bytes aren't re-loaded -- they would only
+                // be needed for a re-bake.
+                Source = new ProceduralEnvironmentSource(sunDirection),
+                EnvCubeFaceSize = data.EnvFaceSize,
+                IrradianceFaceSize = data.IrradianceFaceSize,
+                SpecularPrefilterBaseSize = data.PrefilterBaseSize,
+                SpecularPrefilterMipCount = data.PrefilterMipCount,
             };
+            if (envProbe.SunDirectionFromEquirect is { } hdrSun)
+            {
+                hdrSunDirectionFromEquirect = hdrSun;
+                sunDirection = hdrSun;
+                sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1.0f, 1.0f));
+                sunYaw = MathF.Atan2(sunDirection.Z, sunDirection.X);
+                Console.WriteLine($"  sun aligned to HDR: {sunDirection}");
+            }
+            Console.WriteLine($"  cooked probe loaded in {probeSw.ElapsedMilliseconds} ms");
         }
         else
         {
-            Console.WriteLine("No HDR sky -- falling back to procedural sky.");
-            envProfile = new EnvironmentProfile
+            if (File.Exists(hdrPath))
             {
-                Source = new ProceduralEnvironmentSource(sunDirection),
-                EnvCubeFaceSize = EnvCubeFaceSize,
-            };
+                Console.WriteLine($"Loading HDR sky: {hdrPath}");
+                var hdrImage = ImageLoader.LoadRgba32F(hdrPath);
+                envProfile = new EnvironmentProfile
+                {
+                    Source = new HdrEnvironmentSource(hdrImage),
+                    EnvCubeFaceSize = EnvCubeFaceSize,
+                };
+            }
+            else
+            {
+                Console.WriteLine("No HDR sky -- falling back to procedural sky.");
+                envProfile = new EnvironmentProfile
+                {
+                    Source = new ProceduralEnvironmentSource(sunDirection),
+                    EnvCubeFaceSize = EnvCubeFaceSize,
+                };
+            }
+            var envSw = System.Diagnostics.Stopwatch.StartNew();
+            Console.WriteLine("Baking environment probe...");
+            envProbe = EnvironmentBaker.Bake(GraphicsDevice, envProfile, "sm");
+            if (envProbe.SunDirectionFromEquirect is { } hdrSun)
+            {
+                hdrSunDirectionFromEquirect = hdrSun;
+                sunDirection = hdrSun;
+                sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1.0f, 1.0f));
+                sunYaw = MathF.Atan2(sunDirection.Z, sunDirection.X);
+                Console.WriteLine($"  sun aligned to HDR: {sunDirection}");
+            }
+            Console.WriteLine($"  env probe baked in {envSw.ElapsedMilliseconds} ms");
+            var brdfSw = System.Diagnostics.Stopwatch.StartNew();
+            Console.WriteLine("Baking BRDF LUT...");
+            brdfLut = EnvironmentBaker.BakeBrdfLut(GraphicsDevice, 256, "sm.brdf_lut");
+            Console.WriteLine($"  BRDF LUT baked in {brdfSw.ElapsedMilliseconds} ms");
         }
-        Console.WriteLine("Baking environment probe...");
-        envProbe = EnvironmentBaker.Bake(GraphicsDevice, envProfile, "sm");
-        if (envProbe.SunDirectionFromEquirect is { } hdrSun)
-        {
-            hdrSunDirectionFromEquirect = hdrSun;
-            sunDirection = hdrSun;
-            sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1.0f, 1.0f));
-            sunYaw = MathF.Atan2(sunDirection.Z, sunDirection.X);
-            Console.WriteLine($"  sun aligned to HDR: {sunDirection}");
-        }
-        Console.WriteLine("Baking BRDF LUT...");
-        brdfLut = EnvironmentBaker.BakeBrdfLut(GraphicsDevice, 256, "sm.brdf_lut");
 
         // --- Lit shader + pipelines ------------------------------------
         var litShader = GraphicsDevice.CreateShaderProgram(LoadShader("lit.vert", "lit.frag"));
@@ -202,6 +290,19 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
                 RasterizerState.NoCulling,
                 new[] { BlendState.Disabled, BlendState.Disabled }),
             name: "sm.lit.doublesided");
+        // BLEND materials -- depth tested but no depth write, alpha blended.
+        // No back-to-front sorting yet so order is submission order; a fix
+        // for a future pass if it bites visibly. Material G-buffer attachment
+        // gets alpha-blended too so SSR's roughness gate still kicks in.
+        litAlphaBlendPipeline = GraphicsDevice.CreatePipeline(
+            new PipelineDescription(
+                litShader,
+                VertexPosition3NormalTexture.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualNoWrite,
+                RasterizerState.BackFaceCulling,
+                new[] { BlendState.AlphaBlend, BlendState.AlphaBlend }),
+            name: "sm.lit.alphablend");
 
         // --- Shadow caster pipelines ------------------------------------
         var shadowShader = GraphicsDevice.CreateShaderProgram(LoadShader("shadow.vert", "shadow.frag"));
@@ -273,15 +374,42 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         post.FogMaterial.SetTexture("uShadowMap", cascadeShadowMaps[CascadeCount - 1], 1);
 
         // --- Load Modern Sponza + add-ons via GltfSceneInstance --------
+        uploader = new ResourceUploader(GraphicsDevice);
+
         var defaults = new GltfDefaultTextures(
             WhitePixel: whitePixel,
             FlatNormal: flatNormal,
             NeutralMetallicRoughness: neutralMetallicRoughness,
             FullOcclusion: fullOcclusion);
+        // GenerateMipmaps=false: every material texture loads through the
+        // cooked .blixtex path now, which supplies all mips pre-computed.
+        // glGenerateMipmap would either regenerate over them (wasting work)
+        // or fight the per-level UploadTextureMip path the ResourceUploader
+        // walks for progressive uploads.
         var sampler = new SamplerDescription(
             TextureFilter.Linear, TextureFilter.Linear,
             TextureWrap.Repeat, TextureWrap.Repeat,
-            GenerateMipmaps: true, Compare: false);
+            GenerateMipmaps: false, Compare: false);
+
+        // SponzaModern has no point lights, but lit.frag still declares
+        // uPointShadowMap0..3 as samplerCubeShadow. If those samplers are
+        // left unbound, Apple's GL driver defaults them to texture unit 0
+        // (where uAlbedo lives) -- a sampler-type mismatch
+        // (samplerCubeShadow vs sampler2D) which triggers GL_INVALID_OPERATION
+        // and silently kills every PBR draw. Bind a single 8x8 dummy cube
+        // depth texture (Compare:true so it matches the samplerCubeShadow
+        // type) to all four slots. The shader only reads them when
+        // uPointLightCount > 0, which we never set, so the dummy is never
+        // actually sampled.
+        var dummyCubeShadowSampler = new SamplerDescription(
+            MinFilter: TextureFilter.Linear,
+            MagFilter: TextureFilter.Linear,
+            WrapU: TextureWrap.ClampToEdge,
+            WrapV: TextureWrap.ClampToEdge,
+            GenerateMipmaps: false,
+            Compare: true);
+        var dummyPointShadowCube = GraphicsDevice.CreateTextureCubeDepth(
+            8, dummyCubeShadowSampler, name: "sm.pshadow.dummy");
 
         Action<Material, GltfMaterial?> bindShared = (material, _) =>
         {
@@ -292,70 +420,113 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             material.SetTexture("uDiffuseIrradiance", envProbe.DiffuseIrradiance, 10);
             material.SetTexture("uSpecularPrefilter", envProbe.PrefilteredSpecular, 11);
             material.SetTexture("uBrdfLut", brdfLut, 12);
+            material.SetTexture("uPointShadowMap0", dummyPointShadowCube, 6);
+            material.SetTexture("uPointShadowMap1", dummyPointShadowCube, 7);
+            material.SetTexture("uPointShadowMap2", dummyPointShadowCube, 8);
+            material.SetTexture("uPointShadowMap3", dummyPointShadowCube, 9);
             material.SetUniform("uEnvMapMipCount", new FloatUniform((float)envProbe.EnvCubeMipCount));
         };
 
-        mainScene = LoadPack(mainGltfPath, "main",
-            litOpaquePipeline, litDoubleSidedPipeline, defaults, sampler, bindShared);
+        // Cache shared options so all packs share the same factories.
+        // Each importer + GltfSceneInstance.Build call closes over these.
+        var packOptions = new GltfSceneOptions
+        {
+            Opaque = litOpaquePipeline,
+            OpaqueDoubleSided = litDoubleSidedPipeline,
+            AlphaMask = litOpaquePipeline,
+            AlphaMaskDoubleSided = litDoubleSidedPipeline,
+            AlphaBlend = litAlphaBlendPipeline,
+            AlphaBlendDoubleSided = litAlphaBlendPipeline,
+            Uploader = uploader,
+            Defaults = defaults,
+            Sampler = sampler,
+            OnMaterialBuilt = bindShared,
+        };
 
+        // Kick off each pack's glTF parse + texture decode on a background
+        // thread. The model bytes go through ModelRoot.Load (synchronous file
+        // IO + JSON parse) and then through GltfStaticImporter.Import (which
+        // internally Parallel.ForEaches the PNG decode). Returns a model with
+        // CPU-side meshes + decoded GltfTextures. The GL-side build happens
+        // in OnUpdate when the task completes.
+        SchedulePack("main", mainGltfPath, packOptions, scene => mainScene = scene);
         var curtainsPath = Path.Combine(assetsDir, "curtains", "NewSponza_Curtains_glTF.gltf");
         if (File.Exists(curtainsPath))
-        {
-            curtainsScene = LoadPack(curtainsPath, "curtains",
-                litOpaquePipeline, litDoubleSidedPipeline, defaults, sampler, bindShared);
-        }
+            SchedulePack("curtains", curtainsPath, packOptions, scene => curtainsScene = scene);
         var ivyPath = Path.Combine(assetsDir, "ivy", "NewSponza_IvyGrowth_glTF.gltf");
         if (File.Exists(ivyPath))
-        {
-            ivyScene = LoadPack(ivyPath, "ivy",
-                litOpaquePipeline, litDoubleSidedPipeline, defaults, sampler, bindShared);
-        }
+            SchedulePack("ivy", ivyPath, packOptions, scene => ivyScene = scene);
         var treesPath = Path.Combine(assetsDir, "trees", "NewSponza_CypressTree_glTF.gltf");
         if (File.Exists(treesPath))
-        {
-            treesScene = LoadPack(treesPath, "trees",
-                litOpaquePipeline, litDoubleSidedPipeline, defaults, sampler, bindShared);
-        }
+            SchedulePack("trees", treesPath, packOptions, scene => treesScene = scene);
 
         // --- Camera ---------------------------------------------------
+        // No scene bounds yet (packs are still loading). Spawn at a placeholder
+        // position; once the main pack arrives we re-seat to its centroid.
         camera = new Camera3D
         {
-            Transform = new Transform3D { Position = new Vector3(-8.0f, 2.0f, 0.0f) },
+            Transform = new Transform3D { Position = new Vector3(0, 1.7f, 0) },
             VerticalFieldOfView = cameraFov,
             NearPlane = 0.1f,
-            FarPlane = 200.0f,
+            FarPlane = 500.0f,
         };
         (Host as IRenderHost)?.SetCursorCaptured(true);
     }
 
-    private GltfSceneInstance LoadPack(
-        string gltfPath, string name,
-        PipelineHandle opaque, PipelineHandle doubleSided,
-        GltfDefaultTextures defaults, SamplerDescription sampler,
-        Action<Material, GltfMaterial?> bindShared)
+    // Schedules a pack's glTF parse + decode on the thread pool and queues
+    // a build-on-main-thread step to run once the import completes. The
+    // import is the heavy CPU work (parse + parallel PNG decode); the build
+    // is GL work (VB/IB uploads + texture-enqueue via ResourceUploader).
+    private void SchedulePack(
+        string name,
+        string gltfPath,
+        GltfSceneOptions sharedOptions,
+        Action<GltfSceneInstance> assignToField)
     {
-        Console.WriteLine($"Loading pack '{name}': {gltfPath}");
+        Console.WriteLine($"Scheduling pack '{name}': {gltfPath}");
         var importer = new GltfStaticImporter();
-        var model = importer.Import(new AssetImportContext(AssetId.Parse($"models/{name}"), gltfPath));
-        // AlphaMask reuses the opaque pipeline -- the lit shader's existing
-        // `discard(a < 0.5)` covers the common case. AlphaMask + DoubleSided
-        // pairs the no-cull pipeline with the same discard. We don't declare
-        // an AlphaBlend pipeline yet; BLEND materials fall back to Opaque
-        // with a warning (acceptable for Sponza Modern + addons -- nothing
-        // in the source uses BLEND).
-        var sceneInstance = GltfSceneInstance.Build(GraphicsDevice, model, new GltfSceneOptions
+        var task = Task.Run(() =>
         {
-            Opaque = opaque,
-            OpaqueDoubleSided = doubleSided,
-            AlphaMask = opaque,
-            AlphaMaskDoubleSided = doubleSided,
-            Defaults = defaults,
-            Sampler = sampler,
-            Prefix = name,
-            OnMaterialBuilt = bindShared,
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var model = importer.Import(new AssetImportContext(AssetId.Parse($"models/{name}"), gltfPath));
+            Console.WriteLine($"  '{name}' imported in {sw.ElapsedMilliseconds} ms");
+            return model;
         });
-        Console.WriteLine($"  {sceneInstance.Submeshes.Count} submeshes, {sceneInstance.Materials.All.Count} unique materials.");
-        return sceneInstance;
+        var perPackOptions = sharedOptions with { Prefix = name };
+        pendingPacks.Add(new PendingPack(name, task, BuildAndAssign: () =>
+        {
+            var built = GltfSceneInstance.Build(GraphicsDevice, task.Result, perPackOptions);
+            assignToField(built);
+            Console.WriteLine($"  '{name}' built: {built.Submeshes.Count} submeshes, {built.Materials.All.Count} materials");
+        }));
+    }
+
+    // Drains completed packs into the demo's scene fields. Called once per
+    // frame from OnUpdate; runs on the GL thread.
+    private void PromoteCompletedPacks()
+    {
+        for (var i = pendingPacks.Count - 1; i >= 0; i--)
+        {
+            var pack = pendingPacks[i];
+            if (!pack.Import.IsCompleted) continue;
+            pendingPacks.RemoveAt(i);
+            if (pack.Import.IsFaulted)
+            {
+                Console.WriteLine($"  pack '{pack.Name}' failed: {pack.Import.Exception?.GetBaseException().Message}");
+                continue;
+            }
+            pack.BuildAndAssign();
+        }
+
+        if (!cameraReseatedToMain && mainScene is not null)
+        {
+            // Now that main has bounds, drop the camera into the atrium.
+            var b = mainScene.Bounds;
+            var centre = (b.Min + b.Max) * 0.5f;
+            camera.Transform.Position = new Vector3(centre.X, b.Min.Y + 1.7f, centre.Z);
+            cameraReseatedToMain = true;
+            Console.WriteLine($"Camera re-seated to main bounds centre: {camera.Transform.Position}");
+        }
     }
 
     private static ShaderSources LoadShader(string vertName, string fragName)
@@ -374,15 +545,22 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
 
     public override void OnUpdate(Time time)
     {
+        // Drain any packs that finished their background import. Runs the
+        // GL-side GltfSceneInstance.Build on the main thread.
+        PromoteCompletedPacks();
+
         sunDirection = SunDirectionFromYawPitch(sunYaw, sunPitch);
 
+        // WASD on the horizontal plane. Identity rotation looks down -Z;
+        // forwardHoriz at yaw=0 is +Z so W subtracts (moves -Z = camera-forward).
+        // Mirrors the Walkthrough demo's convention.
         var forwardHoriz = new Vector3(MathF.Sin(yaw), 0, MathF.Cos(yaw));
         var rightHoriz = new Vector3(MathF.Cos(yaw), 0, -MathF.Sin(yaw));
         var move = Vector3.Zero;
-        if (keys[(int)Key.W]) move += forwardHoriz;
-        if (keys[(int)Key.S]) move -= forwardHoriz;
-        if (keys[(int)Key.D]) move += rightHoriz;
+        if (keys[(int)Key.W]) move -= forwardHoriz;
+        if (keys[(int)Key.S]) move += forwardHoriz;
         if (keys[(int)Key.A]) move -= rightHoriz;
+        if (keys[(int)Key.D]) move += rightHoriz;
         if (keys[(int)Key.Space]) move += Vector3.UnitY;
         if (keys[(int)Key.LeftControl]) move -= Vector3.UnitY;
         if (move.LengthSquared() > 1e-6f)
@@ -392,11 +570,11 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             camera.Transform.Position += move * speed * (float)time.Delta;
         }
 
-        var fwd = Vector3.Normalize(new Vector3(
-            MathF.Sin(yaw) * MathF.Cos(pitch),
-            MathF.Sin(pitch),
-            MathF.Cos(yaw) * MathF.Cos(pitch)));
-        camera.Transform.Rotation = Quaternion.CreateFromYawPitchRoll(yaw, pitch, 0.0f);
+        // Compose rotation as yaw-about-world-Y then pitch-about-local-X,
+        // matching the Walkthrough's known-good ordering.
+        var pitchQ = Quaternion.CreateFromAxisAngle(Vector3.UnitX, pitch);
+        var yawQ = Quaternion.CreateFromAxisAngle(Vector3.UnitY, yaw);
+        camera.Transform.Rotation = yawQ * pitchQ;
 
         var dt = (float)time.Delta;
         var instantaneousFps = dt > 1e-5f ? 1.0f / dt : 60.0f;
@@ -405,7 +583,18 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
 
     public override void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
-        if (mainScene is null) return;
+        // mainScene may be null for the first ~1-15 seconds while the pack
+        // import runs in the background. Continue rendering anyway -- the
+        // sky still paints, the scene pass renders nothing into the HDR
+        // colour, and the user gets a sky-only view rather than a black
+        // hang. AllScenes() returns an empty enumerable until packs land.
+
+        // Drain pending texture uploads. Costs at most UploadBudgetMillis of
+        // GL time per frame; the queue typically clears within ~1 second of
+        // scene load. Always runs FIRST so the lit pass sees the latest
+        // texture bindings.
+        uploader.Drain(UploadBudgetMillis);
+
         camera.VerticalFieldOfView = cameraFov;
         var aspect = (float)frame.Width / Math.Max(frame.Height, 1);
         var view = camera.GetView();
@@ -451,6 +640,31 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         // --- Lit shader shared uniforms via PbrSceneRenderer ----------
         var splitFloats = new float[CascadeCount + 1];
         Array.Copy(cascadeSplits, splitFloats, CascadeCount + 1);
+        // Lit shader's demo-tuning uniforms. The shader multiplies IBL
+        // diffuse + specular by these so leaving them unset (= 0) zeros
+        // out indirect lighting -- only direct sun contributes -- and
+        // sun strength alone clips to white in ACES tonemap. Defaults
+        // copied from Walkthrough's known-good values.
+        var demoTuning = new ShaderUniform[]
+        {
+            // Walkthrough's EmissiveBoost (2.5) is tuned for the brazier
+            // flames; Modern Sponza has no large emissive surfaces so a
+            // 1.0 baseline reads correctly. Tunable from the debug panel.
+            new("uEmissiveBoost", new FloatUniform(1.0f)),
+            new("uIblSpecAttenuation", new FloatUniform(0.8f)),
+            new("uIblDiffuseBoost", new FloatUniform(1.0f)),
+            new("uMetalFloor", new FloatUniform(0.18f)),
+            new("uIndirectShadowBase", new FloatUniform(0.60f)),
+            new("uIndirectShadowRange", new FloatUniform(0.40f)),
+            new("uHorizonFadeStrength", new FloatUniform(0.85f)),
+            new("uHorizonFadeStart", new FloatUniform(0.15f)),
+            new("uSkyTint", new Vector3Uniform(Vector3.One)),
+            new("uPointLightSpecScale", new FloatUniform(0.35f)),
+            new("uPointShadowFarPlane", new FloatUniform(12.0f)),
+            new("uPointShadowBias", new FloatUniform(0.005f)),
+            new("uPointShadowFilterRadius", new FloatUniform(0.08f)),
+            new("uDebugView", new FloatUniform(debugView)),
+        };
         var frameContext = new PbrFrameContext
         {
             View = view,
@@ -461,6 +675,7 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             Environment = envProbe,
             Cascades = new CascadeShadowState(cascadeLightVPs, splitFloats, false),
             Exposure = exposure,
+            ExtraUniforms = demoTuning,
         };
         var sharedUniforms = pbrRenderer.PackSceneUniforms(frameContext);
 
@@ -695,14 +910,20 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
 
     public void OnMouseDown(MouseButton button) { }
     public void OnMouseUp(MouseButton button) { }
-    public void OnMouseMove(Vector2 position, Vector2 delta)
+    // IMPORTANT: signature must match IInputHandler exactly -- the interface
+    // declares OnMouseMove(float, float, float, float) with a default no-op
+    // body, so a mismatching method (e.g. one taking Vector2 position +
+    // Vector2 delta) silently does NOT override the interface and the
+    // default no-op runs instead. Symptom: WASD works (keyboard signature
+    // matches) but mouse-look does nothing.
+    public void OnMouseMove(float x, float y, float deltaX, float deltaY)
     {
         if (!mouseCaptured) return;
         const float sensitivity = 0.002f;
-        yaw -= delta.X * sensitivity;
-        pitch = Math.Clamp(pitch - delta.Y * sensitivity, -PitchClamp, PitchClamp);
+        yaw -= deltaX * sensitivity;
+        pitch = Math.Clamp(pitch - deltaY * sensitivity, -PitchClamp, PitchClamp);
     }
-    public void OnMouseWheel(float delta) { }
+    public void OnMouseWheel(float offsetX, float offsetY) { }
 
     // --- IDebuggable ------------------------------------------------
 
@@ -720,6 +941,9 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             debug.Values.Value("Submeshes (curtains)", curtainsScene?.Submeshes.Count ?? 0);
             debug.Values.Value("Submeshes (ivy)", ivyScene?.Submeshes.Count ?? 0);
             debug.Values.Value("Submeshes (trees)", treesScene?.Submeshes.Count ?? 0);
+            debug.Values.Value("Uploads pending", uploader.PendingCount);
+            debug.Values.Value("Uploads done", uploader.UploadedCount);
+            debug.Values.Value("Drain ms", $"{uploader.LastDrainMillis:0.00}");
         }
 
         using (debug.Scope("Sun"))
@@ -739,7 +963,7 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
 
         using (debug.Scope("Tonemap"))
         {
-            exposure = debug.Controls.Float("Exposure", exposure, 0.1f, 4.0f);
+            exposure = debug.Controls.Float("Exposure", exposure, 0.001f, 4.0f);
             bloomEnabled = debug.Controls.Toggle("Bloom", bloomEnabled);
             bloomStrength = debug.Controls.Float("Bloom strength", bloomStrength, 0.0f, 1.0f);
             tonemapMode = (int)debug.Controls.Float("Operator (0=ACES, 1=AgX, 2=Reinhard, 3=Neutral)",
@@ -765,6 +989,11 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             ssrSteps = debug.Controls.Float("Steps", ssrSteps, 4.0f, 64.0f);
             ssrThickness = debug.Controls.Float("Hit thickness (NDC.z)", ssrThickness, 0.0005f, 0.05f);
             ssrRoughnessCutoff = debug.Controls.Float("Roughness cutoff", ssrRoughnessCutoff, 0.0f, 1.0f);
+        }
+
+        using (debug.Scope("Debug"))
+        {
+            debugView = debug.Controls.Enum("View", debugView, DebugViewNames);
         }
     }
 }
