@@ -10,7 +10,8 @@ This doc orients you. For detail:
 ## Project graph
 
 ```
-Blix.Demos.Walkthrough         ← Sponza HDR walkthrough (flagship demo)
+Blix.Demos.Walkthrough         ← classic Sponza HDR walkthrough (flagship demo)
+Blix.Demos.SponzaModern        ← Khronos Intel Sponza + add-ons (PBR-MR scene)
 Blix.Demos.ShaderLab           ← shader-feature acceptance demo
         ↑
 Blix.Runtime.OpenTK            ← the current window/runtime adapter

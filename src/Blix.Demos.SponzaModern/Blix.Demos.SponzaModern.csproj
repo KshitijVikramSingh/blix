@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
+    <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
+    <ProjectReference Include="..\Blix.Runtime.OpenTK\Blix.Runtime.OpenTK.csproj" />
+    <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
+    <ProjectReference Include="..\Blix.Graphics.Images\Blix.Graphics.Images.csproj" />
+    <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
+    <ProjectReference Include="..\Blix.Audio\Blix.Audio.csproj" />
+    <ProjectReference Include="..\Blix.Assets\Blix.Assets.csproj" />
+    <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />
+    <ProjectReference Include="..\Blix\Blix.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Assets/ holds Sponza Modern's main glTF + add-on packs (curtains,
+         ivy, trees). Multi-GB of textures so they're gitignored; populate
+         locally via tools/setup-sponza-modern.sh. -->
+    <None Include="Assets/**/*"
+          Exclude="Assets/.gitignore;Assets/.gitkeep"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Shaders/**/*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Engine-level shader library, same as the Walkthrough demo. -->
+    <None Include="..\Blix.Shaders\**\*.glsl"
+          Link="Shaders\lib\%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <UseAppHost>false</UseAppHost>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

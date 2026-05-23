@@ -1,0 +1,6 @@
+# Sponza Modern assets are multi-GB; not committed. Populate locally via
+# tools/setup-sponza-modern.sh (or copy the glTF + textures by hand from
+# the Khronos Sponza repo packs).
+*
+!.gitignore
+!.gitkeep

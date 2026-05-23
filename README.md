@@ -15,7 +15,7 @@ No editor, no scripting, no plugin system, no asset cache, no hot reload. No shi
 
 ## Demos
 
-Two demos ship in `src/`. Each one is an entry point, both run against the same engine.
+Three demos ship in `src/`. Each one is an entry point, all run against the same engine.
 
 ### Sponza Walkthrough (flagship)
 
@@ -40,6 +40,19 @@ Lower-key acceptance demo exercising the rest of the engine: multi-light PCSS sh
 - `WASD` — move. Mouse-drag rotates the directional light.
 - `Cmd+C` / `Ctrl+C` — toggle dev mode (cursor capture + ImGui overlay flip together).
 - `R` — reset; `Esc` — quit. Left-click in dev mode picks a world object.
+
+### Sponza Modern
+
+```sh
+# First time: populate the Assets/ dir from your local Khronos Sponza download.
+tools/setup-sponza-modern.sh
+
+dotnet run --project src/Blix.Demos.SponzaModern/Blix.Demos.SponzaModern.csproj
+```
+
+The Khronos Intel Sponza PBR-MR scene plus the optional curtains / ivy / trees add-on packs. Validates the engine subsystems that grew out of the original Walkthrough — `GltfSceneInstance` for the per-pack import, `EnvironmentProbe` for HDR sky + IBL bake, `PbrSceneRenderer` for the lit + cascade-shadow draws, `PostProcessStack` for fog + SSR + bloom + composite — on a scene with foliage, double-sided geometry, and alpha-test cutouts the classic Sponza didn't exercise.
+
+Source assets are multi-GB and not committed; the setup script copies just the runtime-needed `.gltf` + `.bin` + textures from your `~/Downloads`. Source: <https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/IntelSponza>.
 
 ## Build
 
