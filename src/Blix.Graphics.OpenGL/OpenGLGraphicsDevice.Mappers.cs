@@ -116,19 +116,20 @@ public sealed partial class OpenGLGraphicsDevice
         return format switch
         {
             TextureFormat.Rgba8 => PixelInternalFormat.Rgba8,
+            // GL_SRGB8_ALPHA8: data bytes are sRGB-encoded; the GPU converts
+            // each fetched texel to linear BEFORE filtering, so bilinear /
+            // trilinear / mip blends average in linear space (physically
+            // correct). Callers must NOT pow(2.2) the sampler output --
+            // it's already linear.
+            TextureFormat.Rgba8Srgb => PixelInternalFormat.Srgb8Alpha8,
             TextureFormat.Depth24 => PixelInternalFormat.DepthComponent24,
             TextureFormat.Rgba16F => PixelInternalFormat.Rgba16f,
             TextureFormat.R8 => PixelInternalFormat.R8,
-            // BPTC family. NOTE: both Bc7Srgb and Bc7Unorm currently map to
-            // the NON-sRGB internal format (GL_COMPRESSED_RGBA_BPTC_UNORM).
-            // Reason: the lit shader still does pow(c, 2.2) on base colour
-            // for the source-PNG (Rgba8) code path, and using GL's sRGB
-            // sampler decode here would cause double-decode (washed-out
-            // textures). The Srgb variant is a label for the cook side
-            // ("this data came from sRGB-encoded PNG") -- when the shader
-            // pipeline gets a proper sRGB sampler-side path, switch this
-            // to CompressedSrgbAlphaBptcUnorm and drop the shader pow.
-            TextureFormat.Bc7Srgb => (PixelInternalFormat)All.CompressedRgbaBptcUnorm,
+            // BPTC sRGB variant uses the sRGB-decoding compressed format so
+            // filtering happens in linear space (same rationale as
+            // Rgba8Srgb). Bc7Unorm stays non-sRGB for LINEAR data (normals,
+            // metallic-roughness, AO).
+            TextureFormat.Bc7Srgb => (PixelInternalFormat)All.CompressedSrgbAlphaBptcUnorm,
             TextureFormat.Bc7Unorm => (PixelInternalFormat)All.CompressedRgbaBptcUnorm,
             TextureFormat.Bc5Unorm => (PixelInternalFormat)All.CompressedRgRgtc2,
             TextureFormat.Bc6hUf16 => (PixelInternalFormat)All.CompressedRgbBptcUnsignedFloat,
@@ -141,6 +142,7 @@ public sealed partial class OpenGLGraphicsDevice
         return format switch
         {
             TextureFormat.Rgba8 => PixelFormat.Rgba,
+            TextureFormat.Rgba8Srgb => PixelFormat.Rgba,
             TextureFormat.Depth24 => PixelFormat.DepthComponent,
             TextureFormat.Rgba16F => PixelFormat.Rgba,
             TextureFormat.R8 => PixelFormat.Red,
@@ -162,6 +164,7 @@ public sealed partial class OpenGLGraphicsDevice
         return format switch
         {
             TextureFormat.Rgba8 => PixelType.UnsignedByte,
+            TextureFormat.Rgba8Srgb => PixelType.UnsignedByte,
             TextureFormat.Depth24 => PixelType.UnsignedInt,
             TextureFormat.Rgba16F => PixelType.HalfFloat,
             TextureFormat.R8 => PixelType.UnsignedByte,

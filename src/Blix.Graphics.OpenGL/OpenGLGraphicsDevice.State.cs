@@ -5,6 +5,13 @@ namespace Blix.Graphics.OpenGL;
 
 public sealed partial class OpenGLGraphicsDevice
 {
+    // Debug-only global override: when set, every ApplyRasterizerState call
+    // forces CullMode.None regardless of the pipeline's authored setting.
+    // Lets a demo flip back-face culling off live (without rebuilding the
+    // pipeline graph each frame) to A/B test whether missing geometry is
+    // genuinely culled or caused by something else.
+    public static bool DebugForceDisableCullFace { get; set; } = false;
+
     private void ApplyPipelineState(PipelineResource pipeline)
     {
         ApplyDepthState(pipeline.Depth);
@@ -31,7 +38,7 @@ public sealed partial class OpenGLGraphicsDevice
     {
         GL.FrontFace(MapFrontFace(state.FrontFace));
 
-        if (state.CullMode == CullMode.None)
+        if (state.CullMode == CullMode.None || DebugForceDisableCullFace)
         {
             GL.Disable(EnableCap.CullFace);
             return;
@@ -73,12 +80,10 @@ public sealed partial class OpenGLGraphicsDevice
         foreach (var uniform in uniforms)
         {
             var location = program.GetUniformLocation(uniform.Name);
-
             if (location < 0)
             {
                 continue;
             }
-
             ApplyUniform(location, uniform.Value);
         }
     }

@@ -17,6 +17,13 @@ public enum TextureFormat
     // Single-channel 8-bit unsigned, GL_R8. Used by volumetric textures storing a
     // density scalar per voxel; sampled in GLSL as the .r component of a vec4.
     R8,
+    // Same byte layout as Rgba8 but uploaded with GL_SRGB8_ALPHA8 internal format
+    // so the GPU does sRGB->linear conversion at sample time. This makes bilinear/
+    // trilinear filtering and mip pyramid sampling operate in linear space (the
+    // physically correct behaviour); without it, filtering averages gamma-encoded
+    // bytes and produces too-dark results, especially at mip transitions on high-
+    // contrast textures. Use for glTF BaseColor + Emissive sources (sRGB per spec).
+    Rgba8Srgb,
     // BC7 (BPTC) compressed RGBA, sRGB-encoded. The workhorse compressed colour
     // format -- 8 bits per pixel (4x compression vs Rgba8), high quality.
     // Pixel data is uploaded via glCompressedTexImage2D as 16-byte blocks per
@@ -54,6 +61,7 @@ public static class TextureFormatExtensions
     public static int MipByteCount(this TextureFormat format, int width, int height) => format switch
     {
         TextureFormat.Rgba8 => width * height * 4,
+        TextureFormat.Rgba8Srgb => width * height * 4,
         TextureFormat.Rgba16F => width * height * 8,
         TextureFormat.R8 => width * height,
         // BC7 / BC5 / BC6h are all 16 bytes per 4x4 block.

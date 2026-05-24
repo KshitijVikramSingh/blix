@@ -1180,6 +1180,7 @@ public sealed partial class OpenGLGraphicsDevice
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)MapMagFilter(sampler.MagFilter));
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)MapTextureWrap(sampler.WrapU));
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)MapTextureWrap(sampler.WrapV));
+        ApplyAnisotropy(TextureTarget.Texture2D, sampler);
         GL.TexParameter(
             TextureTarget.Texture2D,
             TextureParameterName.TextureCompareMode,
@@ -1193,12 +1194,26 @@ public sealed partial class OpenGLGraphicsDevice
         }
     }
 
+    // GL_TEXTURE_MAX_ANISOTROPY_EXT lives in EXT_texture_filter_anisotropic.
+    // Apple GL exposes it (max usually 16x). Aniso preserves detail at
+    // grazing angles where regular trilinear samples only a 2x2 bilinear
+    // footprint across an elongated screen-space pixel -> washes out
+    // high-frequency texture detail even with mip 0 selected. Only
+    // meaningful when mipmaps are enabled.
+    private const int TextureMaxAnisotropyExt = 0x84FE;
+    private static void ApplyAnisotropy(TextureTarget target, SamplerDescription sampler)
+    {
+        if (!sampler.GenerateMipmaps) return;
+        GL.TexParameter(target, (TextureParameterName)TextureMaxAnisotropyExt, 16.0f);
+    }
+
     private static void ApplySampler(SamplerDescription sampler)
     {
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)MapMinFilter(sampler.MinFilter, sampler.GenerateMipmaps));
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)MapMagFilter(sampler.MagFilter));
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)MapTextureWrap(sampler.WrapU));
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)MapTextureWrap(sampler.WrapV));
+        ApplyAnisotropy(TextureTarget.Texture2D, sampler);
 
         // Hardware depth-compare for sampler2DShadow lookups. With LEQUAL, the comparison
         // returns 1 when the reference depth is <= the stored depth (fragment is closer

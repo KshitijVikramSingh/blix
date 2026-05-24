@@ -9,6 +9,18 @@ public sealed partial class OpenGLGraphicsDevice
     {
         ThrowIfDisposed();
 
+        // Reset per-frame error tracking so the HUD's "this frame" count is
+        // accurate for the command list we're about to submit. The async
+        // debug callback may also bump frameErrorCount during execution.
+        frameErrorCount = 0;
+        lastErrorContext = string.Empty;
+        lastErrorMessage = string.Empty;
+
+        // Drain any errors left over from setup-phase calls (resource creation
+        // outside Execute). Attribute them to "<pre-frame>" so they aren't
+        // pinned to the first pass and confuse diagnosis.
+        DrainErrors("<pre-frame>");
+
         var passPackets = new List<FrameDebugPass>(commandList.Passes.Count);
         var totalDraws = 0;
 
@@ -27,24 +39,81 @@ public sealed partial class OpenGLGraphicsDevice
 
     private FrameDebugPass ExecutePass(RenderPass pass)
     {
-        var (width, height) = BindRenderSurface(pass.Description.Target);
-        ApplyPassDescription(pass.Description, currentColorAttachmentCount);
-
-        var draws = new List<FrameDebugDraw>(pass.Commands.Count);
-
-        foreach (var command in pass.Commands)
+        // glPushDebugGroup nests the pass label into any KHR_debug-aware
+        // capture tool (Xcode GPU capture, RenderDoc, apitrace). Any messages
+        // the driver emits during this pass — and our own glGetError pump
+        // results — get tagged with the group, which makes "where did this
+        // INVALID_OPERATION come from?" a one-glance answer in the trace.
+        PushDebugGroup(pass.Name);
+        try
         {
-            draws.Add(ExecuteCommand(command));
+            var (width, height) = BindRenderSurface(pass.Description.Target);
+            ApplyPassDescription(pass.Description, currentColorAttachmentCount);
+
+            var draws = new List<FrameDebugDraw>(pass.Commands.Count);
+
+            foreach (var command in pass.Commands)
+            {
+                draws.Add(ExecuteCommand(command));
+            }
+
+            return new FrameDebugPass(
+                pass.Name,
+                pass.Description.Target,
+                width,
+                height,
+                ClearedColor: AnyColorClear(pass.Description.ClearColors),
+                ClearedDepth: pass.Description.ClearDepth,
+                Draws: draws);
+        }
+        finally
+        {
+            // Drain inside the debug group so messages still attribute to the
+            // pass label in external viewers. Pop happens after the drain so
+            // the group fully contains the diagnostic traffic.
+            DrainErrors(pass.Name);
+            PopDebugGroup();
+        }
+    }
+
+    // Per-pass glGetError pump. Routes through GLDiagnostics which knows the
+    // policy (Off / WarnOnly / ThrowOnFirst); we feed it a callback that
+    // updates the device's per-frame counter so the HUD line stays accurate.
+    private void DrainErrors(string passLabel)
+    {
+        if (Diagnostics == DiagnosticsMode.Off)
+        {
+            return;
         }
 
-        return new FrameDebugPass(
-            pass.Name,
-            pass.Description.Target,
-            width,
-            height,
-            ClearedColor: AnyColorClear(pass.Description.ClearColors),
-            ClearedDepth: pass.Description.ClearDepth,
-            Draws: draws);
+        GLDiagnostics.Drain(Diagnostics, $"pass '{passLabel}'", message =>
+        {
+            RecordError(passLabel, message);
+        });
+    }
+
+    // glPushDebugGroup comes from KHR_debug only. ARB_debug_output is older
+    // and never defined a group-marker entry point — Apple GL 4.1 doesn't get
+    // pass groups in external capture tools. (The glGetError pump and async
+    // callback still attribute to the pass label via RecordError, which is
+    // what matters for surfacing silent failures.)
+    private void PushDebugGroup(string label)
+    {
+        if (khrDebugSupported)
+        {
+            // 0 is fine as the message id — the pass label is the useful axis.
+            // Use length so OpenTK doesn't have to walk a null terminator
+            // through a marshalled string.
+            GL.PushDebugGroup(DebugSourceExternal.DebugSourceApplication, 0, label.Length, label);
+        }
+    }
+
+    private void PopDebugGroup()
+    {
+        if (khrDebugSupported)
+        {
+            GL.PopDebugGroup();
+        }
     }
 
     private static bool AnyColorClear(IReadOnlyList<GraphicsColor?> colors)

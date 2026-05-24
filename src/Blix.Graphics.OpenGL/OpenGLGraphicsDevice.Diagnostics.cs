@@ -61,6 +61,20 @@ public sealed partial class OpenGLGraphicsDevice
         var label = FormatShaderLabel(source);
         var numberedSource = BuildLineNumberedSource(source.Source);
 
+        // Dump the expanded source to a temp file so it can be inspected
+        // outside the console (which may truncate or wrap). The file name
+        // includes the stage + clean-name to disambiguate when multiple
+        // shaders fail in the same session.
+        try
+        {
+            var safeName = (source.Name ?? source.Stage.ToString())
+                .Replace('/', '_').Replace('\\', '_').Replace('.', '_');
+            var dumpPath = Path.Combine(Path.GetTempPath(), $"blix-shader-{source.Stage}-{safeName}.glsl");
+            File.WriteAllText(dumpPath, source.Source);
+            Console.Error.WriteLine($"[shader-dump] {label} expanded source -> {dumpPath}");
+        }
+        catch { /* dump is best-effort */ }
+
         var builder = new StringBuilder();
         builder.Append(label);
         builder.AppendLine(" compilation failed:");

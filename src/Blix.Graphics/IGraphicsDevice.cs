@@ -1,8 +1,19 @@
 namespace Blix.Graphics;
 
+// Snapshot of device-level diagnostic counters surfaced to UI / overlays /
+// CI. Frame-scoped values (FrameErrorCount, LastError*) reset at the start
+// of each Execute() so a HUD line that reads "GL errors: 3" reflects the
+// frame currently on screen — not the all-time total.
+public readonly record struct GraphicsDeviceDiagnostics(
+    int FrameErrorCount,
+    string LastErrorContext,
+    string LastErrorMessage);
+
 public interface IGraphicsDevice : IDisposable
 {
     GraphicsDeviceInfo Info { get; }
+
+    GraphicsDeviceDiagnostics DiagnosticsSnapshot { get; }
 
     void SetDefaultRenderSurfaceSize(int width, int height);
 
