@@ -1,4 +1,5 @@
 using System.Numerics;
+using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Render;
 
@@ -100,44 +101,91 @@ public sealed class PbrSceneRenderer
     // shared uniforms. Must be called inside an open RenderPassBuilder
     // whose target is the HDR scene surface (or compatible). No clear
     // happens here -- the demo's RenderPassDescription configures that.
-    public void DrawScene(
+    // When `cullFrustum` is non-null, submeshes whose WorldBounds is fully
+    // outside that frustum are skipped. The frustum is typically built
+    // from the camera's view-projection for the main pass; pass null to
+    // disable culling (e.g. when a demo wants to keep today's
+    // draw-everything behaviour). Returns the number of submeshes that
+    // actually got submitted (useful for perf diagnostics).
+    public int DrawScene(
         RenderPassBuilder pass,
         GltfSceneInstance scene,
-        IReadOnlyList<ShaderUniform> sharedUniforms)
+        IReadOnlyList<ShaderUniform> sharedUniforms,
+        Frustum? cullFrustum = null,
+        float cullMargin = 0.0f)
     {
         ArgumentNullException.ThrowIfNull(pass);
         ArgumentNullException.ThrowIfNull(scene);
         ArgumentNullException.ThrowIfNull(sharedUniforms);
 
         var uniformArray = sharedUniforms as ShaderUniform[] ?? sharedUniforms.ToArray();
+        int drawn = 0;
         foreach (var sub in scene.Submeshes)
         {
+            if (cullFrustum is { } f && !f.Intersects(sub.WorldBounds, cullMargin)) continue;
             pass.DrawMesh(sub.Mesh, sub.Material,
                 perDrawUniforms: uniformArray, perDrawTextures: null);
+            drawn++;
         }
+        return drawn;
     }
 
     // Draws every submesh as a shadow caster into the cascade's depth
     // surface. Caller has already opened the pass with the cascade's
     // depth-only RenderPassDescription.
-    public void DrawCascadeShadow(
+    // Optional `cullFrustum` is the cascade's orthographic light frustum
+    // -- callers should typically build it from cascadeLightVP itself to
+    // skip submeshes outside the slice. This is the heaviest culling win
+    // since each cascade only sees a slab of the scene. Returns the
+    // number of submeshes submitted.
+    public int DrawCascadeShadow(
         RenderPassBuilder pass,
         GltfSceneInstance scene,
-        Matrix4x4 cascadeLightVP)
+        Matrix4x4 cascadeLightVP,
+        Frustum? cullFrustum = null,
+        float cullMargin = 0.0f)
     {
         ArgumentNullException.ThrowIfNull(pass);
         ArgumentNullException.ThrowIfNull(scene);
 
-        var uniforms = new ShaderUniform[]
-        {
-            new("uLightViewProjection", new Matrix4x4Uniform(cascadeLightVP)),
-            new("uModel", new Matrix4x4Uniform(Matrix4x4.Identity)),
-        };
+        int drawn = 0;
         foreach (var sub in scene.Submeshes)
         {
+            if (cullFrustum is { } f && !f.Intersects(sub.WorldBounds, cullMargin)) continue;
+            // Per-submesh uniforms: light VP + alpha-cutout state. Cutoff
+            // is 0 for OPAQUE/BLEND so the shadow.frag discard is a no-op;
+            // MASK foliage gets its alpha threshold so leaves cast leaf-
+            // shape shadows instead of solid rectangles.
+            var cutoff = sub.AlphaMode == Blix.GltfAlphaMode.Mask
+                ? (sub.Source?.AlphaCutoff ?? 0.5f)
+                : 0.0f;
+            var baseFactor = sub.Source?.BaseColorFactor ?? new System.Numerics.Vector4(1.0f);
+            var perDrawUniforms = new ShaderUniform[]
+            {
+                new("uLightViewProjection", new Matrix4x4Uniform(cascadeLightVP)),
+                new("uModel", new Matrix4x4Uniform(Matrix4x4.Identity)),
+                new("uAlphaCutoff", new FloatUniform(cutoff)),
+                new("uBaseColorFactor", new Vector4Uniform(baseFactor)),
+            };
+            var albedoBinding = FindAlbedoBinding(sub.Material);
+            var perDrawTextures = albedoBinding is { } ab ? new[] { ab } : null;
             pass.DrawMesh(sub.Mesh, shadowMaterial,
-                perDrawUniforms: uniforms, perDrawTextures: null);
+                perDrawUniforms: perDrawUniforms, perDrawTextures: perDrawTextures);
+            drawn++;
         }
+        return drawn;
+    }
+
+    // Pull the lit material's uAlbedo binding out so the shadow + cube_shadow
+    // shaders can do alpha-cutout discard on foliage / fabric. Returns null
+    // when the material has no albedo texture (rare; light-bulb / glass).
+    private static ShaderTextureBinding? FindAlbedoBinding(Material material)
+    {
+        for (var i = 0; i < material.Textures.Count; i++)
+        {
+            if (material.Textures[i].Name == "uAlbedo") return material.Textures[i];
+        }
+        return null;
     }
 
     // Draws every submesh as a cube-shadow caster for one cube face. Caller
@@ -152,17 +200,25 @@ public sealed class PbrSceneRenderer
         ArgumentNullException.ThrowIfNull(pass);
         ArgumentNullException.ThrowIfNull(scene);
 
-        var uniforms = new ShaderUniform[]
-        {
-            new("uLightViewProjection", new Matrix4x4Uniform(cubeFaceVP)),
-            new("uModel", new Matrix4x4Uniform(Matrix4x4.Identity)),
-            new("uPointLightPosition", new Vector3Uniform(lightPosition)),
-            new("uPointLightFarPlane", new FloatUniform(lightRange)),
-        };
         foreach (var sub in scene.Submeshes)
         {
+            var cutoff = sub.AlphaMode == Blix.GltfAlphaMode.Mask
+                ? (sub.Source?.AlphaCutoff ?? 0.5f)
+                : 0.0f;
+            var baseFactor = sub.Source?.BaseColorFactor ?? new System.Numerics.Vector4(1.0f);
+            var perDrawUniforms = new ShaderUniform[]
+            {
+                new("uLightViewProjection", new Matrix4x4Uniform(cubeFaceVP)),
+                new("uModel", new Matrix4x4Uniform(Matrix4x4.Identity)),
+                new("uPointLightPosition", new Vector3Uniform(lightPosition)),
+                new("uPointLightFarPlane", new FloatUniform(lightRange)),
+                new("uAlphaCutoff", new FloatUniform(cutoff)),
+                new("uBaseColorFactor", new Vector4Uniform(baseFactor)),
+            };
+            var albedoBinding = FindAlbedoBinding(sub.Material);
+            var perDrawTextures = albedoBinding is { } ab ? new[] { ab } : null;
             pass.DrawMesh(sub.Mesh, cubeShadowMaterial,
-                perDrawUniforms: uniforms, perDrawTextures: null);
+                perDrawUniforms: perDrawUniforms, perDrawTextures: perDrawTextures);
         }
     }
 }

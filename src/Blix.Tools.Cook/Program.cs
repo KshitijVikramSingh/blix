@@ -175,14 +175,19 @@ static int CookTextures(string[] args)
 {
     if (args.Length < 2)
     {
-        Console.Error.WriteLine("Usage: blix-cook textures <directory>");
+        Console.Error.WriteLine("Usage: blix-cook textures <directory> [--force]");
         return 1;
     }
     var root = args[1];
+    var force = args.Skip(2).Any(a => a == "--force" || a == "-f");
     if (!Directory.Exists(root))
     {
         Console.Error.WriteLine($"Directory not found: {root}");
         return 1;
+    }
+    if (force)
+    {
+        Console.WriteLine("  --force: re-cooking even when .blixtex is newer than source");
     }
 
     var sources = Directory
@@ -246,7 +251,7 @@ static int CookTextures(string[] args)
     void ProcessOne(string source)
     {
         var destination = Path.ChangeExtension(source, ".blixtex");
-        if (File.Exists(destination))
+        if (File.Exists(destination) && !force)
         {
             var sourceWrite = File.GetLastWriteTimeUtc(source);
             var destWrite = File.GetLastWriteTimeUtc(destination);
@@ -339,9 +344,17 @@ static void CookOne(string source, string destination, out long sourceLen, out l
     using (var stream = File.OpenRead(source))
     {
         var decodeSw = Stopwatch.StartNew();
-        var image = ImageLoader.LoadRgba32(stream);
-        if (verbose) Console.WriteLine($"\r    decoded {name} {image.Width}x{image.Height} in {decodeSw.ElapsedMilliseconds} ms");
         var role = ClassifyRole(source);
+        // MR textures need channel-aware loading: 1-channel grayscale
+        // PNGs (Modern Sponza's "*_Roughness.png") get expanded by stb to
+        // (Y, Y, Y, 255), which the shader would then read as
+        // metallic = roughness. LoadMetallicRoughness detects the
+        // grayscale source and zeroes the B channel so the cooked
+        // .blixtex stores (255, Y, 0, 255) -- the canonical ORM layout.
+        var image = role == TextureRole.MetallicRoughness
+            ? ImageLoader.LoadMetallicRoughness(stream)
+            : ImageLoader.LoadRgba32(stream);
+        if (verbose) Console.WriteLine($"\r    decoded {name} {image.Width}x{image.Height} in {decodeSw.ElapsedMilliseconds} ms");
         var (bcFormat, flags) = PickFormat(role);
         var format = bcMode ? bcFormat : TextureFormat.Rgba8;
 
@@ -393,11 +406,12 @@ static void CookOne(string source, string destination, out long sourceLen, out l
 // Picks a BCn format + flags based on the heuristic role classification.
 static (TextureFormat Format, BlixTex.Flags Flags) PickFormat(TextureRole role) => role switch
 {
-    TextureRole.BaseColor => (TextureFormat.Bc7Srgb, BlixTex.Flags.Srgb),
-    TextureRole.Emissive  => (TextureFormat.Bc7Srgb, BlixTex.Flags.Srgb),
-    TextureRole.Normal    => (TextureFormat.Bc7Unorm, BlixTex.Flags.NormalMap),
-    TextureRole.Linear    => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
-    _                     => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
+    TextureRole.BaseColor          => (TextureFormat.Bc7Srgb, BlixTex.Flags.Srgb),
+    TextureRole.Emissive           => (TextureFormat.Bc7Srgb, BlixTex.Flags.Srgb),
+    TextureRole.Normal             => (TextureFormat.Bc7Unorm, BlixTex.Flags.NormalMap),
+    TextureRole.MetallicRoughness  => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
+    TextureRole.Linear             => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
+    _                              => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
 };
 
 // BC5 is the textbook normal-map format (two-channel RG, reconstruct Z in
@@ -487,9 +501,19 @@ static TextureRole ClassifyRole(string path)
         return TextureRole.BaseColor;
     if (name.Contains("emiss"))
         return TextureRole.Emissive;
+    // MR detection. Modern Sponza names them "<material>_Roughness.png" or
+    // "<material>_Roughness<material>_Metalness.png" (the concatenation
+    // pattern is how their exporter joins the two original maps). Check
+    // for roughness/metalness/metallic/metalrough as substrings -- comes
+    // BEFORE the normal check so "normal_roughness.png" doesn't get mis-
+    // classified as normal.
+    if (name.Contains("roughness") || name.Contains("metalness")
+        || name.Contains("metallic") || name.Contains("metalrough")
+        || name.Contains("metal_rough"))
+        return TextureRole.MetallicRoughness;
     if (name.Contains("normal") || name.EndsWith("_n") || name.EndsWith(".n"))
         return TextureRole.Normal;
     return TextureRole.Linear;
 }
 
-enum TextureRole { BaseColor, Normal, Emissive, Linear }
+enum TextureRole { BaseColor, Normal, Emissive, MetallicRoughness, Linear }

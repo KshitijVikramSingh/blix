@@ -167,6 +167,11 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         string gltfDir)
     {
         var imageRefs = new HashSet<int>();
+        // Track which images are used as MetallicRoughness so the decode
+        // path can route them through LoadMetallicRoughness -- handles
+        // 1-channel grayscale "roughness only" PNGs correctly. Mirror of
+        // GltfStaticImporter.PreDecodeImages.
+        var mrImageIndices = new HashSet<int>();
         foreach (var mat in model.LogicalMaterials)
         {
             foreach (var channelName in PreDecodeChannels)
@@ -176,6 +181,10 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 var img = channel.Value.Texture?.PrimaryImage;
                 if (img is null) continue;
                 imageRefs.Add(img.LogicalIndex);
+                if (channelName == "MetallicRoughness")
+                {
+                    mrImageIndices.Add(img.LogicalIndex);
+                }
             }
         }
         if (imageRefs.Count == 0) return;
@@ -221,7 +230,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         {
             var bytes = image.Content.Content.ToArray();
             using var stream = new MemoryStream(bytes);
-            var d = ImageLoader.LoadRgba32(stream);
+            var d = mrImageIndices.Contains(image.LogicalIndex)
+                ? ImageLoader.LoadMetallicRoughness(stream)
+                : ImageLoader.LoadRgba32(stream);
             decoded[image.LogicalIndex] = GltfTexture.Rgba8Single(
                 image.Name ?? $"image_{image.LogicalIndex}",
                 d.Pixels, d.Width, d.Height);

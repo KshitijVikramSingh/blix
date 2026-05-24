@@ -96,6 +96,11 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             var cooked = BlixMeshReader.Read(blixmeshPath);
             foreach (var p in cooked.Primitives)
             {
+                // Heal degenerate UVs in cooked files too (in-place mutation
+                // is fine, we own the buffer after BlixMeshReader returns it).
+                // Lets us fix asset-level UV corruption without re-running the
+                // cook step.
+                SanitizePackedUVs(p.VertexBytes, p.VertexCount, p.Name);
                 var meshData = new MeshData(
                     p.Name,
                     p.VertexBytes,
@@ -246,13 +251,55 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         }
 
         var bounds = vertexCount == 0 ? Bounds3.Empty : new Bounds3(minB, maxB);
+        var packed = VertexPosition3NormalTexture.Pack(vertices);
+        SanitizePackedUVs(packed, vertexCount, name);
         return new MeshData(
             name,
-            VertexPosition3NormalTexture.Pack(vertices),
+            packed,
             indices16,
             VertexPosition3NormalTexture.Layout,
             bounds,
             Indices32: indices32);
+    }
+
+    // Some authored assets ship one or two vertices with extreme UV values
+    // (we've seen -42470 in the Khronos Intel Sponza source). With wrap=
+    // Repeat the GPU still tiles, but adjacent triangles' UV interpolation
+    // drags across thousands of units, blowing up dFdx/dFdy so the sampler
+    // picks the coarsest mip everywhere -> washed-out garbage. Fold any
+    // out-of-range vertex back into [0,1) with `frac` so the LOD calc and
+    // texture cache stay sane; tiled textures still tile correctly because
+    // frac is the same value modulo 1.
+    private const float MaxReasonableUV = 100.0f;
+
+    private static int SanitizePackedUVs(byte[] vertexBytes, int vertexCount, string ownerName)
+    {
+        const int Stride = 32; // VertexPosition3NormalTexture
+        const int UvOffset = 24;
+        var touched = 0;
+        var span = vertexBytes.AsSpan();
+        for (var v = 0; v < vertexCount; v++)
+        {
+            var slot = span.Slice(v * Stride + UvOffset, 8);
+            var u = System.Runtime.InteropServices.MemoryMarshal.Read<float>(slot);
+            var vv = System.Runtime.InteropServices.MemoryMarshal.Read<float>(slot.Slice(4));
+            var fix = false;
+            if (MathF.Abs(u) > MaxReasonableUV) { u -= MathF.Floor(u); fix = true; }
+            if (MathF.Abs(vv) > MaxReasonableUV) { vv -= MathF.Floor(vv); fix = true; }
+            if (fix)
+            {
+                System.Runtime.InteropServices.MemoryMarshal.Write(slot, in u);
+                System.Runtime.InteropServices.MemoryMarshal.Write(slot.Slice(4), in vv);
+                touched++;
+            }
+        }
+        if (touched > 0)
+        {
+            Console.WriteLine(
+                $"[GltfStaticImporter] sanitized {touched} vertex UV(s) in '{ownerName}' " +
+                $"(values exceeded |UV|>{MaxReasonableUV}; folded with frac to [0,1))");
+        }
+        return touched;
     }
 
     // PBR channels we sample per material. Match the set ExtractMaterial walks
@@ -269,6 +316,14 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         string gltfDir)
     {
         var imageRefs = new HashSet<int>();
+        // Track which images are used as MetallicRoughness so we can route
+        // them through the channel-aware loader that handles 1-channel
+        // grayscale "roughness only" PNGs (Modern Sponza ships those, and
+        // the default LoadRgba32 expansion turns them into "matte metal"
+        // walls when shader reads .b as metallic). First channel-binding
+        // wins -- an image used as both BaseColor and MR somewhere
+        // (unlikely but valid in glTF) gets BaseColor's loader.
+        var mrImageIndices = new HashSet<int>();
         foreach (var mat in model.LogicalMaterials)
         {
             foreach (var channelName in PreDecodeChannels)
@@ -278,6 +333,10 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 var img = channel.Value.Texture?.PrimaryImage;
                 if (img is null) continue;
                 imageRefs.Add(img.LogicalIndex);
+                if (channelName == "MetallicRoughness")
+                {
+                    mrImageIndices.Add(img.LogicalIndex);
+                }
             }
         }
         if (imageRefs.Count == 0) return;
@@ -333,7 +392,9 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         {
             var bytes = image.Content.Content.ToArray();
             using var stream = new MemoryStream(bytes);
-            var d = ImageLoader.LoadRgba32(stream);
+            var d = mrImageIndices.Contains(image.LogicalIndex)
+                ? ImageLoader.LoadMetallicRoughness(stream)
+                : ImageLoader.LoadRgba32(stream);
             decoded[image.LogicalIndex] = GltfTexture.Rgba8Single(
                 image.Name ?? $"image_{image.LogicalIndex}",
                 d.Pixels, d.Width, d.Height);

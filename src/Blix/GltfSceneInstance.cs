@@ -50,6 +50,15 @@ public sealed class GltfSceneInstance
         ArgumentNullException.ThrowIfNull(model);
         ArgumentNullException.ThrowIfNull(options);
 
+        // Memoise the OverrideMaterial result per source ref so each unique
+        // GltfMaterial gets one rewritten record reused across every primitive
+        // that references it. Without memoisation, two primitives with the
+        // same source would each compute (potentially diverging) overrides
+        // and the materialCache below would key on the original ref but get
+        // mismatched values.
+        var overrideCache = options.OverrideMaterial is null
+            ? null
+            : new Dictionary<GltfMaterial, GltfMaterial>(ReferenceEqualityComparer.Instance);
         var textureCache = new Dictionary<GltfTexture, TextureHandle>(ReferenceEqualityComparer.Instance);
         // Tracks textures currently being uploaded but whose handle hasn't
         // landed yet. Subsequent bindings of the same GltfTexture attach
@@ -70,6 +79,20 @@ public sealed class GltfSceneInstance
         for (var i = 0; i < model.Primitives.Length; i++)
         {
             var prim = model.Primitives[i];
+            // Apply OverrideMaterial once per unique source. The cache key is
+            // the ORIGINAL source ref; subsequent lookups for the same source
+            // return the already-rewritten record so all later code paths see
+            // a consistent alphaMode + doubleSided + cutoff per primitive.
+            var sourceMaterial = prim.Material;
+            if (sourceMaterial is not null && overrideCache is not null)
+            {
+                if (!overrideCache.TryGetValue(sourceMaterial, out var rewritten))
+                {
+                    rewritten = options.OverrideMaterial!(sourceMaterial);
+                    overrideCache[sourceMaterial] = rewritten;
+                }
+                sourceMaterial = rewritten;
+            }
             var meshName = $"{options.Prefix}.mesh.{prim.Mesh.Name}";
             var vb = device.CreateVertexBuffer(
                 new VertexBufferData(
@@ -81,18 +104,21 @@ public sealed class GltfSceneInstance
                 : device.CreateIndexBuffer(prim.Mesh.Indices, name: $"{meshName}.ib");
             var mesh = new Mesh(meshName, vb, ib, prim.Mesh.IndexCount, prim.Mesh.Bounds);
 
-            var alphaMode = prim.Material?.AlphaMode ?? GltfAlphaMode.Opaque;
-            var doubleSided = prim.Material?.DoubleSided ?? false;
+            var alphaMode = sourceMaterial?.AlphaMode ?? GltfAlphaMode.Opaque;
+            var doubleSided = sourceMaterial?.DoubleSided ?? false;
             var pipeline = SelectPipeline(options, alphaMode, doubleSided, fallbackPipelineWarnings);
 
             Material? material;
-            if (prim.Material is { } gm)
+            if (sourceMaterial is { } gm)
             {
-                if (!materialCache.TryGetValue(gm, out material))
+                // Cache by ORIGINAL prim.Material reference so primitives that
+                // share a source (after override) share one runtime Material.
+                var cacheKey = prim.Material!;
+                if (!materialCache.TryGetValue(cacheKey, out material))
                 {
                     material = BuildMaterial(device, gm, pipeline, options, textureCache, pendingTextures);
                     options.OnMaterialBuilt?.Invoke(material, gm);
-                    materialCache[gm] = material;
+                    materialCache[cacheKey] = material;
                 }
             }
             else
@@ -115,7 +141,7 @@ public sealed class GltfSceneInstance
                 Name: prim.Mesh.Name,
                 Mesh: mesh,
                 Material: material,
-                Source: prim.Material,
+                Source: sourceMaterial,
                 WorldBounds: prim.Mesh.Bounds,
                 AlphaMode: alphaMode,
                 DoubleSided: doubleSided);
@@ -128,8 +154,38 @@ public sealed class GltfSceneInstance
             ? Bounds3.Empty
             : new Bounds3(worldMin, worldMax);
         var materialSet = new MaterialSet(materialCache.Values.ToArray());
+
+        // Diagnostic dump: surface per-material classification so we can
+        // spot misbehaviour like an opaque wall declared alphaMode=BLEND
+        // (renders see-through), or a textured material whose albedo
+        // import dropped to null (renders as the default white pixel).
+        // Gated behind an env var so the regular Walkthrough demo's
+        // console doesn't get spammed.
+        if (Environment.GetEnvironmentVariable("BLIX_DUMP_MATERIALS") != null)
+        {
+            Console.WriteLine($"[GltfSceneInstance:{options.Prefix}] {materialCache.Count} materials, {submeshes.Length} submeshes:");
+            Console.WriteLine($"  {"name",-50} {"alpha",-7} {"2-side",-7} {"baseFac.a",-10} {"alb",-3} {"nrm",-3} {"mr",-3} {"ao",-3} {"em",-3}");
+            foreach (var (gm, _) in materialCache.OrderBy(kv => kv.Key.Name))
+            {
+                Console.WriteLine(
+                    $"  {Trunc(gm.Name, 50),-50} {gm.AlphaMode,-7} {gm.DoubleSided,-7} " +
+                    $"{gm.BaseColorFactor.W,-10:0.000} " +
+                    $"{(gm.BaseColorTexture is null ? "-" : "Y"),-3} " +
+                    $"{(gm.NormalTexture is null ? "-" : "Y"),-3} " +
+                    $"{(gm.MetallicRoughnessTexture is null ? "-" : "Y"),-3} " +
+                    $"{(gm.OcclusionTexture is null ? "-" : "Y"),-3} " +
+                    $"{(gm.EmissiveTexture is null ? "-" : "Y"),-3}");
+            }
+            var byMode = materialCache.Keys.GroupBy(m => m.AlphaMode)
+                .OrderBy(g => g.Key)
+                .Select(g => $"{g.Key}={g.Count()}");
+            Console.WriteLine($"  By alphaMode: {string.Join(", ", byMode)}");
+        }
+
         return new GltfSceneInstance(submeshes, bounds, materialSet);
     }
+
+    private static string Trunc(string s, int n) => s.Length <= n ? s : s.Substring(0, n - 1) + "~";
 
     private static PipelineHandle SelectPipeline(
         GltfSceneOptions options, GltfAlphaMode mode, bool doubleSided,
@@ -245,6 +301,19 @@ public sealed class GltfSceneInstance
             return;
         }
 
+        // sRGB-aware format selection. glTF spec: BaseColor + Emissive are
+        // sRGB-encoded; Normal + MetallicRoughness + Occlusion are LINEAR.
+        // We promote Rgba8 -> Rgba8Srgb for the sRGB slots so GL does sRGB->
+        // linear conversion BEFORE filtering (correct), instead of the shader
+        // pow(c, 2.2)'ing the already-filtered gamma-space average (wrong on
+        // high-contrast textures, producing too-dark mip transitions).
+        // Compressed BC7 textures already encode the sRGB flag in their own
+        // format enum (Bc7Srgb vs Bc7Unorm) so we pass those through.
+        var isSrgbSlot = slotHint == "albedo" || slotHint == "emissive";
+        var uploadFormat = source.Format == TextureFormat.Rgba8 && isSrgbSlot
+            ? TextureFormat.Rgba8Srgb
+            : source.Format;
+
         if (options.Uploader is { } uploader)
         {
             var subscribers = new List<Action<TextureHandle>> { apply };
@@ -263,7 +332,7 @@ public sealed class GltfSceneInstance
                 // hits each mip. Captures `lazy` so the mip reads happen
                 // at process-time, not enqueue-time.
                 uploader.EnqueueLazy(
-                    source.Format, source.Width, source.Height, source.MipCount,
+                    uploadFormat, source.Width, source.Height, source.MipCount,
                     mipReader: level => BlixTexReader.ReadMip(lazy, level),
                     options.Sampler, name, OnUploaded);
                 return;
@@ -276,7 +345,7 @@ public sealed class GltfSceneInstance
                 ?? throw new InvalidOperationException(
                     $"GltfTexture '{source.Name}' has neither lazy handle nor CPU mip bytes.");
             uploader.Enqueue(
-                source.Format, source.Width, source.Height, mipBytes, options.Sampler,
+                uploadFormat, source.Width, source.Height, mipBytes, options.Sampler,
                 name, OnUploaded);
             source.ReleaseCpuMipBytes();
             return;
@@ -298,7 +367,7 @@ public sealed class GltfSceneInstance
                     $"GltfTexture '{source.Name}' has neither lazy handle nor CPU mip bytes.");
         }
         var handle = device.CreateTexture2DMipped(
-            new TextureDescription(source.Width, source.Height, source.Format, options.Sampler),
+            new TextureDescription(source.Width, source.Height, uploadFormat, options.Sampler),
             bytesForSync,
             name: $"{options.Prefix}.{slotHint}.{source.Name}");
         textureCache[source] = handle;
@@ -357,6 +426,16 @@ public sealed record GltfSceneOptions
     // (null for primitives with no material reference). Bind any scene-wide
     // textures (shadow maps, IBL probes, BRDF LUT, env cube) here.
     public Action<Material, GltfMaterial?>? OnMaterialBuilt { get; init; }
+
+    // Demo hook: rewrite a source GltfMaterial BEFORE pipeline selection and
+    // BuildMaterial. Use this to compensate for upstream authoring quirks like
+    // foliage tagged alphaMode=BLEND that the runtime should treat as MASK
+    // (binary alpha + depth-write so leaves z-sort against themselves without
+    // a back-to-front pass). Returns the (possibly rewritten) material. Called
+    // at most once per UNIQUE source GltfMaterial -- if multiple primitives
+    // reference the same source, the same overridden record is reused so
+    // materialCache keying stays stable. Return the input unchanged to opt out.
+    public Func<GltfMaterial, GltfMaterial>? OverrideMaterial { get; init; }
 
     // When set, per-material texture uploads are queued through the uploader
     // instead of running synchronously inside Build. Materials get the
