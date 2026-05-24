@@ -35,6 +35,17 @@ uniform float uCascadeSplits[CASCADE_COUNT + 1];
 // instead of lighting them, so we can see which fragments fall in which
 // cascade. Set to 0 in normal rendering.
 uniform float uVisualizeCascades;
+// Debug view selector. Indices must match Program.cs DebugViewNames:
+//   0 PBR (real)        - no override
+//   1 Albedo            - sRGB albedo as colour
+//   2 Emissive          - emissive contribution only
+//   3 Indirect diffuse  - IBL diffuse term only
+//   4 Indirect specular - IBL split-sum specular only
+//   5 Direct sun        - direct sun + shadow only (no point lights, no IBL)
+//   6 Roughness         - grayscale
+//   7 Metallic          - grayscale
+//   8 World normal      - N * 0.5 + 0.5
+uniform float uDebugView;
 // HDR linear cubemap (no sRGB decode). Auto-generated mips approximate a
 // roughness prefilter: sample at lod = roughness * (mipCount - 1) for spec,
 // at lod = mipCount - 1 for diffuse irradiance (most-blurred mip is close
@@ -66,6 +77,10 @@ uniform float uRoughnessFactor;
 // sets this per-material based on the source alphaMode.
 uniform float uAlphaCutoff;
 uniform float uNormalScale;
+// Y-axis convention flip for tangent-space normal maps. 1.0 = OpenGL/glTF
+// convention (Y up after unpack); -1.0 = DirectX/UE convention (Y down).
+// Applied on the sampled tangent normal before transforming to world.
+uniform float uNormalMapFlipY;
 uniform float uHasMetallicMap;
 // glTF doubleSided gate: when > 0.5, fragments on the back face (i.e.
 // !gl_FrontFacing) flip the geometric normal so two-sided geometry like
@@ -169,6 +184,7 @@ mat3 cotangentFrame(vec3 N, vec3 worldPos, vec2 uv)
 vec3 perturbNormal(vec3 N, vec3 worldPos, vec2 uv)
 {
     vec3 sampled = texture(uNormalMap, uv).rgb * 2.0 - 1.0;
+    sampled.y *= uNormalMapFlipY;  // DX-vs-GL Y convention; uniform = -1 flips
     vec3 tangentNormal = mix(vec3(0.0, 0.0, 1.0), sampled, uNormalScale);
     return normalize(cotangentFrame(N, worldPos, uv) * tangentNormal);
 }
@@ -340,7 +356,11 @@ void main()
 
     vec4 albedoSample = texture(uAlbedo, uv) * uBaseColorFactor;
     if (uAlphaCutoff > 0.0 && albedoSample.a < uAlphaCutoff) discard;
-    vec3 albedo = pow(albedoSample.rgb, vec3(2.2));
+    // uAlbedo is uploaded with GL_SRGB8_ALPHA8 internal format (see
+    // GltfSceneInstance.BindMaterialTexture sRGB promotion), so the sampler
+    // has already done sRGB->linear and applied bilinear/trilinear filtering
+    // in linear space. NO pow(2.2) here -- doing it would be a double-decode.
+    vec3 albedo = albedoSample.rgb;
 
 
 
@@ -395,7 +415,8 @@ void main()
     // Frostbite/Marmoset-style extension that gives crevices realistic
     // contact darkening under direct light too.
     float aoMicroSun = max(ao, 1.0 - NdotL);
-    vec3 direct = (kD * albedo / PI + specular) * uSunColor * NdotL * shadow * aoMicroSun;
+    vec3 directSun = (kD * albedo / PI + specular) * uSunColor * NdotL * shadow * aoMicroSun;
+    vec3 direct = directSun;
 
     // --- Point lights ----------------------------------------------------
     int plCount = int(uPointLightCount);
@@ -479,8 +500,8 @@ void main()
     // reaches them; flat surfaces sample ao ~ 1 and are unaffected.
     vec3 indirect = (indirectDiffuse + indirectSpecular) * indirectMix * ao;
 
-    vec3 emissive = pow(texture(uEmissive, uv).rgb, vec3(2.2))
-        * uEmissiveFactor * uEmissiveBoost;
+    // uEmissive is GL_SRGB8_ALPHA8 too -- sampler returns linear values.
+    vec3 emissive = texture(uEmissive, uv).rgb * uEmissiveFactor * uEmissiveBoost;
 
     // Output linear HDR. The composite pass downstream applies ACES + gamma
     // to the combined HDR scene + bloom buffer. uExposure stays here so
@@ -501,6 +522,104 @@ void main()
         else if (cIdx == 1) cTint = vec3(0.2, 0.6, 0.2);
         else if (cIdx == 2) cTint = vec3(0.2, 0.2, 0.6);
         hdr = mix(hdr, cTint * 5.0, 0.6);
+    }
+
+    // Debug view overrides. Output goes into the HDR target so the
+    // composite pass still tonemaps + gamma-encodes it -- view values are
+    // in linear scene-space, picked to read sensibly after ACES (so albedo
+    // at 1.0 lands ~white, normals at 0..1 land mid-gray etc).
+    // Indices must match Program.cs DebugViewNames.
+    int dv = int(uDebugView + 0.5);
+    if (dv == 1) {
+        hdr = albedo;
+    } else if (dv == 2) {
+        hdr = emissive;
+    } else if (dv == 3) {
+        hdr = indirectDiffuse * indirectMix * ao;
+    } else if (dv == 4) {
+        hdr = indirectSpecular * indirectMix * ao;
+    } else if (dv == 5) {
+        hdr = directSun;
+    } else if (dv == 6) {
+        hdr = vec3(roughness);
+    } else if (dv == 7) {
+        hdr = vec3(metallic);
+    } else if (dv == 8) {
+        hdr = N * 0.5 + vec3(0.5);
+    } else if (dv == 9) {
+        // Raw MR texture sample. Expect (R=AO~1, G=roughness, B=metallic).
+        // Walls should show as ~black/dark with a green/cyan cast.
+        hdr = mrSample;
+    } else if (dv == 10) {
+        // Raw normal map sample (tangent-space, before unpack). A working
+        // normal map is mostly purple/blue with detail variation; a flat
+        // default reads as uniform (0.5, 0.5, 1.0).
+        hdr = texture(uNormalMap, uv).rgb;
+    } else if (dv == 11) {
+        // Per-material gate uniforms. If a channel reads as 0 here, the
+        // material's source GltfTexture was null at build time, so the
+        // shader falls back to the *Factor uniform.
+        hdr = vec3(uHasMetallicMap, uNormalScale, uHasOcclusionMap);
+    } else if (dv == 12) {
+        // Raw shadow value from CSM sampling. 1.0 = lit, 0.0 = in shadow.
+        // If you see large patches of black on surfaces that obviously
+        // face the sun, the cascade VP / depth map content is wrong.
+        hdr = vec3(shadow);
+    } else if (dv == 13) {
+        // Which cascade this fragment falls into. Each cascade should
+        // form a clean band of color from camera-near outward; the order
+        // should be red (closest) -> green -> blue (furthest). Gaps,
+        // overlaps, or out-of-order means the cascade slice math is off.
+        int dvCidx = -1;
+        for (int i = 0; i < CASCADE_COUNT; ++i)
+        {
+            if (viewDepth <= uCascadeSplits[i + 1]) { dvCidx = i; break; }
+        }
+        if      (dvCidx == 0) hdr = vec3(1.0, 0.0, 0.0);
+        else if (dvCidx == 1) hdr = vec3(0.0, 1.0, 0.0);
+        else if (dvCidx == 2) hdr = vec3(0.0, 0.0, 1.0);
+        else                  hdr = vec3(0.3);
+    } else if (dv == 14) {
+        // Raw UV in [r=u, g=v]. We use the same texCoord as the lit path
+        // (which inverts V; see `vec2 uv = vec2(texCoord.x, 1.0-texCoord.y)`
+        // at the top of main). Smooth gradients across a surface = healthy
+        // UVs. Constant-color patches or sharp lines unrelated to geometry
+        // edges = UV anomaly (missing per-vertex UVs, mis-shared accessors,
+        // etc).
+        hdr = vec3(uv.x, uv.y, 0.0);
+    } else if (dv == 15) {
+        // UV mod 1 -- highlights tiling. A clean tiled wall shows uniform
+        // gradient cycles; a wall with sudden colour jumps inside one
+        // surface means UV interpolation crossed a discontinuity.
+        hdr = vec3(fract(uv.x), fract(uv.y), 0.0);
+    } else if (dv == 16) {
+        // GL's chosen mip level for the albedo sampler at this fragment.
+        // textureQueryLod returns vec2(LOD with no clamp, LOD after clamp);
+        // the .x value is what we want to see. Normalized by max mip count
+        // so 0=mip0 (full res) and 1=max mip. Anything routinely above 0.5
+        // means most of the screen is sampling washed-out averages -- the
+        // fix is anisotropic filtering, not more textures.
+        float lod = textureQueryLod(uAlbedo, uv).x;
+        // Albedo has ~12 mip levels for a 4K texture; normalise to [0,1].
+        hdr = vec3(clamp(lod / 12.0, 0.0, 1.0));
+    } else if (dv == 17) {
+        // Same as above but as a perceptual heatmap: black = mip 0 (sharp),
+        // dark blue = 1-3, cyan = 4-5, green = 6, yellow = 8, red = 10+.
+        float lod = textureQueryLod(uAlbedo, uv).x;
+        float t = clamp(lod / 12.0, 0.0, 1.0);
+        // Smooth cool-to-hot. Approximates the viridis-ish palette popular
+        // for LOD heatmaps in PIX / RenderDoc captures.
+        vec3 cold = vec3(0.0, 0.0, 0.0);
+        vec3 mid1 = vec3(0.0, 0.2, 0.6);   // dark blue
+        vec3 mid2 = vec3(0.0, 0.8, 0.8);   // cyan
+        vec3 mid3 = vec3(0.2, 0.9, 0.2);   // green
+        vec3 mid4 = vec3(1.0, 0.9, 0.0);   // yellow
+        vec3 hot  = vec3(1.0, 0.1, 0.1);   // red
+        if (t < 0.2)      hdr = mix(cold, mid1, t / 0.2);
+        else if (t < 0.4) hdr = mix(mid1, mid2, (t - 0.2) / 0.2);
+        else if (t < 0.6) hdr = mix(mid2, mid3, (t - 0.4) / 0.2);
+        else if (t < 0.8) hdr = mix(mid3, mid4, (t - 0.6) / 0.2);
+        else              hdr = mix(mid4, hot,  (t - 0.8) / 0.2);
     }
 
     fragColor = vec4(hdr, 1.0);

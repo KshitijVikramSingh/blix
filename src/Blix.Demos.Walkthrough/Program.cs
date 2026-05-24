@@ -1049,6 +1049,11 @@ internal sealed class WalkthroughGame : Game, IInputHandler, IDebuggable
             new("uMetalFloor", new FloatUniform(metalFloor)),
             new("uIndirectShadowBase", new FloatUniform(indirectShadowBase)),
             new("uIndirectShadowRange", new FloatUniform(indirectShadowRange)),
+            // Walkthrough was originally tuned without the dielectric
+            // ambient floor; keep it at 0 to preserve the existing look.
+            // SponzaModern uses a non-zero default. Settable per-scenario
+            // via the scene presets if needed.
+            new("uAmbientFloor", new FloatUniform(0.0f)),
             new("uHorizonFadeStrength", new FloatUniform(horizonFadeStrength)),
             new("uHorizonFadeStart", new FloatUniform(horizonFadeStart)),
             new("uSkyTint", new Vector3Uniform(skyTint)),

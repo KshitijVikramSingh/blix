@@ -6,15 +6,18 @@
 // usual nonlinear projection depth.
 
 layout (location = 0) in vec3 aPosition;
+layout (location = 2) in vec2 aTexCoord;
 
 uniform mat4 uModel;
 uniform mat4 uLightViewProjection;   // per-face: 90deg persp * lookAt(lightPos, lightPos + faceDir)
 
 out vec3 vWorldPosition;
+out vec2 vTexCoord;
 
 void main()
 {
     vec4 wp = uModel * vec4(aPosition, 1.0);
     vWorldPosition = wp.xyz;
+    vTexCoord = aTexCoord;
     gl_Position = uLightViewProjection * wp;
 }

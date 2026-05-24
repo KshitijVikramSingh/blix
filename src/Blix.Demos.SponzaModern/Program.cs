@@ -32,7 +32,21 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
     private const int EnvCubeFaceSize = 256;
     private const int ShadowMapSize = 2048;
     private const int CascadeCount = 3;
-    private static readonly float[] cascadeSplits = { 0.1f, 6.0f, 22.0f, 60.0f };
+    // Live-tunable from the Debug panel. Index 0 is the camera near; index N
+    // is the maximum shadow distance. Each cascade slot covers (splits[i],
+    // splits[i+1]) along the camera's forward axis.
+    private readonly float[] cascadeSplits = { 0.1f, 6.0f, 22.0f, 60.0f };
+    private float cameraNear = 0.1f;
+    private float cameraFar = 500.0f;
+    private bool enableFrustumCulling = true;
+    // Inflates submesh AABBs by this many world units at frustum-test time.
+    // 0 = canonical conservative cull; positive values expand the effective
+    // frustum to compensate for grazing-plane false negatives.
+    private float cullMargin = 0.0f;
+    // Back-face culling toggle, plumbed through OpenGLGraphicsDevice's static
+    // DebugForceDisableCullFace override so we don't rebuild the pipeline
+    // graph per frame.
+    private bool enableBackFaceCulling = true;
 
     // Camera + input state (the boilerplate any first-person walkthrough wants).
     private Camera3D camera = null!;
@@ -132,9 +146,29 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
     private Vector3 colorTemp = Vector3.One;
 
     private float fpsSmoothed = 60.0f;
+    // Per-frame draw counters. Captured during command-list build and read
+    // back into the HUD next frame so we can see frustum culling working.
+    private int lastOpaqueDrawn;
+    private int lastCascadeDrawn;
+
+    // Live PBR-tuning knobs. These shadow the lit shader's `uMetalFloor`,
+    // `uIndirectShadowBase`, `uIndirectShadowRange` uniforms so we can dial
+    // them from the debug panel.
+    private float metalFloor = 0.18f;
+    private float indirectShadowBase = 0.60f;
+    private float indirectShadowRange = 0.40f;
+    private float iblDiffuseBoost = 1.0f;
+    private float iblSpecAttenuation = 0.8f;
+    // Normal map Y convention. OpenGL/glTF: Y up (sampled.g maps positive
+    // = bump points up in tangent space). DirectX/UE: Y down (G channel
+    // inverted). Many tools export DX style by default. Setting this to
+    // -1 flips Y on sample so DX-authored maps light correctly under
+    // GL/glTF assumptions.
+    private float normalMapFlipY = 1.0f;
 
     // Lit shader debug view selector. Index must match the lit.frag switch.
     private int debugView = 0;
+    private bool visualizeCascades = false;
     private static readonly string[] DebugViewNames =
     {
         "PBR (real)",
@@ -146,6 +180,28 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         "Roughness",
         "Metallic",
         "World normal",
+        // Below: raw-texture views to diagnose import/upload issues.
+        // If "Metallic" shows white but "MR sample" shows the correct
+        // dark blue channel, the bug is in uHasMetallicMap gating, not
+        // the texture itself.
+        "MR sample (raw)",
+        "Normal sample (raw)",
+        "Gates (R=hasMR G=normScale B=hasAO)",
+        // Shadow / cascade diagnostic views.
+        "Shadow value (1=lit 0=shadow)",
+        "Selected cascade (R=0 G=1 B=2)",
+        // Geometry attribute views. UV maps to red/green channels so any
+        // constant-color BLOCKS (instead of smooth gradients) tell us UV
+        // data is missing/wrong for that submesh.
+        "UV (R=u G=v)",
+        "UV mod 1 (tiles per UV unit)",
+        // Sampling diagnostics. Mip level shows which mip the GPU actually
+        // reads at the current view distance/angle -- if surfaces sample
+        // mip 8/9/10 routinely they're losing all per-texel detail to mip
+        // averaging, and the fix is anisotropic filtering, NOT more mips
+        // or sharper textures.
+        "Mip level sampled (grayscale)",
+        "Mip level sampled (heatmap)",
     };
 
     protected override void OnLoad()
@@ -188,7 +244,11 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             new byte[] { 128, 128, 255, 255 }, name: "sm.flat_normal");
         neutralMetallicRoughness = GraphicsDevice.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
-            new byte[] { 0, 255, 0, 255 }, name: "sm.neutral_mr");
+            // R=AO=1, G=roughness=1, B=metallic=0. Materials with no MR map
+            // sample (1,1,0,1); the uHasMetallicMap=0 gate makes the lit
+            // shader bypass this anyway, but staying close to the spec
+            // intent keeps the bake correct if the gate is ever removed.
+            new byte[] { 255, 255, 0, 255 }, name: "sm.neutral_mr");
         fullOcclusion = GraphicsDevice.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
             new byte[] { 255, 255, 255, 255 }, name: "sm.full_ao");
@@ -386,10 +446,18 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         // glGenerateMipmap would either regenerate over them (wasting work)
         // or fight the per-level UploadTextureMip path the ResourceUploader
         // walks for progressive uploads.
+        // Trilinear filtering across the pre-baked mip chain. The cooked
+        // .blixtex carries all 11 mip levels, ResourceUploader.EnqueueLazy
+        // walks them onto the GPU in smallest-first order, and
+        // ApplySamplerNoMipGen sets MIN_FILTER from this flag WITHOUT
+        // ever calling glGenerateMipmap (so the pre-baked mips stay
+        // intact). Without trilinear, sampling at grazing angles or far
+        // distance reads only mip 0, producing severe aliasing that on
+        // Sponza Modern reads as washed-out / greyed-out walls.
         var sampler = new SamplerDescription(
             TextureFilter.Linear, TextureFilter.Linear,
             TextureWrap.Repeat, TextureWrap.Repeat,
-            GenerateMipmaps: false, Compare: false);
+            GenerateMipmaps: true, Compare: false);
 
         // SponzaModern has no point lights, but lit.frag still declares
         // uPointShadowMap0..3 as samplerCubeShadow. If those samplers are
@@ -429,11 +497,26 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
 
         // Cache shared options so all packs share the same factories.
         // Each importer + GltfSceneInstance.Build call closes over these.
+        // Sponza Modern's walls are authored as inside-facing single-sided
+        // geometry. With back-face culling on, the camera sees through any
+        // wall it ends up "behind" (e.g. exterior of an upper-floor walkway
+        // wall whose textured side faces the courtyard). Route Opaque +
+        // AlphaMask through the double-sided pipeline so both faces render.
+        // Cost is negligible -- Sponza is mostly thin shell geometry, not
+        // closed solids where back-face culling would meaningfully help.
+        // Sponza Modern's walls render with the double-sided pipeline (see
+        // pipeline assignments above). We also flip DoubleSided=true on every
+        // imported GltfMaterial so the lit shader's uDoubleSided uniform
+        // ends up at 1.0 -- that triggers the back-face normal-flip in
+        // lit.frag (`if (uDoubleSided > 0.5 && !gl_FrontFacing) N0 = -N0`),
+        // which gives back-facing fragments correct Lambertian + IBL
+        // contribution instead of inverted/black lighting.
+        Func<GltfMaterial, GltfMaterial> forceDoubleSided = gm => gm with { DoubleSided = true };
         var packOptions = new GltfSceneOptions
         {
-            Opaque = litOpaquePipeline,
+            Opaque = litDoubleSidedPipeline,
             OpaqueDoubleSided = litDoubleSidedPipeline,
-            AlphaMask = litOpaquePipeline,
+            AlphaMask = litDoubleSidedPipeline,
             AlphaMaskDoubleSided = litDoubleSidedPipeline,
             AlphaBlend = litAlphaBlendPipeline,
             AlphaBlendDoubleSided = litAlphaBlendPipeline,
@@ -441,6 +524,7 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             Defaults = defaults,
             Sampler = sampler,
             OnMaterialBuilt = bindShared,
+            OverrideMaterial = forceDoubleSided,
         };
 
         // Kick off each pack's glTF parse + texture decode on a background
@@ -458,7 +542,35 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             SchedulePack("ivy", ivyPath, packOptions, scene => ivyScene = scene);
         var treesPath = Path.Combine(assetsDir, "trees", "NewSponza_CypressTree_glTF.gltf");
         if (File.Exists(treesPath))
-            SchedulePack("trees", treesPath, packOptions, scene => treesScene = scene);
+        {
+            // Cypress source declares the leaf material as alphaMode=BLEND.
+            // Without a back-to-front sort the BLEND pipeline composites leaf
+            // cards in submission order with alpha-blend, leaving the dark
+            // patches inside the canopy. The texture's alpha is effectively
+            // binary anyway (foliage cutout), so re-tag as MASK at load --
+            // depth-write + alpha discard means leaves z-sort against
+            // themselves cheaply and no sort pass is needed.
+            var treesOptions = packOptions with
+            {
+                OverrideMaterial = gm =>
+                {
+                    // Start from the pack-level double-sided promotion; then
+                    // re-tag BLEND -> MASK for leaf cards (see top of file
+                    // for why the source's BLEND tag produces dark patches).
+                    var m = forceDoubleSided(gm);
+                    if (m.AlphaMode == GltfAlphaMode.Blend && m.BaseColorTexture is not null)
+                    {
+                        m = m with
+                        {
+                            AlphaMode = GltfAlphaMode.Mask,
+                            AlphaCutoff = m.AlphaCutoff > 0.0f ? m.AlphaCutoff : 0.5f,
+                        };
+                    }
+                    return m;
+                },
+            };
+            SchedulePack("trees", treesPath, treesOptions, scene => treesScene = scene);
+        }
 
         // --- Camera ---------------------------------------------------
         // No scene bounds yet (packs are still loading). Spawn at a placeholder
@@ -543,6 +655,7 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         if (treesScene is not null) yield return treesScene;
     }
 
+
     public override void OnUpdate(Time time)
     {
         // Drain any packs that finished their background import. Runs the
@@ -596,10 +709,18 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         uploader.Drain(UploadBudgetMillis);
 
         camera.VerticalFieldOfView = cameraFov;
+        camera.NearPlane = cameraNear;
+        camera.FarPlane = cameraFar;
         var aspect = (float)frame.Width / Math.Max(frame.Height, 1);
         var view = camera.GetView();
         var proj = camera.GetProjection(aspect);
         var invViewProj = InvertOrIdentity(proj * view);
+        // Setting this to null disables the per-submesh frustum cull so we
+        // can A/B test whether geometry being missing is from our culling
+        // step or downstream (back-face, depth, etc.).
+        Frustum? cameraFrustum = enableFrustumCulling
+            ? Frustum.FromViewProjection(proj * view)
+            : null;
 
         for (int c = 0; c < CascadeCount; c++)
         {
@@ -614,6 +735,9 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         {
             var cascadeIndex = c;
             var cascadeVP = cascadeLightVPs[c];
+            Frustum? cascadeFrustum = enableFrustumCulling
+                ? Frustum.FromViewProjection(cascadeVP)
+                : null;
             commandList.Pass(
                 $"sm.shadow.cascade{cascadeIndex}",
                 new RenderPassDescription(
@@ -622,10 +746,15 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
                     ClearDepth: true),
                 pass =>
                 {
+                    int drawn = 0;
                     foreach (var sceneInstance in AllScenes())
                     {
-                        pbrRenderer.DrawCascadeShadow(pass, sceneInstance, cascadeVP);
+                        drawn += pbrRenderer.DrawCascadeShadow(pass, sceneInstance, cascadeVP, cascadeFrustum, cullMargin);
                     }
+                    // Sum across all cascades into the cumulative counter, reset
+                    // by the first cascade so the HUD shows total cascade draws.
+                    if (cascadeIndex == 0) lastCascadeDrawn = 0;
+                    lastCascadeDrawn += drawn;
                 });
         }
 
@@ -651,11 +780,12 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             // flames; Modern Sponza has no large emissive surfaces so a
             // 1.0 baseline reads correctly. Tunable from the debug panel.
             new("uEmissiveBoost", new FloatUniform(1.0f)),
-            new("uIblSpecAttenuation", new FloatUniform(0.8f)),
-            new("uIblDiffuseBoost", new FloatUniform(1.0f)),
-            new("uMetalFloor", new FloatUniform(0.18f)),
-            new("uIndirectShadowBase", new FloatUniform(0.60f)),
-            new("uIndirectShadowRange", new FloatUniform(0.40f)),
+            new("uIblSpecAttenuation", new FloatUniform(iblSpecAttenuation)),
+            new("uNormalMapFlipY", new FloatUniform(normalMapFlipY)),
+            new("uIblDiffuseBoost", new FloatUniform(iblDiffuseBoost)),
+            new("uMetalFloor", new FloatUniform(metalFloor)),
+            new("uIndirectShadowBase", new FloatUniform(indirectShadowBase)),
+            new("uIndirectShadowRange", new FloatUniform(indirectShadowRange)),
             new("uHorizonFadeStrength", new FloatUniform(0.85f)),
             new("uHorizonFadeStart", new FloatUniform(0.15f)),
             new("uSkyTint", new Vector3Uniform(Vector3.One)),
@@ -673,7 +803,7 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             SunDirection = sunDirection,
             SunColor = new Vector3(1.0f, 0.94f, 0.82f) * sunStrength,
             Environment = envProbe,
-            Cascades = new CascadeShadowState(cascadeLightVPs, splitFloats, false),
+            Cascades = new CascadeShadowState(cascadeLightVPs, splitFloats, visualizeCascades),
             Exposure = exposure,
             ExtraUniforms = demoTuning,
         };
@@ -688,10 +818,12 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
                 ClearDepth: true),
             pass =>
             {
+                int drawn = 0;
                 foreach (var sceneInstance in AllScenes())
                 {
-                    pbrRenderer.DrawScene(pass, sceneInstance, sharedUniforms);
+                    drawn += pbrRenderer.DrawScene(pass, sceneInstance, sharedUniforms, cameraFrustum, cullMargin);
                 }
+                lastOpaqueDrawn = drawn;
                 pass.DrawMesh(skyMesh, skyboxMaterial,
                     perDrawUniforms: skyUniforms, perDrawTextures: null);
             });
@@ -839,44 +971,72 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         Vector3 sunDir, Matrix4x4 view, Matrix4x4 invViewProj,
         float nearSplit, float farSplit, int shadowMapSize)
     {
+        // Compute the 8 corners of the CAMERA FRUSTUM SLICE [nearSplit, farSplit]
+        // in view space, then transform to world. The old code used NDC z=[-1,1]
+        // (full camera frustum, near=0.1 to far=500) for every cascade -- all
+        // three cascades landed on the same huge box, blowing precision and
+        // stamping phantom shadows everywhere. Slicing properly gives each
+        // cascade a snug ortho sized to its depth range.
+        //
+        // We don't have aspect / FOV directly but can recover (right, top) at
+        // a known near distance by unprojecting an NDC corner. View-space corner
+        // = invView * (invProj * NDC); we get there in one step via invViewProj
+        // then re-projecting through view.
+        var nearNdc = TransformVec4(invViewProj, new Vector4(1.0f, 1.0f, -1.0f, 1.0f));
+        var nearWorld = new Vector3(nearNdc.X, nearNdc.Y, nearNdc.Z) / nearNdc.W;
+        var nearView = GraphicsMatrices.TransformPoint(view, nearWorld);
+        var camNear = -nearView.Z; // view-space z is negative going forward
+        var tanHalfFovX = nearView.X / camNear;
+        var tanHalfFovY = nearView.Y / camNear;
+        // Cascade slice corners in view space (z negative going forward).
+        var nrx = nearSplit * tanHalfFovX;
+        var nry = nearSplit * tanHalfFovY;
+        var frx = farSplit  * tanHalfFovX;
+        var fry = farSplit  * tanHalfFovY;
+        var sliceView = new Vector3[8]
+        {
+            new(-nrx, -nry, -nearSplit), new( nrx, -nry, -nearSplit),
+            new(-nrx,  nry, -nearSplit), new( nrx,  nry, -nearSplit),
+            new(-frx, -fry, -farSplit),  new( frx, -fry, -farSplit),
+            new(-frx,  fry, -farSplit),  new( frx,  fry, -farSplit),
+        };
+        Matrix4x4.Invert(view, out var invView);
         var corners = new Vector3[8];
-        float[] ndcZ = { -1.0f, 1.0f };
-        var idx = 0;
-        for (var x = -1.0f; x <= 1.0f; x += 2.0f)
-            for (var y = -1.0f; y <= 1.0f; y += 2.0f)
-                for (var k = 0; k < 2; k++)
-                {
-                    var ndc = new Vector4(x, y, ndcZ[k], 1.0f);
-                    var w = Vector4.Transform(ndc, invViewProj);
-                    corners[idx++] = new Vector3(w.X, w.Y, w.Z) / w.W;
-                }
+        for (var i = 0; i < 8; i++) corners[i] = GraphicsMatrices.TransformPoint(invView, sliceView[i]);
+        // Centroid + bounding sphere of the slice. Sphere bound is loose vs an
+        // OBB but keeps the shadow box rotation-invariant which is what makes
+        // the texel snap work.
         var center = Vector3.Zero;
         for (var i = 0; i < 8; i++) center += corners[i];
         center /= 8.0f;
-        // Clamp the view-space frustum to the cascade's depth slice.
-        // Approximation: just take the world-space sphere bound of all 8 corners.
         float radius = 0;
         for (var i = 0; i < 8; i++) radius = MathF.Max(radius, Vector3.Distance(corners[i], center));
+        radius = MathF.Ceiling(radius);
         // Snap centre to texel grid in light space.
         var L = Vector3.Normalize(-sunDir);
         var up = MathF.Abs(L.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
         var lightView = GraphicsMatrices.CreateLookAt(center + L * (shadowSunDistance + radius), center, up);
         var texelSize = (2.0f * radius) / shadowMapSize;
-        // Project centre to light space, snap, project back.
-        var clip = Vector4.Transform(new Vector4(center, 1), lightView);
-        var snappedClip = new Vector4(
-            MathF.Round(clip.X / texelSize) * texelSize,
-            MathF.Round(clip.Y / texelSize) * texelSize,
-            clip.Z, clip.W);
+        var centreLight = GraphicsMatrices.TransformPoint(lightView, center);
+        centreLight.X = MathF.Round(centreLight.X / texelSize) * texelSize;
+        centreLight.Y = MathF.Round(centreLight.Y / texelSize) * texelSize;
         Matrix4x4.Invert(lightView, out var invLightView);
-        var snappedCentre = Vector4.Transform(snappedClip, invLightView);
-        var snappedC3 = new Vector3(snappedCentre.X, snappedCentre.Y, snappedCentre.Z);
+        var snappedC3 = GraphicsMatrices.TransformPoint(invLightView, centreLight);
         var lightView2 = GraphicsMatrices.CreateLookAt(snappedC3 + L * (shadowSunDistance + radius), snappedC3, up);
         var projection = GraphicsMatrices.CreateOrthographicOffCenter(
             -radius, radius, -radius, radius,
             0.0f, 2.0f * (shadowSunDistance + radius));
         return projection * lightView2;
     }
+
+    // Vector4 transform for column-vector matrices. System.Numerics's built-in
+    // Vector4.Transform assumes row-vector storage and would silently drop the
+    // M14/M24/M34 translation column on a Blix matrix.
+    private static Vector4 TransformVec4(Matrix4x4 m, Vector4 v) => new(
+        m.M11 * v.X + m.M12 * v.Y + m.M13 * v.Z + m.M14 * v.W,
+        m.M21 * v.X + m.M22 * v.Y + m.M23 * v.Z + m.M24 * v.W,
+        m.M31 * v.X + m.M32 * v.Y + m.M33 * v.Z + m.M34 * v.W,
+        m.M41 * v.X + m.M42 * v.Y + m.M43 * v.Z + m.M44 * v.W);
 
     private static Matrix4x4 InvertOrIdentity(Matrix4x4 m)
         => Matrix4x4.Invert(m, out var inv) ? inv : Matrix4x4.Identity;
@@ -941,6 +1101,12 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             debug.Values.Value("Submeshes (curtains)", curtainsScene?.Submeshes.Count ?? 0);
             debug.Values.Value("Submeshes (ivy)", ivyScene?.Submeshes.Count ?? 0);
             debug.Values.Value("Submeshes (trees)", treesScene?.Submeshes.Count ?? 0);
+            int totalSubs = (mainScene?.Submeshes.Count ?? 0)
+                + (curtainsScene?.Submeshes.Count ?? 0)
+                + (ivyScene?.Submeshes.Count ?? 0)
+                + (treesScene?.Submeshes.Count ?? 0);
+            debug.Values.Value("Drawn opaque", $"{lastOpaqueDrawn} / {totalSubs}");
+            debug.Values.Value("Drawn cascade", $"{lastCascadeDrawn} / {totalSubs * CascadeCount}");
             debug.Values.Value("Uploads pending", uploader.PendingCount);
             debug.Values.Value("Uploads done", uploader.UploadedCount);
             debug.Values.Value("Drain ms", $"{uploader.LastDrainMillis:0.00}");
@@ -994,6 +1160,64 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         using (debug.Scope("Debug"))
         {
             debugView = debug.Controls.Enum("View", debugView, DebugViewNames);
+            visualizeCascades = debug.Controls.Toggle("Visualize cascades", visualizeCascades);
+        }
+
+        using (debug.Scope("PBR tuning"))
+        {
+            // uMetalFloor: floor on indirect specular for metals. Default 0.18
+            // produces near-black metals with dark-albedo authoring (Sponza
+            // Modern metals are sRGB ~56 -> linear ~0.04). Crank to 1.0+ to
+            // make metals visible; physically less correct above ~1.0 but
+            // recovers asset visual.
+            metalFloor = debug.Controls.Float("Metal floor", metalFloor, 0.0f, 4.0f);
+            indirectShadowBase = debug.Controls.Float("Indirect shadow base", indirectShadowBase, 0.0f, 1.0f);
+            indirectShadowRange = debug.Controls.Float("Indirect shadow range", indirectShadowRange, 0.0f, 1.0f);
+            iblDiffuseBoost = debug.Controls.Float("IBL diffuse boost", iblDiffuseBoost, 0.0f, 4.0f);
+            iblSpecAttenuation = debug.Controls.Float("IBL spec attenuation", iblSpecAttenuation, 0.0f, 1.0f);
+            // Slider so you can move between +1 (GL/glTF Y up) and -1 (DX Y
+            // down) live. If bumps look inverted (highlight on wrong side
+            // of crevices) flipping this to -1 fixes it.
+            normalMapFlipY = debug.Controls.Float("Normal Y (+1 GL / -1 DX)", normalMapFlipY, -1.0f, 1.0f);
+        }
+
+        using (debug.Scope("Camera"))
+        {
+            // Live FoV / near / far for debugging projection issues. cameraFov
+            // is already wired separately for the input handler's zoom; tying
+            // it here too keeps both in sync.
+            cameraFov = debug.Controls.Float("FoV (rad)", cameraFov, 0.3f, 2.5f);
+            cameraNear = debug.Controls.Float("Near", cameraNear, 0.01f, 5.0f);
+            cameraFar = debug.Controls.Float("Far", cameraFar, 50.0f, 2000.0f);
+            debug.Values.Value("Position", camera.Transform.Position);
+        }
+
+        using (debug.Scope("Cascades + culling"))
+        {
+            // A/B test: flip frustum culling off to see if missing geometry
+            // reappears. If it does, my cull logic is excluding something it
+            // shouldn't; if not, the bug is downstream (back-face, depth, etc.).
+            enableFrustumCulling = debug.Controls.Toggle("Frustum cull", enableFrustumCulling);
+            // Inflate submesh AABBs by this many world units before testing.
+            // Diagnostic: if a small (~0.5m) margin makes "missing geometry"
+            // reappear, our AABBs or the Gribb-Hartmann planes have a small
+            // numerical offset that we should hunt down.
+            cullMargin = debug.Controls.Float("Cull margin (m)", cullMargin, 0.0f, 10.0f);
+            // Toggling this drives OpenGLGraphicsDevice.DebugForceDisableCullFace
+            // -- when off, the GL backend ignores every pipeline's authored
+            // CullMode and runs with cull-face disabled. Lets us see whether
+            // missing geometry is back-faces (single-sided geometry seen from
+            // the wrong side) without rebuilding any pipelines.
+            enableBackFaceCulling = debug.Controls.Toggle("Back-face cull", enableBackFaceCulling);
+            Blix.Graphics.OpenGL.OpenGLGraphicsDevice.DebugForceDisableCullFace = !enableBackFaceCulling;
+            // Cascade splits along camera forward (distance from camera in
+            // world units). [0]=near, [N]=max shadow distance. Bands must
+            // stay monotonic ([i+1] > [i]); we clamp to enforce that.
+            cascadeSplits[0] = debug.Controls.Float("Split 0 (near)", cascadeSplits[0], 0.01f, 10.0f);
+            cascadeSplits[1] = debug.Controls.Float("Split 1", cascadeSplits[1], cascadeSplits[0] + 0.1f, 50.0f);
+            cascadeSplits[2] = debug.Controls.Float("Split 2", cascadeSplits[2], cascadeSplits[1] + 0.1f, 150.0f);
+            cascadeSplits[3] = debug.Controls.Float("Split 3 (max)", cascadeSplits[3], cascadeSplits[2] + 0.1f, 500.0f);
+            debug.Values.Value("Drawn opaque", $"{lastOpaqueDrawn} / {(mainScene?.Submeshes.Count ?? 0) + (curtainsScene?.Submeshes.Count ?? 0) + (ivyScene?.Submeshes.Count ?? 0) + (treesScene?.Submeshes.Count ?? 0)}");
         }
     }
 }

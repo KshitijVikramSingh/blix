@@ -77,6 +77,19 @@ pass.DrawMesh(cubeMesh, sceneMaterial, perDrawUniforms:
 
 The extension on `RenderPassBuilder` (defined in `Blix.Render`). Merges material state with per-draw overrides — material first, then per-draw. The same uniform set twice means per-draw wins (`glUniform` call order: second wins, which gives intuitive precedence). Texture bindings follow the same rule.
 
+### PbrSceneRenderer
+
+A small helper that walks a `GltfSceneInstance` and issues `DrawMesh` per submesh, optionally with a conservative AABB frustum cull.
+
+```csharp
+pbrRenderer.DrawScene(pass, sceneInstance, sharedUniforms, cullFrustum: cameraFrustum, cullMargin: 0.0f);
+pbrRenderer.DrawCascadeShadow(pass, sceneInstance, cascadeVP, cullFrustum: cascadeFrustum, cullMargin: 0.0f);
+```
+
+`Frustum.FromViewProjection(proj * view)` extracts six planes via Gribb-Hartmann (`row4 ± row{1,2,3}` of the column-vector matrix). `Intersects(Bounds3, margin)` does the p-vertex test with optional outward expansion; the margin escape hatch is there for cases where bounds are slightly under-tight or where author-side authoring quirks land an AABB just outside what the frustum strictly contains.
+
+`DrawCascadeShadow` and `DrawCubeShadowFace` also pull each submesh's albedo binding + base-color factor + alpha cutoff through `perDrawUniforms` so a single shared shadow material can serve every casting material — required for foliage / fabric to cast leaf-shape shadows (see `Alpha-cutout shadow casters` below).
+
 ### SpriteBatch + Font + DebugDraw
 
 Covered below in their own sections. All three are `Blix.Render` types built on top of `IGraphicsDevice`.
@@ -338,7 +351,9 @@ Plus the convenience `HdrSunFinder.FindSunDirection(hdrImage)` — scans the upp
 
 ### sRGB and linear space
 
-`uTexture` and `uEnvMap` samples are decoded from sRGB to linear before lighting math. All lighting runs in linear space. The final composite/tone-map shader does linear → sRGB encode for display.
+All lighting runs in linear space. BaseColor and Emissive textures are uploaded with `TextureFormat.Rgba8Srgb` (mapped to `GL_SRGB8_ALPHA8` on the GL side), and compressed sRGB variants use `COMPRESSED_SRGB_ALPHA_BPTC_UNORM` — the GPU does the sRGB → linear conversion **before** filtering, so bilinear / trilinear / mip-pyramid averaging happens in linear space (the physically correct behaviour). The fragment shaders treat the sampler output as already-linear; there's no per-fragment `pow(2.2)`. Normal, MetallicRoughness and Occlusion textures stay linear (`Rgba8` / `Bc7Unorm`) per glTF spec. The final composite/tone-map shader does linear → sRGB encode for display.
+
+`GltfSceneInstance.BindMaterialTexture` promotes `Rgba8 → Rgba8Srgb` automatically when the slot is `"albedo"` or `"emissive"` so callers don't have to think about it.
 
 ### Tangent-space normal mapping
 
@@ -385,6 +400,12 @@ Result: shadows close to their occluder are sharp; shadows farther away widen an
 Point cubemap shadows use a direction-space PCSS analog: per-fragment tangent basis perpendicular to the light-to-fragment direction, Poisson disk offsets projected onto that tangent plane, blocker search + variable-kernel PCF.
 
 Back-facing fragments (`dot(N, L) ≤ 0`) skip the shadow lookup and use `shadow = 1`. Reason: with front-face culling in the shadow pass, the shadow map records the back-of-geometry from the light's POV. A back-facing fragment sits *at* that recorded depth, so the depth compare is borderline-stable and produces noise. Back-faces can't be cast-shadowed anyway, so the gate is physically correct and removes the noise source.
+
+### Alpha-cutout shadow casters
+
+`shadow.frag` and `shadow_cube.frag` sample the casting material's albedo and `discard` fragments below `uAlphaCutoff` — so MASK-mode foliage (cypress leaves, etc.) writes leaf-shape gaps into the shadow map instead of a solid bounding rectangle. Volumetric fog god-rays sample these maps too, so the sun-streak shape passes through individual leaf gaps. Opaque materials pass `uAlphaCutoff = 0` and skip the texture sample entirely.
+
+`PbrSceneRenderer.DrawCascadeShadow` and `DrawCubeShadowFace` carry the per-submesh `uAlbedo` binding + `uBaseColorFactor` + `uAlphaCutoff` through `perDrawUniforms` / `perDrawTextures` so a single shared shadow material can serve every primitive.
 
 ### Limits
 

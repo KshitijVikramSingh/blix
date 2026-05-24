@@ -82,6 +82,15 @@ uniform sampler2D uOcclusion;
 uniform float     uHasOcclusionMap;
 uniform float     uOcclusionStrength;
 
+// Constant ambient floor added to indirect diffuse, scaled by albedo and
+// gated to dielectrics. Compensates for the missing GI/light-probe stack
+// -- the IBL probe captures sky only, not wall-bounce / ground-bounce, so
+// shadowed interior surfaces with low sky-visibility crush to black
+// without this. Real engines solve this with baked GI or runtime probes;
+// uAmbientFloor is the cheap stand-in. Set to 0 to disable (recovers
+// strict PBR with no GI approximation).
+uniform float     uAmbientFloor;
+
 uniform vec3  uCameraPosition;
 uniform vec3  uSunDirection;
 uniform vec3  uSunColor;
@@ -340,7 +349,10 @@ void main()
 
     vec4 albedoSample = texture(uAlbedo, uv) * uBaseColorFactor;
     if (uAlphaCutoff > 0.0 && albedoSample.a < uAlphaCutoff) discard;
-    vec3 albedo = pow(albedoSample.rgb, vec3(2.2));
+    // uAlbedo is uploaded with GL_SRGB8_ALPHA8 internal format (see
+    // GltfSceneInstance.BindMaterialTexture sRGB promotion), so the sampler
+    // returns linear values after sRGB-aware filtering. No pow(2.2) needed.
+    vec3 albedo = albedoSample.rgb;
 
     vec3 mrSample = texture(uMetallicRoughness, uv).rgb;
     float metallic = mix(uMetallicFactor, mrSample.b * uMetallicFactor, uHasMetallicMap);
@@ -444,7 +456,12 @@ void main()
     vec3 kD_ibl = (vec3(1.0) - F_ibl) * (1.0 - metallic);
 
     vec3 irradiance = sampleEnvIrradiance(N) * uSkyTint;
-    vec3 indirectDiffuse = kD_ibl * albedo * irradiance;
+    // Lambertian BRDF is 1/PI; the irradiance bake stores raw E (with the
+    // canonical *PI recovery after cos-weighted MC), so the Lambertian
+    // diffuse outgoing radiance is (albedo/PI) * E. Earlier shader was
+    // missing the /PI, leaving indirect diffuse PI x too bright -- which
+    // demos compensated for by dialing exposure down or iblDiffuseBoost up.
+    vec3 indirectDiffuse = kD_ibl * albedo * irradiance / PI;
 
     // --- Split-sum specular IBL (Karis 2014) ----------------------------
     // prefilteredColor = GGX-convolved env at this roughness;
@@ -472,13 +489,26 @@ void main()
     indirectDiffuse *= uIblDiffuseBoost;
 
     float indirectMix = uIndirectShadowBase + uIndirectShadowRange * shadow;
-    // Baked AO modulates the indirect (ambient) term in full per glTF spec.
-    // Crevices that occlude the sky stay dark even when no direct light
-    // reaches them; flat surfaces sample ao ~ 1 and are unaffected.
-    vec3 indirect = (indirectDiffuse + indirectSpecular) * indirectMix * ao;
+    // Baked AO modulates the indirect DIFFUSE term per glTF spec -- diffuse
+    // IBL is a hemisphere integral, so per-fragment occlusion of incoming
+    // ambient light is the right physical model. Indirect SPECULAR is a
+    // single-direction sample from the GGX-prefiltered probe; AO is the
+    // wrong occlusion model there (a polished metal in a crevice should
+    // still reflect what's in front of it, not be blacked out). The
+    // physically right answer is Lagarde's specular-occlusion approximation;
+    // leaving specular un-occluded is the cheap stand-in until that lands.
+    vec3 indirect = (indirectDiffuse * ao + indirectSpecular) * indirectMix;
 
-    vec3 emissive = pow(texture(uEmissive, uv).rgb, vec3(2.2))
-        * uEmissiveFactor * uEmissiveBoost;
+    // Dielectric ambient floor. Added AFTER indirectMix so shadowed
+    // surfaces (where indirectMix shrinks indirect) still receive the
+    // full floor. Symmetric in spirit with the metalFloor term above
+    // -- metals get a Fresnel-shaped floor on indirect specular, non-
+    // metals get an albedo-shaped floor on indirect diffuse. Both are
+    // explicit "GI would go here" hacks.
+    indirect += uAmbientFloor * albedo * (1.0 - metallic);
+
+    // uEmissive is GL_SRGB8_ALPHA8 too -- sampler returns linear values.
+    vec3 emissive = texture(uEmissive, uv).rgb * uEmissiveFactor * uEmissiveBoost;
 
     // Output linear HDR. The composite pass downstream applies ACES + gamma
     // to the combined HDR scene + bloom buffer. uExposure stays here so
