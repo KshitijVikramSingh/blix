@@ -71,9 +71,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         // Instead, we expose the matrix on GltfModel so the renderer composes
         // it into the model matrix at draw time:
         //    uModel = userTransform.ToMatrix() * meshNodeTransform
-        // The transpose is the standard row-vector (SharpGLTF / System.Numerics)
-        // to column-vector (engine) bridge — same as IBM extraction below.
-        var meshNodeTransform = Matrix4x4.Transpose(primarySkinNode.WorldMatrix);
+        // F-016: engine row-vector form now matches SharpGLTF — no transpose.
+        var meshNodeTransform = primarySkinNode.WorldMatrix;
 
         // Collect every skinned-mesh node that references the primary skin.
         // The typical case is one node (CesiumMan, Fox); multi-mesh characters
@@ -435,8 +434,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             var joint = joints[oldIdx];
             var ibm = ibmList[oldIdx];
             var parentNew = parentOld[oldIdx] >= 0 ? oldToNew[parentOld[oldIdx]] : -1;
-            var ibp = Matrix4x4.Transpose(ibm);
-            bones[newIdx] = new Bone(joint.Name ?? $"bone_{newIdx}", parentNew, ibp);
+            // F-016: SharpGLTF IBM is already row-vector form (matching the
+            // engine convention). Pass through without transpose.
+            bones[newIdx] = new Bone(joint.Name ?? $"bone_{newIdx}", parentNew, ibm);
         }
         return (bones, oldToNew);
     }

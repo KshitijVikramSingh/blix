@@ -32,17 +32,15 @@ public readonly record struct BoneTransform(
     //
     // Convention gotcha: System.Numerics.Matrix4x4.Decompose assumes row-vector
     // form (translation in M41/M42/M43, rotation×scale stored row-wise). Our
-    // engine matrices are column-vector form (translation in M14/M24/M34,
-    // rotation×scale stored column-wise). Transposing the input maps our layout
-    // into the layout Decompose expects: column-vector translation → row-vector
-    // translation, column-vector rotation columns → row-vector rotation rows.
+    // F-016: engine matrices are row-vector form, matching System.Numerics's
+    // Matrix4x4.Decompose. No transpose needed — pass through directly.
     //
     // Degenerate inputs that Decompose can't handle (zero scale, non-affine,
     // perspective row) fall back to Identity rather than throwing — bad input
     // shouldn't crash construction.
     public static BoneTransform FromMatrix(Matrix4x4 m)
     {
-        return Matrix4x4.Decompose(Matrix4x4.Transpose(m), out var scale, out var rotation, out var translation)
+        return Matrix4x4.Decompose(m, out var scale, out var rotation, out var translation)
             ? new BoneTransform(translation, rotation, scale)
             : Identity;
     }

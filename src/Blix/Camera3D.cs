@@ -24,7 +24,7 @@ public sealed class Camera3D
     public Matrix4x4 GetProjection(float aspectRatio) =>
         GraphicsMatrices.CreatePerspective(VerticalFieldOfView, aspectRatio, NearPlane, FarPlane);
 
-    public Matrix4x4 GetViewProjection(float aspectRatio) => GetProjection(aspectRatio) * GetView();
+    public Matrix4x4 GetViewProjection(float aspectRatio) => GetView() * GetProjection(aspectRatio);
 
     // Build a world-space Ray from a screen-pixel position. Screen coordinates use
     // top-left origin (screen Y grows downward, the OpenTK / window-system convention);
@@ -59,25 +59,14 @@ public sealed class Camera3D
             return new Ray(Transform.Position, Transform.Forward);
         }
 
-        var nearH = TransformColumnVector4(inv, new Vector4(ndcX, ndcY, -1.0f, 1.0f));
-        var farH  = TransformColumnVector4(inv, new Vector4(ndcX, ndcY,  1.0f, 1.0f));
+        // F-016: engine row-vector form. Vector4.Transform applies v_row * M
+        // which is exactly what we need for unprojecting NDC through inv(viewProj).
+        var nearH = Vector4.Transform(new Vector4(ndcX, ndcY, -1.0f, 1.0f), inv);
+        var farH  = Vector4.Transform(new Vector4(ndcX, ndcY,  1.0f, 1.0f), inv);
 
         var near = new Vector3(nearH.X / nearH.W, nearH.Y / nearH.W, nearH.Z / nearH.W);
         var far  = new Vector3(farH.X  / farH.W,  farH.Y  / farH.W,  farH.Z  / farH.W);
 
         return new Ray(near, Vector3.Normalize(far - near));
-    }
-
-    // Vector4 transform under column-vector convention. Mirrors GraphicsMatrices'
-    // TransformPoint / TransformDirection but for w-bearing homogeneous coords
-    // (System.Numerics Vector4.Transform uses row-vector convention and would
-    // ignore the M14/M24/M34 translation column).
-    private static Vector4 TransformColumnVector4(Matrix4x4 m, Vector4 v)
-    {
-        return new Vector4(
-            m.M11 * v.X + m.M12 * v.Y + m.M13 * v.Z + m.M14 * v.W,
-            m.M21 * v.X + m.M22 * v.Y + m.M23 * v.Z + m.M24 * v.W,
-            m.M31 * v.X + m.M32 * v.Y + m.M33 * v.Z + m.M34 * v.W,
-            m.M41 * v.X + m.M42 * v.Y + m.M43 * v.Z + m.M44 * v.W);
     }
 }

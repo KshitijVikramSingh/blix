@@ -93,8 +93,14 @@ public sealed partial class OpenGLGraphicsDevice
         switch (value)
         {
             case Matrix4x4Uniform matrix:
-                WriteColumnMajor(matrix.Value, matrixUploadBuffer);
-                GL.UniformMatrix4(location, 1, transpose: false, matrixUploadBuffer);
+                // Engine convention is .NET row-vector form (F-016). Direct
+                // memcpy of .NET's row-major bytes + transpose:true tells GL to
+                // store internally as column-major — which means GLSL's
+                // column-major reading reconstructs the column-vector form
+                // that `M * v_col` expects. Same logic Vulkan uses (no
+                // manual transpose either, just direct memcpy).
+                WriteMatrixBytes(matrix.Value, matrixUploadBuffer);
+                GL.UniformMatrix4(location, 1, transpose: true, matrixUploadBuffer);
                 break;
 
             case Matrix4x4ArrayUniform array:
@@ -107,9 +113,9 @@ public sealed partial class OpenGLGraphicsDevice
                 }
                 for (var i = 0; i < array.Value.Length; i++)
                 {
-                    WriteColumnMajor(array.Value[i], matrixUploadBuffer.AsSpan(i * 16, 16));
+                    WriteMatrixBytes(array.Value[i], matrixUploadBuffer.AsSpan(i * 16, 16));
                 }
-                GL.UniformMatrix4(location, array.Value.Length, transpose: false, matrixUploadBuffer);
+                GL.UniformMatrix4(location, array.Value.Length, transpose: true, matrixUploadBuffer);
                 break;
 
             case Vector4Uniform v4:
@@ -196,11 +202,15 @@ public sealed partial class OpenGLGraphicsDevice
         }
     }
 
-    private static void WriteColumnMajor(System.Numerics.Matrix4x4 m, Span<float> dst)
+    // Copies .NET Matrix4x4's raw row-major bytes into the upload buffer
+    // unchanged. Combined with GL.UniformMatrix4(transpose: true), GL
+    // interprets the bytes as row-major and stores them as column-major
+    // internally — producing the column-vector form GLSL's `M * v_col`
+    // expects. Symmetric with the Vulkan backend's direct UBO memcpy.
+    private static void WriteMatrixBytes(System.Numerics.Matrix4x4 m, Span<float> dst)
     {
-        dst[0] = m.M11; dst[1] = m.M21; dst[2] = m.M31; dst[3] = m.M41;
-        dst[4] = m.M12; dst[5] = m.M22; dst[6] = m.M32; dst[7] = m.M42;
-        dst[8] = m.M13; dst[9] = m.M23; dst[10] = m.M33; dst[11] = m.M43;
-        dst[12] = m.M14; dst[13] = m.M24; dst[14] = m.M34; dst[15] = m.M44;
+        var src = System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref m, 1);
+        var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<System.Numerics.Matrix4x4, float>(src);
+        floats.CopyTo(dst);
     }
 }

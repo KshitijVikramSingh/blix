@@ -19,18 +19,20 @@ public sealed class Camera2D
 
     public Matrix4x4 GetView()
     {
-        // V = R_inv * T_inv in column-vector convention. 2D rotation around Z: positive
-        // angle rotates +X toward +Y, so the view rotation uses -Rotation.
+        // F-016: row-vector convention. V = T_inv * R_inv, applied as v_row * V
+        // translates first then rotates. 2D rotation around Z: positive angle
+        // rotates +X toward +Y, so the view rotation uses -Rotation.
+        // Translation lives in last row (M41, M42).
         var c = MathF.Cos(-Transform.Rotation);
         var s = MathF.Sin(-Transform.Rotation);
         var tx = -Transform.Position.X;
         var ty = -Transform.Position.Y;
 
         return new Matrix4x4(
-            c, -s, 0.0f, c * tx + (-s) * ty,
-            s, c, 0.0f, s * tx + c * ty,
-            0.0f, 0.0f, 1.0f, 0.0f,
-            0.0f, 0.0f, 0.0f, 1.0f);
+            c,                       s,                       0.0f, 0.0f,
+            -s,                      c,                       0.0f, 0.0f,
+            0.0f,                    0.0f,                    1.0f, 0.0f,
+            tx * c + ty * (-s),      tx * s + ty * c,         0.0f, 1.0f);
     }
 
     public Matrix4x4 GetProjection(float viewportWidth, float viewportHeight)
@@ -58,5 +60,5 @@ public sealed class Camera2D
     }
 
     public Matrix4x4 GetViewProjection(float viewportWidth, float viewportHeight) =>
-        GetProjection(viewportWidth, viewportHeight) * GetView();
+        GetView() * GetProjection(viewportWidth, viewportHeight);
 }

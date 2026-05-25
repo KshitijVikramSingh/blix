@@ -2,18 +2,28 @@ using System.Numerics;
 
 namespace Blix.Graphics;
 
+// Engine convention: .NET row-vector form throughout (F-016). Matrices use
+// System.Numerics's native layout, where translation lives in M41/M42/M43,
+// Vector4.Transform applies as v_row * M, and `M = A * B * C` composed
+// left-to-right applies A first, B second, C third.
+//
+// Backends upload .NET row-major bytes directly to UBO/uniform storage.
+// GLSL's std140 column-major reading of those bytes produces the TRANSPOSE
+// (column-vector form) in shader-space — that's the correct form for
+// GLSL's `M * v_col` multiplication. Net effect: same transformation,
+// no manual transposes anywhere.
 public static class GraphicsMatrices
 {
     public static Matrix4x4 CreateModel(Vector3 position, Quaternion rotation, Vector3 scale)
     {
-        // Column-vector composition: T * R * S applied to a local-space vertex
-        // performs scale first, then rotation, then translation - the standard
-        // model-matrix interpretation. Swapping the order silently breaks any
-        // model that combines non-unit scale with non-zero translation.
+        // Row-vector composition: v_row * (S * R * T) applies S first, then R,
+        // then T — standard model-matrix interpretation. Reversed from the
+        // column-vector convention's `T * R * S` because row-vector
+        // multiplication applies the LEFTMOST factor first.
         return
-            CreateTranslation(position) *
-            CreateRotation(rotation) *
-            CreateScale(scale);
+            Matrix4x4.CreateScale(scale) *
+            Matrix4x4.CreateFromQuaternion(rotation) *
+            Matrix4x4.CreateTranslation(position);
     }
 
     public static Matrix4x4 CreateModelCentered(
@@ -27,11 +37,14 @@ public static class GraphicsMatrices
         // center lands exactly at `position` regardless of where the asset was
         // authored relative to its origin. Use this for OBJ imports where the source
         // wasn't centered (e.g. Suzanne loaded with bounds center at world ~(-2.5, 1.25, 4.1)).
+        //
+        // Row-vector convention: leftmost factor applied first. Order:
+        // center-shift, then scale, then rotate, then translate to world.
         return
-            CreateTranslation(position) *
-            CreateRotation(rotation) *
-            CreateScale(scale) *
-            CreateTranslation(-modelCenter);
+            Matrix4x4.CreateTranslation(-modelCenter) *
+            Matrix4x4.CreateScale(scale) *
+            Matrix4x4.CreateFromQuaternion(rotation) *
+            Matrix4x4.CreateTranslation(position);
     }
 
     public static Matrix4x4 CreateNormalMatrix(Matrix4x4 model)
@@ -39,35 +52,42 @@ public static class GraphicsMatrices
         // Normals transform by the inverse-transpose of the model matrix; this is
         // invariant to non-uniform scale, where mat3(model) would skew normals.
         // Returns the full 4x4 — shaders extract the relevant 3x3 via mat3(...).
+        //
+        // Row-vector convention (F-016): the .NET model matrix is the row-vector
+        // form. After upload (direct memcpy + GLSL column-major reading), GLSL
+        // sees the TRANSPOSE = column-vector form. So GLSL's column-vector
+        // M_glsl = M_dotnet^T. For the normal transform GLSL needs M_glsl^-T
+        // = (M_dotnet^T)^-T = M_dotnet^-1. So we just invert — no explicit
+        // Transpose needed in .NET space; the upload-time reinterpretation
+        // provides it.
         if (!Matrix4x4.Invert(model, out var inverse))
         {
             return Matrix4x4.Identity;
         }
-
-        return Matrix4x4.Transpose(inverse);
+        return inverse;
     }
 
     public static Matrix4x4 CreateView(Vector3 position, Quaternion rotation)
     {
+        // Row-vector view: v_row * T * R = first translate (so camera at origin),
+        // then rotate to canonical orientation. Reversed from column-vector
+        // form's `R * T` composition.
         var inverseRotation = Quaternion.Inverse(rotation);
         var inversePosition = -position;
-
         return
-            CreateRotation(inverseRotation) *
-            CreateTranslation(inversePosition);
+            Matrix4x4.CreateTranslation(inversePosition) *
+            Matrix4x4.CreateFromQuaternion(inverseRotation);
     }
 
     public static Matrix4x4 CreateLookAt(Vector3 eye, Vector3 target, Vector3 up)
     {
-        var forward = Vector3.Normalize(target - eye);
-        var right = Vector3.Normalize(Vector3.Cross(forward, up));
-        var actualUp = Vector3.Cross(right, forward);
-
-        return new Matrix4x4(
-            right.X, right.Y, right.Z, -Vector3.Dot(right, eye),
-            actualUp.X, actualUp.Y, actualUp.Z, -Vector3.Dot(actualUp, eye),
-            -forward.X, -forward.Y, -forward.Z, Vector3.Dot(forward, eye),
-            0.0f, 0.0f, 0.0f, 1.0f);
+        // Equivalent to System.Numerics.Matrix4x4.CreateLookAt — produces a
+        // row-vector view matrix where v_row * view = camera-local position.
+        // System.Numerics uses (cameraPosition - cameraTarget) as the z-axis
+        // (camera-backward) which gives standard right-handed view space:
+        // camera looks down -Z in view space; origin in front of camera has
+        // negative view-z.
+        return Matrix4x4.CreateLookAt(eye, target, up);
     }
 
     // Off-centre orthographic projection. Useful for screen-space UI overlays where
@@ -95,11 +115,14 @@ public static class GraphicsMatrices
         var tb = top - bottom;
         var fn = farPlane - nearPlane;
 
+        // Row-vector orthographic: translation lives in last row (M41-M43).
+        // Equivalent to transposing the column-vector form (translation in
+        // last column).
         return new Matrix4x4(
-            2.0f / rl, 0.0f, 0.0f, -(right + left) / rl,
-            0.0f, 2.0f / tb, 0.0f, -(top + bottom) / tb,
-            0.0f, 0.0f, -2.0f / fn, -(farPlane + nearPlane) / fn,
-            0.0f, 0.0f, 0.0f, 1.0f);
+            2.0f / rl,                0.0f,                     0.0f,                            0.0f,
+            0.0f,                     2.0f / tb,                0.0f,                            0.0f,
+            0.0f,                     0.0f,                     -2.0f / fn,                      0.0f,
+            -(right + left) / rl,     -(top + bottom) / tb,     -(farPlane + nearPlane) / fn,    1.0f);
     }
 
     public static Matrix4x4 CreateOrthographic(float width, float height, float nearPlane, float farPlane)
@@ -121,11 +144,12 @@ public static class GraphicsMatrices
 
         var depth = farPlane - nearPlane;
 
+        // Row-vector orthographic centered at origin: z-translation lives in last row (M43).
         return new Matrix4x4(
-            2.0f / width, 0.0f, 0.0f, 0.0f,
-            0.0f, 2.0f / height, 0.0f, 0.0f,
-            0.0f, 0.0f, -2.0f / depth, -(farPlane + nearPlane) / depth,
-            0.0f, 0.0f, 0.0f, 1.0f);
+            2.0f / width, 0.0f,          0.0f,                          0.0f,
+            0.0f,         2.0f / height, 0.0f,                          0.0f,
+            0.0f,         0.0f,          -2.0f / depth,                 0.0f,
+            0.0f,         0.0f,          -(farPlane + nearPlane) / depth, 1.0f);
     }
 
     public static Matrix4x4 CreatePerspective(
@@ -157,11 +181,14 @@ public static class GraphicsMatrices
         var focalLength = 1.0f / MathF.Tan(verticalFieldOfView * 0.5f);
         var depth = nearPlane - farPlane;
 
+        // Row-vector layout (F-016): perspective-divide flag (-1) lives at M34
+        // and the z-translation lives at M43. Opposite of the column-vector
+        // form this helper produced before the migration.
         return new Matrix4x4(
-            focalLength / aspectRatio, 0.0f, 0.0f, 0.0f,
-            0.0f, focalLength, 0.0f, 0.0f,
-            0.0f, 0.0f, (farPlane + nearPlane) / depth, (2.0f * farPlane * nearPlane) / depth,
-            0.0f, 0.0f, -1.0f, 0.0f);
+            focalLength / aspectRatio, 0.0f,         0.0f,                              0.0f,
+            0.0f,                      focalLength,  0.0f,                              0.0f,
+            0.0f,                      0.0f,         (farPlane + nearPlane) / depth,    -1.0f,
+            0.0f,                      0.0f,         (2.0f * farPlane * nearPlane) / depth, 0.0f);
     }
 
     // Vulkan-NDC perspective: +Y points DOWN in clip space (the projection
@@ -226,51 +253,32 @@ public static class GraphicsMatrices
             0.0f, 0.0f, 0.0f, 1.0f);
     }
 
-    // Apply this column-vector matrix to a point (w = 1). The engine builds matrices
-    // in column-vector form (translation in M14/M24/M34) but System.Numerics
-    // Vector3.Transform treats them as row-vector — it ignores the M14/M24/M34
-    // translation column entirely. This helper does the math manually so callers can
-    // transform points by engine matrices without that footgun.
+    // Apply a row-vector matrix to a point (w = 1). Equivalent to
+    // System.Numerics.Vector4.Transform(new Vector4(p, 1), m) followed by a
+    // perspective divide, but returns a Vector3 directly. Use this when the
+    // matrix may project (perspective) — for affine xforms,
+    // Vector4.Transform with w=1 is sufficient.
     public static Vector3 TransformPoint(Matrix4x4 m, Vector3 p)
     {
-        var w = m.M41 * p.X + m.M42 * p.Y + m.M43 * p.Z + m.M44;
+        // Row-vector convention: result_j = sum_i v_i * M[i, j].
+        var x = p.X * m.M11 + p.Y * m.M21 + p.Z * m.M31 + m.M41;
+        var y = p.X * m.M12 + p.Y * m.M22 + p.Z * m.M32 + m.M42;
+        var z = p.X * m.M13 + p.Y * m.M23 + p.Z * m.M33 + m.M43;
+        var w = p.X * m.M14 + p.Y * m.M24 + p.Z * m.M34 + m.M44;
         if (w == 0.0f) w = 1.0f;   // affine xforms always have w = 1; defensive
-        return new Vector3(
-            (m.M11 * p.X + m.M12 * p.Y + m.M13 * p.Z + m.M14) / w,
-            (m.M21 * p.X + m.M22 * p.Y + m.M23 * p.Z + m.M24) / w,
-            (m.M31 * p.X + m.M32 * p.Y + m.M33 * p.Z + m.M34) / w);
+        return new Vector3(x / w, y / w, z / w);
     }
 
-    // Apply this column-vector matrix to a direction (w = 0) — translation rows are
-    // ignored; only rotation/scale carry. Use for normals (after compensating for
-    // non-uniform scale via the inverse-transpose normal matrix) or any vector that
-    // shouldn't be translated.
+    // Apply a row-vector matrix to a direction (w = 0). Translation columns
+    // (M41-M43) are ignored — only the rotation/scale 3x3 contributes.
+    // Use for normals (after compensating for non-uniform scale via the
+    // inverse-transpose normal matrix from CreateNormalMatrix) or any
+    // vector that shouldn't be translated.
     public static Vector3 TransformDirection(Matrix4x4 m, Vector3 d)
     {
         return new Vector3(
-            m.M11 * d.X + m.M12 * d.Y + m.M13 * d.Z,
-            m.M21 * d.X + m.M22 * d.Y + m.M23 * d.Z,
-            m.M31 * d.X + m.M32 * d.Y + m.M33 * d.Z);
-    }
-
-    private static Matrix4x4 CreateRotation(Quaternion rotation)
-    {
-        rotation = Quaternion.Normalize(rotation);
-
-        var xx = rotation.X * rotation.X;
-        var yy = rotation.Y * rotation.Y;
-        var zz = rotation.Z * rotation.Z;
-        var xy = rotation.X * rotation.Y;
-        var xz = rotation.X * rotation.Z;
-        var yz = rotation.Y * rotation.Z;
-        var wx = rotation.W * rotation.X;
-        var wy = rotation.W * rotation.Y;
-        var wz = rotation.W * rotation.Z;
-
-        return new Matrix4x4(
-            1.0f - 2.0f * (yy + zz), 2.0f * (xy - wz), 2.0f * (xz + wy), 0.0f,
-            2.0f * (xy + wz), 1.0f - 2.0f * (xx + zz), 2.0f * (yz - wx), 0.0f,
-            2.0f * (xz - wy), 2.0f * (yz + wx), 1.0f - 2.0f * (xx + yy), 0.0f,
-            0.0f, 0.0f, 0.0f, 1.0f);
+            d.X * m.M11 + d.Y * m.M21 + d.Z * m.M31,
+            d.X * m.M12 + d.Y * m.M22 + d.Z * m.M32,
+            d.X * m.M13 + d.Y * m.M23 + d.Z * m.M33);
     }
 }

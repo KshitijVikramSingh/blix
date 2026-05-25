@@ -120,10 +120,9 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             foreach (var node in model.LogicalNodes)
             {
                 if (node.Mesh is null) continue;
-                // SharpGLTF's WorldMatrix is row-vector form; transpose to the engine's
-                // column-vector convention before consuming it for vertex transforms.
-                var worldRowVector = node.WorldMatrix;
-                var world = Matrix4x4.Transpose(worldRowVector);
+                // F-016: engine is now row-vector form throughout — same as SharpGLTF.
+                // No transpose needed; just use the world matrix directly.
+                var world = node.WorldMatrix;
                 var normalMatrix = ComputeNormalMatrix(world);
 
                 for (var i = 0; i < node.Mesh.Primitives.Count; i++)
@@ -167,8 +166,8 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         foreach (var node in model.LogicalNodes)
         {
             if (node.Mesh is null) continue;
-            var worldRowVector = node.WorldMatrix;
-            var world = Matrix4x4.Transpose(worldRowVector);
+            // F-016: engine is now row-vector form; matches SharpGLTF.
+            var world = node.WorldMatrix;
             var normalMatrix = ComputeNormalMatrix(world);
             for (var i = 0; i < node.Mesh.Primitives.Count; i++)
             {
@@ -428,8 +427,11 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
 
     private static Matrix4x4 ComputeNormalMatrix(Matrix4x4 model)
     {
-        // Inverse-transpose. Same convention as GraphicsMatrices.CreateNormalMatrix
-        // but consumed for direction transforms rather than a shader uniform.
+        // F-016: engine row-vector convention. For a direction transform,
+        // GraphicsMatrices.TransformDirection treats the matrix as row-vector
+        // and uses the rotation 3x3 (M11-M33). For invariance under non-uniform
+        // scale we need the inverse-transpose. In row-vector form that's
+        // Transpose(Invert(model)).
         if (!Matrix4x4.Invert(model, out var inverse)) return Matrix4x4.Identity;
         return Matrix4x4.Transpose(inverse);
     }

@@ -258,6 +258,39 @@ Vector A would conflate two redesigns. Doing it dedicated makes every
 subsequent Vector A failure isolatable to binding-layer code, not
 matrix-convention code.
 
+**STATUS: RESOLVED.** Migration shipped. Key changes:
+- `Blix.Test.Graphics` test project added with 35 invariant tests
+  covering System.Numerics conformance, `GraphicsMatrices.*` row-vector
+  shapes, end-to-end backend symmetry (.NET → upload → simulated GLSL
+  M*v_col → matches Vector4.Transform). Run via
+  `dotnet run --project src/Blix.Test.Graphics`.
+- `GraphicsMatrices.cs` rewritten: `CreatePerspective` perspective-divide
+  flag moved from M43 to M34, `CreateModel` composition order reversed
+  (`T*R*S` → `S*R*T`), `CreateNormalMatrix` no longer transposes (just
+  Invert), `CreateLookAt` delegates to `System.Numerics.Matrix4x4.CreateLookAt`
+  (already row-vector form), `CreateOrthographic*` translation moved
+  to last row, `TransformPoint`/`TransformDirection` rewritten with
+  row-vector formulas. Private `CreateTranslation`/`CreateScale`/
+  `CreateRotation` removed — `System.Numerics` equivalents used directly.
+- `OpenGLGraphicsDevice.State.cs`: `WriteColumnMajor` removed, replaced
+  by `WriteMatrixBytes` (direct memcpy) + `glUniformMatrix4(transpose: true)`.
+  Matches Vulkan backend's direct-memcpy upload path. Engine + backends
+  speak one matrix convention end-to-end now.
+- `GltfStaticImporter.cs`, `GltfImporter.cs`, `BoneTransform.cs`: removed
+  `Matrix4x4.Transpose` calls at the SharpGLTF → engine boundary. Both
+  layers are row-vector now; transpose was bridging conventions that no
+  longer differ.
+- `Camera3D.GetViewProjection` and `Camera2D.GetViewProjection` composition
+  order reversed (`proj * view` → `view * proj`) to match row-vector
+  composition semantics. `Camera3D.ScreenPointToRay` switched from
+  hand-rolled `TransformColumnVector4` to `Vector4.Transform`.
+- `Camera2D.GetView` matrix rewritten with translation in last row
+  (M41-M43) instead of last column (M14-M24).
+
+The Vector-D-shipped `CreatePerspectiveVulkan` stays as a sibling to
+`CreatePerspective` — both are now in row-vector form but with different
+projection math (Vulkan: Y-flip + [0,1] depth; GL: Y-up + [-1,1] depth).
+
 ### F-013 — Friction is concentrated in `Material` / uniform plumbing, not in handles
 
 Strong signal: handle-based resource APIs (`VertexBuffer`, `IndexBuffer`,
