@@ -1,6 +1,8 @@
 #version 450
 
-layout(location = 0) in vec4 vColor;
+layout(set = 0, binding = 1) uniform sampler2D uAlbedo;
+
+layout(location = 0) in vec2 vUv;
 layout(location = 1) in vec3 vWorldPos;
 
 layout(location = 0) out vec4 outColor;
@@ -20,6 +22,7 @@ void main() {
     vec3 N = normalize(cross(dy, dx));
 
     float NdotL = max(dot(N, lightDir), 0.0);
-    vec3 lit = vColor.rgb * (0.18 + 0.82 * NdotL);
-    outColor = vec4(lit, vColor.a);
+    vec3 albedo = texture(uAlbedo, vUv).rgb;
+    vec3 lit = albedo * (0.18 + 0.82 * NdotL);
+    outColor = vec4(lit, 1.0);
 }

@@ -57,7 +57,16 @@ public sealed class VkLineDrawer : IDisposable
         var uniformLayout = new UniformBlockLayout(
             TotalSize: 64,
             Members: new[] { new UniformBlockMember("uViewProjection", Offset: 0, Size: 64) });
-        shader = device.CreateShaderProgramFromSpv(vertSpv, fragSpv, uniformLayout, "debugline");
+        var lineInterface = new ShaderInterface(new[]
+        {
+            new DescriptorSetSlot(
+                Set: 0,
+                Binding: 0,
+                Type: ShaderResourceType.UniformBuffer,
+                Stages: ShaderStages.Vertex | ShaderStages.Fragment,
+                BlockLayout: uniformLayout),
+        });
+        shader = device.CreateShaderProgramFromSpv(vertSpv, fragSpv, lineInterface, "debugline");
 
         pipeline = device.CreatePipeline(new PipelineDescription(
             shader,

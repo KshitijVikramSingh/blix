@@ -35,6 +35,7 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
     private IndexBufferHandle indexBuffer;
     private ShaderProgramHandle shaderProgram;
     private PipelineHandle pipeline;
+    private TextureHandle albedoTexture;
     private int frameCount;
     private Matrix4x4 viewProj;
 
@@ -55,9 +56,18 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
         gpuInfo = graphicsDevice.Info;
 
         var (vertices, indices) = BuildCube();
-        var vertexData = VertexPosition3Color.CreateBufferData(vertices);
+        var vertexData = VertexPosition3Texture.CreateBufferData(vertices);
         vertexBuffer = vk.CreateVertexBuffer(vertexData, "cube.vb");
         indexBuffer = vk.CreateIndexBuffer(indices, name: "cube.ib");
+
+        // Procedural checkerboard albedo with red/green UV-corner markers so
+        // texture orientation is visually verifiable: red marker = UV (0,0)
+        // origin, green = UV (1,0). 256×256 RGBA8 sRGB.
+        var checker = BuildUvAwareCheckerboard(size: 256, cellCount: 8);
+        albedoTexture = vk.CreateTexture2D(
+            new TextureDescription(256, 256, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
+            checker,
+            "cube.albedo");
 
         // Explicit UBO layout: the shader declares
         //   layout(set=0, binding=0) uniform Frame { mat4 uViewProjection; mat4 uModel; };
@@ -71,14 +81,31 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
                 new UniformBlockMember("uModel", Offset: 64, Size: 64),
             });
 
+        // Declared binding contract: per-frame UBO at (set 0, binding 0) plus
+        // an albedo sampler at (set 0, binding 1). 2c's single-set assumption:
+        // ShaderTextureBinding.Slot in the draw call is matched against
+        // DescriptorSetSlot.Binding to resolve the descriptor.
+        var cubeInterface = new ShaderInterface(new[]
+        {
+            new DescriptorSetSlot(
+                Set: 0, Binding: 0,
+                Type: ShaderResourceType.UniformBuffer,
+                Stages: ShaderStages.Vertex | ShaderStages.Fragment,
+                BlockLayout: uniformLayout),
+            new DescriptorSetSlot(
+                Set: 0, Binding: 1,
+                Type: ShaderResourceType.SampledImage,
+                Stages: ShaderStages.Fragment),
+        });
+
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         var vertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv"));
         var fragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv"));
-        shaderProgram = vk.CreateShaderProgramFromSpv(vertSpv, fragSpv, uniformLayout, "cube");
+        shaderProgram = vk.CreateShaderProgramFromSpv(vertSpv, fragSpv, cubeInterface, "cube");
 
         pipeline = vk.CreatePipeline(new PipelineDescription(
             shaderProgram,
-            VertexPosition3Color.Layout,
+            VertexPosition3Texture.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
@@ -123,7 +150,10 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
                         new("uViewProjection", new Matrix4x4Uniform(viewProj)),
                         new("uModel", new Matrix4x4Uniform(model)),
                     },
-                    textures: Array.Empty<ShaderTextureBinding>());
+                    textures: new[]
+                    {
+                        new ShaderTextureBinding("uAlbedo", albedoTexture, Slot: 1),
+                    });
             });
     }
 
@@ -188,46 +218,39 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
         debug.Draw.Obb("cube/obb", obb, new GraphicsColor(1f, 1f, 1f, 0.85f));
     }
 
-    private static (VertexPosition3Color[] Vertices, ushort[] Indices) BuildCube()
+    private static (VertexPosition3Texture[] Vertices, ushort[] Indices) BuildCube()
     {
-        // 24 vertices = 4 per face. Per-face colours interpolate trivially
-        // (all four corners share the colour), avoiding the diagonal-seam
-        // artifact you get with an 8-vertex cube where each vertex carries
-        // a different colour and the two triangles per face share only
-        // 3 of the 4 corner colours each.
-        var red     = new GraphicsColor(0.95f, 0.30f, 0.30f, 1f); // -Z
-        var cyan    = new GraphicsColor(0.30f, 0.85f, 0.95f, 1f); // +Z
-        var yellow  = new GraphicsColor(0.95f, 0.85f, 0.25f, 1f); // -X
-        var magenta = new GraphicsColor(0.95f, 0.30f, 0.85f, 1f); // +X
-        var orange  = new GraphicsColor(0.95f, 0.55f, 0.20f, 1f); // -Y
-        var green   = new GraphicsColor(0.30f, 0.80f, 0.40f, 1f); // +Y
+        // 24 vertices = 4 per face. Per-face UV mapping wraps the full
+        // texture onto each face. UV (0,0) is top-left of the texture; the
+        // vertex order matches the index buffer's triangulation:
+        //   v0 = lower-left  → UV (0, 1)
+        //   v1 = lower-right → UV (1, 1)
+        //   v2 = upper-right → UV (1, 0)
+        //   v3 = upper-left  → UV (0, 0)
+        VertexPosition3Texture V(float x, float y, float z, float u, float v) =>
+            new(new GraphicsVector3(x, y, z), new GraphicsVector2(u, v));
 
-        VertexPosition3Color V(float x, float y, float z, GraphicsColor c) =>
-            new(new GraphicsVector3(x, y, z), c);
-
-        var vertices = new VertexPosition3Color[]
+        var vertices = new VertexPosition3Texture[]
         {
-            // -Z face (red)
-            V(-0.5f, -0.5f, -0.5f, red), V( 0.5f, -0.5f, -0.5f, red),
-            V( 0.5f,  0.5f, -0.5f, red), V(-0.5f,  0.5f, -0.5f, red),
-            // +Z face (cyan)
-            V(-0.5f, -0.5f,  0.5f, cyan), V( 0.5f, -0.5f,  0.5f, cyan),
-            V( 0.5f,  0.5f,  0.5f, cyan), V(-0.5f,  0.5f,  0.5f, cyan),
-            // -X face (yellow)
-            V(-0.5f, -0.5f, -0.5f, yellow), V(-0.5f, -0.5f,  0.5f, yellow),
-            V(-0.5f,  0.5f,  0.5f, yellow), V(-0.5f,  0.5f, -0.5f, yellow),
-            // +X face (magenta)
-            V( 0.5f, -0.5f, -0.5f, magenta), V( 0.5f,  0.5f, -0.5f, magenta),
-            V( 0.5f,  0.5f,  0.5f, magenta), V( 0.5f, -0.5f,  0.5f, magenta),
-            // -Y face (orange)
-            V(-0.5f, -0.5f, -0.5f, orange), V( 0.5f, -0.5f, -0.5f, orange),
-            V( 0.5f, -0.5f,  0.5f, orange), V(-0.5f, -0.5f,  0.5f, orange),
-            // +Y face (green)
-            V(-0.5f,  0.5f, -0.5f, green), V(-0.5f,  0.5f,  0.5f, green),
-            V( 0.5f,  0.5f,  0.5f, green), V( 0.5f,  0.5f, -0.5f, green),
+            // -Z face
+            V(-0.5f, -0.5f, -0.5f, 0, 1), V( 0.5f, -0.5f, -0.5f, 1, 1),
+            V( 0.5f,  0.5f, -0.5f, 1, 0), V(-0.5f,  0.5f, -0.5f, 0, 0),
+            // +Z face
+            V(-0.5f, -0.5f,  0.5f, 0, 1), V( 0.5f, -0.5f,  0.5f, 1, 1),
+            V( 0.5f,  0.5f,  0.5f, 1, 0), V(-0.5f,  0.5f,  0.5f, 0, 0),
+            // -X face
+            V(-0.5f, -0.5f, -0.5f, 0, 1), V(-0.5f, -0.5f,  0.5f, 1, 1),
+            V(-0.5f,  0.5f,  0.5f, 1, 0), V(-0.5f,  0.5f, -0.5f, 0, 0),
+            // +X face
+            V( 0.5f, -0.5f, -0.5f, 0, 1), V( 0.5f,  0.5f, -0.5f, 0, 0),
+            V( 0.5f,  0.5f,  0.5f, 1, 0), V( 0.5f, -0.5f,  0.5f, 1, 1),
+            // -Y face
+            V(-0.5f, -0.5f, -0.5f, 0, 1), V( 0.5f, -0.5f, -0.5f, 1, 1),
+            V( 0.5f, -0.5f,  0.5f, 1, 0), V(-0.5f, -0.5f,  0.5f, 0, 0),
+            // +Y face
+            V(-0.5f,  0.5f, -0.5f, 0, 1), V(-0.5f,  0.5f,  0.5f, 0, 0),
+            V( 0.5f,  0.5f,  0.5f, 1, 0), V( 0.5f,  0.5f, -0.5f, 1, 1),
         };
-        // Each face's 4 vertices are laid out so (a,b,c,d) triangulates as
-        // (a,b,c) + (a,c,d) without diagonal-color discontinuity.
         var indices = new ushort[]
         {
             0,  1,  2,   0,  2,  3,    // -Z
@@ -238,6 +261,40 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
             20, 21, 22,  20, 22, 23,   // +Y
         };
         return (vertices, indices);
+    }
+
+    // Procedural texture: greyscale checkerboard with two coloured corner
+    // markers so UV orientation is visible. Red at the texture's (0,0)
+    // pixel (UV origin), green at the (size-1, 0) pixel (UV (1,0) end).
+    // Row order is top-down — pixel (x, y) where y=0 is the top row, so the
+    // red marker lands in the first scanline written.
+    private static byte[] BuildUvAwareCheckerboard(int size, int cellCount)
+    {
+        var data = new byte[size * size * 4];
+        var cellSize = size / cellCount;
+        var markerSize = size / 16;
+        for (var y = 0; y < size; y++)
+        for (var x = 0; x < size; x++)
+        {
+            var dark = ((x / cellSize) + (y / cellSize)) % 2 == 0;
+            var idx = (y * size + x) * 4;
+            var c = dark ? (byte)40 : (byte)220;
+            data[idx]     = c;
+            data[idx + 1] = c;
+            data[idx + 2] = c;
+            data[idx + 3] = 255;
+            // UV (0,0) corner marker — red
+            if (x < markerSize && y < markerSize)
+            {
+                data[idx] = 220; data[idx + 1] = 50; data[idx + 2] = 50;
+            }
+            // UV (1,0) corner marker — green
+            else if (x >= size - markerSize && y < markerSize)
+            {
+                data[idx] = 50; data[idx + 1] = 220; data[idx + 2] = 50;
+            }
+        }
+        return data;
     }
 
 }

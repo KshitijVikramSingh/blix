@@ -31,13 +31,28 @@ public sealed partial class VulkanGraphicsDevice
         public ShaderModule Vertex;
         public ShaderModule Fragment;
         public string Name = string.Empty;
-        // Descriptor infrastructure — non-default only when the program was
-        // created with a UniformBlockLayout (i.e. it has a UBO at set=0,binding=0).
-        public UniformBlockLayout? UniformLayout;
-        public DescriptorSetLayout DescriptorSetLayout;
-        public DescriptorPool DescriptorPool;
-        public DescriptorSet[] DescriptorSetsPerFrame = Array.Empty<DescriptorSet>();
-        public VkBufferEntry[] UniformBuffersPerFrame = Array.Empty<VkBufferEntry>();
+        // Declared binding contract. Always non-null post-2b.
+        public ShaderInterface Interface = null!;
+        // Per-set resources indexed by Vulkan set number. Length = MaxSet+1
+        // (Sets is empty when the interface declares no slots). Sets that
+        // aren't declared by the interface but lie in [0, MaxSet] carry an
+        // "empty layout" entry so the pipeline layout stays contiguous —
+        // Vulkan rejects gaps in pSetLayouts.
+        public VkShaderSetResources?[] Sets = Array.Empty<VkShaderSetResources?>();
+    }
+
+    internal sealed class VkShaderSetResources
+    {
+        public int Set;
+        public DescriptorSetLayout Layout;
+        public DescriptorPool Pool; // default(DescriptorPool) for empty intermediate sets
+        public DescriptorSet[] PerFrame = Array.Empty<DescriptorSet>();
+        // Buffer slots in this set, keyed by binding number. Each entry is
+        // one UBO/SSBO per frame slot. Image/sampler slots in this set have
+        // no entry here (their descriptor write lands in 2c).
+        public Dictionary<int, VkBufferEntry[]> BuffersPerBinding = new();
+        // Slots declared at this set, for name lookup during uniform writes.
+        public List<DescriptorSetSlot> Slots = new();
     }
 
     internal sealed class VkPipelineEntry
@@ -177,22 +192,26 @@ public sealed partial class VulkanGraphicsDevice
 
     // --- Shader programs ---------------------------------------------------
 
-    // Caller passes raw SPIR-V words for each stage. We don't compile GLSL
-    // at runtime — pre-compiled .spv from glslc is the dependency-light
-    // path for now. The runtime-compile path (libshaderc binding) is a
-    // future concern when we want hot reload.
+    // Caller passes raw SPIR-V words for each stage and the program's declared
+    // ShaderInterface. We don't compile GLSL at runtime — pre-compiled .spv
+    // from glslc is the dependency-light path for now. The runtime-compile
+    // path (libshaderc binding) is a future concern when we want hot reload.
     //
-    // When uniformLayout is non-null, the shader is assumed to declare a
-    // single uniform block at (set=0, binding=0) sized to layout.TotalSize.
-    // We create the descriptor set layout, pool, per-frame descriptor sets,
-    // and per-frame UBOs here so the draw path can route ShaderUniform
-    // writes into the right UBO offset and bind the right descriptor set.
+    // The ShaderInterface drives descriptor-set generation: one
+    // VkDescriptorSetLayout per declared set, one VkDescriptorPool per set,
+    // per-frame descriptor sets, and per-frame UBOs for each UniformBuffer/
+    // StorageBuffer slot. Image and sampler slots get declared in the layout
+    // but their descriptor writes land later when the texture infrastructure
+    // (Vector A 2c) lands.
     public ShaderProgramHandle CreateShaderProgramFromSpv(
         byte[] vertexSpv,
         byte[] fragmentSpv,
-        UniformBlockLayout? uniformLayout = null,
+        ShaderInterface shaderInterface,
         string? name = null)
     {
+        ArgumentNullException.ThrowIfNull(shaderInterface);
+        shaderInterface.Validate();
+
         var vert = CreateShaderModule(vertexSpv, $"{name ?? "shader"}.vert");
         var frag = CreateShaderModule(fragmentSpv, $"{name ?? "shader"}.frag");
         var entry = new VkShaderProgramEntry
@@ -200,12 +219,10 @@ public sealed partial class VulkanGraphicsDevice
             Vertex = vert,
             Fragment = frag,
             Name = name ?? "shader",
-            UniformLayout = uniformLayout,
+            Interface = shaderInterface,
         };
-        if (uniformLayout is not null)
-        {
-            CreateDescriptorInfrastructure(entry, uniformLayout);
-        }
+        CreateSetResources(entry);
+
         var id = nextResourceId++;
         shaderProgramTable[id] = entry;
         return new ShaderProgramHandle(id);
@@ -213,47 +230,112 @@ public sealed partial class VulkanGraphicsDevice
 
     private const int MaxFramesInFlightConst = 2; // mirrors VulkanGraphicsDevice.Swapchain.cs constant
 
-    private unsafe void CreateDescriptorInfrastructure(VkShaderProgramEntry entry, UniformBlockLayout layout)
+    // Materializes per-set descriptor-set layouts, pools, and per-frame
+    // descriptor sets from entry.Interface.Slots. Buffer slots also get a
+    // per-frame VkBufferEntry (host-visible UBO/SSBO) wired into the
+    // descriptor sets via vkUpdateDescriptorSets. Image/sampler slots get
+    // their binding declared in the layout but no descriptor write yet — the
+    // texture-infrastructure step (Vector A 2c) fills those in.
+    private unsafe void CreateSetResources(VkShaderProgramEntry entry)
     {
-        // Set layout: one UBO at binding 0, visible to vertex + fragment.
-        // Real material systems will want this driven by the shader's
-        // declared bindings (SPIR-V reflection or out-of-band material
-        // descriptor). For the validation push this hard-coded single-UBO
-        // shape is enough.
-        var binding = new DescriptorSetLayoutBinding
+        var slots = entry.Interface.Slots;
+        if (slots.Count == 0)
         {
-            Binding = 0,
-            DescriptorType = DescriptorType.UniformBuffer,
-            DescriptorCount = 1,
-            StageFlags = ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit,
-        };
+            entry.Sets = Array.Empty<VkShaderSetResources?>();
+            return;
+        }
+
+        // Vulkan requires pipeline-layout set indices to be contiguous from
+        // set 0. Allocate Sets[0..maxSet] and create an "empty" layout entry
+        // for any intermediate set the shader doesn't declare.
+        var maxSet = 0;
+        foreach (var s in slots) if (s.Set > maxSet) maxSet = s.Set;
+        entry.Sets = new VkShaderSetResources?[maxSet + 1];
+
+        var slotsBySet = new Dictionary<int, List<DescriptorSetSlot>>();
+        foreach (var s in slots)
+        {
+            if (!slotsBySet.TryGetValue(s.Set, out var bucket))
+            {
+                bucket = new List<DescriptorSetSlot>();
+                slotsBySet[s.Set] = bucket;
+            }
+            bucket.Add(s);
+        }
+
+        for (var setIdx = 0; setIdx <= maxSet; setIdx++)
+        {
+            var setSlots = slotsBySet.TryGetValue(setIdx, out var bucket) ? bucket : new List<DescriptorSetSlot>();
+            entry.Sets[setIdx] = CreateOneSetResources(entry.Name, setIdx, setSlots);
+        }
+    }
+
+    private unsafe VkShaderSetResources CreateOneSetResources(string programName, int setIdx, List<DescriptorSetSlot> setSlots)
+    {
+        var resources = new VkShaderSetResources { Set = setIdx, Slots = setSlots };
+
+        // --- Descriptor set layout ------------------------------------------
+        // Empty layout (no bindings) is valid — used for "gap" sets the
+        // shader skips between declared sets, keeping pSetLayouts contiguous.
+        var bindings = stackalloc DescriptorSetLayoutBinding[Math.Max(1, setSlots.Count)];
+        for (var i = 0; i < setSlots.Count; i++)
+        {
+            var s = setSlots[i];
+            bindings[i] = new DescriptorSetLayoutBinding
+            {
+                Binding = (uint)s.Binding,
+                DescriptorType = MapDescriptorType(s.Type),
+                DescriptorCount = (uint)s.Count,
+                StageFlags = MapStageFlags(s.Stages),
+            };
+        }
         var setCi = new DescriptorSetLayoutCreateInfo
         {
             SType = StructureType.DescriptorSetLayoutCreateInfo,
-            BindingCount = 1,
-            PBindings = &binding,
+            BindingCount = (uint)setSlots.Count,
+            PBindings = setSlots.Count > 0 ? bindings : null,
         };
         DescriptorSetLayout setLayout;
-        ThrowIfNotSuccess(Vk.CreateDescriptorSetLayout(Device, in setCi, null, &setLayout), "vkCreateDescriptorSetLayout");
-        entry.DescriptorSetLayout = setLayout;
+        ThrowIfNotSuccess(
+            Vk.CreateDescriptorSetLayout(Device, in setCi, null, &setLayout),
+            $"vkCreateDescriptorSetLayout({programName}.set{setIdx})");
+        resources.Layout = setLayout;
 
-        var poolSize = new DescriptorPoolSize
+        // Gap sets have nothing to allocate beyond the empty layout — they
+        // exist only to keep pSetLayouts contiguous for the pipeline layout.
+        if (setSlots.Count == 0) return resources;
+
+        // --- Pool sized to the union of this set's per-frame allocations ----
+        // One pool size per distinct DescriptorType used in the set,
+        // multiplied by MaxFramesInFlightConst (one descriptor per slot per
+        // frame). Sampler arrays multiply by Count.
+        var perTypeCount = new Dictionary<DescriptorType, uint>();
+        foreach (var s in setSlots)
         {
-            Type = DescriptorType.UniformBuffer,
-            DescriptorCount = (uint)MaxFramesInFlightConst,
-        };
+            var t = MapDescriptorType(s.Type);
+            perTypeCount.TryGetValue(t, out var current);
+            perTypeCount[t] = current + (uint)(s.Count * MaxFramesInFlightConst);
+        }
+        var poolSizes = stackalloc DescriptorPoolSize[perTypeCount.Count];
+        var poolIdx = 0;
+        foreach (var (type, count) in perTypeCount)
+        {
+            poolSizes[poolIdx++] = new DescriptorPoolSize { Type = type, DescriptorCount = count };
+        }
         var poolCi = new DescriptorPoolCreateInfo
         {
             SType = StructureType.DescriptorPoolCreateInfo,
-            PoolSizeCount = 1,
-            PPoolSizes = &poolSize,
+            PoolSizeCount = (uint)perTypeCount.Count,
+            PPoolSizes = poolSizes,
             MaxSets = (uint)MaxFramesInFlightConst,
         };
         DescriptorPool pool;
-        ThrowIfNotSuccess(Vk.CreateDescriptorPool(Device, in poolCi, null, &pool), "vkCreateDescriptorPool");
-        entry.DescriptorPool = pool;
+        ThrowIfNotSuccess(
+            Vk.CreateDescriptorPool(Device, in poolCi, null, &pool),
+            $"vkCreateDescriptorPool({programName}.set{setIdx})");
+        resources.Pool = pool;
 
-        // Allocate descriptor sets — one per frame slot, all sharing the same layout.
+        // --- One descriptor set per frame, all sharing the same layout ------
         var layouts = stackalloc DescriptorSetLayout[MaxFramesInFlightConst];
         for (var i = 0; i < MaxFramesInFlightConst; i++) layouts[i] = setLayout;
         var allocInfo = new DescriptorSetAllocateInfo
@@ -266,38 +348,66 @@ public sealed partial class VulkanGraphicsDevice
         var sets = new DescriptorSet[MaxFramesInFlightConst];
         fixed (DescriptorSet* p = sets)
         {
-            ThrowIfNotSuccess(Vk.AllocateDescriptorSets(Device, in allocInfo, p), "vkAllocateDescriptorSets");
+            ThrowIfNotSuccess(
+                Vk.AllocateDescriptorSets(Device, in allocInfo, p),
+                $"vkAllocateDescriptorSets({programName}.set{setIdx})");
         }
-        entry.DescriptorSetsPerFrame = sets;
+        resources.PerFrame = sets;
 
-        // Create one UBO per frame slot and write its binding into the
-        // corresponding descriptor set. UBOs stay host-visible+coherent;
-        // per-draw uniform writes just memcpy into them.
-        entry.UniformBuffersPerFrame = new VkBufferEntry[MaxFramesInFlightConst];
-        var ubBytes = new byte[layout.TotalSize];
-        for (var i = 0; i < MaxFramesInFlightConst; i++)
+        // --- Per-frame UBO/SSBO allocation + descriptor write ---------------
+        foreach (var s in setSlots)
         {
-            var ubo = CreateHostVisibleBuffer(ubBytes, BufferUsageFlags.UniformBufferBit, $"{entry.Name}.ubo[{i}]");
-            entry.UniformBuffersPerFrame[i] = ubo;
-
-            var bufInfo = new DescriptorBufferInfo
+            if (s.BlockLayout is not { } block) continue; // image/sampler — descriptor write deferred to 2c
+            var usage = s.Type == ShaderResourceType.StorageBuffer
+                ? BufferUsageFlags.StorageBufferBit
+                : BufferUsageFlags.UniformBufferBit;
+            var buffers = new VkBufferEntry[MaxFramesInFlightConst];
+            var bytes = new byte[block.TotalSize];
+            for (var i = 0; i < MaxFramesInFlightConst; i++)
             {
-                Buffer = ubo.Buffer,
-                Offset = 0,
-                Range = (ulong)layout.TotalSize,
-            };
-            var write = new WriteDescriptorSet
-            {
-                SType = StructureType.WriteDescriptorSet,
-                DstSet = sets[i],
-                DstBinding = 0,
-                DstArrayElement = 0,
-                DescriptorType = DescriptorType.UniformBuffer,
-                DescriptorCount = 1,
-                PBufferInfo = &bufInfo,
-            };
-            Vk.UpdateDescriptorSets(Device, 1, in write, 0, default(CopyDescriptorSet*));
+                var buf = CreateHostVisibleBuffer(bytes, usage, $"{programName}.set{setIdx}.binding{s.Binding}.buf[{i}]");
+                buffers[i] = buf;
+                var bufInfo = new DescriptorBufferInfo
+                {
+                    Buffer = buf.Buffer,
+                    Offset = 0,
+                    Range = (ulong)block.TotalSize,
+                };
+                var write = new WriteDescriptorSet
+                {
+                    SType = StructureType.WriteDescriptorSet,
+                    DstSet = sets[i],
+                    DstBinding = (uint)s.Binding,
+                    DstArrayElement = 0,
+                    DescriptorType = MapDescriptorType(s.Type),
+                    DescriptorCount = 1,
+                    PBufferInfo = &bufInfo,
+                };
+                Vk.UpdateDescriptorSets(Device, 1, in write, 0, default(CopyDescriptorSet*));
+            }
+            resources.BuffersPerBinding[s.Binding] = buffers;
         }
+
+        return resources;
+    }
+
+    private static DescriptorType MapDescriptorType(ShaderResourceType t) => t switch
+    {
+        ShaderResourceType.UniformBuffer => DescriptorType.UniformBuffer,
+        ShaderResourceType.StorageBuffer => DescriptorType.StorageBuffer,
+        ShaderResourceType.SampledImage => DescriptorType.CombinedImageSampler,
+        ShaderResourceType.StorageImage => DescriptorType.StorageImage,
+        ShaderResourceType.Sampler => DescriptorType.Sampler,
+        _ => throw new InvalidOperationException($"Unknown ShaderResourceType {t}"),
+    };
+
+    private static ShaderStageFlags MapStageFlags(ShaderStages s)
+    {
+        var flags = ShaderStageFlags.None;
+        if (s.HasFlag(ShaderStages.Vertex)) flags |= ShaderStageFlags.VertexBit;
+        if (s.HasFlag(ShaderStages.Fragment)) flags |= ShaderStageFlags.FragmentBit;
+        if (s.HasFlag(ShaderStages.Compute)) flags |= ShaderStageFlags.ComputeBit;
+        return flags;
     }
 
     public void DestroyShaderProgram(ShaderProgramHandle handle)
@@ -328,9 +438,14 @@ public sealed partial class VulkanGraphicsDevice
 
     private unsafe void DestroyVkShaderProgramEntry(VkShaderProgramEntry e)
     {
-        foreach (var ubo in e.UniformBuffersPerFrame) DestroyVkBufferEntry(ubo);
-        if (e.DescriptorPool.Handle != 0) Vk.DestroyDescriptorPool(Device, e.DescriptorPool, null);
-        if (e.DescriptorSetLayout.Handle != 0) Vk.DestroyDescriptorSetLayout(Device, e.DescriptorSetLayout, null);
+        foreach (var sr in e.Sets)
+        {
+            if (sr is null) continue;
+            foreach (var buffers in sr.BuffersPerBinding.Values)
+                foreach (var b in buffers) DestroyVkBufferEntry(b);
+            if (sr.Pool.Handle != 0) Vk.DestroyDescriptorPool(Device, sr.Pool, null);
+            if (sr.Layout.Handle != 0) Vk.DestroyDescriptorSetLayout(Device, sr.Layout, null);
+        }
         if (e.Vertex.Handle != 0) Vk.DestroyShaderModule(Device, e.Vertex, null);
         if (e.Fragment.Handle != 0) Vk.DestroyShaderModule(Device, e.Fragment, null);
     }
@@ -344,18 +459,36 @@ public sealed partial class VulkanGraphicsDevice
             throw new InvalidOperationException($"Unknown shader program handle {description.ShaderProgram.Id}.");
         }
 
-        // Pipeline layout pulls in the shader program's descriptor set
-        // layout when present. Programs created without a UniformBlockLayout
-        // produce a zero-set-layout pipeline (e.g. the original hello-
-        // triangle path, no uniforms).
-        var setLayout = prog.DescriptorSetLayout;
-        var hasSet = setLayout.Handle != 0;
+        // Pipeline layout pulls in every set layout the shader declared (sets
+        // 0..maxSet) plus its push-constant ranges. Gap sets carry an empty
+        // layout — Vulkan rejects gaps in pSetLayouts.
+        var setLayouts = stackalloc DescriptorSetLayout[Math.Max(1, prog.Sets.Length)];
+        var setCount = (uint)prog.Sets.Length;
+        for (var i = 0; i < prog.Sets.Length; i++)
+        {
+            setLayouts[i] = prog.Sets[i] is { } sr ? sr.Layout : default;
+        }
+
+        var declaredRanges = prog.Interface.PushConstants;
+        var pushRanges = stackalloc Silk.NET.Vulkan.PushConstantRange[Math.Max(1, declaredRanges.Count)];
+        for (var i = 0; i < declaredRanges.Count; i++)
+        {
+            var r = declaredRanges[i];
+            pushRanges[i] = new Silk.NET.Vulkan.PushConstantRange
+            {
+                StageFlags = MapStageFlags(r.Stages),
+                Offset = (uint)r.Offset,
+                Size = (uint)r.Size,
+            };
+        }
+
         var layoutCi = new PipelineLayoutCreateInfo
         {
             SType = StructureType.PipelineLayoutCreateInfo,
-            SetLayoutCount = hasSet ? 1u : 0u,
-            PSetLayouts = hasSet ? &setLayout : null,
-            PushConstantRangeCount = 0,
+            SetLayoutCount = setCount,
+            PSetLayouts = setCount > 0 ? setLayouts : null,
+            PushConstantRangeCount = (uint)declaredRanges.Count,
+            PPushConstantRanges = declaredRanges.Count > 0 ? pushRanges : null,
         };
         PipelineLayout layout;
         ThrowIfNotSuccess(Vk.CreatePipelineLayout(Device, in layoutCi, null, &layout), "vkCreatePipelineLayout");
@@ -563,6 +696,8 @@ public sealed partial class VulkanGraphicsDevice
         shaderProgramTable.Clear();
         foreach (var e in vertexBufferTable.Values) DestroyVkBufferEntry(e);
         vertexBufferTable.Clear();
+        DestroyAllTextures();
+        DestroyAllSamplers();
         foreach (var e in indexBufferTable.Values) DestroyVkBufferEntry(e);
         indexBufferTable.Clear();
     }

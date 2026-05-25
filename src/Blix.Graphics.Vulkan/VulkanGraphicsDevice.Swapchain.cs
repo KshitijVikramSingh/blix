@@ -857,30 +857,34 @@ public sealed partial class VulkanGraphicsDevice
         var ib = GetIndexBuffer(d.IndexBuffer);
         var prog = shaderProgramTable[pipe.ShaderProgram.Id];
 
-        // Per-draw uniforms → UBO offsets via the program's UniformBlockLayout.
+        // Per-draw uniforms → UBO offsets. Name-keyed writes search every
+        // buffer slot across every declared set for the first matching
+        // member; first match wins. Image/sampler slots are skipped (their
+        // binding is image-handle-based, not uniform-name based).
         // FRICTION: today every draw clobbers the SAME per-frame UBO. Multiple
         // draws sharing the program but with different uniform values would
         // collide. Need either per-draw descriptor sets, dynamic-offset UBOs,
         // or push constants — none modeled in the cross-backend API yet.
-        // (Logged as F-007 in docs/vulkan-friction.md.)
-        if (prog.UniformLayout is { } layout && d.Uniforms.Count > 0)
-        {
-            var ubo = prog.UniformBuffersPerFrame[frameSlot];
-            WriteUniformsToUbo(layout, ubo, d.Uniforms);
-        }
+        // (Logged as F-007 in docs/vulkan-friction.md; per-draw lifetime
+        // lands in Vector A 2e via push constants.)
+        if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
+        if (d.Textures.Count > 0) WriteTextureBindings(prog, frameSlot, d.Textures);
 
         Vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, pipe.Pipeline);
 
-        if (prog.DescriptorSetsPerFrame.Length > 0)
+        // Bind every declared set at its set index. Gap sets exist only for
+        // pipeline-layout contiguity and carry no per-frame descriptor sets.
+        for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
         {
-            var set = prog.DescriptorSetsPerFrame[frameSlot];
+            if (prog.Sets[setIdx] is not { } sr || sr.PerFrame.Length == 0) continue;
+            var ds = sr.PerFrame[frameSlot];
             Vk.CmdBindDescriptorSets(
                 cmd,
                 PipelineBindPoint.Graphics,
                 pipe.Layout,
-                firstSet: 0,
+                firstSet: (uint)setIdx,
                 descriptorSetCount: 1,
-                &set,
+                &ds,
                 dynamicOffsetCount: 0,
                 pDynamicOffsets: null);
         }
@@ -892,8 +896,9 @@ public sealed partial class VulkanGraphicsDevice
         Vk.CmdDrawIndexed(cmd, (uint)d.IndexCount, 1, (uint)d.IndexOffset, 0, 0);
     }
 
-    // Translate name-keyed ShaderUniform writes into byte offsets within
-    // the program's UBO. std140 layout assumed.
+    // Translate name-keyed ShaderUniform writes into byte offsets across
+    // every UBO/SSBO slot the program declared. First match wins. std140
+    // layout assumed.
     //
     // .NET's System.Numerics.Matrix4x4 stores row-major bytes; GLSL std140
     // reads mat4 column-major. That difference IS the transpose we want:
@@ -901,27 +906,151 @@ public sealed partial class VulkanGraphicsDevice
     // column-vector M_col = M_row^T, and `clip = M_col * v_col` in GLSL
     // is mathematically equivalent to `clip_row = v_row * M_row` in .NET.
     // Writing without an explicit Transpose() is correct — see F-008.
-    private unsafe void WriteUniformsToUbo(UniformBlockLayout layout, VkBufferEntry ubo, IReadOnlyList<ShaderUniform> uniforms)
+    //
+    // For now we map each unique buffer at most once per draw — multiple
+    // writes into the same buffer share the mapping. Buffers that receive
+    // no writes this draw are not mapped at all.
+    // Per-draw scratch reused across calls. The draw path runs on a single
+    // thread (the render thread) so one shared pair is safe and saves a
+    // dict + list allocation per draw call. Cleared, not re-allocated.
+    private readonly Dictionary<(int Set, int Binding), nint> uniformMappedPtrs = new();
+    private readonly List<VkBufferEntry> uniformMappedBuffers = new();
+
+    private unsafe void WriteUniformsAcrossSets(
+        VkShaderProgramEntry prog,
+        int frameSlot,
+        IReadOnlyList<ShaderUniform> uniforms)
     {
-        void* ptr;
-        ThrowIfNotSuccess(Vk.MapMemory(Device, ubo.Memory, 0, ubo.Size, 0, &ptr), "vkMapMemory(ubo)");
-        var dst = new Span<byte>(ptr, (int)ubo.Size);
+        // Lazy-mapped per (set, binding) so we touch each underlying buffer
+        // exactly once across all uniform writes in this draw.
+        uniformMappedPtrs.Clear();
+        uniformMappedBuffers.Clear();
+
         foreach (var u in uniforms)
         {
-            var member = FindMember(layout, u.Name);
-            if (member is null) continue;
+            if (!FindBufferMember(prog, u.Name, out var setIdx, out var binding, out var member)) continue;
+            var buf = prog.Sets[setIdx]!.BuffersPerBinding[binding][frameSlot];
+            if (!uniformMappedPtrs.TryGetValue((setIdx, binding), out var ptr))
+            {
+                void* raw;
+                ThrowIfNotSuccess(
+                    Vk.MapMemory(Device, buf.Memory, 0, buf.Size, 0, &raw),
+                    $"vkMapMemory({prog.Name}.set{setIdx}.binding{binding})");
+                ptr = (nint)raw;
+                uniformMappedPtrs[(setIdx, binding)] = ptr;
+                uniformMappedBuffers.Add(buf);
+            }
+            var dst = new Span<byte>((void*)ptr, (int)buf.Size);
             WriteUniformValue(dst.Slice(member.Offset, member.Size), u.Value);
         }
-        Vk.UnmapMemory(Device, ubo.Memory);
+
+        foreach (var buf in uniformMappedBuffers) Vk.UnmapMemory(Device, buf.Memory);
     }
 
-    private static UniformBlockMember? FindMember(UniformBlockLayout layout, string name)
+    // Update the per-frame descriptor sets with (texture, sampler) bindings
+    // before the descriptor sets get bound for this draw.
+    //
+    // ShaderTextureBinding.Slot semantics differ per backend:
+    //   - GL: GL_TEXTURE0+slot texture unit; uniform sampler points at unit
+    //   - Vulkan: the descriptor binding number within the slot's set
+    // For Vulkan the slot's set is inferred — we walk every declared set and
+    // match the first SampledImage slot whose Binding equals the requested
+    // number. This is the single-set assumption documented in the 2c plan;
+    // when multi-set materials land in 2d, ShaderTextureBinding needs to
+    // carry an explicit Set, or the lookup needs a name-keyed path.
+    //
+    // The descriptor write happens every draw — wasteful when bindings don't
+    // change between draws, fine for correctness. A "skip if unchanged"
+    // cache keyed on (frameSlot, set, binding) → (texture, sampler) is a
+    // follow-up perf optimization.
+    private unsafe void WriteTextureBindings(
+        VkShaderProgramEntry prog,
+        int frameSlot,
+        IReadOnlyList<ShaderTextureBinding> bindings)
     {
-        for (var i = 0; i < layout.Members.Count; i++)
+        foreach (var b in bindings)
         {
-            if (layout.Members[i].Name == name) return layout.Members[i];
+            if (b.Slot < 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(bindings),
+                    $"ShaderTextureBinding '{b.Name}' has negative Slot ({b.Slot}).");
+            }
+            if (!FindImageSlot(prog, b.Slot, out var setIdx, out var binding))
+            {
+                // No matching SampledImage slot in any declared set. Silently
+                // skip to mirror UBO-uniform behavior — programs that don't
+                // sample the texture just ignore the binding.
+                continue;
+            }
+            var tex = textureTable[b.Texture.Id];
+            var sr = prog.Sets[setIdx]!;
+            var imgInfo = new DescriptorImageInfo
+            {
+                Sampler = tex.Sampler,
+                ImageView = tex.View,
+                ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
+            };
+            var write = new WriteDescriptorSet
+            {
+                SType = StructureType.WriteDescriptorSet,
+                DstSet = sr.PerFrame[frameSlot],
+                DstBinding = (uint)binding,
+                DstArrayElement = 0,
+                DescriptorType = DescriptorType.CombinedImageSampler,
+                DescriptorCount = 1,
+                PImageInfo = &imgInfo,
+            };
+            Vk.UpdateDescriptorSets(Device, 1, in write, 0, default(CopyDescriptorSet*));
         }
-        return null;
+    }
+
+    private static bool FindImageSlot(VkShaderProgramEntry prog, int bindingNumber, out int setIdx, out int binding)
+    {
+        for (var i = 0; i < prog.Sets.Length; i++)
+        {
+            if (prog.Sets[i] is not { } sr) continue;
+            foreach (var slot in sr.Slots)
+            {
+                if (slot.Binding != bindingNumber) continue;
+                if (slot.Type is not (ShaderResourceType.SampledImage or ShaderResourceType.StorageImage or ShaderResourceType.Sampler)) continue;
+                setIdx = i;
+                binding = slot.Binding;
+                return true;
+            }
+        }
+        setIdx = 0;
+        binding = 0;
+        return false;
+    }
+
+    private static bool FindBufferMember(
+        VkShaderProgramEntry prog,
+        string name,
+        out int setIdx,
+        out int binding,
+        out UniformBlockMember member)
+    {
+        for (var i = 0; i < prog.Sets.Length; i++)
+        {
+            if (prog.Sets[i] is not { } sr) continue;
+            foreach (var slot in sr.Slots)
+            {
+                if (slot.BlockLayout is not { } block) continue;
+                for (var j = 0; j < block.Members.Count; j++)
+                {
+                    if (block.Members[j].Name != name) continue;
+                    setIdx = i;
+                    binding = slot.Binding;
+                    member = block.Members[j];
+                    return true;
+                }
+            }
+        }
+        setIdx = 0;
+        binding = 0;
+        member = null!;
+        return false;
     }
 
     private static unsafe void WriteUniformValue(Span<byte> dst, ShaderUniformValue value)

@@ -18,9 +18,6 @@ public sealed partial class VulkanGraphicsDevice
         throw new NotImplementedException(
             NotYet + " Use CreateShaderProgramFromSpv(byte[] vertSpv, byte[] fragSpv) until runtime GLSL→SPIR-V compilation is wired.");
 
-    public TextureHandle CreateTexture2D(TextureDescription description, ReadOnlySpan<byte> pixels, string? name = null) =>
-        throw new NotImplementedException(NotYet);
-
     public TextureHandle CreateTexture2DMipped(
         TextureDescription description,
         IReadOnlyList<byte[]> mipBytes,
@@ -58,9 +55,6 @@ public sealed partial class VulkanGraphicsDevice
         IReadOnlyList<Half[]> mipFaces,
         SamplerDescription sampler,
         string? name = null) =>
-        throw new NotImplementedException(NotYet);
-
-    public void DestroyTexture(TextureHandle handle) =>
         throw new NotImplementedException(NotYet);
 
     public RenderSurface CreateRenderSurface(RenderSurfaceDescription description) =>

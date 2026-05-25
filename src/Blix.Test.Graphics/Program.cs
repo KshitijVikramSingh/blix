@@ -1,5 +1,6 @@
 using System.Numerics;
 using Blix.Graphics;
+using Blix.Graphics.Vulkan;
 
 // CLI test harness for Blix.Graphics. Currently focused on the F-016
 // matrix-convention migration acceptance criteria. After migration:
@@ -220,8 +221,264 @@ var t = new TestRunner();
         glslTransposeTrue, new Vector4(0, 0, 0, 1));
 }
 
+// ============================================================================
+// Section E — ShaderInterface structural validation (Vector A 2a).
+// ============================================================================
+//
+// 2a only declares the binding-contract types; backend wiring lands in 2b.
+// The tests here lock in the shape of Validate() so a malformed
+// ShaderInterface fails at startup with a specific reason instead of at
+// pipeline-creation time with a Vulkan validation-layer error.
+
+// Helper: a minimal valid UBO BlockLayout (mat4 × 1, 64 bytes).
+static UniformBlockLayout Mat4Block() => new(
+    TotalSize: 64,
+    Members: new[] { new UniformBlockMember("uModel", Offset: 0, Size: 64) });
+
+// E.1 — Happy path: the cube demo's actual interface validates cleanly.
+{
+    var cube = new ShaderInterface(new[]
+    {
+        new DescriptorSetSlot(
+            Set: 0, Binding: 0,
+            Type: ShaderResourceType.UniformBuffer,
+            Stages: ShaderStages.Vertex | ShaderStages.Fragment,
+            BlockLayout: new UniformBlockLayout(
+                TotalSize: 128,
+                Members: new[]
+                {
+                    new UniformBlockMember("uViewProjection", 0, 64),
+                    new UniformBlockMember("uModel", 64, 64),
+                })),
+    });
+    var threw = TryValidate(cube);
+    t.ExpectTrue("E.1 cube demo interface validates", threw is null);
+}
+
+// E.2 — Lit-shader-shape fixture: per-frame UBO + per-pass UBO + sampler array
+// + per-material UBO + per-material samplers + push constants. Mirrors
+// docs/vulkan-reshape-shaderlab-target.md Section 1. Proves the type composes
+// for the real downstream use case.
+{
+    var lit = new ShaderInterface(
+        Slots: new[]
+        {
+            new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer,
+                ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: Mat4Block()),
+            new DescriptorSetSlot(1, 0, ShaderResourceType.UniformBuffer,
+                ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: Mat4Block()),
+            new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+            new DescriptorSetSlot(1, 4, ShaderResourceType.SampledImage, ShaderStages.Fragment, Count: 4),
+            new DescriptorSetSlot(2, 0, ShaderResourceType.UniformBuffer,
+                ShaderStages.Fragment, BlockLayout: Mat4Block()),
+            new DescriptorSetSlot(2, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+        },
+        PushConstants: new[]
+        {
+            new PushConstantRange(ShaderStages.Vertex, Offset: 0,  Size: 64),
+            new PushConstantRange(ShaderStages.Vertex, Offset: 64, Size: 64),
+        });
+    var threw = TryValidate(lit);
+    t.ExpectTrue("E.2 lit-shape interface (multi-set + sampler array + push constants) validates", threw is null);
+}
+
+// E.3 — Duplicate (set, binding) is rejected.
+{
+    var dup = new ShaderInterface(new[]
+    {
+        new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer, ShaderStages.Vertex, BlockLayout: Mat4Block()),
+        new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+    });
+    var threw = TryValidate(dup);
+    t.ExpectTrue("E.3 duplicate (set,binding) is rejected", threw is { } e && e.Message.Contains("duplicate"));
+}
+
+// E.4 — UniformBuffer without BlockLayout is rejected.
+{
+    var bad = new ShaderInterface(new[]
+    {
+        new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer, ShaderStages.Vertex),
+    });
+    var threw = TryValidate(bad);
+    t.ExpectTrue("E.4 UniformBuffer without BlockLayout is rejected",
+        threw is { } e && e.Message.Contains("no BlockLayout"));
+}
+
+// E.5 — StorageBuffer without BlockLayout is rejected (same rule as UBO).
+{
+    var bad = new ShaderInterface(new[]
+    {
+        new DescriptorSetSlot(3, 0, ShaderResourceType.StorageBuffer, ShaderStages.Vertex),
+    });
+    var threw = TryValidate(bad);
+    t.ExpectTrue("E.5 StorageBuffer without BlockLayout is rejected",
+        threw is { } e && e.Message.Contains("no BlockLayout"));
+}
+
+// E.6 — SampledImage carrying a BlockLayout is rejected.
+{
+    var bad = new ShaderInterface(new[]
+    {
+        new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment, BlockLayout: Mat4Block()),
+    });
+    var threw = TryValidate(bad);
+    t.ExpectTrue("E.6 SampledImage with BlockLayout is rejected",
+        threw is { } e && e.Message.Contains("must not declare one"));
+}
+
+// E.7 — Stages.None on a slot is rejected.
+{
+    var bad = new ShaderInterface(new[]
+    {
+        new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer, ShaderStages.None, BlockLayout: Mat4Block()),
+    });
+    var threw = TryValidate(bad);
+    t.ExpectTrue("E.7 Stages=None on slot is rejected",
+        threw is { } e && e.Message.Contains("Stages=None"));
+}
+
+// E.8 — Count < 1 is rejected.
+{
+    var bad = new ShaderInterface(new[]
+    {
+        new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer, ShaderStages.Vertex, Count: 0, BlockLayout: Mat4Block()),
+    });
+    var threw = TryValidate(bad);
+    t.ExpectTrue("E.8 Count=0 on slot is rejected",
+        threw is { } e && e.Message.Contains("Count=0"));
+}
+
+// E.9 — Negative Set / Binding is rejected.
+{
+    var bad = new ShaderInterface(new[]
+    {
+        new DescriptorSetSlot(-1, 0, ShaderResourceType.UniformBuffer, ShaderStages.Vertex, BlockLayout: Mat4Block()),
+    });
+    var threw = TryValidate(bad);
+    t.ExpectTrue("E.9 negative Set is rejected",
+        threw is { } e && e.Message.Contains("negative Set"));
+}
+
+// E.10 — Overlapping push-constant ranges within the same stage are rejected.
+{
+    var bad = new ShaderInterface(
+        Slots: Array.Empty<DescriptorSetSlot>(),
+        PushConstants: new[]
+        {
+            new PushConstantRange(ShaderStages.Vertex, 0, 64),
+            new PushConstantRange(ShaderStages.Vertex, 32, 64),
+        });
+    var threw = TryValidate(bad);
+    t.ExpectTrue("E.10 push-constant overlap within shared stage is rejected",
+        threw is { } e && e.Message.Contains("overlapping byte ranges"));
+}
+
+// E.11 — Overlapping push-constant ranges in DISJOINT stages are allowed.
+// (Per Vulkan spec: separate hardware blocks per stage, so overlap is fine
+// when no stage bit is shared.)
+{
+    var ok = new ShaderInterface(
+        Slots: Array.Empty<DescriptorSetSlot>(),
+        PushConstants: new[]
+        {
+            new PushConstantRange(ShaderStages.Vertex,   0, 64),
+            new PushConstantRange(ShaderStages.Fragment, 0, 64),
+        });
+    var threw = TryValidate(ok);
+    t.ExpectTrue("E.11 push-constant overlap across disjoint stages is allowed", threw is null);
+}
+
+// E.12 — Push-constant Size ≤ 0 is rejected.
+{
+    var bad = new ShaderInterface(
+        Slots: Array.Empty<DescriptorSetSlot>(),
+        PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 0) });
+    var threw = TryValidate(bad);
+    t.ExpectTrue("E.12 push-constant Size=0 is rejected",
+        threw is { } e && e.Message.Contains("Size=0"));
+}
+
+// E.13 — Push-constant Stages.None is rejected.
+{
+    var bad = new ShaderInterface(
+        Slots: Array.Empty<DescriptorSetSlot>(),
+        PushConstants: new[] { new PushConstantRange(ShaderStages.None, 0, 64) });
+    var threw = TryValidate(bad);
+    t.ExpectTrue("E.13 push-constant Stages=None is rejected",
+        threw is { } e && e.Message.Contains("Stages=None"));
+}
+
+// ============================================================================
+// Section F — Texture infrastructure (Vector A 2c).
+// ============================================================================
+//
+// The Vulkan sampler cache keys on SamplerDescription value-equality. If the
+// record loses its auto-generated equality (or a future refactor turns it
+// into a class) the cache silently deduplicates nothing and identical
+// samplers proliferate. The tests below lock that contract in.
+//
+// MipByteCount() also pins down the byte-count math the staging-buffer
+// path relies on — get it wrong and we either upload garbage tail bytes or
+// crash on a short copy.
+
+{
+    // F.1 — Two LinearRepeat presets are equal (cache dedupes presets).
+    t.ExpectTrue("F.1 SamplerDescription.LinearRepeat equals itself",
+        SamplerDescription.LinearRepeat.Equals(SamplerDescription.LinearRepeat));
+    t.ExpectTrue("F.1 LinearRepeat == fresh equivalent description",
+        SamplerDescription.LinearRepeat.Equals(new SamplerDescription(
+            TextureFilter.Linear, TextureFilter.Linear,
+            TextureWrap.Repeat, TextureWrap.Repeat,
+            GenerateMipmaps: false)));
+}
+
+{
+    // F.2 — Two distinct sampler descriptions are NOT equal (cache distinguishes).
+    t.ExpectTrue("F.2 LinearRepeat != LinearClamp",
+        !SamplerDescription.LinearRepeat.Equals(SamplerDescription.LinearClamp));
+    t.ExpectTrue("F.2 LinearRepeat != PixelatedRepeat (filter differs)",
+        !SamplerDescription.LinearRepeat.Equals(SamplerDescription.PixelatedRepeat));
+    t.ExpectTrue("F.2 LinearClamp != LinearClampMipmap (mipmap toggle differs)",
+        !SamplerDescription.LinearClamp.Equals(SamplerDescription.LinearClampMipmap));
+}
+
+{
+    // F.3 — Uncompressed format byte counts.
+    t.ExpectClose("F.3 Rgba8 256×256 = 256*256*4 bytes",
+        TextureFormat.Rgba8.MipByteCount(256, 256), 256 * 256 * 4);
+    t.ExpectClose("F.3 Rgba8Srgb 1×1 = 4 bytes",
+        TextureFormat.Rgba8Srgb.MipByteCount(1, 1), 4);
+    t.ExpectClose("F.3 R8 16×16 = 256 bytes",
+        TextureFormat.R8.MipByteCount(16, 16), 256);
+    t.ExpectClose("F.3 Rgba16F 4×4 = 4*4*8 bytes",
+        TextureFormat.Rgba16F.MipByteCount(4, 4), 4 * 4 * 8);
+}
+
+{
+    // F.4 — BCn block math. Block-compressed formats are 16 bytes per 4×4 block,
+    // and small mips round UP to the next block boundary — a 1×1 mip still
+    // costs a full 16-byte block, not 1 byte.
+    t.ExpectClose("F.4 Bc7Srgb 4×4 = one block",
+        TextureFormat.Bc7Srgb.MipByteCount(4, 4), 16);
+    t.ExpectClose("F.4 Bc7Srgb 1×1 = one block (padded)",
+        TextureFormat.Bc7Srgb.MipByteCount(1, 1), 16);
+    t.ExpectClose("F.4 Bc7Srgb 7×7 = 2×2 blocks (rounded up)",
+        TextureFormat.Bc7Srgb.MipByteCount(7, 7), 2 * 2 * 16);
+    t.ExpectClose("F.4 Bc5Unorm 8×8 = 4 blocks",
+        TextureFormat.Bc5Unorm.MipByteCount(8, 8), 2 * 2 * 16);
+}
+
 t.PrintSummary();
 return t.FailedCount;
+
+// Calls Validate() on a ShaderInterface and returns the thrown exception
+// (or null on success). Lets test cases assert *which* failure occurred
+// without leaking try/catch into every case.
+static InvalidOperationException? TryValidate(ShaderInterface iface)
+{
+    try { iface.Validate(); return null; }
+    catch (InvalidOperationException e) { return e; }
+}
 
 // GLSL M*v_col interpretation when GL stored the bytes as column-major
 // (transpose:false in UniformMatrix4). math(r, c) = bytes[4*c + r].
