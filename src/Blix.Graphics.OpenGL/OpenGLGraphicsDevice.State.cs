@@ -94,13 +94,14 @@ public sealed partial class OpenGLGraphicsDevice
         {
             case Matrix4x4Uniform matrix:
                 // Engine convention is .NET row-vector form (F-016). Direct
-                // memcpy of .NET's row-major bytes + transpose:true tells GL to
-                // store internally as column-major — which means GLSL's
-                // column-major reading reconstructs the column-vector form
-                // that `M * v_col` expects. Same logic Vulkan uses (no
-                // manual transpose either, just direct memcpy).
+                // memcpy of .NET's row-major bytes with transpose:false tells
+                // GL "interpret these bytes as column-major" — which, applied
+                // to .NET row-major storage, naturally reinterprets the
+                // matrix as its TRANSPOSE = column-vector form in GLSL, which
+                // is what `M * v_col` expects. Same operation Vulkan does
+                // implicitly via std140 column-major reading of the UBO.
                 WriteMatrixBytes(matrix.Value, matrixUploadBuffer);
-                GL.UniformMatrix4(location, 1, transpose: true, matrixUploadBuffer);
+                GL.UniformMatrix4(location, 1, transpose: false, matrixUploadBuffer);
                 break;
 
             case Matrix4x4ArrayUniform array:
@@ -115,7 +116,7 @@ public sealed partial class OpenGLGraphicsDevice
                 {
                     WriteMatrixBytes(array.Value[i], matrixUploadBuffer.AsSpan(i * 16, 16));
                 }
-                GL.UniformMatrix4(location, array.Value.Length, transpose: true, matrixUploadBuffer);
+                GL.UniformMatrix4(location, array.Value.Length, transpose: false, matrixUploadBuffer);
                 break;
 
             case Vector4Uniform v4:
@@ -203,10 +204,13 @@ public sealed partial class OpenGLGraphicsDevice
     }
 
     // Copies .NET Matrix4x4's raw row-major bytes into the upload buffer
-    // unchanged. Combined with GL.UniformMatrix4(transpose: true), GL
-    // interprets the bytes as row-major and stores them as column-major
-    // internally — producing the column-vector form GLSL's `M * v_col`
-    // expects. Symmetric with the Vulkan backend's direct UBO memcpy.
+    // unchanged. Combined with GL.UniformMatrix4(transpose: false), GL
+    // interprets the bytes as column-major from the GPU's perspective —
+    // applied to .NET's row-major storage, that's the same byte-level
+    // operation as taking the transpose, which converts the engine's
+    // row-vector form into the column-vector form GLSL's `M * v_col`
+    // expects. Symmetric with the Vulkan backend's direct UBO memcpy
+    // (where GLSL's std140 column-major reading does the same job).
     private static void WriteMatrixBytes(System.Numerics.Matrix4x4 m, Span<float> dst)
     {
         var src = System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref m, 1);

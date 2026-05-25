@@ -185,8 +185,65 @@ var t = new TestRunner();
         dotnetResult2, glslResult2);
 }
 
+// ============================================================================
+// Section D — GL transpose-flag semantics (regression for the transpose:true
+//             vs transpose:false confusion that broke GL demos after F-016).
+// ============================================================================
+//
+// The byte-level tests above don't exercise the GL.UniformMatrix4 transpose
+// flag — they only check what GLSL sees AFTER GL's internal reinterpretation.
+// The actual flag value matters: for .NET row-major bytes to land as
+// column-vector form in GLSL, GL must read them as column-major
+// (transpose: false). The opposite (transpose: true) leaves the matrix as
+// row-vector form in GLSL, which silently breaks every M*v multiplication.
+
+{
+    var m = Matrix4x4.CreateTranslation(new Vector3(10, 20, 30));
+
+    var bytes = new float[16];
+    var span = System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref m, 1);
+    var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<Matrix4x4, float>(span);
+    floats.CopyTo(bytes);
+
+    // Simulate GL.UniformMatrix4(transpose: false): input treated as column-major.
+    // GLSL math(r, c) = bytes[4*c + r].
+    var origin = new Vector4(0, 0, 0, 1);
+    var glslTransposeFalse = GlslMulColumnMajor(bytes, origin);
+    t.ExpectClose("GL transpose:false + row-major .NET bytes ⇒ GLSL translates correctly",
+        glslTransposeFalse, new Vector4(10, 20, 30, 1));
+
+    // Simulate GL.UniformMatrix4(transpose: true): input treated as row-major.
+    // GLSL math(r, c) = bytes[4*r + c]. For .NET row-vector matrix this leaves
+    // translation in row 3 — column-vector M*v_col then produces NO translation.
+    var glslTransposeTrue = GlslMulRowMajor(bytes, origin);
+    t.ExpectClose("GL transpose:true + row-major .NET bytes ⇒ GLSL DOES NOT translate (regression marker)",
+        glslTransposeTrue, new Vector4(0, 0, 0, 1));
+}
+
 t.PrintSummary();
 return t.FailedCount;
+
+// GLSL M*v_col interpretation when GL stored the bytes as column-major
+// (transpose:false in UniformMatrix4). math(r, c) = bytes[4*c + r].
+static Vector4 GlslMulColumnMajor(float[] bytes, Vector4 v)
+{
+    var rx = bytes[0]  * v.X + bytes[4]  * v.Y + bytes[8]   * v.Z + bytes[12] * v.W;
+    var ry = bytes[1]  * v.X + bytes[5]  * v.Y + bytes[9]   * v.Z + bytes[13] * v.W;
+    var rz = bytes[2]  * v.X + bytes[6]  * v.Y + bytes[10]  * v.Z + bytes[14] * v.W;
+    var rw = bytes[3]  * v.X + bytes[7]  * v.Y + bytes[11]  * v.Z + bytes[15] * v.W;
+    return new Vector4(rx, ry, rz, rw);
+}
+
+// GLSL M*v_col when GL was told transpose:true (input was row-major).
+// math(r, c) = bytes[4*r + c]. result[r] = sum_c M[r,c] * v[c] = sum_c bytes[4*r+c] * v[c].
+static Vector4 GlslMulRowMajor(float[] bytes, Vector4 v)
+{
+    var rx = bytes[0]  * v.X + bytes[1]  * v.Y + bytes[2]   * v.Z + bytes[3]  * v.W;
+    var ry = bytes[4]  * v.X + bytes[5]  * v.Y + bytes[6]   * v.Z + bytes[7]  * v.W;
+    var rz = bytes[8]  * v.X + bytes[9]  * v.Y + bytes[10]  * v.Z + bytes[11] * v.W;
+    var rw = bytes[12] * v.X + bytes[13] * v.Y + bytes[14]  * v.Z + bytes[15] * v.W;
+    return new Vector4(rx, ry, rz, rw);
+}
 
 // Simulate GLSL's `M * v_col` with M read column-major from a flat float buffer.
 // math (r, c) = bytes[4*c + r]; result[r] = sum_c M[r,c] * v[c].
