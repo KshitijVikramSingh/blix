@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Blix.Core;
 
 namespace Blix.Diagnostics;
@@ -7,19 +8,44 @@ public sealed class DebugContext
     private readonly Stack<string> scopes = new();
     private readonly Dictionary<string, object> pendingControlValues;
 
-    internal DebugContext(DebugState state, RenderFrameContext frame, Dictionary<string, object> pendingControlValues)
+    internal DebugContext(DebugState state, RenderFrameContext frame, Dictionary<string, object> pendingControlValues, int frameNumber, Stopwatch clock, string? selectedPath)
     {
         State = state;
         Frame = frame;
         this.pendingControlValues = pendingControlValues;
+        FrameNumber = frameNumber;
+        SelectedPath = selectedPath;
         Values = new DebugValues(this);
         Controls = new DebugControls(this);
         Draw = new DebugDrawChannel(this);
+        Stats = new DebugStatsChannel(this);
+        Timers = new DebugTimersChannel(this);
+        Events = new DebugEventsChannel(this, clock);
     }
 
     public DebugState State { get; }
 
     public RenderFrameContext Frame { get; }
+
+    // Monotonically increasing frame number assigned by DebugSystem.BeginFrame.
+    // Producers can read it (e.g. to log "saw this on frame N"); the same
+    // number is stamped onto the DebugFrame produced by Snapshot().
+    public int FrameNumber { get; }
+
+    public DebugStatsChannel Stats { get; }
+
+    public DebugTimersChannel Timers { get; }
+
+    public DebugEventsChannel Events { get; }
+
+    // Snapshot of DebugSystem.SelectedPath taken at BeginFrame. Producers
+    // can read this from inside Debug/EmitGeometry/Inspect to specialise
+    // their behaviour for the selected entity — e.g. GltfSceneInstance
+    // suppresses the per-submesh AABB for the selected submesh to avoid
+    // drawing two overlapping outlines. Stays stable for the whole
+    // frame even if Select() is called mid-frame (the change applies
+    // next frame).
+    public string? SelectedPath { get; }
 
     public DebugValues Values { get; }
 
@@ -76,6 +102,28 @@ public sealed class DebugContext
     internal void ClearPendingControlValue(string path)
     {
         pendingControlValues.Remove(path);
+    }
+
+    // Seals the current builder state into an immutable DebugFrame.
+    //
+    // Defensive-copies every entry list because the channels keep mutable
+    // List<T> storage that the next frame will append to. Returning the
+    // lists by reference would let a later BeginFrame() retroactively
+    // mutate a snapshot held by a sink or by Freeze().
+    internal DebugFrame Snapshot(double wallClockMs, string? selectedPath)
+    {
+        return new DebugFrame(
+            FrameNumber,
+            wallClockMs,
+            Frame,
+            Values.Entries.ToArray(),
+            Controls.Entries.ToArray(),
+            Draw.Commands.ToArray(),
+            Draw.ViewProjection,
+            Stats.Entries.ToArray(),
+            Timers.Entries.ToArray(),
+            Events.Entries.ToArray(),
+            selectedPath);
     }
 
     private void PopScope()

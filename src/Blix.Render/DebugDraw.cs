@@ -182,6 +182,271 @@ public sealed class DebugDraw
         Line(corners[3], corners[7], color);
     }
 
+    // Three great circles in the XY, YZ, and XZ planes. Segments is the
+    // number of line segments around each circle (24 is a good default).
+    public void Sphere(Vector3 center, float radius, GraphicsColor color, int segments)
+    {
+        if (radius <= 0.0f || segments < 3)
+        {
+            return;
+        }
+        CircleStrip(center, Vector3.UnitX * radius, Vector3.UnitY * radius, segments, color);
+        CircleStrip(center, Vector3.UnitY * radius, Vector3.UnitZ * radius, segments, color);
+        CircleStrip(center, Vector3.UnitX * radius, Vector3.UnitZ * radius, segments, color);
+    }
+
+    // Square in the plane perpendicular to `normal`, centered at `center`,
+    // edge length = size. Plus a normal stub of length size*0.5 from the
+    // center along the normal for direction disambiguation.
+    public void Plane(Vector3 center, Vector3 normal, float size, GraphicsColor color)
+    {
+        if (size <= 0.0f)
+        {
+            return;
+        }
+        var n = Vector3.Normalize(normal);
+        if (n.LengthSquared() < 1e-6f)
+        {
+            return;
+        }
+        // Pick a tangent that isn't parallel to the normal.
+        var seed = MathF.Abs(n.Y) < 0.9f ? Vector3.UnitY : Vector3.UnitX;
+        var u = Vector3.Normalize(Vector3.Cross(n, seed)) * (size * 0.5f);
+        var v = Vector3.Normalize(Vector3.Cross(n, u)) * (size * 0.5f);
+
+        var p00 = center - u - v;
+        var p10 = center + u - v;
+        var p11 = center + u + v;
+        var p01 = center - u + v;
+        Line(p00, p10, color);
+        Line(p10, p11, color);
+        Line(p11, p01, color);
+        Line(p01, p00, color);
+        Line(center, center + n * (size * 0.5f), color);
+    }
+
+    public void Ray(Vector3 origin, Vector3 direction, float length, GraphicsColor color)
+    {
+        if (direction.LengthSquared() < 1e-12f || length <= 0.0f)
+        {
+            return;
+        }
+        var end = origin + Vector3.Normalize(direction) * length;
+        DrawArrow(origin, end, color);
+    }
+
+    // Capsule = two endcap circles + 4 longitudinal lines connecting them.
+    // For a tight visual, we also draw two half-arcs on the endcaps so the
+    // hemisphere is visible even with line-only rendering.
+    public void Capsule(Vector3 a, Vector3 b, float radius, GraphicsColor color, int segments)
+    {
+        if (radius <= 0.0f || segments < 3)
+        {
+            return;
+        }
+        var axis = b - a;
+        var axisLen = axis.Length();
+        if (axisLen < 1e-6f)
+        {
+            Sphere(a, radius, color, segments);
+            return;
+        }
+        var axisUnit = axis / axisLen;
+        // Build an orthonormal basis (axisUnit, right, up).
+        var seed = MathF.Abs(axisUnit.Y) < 0.9f ? Vector3.UnitY : Vector3.UnitX;
+        var right = Vector3.Normalize(Vector3.Cross(axisUnit, seed)) * radius;
+        var up = Vector3.Normalize(Vector3.Cross(axisUnit, right)) * radius;
+
+        CircleStrip(a, right, up, segments, color);
+        CircleStrip(b, right, up, segments, color);
+
+        // 4 longitudinal lines (right, -right, up, -up offsets).
+        Line(a + right, b + right, color);
+        Line(a - right, b - right, color);
+        Line(a + up, b + up, color);
+        Line(a - up, b - up, color);
+
+        // Hemispherical half-arcs on each cap so the cap is recognizable.
+        ArcStrip(a, -axisUnit * radius, right, segments / 2, color);
+        ArcStrip(a, -axisUnit * radius, up, segments / 2, color);
+        ArcStrip(b, axisUnit * radius, right, segments / 2, color);
+        ArcStrip(b, axisUnit * radius, up, segments / 2, color);
+    }
+
+    // The Obb transform maps the unit cube [-1,1]^3 into world space.
+    // Translation lives in column 4; basis columns 1-3 carry rotation + extents.
+    public void Obb(Matrix4x4 transform, GraphicsColor color)
+    {
+        Span<Vector3> corners = stackalloc Vector3[8];
+        ReadOnlySpan<Vector3> unit =
+        [
+            new(-1, -1, -1), new( 1, -1, -1), new( 1,  1, -1), new(-1,  1, -1),
+            new(-1, -1,  1), new( 1, -1,  1), new( 1,  1,  1), new(-1,  1,  1),
+        ];
+        for (var i = 0; i < 8; i++)
+        {
+            var v = new Vector4(unit[i], 1.0f);
+            var w = TransformColumnVector(transform, v);
+            // Obb transforms are affine (no projection), so w.W is 1.
+            corners[i] = new Vector3(w.X, w.Y, w.Z);
+        }
+        // 12 edges of the cube.
+        Line(corners[0], corners[1], color);
+        Line(corners[1], corners[2], color);
+        Line(corners[2], corners[3], color);
+        Line(corners[3], corners[0], color);
+        Line(corners[4], corners[5], color);
+        Line(corners[5], corners[6], color);
+        Line(corners[6], corners[7], color);
+        Line(corners[7], corners[4], color);
+        Line(corners[0], corners[4], color);
+        Line(corners[1], corners[5], color);
+        Line(corners[2], corners[6], color);
+        Line(corners[3], corners[7], color);
+    }
+
+    // 3D crosshair: three axis-aligned segments through `center`, each
+    // running 2*size in length.
+    public void Cross(Vector3 center, float size, GraphicsColor color)
+    {
+        if (size <= 0.0f)
+        {
+            return;
+        }
+        Line(center - Vector3.UnitX * size, center + Vector3.UnitX * size, color);
+        Line(center - Vector3.UnitY * size, center + Vector3.UnitY * size, color);
+        Line(center - Vector3.UnitZ * size, center + Vector3.UnitZ * size, color);
+    }
+
+    // Open cone: base circle + lines from apex to each base sample.
+    public void Cone(Vector3 apex, Vector3 axis, float length, float halfAngleRad, GraphicsColor color, int segments)
+    {
+        if (length <= 0.0f || halfAngleRad <= 0.0f || segments < 3)
+        {
+            return;
+        }
+        var n = Vector3.Normalize(axis);
+        if (n.LengthSquared() < 1e-6f)
+        {
+            return;
+        }
+        var baseCenter = apex + n * length;
+        var baseRadius = length * MathF.Tan(halfAngleRad);
+
+        var seed = MathF.Abs(n.Y) < 0.9f ? Vector3.UnitY : Vector3.UnitX;
+        var u = Vector3.Normalize(Vector3.Cross(n, seed)) * baseRadius;
+        var v = Vector3.Normalize(Vector3.Cross(n, u)) * baseRadius;
+
+        var prev = baseCenter + u;
+        for (var i = 1; i <= segments; i++)
+        {
+            var t = (float)i / segments * MathF.Tau;
+            var pt = baseCenter + u * MathF.Cos(t) + v * MathF.Sin(t);
+            Line(prev, pt, color);
+            prev = pt;
+        }
+        // 4 spokes from apex to cardinal base points — keeps the cone
+        // readable without flooding it with one line per base segment.
+        Line(apex, baseCenter + u, color);
+        Line(apex, baseCenter - u, color);
+        Line(apex, baseCenter + v, color);
+        Line(apex, baseCenter - v, color);
+    }
+
+    public void Arrow(Vector3 from, Vector3 to, GraphicsColor color)
+    {
+        DrawArrow(from, to, color);
+    }
+
+    // Edges is a flat (i0, i1, i0, i1, ...) array. Odd-length input
+    // drops the trailing dangling index. Indices out of range silently
+    // skip — wireframes are diagnostic output; a malformed edge list
+    // shouldn't take down rendering.
+    public void MeshWireframe(IReadOnlyList<Vector3> vertices, IReadOnlyList<int> edges, GraphicsColor color)
+    {
+        var n = vertices.Count;
+        var pairCount = edges.Count / 2;
+        for (var i = 0; i < pairCount; i++)
+        {
+            var a = edges[i * 2];
+            var b = edges[i * 2 + 1];
+            if ((uint)a >= (uint)n || (uint)b >= (uint)n)
+            {
+                continue;
+            }
+            Line(vertices[a], vertices[b], color);
+        }
+    }
+
+    // One line per (position, normal) pair. Mismatched lengths render
+    // up to the shorter of the two — same diagnostic-tolerance rule as
+    // MeshWireframe.
+    public void Normals(IReadOnlyList<Vector3> positions, IReadOnlyList<Vector3> normals, float length, GraphicsColor color)
+    {
+        if (length <= 0.0f)
+        {
+            return;
+        }
+        var count = Math.Min(positions.Count, normals.Count);
+        for (var i = 0; i < count; i++)
+        {
+            Line(positions[i], positions[i] + normals[i] * length, color);
+        }
+    }
+
+    // Shared arrowhead helper for Arrow and Ray.
+    private void DrawArrow(Vector3 from, Vector3 to, GraphicsColor color)
+    {
+        Line(from, to, color);
+        var shaft = to - from;
+        var shaftLen = shaft.Length();
+        if (shaftLen < 1e-6f)
+        {
+            return;
+        }
+        var n = shaft / shaftLen;
+        var headLength = MathF.Min(shaftLen * 0.2f, 0.5f);
+        var headRadius = headLength * 0.5f;
+        var seed = MathF.Abs(n.Y) < 0.9f ? Vector3.UnitY : Vector3.UnitX;
+        var u = Vector3.Normalize(Vector3.Cross(n, seed)) * headRadius;
+        var v = Vector3.Normalize(Vector3.Cross(n, u)) * headRadius;
+        var basePos = to - n * headLength;
+        Line(to, basePos + u, color);
+        Line(to, basePos - u, color);
+        Line(to, basePos + v, color);
+        Line(to, basePos - v, color);
+    }
+
+    private void CircleStrip(Vector3 center, Vector3 axisA, Vector3 axisB, int segments, GraphicsColor color)
+    {
+        var prev = center + axisA;
+        for (var i = 1; i <= segments; i++)
+        {
+            var t = (float)i / segments * MathF.Tau;
+            var pt = center + axisA * MathF.Cos(t) + axisB * MathF.Sin(t);
+            Line(prev, pt, color);
+            prev = pt;
+        }
+    }
+
+    // Half-arc from `from` (= center + axisFrom) to `center + axisTo`,
+    // following the great-circle path. Used by capsule endcaps.
+    private void ArcStrip(Vector3 center, Vector3 axisFrom, Vector3 axisTo, int segments, GraphicsColor color)
+    {
+        if (segments < 2)
+        {
+            segments = 2;
+        }
+        var prev = center + axisFrom;
+        for (var i = 1; i <= segments; i++)
+        {
+            var t = (float)i / segments * (MathF.PI * 0.5f);
+            var pt = center + axisFrom * MathF.Cos(t) + axisTo * MathF.Sin(t);
+            Line(prev, pt, color);
+            prev = pt;
+        }
+    }
+
     public void Submit(RenderPassBuilder pass, Matrix4x4 viewProjection)
     {
         ArgumentNullException.ThrowIfNull(pass);

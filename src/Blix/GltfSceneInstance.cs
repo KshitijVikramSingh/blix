@@ -1,4 +1,5 @@
 using System.Numerics;
+using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Images;
@@ -31,17 +32,101 @@ namespace Blix;
 // material in the scene shares. Without it GltfSceneInstance would need
 // to know about every scene-wide texture, which couples it to the
 // scene-renderer it shouldn't know about.
-public sealed class GltfSceneInstance
+public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, IDebugInspectable
 {
+    // Static AABB color for the per-submesh outlines. Pale cyan keeps
+    // contrast against typical lit albedo without dominating.
+    private static readonly GraphicsColor SubmeshAabbColor = new(0.30f, 0.85f, 0.95f, 1.0f);
+
     public IReadOnlyList<SubmeshInstance> Submeshes { get; }
     public Bounds3 Bounds { get; }
     public MaterialSet Materials { get; }
 
-    private GltfSceneInstance(SubmeshInstance[] submeshes, Bounds3 bounds, MaterialSet materials)
+    // The producer's identity. Defaults to "scene/<options.Prefix>" so
+    // any number of registered scene instances live under one toggleable
+    // root ("scene") in the Layers panel while keeping per-instance
+    // sub-toggles ("scene/sponza-main", "scene/curtains").
+    public string DebugName { get; }
+
+    private GltfSceneInstance(SubmeshInstance[] submeshes, Bounds3 bounds, MaterialSet materials, string debugName)
     {
         Submeshes = submeshes;
         Bounds = bounds;
         Materials = materials;
+        DebugName = debugName;
+    }
+
+    // IDebugGeometrySource: emits one Aabb per submesh under a path of
+    // "scene/<name>/submesh-N/bounds". Skipped entirely when the layer
+    // is off (DebugSystem.Run gates IDebugGeometrySource by
+    // State.IsPathVisible(DebugName)). The auto-scope already pushes
+    // DebugName, so emissions resolve to the right path without manual
+    // scope manipulation here.
+    public void EmitGeometry(DebugContext debug)
+    {
+        // Skip the AABB for whichever submesh (if any) is currently
+        // selected — the selection sweep draws its own bright outline
+        // there and we'd otherwise paint a faint cyan box on top of /
+        // overlapping the yellow selection box.
+        var selected = debug.SelectedPath;
+        var selectedPrefix = DebugName + "/submesh-";
+        var selectedIndex = -1;
+        if (selected is not null && selected.StartsWith(selectedPrefix, StringComparison.Ordinal))
+        {
+            int.TryParse(selected.AsSpan(selectedPrefix.Length), out selectedIndex);
+        }
+
+        for (var i = 0; i < Submeshes.Count; i++)
+        {
+            if (i == selectedIndex)
+            {
+                continue;
+            }
+            var sub = Submeshes[i];
+            debug.Draw.Aabb($"submesh-{i}/bounds", sub.WorldBounds.Min, sub.WorldBounds.Max, SubmeshAabbColor);
+        }
+    }
+
+    // IDebugSelectable: appends one DebugSelectable per submesh with a
+    // path that mirrors the EmitGeometry paths ("scene/<name>/submesh-N")
+    // so selection-vs-geometry attribution stays unified.
+    public void CollectSelectables(List<DebugSelectable> destination)
+    {
+        for (var i = 0; i < Submeshes.Count; i++)
+        {
+            var sub = Submeshes[i];
+            destination.Add(new DebugSelectable(
+                EntityPath: $"{DebugName}/submesh-{i}",
+                Bounds: sub.WorldBounds));
+        }
+    }
+
+    // IDebugInspectable: emit material + alpha + double-sided info when
+    // the selected path is one of our submeshes. We prefix-check and
+    // then index into Submeshes — keeps O(1) lookup for the inspect path
+    // most commonly hit (the just-picked submesh) without scanning all
+    // submeshes again.
+    public void Inspect(string entityPath, DebugContext debug)
+    {
+        var prefix = DebugName + "/submesh-";
+        if (!entityPath.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return;
+        }
+        var indexText = entityPath.AsSpan(prefix.Length);
+        if (!int.TryParse(indexText, out var index) || (uint)index >= (uint)Submeshes.Count)
+        {
+            return;
+        }
+        var sub = Submeshes[index];
+        debug.Values.Value("scene", DebugName);
+        debug.Values.Value("submesh-index", index);
+        debug.Values.Value("name", sub.Name);
+        debug.Values.Value("material", sub.Material.Name);
+        debug.Values.Value("alpha-mode", sub.AlphaMode);
+        debug.Values.Value("double-sided", sub.DoubleSided);
+        debug.Values.Value("bounds-min", sub.WorldBounds.Min);
+        debug.Values.Value("bounds-max", sub.WorldBounds.Max);
     }
 
     public static GltfSceneInstance Build(IGraphicsDevice device, GltfModel model, GltfSceneOptions options)
@@ -182,7 +267,7 @@ public sealed class GltfSceneInstance
             Console.WriteLine($"  By alphaMode: {string.Join(", ", byMode)}");
         }
 
-        return new GltfSceneInstance(submeshes, bounds, materialSet);
+        return new GltfSceneInstance(submeshes, bounds, materialSet, debugName: $"scene/{options.Prefix}");
     }
 
     private static string Trunc(string s, int n) => s.Length <= n ? s : s.Substring(0, n - 1) + "~";

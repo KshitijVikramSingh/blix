@@ -21,6 +21,10 @@ public sealed partial class OpenGLGraphicsDevice
         // pinned to the first pass and confuse diagnosis.
         DrainErrors("<pre-frame>");
 
+        // Advance the GPU frame counter before any per-pass timing queries
+        // are issued so their FrameIssued stamps match this frame.
+        currentGpuFrameNumber++;
+
         var passPackets = new List<FrameDebugPass>(commandList.Passes.Count);
         var totalDraws = 0;
 
@@ -30,6 +34,12 @@ public sealed partial class OpenGLGraphicsDevice
             passPackets.Add(passPacket);
             totalDraws += passPacket.Draws.Count;
         }
+
+        // Harvest any timestamp pairs that the GPU finished while we
+        // were issuing this frame's work. Drained results are exposed
+        // via ConsumeAvailableGpuTimings() for the runtime to push into
+        // the diagnostics Timers channel.
+        HarvestGpuTimings();
 
         return new FrameDebugPacket(
             TotalPasses: passPackets.Count,
@@ -45,6 +55,16 @@ public sealed partial class OpenGLGraphicsDevice
         // results — get tagged with the group, which makes "where did this
         // INVALID_OPERATION come from?" a one-glance answer in the trace.
         PushDebugGroup(pass.Name);
+
+        // GPU timing bracket. BeginPassGpuTiming issues glQueryCounter at
+        // the start of the pass's GL stream; EndPassGpuTiming issues a
+        // matching one at the end. Both are no-ops when GpuTimingEnabled
+        // is false or the extension isn't available, so the call cost
+        // collapses to a flag check on platforms without timer_query.
+        // We intentionally measure AFTER PushDebugGroup so external
+        // captures see the queries as part of the pass; debug-group
+        // pop happens after EndPassGpuTiming for the same reason.
+        var beginQueryId = BeginPassGpuTiming(pass.Name);
         try
         {
             var (width, height) = BindRenderSurface(pass.Description.Target);
@@ -68,6 +88,7 @@ public sealed partial class OpenGLGraphicsDevice
         }
         finally
         {
+            EndPassGpuTiming(pass.Name, beginQueryId);
             // Drain inside the debug group so messages still attribute to the
             // pass label in external viewers. Pop happens after the drain so
             // the group fully contains the diagnostic traffic.

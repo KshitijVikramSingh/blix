@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Blix.Diagnostics;
 using Blix.Graphics;
 
 namespace Blix.Render;
@@ -28,12 +29,17 @@ namespace Blix.Render;
 // Deliberate non-goals:
 // - Not a streaming system. Every enqueue is unconditional.
 // - Not thread-safe. All Drain + Enqueue calls run on the GL thread.
-public sealed class ResourceUploader
+public sealed class ResourceUploader : IDebuggable
 {
     private readonly IGraphicsDevice device;
     private readonly Queue<MipUpload> queue = new();
     private long uploadedCount;
     private double lastDrainMillis;
+    // Tracks uploadedCount at the previous Debug() invocation so we can
+    // surface a single Info event per frame summarising the delta —
+    // useful for "this frame finished N mips" without spamming one
+    // event per mip.
+    private long uploadedCountAtLastDebug;
 
     public ResourceUploader(IGraphicsDevice device)
     {
@@ -44,6 +50,31 @@ public sealed class ResourceUploader
     public int PendingCount => queue.Count;
     public long UploadedCount => uploadedCount;
     public double LastDrainMillis => lastDrainMillis;
+
+    public string DebugName => "uploader";
+
+    // Pull-style producer: invoked once per frame from DebugSystem.Run.
+    // The counters are state the uploader already maintains, so the
+    // implementation is just a typed surface for them — values become
+    // graph-able gauges instead of opaque strings.
+    public void Debug(DebugContext debug)
+    {
+        debug.Stats.Gauge("pending", PendingCount);
+        debug.Stats.Gauge("uploaded", UploadedCount);
+        debug.Stats.Gauge("drain-ms", LastDrainMillis);
+
+        var delta = uploadedCount - uploadedCountAtLastDebug;
+        uploadedCountAtLastDebug = uploadedCount;
+        if (delta > 0)
+        {
+            // Info severity — finishing a batch of mip uploads is normal
+            // progress, not a warning. The ConsoleEventSink's default
+            // minimum severity is Warn, so this stays quiet unless a
+            // consumer opts in.
+            debug.Events.Info(
+                $"uploaded {delta} mip(s) in {LastDrainMillis:0.00} ms, {PendingCount} pending");
+        }
+    }
 
     public void EnqueueRgba8(
         byte[] pixels, int width, int height, SamplerDescription sampler,

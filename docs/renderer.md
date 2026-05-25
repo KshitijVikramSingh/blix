@@ -562,65 +562,139 @@ Screen-space ortho is `GraphicsMatrices.CreateOrthographicOffCenter(0, width, he
 
 ## Diagnostics
 
-`Blix.Diagnostics` is a *contribution* system, not a second engine lifecycle. A runtime object implements `IDebuggable` and contributes to a per-frame `DebugContext`:
+`Blix.Diagnostics` is a contribution-based observability layer with three independent extension axes: **channels** (what data shape gets produced), **producers** (who emits the data), and **sinks** (who consumes finished frames). Game code never calls ImGui directly — it contributes through typed channels and the OpenTK runtime renders them.
 
-```csharp
-public interface IDebuggable
-{
-    string DebugName { get; }
-    void Debug(DebugContext debug);
-}
+### Frame model
+
+Each frame is an immutable `DebugFrame` snapshot. `DebugSystem` keeps the most recent ~120 finished frames in a ring (`DebugFrameHistory`), drives the per-frame producer walk, and fans the snapshot out to registered sinks.
+
+```
+BeginFrame(renderFrameContext)         // mints a DebugContext
+Run(IDebuggable[])                     // pull-mode producers
+  ... game render ...                  // push producers via IDebugHost.CurrentDebug
+EndFrame()                             // snapshot -> ring -> sinks; Current cleared
 ```
 
-The context has scoped channels:
-
-```csharp
-using (debug.Scope("Lighting"))
-{
-    debug.Values.Value("Direction", lightDirection);
-    lightIntensity = debug.Controls.Float("Direct", lightIntensity, 0.0f, 3.0f);
-}
-
-using (debug.Scope("Post"))
-{
-    presentMode = debug.Controls.Enum("Present", presentMode, PresentModeLabels);
-}
-```
-
-`DebugSystem` owns `DebugState`, pending control values, and the current frame's collected entries. Scoped paths such as `ShaderLab/Lighting/Direct` are stable keys — the current ImGui UI uses them, and the same keys would feed any future editor/debugger packet format.
+`Freeze()` / `Freeze(int frameNumber)` / `Unfreeze()` lets the UI render against a frozen `DebugFrame` while the game keeps producing new frames behind it. The frozen frame is held independently of the ring so a long inspection survives ring overwrite.
 
 ### Channels
 
-- **`Values`** — read-only state (positions, vectors, scalars).
-- **`Controls`** — writable toggles, floats, enums, one-frame buttons.
-- **`Draw`** — line, AABB, grid, frustum commands collected into a runtime-appended pass.
+All six channels live on `DebugContext` and snapshot into `DebugFrame`:
+
+| Channel | API | Aggregation |
+| --- | --- | --- |
+| `Values` | `Value(name, object?)` | last-write per path |
+| `Controls` | `Toggle`/`Float`/`Enum`/`Button` | last-write per path; UI mutations round-trip through `pendingControlValues` |
+| `Draw` | `Line/Aabb/Grid/Frustum/Sphere/Plane/Ray/Capsule/Obb/Cross/Cone/Arrow/MeshWireframe/Normals` | append-only |
+| `Stats` | `Count(name, delta)` / `Increment(name)` / `Gauge(name, value)` | sum (Count) / last (Gauge), eager per path |
+| `Timers` | `using (Timers.Measure("Opaque")) { ... }` | sum `TotalMs`, `++CallCount` per path |
+| `Events` | `Info/Warn/Error(message, payload?)` | chronological, no aggregation |
+
+Path resolution is uniform across channels — emissions inherit the current `Scope`. A producer named `"physics"` emitting `Stats.Count("draws", 1)` from inside `using (ctx.Scope("colliders"))` resolves to path `"physics/colliders/draws"`.
+
+Frame-level CPU timer ("frame") is auto-recorded by `DebugSystem.EndFrame` so every frame has a baseline. The OpenGL backend additionally emits per-pass GPU timings via `glQueryCounter` (when `GL_ARB_timer_query` is available); the runtime drains them into `Timers` under scope `"gpu/passes"` 1–N frames after issue.
+
+### Producer interfaces
+
+Every producer implements `IDebugContributor` (just `string DebugName { get; }`) and registers once with `DebugSystem.Register(contributor)`. Three specialisations stack independently:
+
+| Interface | Role | When invoked |
+| --- | --- | --- |
+| `IDebuggable` | Pull-mode state production (`Values`, `Controls`, `Stats`, etc.) | Every `Run()`, under auto-scope of `DebugName` |
+| `IDebugGeometrySource` | Spatial geometry emission (debug AABBs, normals, wireframes) | Every `Run()`, only when `State.IsPathVisible(DebugName)` — disabled layers skip the call entirely (zero CPU) |
+| `IDebugSelectable` | Picking surface (`(EntityPath, Bounds3)` collected into a destination list for ray-vs-AABB) | On demand via `DebugSystem.CollectSelectables()` |
+| `IDebugInspectable` | Per-selection inspector (emits Values under `"selection/"` scope when path matches) | Every `Run()` if `SelectedPath != null` |
+| `IDebugUi` (in `Blix.Runtime.OpenTK`) | Custom ImGui panel | Every frame in the HUD's Custom tab |
+
+A class can implement any combination — the same registry holds it once.
+
+### Push hook (graphics-side)
+
+`IFrameRecorder` in `Blix.Graphics` lets the render-command layer feed events back to diagnostics without coupling. `RenderCommandList.Pass()` invokes `OnPassBegin`/`OnPassEnd`; `RenderPassBuilder.DrawIndexed` invokes `OnDraw(in DrawIndexedCommand)`. `DiagnosticsFrameRecorder` (the diagnostics-side implementation, wired by `Window`) translates these into `Stats` (`draws`, `triangles`, both top-level and per-pass under `passes/<name>/`) and per-pass `Timers` (`passes/<name>/build`).
+
+### Sinks
+
+`IDebugFrameSink.Consume(DebugFrame)` runs after each `EndFrame` snapshot. The runtime registers two by default:
+
+- **`ConsoleEventSink`** — prints `Events` at or above min-severity (default `Warn`) to stderr.
+- **`JsonDumpSink`** — `F12` dumps the current display frame (frozen if frozen, else latest) to `dumps/frame-NNNNNN.json`. Schema-stable DTO keyed by `Kind` discriminator. Polymorphic payloads (e.g. `AssetLoadReport`) captured via `JsonNode` so the runtime type is preserved on disk.
+
+A throwing sink is caught and logged; the loop keeps running.
+
+### Selection + picking
+
+Demos own the camera + ray construction (the runtime is camera-agnostic). The typical pick flow:
+
+```csharp
+var selectables = debugSystem.CollectSelectables();
+var bestVolume = float.PositiveInfinity;
+DebugSelectable? best = null;
+foreach (var s in selectables)
+{
+    if (Intersection.Raycast(ray, s.Bounds, float.PositiveInfinity) is { } hit)
+    {
+        var v = Volume(s.Bounds);
+        if (v < bestVolume) { bestVolume = v; best = s; }
+    }
+}
+if (best is { } pick) debugSystem.Select(pick.EntityPath, pick.Bounds);
+else debugSystem.ClearSelection();
+```
+
+Smallest-AABB-volume preference is the right heuristic when scenes have overlapping bounds (Sponza's structural pieces encompass their decor) — without true mesh-level picking, ray-entry-time alone always grabs the floor.
+
+`SelectedPath` and `SelectedBounds` are cross-frame state, snapshotted into `DebugFrame.SelectedPath`. The selection sweep at the end of `Run()` auto-emits a bright **magenta** outline (`Aabb` + `Sphere` at the bounds centre + `Cross` for orientation) under path `"selection/<entity-path>"`. These bypass the layer filter — they're system feedback, not user content. Registered `IDebugInspectable` producers also receive `Inspect(SelectedPath, ctx)` and emit data under the same `"selection"` scope; the ImGui Selection tab pulls those Values and the State tab filters them out.
+
+### IDebugHost
+
+`Window` implements `IDebugHost`, exposing both the active `DebugContext` (for push-mode draws / inspect data during render) and the full `DebugSystem` (for registry + freeze + selection from `OnLoad`):
+
+```csharp
+if (Host is IDebugHost { System: { } sys })
+{
+    sys.Register(uploader);                  // IDebuggable producer
+    sys.Register(myMesh);                    // IDebugSelectable + IDebugInspectable
+    sys.State.LayersEnabled["scene"] = false; // start with scene viz hidden
+}
+
+// ... per-frame in OnRender:
+if (Host is IDebugHost { CurrentDebug: { } dbg })
+{
+    dbg.Draw.ViewProjection = projection * view;   // required — see footgun below
+}
+```
+
+**Footgun:** `Draw.ViewProjection` defaults to `Matrix4x4.Identity` each frame. A demo that emits debug-draw primitives but never assigns the matrix sees nothing — lines are multiplied by identity and clipped. The runtime prints a one-shot stderr warning the first time this happens.
+
+### Layer toggles
+
+`DebugState.LayersEnabled : Dictionary<string, bool>` gates debug-draw rendering by path prefix. `IsPathVisible(path)` walks the path leaf → root and short-circuits on the first explicit `false`. Disabling `"physics"` hides everything under it; disabling `"physics/aabb"` keeps `"physics/velocities"` visible. Missing-key defaults to visible.
+
+The ImGui Layers tab builds a tree of observed prefixes with `(visible/total)` counts and `[All]`/`[None]` buttons per node. `IDebugGeometrySource` producers are gated at the registry level — disabled layers don't even call `EmitGeometry`.
+
+### ImGui HUD
+
+`Blix.Runtime.OpenTK.ImGuiOverlayRenderer` lays out a single resizable window:
+
+- **Status bar** (always visible) — `frame N • fps • ms • draws • tris • sel:<path>` plus Freeze/Unfreeze.
+- **Tab bar** — `Selection` (visible only when picked; auto-focuses on a new pick) • `Stats` • `Timers` • `Events` (only if any) • `Controls` • `State` • `Layers` • `Custom` (only if any `IDebugUi` registered).
+- Stats / Timers rows are text-only; click the `·` icon per row to expand a sparkline drawn from `DebugFrameHistory`.
+- **`** (backtick) toggles the HUD entirely.
 
 ### Lifecycle
 
 `Blix.Runtime.OpenTK.Window` creates a `DebugSystem` when the game loop implements `IDebuggable`. Per frame:
 
-1. Begin the debug frame and run contributors.
-2. Let the game render normally.
-3. Append one runtime-owned `debug` pass if `debug.Draw` contains commands.
-4. Render the ImGui diagnostics UI after command execution and before buffer swap.
-
-The OpenTK ImGui adapter is intentionally thin. Game code does not call ImGui directly — it contributes generic controls and state through `DebugContext`.
-
-### IDebugHost
-
-`Window` implements `IDebugHost`, exposing `CurrentDebug` (the active `DebugContext`). Game code reads it to gate per-frame `debug.Draw.*` calls behind dev mode:
-
-```csharp
-if ((Host as IDebugHost)?.CurrentDebug is { State.ShowDebugDraw: true } debug)
-{
-    debug.Draw.Grid("World Grid", Vector3.Zero, 4.0f, 8, gray);
-    debug.Draw.Aabb("Bunny", worldBounds.Min, worldBounds.Max, green);
-}
-```
+1. `BeginFrame` mints a `DebugContext`.
+2. `Run(gameLoop)` walks registered contributors then the game-root `IDebuggable`. `IDebugGeometrySource` producers run in a separate gated sweep; selection sweep runs last when `SelectedPath != null`.
+3. Game records render passes; `RenderPassBuilder.DrawIndexed` feeds the `IFrameRecorder` hook.
+4. Window appends one runtime-owned `debug` pass when there are draw commands.
+5. Render the ImGui HUD.
+6. `EndFrame` records the frame timer, snapshots into history, fans out to sinks, clears `Current`.
 
 ### Frame debug packets
 
-`IRenderer.Execute(RenderCommandList)` returns a `FrameDebugPacket` describing what the backend just executed: pass names + resolved sizes + target render surfaces + clear flags + per-draw pipeline/buffer/uniform/texture metadata. `Window` forwards each packet — along with a `ResourceRegistrySnapshot` from `IGraphicsDevice.SnapshotResources()` — to an optional `IRuntimeDiagnosticsSink` (in `Blix.Core`). `ConsoleFrameDebugSink` is a minimal sink that prints a per-frame summary at a configurable cadence, resolving target render-surface names through the snapshot.
+`IRenderer.Execute(RenderCommandList)` returns a `FrameDebugPacket` (separate from the diagnostics frame) describing what the backend just executed: pass names + resolved sizes + target surfaces + clear flags + per-draw pipeline/buffer/uniform/texture metadata. `Window` forwards each packet — along with a `ResourceRegistrySnapshot` from `IGraphicsDevice.SnapshotResources()` — to an optional `IRuntimeDiagnosticsSink` (in `Blix.Core`). `ConsoleFrameDebugSink` is a minimal sink that prints a per-frame summary at a configurable cadence.
 
 ### Resource registry
 
@@ -632,22 +706,19 @@ Names are propagated to OpenGL as object labels via `glObjectLabel` (when `GL_KH
 
 `Blix.Render.DebugDraw` is the renderer-side line batch. Construction allocates a dynamic vertex buffer at max capacity (64 000 vertices = 32 000 lines), a pre-baked sequential index buffer, an embedded debug shader/pipeline, and a `Material` wrapping them.
 
-Game code rarely owns a `DebugDraw` directly — it contributes commands through diagnostics, and the runtime's `Window` owns the actual `DebugDraw` instance:
+Game code rarely owns a `DebugDraw` directly — it contributes commands through diagnostics, and the runtime's `Window` owns the actual instance:
 
 ```csharp
-debug.Draw.ViewProjection = viewProjection;
-debug.Draw.Grid("World Grid", Vector3.Zero, 4.0f, 8, gray);
-debug.Draw.Frustum("Light Frustum", lightViewProjection, yellow);
-debug.Draw.Aabb("Bunny", worldBounds.Min, worldBounds.Max, green);
+dbg.Draw.ViewProjection = projection * view;            // required (see footgun above)
+dbg.Draw.Grid("World Grid", Vector3.Zero, 4.0f, 8, gray);
+dbg.Draw.Frustum("Light Frustum", lightViewProjection, yellow);
+dbg.Draw.Aabb("Bunny", worldBounds.Min, worldBounds.Max, green);
+dbg.Draw.Sphere("Picked", center, 0.25f, magenta);
 ```
 
-`Window` converts collected commands into one appended `debug` pass and submits through its runtime-owned `DebugDraw`.
+`Window` converts collected commands into one appended `debug` pass and submits through its runtime-owned `DebugDraw`. `Submit` uploads accumulated vertices, issues one `DrawIndexed`, and clears the buffer for next frame. **Depth-disabled** by default — lines always render on top of the scene.
 
-`Submit` uploads accumulated vertices via `IGraphicsDevice.UpdateVertexBuffer(handle, bytes, byteOffset)`, issues one `DrawIndexed`, and clears the buffer for next frame.
-
-Available primitives: `Line`, `Aabb`, `Grid`, `Frustum`. Wireframe sphere and shapes-with-fill are deferred until something needs them.
-
-`DebugDraw` runs **depth-disabled** by default — lines always render on top of the scene. This is the right default for camera/frustum/bounds debugging where occluded geometry still needs to be visible.
+Available primitives: `Line`, `Aabb`, `Grid`, `Frustum`, `Sphere`, `Plane`, `Ray`, `Capsule`, `Obb`, `Cross`, `Cone`, `Arrow`, `MeshWireframe`, `Normals`. Mesh primitives carry vertex/edge arrays by reference (producer-side immutability is the contract); the JSON dump emits summary counts only.
 
 ### Derived bounds
 

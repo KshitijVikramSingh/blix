@@ -57,6 +57,12 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
     private bool sprintHeld = false;
     private float cameraFov = MathF.PI / 3.0f;
     private bool mouseCaptured = true;
+    // Last known cursor position in window-logical coords. Tracked even
+    // when mouseCaptured is true (where it's typically pinned to the
+    // window centre) so click-to-pick after pressing C has the right
+    // coordinate to ray-cast through.
+    private float lastMouseX;
+    private float lastMouseY;
 
     // Environment + IBL.
     private EnvironmentProfile envProfile = null!;
@@ -167,8 +173,13 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
     private float normalMapFlipY = 1.0f;
 
     // Lit shader debug view selector. Index must match the lit.frag switch.
-    private int debugView = 0;
-    private bool visualizeCascades = false;
+    // State lives inside LightingDebugView (a registered IDebugUi); this
+    // class reads from lightingDebug.SelectedViewIndex / .VisualizeCascades
+    // in the render path. lightingDebug is constructed in OnLoad and
+    // registered with the debug system so it produces its own scope and
+    // owns its own custom panel.
+    private LightingDebugView lightingDebug = null!;
+
     private static readonly string[] DebugViewNames =
     {
         "PBR (real)",
@@ -436,6 +447,25 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         // --- Load Modern Sponza + add-ons via GltfSceneInstance --------
         uploader = new ResourceUploader(GraphicsDevice);
 
+        lightingDebug = new LightingDebugView(DebugViewNames);
+
+        // Register subsystem-level contributors with the diagnostics
+        // registry so they get their own scopes and (where applicable)
+        // their own ImGui panels. The Host is the Window; IDebugHost.System
+        // returns null when the runtime wasn't built with diagnostics —
+        // tolerated, since our own Debug() body still runs without it.
+        if (Host is Blix.Diagnostics.IDebugHost { System: { } debugSystem })
+        {
+            debugSystem.Register(uploader);
+            debugSystem.Register(lightingDebug);
+            // Sponza ships ~200 submesh AABBs across its packs — useful
+            // when investigating a specific cull bug, overwhelming as
+            // a startup default. Layer is off; user toggles it on per
+            // pack ("scene/main", "scene/curtains", ...) from the
+            // Layers panel.
+            debugSystem.State.LayersEnabled["scene"] = false;
+        }
+
         var defaults = new GltfDefaultTextures(
             WhitePixel: whitePixel,
             FlatNormal: flatNormal,
@@ -609,6 +639,15 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         {
             var built = GltfSceneInstance.Build(GraphicsDevice, task.Result, perPackOptions);
             assignToField(built);
+            // Register the new scene with the diagnostics registry so its
+            // per-submesh AABBs appear in the Layers panel under
+            // "scene/<name>" without any further demo wiring. Late
+            // registration is fine — the producer's first emission lands
+            // on the next frame after Build completes.
+            if (Host is Blix.Diagnostics.IDebugHost { System: { } debugSystem })
+            {
+                debugSystem.Register(built);
+            }
             Console.WriteLine($"  '{name}' built: {built.Submeshes.Count} submeshes, {built.Materials.All.Count} materials");
         }));
     }
@@ -715,6 +754,15 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         var view = camera.GetView();
         var proj = camera.GetProjection(aspect);
         var invViewProj = InvertOrIdentity(proj * view);
+
+        // Feed the debug-draw channel the world->clip matrix every frame.
+        // Without this, debug lines pass through Matrix4x4.Identity and
+        // get culled in clip space — symptom: selection outlines and any
+        // other Draw primitives are silently invisible.
+        if (Host is Blix.Diagnostics.IDebugHost { CurrentDebug: { } dbg })
+        {
+            dbg.Draw.ViewProjection = proj * view;
+        }
         // Setting this to null disables the per-submesh frustum cull so we
         // can A/B test whether geometry being missing is from our culling
         // step or downstream (back-face, depth, etc.).
@@ -793,7 +841,7 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             new("uPointShadowFarPlane", new FloatUniform(12.0f)),
             new("uPointShadowBias", new FloatUniform(0.005f)),
             new("uPointShadowFilterRadius", new FloatUniform(0.08f)),
-            new("uDebugView", new FloatUniform(debugView)),
+            new("uDebugView", new FloatUniform(lightingDebug.SelectedViewIndex)),
         };
         var frameContext = new PbrFrameContext
         {
@@ -803,7 +851,7 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             SunDirection = sunDirection,
             SunColor = new Vector3(1.0f, 0.94f, 0.82f) * sunStrength,
             Environment = envProbe,
-            Cascades = new CascadeShadowState(cascadeLightVPs, splitFloats, visualizeCascades),
+            Cascades = new CascadeShadowState(cascadeLightVPs, splitFloats, lightingDebug.VisualizeCascades),
             Exposure = exposure,
             ExtraUniforms = demoTuning,
         };
@@ -1060,6 +1108,80 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             mouseCaptured = !mouseCaptured;
             (Host as IRenderHost)?.SetCursorCaptured(mouseCaptured);
         }
+        if (key == Key.P)
+        {
+            PickCenterScreen();
+        }
+    }
+
+    // Two-mode picking: P at screen centre (works in FPS-capture mode);
+    // left-click at cursor pos (works after pressing C to free the
+    // cursor). Both funnel through DoPick() so the raycast + selection
+    // bookkeeping lives in one place.
+    private void PickCenterScreen()
+    {
+        var (logicalW, logicalH) = ((IRenderHost)Host).LogicalSize;
+        var ray = camera.ScreenPointToRay(logicalW * 0.5f, logicalH * 0.5f, logicalW, logicalH);
+        DoPick(ray);
+    }
+
+    private void PickAtCursor()
+    {
+        var (logicalW, logicalH) = ((IRenderHost)Host).LogicalSize;
+        var ray = camera.ScreenPointToRay(lastMouseX, lastMouseY, logicalW, logicalH);
+        DoPick(ray);
+    }
+
+    private void DoPick(Blix.Geometry.Ray ray)
+    {
+        if (Host is not Blix.Diagnostics.IDebugHost { System: { } debugSystem })
+        {
+            return;
+        }
+        var selectables = debugSystem.CollectSelectables();
+
+        // Sponza has heavily overlapping submesh AABBs: large structural
+        // pieces (floor, walls, ceilings) encompass dozens of smaller
+        // decoration submeshes. Picking by ray-entry time alone almost
+        // always lands on the big box, because the floor's AABB starts
+        // near the camera's feet — its t_entry beats a chair sitting on
+        // the floor every time. Two-pass:
+        //   1. Collect every AABB the ray hits, with its hit-time.
+        //   2. Among those, prefer the SMALLEST world-space volume —
+        //      "click selects the most-specific thing your ray touches".
+        // This trades a small amount of "I wanted the room, not the
+        // sconce" surprise for far more "I clicked the chair and got
+        // the chair." Without true mesh-level picking, it's the right
+        // heuristic for Sponza-shaped scenes.
+        DebugSelectable? best = null;
+        var bestVolume = float.PositiveInfinity;
+        var bestT = float.PositiveInfinity;
+        for (var i = 0; i < selectables.Count; i++)
+        {
+            var s = selectables[i];
+            if (Blix.Geometry.Intersection.Raycast(ray, s.Bounds, float.PositiveInfinity) is { } hit)
+            {
+                var ext = s.Bounds.Max - s.Bounds.Min;
+                var volume = ext.X * ext.Y * ext.Z;
+                if (volume < bestVolume)
+                {
+                    bestVolume = volume;
+                    bestT = hit.Time;
+                    best = s;
+                }
+            }
+        }
+
+        if (best is { } pick)
+        {
+            debugSystem.Select(pick.EntityPath, pick.Bounds);
+            Console.WriteLine($"[diagnostics] picked {pick.EntityPath} at t={bestT:0.00}, volume={bestVolume:0.00}");
+        }
+        else
+        {
+            debugSystem.ClearSelection();
+            Console.WriteLine("[diagnostics] pick missed; selection cleared");
+        }
     }
 
     public void OnKeyUp(Key key)
@@ -1068,7 +1190,16 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         if (key is Key.LeftSuper or Key.RightSuper) sprintHeld = false;
     }
 
-    public void OnMouseDown(MouseButton button) { }
+    public void OnMouseDown(MouseButton button)
+    {
+        // Click-to-pick when the cursor is free (post C-toggle).
+        // FPS-capture mode keeps the cursor pinned, so click-pick there
+        // would always hit the screen centre — P key handles that case.
+        if (button == MouseButton.Left && !mouseCaptured)
+        {
+            PickAtCursor();
+        }
+    }
     public void OnMouseUp(MouseButton button) { }
     // IMPORTANT: signature must match IInputHandler exactly -- the interface
     // declares OnMouseMove(float, float, float, float) with a default no-op
@@ -1078,6 +1209,8 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
     // matches) but mouse-look does nothing.
     public void OnMouseMove(float x, float y, float deltaX, float deltaY)
     {
+        lastMouseX = x;
+        lastMouseY = y;
         if (!mouseCaptured) return;
         const float sensitivity = 0.002f;
         yaw -= deltaX * sensitivity;
@@ -1090,7 +1223,10 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
     public void Debug(DebugContext debug)
     {
         debug.State.Enabled = true;
-        debug.State.ShowOverlay = true;
+        // ShowOverlay used to be forced true here every frame, which
+        // fought the runtime's tilde-toggle (Window swaps ShowOverlay;
+        // next frame we'd flip it back). Initialise once via the field
+        // default (true) and let the user own it from then on.
         debug.State.ShowDebugDraw = true;
 
         using (debug.Scope("Frame"))
@@ -1107,10 +1243,12 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
                 + (treesScene?.Submeshes.Count ?? 0);
             debug.Values.Value("Drawn opaque", $"{lastOpaqueDrawn} / {totalSubs}");
             debug.Values.Value("Drawn cascade", $"{lastCascadeDrawn} / {totalSubs * CascadeCount}");
-            debug.Values.Value("Uploads pending", uploader.PendingCount);
-            debug.Values.Value("Uploads done", uploader.UploadedCount);
-            debug.Values.Value("Drain ms", $"{uploader.LastDrainMillis:0.00}");
         }
+
+        // ResourceUploader and LightingDebugView are registered with the
+        // DebugSystem in OnLoad; the registry walks them automatically
+        // each frame under their own top-level scopes ("uploader",
+        // "lighting-debug"), so no manual delegation is needed here.
 
         using (debug.Scope("Sun"))
         {
@@ -1157,11 +1295,11 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             ssrRoughnessCutoff = debug.Controls.Float("Roughness cutoff", ssrRoughnessCutoff, 0.0f, 1.0f);
         }
 
-        using (debug.Scope("Debug"))
-        {
-            debugView = debug.Controls.Enum("View", debugView, DebugViewNames);
-            visualizeCascades = debug.Controls.Toggle("Visualize cascades", visualizeCascades);
-        }
+        // The lighting debug view (debug-view enum + cascade-color toggle)
+        // is now a LightingDebugView registered with the debug system. Its
+        // custom ImGui panel appears as its own collapsing header, and its
+        // state is read directly via lightingDebug.SelectedViewIndex /
+        // .VisualizeCascades in the render path above.
 
         using (debug.Scope("PBR tuning"))
         {

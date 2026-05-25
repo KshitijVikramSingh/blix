@@ -36,7 +36,11 @@ Blix.Shaders                   ← engine-level GLSL library (no csproj; .glsl
                                   files copied into each demo's bin via csproj
                                   globs; tonemap.glsl, noise.glsl, pbr.glsl)
 Blix.Diagnostics               ← contribution-based debug system
-        ↑                         (IDebuggable, DebugContext, scoped channels)
+        ↑                         (DebugFrame snapshots + history ring,
+                                   Values/Controls/Draw/Stats/Timers/Events
+                                   channels, sinks, selection + picking,
+                                   IDebuggable / IDebugGeometrySource /
+                                   IDebugSelectable / IDebugInspectable)
 Blix.Core                      ← platform contracts (no implementations)
                                   (IRenderHost, IAudioHost, IDebugHost,
                                    IInputHandler, IRuntimeDiagnosticsSink, Key,
@@ -58,7 +62,7 @@ Every cross-project dependency in the source tree fits one of the arrows above. 
 | --- | --- | --- |
 | `IRenderHost` | `Blix.Core` | Runtime knobs: `SetTitle`, `RequestClose`, `SetCursorCaptured`, `LogicalSize`. |
 | `IAudioHost` | `Blix.Core` | Hands out the `IAudioDevice` (`Blix.Audio`) for the running session. |
-| `IDebugHost` | `Blix.Diagnostics` | Exposes the active `DebugContext` so game code can gate debug-only work. |
+| `IDebugHost` | `Blix.Diagnostics` | Exposes the active `DebugContext` (for per-frame writes) and the full `DebugSystem` (for contributor registration, freeze, selection). |
 | `IInputHandler` | `Blix.Core` | Edge-triggered input events: `OnKeyDown/Up`, `OnMouseDown/Up`, `OnMouseMove`, `OnMouseWheel`. |
 | `IRuntimeDiagnosticsSink` | `Blix.Core` | Per-frame backend introspection: receives `FrameDebugPacket` + `ResourceRegistrySnapshot`. |
 
@@ -95,7 +99,10 @@ The game implements `IGameLoop` (in `Blix`) and optionally `IInputHandler` and `
 | Make a `Game` subclass, place an object, animate it, query collisions | [`blix.md`](blix.md) |
 | Add a host facet (audio, gamepads, networking) | `src/Blix.Core/` for the contract, then implement in `src/Blix.Runtime.OpenTK/` |
 | Add a new asset type | `src/Blix.Assets/` (importer + intermediate data type) |
-| Add a new debug control | `IDebuggable.Debug(DebugContext)` — see "Diagnostics" in [`renderer.md`](renderer.md) |
+| Add a new debug control / stat / timer / event | `IDebuggable.Debug(DebugContext)` — see "Diagnostics" in [`renderer.md`](renderer.md) |
+| Register a debug producer (subsystem, asset, scene instance) | `debugSystem.Register(contributor)` from `OnLoad` — implement `IDebuggable` / `IDebugGeometrySource` / `IDebugSelectable` / `IDebugInspectable` / `IDebugUi` independently |
+| Save a frame snapshot to disk | Press `F12` (runtime-owned) — writes `dumps/frame-NNNNNN.json` via `JsonDumpSink` |
+| Toggle the diagnostics overlay | Press `` ` `` (backtick) |
 | Add a reusable shader primitive | `src/Blix.Shaders/<concept>.glsl` (one concept per file, `blix_`-prefixed symbols) |
 
 ## Build + run

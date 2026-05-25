@@ -79,6 +79,12 @@ public sealed partial class OpenGLGraphicsDevice : IGraphicsDevice, IRenderer
         // glObjectLabel, so label calls stay gated on khrDebugSupported.
         debugLabelsSupported = khrDebugSupported;
 
+        // GPU timing is opt-in but defaults ON when the extension is
+        // present — the per-pass cost is two glQueryCounter calls, which
+        // is negligible, and the diagnostic value is high.
+        gpuTimingSupported = DetectGpuTimingSupport();
+        GpuTimingEnabled = gpuTimingSupported;
+
         if (Diagnostics != DiagnosticsMode.Off)
         {
             InstallDebugCallback();
@@ -141,6 +147,8 @@ public sealed partial class OpenGLGraphicsDevice : IGraphicsDevice, IRenderer
         {
             DeleteRenderSurfaceResource(resource);
         }
+
+        DisposeGpuTiming();
 
         GL.DeleteVertexArray(vertexArray);
         vertexBuffers.Clear();

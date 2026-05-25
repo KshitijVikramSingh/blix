@@ -1,3 +1,4 @@
+using System.Numerics;
 using Blix.Audio;
 using Blix.Audio.OpenAL;
 using Blix.Core;
@@ -22,7 +23,13 @@ public sealed class Window : GameWindow, IRenderHost, IAudioHost, IDebugHost
     private readonly IInputHandler? inputHandler;
     private readonly IRuntimeDiagnosticsSink? diagnostics;
     private readonly DebugSystem? debugSystem;
+    private readonly DiagnosticsFrameRecorder? frameRecorder;
+    private readonly JsonDumpSink? jsonDumpSink;
     private OpenGLGraphicsDevice? graphicsDevice;
+    // One-shot footgun guard for the most common debug-draw setup miss
+    // (demo emits Draw primitives but never sets Draw.ViewProjection).
+    // Set on the first frame the warning fires; never resets.
+    private bool warnedAboutIdentityViewProjection;
     private OpenALAudioDevice? audioDevice;
     private ImGuiOverlayRenderer? debugOverlayRenderer;
     private DebugDraw? debugDraw;
@@ -44,6 +51,15 @@ public sealed class Window : GameWindow, IRenderHost, IAudioHost, IDebugHost
         if (gameLoop is IDebuggable)
         {
             debugSystem = new DebugSystem();
+            frameRecorder = new DiagnosticsFrameRecorder(debugSystem);
+            // Default to warn+error on stderr; producers that emit info-level
+            // chatter (e.g. ResourceUploader per-mip completions) stay quiet
+            // unless the consumer opts in to a noisier sink.
+            debugSystem.AddSink(new ConsoleEventSink());
+            // F12 dumps the current display frame to disk; sink stays armed
+            // between presses and discharges on the next EndFrame.
+            jsonDumpSink = new JsonDumpSink();
+            debugSystem.AddSink(jsonDumpSink);
         }
     }
 
@@ -96,16 +112,44 @@ public sealed class Window : GameWindow, IRenderHost, IAudioHost, IDebugHost
         if (debugSystem is not null && gameLoop is IDebuggable debuggable)
         {
             debugSystem.BeginFrame(frame);
-            debugSystem.Run(debuggable);
+            using (debugSystem.Current!.Timers.Measure("run-debuggables"))
+            {
+                debugSystem.Run(debuggable);
+            }
         }
 
-        var commandList = new RenderCommandList();
-        gameLoop.OnRender(time, frame, commandList);
-        AppendDebugDrawPass(commandList);
+        var commandList = new RenderCommandList(frameRecorder);
+        // The three phase timers below split the per-tick CPU work into
+        // build / submit / overlay so the HUD answers "is the cost in
+        // recording commands, in the GL backend translating them, or in
+        // the debug UI itself?" without anyone having to wire it per demo.
+        using (debugSystem?.Current?.Timers.Measure("build-commands"))
+        {
+            gameLoop.OnRender(time, frame, commandList);
+            AppendDebugDrawPass(commandList);
+        }
 
         if (graphicsDevice is { } device)
         {
-            var packet = device.Execute(commandList);
+            FrameDebugPacket packet;
+            using (debugSystem?.Current?.Timers.Measure("execute"))
+            {
+                packet = device.Execute(commandList);
+            }
+
+            // GPU pass timings landing this tick (results from this frame
+            // or one of the previous few, driver-dependent). Pushed under
+            // a dedicated "gpu/passes" scope so they group apart from the
+            // CPU "passes/<name>/build" timers Phase 3 already emits.
+            if (debugSystem?.Current is { } ctx)
+            {
+                var gpuTimings = device.ConsumeAvailableGpuTimings();
+                for (var i = 0; i < gpuTimings.Count; i++)
+                {
+                    var t = gpuTimings[i];
+                    ctx.Timers.AppendCompleted(t.PassName, scope: "gpu/passes", t.ElapsedMs);
+                }
+            }
 
             if (diagnostics is { } sink)
             {
@@ -115,14 +159,24 @@ public sealed class Window : GameWindow, IRenderHost, IAudioHost, IDebugHost
             if (debugOverlayRenderer is { } overlayRenderer &&
                 debugSystem is { State.Enabled: true, State.ShowOverlay: true })
             {
-                overlayRenderer.RenderOverlay(
-                    ClientSize,
-                    GetCurrentFramebufferSize(),
-                    (float)args.Time,
-                    MouseState,
-                    debugSystem);
+                using (debugSystem.Current?.Timers.Measure("overlay"))
+                {
+                    overlayRenderer.RenderOverlay(
+                        ClientSize,
+                        GetCurrentFramebufferSize(),
+                        (float)args.Time,
+                        MouseState,
+                        debugSystem);
+                }
             }
         }
+
+        // Seal the frame *after* ImGui has read it. EndFrame snapshots the
+        // live context into the history ring and clears Current; doing it
+        // before RenderOverlay would force ImGui to read from LatestFrame
+        // (one-frame display lag) and lose interactivity on the controls
+        // that are mutating their pending values during this same call.
+        debugSystem?.EndFrame();
 
         SwapBuffers();
     }
@@ -143,7 +197,58 @@ public sealed class Window : GameWindow, IRenderHost, IAudioHost, IDebugHost
     protected override void OnKeyDown(KeyboardKeyEventArgs args)
     {
         base.OnKeyDown(args);
+        // Runtime-owned shortcut: F12 captures the current display frame
+        // (frozen if frozen, else latest finished snapshot) to disk via
+        // JsonDumpSink. Swallowed before the input handler sees it so a
+        // game that uses F12 for something else doesn't conflict — we
+        // own the binding.
+        if (args.Key == Keys.F12 && TryDumpCurrentFrame())
+        {
+            return;
+        }
+        // Tilde / backtick toggles the diagnostics overlay window. The
+        // diagnostics system stays running (draws still emit, frames
+        // still snapshot, sinks still fire) — only the ImGui overlay
+        // hides. Same convention as console-toggle in many engines.
+        if (args.Key == Keys.GraveAccent && debugSystem is not null)
+        {
+            debugSystem.State.ShowOverlay = !debugSystem.State.ShowOverlay;
+            return;
+        }
         inputHandler?.OnKeyDown(MapKey(args.Key));
+    }
+
+    // Matches paths emitted by DebugSystem.Run's selection sweep —
+    // duplicated here as a literal so this runtime-side filter stays
+    // independent of an import for one constant. Kept in sync with
+    // DebugSystem.SelectionScope.
+    private static bool IsSelectionPath(string path)
+    {
+        return path.StartsWith("selection/", StringComparison.Ordinal);
+    }
+
+    private bool TryDumpCurrentFrame()
+    {
+        if (debugSystem is null || jsonDumpSink is null)
+        {
+            return false;
+        }
+
+        // Frozen frame is dumped immediately because the user has it in
+        // front of them and shouldn't have to wait for "the next live
+        // frame"; live mode arms the sink so the dump captures the
+        // frame number that will fire on the next EndFrame.
+        if (debugSystem.FrozenFrame is { } frozen)
+        {
+            var path = jsonDumpSink.Dump(frozen);
+            Console.WriteLine($"[diagnostics] dumped frozen frame {frozen.Number} -> {path}");
+        }
+        else
+        {
+            jsonDumpSink.RequestDump();
+            Console.WriteLine("[diagnostics] dump armed; firing on next EndFrame");
+        }
+        return true;
     }
 
     protected override void OnKeyUp(KeyboardKeyEventArgs args)
@@ -206,6 +311,8 @@ public sealed class Window : GameWindow, IRenderHost, IAudioHost, IDebugHost
     }
 
     public DebugContext? CurrentDebug => debugSystem?.Current;
+
+    public DebugSystem? System => debugSystem;
 
     public void SetTitle(string title)
     {
@@ -275,24 +382,79 @@ public sealed class Window : GameWindow, IRenderHost, IAudioHost, IDebugHost
             return;
         }
 
+        // Footgun guard: a demo that emits debug-draw primitives but
+        // never assigns Draw.ViewProjection will see *nothing* render
+        // because identity * world_position lands outside clip space.
+        // The symptom is invisible — Phase 11 made selection visibility
+        // depend on this, and the user hit it. Warn loudly once.
+        if (!warnedAboutIdentityViewProjection &&
+            debugSystem.Current.Draw.ViewProjection.Equals(Matrix4x4.Identity))
+        {
+            warnedAboutIdentityViewProjection = true;
+            Console.Error.WriteLine(
+                "[diagnostics] debug.Draw.ViewProjection is Matrix4x4.Identity but draw commands " +
+                "were emitted this frame. Lines will render in clip space (likely invisible). " +
+                "Set debug.Draw.ViewProjection = projection * view in your render code.");
+        }
+
+        var state = debugSystem.State;
         foreach (var command in debugSystem.Current.Draw.Commands)
         {
-            switch (command.Kind)
+            // Path-prefix layer gate: disabled prefixes skip the entire
+            // primitive instead of just hiding it in the UI, so the
+            // CPU cost of expanding into line vertices is also saved.
+            //
+            // Selection draws are system feedback ("you picked this"),
+            // not user-content. They bypass the filter so a stray click
+            // in the Layers panel can't accidentally hide the very
+            // outline the user needs to confirm what they picked.
+            if (!IsSelectionPath(command.Path) && !state.IsPathVisible(command.Path))
             {
-                case DebugDrawCommandKind.Line:
-                    debugDraw.Line(command.A, command.B, command.Color);
+                continue;
+            }
+            switch (command)
+            {
+                case DebugDrawLine c:
+                    debugDraw.Line(c.A, c.B, c.Color);
                     break;
-
-                case DebugDrawCommandKind.Aabb:
-                    debugDraw.Aabb(command.A, command.B, command.Color);
+                case DebugDrawAabb c:
+                    debugDraw.Aabb(c.Min, c.Max, c.Color);
                     break;
-
-                case DebugDrawCommandKind.Grid:
-                    debugDraw.Grid(command.A, command.Size, command.Divisions, command.Color);
+                case DebugDrawGrid c:
+                    debugDraw.Grid(c.Center, c.Size, c.Divisions, c.Color);
                     break;
-
-                case DebugDrawCommandKind.Frustum:
-                    debugDraw.Frustum(command.Matrix, command.Color);
+                case DebugDrawFrustum c:
+                    debugDraw.Frustum(c.ViewProjection, c.Color);
+                    break;
+                case DebugDrawSphere c:
+                    debugDraw.Sphere(c.Center, c.Radius, c.Color, c.Segments);
+                    break;
+                case DebugDrawPlane c:
+                    debugDraw.Plane(c.Center, c.Normal, c.Size, c.Color);
+                    break;
+                case DebugDrawRay c:
+                    debugDraw.Ray(c.Origin, c.Direction, c.Length, c.Color);
+                    break;
+                case DebugDrawCapsule c:
+                    debugDraw.Capsule(c.A, c.B, c.Radius, c.Color, c.Segments);
+                    break;
+                case DebugDrawObb c:
+                    debugDraw.Obb(c.Transform, c.Color);
+                    break;
+                case DebugDrawCross c:
+                    debugDraw.Cross(c.Center, c.Size, c.Color);
+                    break;
+                case DebugDrawCone c:
+                    debugDraw.Cone(c.Apex, c.Axis, c.Length, c.HalfAngleRad, c.Color, c.Segments);
+                    break;
+                case DebugDrawArrow c:
+                    debugDraw.Arrow(c.From, c.To, c.Color);
+                    break;
+                case DebugDrawMeshWireframe c:
+                    debugDraw.MeshWireframe(c.Vertices, c.Edges, c.Color);
+                    break;
+                case DebugDrawNormals c:
+                    debugDraw.Normals(c.Positions, c.Normals, c.Length, c.Color);
                     break;
             }
         }

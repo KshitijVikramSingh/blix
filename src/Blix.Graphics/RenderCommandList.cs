@@ -3,6 +3,16 @@ namespace Blix.Graphics;
 public sealed class RenderCommandList
 {
     private readonly List<RenderPass> passes = [];
+    private readonly IFrameRecorder? recorder;
+
+    // The optional recorder is invoked synchronously around each Pass and
+    // each DrawIndexed call. Null is the default for headless paths and
+    // for callers (offscreen renderers, tools) that don't want to feed a
+    // diagnostics system.
+    public RenderCommandList(IFrameRecorder? recorder = null)
+    {
+        this.recorder = recorder;
+    }
 
     public IReadOnlyList<RenderPass> Passes => passes;
 
@@ -12,15 +22,32 @@ public sealed class RenderCommandList
         ArgumentNullException.ThrowIfNull(description);
         ArgumentNullException.ThrowIfNull(record);
 
-        var builder = new RenderPassBuilder();
-        record(builder);
-        passes.Add(new RenderPass(name, description, builder.Commands));
+        recorder?.OnPassBegin(name);
+        try
+        {
+            var builder = new RenderPassBuilder(recorder);
+            record(builder);
+            passes.Add(new RenderPass(name, description, builder.Commands));
+        }
+        finally
+        {
+            // OnPassEnd must fire even if `record` throws, otherwise the
+            // recorder's pass scope leaks into subsequent passes and the
+            // attribution silently corrupts.
+            recorder?.OnPassEnd();
+        }
     }
 }
 
 public sealed class RenderPassBuilder
 {
     private readonly List<RenderCommand> commands = [];
+    private readonly IFrameRecorder? recorder;
+
+    internal RenderPassBuilder(IFrameRecorder? recorder)
+    {
+        this.recorder = recorder;
+    }
 
     internal IReadOnlyList<RenderCommand> Commands => commands;
 
@@ -32,7 +59,9 @@ public sealed class RenderPassBuilder
         IReadOnlyList<ShaderUniform> uniforms,
         IReadOnlyList<ShaderTextureBinding> textures)
     {
-        commands.Add(new DrawIndexedCommand(vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures));
+        var command = new DrawIndexedCommand(vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures);
+        commands.Add(command);
+        recorder?.OnDraw(in command);
     }
 
     // Sub-range draw: starts at indexOffset into the index buffer. Lets multiple
@@ -49,6 +78,8 @@ public sealed class RenderPassBuilder
         IReadOnlyList<ShaderUniform> uniforms,
         IReadOnlyList<ShaderTextureBinding> textures)
     {
-        commands.Add(new DrawIndexedCommand(vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures, indexOffset));
+        var command = new DrawIndexedCommand(vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures, indexOffset);
+        commands.Add(command);
+        recorder?.OnDraw(in command);
     }
 }

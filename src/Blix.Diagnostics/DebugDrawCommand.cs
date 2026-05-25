@@ -1,0 +1,93 @@
+using System.Numerics;
+using Blix.Graphics;
+
+namespace Blix.Diagnostics;
+
+// Polymorphic primitive for the debug-draw channel. Each command is a
+// sealed derived record so consumers (the GL renderer, JSON dump sink,
+// future picking-aware sinks) can pattern-match without a Kind enum or
+// nullable grab-bag fields.
+//
+// Path is the hierarchical identifier (scope + name, exactly like
+// Values/Stats/Timers paths). It serves double duty in Phase 8+:
+//   - Layer toggles: DebugState.LayersEnabled["physics/aabb"] = false
+//     hides every command whose path begins with that prefix.
+//   - Entity identity (Phase 10): the path locates the producer-defined
+//     thing the command attaches to, so selection / inspection wire up
+//     against the same string the producer already names.
+//
+// Color is on the base record because every primitive renders with one
+// uniform color; per-vertex coloring would be a separate primitive type.
+public abstract record DebugDrawCommand(string Path, GraphicsColor Color);
+
+public sealed record DebugDrawLine(string Path, GraphicsColor Color, Vector3 A, Vector3 B)
+    : DebugDrawCommand(Path, Color);
+
+public sealed record DebugDrawAabb(string Path, GraphicsColor Color, Vector3 Min, Vector3 Max)
+    : DebugDrawCommand(Path, Color);
+
+public sealed record DebugDrawGrid(string Path, GraphicsColor Color, Vector3 Center, float Size, int Divisions)
+    : DebugDrawCommand(Path, Color);
+
+public sealed record DebugDrawFrustum(string Path, GraphicsColor Color, Matrix4x4 ViewProjection)
+    : DebugDrawCommand(Path, Color);
+
+public sealed record DebugDrawSphere(string Path, GraphicsColor Color, Vector3 Center, float Radius, int Segments)
+    : DebugDrawCommand(Path, Color);
+
+public sealed record DebugDrawPlane(string Path, GraphicsColor Color, Vector3 Center, Vector3 Normal, float Size)
+    : DebugDrawCommand(Path, Color);
+
+public sealed record DebugDrawRay(string Path, GraphicsColor Color, Vector3 Origin, Vector3 Direction, float Length)
+    : DebugDrawCommand(Path, Color);
+
+public sealed record DebugDrawCapsule(string Path, GraphicsColor Color, Vector3 A, Vector3 B, float Radius, int Segments)
+    : DebugDrawCommand(Path, Color);
+
+// Obb is described by a single Transform that maps the unit cube
+// [-1, 1]^3 into world space. Position lives in column 4; per-axis
+// extents are baked into the basis vector lengths in columns 1..3.
+// Renderers expand into the 12 transformed edges; no separate
+// (center, rotation, extents) tuple needed.
+public sealed record DebugDrawObb(string Path, GraphicsColor Color, Matrix4x4 Transform)
+    : DebugDrawCommand(Path, Color);
+
+public sealed record DebugDrawCross(string Path, GraphicsColor Color, Vector3 Center, float Size)
+    : DebugDrawCommand(Path, Color);
+
+public sealed record DebugDrawCone(string Path, GraphicsColor Color, Vector3 Apex, Vector3 Axis, float Length, float HalfAngleRad, int Segments)
+    : DebugDrawCommand(Path, Color);
+
+public sealed record DebugDrawArrow(string Path, GraphicsColor Color, Vector3 From, Vector3 To)
+    : DebugDrawCommand(Path, Color);
+
+// World-space wireframe of a mesh. Vertices are positions; Edges is a
+// flat (i0, i1, i0, i1, ...) index array — one pair per line segment.
+//
+// The arrays are held by reference, not copied at emit time: the
+// producer is responsible for treating them as immutable for as long as
+// any frame snapshot might reference them (same contract as
+// DebugEventEntry.Payload). For typical scene producers this is fine —
+// per-submesh edge tables are precomputed once and reused every frame.
+//
+// JSON dump records vertex/edge COUNTS, not the arrays themselves;
+// embedding a 100k-vertex mesh in a debug dump file would be useless.
+public sealed record DebugDrawMeshWireframe(
+    string Path,
+    GraphicsColor Color,
+    IReadOnlyList<Vector3> Vertices,
+    IReadOnlyList<int> Edges)
+    : DebugDrawCommand(Path, Color);
+
+// Per-vertex normals visualisation. Each (position, normal) pair becomes
+// a single line from position to position + normal*Length. Length is the
+// world-space draw length, not a per-normal magnitude (normals are
+// expected to be unit-length); use a small value (~0.05–0.5) for most
+// scenes or the lines drown the mesh.
+public sealed record DebugDrawNormals(
+    string Path,
+    GraphicsColor Color,
+    IReadOnlyList<Vector3> Positions,
+    IReadOnlyList<Vector3> Normals,
+    float Length)
+    : DebugDrawCommand(Path, Color);
