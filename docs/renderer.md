@@ -90,6 +90,19 @@ pbrRenderer.DrawCascadeShadow(pass, sceneInstance, cascadeVP, cullFrustum: casca
 
 `DrawCascadeShadow` and `DrawCubeShadowFace` also pull each submesh's albedo binding + base-color factor + alpha cutoff through `perDrawUniforms` so a single shared shadow material can serve every casting material — required for foliage / fabric to cast leaf-shape shadows (see `Alpha-cutout shadow casters` below).
 
+`DrawScene` accepts an optional `IOccluder` (Blix.Render) for GPU occlusion culling — currently disabled by default while we work out a less-conservative test for loose-bounded foliage. See `Diagnostics → Occlusion culling` for the design.
+
+### GltfSceneInstance — logical vs physical units
+
+A glTF scene at runtime has two parallel representations:
+
+- **`Submeshes : IReadOnlyList<SubmeshInstance>`** — *physical* render units. What `PbrSceneRenderer.DrawScene` iterates and `pass.DrawMesh`'s. With `BatchMergeByMaterial` (default on), primitives sharing the same runtime `Material` + vertex layout get concatenated into a single merged VBO/IBO/Mesh per group — cuts opaque + cascade draw counts ~5–7× on Sponza main.
+- **`Primitives : IReadOnlyList<PrimitiveSource>`** — *logical* units, one per source glTF primitive regardless of batching. What diagnostics enumerate: `IDebugSelectable` / `IDebugInspectable` / `IDebugGeometrySource` all use `Primitives` so picking selects a single primitive (not "every primitive sharing its material") and per-primitive cull-viz draws TIGHT bounds, not the merged batch's union.
+
+Each `PrimitiveSource` carries a `BatchIndex` pointing back to the `SubmeshInstance` that draws it, so an inspector can show both halves of the story (logical identity + physical batch). Merged batches always use UInt32 indices — concatenated vertex counts easily exceed the ushort range.
+
+Tradeoff: merged batches have UNION bounds, so per-batch frustum cull rejects fewer of them than per-primitive would. For Sponza-shaped scenes (content packed into one atrium) the per-draw saving dominates; scenes with spatially scattered same-material primitives may eventually want a spatial sub-batching layer. Set `BatchMergeByMaterial = false` on `GltfSceneOptions` to fall back to the original per-primitive layout for cull-fidelity debugging.
+
 ### SpriteBatch + Font + DebugDraw
 
 Covered below in their own sections. All three are `Blix.Render` types built on top of `IGraphicsDevice`.
@@ -592,7 +605,13 @@ All six channels live on `DebugContext` and snapshot into `DebugFrame`:
 
 Path resolution is uniform across channels — emissions inherit the current `Scope`. A producer named `"physics"` emitting `Stats.Count("draws", 1)` from inside `using (ctx.Scope("colliders"))` resolves to path `"physics/colliders/draws"`.
 
-Frame-level CPU timer ("frame") is auto-recorded by `DebugSystem.EndFrame` so every frame has a baseline. The OpenGL backend additionally emits per-pass GPU timings via `glQueryCounter` (when `GL_ARB_timer_query` is available); the runtime drains them into `Timers` under scope `"gpu/passes"` 1–N frames after issue.
+Frame-level CPU timer ("frame") is auto-recorded by `DebugSystem.EndFrame` so every frame has a baseline. The OpenGL backend can emit per-pass GPU timings via `glQueryCounter` (when `GL_ARB_timer_query` is available); the runtime drains them into `Timers` under scope `"gpu/passes"` 1–N frames after issue.
+
+**GPU timing is off by default and has real platform caveats.** Two issues, both found the hard way on macOS:
+- Issuing `glQueryCounter` calls forces a partial sync on Apple's GL→Metal translation layer, costing 5–15 ms of every frame *we wanted to measure*. Classic observer effect — the diagnostic itself dragged the budget down. Hence opt-in via `OpenGLGraphicsDevice.GpuTimingEnabled`.
+- Even with the queries enabled, the macOS driver returns timestamps at command-submit time rather than GPU-execute time. Begin/end deltas come back as ~0 for every pass, making the column unusable on Apple's GL. Linux / Windows drivers should populate normally. The Perf tab detects all-zero results and surfaces a hint explaining why.
+
+CPU phase timers (`frame`, `build-commands`, `execute`, `overlay`, `swap`) are unaffected — they measure CPU-side wall-clock and are trustworthy on every platform. The `swap` timer specifically reveals when `SwapBuffers` is the bottleneck (vsync wait, GPU-still-busy fence, or display-link sync) — a value > 20 ms there means the ceiling is below us, not in our rendering work.
 
 ### Producer interfaces
 
@@ -677,9 +696,17 @@ The ImGui Layers tab builds a tree of observed prefixes with `(visible/total)` c
 `Blix.Runtime.OpenTK.ImGuiOverlayRenderer` lays out a single resizable window:
 
 - **Status bar** (always visible) — `frame N • fps • ms • draws • tris • sel:<path>` plus Freeze/Unfreeze.
-- **Tab bar** — `Selection` (visible only when picked; auto-focuses on a new pick) • `Stats` • `Timers` • `Events` (only if any) • `Controls` • `State` • `Layers` • `Custom` (only if any `IDebugUi` registered).
+- **Tab bar** — `Selection` (visible only when picked; auto-focuses on a new pick) • `Perf` • `Stats` • `Timers` • `Events` (only if any) • `Controls` • `State` • `Layers` • `Custom` (only if any `IDebugUi` registered).
 - Stats / Timers rows are text-only; click the `·` icon per row to expand a sparkline drawn from `DebugFrameHistory`.
 - **`** (backtick) toggles the HUD entirely.
+
+The **Perf tab** is the canonical "what's expensive?" surface: three small tables that roll up existing Stats + Timers without any extra instrumentation.
+
+- **Phases** — top-level CPU phase timers (`frame`, `build-commands`, `execute`, `overlay`, `swap`, `run-debuggables`). The wall-clock split for one tick.
+- **Passes** — auto-discovered from `passes/<name>/*` entries. Columns: Draws, Tris, CPU build ms, GPU ms (when the platform supports it).
+- **Packs** — auto-discovered from `submeshes/<pack>/*`. Columns: Batches, Primitives, Tris, Opaque/Mask/Blend counts. The Primitives:Batches ratio shows the glTF batcher's effect at a glance.
+
+Auto-discovery scans the latest frame's entries for matching scope prefixes — no hardcoded pack/pass names, generic across demos.
 
 ### Lifecycle
 

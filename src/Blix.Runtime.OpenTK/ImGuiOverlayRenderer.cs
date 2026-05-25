@@ -155,6 +155,12 @@ internal sealed class ImGuiOverlayRenderer : IDisposable
             }
             lastRenderedSelection = debugSystem.SelectedPath;
 
+            if (ImGui.BeginTabItem("Perf"))
+            {
+                DrawPerfReport(stats, timers);
+                ImGui.EndTabItem();
+            }
+
             if (ImGui.BeginTabItem("Stats"))
             {
                 DrawStatsTab(debugSystem.History, stats);
@@ -650,6 +656,244 @@ internal sealed class ImGuiOverlayRenderer : IDisposable
     // a sparkline plot for that specific path. Keeps the panel tight
     // while letting the user "expand to see history" for whatever they
     // care about right now.
+    // The Perf tab rolls existing Stats + Timers entries into three
+    // compact tables — Phases, Passes, Packs — so "what's expensive?"
+    // has a single canonical surface. No new instrumentation; everything
+    // here is a lookup into entries the producers already emit.
+    //
+    // Auto-discovery: pass and pack names come from observed entry
+    // scopes, not a hardcoded list. Generic across demos — a future
+    // game with different pack/pass names gets a working Perf tab for
+    // free.
+    private void DrawPerfReport(IReadOnlyList<DebugStatEntry> stats, IReadOnlyList<DebugTimerEntry> timers)
+    {
+        DrawPhasesTable(timers);
+        ImGui.Spacing();
+        DrawPassesTable(stats, timers);
+        ImGui.Spacing();
+        DrawPacksTable(stats);
+    }
+
+    // The Window-level phase timers — frame, build-commands, execute,
+    // overlay, run-debuggables, swap. Identified by root-scope timers
+    // (Scope == ""): these are emitted at the top level, not under
+    // "passes/" or anywhere else.
+    private static void DrawPhasesTable(IReadOnlyList<DebugTimerEntry> timers)
+    {
+        if (!ImGui.CollapsingHeader("Phases", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            return;
+        }
+        if (!ImGui.BeginTable("perf-phases", 2,
+            ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
+        {
+            return;
+        }
+        ImGui.TableSetupColumn("Phase");
+        ImGui.TableSetupColumn("ms");
+        ImGui.TableHeadersRow();
+        for (var i = 0; i < timers.Count; i++)
+        {
+            var t = timers[i];
+            if (!string.IsNullOrEmpty(t.Scope)) continue; // skip nested (pass/gpu) timers
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(t.Name);
+            ImGui.TableSetColumnIndex(1); ImGui.Text($"{t.TotalMs:0.00}");
+        }
+        ImGui.EndTable();
+    }
+
+    // Per-pass table — auto-discovers pass names from entries whose
+    // scope starts with "passes/" (DiagnosticsFrameRecorder convention)
+    // or whose scope is exactly "gpu/passes" (Phase 7 GPU timing,
+    // when enabled). Cols: pass, draws, tris, build-ms, gpu-ms.
+    private static void DrawPassesTable(IReadOnlyList<DebugStatEntry> stats, IReadOnlyList<DebugTimerEntry> timers)
+    {
+        var passes = new SortedSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < stats.Count; i++)
+        {
+            if (TryExtractSegment(stats[i].Scope, "passes/", out var name))
+            {
+                passes.Add(name);
+            }
+        }
+        for (var i = 0; i < timers.Count; i++)
+        {
+            var t = timers[i];
+            if (TryExtractSegment(t.Scope, "passes/", out var name))
+            {
+                passes.Add(name);
+            }
+            // GPU timer convention: scope == "gpu/passes", name == passName.
+            if (t.Scope == "gpu/passes")
+            {
+                passes.Add(t.Name);
+            }
+        }
+        if (passes.Count == 0)
+        {
+            return;
+        }
+        if (!ImGui.CollapsingHeader($"Passes ({passes.Count})", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            return;
+        }
+        if (!ImGui.BeginTable("perf-passes", 5,
+            ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
+        {
+            return;
+        }
+        ImGui.TableSetupColumn("Pass");
+        ImGui.TableSetupColumn("Draws");
+        ImGui.TableSetupColumn("Tris");
+        ImGui.TableSetupColumn("CPU ms");
+        ImGui.TableSetupColumn("GPU ms");
+        ImGui.TableHeadersRow();
+        var sawGpuPath = false;
+        var sawNonZeroGpu = false;
+        foreach (var pass in passes)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(pass);
+            ImGui.TableSetColumnIndex(1); ImGui.Text(FormatStat(stats, $"passes/{pass}/draws", asCount: true));
+            ImGui.TableSetColumnIndex(2); ImGui.Text(FormatStat(stats, $"passes/{pass}/triangles", asCount: true));
+            ImGui.TableSetColumnIndex(3); ImGui.Text(FormatTimerMs(timers, $"passes/{pass}/build"));
+
+            // GPU timer path is gpu/passes/<name>. Three possible states:
+            //   - timer absent ("-")     -> GPU timing disabled
+            //   - timer present, ms = 0  -> driver returned zeros
+            //                                (macOS GL through Metal
+            //                                doesn't actually measure
+            //                                per-pass time even when the
+            //                                extension is exposed)
+            //   - timer present, ms > 0  -> working
+            (var gpu, var ms) = LookupTimerMsRaw(timers, $"gpu/passes/{pass}");
+            ImGui.TableSetColumnIndex(4); ImGui.Text(gpu);
+            if (gpu != "-")
+            {
+                sawGpuPath = true;
+                if (ms > 0.0) sawNonZeroGpu = true;
+            }
+        }
+        ImGui.EndTable();
+
+        if (!sawGpuPath)
+        {
+            ImGui.TextDisabled("GPU ms: timing disabled. Enable via Controls > SponzaModern/Perf > GPU timing.");
+        }
+        else if (!sawNonZeroGpu)
+        {
+            ImGui.TextDisabled(
+                "GPU ms: enabled but driver reports 0 for every pass. " +
+                "macOS GL routes timestamps through Metal and reports submit-time, not GPU-execute-time " +
+                "- timings are effectively unusable here. Linux/Windows drivers should populate normally.");
+        }
+    }
+
+    private static (string formatted, double ms) LookupTimerMsRaw(IReadOnlyList<DebugTimerEntry> timers, string path)
+    {
+        for (var i = 0; i < timers.Count; i++)
+        {
+            if (timers[i].Path == path) return ($"{timers[i].TotalMs:0.00}", timers[i].TotalMs);
+        }
+        return ("-", 0.0);
+    }
+
+    // Per-pack table — auto-discovers pack names from stats whose scope
+    // starts with "submeshes/" (skipping the top-level submeshes scope
+    // itself, which carries aggregate counts not per-pack).
+    private static void DrawPacksTable(IReadOnlyList<DebugStatEntry> stats)
+    {
+        var packs = new SortedSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < stats.Count; i++)
+        {
+            if (TryExtractSegment(stats[i].Scope, "submeshes/", out var name))
+            {
+                packs.Add(name);
+            }
+        }
+        if (packs.Count == 0)
+        {
+            return;
+        }
+        if (!ImGui.CollapsingHeader($"Packs ({packs.Count})", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            return;
+        }
+        if (!ImGui.BeginTable("perf-packs", 8,
+            ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
+        {
+            return;
+        }
+        ImGui.TableSetupColumn("Pack");
+        ImGui.TableSetupColumn("Batches");
+        ImGui.TableSetupColumn("Primitives");
+        ImGui.TableSetupColumn("Tris");
+        ImGui.TableSetupColumn("Opaque");
+        ImGui.TableSetupColumn("Mask");
+        ImGui.TableSetupColumn("Blend");
+        ImGui.TableSetupColumn("2-side");
+        ImGui.TableHeadersRow();
+        foreach (var pack in packs)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(pack);
+            ImGui.TableSetColumnIndex(1); ImGui.Text(FormatStat(stats, $"submeshes/{pack}/batches",     asCount: true));
+            ImGui.TableSetColumnIndex(2); ImGui.Text(FormatStat(stats, $"submeshes/{pack}/count",       asCount: true));
+            ImGui.TableSetColumnIndex(3); ImGui.Text(FormatStat(stats, $"submeshes/{pack}/tris-total",  asCount: true));
+            ImGui.TableSetColumnIndex(4); ImGui.Text(FormatStat(stats, $"submeshes/{pack}/opaque",      asCount: true));
+            ImGui.TableSetColumnIndex(5); ImGui.Text(FormatStat(stats, $"submeshes/{pack}/mask",        asCount: true));
+            ImGui.TableSetColumnIndex(6); ImGui.Text(FormatStat(stats, $"submeshes/{pack}/blend",       asCount: true));
+            ImGui.TableSetColumnIndex(7); ImGui.Text(FormatStat(stats, $"submeshes/{pack}/double-sided",asCount: true));
+        }
+        ImGui.EndTable();
+    }
+
+    // Extracts the SINGLE segment immediately after `prefix` in `scope`.
+    // "submeshes/main" + prefix "submeshes/" -> "main". Returns false
+    // when scope doesn't start with prefix, OR equals it (top-level
+    // scope with no per-pack/per-pass member).
+    private static bool TryExtractSegment(string scope, string prefix, out string segment)
+    {
+        if (!scope.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            segment = string.Empty;
+            return false;
+        }
+        var rest = scope.AsSpan(prefix.Length);
+        if (rest.Length == 0)
+        {
+            segment = string.Empty;
+            return false;
+        }
+        var slash = rest.IndexOf('/');
+        segment = slash < 0 ? rest.ToString() : rest[..slash].ToString();
+        return segment.Length > 0;
+    }
+
+    private static string FormatStat(IReadOnlyList<DebugStatEntry> stats, string path, bool asCount)
+    {
+        for (var i = 0; i < stats.Count; i++)
+        {
+            if (stats[i].Path == path)
+            {
+                return asCount
+                    ? ((long)stats[i].Value).ToString("N0")
+                    : stats[i].Value.ToString("0.###");
+            }
+        }
+        return "-";
+    }
+
+    private static string FormatTimerMs(IReadOnlyList<DebugTimerEntry> timers, string path)
+    {
+        for (var i = 0; i < timers.Count; i++)
+        {
+            if (timers[i].Path == path) return $"{timers[i].TotalMs:0.00}";
+        }
+        return "-";
+    }
+
     private void DrawStatsTab(DebugFrameHistory history, IReadOnlyList<DebugStatEntry> entries)
     {
         foreach (var group in entries.GroupBy(entry => entry.Scope).OrderBy(group => group.Key, StringComparer.Ordinal))
