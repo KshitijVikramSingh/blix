@@ -164,6 +164,50 @@ public static class GraphicsMatrices
             0.0f, 0.0f, -1.0f, 0.0f);
     }
 
+    // Vulkan-NDC perspective: +Y points DOWN in clip space (the projection
+    // flips Y so screen Y matches framebuffer Y-down convention) and depth
+    // maps to [0, 1] instead of OpenGL's [-1, 1]. Built directly in the
+    // form the Vulkan backend's UBO-write path expects — System.Numerics
+    // row-major bytes, no transpose at upload time. Math (row, col) lives
+    // at M[col+1, row+1] in .NET field naming, which is the inverse of
+    // CreatePerspective above (column-vector form, transposed by the GL
+    // backend on upload). See vulkan-friction.md F-008.
+    //
+    // Returns the camera's view-space → Vulkan-clip transform applied as
+    // `clip_row = view_row * proj` in .NET (row-vector convention).
+    public static Matrix4x4 CreatePerspectiveVulkan(
+        float verticalFieldOfView,
+        float aspectRatio,
+        float nearPlane,
+        float farPlane)
+    {
+        if (verticalFieldOfView <= 0.0f || verticalFieldOfView >= MathF.PI)
+        {
+            throw new ArgumentOutOfRangeException(nameof(verticalFieldOfView), "Field of view must be between 0 and PI radians.");
+        }
+        if (aspectRatio <= 0.0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(aspectRatio), "Aspect ratio must be greater than zero.");
+        }
+        if (nearPlane <= 0.0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(nearPlane), "Near plane must be greater than zero.");
+        }
+        if (farPlane <= nearPlane)
+        {
+            throw new ArgumentOutOfRangeException(nameof(farPlane), "Far plane must be greater than the near plane.");
+        }
+
+        var focalLength = 1.0f / MathF.Tan(verticalFieldOfView * 0.5f);
+        var depth = nearPlane - farPlane;
+
+        return new Matrix4x4(
+            focalLength / aspectRatio, 0.0f, 0.0f,                       0.0f,
+            0.0f,                     -focalLength, 0.0f,                0.0f,
+            0.0f,                      0.0f,        farPlane / depth,   -1.0f,
+            0.0f,                      0.0f,        (nearPlane * farPlane) / depth, 0.0f);
+    }
+
     private static Matrix4x4 CreateTranslation(Vector3 position)
     {
         return new Matrix4x4(

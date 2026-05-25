@@ -92,7 +92,7 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
         cameraTarget = Vector3.Zero;
         fovYRadians = MathF.PI / 3f;
         var view = Matrix4x4.CreateLookAt(cameraPosition, cameraTarget, Vector3.UnitY);
-        var proj = VulkanPerspective(fovY: fovYRadians, aspect: aspect, near: 0.1f, far: 100f);
+        var proj = GraphicsMatrices.CreatePerspectiveVulkan(fovYRadians, aspect, nearPlane: 0.1f, farPlane: 100f);
         viewProj = view * proj;
     }
 
@@ -240,22 +240,4 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
         return (vertices, indices);
     }
 
-    // Right-handed view space → Vulkan clip space: +Y down, depth in [0, 1].
-    // Built directly in row-vector (System.Numerics) form, so when the
-    // backend transposes on UBO write the GLSL side sees the standard
-    // column-vector Vulkan perspective.
-    private static Matrix4x4 VulkanPerspective(float fovY, float aspect, float near, float far)
-    {
-        var f = 1.0f / MathF.Tan(fovY * 0.5f);
-        var m = new Matrix4x4
-        {
-            M11 = f / aspect,
-            M22 = -f,
-            M33 = far / (near - far),
-            M34 = -1,
-            M43 = (near * far) / (near - far),
-            M44 = 0,
-        };
-        return m;
-    }
 }

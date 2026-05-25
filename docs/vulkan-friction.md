@@ -219,6 +219,28 @@ documented as "use `cross(dy, dx)` for Vulkan / `cross(dx, dy)` for GL"
 in the shader-authoring guide. The cross order is one character but
 the failure mode is subtle visual wrongness, so it belongs in a helper.
 
+### F-016 — Backends require different .NET-side matrix conventions (audit discovery)
+
+Surfaced during the audit when verifying the F-008 disposition: the
+GL backend's `WriteColumnMajor` reorders M-fields on upload (so a
+`Matrix4x4` built in **column-vector form** — M[r,c] = math (row, col) —
+lands in GLSL correctly), while the Vulkan backend's `WriteUniformValue`
+does direct memcpy (so a `Matrix4x4` must be in **row-vector form** —
+M[r,c] = math (col, row) — to land in GLSL correctly). Concretely:
+existing `GraphicsMatrices.CreatePerspective` puts the perspective-divide
+flag at M43 (column-vector layout); the new `CreatePerspectiveVulkan`
+puts it at M34 (row-vector layout). Demos that use the wrong helper on
+the wrong backend silently produce garbage geometry (this is exactly
+the "clipped pyramid" bug from the cube push).
+**Direction:** decided as part of Vector A audit — the engine adopts
+**.NET row-vector form** as its single convention. The GL backend's
+upload path will switch to `glUniformMatrix4(..., transpose: true, ...)`
+with raw .NET bytes (functionally equivalent to today's
+WriteColumnMajor, just simpler). All existing GL `GraphicsMatrices`
+helpers need rewriting to row-vector form during the reshape. This
+is deferred to Vector A because matrix uniforms go through the same
+binding-layer rewrite as everything else.
+
 ### F-013 — Friction is concentrated in `Material` / uniform plumbing, not in handles
 
 Strong signal: handle-based resource APIs (`VertexBuffer`, `IndexBuffer`,
@@ -234,6 +256,168 @@ target. Below it (handles, lists, passes) is portable.
 
 ## Audit phase consolidation
 
-To be written after the validation push wraps. Each F-xxx gets a final
-disposition (kept / replaced / deferred), grouped into a small number
-of redesign vectors with concrete API sketches.
+Fifteen friction entries consolidated into four redesign vectors along
+a single axis: how much of the binding/dispatch story moves from
+per-frame runtime decisions into pre-baked declarations.
+
+### Render-graph philosophy decision
+
+The reshape adopts a **"focused middle"** render-graph position — between
+bgfx's imperative passes and Unreal RDG's per-frame rebuild:
+
+- Passes are **baked at engine init**, not rebuilt per-frame.
+- I/O shape (targets + load/store ops + reads + shader interface) is
+  **fixed at pass registration**.
+- Per-frame calls supply runtime parameters (uniforms, descriptor binds,
+  toggle flags) and trigger `Execute`.
+- Persistent resources only; transient/aliased resource lifetimes are a
+  deferred concern.
+- Sync (barriers + image layout transitions) and render-pass compatibility
+  are derived automatically from the declared graph.
+
+Explicitly NOT going for: full RDG-style per-frame graph rebuild (overkill,
+unbounded maintenance), nor bgfx-style purely imperative passes (loses
+the auto-sync leverage that justifies the design).
+
+### Vector A — Shader interface + material binding
+
+**Friction notes:** F-001, F-002, F-007, F-009, F-011
+**Status:** Planned. Gates Vector B.
+**Effort:** 1–2 weeks design + implementation.
+
+Replace name-keyed bindings with explicit `(set, binding)` declarations
+carried by a `ShaderInterface` alongside the SPIR-V bytes. Reserve
+descriptor sets 0–3 by lifetime: per-frame, per-pass, per-material,
+per-draw. `Material` becomes the carrier for set-2 only; per-frame
+and per-pass bindings live on the pass; per-draw goes through push
+constants (256-byte budget covers MVP + a handful of small uniforms).
+SSBOs replace UBOs for bone palettes and other >handful arrays.
+
+API outline (subject to refinement when Vector A starts):
+
+```csharp
+public sealed record ShaderInterface(
+    IReadOnlyList<DescriptorSetSlot> Slots,
+    IReadOnlyList<PushConstantRange> PushConstants,
+    VertexLayout VertexInput);
+
+public sealed record DescriptorSetSlot(
+    int Set, int Binding,
+    ShaderResourceType Type,        // UniformBuffer, StorageBuffer, SampledImage, StorageImage, Sampler
+    ShaderStages Stages,
+    int Count = 1,
+    UniformBlockLayout? BlockLayout = null);
+
+// Set conventions, enforced by the engine:
+//   set 0: per-frame    (viewProj, sun direction, env probe)
+//   set 1: per-pass     (shadow map, gbuffer reads)
+//   set 2: per-material (albedo + normal + MR textures, factors)
+//   set 3: per-draw     (push constants when ≤256B; descriptor set otherwise)
+```
+
+Disposition of contributing friction notes:
+- **F-001:** Resolved — `CreateShaderProgram` takes SPIR-V bytes + `ShaderInterface`. GLSL text path becomes optional runtime helper.
+- **F-002:** Resolved — bindings are explicit `(set, binding)`. Names survive only as cook-time aliases in material descriptors.
+- **F-007:** Resolved by classification — per-draw is push constants, per-frame/pass/material each have their own descriptor set with appropriate lifetime.
+- **F-009:** Mostly resolved — `UniformBlockMember` grows an `ElementStride` for the rare in-UBO arrays; bone palettes etc. move to SSBOs.
+- **F-011:** Resolved — descriptor set layout is derived from `ShaderInterface` instead of hardcoded.
+
+### Vector B — Render graph + pass declaration
+
+**Friction notes:** F-005, F-006, F-012, F-015
+**Status:** Planned. Depends on Vector A (graph nodes need a shader-interface shape to bind into).
+**Effort:** 2–3 weeks design + implementation.
+
+Pre-bake the frame's pass topology at init. Each pass declares its
+render targets (with load/store ops), the resources it reads from
+other passes, and its `ShaderInterface`. Backend computes barriers,
+framebuffer compatibility, and dependency shapes from the declared
+graph. Compute passes are first-class — they declare dispatches
+instead of draws. Per-frame `Execute` just supplies parameters.
+
+API outline:
+
+```csharp
+var graph = new RenderGraph(device);
+
+graph.GraphicsPass("shadow")
+     .Target(shadowMap, LoadOp.Clear, StoreOp.Store)
+     .Shader(shadowProgram);
+
+graph.GraphicsPass("scene")
+     .Target(hdrScene, LoadOp.Clear)
+     .Target(depth, LoadOp.Clear)
+     .Read(shadowMap)              // declares dependency
+     .Shader(litProgram);
+
+graph.ComputePass("fog-froxels")
+     .Read(depth)
+     .Write(fogVolume)
+     .Shader(fogComputeProgram);
+
+graph.GraphicsPass("composite")
+     .Target(swapchain, LoadOp.DontCare)
+     .Read(hdrScene)
+     .Read(fogVolume)
+     .Shader(compositeProgram);
+
+graph.Compile();                   // sync/barriers/framebuffer resolution
+
+// per-frame:
+graph.Execute(parameters);
+```
+
+Disposition of contributing friction notes:
+- **F-005:** Resolved — `ComputePass` is a first-class graph node.
+- **F-006:** Resolved — sync derived from declared `Read`/`Write` edges.
+- **F-012:** Resolved — `LoadOp` lives on `.Target(...)` at pass declaration time, not on the per-frame call.
+- **F-015:** Resolved — graph generates one render-pass per compatible group of graphics passes; dep unification is internal.
+
+### Vector C — Resource shape cleanup
+
+**Friction notes:** F-003, F-004
+**Status:** Planned. Parallelizable with Vector A (low-risk filler).
+**Effort:** 1–3 days.
+
+Collapse texture creation overloads to `CreateTexture(TextureDescription,
+byte[])` + `AllocateTexture(TextureDescription)` for streamed uploads.
+Add `instanceCount` + `instanceBuffer` + `firstInstance` to
+`DrawIndexedCommand`; introduce `DrawIndirectCommand`. Let `Mesh` carry
+sub-range offsets so a single big VBO can host many meshes — gateway
+for later GPU-driven submission work.
+
+Disposition:
+- **F-003:** Resolved — texture creation surface collapses to one or two entry points.
+- **F-004:** Resolved — instancing + indirect added to draw commands; `Mesh` carries offsets.
+
+### Vector D — Convention helpers
+
+**Friction notes:** F-008, F-010, F-014, F-016
+**Status:** Do FIRST.
+**Effort:** Half a day.
+
+Disposition per note (this is what Vector D actually ships):
+
+- **F-010 — RESOLVED.** `Blix.Graphics.GraphicsMatrices.CreatePerspectiveVulkan`
+  (Y-down + [0,1] depth, row-vector form). Demo uses it directly. Sibling
+  to the existing `CreatePerspective` until Vector A unifies conventions.
+- **F-014 — RESOLVED inline.** `cube.frag` already uses `cross(dFdy, dFdx)`
+  with a comment block explaining why. A proper shared `blix_face_normal`
+  helper in `src/Blix.Shaders/` is deferred until the shader-library
+  access path is reworked in Vector A or B (the existing `<None Include>`
+  copy-glob is GL-shaped; Vulkan uses glslc `-I` includes which the
+  current csproj doesn't wire up).
+- **F-008 — DEFERRED to Vector A.** The matrix-convention question is
+  bigger than a doc note — see F-016 (audit discovery). Engine-wide
+  decision: row-vector .NET convention. Implementation lands with the
+  Vector A reshape since it touches the upload path on both backends.
+
+### Order of attack
+
+1. **Vector D first** — half a day. Clears the small footguns; gives quick confidence that the audit produces real changes.
+2. **Vector A** — gates B because the render graph needs to know shader interfaces to wire descriptor bindings correctly. Also unlocks the first real material-driven demo.
+3. **Vector C in parallel with A** — pure cleanup, low risk; lands whenever it doesn't conflict.
+4. **Vector B** — biggest payoff, biggest design surface. Built on Vector A.
+5. **Port a scene** to the reshape (likely Sponza Modern — simpler than the Walkthrough flagship).
+6. **Visual rework** on the reshaped engine (TAA, froxel fog, etc.) — the original goal that started this branch.
+7. **Sunset OpenGL** — once the reshape and one ported demo are stable.
