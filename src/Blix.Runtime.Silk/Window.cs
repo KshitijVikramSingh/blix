@@ -1,0 +1,394 @@
+using Blix.Core;
+using Blix.Diagnostics;
+using Blix;
+using Blix.Graphics;
+using Blix.Graphics.Vulkan;
+using Blix.Render;
+using Silk.NET.Input;
+using Silk.NET.Maths;
+using Silk.NET.Windowing;
+using SilkWindowOptions = Silk.NET.Windowing.WindowOptions;
+using BlixWindowOptions = Blix.Runtime.Silk.WindowOptions;
+using BlixKey = Blix.Core.Key;
+using BlixMouseButton = Blix.Core.MouseButton;
+using SilkKey = Silk.NET.Input.Key;
+using SilkMouseButton = Silk.NET.Input.MouseButton;
+
+namespace Blix.Runtime.Silk;
+
+// Sibling to Blix.Runtime.OpenTK.Window. Owns a Silk.NET window in
+// "Vulkan API" mode, pumps the IGameLoop, and wires the diagnostics
+// surface so it stays identical across backends.
+//
+// Scope today: window opens, loop ticks, IDebuggable producers run,
+// console + JSON dump sinks fire. Vulkan instance/surface/swapchain
+// integration lands in the next push — Execute() currently records
+// FrameDebugPacket metadata only and the window has no pixels to
+// present yet. The whole point of this turn is proving the shape
+// of the surface lines up; visible rendering comes after.
+public sealed class Window : IRenderHost, IDebugHost, IDisposable
+{
+    private readonly IWindow window;
+    private readonly IGameLoop gameLoop;
+    private readonly IInputHandler? inputHandler;
+    private readonly IRuntimeDiagnosticsSink? diagnostics;
+    private readonly DebugSystem? debugSystem;
+    private readonly DiagnosticsFrameRecorder? frameRecorder;
+    private readonly JsonDumpSink? jsonDumpSink;
+    private VulkanGraphicsDevice? graphicsDevice;
+    private IInputContext? input;
+    private VkLineDrawer? lineDrawer;
+    private double totalTime;
+
+    public Window(
+        IGameLoop gameLoop,
+        BlixWindowOptions? options = null,
+        IRuntimeDiagnosticsSink? diagnostics = null)
+    {
+        // Resolve MoltenVK + libvulkan + validation layers before Silk's
+        // first probe. No-op off macOS or when a LunarG SDK is already set up.
+        MoltenVkBootstrap.EnsureLoaded();
+
+        this.gameLoop = gameLoop;
+        this.inputHandler = gameLoop as IInputHandler;
+        this.diagnostics = diagnostics;
+
+        if (gameLoop is IDebuggable)
+        {
+            debugSystem = new DebugSystem();
+            frameRecorder = new DiagnosticsFrameRecorder(debugSystem);
+            debugSystem.AddSink(new ConsoleEventSink());
+            // Periodic stdout digest of frame Values + Stats + Timers +
+            // GPU pass timings. Default cadence: every 60 frames (~1s at
+            // 60fps). Opt out with BLIX_DIAG=off; tune cadence with
+            // BLIX_DIAG_INTERVAL=<frames>. Lives alongside ConsoleEventSink
+            // (events → stderr) — these complement, not duplicate.
+            if (Environment.GetEnvironmentVariable("BLIX_DIAG") != "off")
+            {
+                var intervalEnv = Environment.GetEnvironmentVariable("BLIX_DIAG_INTERVAL");
+                var interval = int.TryParse(intervalEnv, out var n) && n > 0 ? n : 60;
+                debugSystem.AddSink(new PeriodicConsoleSummarySink(interval));
+            }
+            jsonDumpSink = new JsonDumpSink();
+            debugSystem.AddSink(jsonDumpSink);
+        }
+
+        var resolved = options ?? BlixWindowOptions.Default;
+        var silkOptions = SilkWindowOptions.DefaultVulkan with
+        {
+            Title = resolved.Title,
+            Size = new Vector2D<int>(resolved.Width, resolved.Height),
+            VSync = true,
+        };
+        window = global::Silk.NET.Windowing.Window.Create(silkOptions);
+
+        window.Load += OnLoad;
+        window.Update += OnUpdate;
+        window.Render += OnRender;
+        window.Resize += OnResize;
+        window.FramebufferResize += OnFramebufferResize;
+        window.Closing += OnClosing;
+    }
+
+    public void Run()
+    {
+        window.Run();
+    }
+
+    private void OnLoad()
+    {
+        var vkSurface = window.VkSurface
+            ?? throw new InvalidOperationException("Silk window did not provide a Vulkan surface. Was the window created with WindowOptions.DefaultVulkan?");
+        var fb = window.FramebufferSize;
+        var w = Math.Max(fb.X > 0 ? fb.X : window.Size.X, 1);
+        var h = Math.Max(fb.Y > 0 ? fb.Y : window.Size.Y, 1);
+        graphicsDevice = new VulkanGraphicsDevice(vkSurface, w, h);
+        Console.WriteLine($"Graphics: {graphicsDevice.Info.Vendor} | {graphicsDevice.Info.Renderer} | {graphicsDevice.Info.Version}");
+        if (debugSystem is not null)
+        {
+            // VkLineDrawer translates debug.Draw.* commands into a Vulkan
+            // line-pipeline draw on the OverlayRenderPass. Only allocate when
+            // diagnostics are live (no IDebuggable game loop → no overlay).
+            lineDrawer = new VkLineDrawer(graphicsDevice);
+        }
+
+        input = window.CreateInput();
+        for (var i = 0; i < input.Keyboards.Count; i++)
+        {
+            input.Keyboards[i].KeyDown += OnKeyDown;
+            input.Keyboards[i].KeyUp += OnKeyUp;
+        }
+        for (var i = 0; i < input.Mice.Count; i++)
+        {
+            input.Mice[i].MouseDown += OnMouseDown;
+            input.Mice[i].MouseUp += OnMouseUp;
+            input.Mice[i].MouseMove += OnMouseMove;
+            input.Mice[i].Scroll += OnMouseScroll;
+        }
+
+        ApplyDefaultSurfaceSize();
+        gameLoop.OnLoad(this, graphicsDevice);
+    }
+
+    private void OnUpdate(double deltaTime)
+    {
+        totalTime += deltaTime;
+        gameLoop.OnUpdate(new Time(totalTime, deltaTime));
+    }
+
+    private void OnRender(double deltaTime)
+    {
+        if (graphicsDevice is null) return;
+
+        var time = new Time(totalTime, deltaTime);
+        var frame = CreateFrameContext();
+
+        if (debugSystem is not null && gameLoop is IDebuggable debuggable)
+        {
+            debugSystem.BeginFrame(frame);
+            using (debugSystem.Current!.Timers.Measure("run-debuggables"))
+            {
+                debugSystem.Run(debuggable);
+            }
+        }
+
+        var commandList = new RenderCommandList(frameRecorder);
+        using (debugSystem?.Current?.Timers.Measure("build-commands"))
+        {
+            gameLoop.OnRender(time, frame, commandList);
+            AppendDebugLinesPass(commandList);
+        }
+
+        FrameDebugPacket packet;
+        using (debugSystem?.Current?.Timers.Measure("execute"))
+        {
+            packet = graphicsDevice.Execute(commandList);
+        }
+
+        if (debugSystem?.Current is { } ctx)
+        {
+            var gpuTimings = graphicsDevice.ConsumeAvailableGpuTimings();
+            for (var i = 0; i < gpuTimings.Count; i++)
+            {
+                var t = gpuTimings[i];
+                ctx.Timers.AppendCompleted(t.PassName, scope: "gpu/passes", t.ElapsedMs);
+            }
+        }
+
+        if (diagnostics is { } sink)
+        {
+            sink.OnFrameDebug(packet, graphicsDevice.SnapshotResources());
+        }
+
+        // Present + buffer-swap lands here once swapchain integration is in
+        // — Silk's IWindow.SwapBuffers is GL-specific, so the Vk path
+        // calls vkQueuePresentKHR through the device. Until then this is a
+        // no-op and the window stays unpainted.
+
+        debugSystem?.EndFrame();
+    }
+
+    private void OnResize(Vector2D<int> size)
+    {
+        gameLoop.OnResize(size.X, size.Y);
+    }
+
+    private void OnFramebufferResize(Vector2D<int> size)
+    {
+        graphicsDevice?.SetDefaultRenderSurfaceSize(Math.Max(size.X, 1), Math.Max(size.Y, 1));
+    }
+
+    private void OnClosing()
+    {
+        gameLoop.OnUnload();
+    }
+
+    private void OnKeyDown(IKeyboard kbd, SilkKey key, int scancode)
+    {
+        if (key == SilkKey.F12 && TryDumpCurrentFrame()) return;
+        if (key == SilkKey.GraveAccent && debugSystem is not null)
+        {
+            debugSystem.State.ShowOverlay = !debugSystem.State.ShowOverlay;
+            return;
+        }
+        inputHandler?.OnKeyDown(MapKey(key));
+    }
+
+    private void OnKeyUp(IKeyboard kbd, SilkKey key, int scancode)
+    {
+        inputHandler?.OnKeyUp(MapKey(key));
+    }
+
+    private void OnMouseDown(IMouse mouse, SilkMouseButton button)
+    {
+        inputHandler?.OnMouseDown(MapMouseButton(button));
+    }
+
+    private void OnMouseUp(IMouse mouse, SilkMouseButton button)
+    {
+        inputHandler?.OnMouseUp(MapMouseButton(button));
+    }
+
+    private global::System.Numerics.Vector2 lastMousePosition;
+
+    private void OnMouseMove(IMouse mouse, global::System.Numerics.Vector2 position)
+    {
+        var delta = position - lastMousePosition;
+        lastMousePosition = position;
+        inputHandler?.OnMouseMove(position.X, position.Y, delta.X, delta.Y);
+    }
+
+    private void OnMouseScroll(IMouse mouse, ScrollWheel wheel)
+    {
+        inputHandler?.OnMouseWheel(wheel.X, wheel.Y);
+    }
+
+    private bool TryDumpCurrentFrame()
+    {
+        if (debugSystem is null || jsonDumpSink is null) return false;
+        if (debugSystem.FrozenFrame is { } frozen)
+        {
+            var path = jsonDumpSink.Dump(frozen);
+            Console.WriteLine($"[diagnostics] dumped frozen frame {frozen.Number} -> {path}");
+        }
+        else
+        {
+            jsonDumpSink.RequestDump();
+            Console.WriteLine("[diagnostics] dump armed; firing on next EndFrame");
+        }
+        return true;
+    }
+
+    private RenderFrameContext CreateFrameContext()
+    {
+        var size = window.FramebufferSize;
+        var w = size.X > 0 ? size.X : window.Size.X;
+        var h = size.Y > 0 ? size.Y : window.Size.Y;
+        return new RenderFrameContext(Width: w, Height: h);
+    }
+
+    private void ApplyDefaultSurfaceSize()
+    {
+        var size = window.FramebufferSize;
+        var w = size.X > 0 ? size.X : window.Size.X;
+        var h = size.Y > 0 ? size.Y : window.Size.Y;
+        graphicsDevice?.SetDefaultRenderSurfaceSize(Math.Max(w, 1), Math.Max(h, 1));
+    }
+
+    // IRenderHost
+    public void SetTitle(string title) => window.Title = title;
+    public void RequestClose() => window.Close();
+
+    public void SetCursorCaptured(bool captured)
+    {
+        if (input is null) return;
+        for (var i = 0; i < input.Mice.Count; i++)
+        {
+            input.Mice[i].Cursor.CursorMode = captured ? CursorMode.Raw : CursorMode.Normal;
+        }
+    }
+
+    public (int Width, int Height) LogicalSize => (window.Size.X, window.Size.Y);
+
+    public void SetVSync(bool enabled) => window.VSync = enabled;
+
+    // IDebugHost
+    public DebugContext? CurrentDebug => debugSystem?.Current;
+    public DebugSystem? System => debugSystem;
+
+    public void Dispose()
+    {
+        lineDrawer?.Dispose();
+        input?.Dispose();
+        graphicsDevice?.Dispose();
+        window.Dispose();
+    }
+
+    // Walk the frame's accumulated debug.Draw.* commands, expand them into
+    // line vertices on the VkLineDrawer, and append a swapchain pass that
+    // submits them. The pass has empty ClearColors → the Vulkan backend
+    // picks OverlayRenderPass (LoadOp.Load), so we draw OVER whatever the
+    // game's pass(es) painted.
+    private void AppendDebugLinesPass(RenderCommandList commandList)
+    {
+        if (debugSystem?.Current is not { } ctx) return;
+        if (lineDrawer is null) return;
+        var commands = ctx.Draw.Commands;
+        if (commands.Count == 0) return;
+
+        for (var i = 0; i < commands.Count; i++)
+        {
+            var c = commands[i];
+            switch (c)
+            {
+                case DebugDrawLine d: lineDrawer.Line(d.A, d.B, d.Color); break;
+                case DebugDrawAabb d: lineDrawer.Aabb(d.Min, d.Max, d.Color); break;
+                case DebugDrawCross d: lineDrawer.Cross(d.Center, d.Size, d.Color); break;
+                case DebugDrawArrow d: lineDrawer.Arrow(d.From, d.To, d.Color); break;
+                case DebugDrawRay d:
+                    var end = d.Origin + global::System.Numerics.Vector3.Normalize(d.Direction) * d.Length;
+                    lineDrawer.Arrow(d.Origin, end, d.Color);
+                    break;
+                case DebugDrawObb d: lineDrawer.Obb(d.Transform, d.Color); break;
+                // Sphere / Grid / Plane / Frustum / Capsule / Cone / MeshWireframe
+                // / Normals not implemented yet — silent skip rather than crash.
+                // Tracked as a follow-up; debug.Draw.* gracefully degrades.
+            }
+        }
+
+        if (!lineDrawer.HasLines) return;
+
+        // Footgun guard: emit-once warning when commands were issued but the
+        // game forgot to set debug.Draw.ViewProjection. Without this, lines
+        // render in clip space and are almost always invisible.
+        if (!warnedDebugIdentityVp && ctx.Draw.ViewProjection.Equals(global::System.Numerics.Matrix4x4.Identity))
+        {
+            warnedDebugIdentityVp = true;
+            Console.Error.WriteLine("[diagnostics] debug.Draw.ViewProjection is Identity; lines will render in clip space (likely invisible). Set debug.Draw.ViewProjection = viewProj.");
+        }
+
+        var viewProj = ctx.Draw.ViewProjection;
+        commandList.Pass(
+            "debug",
+            new RenderPassDescription(
+                Target: RenderSurfaceHandle.Default,
+                ClearColors: Array.Empty<GraphicsColor?>(),
+                ClearDepth: false),
+            pass => lineDrawer.Submit(pass, viewProj));
+    }
+
+    private bool warnedDebugIdentityVp;
+
+    private static BlixKey MapKey(SilkKey key) => key switch
+    {
+        SilkKey.Escape => BlixKey.Escape,
+        SilkKey.Space => BlixKey.Space,
+        SilkKey.Enter => BlixKey.Enter,
+        SilkKey.Tab => BlixKey.Tab,
+        SilkKey.Backspace => BlixKey.Backspace,
+        SilkKey.Left => BlixKey.Left,
+        SilkKey.Right => BlixKey.Right,
+        SilkKey.Up => BlixKey.Up,
+        SilkKey.Down => BlixKey.Down,
+        SilkKey.A => BlixKey.A, SilkKey.B => BlixKey.B, SilkKey.C => BlixKey.C, SilkKey.D => BlixKey.D,
+        SilkKey.E => BlixKey.E, SilkKey.F => BlixKey.F, SilkKey.G => BlixKey.G, SilkKey.H => BlixKey.H,
+        SilkKey.I => BlixKey.I, SilkKey.J => BlixKey.J, SilkKey.K => BlixKey.K, SilkKey.L => BlixKey.L,
+        SilkKey.M => BlixKey.M, SilkKey.N => BlixKey.N, SilkKey.O => BlixKey.O, SilkKey.P => BlixKey.P,
+        SilkKey.Q => BlixKey.Q, SilkKey.R => BlixKey.R, SilkKey.S => BlixKey.S, SilkKey.T => BlixKey.T,
+        SilkKey.U => BlixKey.U, SilkKey.V => BlixKey.V, SilkKey.W => BlixKey.W, SilkKey.X => BlixKey.X,
+        SilkKey.Y => BlixKey.Y, SilkKey.Z => BlixKey.Z,
+        SilkKey.ControlLeft => BlixKey.LeftControl,
+        SilkKey.ControlRight => BlixKey.RightControl,
+        SilkKey.SuperLeft => BlixKey.LeftSuper,
+        SilkKey.SuperRight => BlixKey.RightSuper,
+        _ => BlixKey.Unknown,
+    };
+
+    private static BlixMouseButton MapMouseButton(SilkMouseButton button) => button switch
+    {
+        SilkMouseButton.Left => BlixMouseButton.Left,
+        SilkMouseButton.Right => BlixMouseButton.Right,
+        SilkMouseButton.Middle => BlixMouseButton.Middle,
+        _ => BlixMouseButton.Unknown,
+    };
+}

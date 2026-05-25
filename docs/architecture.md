@@ -1,21 +1,28 @@
 # Architecture
 
-The engine is organised so that game code lives in `Blix` (the root namespace, the layer game code targets), the renderer spine lives below it (`Blix.Render` → `Blix.Graphics` → `Blix.Graphics.OpenGL`), and platform contracts (windowing, input, audio host, diagnostics) live below everything in `Blix.Core`.
+The engine is organised so that game code lives in `Blix` (the root namespace, the layer game code targets), the renderer spine lives below it (`Blix.Render` → `Blix.Graphics` → backend), and platform contracts (windowing, input, audio host, diagnostics) live below everything in `Blix.Core`.
+
+Two backends + runtimes ship today: the original OpenGL + OpenTK pair (used by the three Sponza/ShaderLab demos), and a newer Vulkan + Silk.NET pair (used by `Blix.Demos.VulkanHello`). The Vulkan path is the active development target; the engine is being reshaped around it (see [`vulkan-friction.md`](vulkan-friction.md) for the friction notes driving the reshape).
 
 This doc orients you. For detail:
 - Renderer architecture: [`renderer.md`](renderer.md)
 - Game-engine layer reference: [`blix.md`](blix.md)
 - Flagship demo deep dive: [`walkthrough.md`](walkthrough.md)
+- Vulkan-backend reshape notes: [`vulkan-friction.md`](vulkan-friction.md)
 
 ## Project graph
 
 ```
-Blix.Demos.Walkthrough         ← classic Sponza HDR walkthrough (flagship demo)
+Blix.Demos.Walkthrough         ← classic Sponza HDR walkthrough (flagship GL demo)
 Blix.Demos.SponzaModern        ← Khronos Intel Sponza + add-ons (PBR-MR scene)
 Blix.Demos.ShaderLab           ← shader-feature acceptance demo
+Blix.Demos.VulkanHello         ← Vulkan validation demo (cube + debug overlay)
         ↑
-Blix.Runtime.OpenTK            ← the current window/runtime adapter
-        ↑                         (OpenTK window + GL context + ImGui overlay)
+Blix.Runtime.OpenTK            ← OpenGL window/runtime adapter
+Blix.Runtime.Silk              ← Vulkan window/runtime adapter
+                                  (Silk.NET window + IVkSurface + MoltenVK bootstrap,
+                                   VkLineDrawer for debug overlay)
+        ↑
 Blix                           ← layer game code targets
    ↑   ↑      ↑       ↑           (loop, scene, animations, physics, audio, glTF)
    │   │      │       │
@@ -26,9 +33,12 @@ Blix                           ← layer game code targets
    │ Blix.Geometry              ← primitives + intersection tests
    │                              (Bounds3/2, Sphere, Capsule, OBB, mesh colliders)
 Blix.Graphics                  ← graphics command language
-   ↑                              (handles, pipelines, surfaces, vertex types,
-   │                               shader sources, GLSL preprocessor + ShaderLoader)
-Blix.Graphics.OpenGL           ← OpenGL backend
+   ↑   ↑                          (handles, pipelines, surfaces, vertex types,
+   │   │                           shader sources, GLSL preprocessor + ShaderLoader)
+   │ Blix.Graphics.OpenGL       ← OpenGL backend
+   Blix.Graphics.Vulkan         ← Vulkan backend (Silk.NET.Vulkan bindings,
+                                   instance/device/swapchain/descriptor sets,
+                                   UniformBlockLayout for name→offset mapping)
 Blix.Graphics.Images           ← image decode + HDR IBL bake pipeline
                                   (StbImageSharp, EquirectangularToCubemap,
                                    PbrIblBaker, HdrSunFinder)
@@ -39,8 +49,7 @@ Blix.Diagnostics               ← contribution-based debug system
         ↑                         (DebugFrame snapshots + history ring,
                                    Values/Controls/Draw/Stats/Timers/Events
                                    channels, sinks, selection + picking,
-                                   IDebuggable / IDebugGeometrySource /
-                                   IDebugSelectable / IDebugInspectable)
+                                   PeriodicConsoleSummarySink for stdout digest)
 Blix.Core                      ← platform contracts (no implementations)
                                   (IRenderHost, IAudioHost, IDebugHost,
                                    IInputHandler, IRuntimeDiagnosticsSink, Key,
@@ -50,7 +59,9 @@ Blix.Audio                     ← audio command language (IAudioDevice)
 Blix.Audio.OpenAL              ← OpenAL Soft backend
 ```
 
-Every cross-project dependency in the source tree fits one of the arrows above. Nothing above `Blix.Core` depends on a windowing/audio backend directly — `Blix.Runtime.OpenTK` is the only project that wires `IRenderHost`/`IAudioHost`/`IDebugHost` to concrete implementations.
+Every cross-project dependency in the source tree fits one of the arrows above. Nothing above `Blix.Core` depends on a windowing/audio backend directly — the two runtime projects (`Blix.Runtime.OpenTK`, `Blix.Runtime.Silk`) are the only ones that wire `IRenderHost`/`IAudioHost`/`IDebugHost` to concrete implementations.
+
+The Vulkan path is feature-narrow today vs. the OpenGL path (no glTF, no materials, no IBL, no SSR, no post-process), by design — it's a validation track that's revealing where the engine's API needs to reshape before the scene demos port over. The Sponza/ShaderLab demos still run on OpenGL during this transition.
 
 `Blix.Shaders` isn't a code project — it's a folder of `.glsl` files copied into each demo's output via `<None Include="..\Blix.Shaders\**\*.glsl" Link="Shaders\lib\...">` in the demo csproj. Demo shaders write `#include "lib/tonemap.glsl"` and the include preprocessor resolves it at load time. See [renderer.md → Shader library](renderer.md#shader-library).
 

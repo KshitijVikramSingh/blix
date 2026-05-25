@@ -15,7 +15,19 @@ No editor, no scripting, no plugin system, no asset cache, no hot reload. No shi
 
 ## Demos
 
-Three demos ship in `src/`. Each one is an entry point, all run against the same engine.
+Four demos ship in `src/`. Each is an entry point against the engine. The Vulkan demo is the active development target; the OpenGL demos are stable but in the process of being sunset as the engine reshapes around Vulkan as the primary backend (see [`docs/vulkan-friction.md`](docs/vulkan-friction.md) for the in-flight reshape notes).
+
+### Vulkan Cube (active development)
+
+```sh
+tools/run-vulkan-hello.sh
+```
+
+Spinning depth-tested 24-vertex cube on the Vulkan backend via MoltenVK on macOS. Exercises swapchain creation, per-frame command buffers + sync, descriptor sets + per-frame UBO ring, VkQueryPool timing infrastructure, and a debug-line overlay pass drawn on top of the scene (world axes, light direction arrow, cube OBB wireframe). Diagnostics surface (Values / Stats / Timers / GPU pass timings / Events) flows through the same `IDebuggable` API as the OpenGL demos.
+
+Runs at vsync with full validation-layer cleanliness (`BLIX_VK_VALIDATE=1` to enable Khronos validation layers). `BLIX_DIAG_INTERVAL=<frames>` controls how often the periodic console digest fires (default every 60 frames; `BLIX_DIAG=off` disables).
+
+Setup: `brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc`. The launcher script (`tools/run-vulkan-hello.sh`) sets the `DYLD_FALLBACK_LIBRARY_PATH` + `VK_ICD_FILENAMES` + `VK_LAYER_PATH` env vars before `dotnet run` since dyld snapshots `DYLD_*` at process start and won't pick them up from runtime `setenv`.
 
 ### Sponza Walkthrough (flagship)
 
