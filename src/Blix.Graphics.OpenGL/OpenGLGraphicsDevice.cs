@@ -3,7 +3,7 @@ using OpenTK.Graphics.OpenGL4;
 
 namespace Blix.Graphics.OpenGL;
 
-public sealed partial class OpenGLGraphicsDevice : IGraphicsDevice, IRenderer
+public sealed partial class OpenGLGraphicsDevice : IGraphicsDevice, IRenderer, IOcclusionQueryProvider
 {
     private readonly Dictionary<int, VertexBufferResource> vertexBuffers = [];
     private readonly Dictionary<int, IndexBufferResource> indexBuffers = [];
@@ -79,11 +79,19 @@ public sealed partial class OpenGLGraphicsDevice : IGraphicsDevice, IRenderer
         // glObjectLabel, so label calls stay gated on khrDebugSupported.
         debugLabelsSupported = khrDebugSupported;
 
-        // GPU timing is opt-in but defaults ON when the extension is
-        // present — the per-pass cost is two glQueryCounter calls, which
-        // is negligible, and the diagnostic value is high.
+        // GPU timing is opt-in. The Phase 7 design assumed glQueryCounter
+        // was effectively free; profiling on macOS' GL (which runs
+        // through a Metal translation layer) showed it's NOT — each
+        // timestamp insertion forces a partial sync that costs real
+        // wall-clock time, and the per-pass timings themselves come
+        // back skewed by command-buffer batching. Net effect:
+        // turning the instrumentation on actively dragged FPS down
+        // by 5–15 ms and gave inflated numbers. Default OFF; demos
+        // opt in via a Control when they specifically need per-pass
+        // GPU times for profiling and accept the perturbation.
         gpuTimingSupported = DetectGpuTimingSupport();
-        GpuTimingEnabled = gpuTimingSupported;
+        GpuTimingEnabled = false;
+        DetectOcclusionQuerySupport();
 
         if (Diagnostics != DiagnosticsMode.Off)
         {
@@ -149,6 +157,7 @@ public sealed partial class OpenGLGraphicsDevice : IGraphicsDevice, IRenderer
         }
 
         DisposeGpuTiming();
+        DisposeOcclusionQueries();
 
         GL.DeleteVertexArray(vertexArray);
         vertexBuffers.Clear();

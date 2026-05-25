@@ -64,6 +64,20 @@ public sealed class RenderPassBuilder
         recorder?.OnDraw(in command);
     }
 
+    // Scope an occlusion query around the draws that follow until
+    // EndOcclusionQuery(). The QueryId must come from the graphics
+    // device's occlusion-query pool; the backend issues GL begin/end
+    // calls and the result becomes readable asynchronously.
+    public void BeginOcclusionQuery(int queryId)
+    {
+        commands.Add(new BeginOcclusionQueryCommand(queryId));
+    }
+
+    public void EndOcclusionQuery()
+    {
+        commands.Add(new EndOcclusionQueryCommand());
+    }
+
     // Sub-range draw: starts at indexOffset into the index buffer. Lets multiple
     // partitions share one (vertex buffer, index buffer) pair after a single
     // batched upload — without this, calling UpdateVertexBuffer between two

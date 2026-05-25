@@ -171,14 +171,22 @@ public sealed class Window : GameWindow, IRenderHost, IAudioHost, IDebugHost
             }
         }
 
-        // Seal the frame *after* ImGui has read it. EndFrame snapshots the
-        // live context into the history ring and clears Current; doing it
-        // before RenderOverlay would force ImGui to read from LatestFrame
-        // (one-frame display lag) and lose interactivity on the controls
-        // that are mutating their pending values during this same call.
-        debugSystem?.EndFrame();
+        // SwapBuffers blocks on the display-sync source — VSync if it's
+        // on, but on macOS the Cocoa/Metal layer can impose its own
+        // half-rate / refresh sync that's *independent* of GL's VSync
+        // mode. If `swap` shows 20+ ms while every other timer is small,
+        // the cap isn't GPU work or driver overhead — it's the present.
+        // Timed before EndFrame so the value lands in this frame's
+        // snapshot (Current is still alive until EndFrame clears it).
+        using (debugSystem?.Current?.Timers.Measure("swap"))
+        {
+            SwapBuffers();
+        }
 
-        SwapBuffers();
+        // Seal the frame *after* swap so the frame timer covers the
+        // entire wall-clock cost (including the present wait). ImGui
+        // already read its data above the swap call.
+        debugSystem?.EndFrame();
     }
 
     protected override void OnResize(ResizeEventArgs args)
@@ -329,6 +337,15 @@ public sealed class Window : GameWindow, IRenderHost, IAudioHost, IDebugHost
         // OpenTK's "Grabbed" hides the cursor AND locks it to the window center,
         // reporting all motion as deltas. That's the FPS-style capture the demo wants.
         CursorState = captured ? CursorState.Grabbed : CursorState.Normal;
+    }
+
+    public void SetVSync(bool enabled)
+    {
+        // OpenTK's VSync property: On clamps to refresh; Off lets the
+        // GPU run uncapped (shows true frame cost in profiling); Adaptive
+        // is per-driver-discretion. We expose binary on/off — Adaptive
+        // is the user's display-control-panel concern, not engine API.
+        VSync = enabled ? VSyncMode.On : VSyncMode.Off;
     }
 
     // Explicit interface impl — the base GameWindow already has a ClientSize property

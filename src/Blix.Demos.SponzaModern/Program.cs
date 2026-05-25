@@ -180,6 +180,63 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
     // owns its own custom panel.
     private LightingDebugView lightingDebug = null!;
 
+    // VSync state surfaced as a debug toggle. Critical for profiling:
+    // OpenTK defaults VSync On (clamps to refresh rate). On a 60Hz
+    // display, any frame exceeding ~16.7ms drops the displayed rate
+    // to 30fps even if the real cost is 17ms — the "vsync half-rate"
+    // pattern. Flip off in the Controls tab to see uncapped FPS.
+    private bool vsyncEnabled = true;
+
+    // Per-cascade render skip. When false, that cascade's shadow pass
+    // is skipped entirely (the lit pass still samples its shadow map,
+    // which holds whatever was rendered LAST time — so toggling off
+    // produces stale shadows for that range). A pure perf probe:
+    // status-bar ms delta between toggling = the cascade's cost.
+    private readonly bool[] cascadeRenderEnabled = { true, true, true };
+
+    // GPU occlusion culler for the opaque scene pass. Constructed in
+    // OnLoad once the GraphicsDevice is alive. When enabled, each
+    // opaque submesh that passes frustum cull also gets a depth-tested
+    // bounding-box proxy query whose result decides whether to skip
+    // its real draw next frame. Off by default — opt-in via Controls
+    // until we've validated it doesn't introduce visible artifacts.
+    private GpuOcclusionCuller? occlusionCuller;
+    private bool useOcclusionCull;
+
+    // Shadow-caster volume culling: a tight light-space AABB of the
+    // camera frustum slice corners, extended along +Z (toward sun) by
+    // shadowCasterExtent so objects above receivers (towers, ceiling
+    // detail) still contribute shadows. Strictly tighter than the
+    // existing radius-sphere ortho the RENDER VP uses, so RENDER stays
+    // stable (texel-snap intact) while CULLING gets aggressive.
+    // Default on — the whole point of adding it.
+    private bool useCasterVolumeCull = true;
+    // World-space distance to extend the cull volume toward the sun
+    // past the highest receiver. Must clear the tallest expected
+    // caster above any visible receiver. Sponza atrium ceiling is
+    // ~12m, columns + decor maybe 15m above floor; 30 is generous.
+    private float shadowCasterExtent = 30.0f;
+
+    // Distinct colors for the 3 cascade frustum wireframes so a user
+    // can see them nest (cascade 0 is the tightest near-camera; 2 is
+    // the widest far-range). Picked so each is readable against
+    // Sponza's warm lighting AND distinct from selection magenta.
+    private static readonly GraphicsColor[] CascadeFrustumColors =
+    {
+        new(0.30f, 1.00f, 0.30f, 1.0f), // green  — cascade 0 (near)
+        new(1.00f, 0.85f, 0.00f, 1.0f), // amber  — cascade 1 (mid)
+        new(0.30f, 0.65f, 1.00f, 1.0f), // blue   — cascade 2 (far)
+    };
+
+    private static readonly GraphicsColor CameraFrustumColor =
+        new(1.00f, 1.00f, 1.00f, 1.0f); // white  — camera frustum
+
+    private static readonly GraphicsColor CullVisibleColor =
+        new(0.20f, 0.95f, 0.30f, 1.0f); // green  — submesh would draw
+
+    private static readonly GraphicsColor CullCulledColor =
+        new(0.95f, 0.20f, 0.20f, 1.0f); // red    — submesh would skip
+
     private static readonly string[] DebugViewNames =
     {
         "PBR (real)",
@@ -454,6 +511,14 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         // their own ImGui panels. The Host is the Window; IDebugHost.System
         // returns null when the runtime wasn't built with diagnostics —
         // tolerated, since our own Debug() body still runs without it.
+        // Occlusion culler — constructed once the device is available.
+        // Requires both the device (for proxy mesh/pipeline resources)
+        // and the occlusion-query provider (the same device, cast).
+        if (GraphicsDevice is Blix.Graphics.IOcclusionQueryProvider queryProvider)
+        {
+            occlusionCuller = new GpuOcclusionCuller(GraphicsDevice, queryProvider);
+        }
+
         if (Host is Blix.Diagnostics.IDebugHost { System: { } debugSystem })
         {
             debugSystem.Register(uploader);
@@ -464,6 +529,11 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             // pack ("scene/main", "scene/curtains", ...) from the
             // Layers panel.
             debugSystem.State.LayersEnabled["scene"] = false;
+            // Engine debug-geometry layers (added by EmitEngineDebugGeometry).
+            // All off by default; user opts in to whatever they need.
+            debugSystem.State.LayersEnabled["camera"] = false;
+            debugSystem.State.LayersEnabled["shadow"] = false;
+            debugSystem.State.LayersEnabled["culling"] = false;
         }
 
         var defaults = new GltfDefaultTextures(
@@ -686,12 +756,21 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         return ShaderLoader.LoadVertexFragment(Path.Combine(dir, vertName), Path.Combine(dir, fragName));
     }
 
+    // Per-pack render toggles. When false, that pack is excluded from
+    // AllScenes() — opaque pass, all 3 cascade passes, AND the culling/
+    // selectable surfaces all skip it together. The natural A/B for
+    // "what's the tree costing?" / "is alpha-mask foliage the issue?".
+    private bool renderMainPack = true;
+    private bool renderCurtainsPack = true;
+    private bool renderIvyPack = true;
+    private bool renderTreesPack = true;
+
     private IEnumerable<GltfSceneInstance> AllScenes()
     {
-        if (mainScene is not null) yield return mainScene;
-        if (curtainsScene is not null) yield return curtainsScene;
-        if (ivyScene is not null) yield return ivyScene;
-        if (treesScene is not null) yield return treesScene;
+        if (renderMainPack     && mainScene     is not null) yield return mainScene;
+        if (renderCurtainsPack && curtainsScene is not null) yield return curtainsScene;
+        if (renderIvyPack      && ivyScene      is not null) yield return ivyScene;
+        if (renderTreesPack    && treesScene    is not null) yield return treesScene;
     }
 
 
@@ -741,11 +820,32 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         // colour, and the user gets a sky-only view rather than a black
         // hang. AllScenes() returns an empty enumerable until packs land.
 
+        // Pull the live DebugContext once per frame so we can scope
+        // sub-phase timers without re-casting Host every time. Null when
+        // the runtime wasn't built with diagnostics (headless / non-
+        // IDebuggable game); the using(null) pattern silently no-ops.
+        var dbg = (Host as Blix.Diagnostics.IDebugHost)?.CurrentDebug;
+
+        // Drain last frame's occlusion query results at the START of
+        // this frame — by now device.Execute has finished and the GL
+        // driver should have the answers. Doing it here (rather than
+        // post-Execute) means the 1-frame-stale visibility window is
+        // tied naturally to OnRender's cadence.
+        using (dbg?.Timers.Measure("occlusion.update"))
+        {
+            occlusionCuller?.Update();
+        }
+
         // Drain pending texture uploads. Costs at most UploadBudgetMillis of
         // GL time per frame; the queue typically clears within ~1 second of
         // scene load. Always runs FIRST so the lit pass sees the latest
-        // texture bindings.
-        uploader.Drain(UploadBudgetMillis);
+        // texture bindings. The Timer makes the cost visible in the HUD —
+        // ResourceUploader's own "drain-ms" gauge is the value LAST drain
+        // produced; this timer accumulates per-frame for sparkline trend.
+        using (dbg?.Timers.Measure("uploader.drain"))
+        {
+            uploader.Drain(UploadBudgetMillis);
+        }
 
         camera.VerticalFieldOfView = cameraFov;
         camera.NearPlane = cameraNear;
@@ -759,7 +859,7 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         // Without this, debug lines pass through Matrix4x4.Identity and
         // get culled in clip space — symptom: selection outlines and any
         // other Draw primitives are silently invisible.
-        if (Host is Blix.Diagnostics.IDebugHost { CurrentDebug: { } dbg })
+        if (dbg is not null)
         {
             dbg.Draw.ViewProjection = proj * view;
         }
@@ -770,22 +870,70 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             ? Frustum.FromViewProjection(proj * view)
             : null;
 
-        for (int c = 0; c < CascadeCount; c++)
+        // Capture this frame's camera VP into the occluder for its
+        // proxy queries. The active occluder (or null) gets handed to
+        // DrawScene below; toggling useOcclusionCull off bypasses
+        // ShouldDraw / RecordQuery entirely.
+        var activeOccluder = useOcclusionCull ? occlusionCuller : null;
+        activeOccluder?.BeginFrame(proj * view);
+
+        // Cascade light-VP compute: 3 iterations of frustum-slice
+        // unprojection + sun-aligned ortho. Cheap individually but worth
+        // a timer because if cascade splits are bad it can produce wildly
+        // different costs frame to frame.
+        using (dbg?.Timers.Measure("cascade.vp"))
         {
-            cascadeLightVPs[c] = ComputeCascadeLightViewProjection(
-                sunDirection, view, invViewProj,
-                cascadeSplits[c], cascadeSplits[c + 1],
-                ShadowMapSize);
+            for (int c = 0; c < CascadeCount; c++)
+            {
+                cascadeLightVPs[c] = ComputeCascadeLightViewProjection(
+                    sunDirection, view, invViewProj,
+                    cascadeSplits[c], cascadeSplits[c + 1],
+                    ShadowMapSize);
+            }
         }
+
+        // --- Engine debug geometry (camera frustum, cascade frustums, cull viz) ---
+        // Emitted inline here because the producer-registry sweep (in
+        // DebugSystem.Run, before OnRender) doesn't have the per-frame
+        // frustums computed yet. Reading from dbg.Draw directly is the
+        // cheap path; the new path prefixes (camera/, shadow/, culling/)
+        // surface in the Layers tab the moment they emit.
+        if (dbg is not null)
+        {
+            EmitEngineDebugGeometry(dbg, cameraFrustum, proj * view);
+        }
+
+        // Reset cascade-draw counter once per frame; the per-cascade
+        // pass bodies below add into it (or are skipped entirely).
+        lastCascadeDrawn = 0;
 
         // --- Cascade shadows: one pass per cascade --------------------
         for (int c = 0; c < CascadeCount; c++)
         {
+            if (!cascadeRenderEnabled[c])
+            {
+                continue; // perf-probe skip; lit pass samples stale shadow map
+            }
             var cascadeIndex = c;
             var cascadeVP = cascadeLightVPs[c];
-            Frustum? cascadeFrustum = enableFrustumCulling
-                ? Frustum.FromViewProjection(cascadeVP)
-                : null;
+            // Two cull-frustum sources for the cascade pass:
+            //  - Caster-volume cull: a tight light-space AABB of the
+            //    slice corners extended by shadowCasterExtent. Strictly
+            //    tighter than the render-VP frustum. Default path.
+            //  - Render-VP cull: the radius-sphere ortho the cascade
+            //    actually renders to. Used as a fallback when the
+            //    caster-volume cull is disabled (so the existing
+            //    behaviour is preserved for A/B). Never produces
+            //    false-negatives because the render ortho is a strict
+            //    superset of the caster volume.
+            Frustum? cascadeFrustum = !enableFrustumCulling
+                ? null
+                : useCasterVolumeCull
+                    ? ComputeCascadeCullFrustum(
+                        sunDirection, view, invViewProj,
+                        cascadeSplits[c], cascadeSplits[c + 1],
+                        shadowCasterExtent)
+                    : Frustum.FromViewProjection(cascadeVP);
             commandList.Pass(
                 $"sm.shadow.cascade{cascadeIndex}",
                 new RenderPassDescription(
@@ -799,9 +947,6 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
                     {
                         drawn += pbrRenderer.DrawCascadeShadow(pass, sceneInstance, cascadeVP, cascadeFrustum, cullMargin);
                     }
-                    // Sum across all cascades into the cumulative counter, reset
-                    // by the first cascade so the HUD shows total cascade draws.
-                    if (cascadeIndex == 0) lastCascadeDrawn = 0;
                     lastCascadeDrawn += drawn;
                 });
         }
@@ -869,7 +1014,7 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
                 int drawn = 0;
                 foreach (var sceneInstance in AllScenes())
                 {
-                    drawn += pbrRenderer.DrawScene(pass, sceneInstance, sharedUniforms, cameraFrustum, cullMargin);
+                    drawn += pbrRenderer.DrawScene(pass, sceneInstance, sharedUniforms, cameraFrustum, cullMargin, activeOccluder);
                 }
                 lastOpaqueDrawn = drawn;
                 pass.DrawMesh(skyMesh, skyboxMaterial,
@@ -1077,6 +1222,92 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         return projection * lightView2;
     }
 
+    // Tight shadow-caster cull frustum for one cascade. Independent of the
+    // RENDER VP (which uses a radius-sphere bound for texel-snap stability)
+    // — this is purely for "does this submesh cast a shadow that lands on
+    // a visible receiver?"
+    //
+    // Math:
+    //   1. Compute the 8 world-space corners of the camera frustum slice
+    //      for this cascade's [nearSplit, farSplit] range.
+    //   2. Build a light view that looks down the sun direction.
+    //   3. Transform the 8 corners to light space; take their AABB.
+    //   4. Extend the AABB in +Z (toward sun in light space) by
+    //      casterExtent so casters above any receiver are included.
+    //   5. Build an ortho projection from that AABB. The resulting VP's
+    //      frustum is the cull volume.
+    //
+    // Why this is exact (not approximate): in light space, shadows
+    // project strictly along -Z. A caster at light-space (x, y, z) only
+    // shadows receivers at (x, y, z') with z' < z. So a caster outside
+    // the slice's XY range cannot contribute regardless of sun angle —
+    // the world-space slant is fully absorbed by the lightView rotation.
+    private Frustum ComputeCascadeCullFrustum(
+        Vector3 sunDir, Matrix4x4 view, Matrix4x4 invViewProj,
+        float nearSplit, float farSplit, float casterExtent)
+    {
+        // (Same slice-corners math as ComputeCascadeLightViewProjection;
+        // duplicated here to keep this function self-contained — the
+        // render-VP and cull-VP are otherwise independent and refactoring
+        // a shared helper out is more disruption than it's worth right now.)
+        var nearNdc = TransformVec4(invViewProj, new Vector4(1.0f, 1.0f, -1.0f, 1.0f));
+        var nearWorld = new Vector3(nearNdc.X, nearNdc.Y, nearNdc.Z) / nearNdc.W;
+        var nearView = GraphicsMatrices.TransformPoint(view, nearWorld);
+        var camNear = -nearView.Z;
+        var tanHalfFovX = nearView.X / camNear;
+        var tanHalfFovY = nearView.Y / camNear;
+        var nrx = nearSplit * tanHalfFovX; var nry = nearSplit * tanHalfFovY;
+        var frx = farSplit  * tanHalfFovX; var fry = farSplit  * tanHalfFovY;
+        Span<Vector3> sliceView = stackalloc Vector3[8]
+        {
+            new(-nrx, -nry, -nearSplit), new( nrx, -nry, -nearSplit),
+            new(-nrx,  nry, -nearSplit), new( nrx,  nry, -nearSplit),
+            new(-frx, -fry, -farSplit),  new( frx, -fry, -farSplit),
+            new(-frx,  fry, -farSplit),  new( frx,  fry, -farSplit),
+        };
+        Matrix4x4.Invert(view, out var invView);
+        Span<Vector3> worldCorners = stackalloc Vector3[8];
+        var center = Vector3.Zero;
+        for (var i = 0; i < 8; i++)
+        {
+            worldCorners[i] = GraphicsMatrices.TransformPoint(invView, sliceView[i]);
+            center += worldCorners[i];
+        }
+        center /= 8.0f;
+
+        // Light view: eye on the sun-side, looking down -sun toward the
+        // scene. Distance is arbitrary (only orientation matters for the
+        // ortho box construction below); 1.0 keeps numbers small.
+        var L = Vector3.Normalize(-sunDir);
+        var up = MathF.Abs(L.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
+        var lightView = GraphicsMatrices.CreateLookAt(center + L * 1.0f, center, up);
+
+        // Light-space AABB of slice corners.
+        float minX = float.PositiveInfinity, minY = float.PositiveInfinity, minZ = float.PositiveInfinity;
+        float maxX = float.NegativeInfinity, maxY = float.NegativeInfinity, maxZ = float.NegativeInfinity;
+        for (var i = 0; i < 8; i++)
+        {
+            var lc = GraphicsMatrices.TransformPoint(lightView, worldCorners[i]);
+            if (lc.X < minX) minX = lc.X; if (lc.X > maxX) maxX = lc.X;
+            if (lc.Y < minY) minY = lc.Y; if (lc.Y > maxY) maxY = lc.Y;
+            if (lc.Z < minZ) minZ = lc.Z; if (lc.Z > maxZ) maxZ = lc.Z;
+        }
+        // Extend toward the sun by casterExtent. In light view space
+        // (GL convention: eye at origin, scene at -Z), receivers have
+        // z = some negative range. "Toward sun" = toward eye = higher Z
+        // (less negative). Bumping maxZ makes the near plane farther
+        // from receivers, capturing casters above them.
+        maxZ += casterExtent;
+
+        // Ortho-off-center takes (left, right, bottom, top, near, far).
+        // near = positive distance from eye to near plane = -maxZ
+        // (since maxZ is the closest-to-eye Z and view Z is negative).
+        var ortho = GraphicsMatrices.CreateOrthographicOffCenter(
+            minX, maxX, minY, maxY,
+            -maxZ, -minZ);
+        return Frustum.FromViewProjection(ortho * lightView);
+    }
+
     // Vector4 transform for column-vector matrices. System.Numerics's built-in
     // Vector4.Transform assumes row-vector storage and would silently drop the
     // M14/M24/M34 translation column on a Blix matrix.
@@ -1111,6 +1342,122 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
         if (key == Key.P)
         {
             PickCenterScreen();
+        }
+    }
+
+    // Per-frame engine-level debug geometry. Three independent layers,
+    // each gated by its own Layers-tab toggle (all default-off so the
+    // scene opens clean — flip on as needed):
+    //
+    //   "camera/frustum"        — camera view frustum wireframe
+    //   "shadow/cascade<N>/..." — per-cascade light frustum
+    //   "culling/visible/..."   — green AABB per submesh that PASSES the cull
+    //   "culling/culled/..."    — red AABB per submesh that the cull rejects
+    //
+    // The cull viz mirrors PbrSceneRenderer's exact test (Frustum.Intersects
+    // with cullMargin) so green/red corresponds to draw/skip 1:1 — toggle
+    // the Frustum cull control and watch every box turn green.
+    private void EmitEngineDebugGeometry(DebugContext dbg, Frustum? cameraFrustum, Matrix4x4 cameraVP)
+    {
+        // Camera frustum: drawn from the live projection*view, NOT the
+        // cull frustum (which is null when culling is off). Lets you see
+        // the camera's actual clip volume independent of cull setting.
+        using (dbg.Scope("camera"))
+        {
+            dbg.Draw.Frustum("frustum", cameraVP, CameraFrustumColor);
+        }
+
+        // Cascade light frustums, one wireframe per cascade. Color-coded
+        // (green/amber/blue, near→far) so a glance tells you which
+        // cascade covers which range.
+        using (dbg.Scope("shadow"))
+        {
+            for (int c = 0; c < CascadeCount; c++)
+            {
+                using (dbg.Scope($"cascade{c}"))
+                {
+                    dbg.Draw.Frustum("frustum", cascadeLightVPs[c], CascadeFrustumColors[c]);
+                }
+            }
+        }
+
+        // Per-submesh color-coded AABB. Skips when no scenes loaded or
+        // when frustum culling is off (everything would be green —
+        // redundant with the "scene" layer's plain AABBs).
+        if (cameraFrustum is null)
+        {
+            return;
+        }
+        using (dbg.Scope("culling"))
+        {
+            foreach (var sceneInstance in AllScenes())
+            {
+                EmitSceneCullDebug(dbg, sceneInstance, cameraFrustum.Value);
+            }
+        }
+    }
+
+    // Per-pack + per-alpha-mode submesh / triangle stats. Lets the user
+    // see exactly what each pack contributes — counts to identify
+    // submesh-heavy packs, tris to identify vertex-heavy ones,
+    // mask/blend counts to identify the high-overdraw foliage packs
+    // that dominate fragment cost (and shadow-pass cost via alpha
+    // discard). All gauges so they sparkline naturally.
+    private void EmitPackStats(DebugContext debug)
+    {
+        EmitOnePackStats(debug, "main",     mainScene);
+        EmitOnePackStats(debug, "curtains", curtainsScene);
+        EmitOnePackStats(debug, "ivy",      ivyScene);
+        EmitOnePackStats(debug, "trees",    treesScene);
+    }
+
+    private static void EmitOnePackStats(DebugContext debug, string label, GltfSceneInstance? scene)
+    {
+        if (scene is null) return;
+        int opaqueN = 0, maskN = 0, blendN = 0, doubleSidedN = 0;
+        long opaqueTris = 0, maskTris = 0, blendTris = 0;
+        for (var i = 0; i < scene.Submeshes.Count; i++)
+        {
+            var sub = scene.Submeshes[i];
+            var tris = sub.Mesh.IndexCount / 3;
+            switch (sub.AlphaMode)
+            {
+                case GltfAlphaMode.Opaque: opaqueN++; opaqueTris += tris; break;
+                case GltfAlphaMode.Mask:   maskN++;   maskTris   += tris; break;
+                case GltfAlphaMode.Blend:  blendN++;  blendTris  += tris; break;
+            }
+            if (sub.DoubleSided) doubleSidedN++;
+        }
+        using (debug.Scope(label))
+        {
+            debug.Stats.Gauge("count",        scene.Submeshes.Count);
+            debug.Stats.Gauge("opaque",       opaqueN);
+            debug.Stats.Gauge("mask",         maskN);
+            debug.Stats.Gauge("blend",        blendN);
+            debug.Stats.Gauge("double-sided", doubleSidedN);
+            debug.Stats.Gauge("tris-opaque",  opaqueTris);
+            debug.Stats.Gauge("tris-mask",    maskTris);
+            debug.Stats.Gauge("tris-blend",   blendTris);
+            debug.Stats.Gauge("tris-total",   opaqueTris + maskTris + blendTris);
+        }
+    }
+
+    private void EmitSceneCullDebug(DebugContext dbg, GltfSceneInstance scene, Frustum frustum)
+    {
+        for (var i = 0; i < scene.Submeshes.Count; i++)
+        {
+            var b = scene.Submeshes[i].WorldBounds;
+            var visible = frustum.Intersects(b, cullMargin);
+            var bucket = visible ? "visible" : "culled";
+            var color = visible ? CullVisibleColor : CullCulledColor;
+            // Path resolves to "culling/visible/<scene-name>/submesh-N"
+            // (or .../culled/...). Layers tab groups the two buckets
+            // for "show me only culled" workflows.
+            using (dbg.Scope(bucket))
+            using (dbg.Scope(scene.DebugName))
+            {
+                dbg.Draw.Aabb($"submesh-{i}", b.Min, b.Max, color);
+            }
         }
     }
 
@@ -1231,18 +1578,86 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
 
         using (debug.Scope("Frame"))
         {
-            debug.Values.Value("FPS", $"{fpsSmoothed:0}");
+            // Position kept as a Value (vector readout doesn't sparkline
+            // meaningfully). Counts moved to Stats so they show up in the
+            // Stats tab with sparklines for at-a-glance trend.
             debug.Values.Value("Position", camera.Transform.Position);
-            debug.Values.Value("Submeshes (main)", mainScene?.Submeshes.Count ?? 0);
-            debug.Values.Value("Submeshes (curtains)", curtainsScene?.Submeshes.Count ?? 0);
-            debug.Values.Value("Submeshes (ivy)", ivyScene?.Submeshes.Count ?? 0);
-            debug.Values.Value("Submeshes (trees)", treesScene?.Submeshes.Count ?? 0);
-            int totalSubs = (mainScene?.Submeshes.Count ?? 0)
-                + (curtainsScene?.Submeshes.Count ?? 0)
-                + (ivyScene?.Submeshes.Count ?? 0)
-                + (treesScene?.Submeshes.Count ?? 0);
-            debug.Values.Value("Drawn opaque", $"{lastOpaqueDrawn} / {totalSubs}");
-            debug.Values.Value("Drawn cascade", $"{lastCascadeDrawn} / {totalSubs * CascadeCount}");
+        }
+
+        using (debug.Scope("Perf"))
+        {
+            // Toggle to bypass vsync. When the renderer is at-budget
+            // (~17ms on a 60Hz display) the vsync wait rounds up to
+            // 33ms / 30fps; flipping this off shows the true frame
+            // cost in the status-bar `ms` readout, which is what you
+            // want when profiling.
+            var nextVsync = debug.Controls.Toggle("VSync", vsyncEnabled);
+            if (nextVsync != vsyncEnabled)
+            {
+                vsyncEnabled = nextVsync;
+                (Host as IRenderHost)?.SetVSync(vsyncEnabled);
+            }
+
+            // Toggle the GPU timing query system itself. On macOS GL,
+            // each glQueryCounter insertion can force a partial sync
+            // with Metal — meaning the queries we use to *measure* GPU
+            // work can be the very thing slowing the GPU down. If
+            // disabling this lifts FPS noticeably, the timer system
+            // is half the problem and we need to switch to deferred
+            // sampling or drop it on this platform.
+            if (GraphicsDevice is Blix.Graphics.OpenGL.OpenGLGraphicsDevice gl)
+            {
+                gl.GpuTimingEnabled = debug.Controls.Toggle("GPU timing", gl.GpuTimingEnabled);
+            }
+
+            // GPU occlusion culling for the opaque pass. Uses 1-frame-
+            // stale visibility from GL_ANY_SAMPLES_PASSED queries on
+            // depth-tested AABB proxies. Off by default — flip on to
+            // measure cull benefit; check submeshes/occlusion-culled
+            // in the Stats tab to see how many draws are being skipped.
+            if (occlusionCuller is not null)
+            {
+                useOcclusionCull = debug.Controls.Toggle("Occlusion cull (opaque)", useOcclusionCull);
+            }
+        }
+
+        using (debug.Scope("Packs"))
+        {
+            // Per-pack render toggles. AllScenes() respects these, so
+            // toggling off a pack removes it from every render path
+            // (opaque + 3 cascades + culling viz) in one click.
+            // Critical for isolating high-cost packs — e.g. trees are
+            // alpha-tested foliage and tend to dominate fragment cost.
+            renderMainPack     = debug.Controls.Toggle("Main",     renderMainPack);
+            renderCurtainsPack = debug.Controls.Toggle("Curtains", renderCurtainsPack);
+            renderIvyPack      = debug.Controls.Toggle("Ivy",      renderIvyPack);
+            renderTreesPack    = debug.Controls.Toggle("Trees",    renderTreesPack);
+        }
+
+        int totalSubs = (mainScene?.Submeshes.Count ?? 0)
+            + (curtainsScene?.Submeshes.Count ?? 0)
+            + (ivyScene?.Submeshes.Count ?? 0)
+            + (treesScene?.Submeshes.Count ?? 0);
+        using (debug.Scope("submeshes"))
+        {
+            debug.Stats.Gauge("total", totalSubs);
+            debug.Stats.Gauge("opaque-drawn", lastOpaqueDrawn);
+            debug.Stats.Gauge("opaque-culled", totalSubs - lastOpaqueDrawn);
+            debug.Stats.Gauge("cascade-drawn", lastCascadeDrawn);
+            debug.Stats.Gauge("cascade-culled", totalSubs * CascadeCount - lastCascadeDrawn);
+            // How many opaque submeshes were skipped this frame because
+            // last-frame's occlusion query reported them blocked. Zero
+            // when useOcclusionCull is off; rises in cluttered interior
+            // views where walls hide other walls.
+            debug.Stats.Gauge("occlusion-culled", occlusionCuller?.OcclusionCulledThisFrame ?? 0);
+
+            // Per-pack + per-alpha-mode breakdown. Captures both "how
+            // much geometry does this pack carry" (counts + tris) and
+            // "how much of that is alpha-tested foliage" (the high-
+            // overdraw, high-shadow-cost path). Reading per-frame
+            // because trees might be loading async — values flicker
+            // into existence as packs land.
+            EmitPackStats(debug);
         }
 
         // ResourceUploader and LightingDebugView are registered with the
@@ -1355,7 +1770,25 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             cascadeSplits[1] = debug.Controls.Float("Split 1", cascadeSplits[1], cascadeSplits[0] + 0.1f, 50.0f);
             cascadeSplits[2] = debug.Controls.Float("Split 2", cascadeSplits[2], cascadeSplits[1] + 0.1f, 150.0f);
             cascadeSplits[3] = debug.Controls.Float("Split 3 (max)", cascadeSplits[3], cascadeSplits[2] + 0.1f, 500.0f);
-            debug.Values.Value("Drawn opaque", $"{lastOpaqueDrawn} / {(mainScene?.Submeshes.Count ?? 0) + (curtainsScene?.Submeshes.Count ?? 0) + (ivyScene?.Submeshes.Count ?? 0) + (treesScene?.Submeshes.Count ?? 0)}");
+            // Per-cascade render-pass toggle. Off = skip the cascade's
+            // shadow pass entirely (stale shadows for that range). Use
+            // to isolate per-cascade cost from the status-bar `ms` delta.
+            cascadeRenderEnabled[0] = debug.Controls.Toggle("Render cascade 0 (near)", cascadeRenderEnabled[0]);
+            cascadeRenderEnabled[1] = debug.Controls.Toggle("Render cascade 1 (mid)",  cascadeRenderEnabled[1]);
+            cascadeRenderEnabled[2] = debug.Controls.Toggle("Render cascade 2 (far)",  cascadeRenderEnabled[2]);
+
+            // Caster-volume cull (the actual fix for "cascade cull only
+            // saves 4%"). When on, the cascade cull frustum is a tight
+            // light-space AABB instead of the render VP's radius-sphere
+            // ortho. Strictly tighter — toggling off reproduces the
+            // previous behaviour for an A/B in submeshes/cascade-drawn.
+            useCasterVolumeCull = debug.Controls.Toggle("Caster-volume cull", useCasterVolumeCull);
+            // World-space extent to extend the cull volume toward the
+            // sun past the highest receiver. Too small → tall objects
+            // above the visible region stop casting shadows in. Too
+            // large → less cull benefit. Sponza atrium tops out ~15m
+            // above the floor; 30m is comfortable headroom.
+            shadowCasterExtent = debug.Controls.Float("Caster extent (m)", shadowCasterExtent, 1.0f, 100.0f);
         }
     }
 }

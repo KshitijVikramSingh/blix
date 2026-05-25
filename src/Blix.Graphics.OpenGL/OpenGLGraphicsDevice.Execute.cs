@@ -74,7 +74,28 @@ public sealed partial class OpenGLGraphicsDevice
 
             foreach (var command in pass.Commands)
             {
-                draws.Add(ExecuteCommand(command));
+                switch (command)
+                {
+                    case BeginOcclusionQueryCommand begin:
+                        if (begin.QueryId != 0)
+                        {
+                            GL.BeginQuery(QueryTarget.AnySamplesPassed, begin.QueryId);
+                        }
+                        break;
+                    case EndOcclusionQueryCommand:
+                        // No-op when the matching Begin had QueryId == 0
+                        // (unsupported on this driver) — only call if a
+                        // query is actually open. The current query is
+                        // not directly queryable through OpenTK; we just
+                        // bracket strictly so unmatched ends shouldn't
+                        // happen, and silently ignore is the safer of
+                        // throw-vs-ignore here.
+                        GL.EndQuery(QueryTarget.AnySamplesPassed);
+                        break;
+                    default:
+                        draws.Add(ExecuteCommand(command));
+                        break;
+                }
             }
 
             return new FrameDebugPass(

@@ -112,7 +112,8 @@ public sealed class PbrSceneRenderer
         GltfSceneInstance scene,
         IReadOnlyList<ShaderUniform> sharedUniforms,
         Frustum? cullFrustum = null,
-        float cullMargin = 0.0f)
+        float cullMargin = 0.0f,
+        IOccluder? occluder = null)
     {
         ArgumentNullException.ThrowIfNull(pass);
         ArgumentNullException.ThrowIfNull(scene);
@@ -120,12 +121,30 @@ public sealed class PbrSceneRenderer
 
         var uniformArray = sharedUniforms as ShaderUniform[] ?? sharedUniforms.ToArray();
         int drawn = 0;
-        foreach (var sub in scene.Submeshes)
+        for (var i = 0; i < scene.Submeshes.Count; i++)
         {
+            var sub = scene.Submeshes[i];
             if (cullFrustum is { } f && !f.Intersects(sub.WorldBounds, cullMargin)) continue;
-            pass.DrawMesh(sub.Mesh, sub.Material,
-                perDrawUniforms: uniformArray, perDrawTextures: null);
-            drawn++;
+
+            // Stable identity per submesh — matches the convention used
+            // by IDebugSelectable/IDebugInspectable so an occluder
+            // implementation can share path state across diagnostic
+            // surfaces if it wants.
+            var entityPath = $"{scene.DebugName}/submesh-{i}";
+
+            if (occluder is null || occluder.ShouldDraw(entityPath))
+            {
+                pass.DrawMesh(sub.Mesh, sub.Material,
+                    perDrawUniforms: uniformArray, perDrawTextures: null);
+                drawn++;
+            }
+            // Always issue the proxy query — the single source of
+            // truth for "is this submesh visible?" Used to alternate
+            // between "real-geometry-as-query" (when drawing) and
+            // "proxy" (when skipping), but the two tests disagree for
+            // loose AABBs (sparse foliage) and produced a visibility
+            // strobe. Consistent proxy-only test = stable state.
+            occluder?.RecordQuery(pass, entityPath, sub.WorldBounds);
         }
         return drawn;
     }

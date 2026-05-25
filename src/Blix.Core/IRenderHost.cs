@@ -20,4 +20,9 @@ public interface IRenderHost
     // screen-point-to-ray picking) must use the same coordinate system on both
     // sides — pass `LogicalSize` here, not the framebuffer dimensions.
     (int Width, int Height) LogicalSize { get; }
+
+    // Toggle vertical sync. Off lets the GPU run uncapped (useful for
+    // profiling — the displayed FPS reflects real frame cost, not what
+    // the refresh rate clamps it to). On is the user-facing default.
+    void SetVSync(bool enabled);
 }
