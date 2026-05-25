@@ -232,14 +232,31 @@ flag at M43 (column-vector layout); the new `CreatePerspectiveVulkan`
 puts it at M34 (row-vector layout). Demos that use the wrong helper on
 the wrong backend silently produce garbage geometry (this is exactly
 the "clipped pyramid" bug from the cube push).
-**Direction:** decided as part of Vector A audit — the engine adopts
-**.NET row-vector form** as its single convention. The GL backend's
-upload path will switch to `glUniformMatrix4(..., transpose: true, ...)`
-with raw .NET bytes (functionally equivalent to today's
-WriteColumnMajor, just simpler). All existing GL `GraphicsMatrices`
-helpers need rewriting to row-vector form during the reshape. This
-is deferred to Vector A because matrix uniforms go through the same
-binding-layer rewrite as everything else.
+
+**Direction:** the engine adopts **.NET row-vector form** as its single
+convention. The GL backend's upload path switches to
+`glUniformMatrix4(..., transpose: true, ...)` with raw .NET bytes
+(functionally equivalent to today's `WriteColumnMajor`, just simpler).
+All existing `GraphicsMatrices` helpers (`CreatePerspective`,
+`CreateLookAt`, `CreateModel`, `CreateNormalMatrix`, etc.) get rewritten
+to produce row-vector form. The Vector-D-shipped
+`CreatePerspectiveVulkan` folds back into the unified `CreatePerspective`
+(no backend-specific variants once the engine speaks one convention).
+
+**Migration plan:** F-016 ships as its own commit *before* any Vector A
+binding work, with explicit acceptance criteria:
+- GL cube (existing demo) still renders correctly post-migration
+- Vulkan cube still renders correctly post-migration
+- Numerical tests on `CreatePerspective`, `CreateLookAt`, `CreateNormalMatrix`
+- `Vector4.Transform` test against the new convention
+- Matrix-upload golden-byte-layout test (memory contents match expected
+  std140 bytes after upload)
+- **Backend-symmetry test:** identical `Matrix4x4` input → identical
+  fragment output on both backends (off-screen render, pixel compare)
+The migration touches enough mental assumptions that smuggling it into
+Vector A would conflate two redesigns. Doing it dedicated makes every
+subsequent Vector A failure isolatable to binding-layer code, not
+matrix-convention code.
 
 ### F-013 — Friction is concentrated in `Material` / uniform plumbing, not in handles
 
