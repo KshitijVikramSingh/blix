@@ -1414,23 +1414,49 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
     private static void EmitOnePackStats(DebugContext debug, string label, GltfSceneInstance? scene)
     {
         if (scene is null) return;
+        // Stats count LOGICAL primitives (scene.Primitives) — the
+        // alpha-mode/tris breakdown reflects what's actually in the
+        // glTF, not how many physical batches the renderer ended up
+        // with. Separate "batches" stat shows the merge effect.
+        //
+        // Precompute primitives-per-batch once (O(N)) so the tri-share
+        // calculation below can divide a batch's triangles evenly
+        // across its members without a quadratic inner loop.
+        var primitivesPerBatch = new int[scene.Submeshes.Count];
+        for (var i = 0; i < scene.Primitives.Count; i++)
+        {
+            primitivesPerBatch[scene.Primitives[i].BatchIndex]++;
+        }
+
         int opaqueN = 0, maskN = 0, blendN = 0, doubleSidedN = 0;
         long opaqueTris = 0, maskTris = 0, blendTris = 0;
-        for (var i = 0; i < scene.Submeshes.Count; i++)
+        for (var i = 0; i < scene.Primitives.Count; i++)
         {
-            var sub = scene.Submeshes[i];
-            var tris = sub.Mesh.IndexCount / 3;
-            switch (sub.AlphaMode)
+            var p = scene.Primitives[i];
+            // The merged batch's IndexCount is the sum across primitives;
+            // per-primitive tri count needs the source mesh, which the
+            // PrimitiveSource record doesn't carry. As a proxy, divide
+            // the batch's tris evenly across its members — close enough
+            // for the at-a-glance gauge.
+            var batch = scene.Submeshes[p.BatchIndex];
+            var share = Math.Max(primitivesPerBatch[p.BatchIndex], 1);
+            var tris = batch.Mesh.IndexCount / 3 / share;
+            switch (p.AlphaMode)
             {
                 case GltfAlphaMode.Opaque: opaqueN++; opaqueTris += tris; break;
                 case GltfAlphaMode.Mask:   maskN++;   maskTris   += tris; break;
                 case GltfAlphaMode.Blend:  blendN++;  blendTris  += tris; break;
             }
-            if (sub.DoubleSided) doubleSidedN++;
+            if (p.DoubleSided) doubleSidedN++;
         }
         using (debug.Scope(label))
         {
-            debug.Stats.Gauge("count",        scene.Submeshes.Count);
+            // "count" is the logical primitive count (what the artist
+            // authored). "batches" is the physical draw count after
+            // material-group merging — the ratio shows how effective
+            // the batcher was on this pack.
+            debug.Stats.Gauge("count",        scene.Primitives.Count);
+            debug.Stats.Gauge("batches",      scene.Submeshes.Count);
             debug.Stats.Gauge("opaque",       opaqueN);
             debug.Stats.Gauge("mask",         maskN);
             debug.Stats.Gauge("blend",        blendN);
@@ -1444,15 +1470,19 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
 
     private void EmitSceneCullDebug(DebugContext dbg, GltfSceneInstance scene, Frustum frustum)
     {
-        for (var i = 0; i < scene.Submeshes.Count; i++)
+        // Per-PRIMITIVE viz (tight bounds), not per-batch — otherwise
+        // a single material group's merged AABB would paint one giant
+        // box covering many submeshes, defeating the point of the
+        // visualization.
+        for (var i = 0; i < scene.Primitives.Count; i++)
         {
-            var b = scene.Submeshes[i].WorldBounds;
+            var b = scene.Primitives[i].Bounds;
             var visible = frustum.Intersects(b, cullMargin);
             var bucket = visible ? "visible" : "culled";
             var color = visible ? CullVisibleColor : CullCulledColor;
             // Path resolves to "culling/visible/<scene-name>/submesh-N"
-            // (or .../culled/...). Layers tab groups the two buckets
-            // for "show me only culled" workflows.
+            // (or .../culled/...). N is the primitive index (matches
+            // the selection/inspection entity paths).
             using (dbg.Scope(bucket))
             using (dbg.Scope(scene.DebugName))
             {
@@ -1634,18 +1664,31 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
             renderTreesPack    = debug.Controls.Toggle("Trees",    renderTreesPack);
         }
 
-        int totalSubs = (mainScene?.Submeshes.Count ?? 0)
+        // Two counts now: logical primitives (what the glTF authored)
+        // and physical batches (what PbrSceneRenderer actually iterates
+        // over). The render-side cull counters work on batches —
+        // lastOpaqueDrawn / lastCascadeDrawn come from
+        // pbrRenderer.DrawScene returns, which is per-batch — so the
+        // cull math here is batches-based too.
+        int totalPrimitives =
+              (mainScene?.Primitives.Count ?? 0)
+            + (curtainsScene?.Primitives.Count ?? 0)
+            + (ivyScene?.Primitives.Count ?? 0)
+            + (treesScene?.Primitives.Count ?? 0);
+        int totalBatches =
+              (mainScene?.Submeshes.Count ?? 0)
             + (curtainsScene?.Submeshes.Count ?? 0)
             + (ivyScene?.Submeshes.Count ?? 0)
             + (treesScene?.Submeshes.Count ?? 0);
         using (debug.Scope("submeshes"))
         {
-            debug.Stats.Gauge("total", totalSubs);
-            debug.Stats.Gauge("opaque-drawn", lastOpaqueDrawn);
-            debug.Stats.Gauge("opaque-culled", totalSubs - lastOpaqueDrawn);
-            debug.Stats.Gauge("cascade-drawn", lastCascadeDrawn);
-            debug.Stats.Gauge("cascade-culled", totalSubs * CascadeCount - lastCascadeDrawn);
-            // How many opaque submeshes were skipped this frame because
+            debug.Stats.Gauge("primitives-total", totalPrimitives);
+            debug.Stats.Gauge("batches-total",    totalBatches);
+            debug.Stats.Gauge("opaque-drawn",     lastOpaqueDrawn);
+            debug.Stats.Gauge("opaque-culled",    totalBatches - lastOpaqueDrawn);
+            debug.Stats.Gauge("cascade-drawn",    lastCascadeDrawn);
+            debug.Stats.Gauge("cascade-culled",   totalBatches * CascadeCount - lastCascadeDrawn);
+            // How many opaque batches were skipped this frame because
             // last-frame's occlusion query reported them blocked. Zero
             // when useOcclusionCull is off; rises in cluttered interior
             // views where walls hide other walls.

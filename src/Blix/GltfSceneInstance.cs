@@ -38,7 +38,19 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
     // contrast against typical lit albedo without dominating.
     private static readonly GraphicsColor SubmeshAabbColor = new(0.30f, 0.85f, 0.95f, 1.0f);
 
+    // Physical render units — what PbrSceneRenderer iterates and draws.
+    // When batching is on, multiple glTF primitives can share one
+    // SubmeshInstance via concatenated VBO/IBO/bounds.
     public IReadOnlyList<SubmeshInstance> Submeshes { get; }
+
+    // Logical units — one per glTF primitive, regardless of batching.
+    // What diagnostics enumerate: picking selects ONE primitive, the
+    // selection viz shows its TIGHT bounds, IDebugInspectable surfaces
+    // the primitive's own name/material/alpha state. The renderer
+    // doesn't touch these; cross-referencing the batch that actually
+    // draws this primitive is via PrimitiveSource.BatchIndex.
+    public IReadOnlyList<PrimitiveSource> Primitives { get; }
+
     public Bounds3 Bounds { get; }
     public MaterialSet Materials { get; }
 
@@ -48,9 +60,12 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
     // sub-toggles ("scene/sponza-main", "scene/curtains").
     public string DebugName { get; }
 
-    private GltfSceneInstance(SubmeshInstance[] submeshes, Bounds3 bounds, MaterialSet materials, string debugName)
+    private GltfSceneInstance(
+        SubmeshInstance[] submeshes, PrimitiveSource[] primitives,
+        Bounds3 bounds, MaterialSet materials, string debugName)
     {
         Submeshes = submeshes;
+        Primitives = primitives;
         Bounds = bounds;
         Materials = materials;
         DebugName = debugName;
@@ -64,10 +79,16 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
     // scope manipulation here.
     public void EmitGeometry(DebugContext debug)
     {
-        // Skip the AABB for whichever submesh (if any) is currently
+        // Emit one AABB per LOGICAL primitive (not per render batch).
+        // After batching, a single batch can contain dozens of
+        // primitives; emitting per-batch would show the user one giant
+        // box covering a whole material group. Per-primitive emission
+        // matches what the picker sees, what the user clicked on, and
+        // what they're trying to debug.
+        //
+        // Skip the AABB for whichever primitive (if any) is currently
         // selected — the selection sweep draws its own bright outline
-        // there and we'd otherwise paint a faint cyan box on top of /
-        // overlapping the yellow selection box.
+        // there and we'd otherwise paint a faint cyan box on top.
         var selected = debug.SelectedPath;
         var selectedPrefix = DebugName + "/submesh-";
         var selectedIndex = -1;
@@ -76,36 +97,36 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
             int.TryParse(selected.AsSpan(selectedPrefix.Length), out selectedIndex);
         }
 
-        for (var i = 0; i < Submeshes.Count; i++)
+        for (var i = 0; i < Primitives.Count; i++)
         {
             if (i == selectedIndex)
             {
                 continue;
             }
-            var sub = Submeshes[i];
-            debug.Draw.Aabb($"submesh-{i}/bounds", sub.WorldBounds.Min, sub.WorldBounds.Max, SubmeshAabbColor);
+            var p = Primitives[i];
+            debug.Draw.Aabb($"submesh-{i}/bounds", p.Bounds.Min, p.Bounds.Max, SubmeshAabbColor);
         }
     }
 
-    // IDebugSelectable: appends one DebugSelectable per submesh with a
-    // path that mirrors the EmitGeometry paths ("scene/<name>/submesh-N")
-    // so selection-vs-geometry attribution stays unified.
+    // IDebugSelectable: appends one DebugSelectable per LOGICAL primitive
+    // (not per batch). Picking a chair selects that chair, not "every
+    // submesh sharing the chair material" — which is what happened
+    // pre-split when this enumerated Submeshes (batches) instead.
     public void CollectSelectables(List<DebugSelectable> destination)
     {
-        for (var i = 0; i < Submeshes.Count; i++)
+        for (var i = 0; i < Primitives.Count; i++)
         {
-            var sub = Submeshes[i];
+            var p = Primitives[i];
             destination.Add(new DebugSelectable(
                 EntityPath: $"{DebugName}/submesh-{i}",
-                Bounds: sub.WorldBounds));
+                Bounds: p.Bounds));
         }
     }
 
     // IDebugInspectable: emit material + alpha + double-sided info when
-    // the selected path is one of our submeshes. We prefix-check and
-    // then index into Submeshes — keeps O(1) lookup for the inspect path
-    // most commonly hit (the just-picked submesh) without scanning all
-    // submeshes again.
+    // the selected path is one of our primitives. Looks up by primitive
+    // index in O(1); also surfaces the batch index so the user can see
+    // which physical batch actually carries this primitive's geometry.
     public void Inspect(string entityPath, DebugContext debug)
     {
         var prefix = DebugName + "/submesh-";
@@ -114,19 +135,20 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
             return;
         }
         var indexText = entityPath.AsSpan(prefix.Length);
-        if (!int.TryParse(indexText, out var index) || (uint)index >= (uint)Submeshes.Count)
+        if (!int.TryParse(indexText, out var index) || (uint)index >= (uint)Primitives.Count)
         {
             return;
         }
-        var sub = Submeshes[index];
+        var p = Primitives[index];
         debug.Values.Value("scene", DebugName);
-        debug.Values.Value("submesh-index", index);
-        debug.Values.Value("name", sub.Name);
-        debug.Values.Value("material", sub.Material.Name);
-        debug.Values.Value("alpha-mode", sub.AlphaMode);
-        debug.Values.Value("double-sided", sub.DoubleSided);
-        debug.Values.Value("bounds-min", sub.WorldBounds.Min);
-        debug.Values.Value("bounds-max", sub.WorldBounds.Max);
+        debug.Values.Value("primitive-index", index);
+        debug.Values.Value("batch-index", p.BatchIndex);
+        debug.Values.Value("name", p.Name);
+        debug.Values.Value("material", p.Material.Name);
+        debug.Values.Value("alpha-mode", p.AlphaMode);
+        debug.Values.Value("double-sided", p.DoubleSided);
+        debug.Values.Value("bounds-min", p.Bounds.Min);
+        debug.Values.Value("bounds-max", p.Bounds.Max);
     }
 
     public static GltfSceneInstance Build(IGraphicsDevice device, GltfModel model, GltfSceneOptions options)
@@ -223,13 +245,22 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
             worldMax = Vector3.Max(worldMax, prim.Mesh.Bounds.Max);
         }
 
-        // Phase 2: turn ResolvedPrimitives into SubmeshInstances —
-        // optionally batching by (material, layout). One SubmeshInstance
-        // per merge group; the merged Mesh holds the concatenated VBO +
-        // IBO + union bounds.
-        var submeshes = options.BatchMergeByMaterial
-            ? BuildBatchedSubmeshes(device, resolved, options.Prefix)
-            : BuildUnbatchedSubmeshes(device, resolved, options.Prefix);
+        // Phase 2: turn ResolvedPrimitives into SubmeshInstances (the
+        // render batches) AND PrimitiveSources (the logical units
+        // diagnostics enumerate). Batched mode merges N primitives
+        // into 1 SubmeshInstance but still emits N PrimitiveSources
+        // — one per original glTF primitive — each pointing at the
+        // batch that draws it via BatchIndex.
+        SubmeshInstance[] submeshes;
+        PrimitiveSource[] primitives;
+        if (options.BatchMergeByMaterial)
+        {
+            (submeshes, primitives) = BuildBatchedSubmeshes(device, resolved, options.Prefix);
+        }
+        else
+        {
+            (submeshes, primitives) = BuildUnbatchedSubmeshes(device, resolved, options.Prefix);
+        }
 
         var bounds = model.Primitives.Length == 0
             ? Bounds3.Empty
@@ -263,7 +294,7 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
             Console.WriteLine($"  By alphaMode: {string.Join(", ", byMode)}");
         }
 
-        return new GltfSceneInstance(submeshes, bounds, materialSet, debugName: $"scene/{options.Prefix}");
+        return new GltfSceneInstance(submeshes, primitives, bounds, materialSet, debugName: $"scene/{options.Prefix}");
     }
 
     private static string Trunc(string s, int n) => s.Length <= n ? s : s.Substring(0, n - 1) + "~";
@@ -309,10 +340,16 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
     // primitive" layout. Useful as a fallback when investigating cull
     // fidelity or other batch-related issues (flip
     // GltfSceneOptions.BatchMergeByMaterial off to enable).
-    private static SubmeshInstance[] BuildUnbatchedSubmeshes(
+    //
+    // Primitives and Submeshes are 1:1 here — each PrimitiveSource
+    // points at its own SubmeshInstance via BatchIndex == its array
+    // index. Inspecting a primitive shows the same numbers as
+    // inspecting its "batch".
+    private static (SubmeshInstance[], PrimitiveSource[]) BuildUnbatchedSubmeshes(
         IGraphicsDevice device, ResolvedPrimitive[] resolved, string prefix)
     {
         var submeshes = new SubmeshInstance[resolved.Length];
+        var primitives = new PrimitiveSource[resolved.Length];
         for (var i = 0; i < resolved.Length; i++)
         {
             var rp = resolved[i];
@@ -334,8 +371,16 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
                 WorldBounds: rp.Primitive.Mesh.Bounds,
                 AlphaMode: rp.AlphaMode,
                 DoubleSided: rp.DoubleSided);
+            primitives[i] = new PrimitiveSource(
+                Name: rp.Primitive.Mesh.Name,
+                Bounds: rp.Primitive.Mesh.Bounds,
+                Material: rp.Material,
+                Source: rp.Source,
+                AlphaMode: rp.AlphaMode,
+                DoubleSided: rp.DoubleSided,
+                BatchIndex: i);
         }
-        return submeshes;
+        return (submeshes, primitives);
     }
 
     // Batched path — primitives sharing (runtime Material, vertex
@@ -354,7 +399,7 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
     // each (material, layout) key, so material-set diagnostics still
     // see a stable order. Within a group, primitives stay in source
     // order — preserves index-buffer locality for the GPU.
-    private static SubmeshInstance[] BuildBatchedSubmeshes(
+    private static (SubmeshInstance[], PrimitiveSource[]) BuildBatchedSubmeshes(
         IGraphicsDevice device, ResolvedPrimitive[] resolved, string prefix)
     {
         // Group key uses Material reference equality (the runtime
@@ -377,11 +422,28 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
         }
 
         var submeshes = new SubmeshInstance[groups.Count];
+        // PrimitiveSources are keyed on original glTF order so the
+        // entity path ("submesh-N") stays stable across batching modes.
+        // Each primitive records the batch (group) it landed in via
+        // BatchIndex so an inspector can cross-reference.
+        var primitives = new PrimitiveSource[resolved.Length];
         for (var g = 0; g < groups.Count; g++)
         {
             submeshes[g] = BuildOneBatch(device, resolved, groups[g], prefix, g);
+            foreach (var memberIdx in groups[g])
+            {
+                var rp = resolved[memberIdx];
+                primitives[memberIdx] = new PrimitiveSource(
+                    Name: rp.Primitive.Mesh.Name,
+                    Bounds: rp.Primitive.Mesh.Bounds,
+                    Material: rp.Material,
+                    Source: rp.Source,
+                    AlphaMode: rp.AlphaMode,
+                    DoubleSided: rp.DoubleSided,
+                    BatchIndex: g);
+            }
         }
-        return submeshes;
+        return (submeshes, primitives);
     }
 
     private static SubmeshInstance BuildOneBatch(
@@ -643,6 +705,11 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
 
 // One uploaded primitive paired with the runtime Material it draws with and
 // the GltfMaterial it was built from (kept for inspection + overrides).
+//
+// When BatchMergeByMaterial is on, ONE SubmeshInstance can carry the
+// merged geometry of many source glTF primitives — Name then becomes
+// "merged.<material>.<count>-prim", WorldBounds the union, and the
+// per-primitive identities live in PrimitiveSource[] instead.
 public sealed record SubmeshInstance(
     string Name,
     Mesh Mesh,
@@ -651,6 +718,27 @@ public sealed record SubmeshInstance(
     Bounds3 WorldBounds,
     GltfAlphaMode AlphaMode,
     bool DoubleSided);
+
+// The LOGICAL unit of a glTF scene — one per source primitive,
+// regardless of how the renderer batches them. Diagnostics enumerate
+// these (selection, inspection, debug-draw bounds) so picking a chair
+// selects that chair, not "all chairs sharing this material". The
+// renderer doesn't see these; cross-reference the physical batch that
+// actually draws this primitive via BatchIndex into
+// GltfSceneInstance.Submeshes.
+//
+// Bounds is the primitive's TIGHT world-space AABB (Sponza primitives
+// have their node transform baked in, so primitive bounds = world
+// bounds directly). Material is a reference to the same runtime
+// Material the containing batch uses.
+public sealed record PrimitiveSource(
+    string Name,
+    Bounds3 Bounds,
+    Material Material,
+    GltfMaterial? Source,
+    GltfAlphaMode AlphaMode,
+    bool DoubleSided,
+    int BatchIndex);
 
 // Flat set of unique runtime materials a scene built. Demos use `Find` to
 // look up by name when applying targeted overrides (Sponza's marble floor,
