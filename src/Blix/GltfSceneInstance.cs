@@ -155,12 +155,17 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
         var pendingTextures = new Dictionary<GltfTexture, List<Action<TextureHandle>>>(
             ReferenceEqualityComparer.Instance);
         var materialCache = new Dictionary<GltfMaterial, Material>(ReferenceEqualityComparer.Instance);
-        var submeshes = new SubmeshInstance[model.Primitives.Length];
 
         var worldMin = new Vector3(float.PositiveInfinity);
         var worldMax = new Vector3(float.NegativeInfinity);
         var fallbackPipelineWarnings = new HashSet<string>();
 
+        // Phase 1: resolve material + alpha state per glTF primitive.
+        // We don't create GL buffers yet — when BatchMergeByMaterial is
+        // on, we want to concatenate same-material primitives into one
+        // VBO/IBO per group. The original per-primitive path falls out
+        // when the merge phase below sees groups of size 1.
+        var resolved = new ResolvedPrimitive[model.Primitives.Length];
         for (var i = 0; i < model.Primitives.Length; i++)
         {
             var prim = model.Primitives[i];
@@ -178,28 +183,18 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
                 }
                 sourceMaterial = rewritten;
             }
-            var meshName = $"{options.Prefix}.mesh.{prim.Mesh.Name}";
-            var vb = device.CreateVertexBuffer(
-                new VertexBufferData(
-                    new VertexBufferDescription(prim.Mesh.Layout, prim.Mesh.VertexCount, GraphicsBufferUsage.Static),
-                    prim.Mesh.VertexBytes),
-                name: $"{meshName}.vb");
-            var ib = prim.Mesh.IndexFormat == IndexFormat.UInt32
-                ? device.CreateIndexBuffer(prim.Mesh.Indices32!, name: $"{meshName}.ib")
-                : device.CreateIndexBuffer(prim.Mesh.Indices, name: $"{meshName}.ib");
-            var mesh = new Mesh(meshName, vb, ib, prim.Mesh.IndexCount, prim.Mesh.Bounds);
 
             var alphaMode = sourceMaterial?.AlphaMode ?? GltfAlphaMode.Opaque;
             var doubleSided = sourceMaterial?.DoubleSided ?? false;
             var pipeline = SelectPipeline(options, alphaMode, doubleSided, fallbackPipelineWarnings);
 
-            Material? material;
+            Material material;
             if (sourceMaterial is { } gm)
             {
                 // Cache by ORIGINAL prim.Material reference so primitives that
                 // share a source (after override) share one runtime Material.
                 var cacheKey = prim.Material!;
-                if (!materialCache.TryGetValue(cacheKey, out material))
+                if (!materialCache.TryGetValue(cacheKey, out material!))
                 {
                     material = BuildMaterial(device, gm, pipeline, options, textureCache, pendingTextures);
                     options.OnMaterialBuilt?.Invoke(material, gm);
@@ -222,18 +217,19 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
                 options.OnMaterialBuilt?.Invoke(material, null);
             }
 
-            submeshes[i] = new SubmeshInstance(
-                Name: prim.Mesh.Name,
-                Mesh: mesh,
-                Material: material,
-                Source: sourceMaterial,
-                WorldBounds: prim.Mesh.Bounds,
-                AlphaMode: alphaMode,
-                DoubleSided: doubleSided);
+            resolved[i] = new ResolvedPrimitive(prim, material, sourceMaterial, alphaMode, doubleSided);
 
             worldMin = Vector3.Min(worldMin, prim.Mesh.Bounds.Min);
             worldMax = Vector3.Max(worldMax, prim.Mesh.Bounds.Max);
         }
+
+        // Phase 2: turn ResolvedPrimitives into SubmeshInstances —
+        // optionally batching by (material, layout). One SubmeshInstance
+        // per merge group; the merged Mesh holds the concatenated VBO +
+        // IBO + union bounds.
+        var submeshes = options.BatchMergeByMaterial
+            ? BuildBatchedSubmeshes(device, resolved, options.Prefix)
+            : BuildUnbatchedSubmeshes(device, resolved, options.Prefix);
 
         var bounds = model.Primitives.Length == 0
             ? Bounds3.Empty
@@ -297,6 +293,190 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
                 "falling back to Opaque. Visual artefacts likely on the affected primitives.");
         }
         return options.Opaque;
+    }
+
+    // Per-glTF-primitive resolved state from Build()'s Phase 1. The
+    // Phase 2 batcher reads these to decide grouping + concatenate
+    // vertex/index data.
+    private readonly record struct ResolvedPrimitive(
+        GltfPrimitive Primitive,
+        Material Material,
+        GltfMaterial? Source,
+        GltfAlphaMode AlphaMode,
+        bool DoubleSided);
+
+    // Unbatched path — preserves the pre-merge "one VBO/IBO per glTF
+    // primitive" layout. Useful as a fallback when investigating cull
+    // fidelity or other batch-related issues (flip
+    // GltfSceneOptions.BatchMergeByMaterial off to enable).
+    private static SubmeshInstance[] BuildUnbatchedSubmeshes(
+        IGraphicsDevice device, ResolvedPrimitive[] resolved, string prefix)
+    {
+        var submeshes = new SubmeshInstance[resolved.Length];
+        for (var i = 0; i < resolved.Length; i++)
+        {
+            var rp = resolved[i];
+            var meshName = $"{prefix}.mesh.{rp.Primitive.Mesh.Name}";
+            var vb = device.CreateVertexBuffer(
+                new VertexBufferData(
+                    new VertexBufferDescription(rp.Primitive.Mesh.Layout, rp.Primitive.Mesh.VertexCount, GraphicsBufferUsage.Static),
+                    rp.Primitive.Mesh.VertexBytes),
+                name: $"{meshName}.vb");
+            var ib = rp.Primitive.Mesh.IndexFormat == IndexFormat.UInt32
+                ? device.CreateIndexBuffer(rp.Primitive.Mesh.Indices32!, name: $"{meshName}.ib")
+                : device.CreateIndexBuffer(rp.Primitive.Mesh.Indices, name: $"{meshName}.ib");
+            var mesh = new Mesh(meshName, vb, ib, rp.Primitive.Mesh.IndexCount, rp.Primitive.Mesh.Bounds);
+            submeshes[i] = new SubmeshInstance(
+                Name: rp.Primitive.Mesh.Name,
+                Mesh: mesh,
+                Material: rp.Material,
+                Source: rp.Source,
+                WorldBounds: rp.Primitive.Mesh.Bounds,
+                AlphaMode: rp.AlphaMode,
+                DoubleSided: rp.DoubleSided);
+        }
+        return submeshes;
+    }
+
+    // Batched path — primitives sharing (runtime Material, vertex
+    // layout) are concatenated into one VBO/IBO/Mesh. The merged
+    // SubmeshInstance carries:
+    //   - VertexBytes = concatenation of every source primitive's bytes
+    //   - Indices32   = concatenation, rebased by each primitive's
+    //                   vertex offset within the merged buffer
+    //   - Bounds      = union of every source primitive's bounds
+    //
+    // Merged indices ALWAYS use UInt32 even when sources are UInt16 —
+    // a group's combined vertex count can easily exceed the ushort
+    // range (65,535) once you concatenate a dozen wall primitives.
+    //
+    // Ordering: groups are emitted in order of first-occurrence of
+    // each (material, layout) key, so material-set diagnostics still
+    // see a stable order. Within a group, primitives stay in source
+    // order — preserves index-buffer locality for the GPU.
+    private static SubmeshInstance[] BuildBatchedSubmeshes(
+        IGraphicsDevice device, ResolvedPrimitive[] resolved, string prefix)
+    {
+        // Group key uses Material reference equality (the runtime
+        // Material instance shared via materialCache) and vertex
+        // layout value equality (Stride + Attributes). Two primitives
+        // with the same runtime Material but different layouts can't
+        // merge — their VBOs are structurally different.
+        var groupIndices = new Dictionary<(Material, VertexLayout), int>(new GroupKeyComparer());
+        var groups = new List<List<int>>();
+        for (var i = 0; i < resolved.Length; i++)
+        {
+            var key = (resolved[i].Material, resolved[i].Primitive.Mesh.Layout);
+            if (!groupIndices.TryGetValue(key, out var gi))
+            {
+                gi = groups.Count;
+                groupIndices[key] = gi;
+                groups.Add(new List<int>());
+            }
+            groups[gi].Add(i);
+        }
+
+        var submeshes = new SubmeshInstance[groups.Count];
+        for (var g = 0; g < groups.Count; g++)
+        {
+            submeshes[g] = BuildOneBatch(device, resolved, groups[g], prefix, g);
+        }
+        return submeshes;
+    }
+
+    private static SubmeshInstance BuildOneBatch(
+        IGraphicsDevice device, ResolvedPrimitive[] resolved, List<int> memberIndices,
+        string prefix, int batchId)
+    {
+        var first = resolved[memberIndices[0]];
+        var layout = first.Primitive.Mesh.Layout;
+        var stride = layout.Stride;
+
+        // Total vertex + index counts up front so we allocate once.
+        int totalVerts = 0, totalIndices = 0;
+        for (var k = 0; k < memberIndices.Count; k++)
+        {
+            var m = resolved[memberIndices[k]];
+            totalVerts += m.Primitive.Mesh.VertexCount;
+            totalIndices += m.Primitive.Mesh.IndexCount;
+        }
+
+        // Concatenate vertex bytes. Each source primitive's bytes are
+        // a contiguous block at the right offset; no per-vertex
+        // rewriting needed because the layout is identical.
+        var vertexBytes = new byte[totalVerts * stride];
+        // Concatenate indices, rebased by the running vertex count so
+        // each source primitive's triangles still address its own
+        // vertices in the merged buffer.
+        var indices32 = new uint[totalIndices];
+        var minSum = new Vector3(float.PositiveInfinity);
+        var maxSum = new Vector3(float.NegativeInfinity);
+        int vByteOffset = 0;
+        int iWriteOffset = 0;
+        uint vBase = 0;
+        foreach (var memberIdx in memberIndices)
+        {
+            var m = resolved[memberIdx];
+            var mesh = m.Primitive.Mesh;
+
+            Buffer.BlockCopy(mesh.VertexBytes, 0, vertexBytes, vByteOffset, mesh.VertexBytes.Length);
+            vByteOffset += mesh.VertexBytes.Length;
+
+            if (mesh.IndexFormat == IndexFormat.UInt32)
+            {
+                var src = mesh.Indices32!;
+                for (var n = 0; n < src.Length; n++) indices32[iWriteOffset + n] = src[n] + vBase;
+                iWriteOffset += src.Length;
+            }
+            else
+            {
+                var src = mesh.Indices;
+                for (var n = 0; n < src.Length; n++) indices32[iWriteOffset + n] = (uint)src[n] + vBase;
+                iWriteOffset += src.Length;
+            }
+            vBase += (uint)mesh.VertexCount;
+
+            // Union bounds. Primitives in Sponza are world-space-baked,
+            // so primitive bounds == world bounds — union is just per-
+            // axis min/max.
+            minSum = Vector3.Min(minSum, mesh.Bounds.Min);
+            maxSum = Vector3.Max(maxSum, mesh.Bounds.Max);
+        }
+
+        var meshName = $"{prefix}.batch.{batchId}.{first.Material.Name}";
+        var vb = device.CreateVertexBuffer(
+            new VertexBufferData(
+                new VertexBufferDescription(layout, totalVerts, GraphicsBufferUsage.Static),
+                vertexBytes),
+            name: $"{meshName}.vb");
+        var ib = device.CreateIndexBuffer(indices32, name: $"{meshName}.ib");
+        var mergedBounds = new Bounds3(minSum, maxSum);
+        var mesh2 = new Mesh(meshName, vb, ib, totalIndices, mergedBounds);
+
+        return new SubmeshInstance(
+            Name: $"merged.{first.Material.Name}.{memberIndices.Count}-prim",
+            Mesh: mesh2,
+            Material: first.Material,
+            // All members of the group share the same runtime Material
+            // and therefore the same overridden GltfMaterial source —
+            // pick any. Convention: the first.
+            Source: first.Source,
+            WorldBounds: mergedBounds,
+            AlphaMode: first.AlphaMode,
+            DoubleSided: first.DoubleSided);
+    }
+
+    // Equality comparer for the (Material, VertexLayout) group key.
+    // Material is matched by reference (the cache returns the same
+    // instance for shared sources); VertexLayout is a record whose
+    // default equality compares Stride + Attributes structurally.
+    private sealed class GroupKeyComparer : IEqualityComparer<(Material, VertexLayout)>
+    {
+        public bool Equals((Material, VertexLayout) x, (Material, VertexLayout) y)
+            => ReferenceEquals(x.Item1, y.Item1) && x.Item2.Equals(y.Item2);
+
+        public int GetHashCode((Material, VertexLayout) obj)
+            => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj.Item1), obj.Item2);
     }
 
     private static Material BuildMaterial(
@@ -532,6 +712,22 @@ public sealed record GltfSceneOptions
     public ResourceUploader? Uploader { get; init; }
 
     public string Prefix { get; init; } = "gltf";
+
+    // When true (default), primitives sharing the same runtime Material
+    // + vertex layout are concatenated into a single merged Mesh at
+    // Build time — one VBO + IBO per material group instead of one per
+    // glTF primitive. On Sponza main (~200 primitives, ~30 unique
+    // materials) this cuts opaque-pass draws ~6-7x and cascade-pass
+    // draws ~6-7x too. The win is per-draw overhead × (3 cascade
+    // passes + opaque) — the dominant cost on macOS GL.
+    //
+    // Tradeoff: each merged Mesh has the UNION of its source primitives'
+    // bounds (potentially much larger), so per-mesh frustum culling
+    // rejects fewer of them. For Sponza-like scenes (content packed
+    // into one atrium), this is a net win because the per-draw saving
+    // outweighs the cull loss. Set false to fall back to the original
+    // per-primitive layout when investigating cull-fidelity issues.
+    public bool BatchMergeByMaterial { get; init; } = true;
 }
 
 // 1x1 default textures the lit pipeline falls back to when a material doesn't
