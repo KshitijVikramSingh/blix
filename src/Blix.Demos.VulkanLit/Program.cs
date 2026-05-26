@@ -50,6 +50,18 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private VertexBufferHandle groundVB;
     private IndexBufferHandle groundIB;
 
+    // PBR sphere test rig: 2 rows (metallic + dielectric) × SphereCount,
+    // sweeping roughness. One shared white material; per-draw metallic/roughness.
+    private const int SphereCount = 6;
+    private VertexBufferHandle sphereVB;
+    private IndexBufferHandle sphereIB;
+    private int sphereIndexCount;
+    private MaterialHandle sphereMaterial;
+    private TextureHandle whiteTexture;
+    private TextureHandle flatNormalTexture;   // (0,0,1) — no perturbation
+    private TextureHandle groundNormalTexture; // procedural bumps
+    private readonly Matrix4x4[] sphereModels = new Matrix4x4[2 * SphereCount];
+
     // Albedo textures + materials.
     private TextureHandle albedoTexture;
     private TextureHandle cesiumAlbedoTexture;
@@ -87,7 +99,6 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private Matrix4x4 cesiumMeshNodeTransform;
     private Matrix4x4 cesiumUserTransform;
     private byte[] cesiumPalettePayload = null!;
-    private readonly byte[] cesiumModelPushBytes = new byte[64];
     private double cesiumAnimTime;
     private VulkanGraphicsDevice vkDevice = null!;
 
@@ -116,8 +127,6 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private IndexBufferHandle fullscreenIB;
 
     // Per-frame state.
-    private readonly byte[] cubeModelPushBytes = new byte[64];
-    private readonly byte[] groundModelPushBytes = new byte[64];
     private int frameCount;
     private Matrix4x4 viewProj;
     private Matrix4x4 sunShadowVP;
@@ -177,6 +186,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private static readonly string[] ViewLabels = { "Final (HDR)", "Sun shadow map", "Spot shadow map", "Scene depth" };
     private int viewMode;          // index into View
     private bool animPaused;
+    private float exposure = 1.0f; // tonemap exposure multiplier (Up/Down keys)
     private GraphResourceHandle sceneDepthHandle;
 
     // Per-light isolation toggles (debug) — switch lights off independently
@@ -215,6 +225,35 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             new TextureDescription(256, 256, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
             checker,
             "albedo");
+
+        // PBR sphere rig: one UV sphere, two rows of materials driven by
+        // per-draw metallic/roughness. White albedo so the BRDF response is
+        // unambiguous (silver metal vs white dielectric).
+        var (sphereVerts, sphereIndices) = BuildSphere(radius: 0.42f, rings: 32, sectors: 48);
+        sphereVB = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(sphereVerts), "sphere.vb");
+        sphereIB = vk.CreateIndexBuffer(sphereIndices, name: "sphere.ib");
+        sphereIndexCount = sphereIndices.Length;
+        var white = new byte[4 * 4 * 4];
+        Array.Fill(white, (byte)255);
+        whiteTexture = vk.CreateTexture2D(
+            new TextureDescription(4, 4, TextureFormat.Rgba8Srgb, SamplerDescription.LinearClamp),
+            white, "white");
+
+        // Normal maps are LINEAR data (directions), not sRGB. Flat = (0,0,1)
+        // encoded as (128,128,255). Ground gets a procedural ripple pattern.
+        flatNormalTexture = vk.CreateTexture2D(
+            new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
+            new byte[] { 128, 128, 255, 255 }, "normal.flat");
+        groundNormalTexture = vk.CreateTexture2D(
+            new TextureDescription(256, 256, TextureFormat.Rgba8, SamplerDescription.LinearRepeat),
+            BuildRippleNormalMap(256, freq: 6f, strength: 1.4f), "normal.ground");
+        // Two rows of SphereCount, spread in x; metallic row higher.
+        for (var i = 0; i < SphereCount; i++)
+        {
+            var x = -3.0f + i * (6.0f / (SphereCount - 1));
+            sphereModels[i]               = Matrix4x4.CreateTranslation(x, 1.7f, -1.8f);
+            sphereModels[SphereCount + i] = Matrix4x4.CreateTranslation(x, 0.7f, -1.8f);
+        }
 
         // --- Skinned model: cesium_man.glb -------------------------------
         var assetPath = Path.Combine(AppContext.BaseDirectory, "Assets", "models", "cesium_man.glb");
@@ -263,7 +302,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         // Per-frame UBO grows with each light. vec4-packed light blocks
         // dodge the std140 vec3+float padding fragility. See lit.vert.
         var frameUbo = new UniformBlockLayout(
-            TotalSize: 432,
+            TotalSize: 448,
             Members: new[]
             {
                 new UniformBlockMember("uViewProjection",     0,   64),
@@ -283,6 +322,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 new UniformBlockMember("uPointPosFar",        384, 16),
                 new UniformBlockMember("uPointColorRange",    400, 16),
                 new UniformBlockMember("uLightEnable",        416, 16),
+                new UniformBlockMember("uCameraPos",          432, 16),
             });
         var tintUbo = new UniformBlockLayout(
             TotalSize: 16,
@@ -313,8 +353,9 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 new DescriptorSetSlot(2, 0, ShaderResourceType.UniformBuffer,
                     ShaderStages.Fragment, BlockLayout: tintUbo),
                 new DescriptorSetSlot(2, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                new DescriptorSetSlot(2, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
             },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 80) });
 
         // Skinned interfaces: add set 3 binding 0 = readonly SSBO bone palette.
         var boneSsboLayout = new UniformBlockLayout(
@@ -352,15 +393,21 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 new DescriptorSetSlot(2, 0, ShaderResourceType.UniformBuffer,
                     ShaderStages.Fragment, BlockLayout: tintUbo),
                 new DescriptorSetSlot(2, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                new DescriptorSetSlot(2, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 new DescriptorSetSlot(3, 0, ShaderResourceType.StorageBuffer,
                     ShaderStages.Vertex, BlockLayout: boneSsboLayout),
             },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 80) });
 
+        // Depth-viz present: just a sampler, no push.
         var presentInterface = new ShaderInterface(new[]
         {
             new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
         });
+        // Final present: sampler + exposure push constant (4 bytes, Fragment).
+        var presentTonemapInterface = new ShaderInterface(
+            Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment) },
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 4) });
 
         // --- Declare graph passes (shadow casters via both interfaces) --
         // sun + 2 spot depth passes; all host the static + skinned casters.
@@ -474,7 +521,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
 
         var presentVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv"));
         var presentFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv"));
-        presentShaderProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, presentInterface, "present");
+        presentShaderProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, presentTonemapInterface, "present");
         presentPipeline = vk.CreatePipeline(new PipelineDescription(
             presentShaderProgram,
             VertexPosition3NormalTexture.Layout,
@@ -499,11 +546,19 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         cubeMaterial = vk.CreateMaterial(litShaderProgram, name: "cube.material")
             .SetUniform(binding: 0, "uTint", new Vector4(1.0f, 1.0f, 1.0f, 1.0f))
             .SetTexture(binding: 1, albedoTexture)
+            .SetTexture(binding: 2, flatNormalTexture)
             .Handle;
 
         groundMaterial = vk.CreateMaterial(litShaderProgram, name: "ground.material")
             .SetUniform(binding: 0, "uTint", new Vector4(0.55f, 0.62f, 0.78f, 1.0f))
             .SetTexture(binding: 1, albedoTexture)
+            .SetTexture(binding: 2, groundNormalTexture)
+            .Handle;
+
+        sphereMaterial = vk.CreateMaterial(litShaderProgram, name: "sphere.material")
+            .SetUniform(binding: 0, "uTint", new Vector4(0.95f, 0.95f, 0.95f, 1.0f))
+            .SetTexture(binding: 1, whiteTexture)
+            .SetTexture(binding: 2, flatNormalTexture)
             .Handle;
 
         // Cesium per-material set (set 2). Tint from BaseColorFactor when
@@ -512,6 +567,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         cesiumSkinMaterial = vk.CreateMaterial(skinnedLitProgram, name: "cesium.skin.material")
             .SetUniform(binding: 0, "uTint", cesiumTint)
             .SetTexture(binding: 1, cesiumAlbedoTexture)
+            .SetTexture(binding: 2, flatNormalTexture)
             .Handle;
 
         // Cesium bone palette (set 3, per-draw SSBO, replicated across
@@ -589,7 +645,6 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         }
 
         groundModel = Matrix4x4.Identity;
-        System.Runtime.InteropServices.MemoryMarshal.Write(groundModelPushBytes, in groundModel);
 
         // Cesium user transform: stand the figure next to the cube on the
         // ground. CesiumMan is roughly 1.5 units tall in mesh-local space;
@@ -667,6 +722,12 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             case Key.C:
                 pointEnabled = !pointEnabled;
                 break;
+            case Key.Up:
+                exposure = Math.Clamp(exposure * 1.25f, 0.05f, 16f);
+                break;
+            case Key.Down:
+                exposure = Math.Clamp(exposure * 0.8f, 0.05f, 16f);
+                break;
             case Key.Escape:
                 host.RequestClose();
                 break;
@@ -719,7 +780,6 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         cubeModel = Matrix4x4.CreateRotationY(currentRotY)
                   * Matrix4x4.CreateRotationX(currentRotX)
                   * Matrix4x4.CreateTranslation(0, 0.2f, 0);
-        System.Runtime.InteropServices.MemoryMarshal.Write(cubeModelPushBytes, in cubeModel);
 
         // --- Animate skinned model -------------------------------------
         // Standard reset-sample-palette sequence (matches SkinnedGameObject.Update):
@@ -742,7 +802,6 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         // axis correction (Z-up → Y-up for CesiumMan). The bone palette
         // is mesh-local; uModel takes mesh-local → world.
         cesiumWorldModel = cesiumMeshNodeTransform * cesiumUserTransform;
-        System.Runtime.InteropServices.MemoryMarshal.Write(cesiumModelPushBytes, in cesiumWorldModel);
 
         // Pack the palette into the SSBO payload bytes (16 floats × N bones)
         // and upload to the slot matching this frame.
@@ -775,6 +834,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             new("uPointColorRange",    new Vector4Uniform(new Vector4(PointColor * PointIntensity, PointRange))),
             new("uLightEnable",        new Vector4Uniform(new Vector4(
                 sunEnabled ? 1f : 0f, spotEnabled ? 1f : 0f, pointEnabled ? 1f : 0f, 0f))),
+            new("uCameraPos",          new Vector4Uniform(new Vector4(cameraPosition, 1f))),
         };
 
         // Sun + 2 spot shadow passes. Each draws the same casters (cube +
@@ -805,6 +865,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         };
         graph.Pass(litPassHandle, scope =>
         {
+            // Each lit draw pushes [model | matParams(metallic, roughness)].
             scope.DrawIndexed(
                 vertexBuffer: groundVB,
                 indexBuffer: groundIB,
@@ -813,7 +874,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 uniforms: perFrame,
                 textures: shadowBindings,
                 material: groundMaterial,
-                pushConstants: groundModelPushBytes);
+                pushConstants: LitPush(groundModel, metallic: 0.0f, roughness: 0.85f, normalScale: 1.0f));
             scope.DrawIndexed(
                 vertexBuffer: cubeVB,
                 indexBuffer: cubeIB,
@@ -822,11 +883,26 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 uniforms: perFrame,
                 textures: shadowBindings,
                 material: cubeMaterial,
-                pushConstants: cubeModelPushBytes);
-            // Skinned cesium: set 2 (skin material — tint + albedo) AND
-            // set 3 (bone palette SSBO, framesInFlight-replicated). The
-            // two-material DrawIndexed overload binds both at their
-            // declared SetIndex values.
+                pushConstants: LitPush(cubeModel, metallic: 0.1f, roughness: 0.35f));
+            // PBR sphere test rig: row of metallic, row of dielectric, each
+            // sweeping roughness left→right. One shared white material; the
+            // metallic/roughness vary per draw via the push constant.
+            for (var i = 0; i < SphereCount; i++)
+            {
+                var rough = SphereCount > 1 ? i / (float)(SphereCount - 1) : 0.5f;
+                rough = 0.05f + rough * 0.95f;
+                scope.DrawIndexed(
+                    vertexBuffer: sphereVB, indexBuffer: sphereIB, pipeline: litPipeline,
+                    indexCount: sphereIndexCount, uniforms: perFrame, textures: shadowBindings,
+                    material: sphereMaterial,
+                    pushConstants: LitPush(sphereModels[i], metallic: 1.0f, roughness: rough));
+                scope.DrawIndexed(
+                    vertexBuffer: sphereVB, indexBuffer: sphereIB, pipeline: litPipeline,
+                    indexCount: sphereIndexCount, uniforms: perFrame, textures: shadowBindings,
+                    material: sphereMaterial,
+                    pushConstants: LitPush(sphereModels[SphereCount + i], metallic: 0.0f, roughness: rough));
+            }
+            // Skinned cesium: set 2 (skin material) + set 3 (bone palette SSBO).
             scope.DrawIndexed(
                 vertexBuffer: cesiumVB,
                 indexBuffer: cesiumIB,
@@ -836,14 +912,15 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 textures: shadowBindings,
                 material: cesiumSkinMaterial,
                 perDrawMaterial: cesiumBoneMaterial,
-                pushConstants: cesiumModelPushBytes);
+                pushConstants: LitPush(cesiumWorldModel, metallic: 0.0f, roughness: 0.6f));
         }, clearColor: new GraphicsColor(0.04f, 0.06f, 0.10f, 1.0f));
 
         graph.Execute(commandList);
 
         // Imperative present — pick the texture + pipeline for the current
-        // debug view. Final shows the lit HDR; the depth views show the
-        // shadow map / scene depth through the grayscale visualizer.
+        // debug view. Final tonemaps the lit HDR (exposure via push); the
+        // depth views show the shadow map / scene depth in grayscale.
+        var isFinal = (View)viewMode == View.Final;
         var (presentTex, presentPipe) = (View)viewMode switch
         {
             View.SunShadow => (graph.GetDepthTexture(sunShadowHandle), presentDepthPipeline),
@@ -851,6 +928,8 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             View.SceneDepth => (graph.GetDepthTexture(sceneDepthHandle), presentDepthPipeline),
             _ => (graph.GetColorTexture(hdrHandle), presentPipeline),
         };
+        var exposureBytes = new byte[4];
+        System.Runtime.InteropServices.MemoryMarshal.Write(exposureBytes, in exposure);
         commandList.Pass(
             "present",
             new RenderPassDescription(
@@ -859,13 +938,22 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 ClearDepth: true),
             pass =>
             {
-                pass.DrawIndexed(
-                    vertexBuffer: fullscreenVB,
-                    indexBuffer: fullscreenIB,
-                    pipeline: presentPipe,
-                    indexCount: 3,
-                    uniforms: Array.Empty<ShaderUniform>(),
-                    textures: new[] { new ShaderTextureBinding("uOffscreen", presentTex, Slot: 0) });
+                var tex = new[] { new ShaderTextureBinding("uOffscreen", presentTex, Slot: 0) };
+                if (isFinal)
+                {
+                    pass.DrawIndexed(
+                        vertexBuffer: fullscreenVB, indexBuffer: fullscreenIB,
+                        pipeline: presentPipe, indexCount: 3,
+                        uniforms: Array.Empty<ShaderUniform>(), textures: tex,
+                        pushConstants: exposureBytes);
+                }
+                else
+                {
+                    pass.DrawIndexed(
+                        vertexBuffer: fullscreenVB, indexBuffer: fullscreenIB,
+                        pipeline: presentPipe, indexCount: 3,
+                        uniforms: Array.Empty<ShaderUniform>(), textures: tex);
+                }
             });
     }
 
@@ -940,6 +1028,17 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         });
     }
 
+    // [model (64) | matParams (16: metallic, roughness, normalScale, _)] = 80 bytes.
+    // The lit/skinned-lit push: vertex reads uModel, fragment reads uMatParams.
+    private static byte[] LitPush(Matrix4x4 model, float metallic, float roughness, float normalScale = 1f)
+    {
+        var bytes = new byte[80];
+        System.Runtime.InteropServices.MemoryMarshal.Write(bytes.AsSpan(0, 64), in model);
+        var p = new Vector4(metallic, roughness, normalScale, 0f);
+        System.Runtime.InteropServices.MemoryMarshal.Write(bytes.AsSpan(64, 16), in p);
+        return bytes;
+    }
+
     // [model (64) | faceViewProj (64) | lightPosFar (16)] = 144 bytes.
     private static byte[] PointShadowPushBytes(Matrix4x4 model, Matrix4x4 faceVp, Vector4 lightPosFar)
     {
@@ -962,6 +1061,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             viewMode = debug.Controls.Enum("View [V]", viewMode, ViewLabels);
             animPaused = debug.Controls.Toggle("Pause anim [P]", animPaused);
             moveSpeed = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 40f);
+            debug.Values.Value("exposure [Up/Dn]", exposure);
         }
         using (debug.Scope("lights"))
         {
@@ -1170,6 +1270,43 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         return (vertices, indices);
     }
 
+    // UV sphere centered at origin. Normals = normalized position (unit
+    // sphere), UVs from spherical coords. rings = latitude bands, sectors =
+    // longitude segments.
+    private static (VertexPosition3NormalTexture[] Vertices, ushort[] Indices) BuildSphere(
+        float radius, int rings, int sectors)
+    {
+        var verts = new List<VertexPosition3NormalTexture>((rings + 1) * (sectors + 1));
+        for (var r = 0; r <= rings; r++)
+        {
+            var phi = MathF.PI * r / rings;          // 0..π latitude
+            var y = MathF.Cos(phi);
+            var sinPhi = MathF.Sin(phi);
+            for (var s = 0; s <= sectors; s++)
+            {
+                var theta = 2f * MathF.PI * s / sectors;  // 0..2π longitude
+                var x = sinPhi * MathF.Cos(theta);
+                var z = sinPhi * MathF.Sin(theta);
+                var n = new GraphicsVector3(x, y, z);
+                verts.Add(new VertexPosition3NormalTexture(
+                    new GraphicsVector3(x * radius, y * radius, z * radius),
+                    n,
+                    new GraphicsVector2(s / (float)sectors, r / (float)rings)));
+            }
+        }
+        var indices = new List<ushort>(rings * sectors * 6);
+        var stride = sectors + 1;
+        for (var r = 0; r < rings; r++)
+        for (var s = 0; s < sectors; s++)
+        {
+            var a = (ushort)(r * stride + s);
+            var b = (ushort)((r + 1) * stride + s);
+            indices.Add(a); indices.Add(b); indices.Add((ushort)(a + 1));
+            indices.Add((ushort)(a + 1)); indices.Add(b); indices.Add((ushort)(b + 1));
+        }
+        return (verts.ToArray(), indices.ToArray());
+    }
+
     private static (VertexPosition3NormalTexture[] Vertices, ushort[] Indices) BuildGround(
         float extent, float y, float uvTile)
     {
@@ -1183,6 +1320,30 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         };
         var indices = new ushort[] { 0, 2, 1,  0, 3, 2 };
         return (vertices, indices);
+    }
+
+    // Procedural tangent-space normal map: two crossed sine ripples whose
+    // height gradient becomes the perturbed normal. Tileable, linear-encoded
+    // (RGB = normal*0.5+0.5). strength scales the xy slope.
+    private static byte[] BuildRippleNormalMap(int size, float freq, float strength)
+    {
+        var data = new byte[size * size * 4];
+        for (var y = 0; y < size; y++)
+        for (var x = 0; x < size; x++)
+        {
+            var u = x / (float)size * MathF.PI * 2f * freq;
+            var v = y / (float)size * MathF.PI * 2f * freq;
+            // height h = sin(u) + sin(v); slope = dh/du, dh/dv.
+            var dhdu = MathF.Cos(u) * strength;
+            var dhdv = MathF.Cos(v) * strength;
+            var n = Vector3.Normalize(new Vector3(-dhdu, -dhdv, 1f));
+            var idx = (y * size + x) * 4;
+            data[idx]     = (byte)((n.X * 0.5f + 0.5f) * 255f);
+            data[idx + 1] = (byte)((n.Y * 0.5f + 0.5f) * 255f);
+            data[idx + 2] = (byte)((n.Z * 0.5f + 0.5f) * 255f);
+            data[idx + 3] = 255;
+        }
+        return data;
     }
 
     private static byte[] BuildCheckerboard(int size, int cellCount)

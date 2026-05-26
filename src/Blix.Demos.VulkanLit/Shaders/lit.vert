@@ -31,10 +31,12 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4 uPointPosFar;
     vec4 uPointColorRange;
     vec4 uLightEnable;
+    vec4 uCameraPos;
 } frame;
 
 layout(push_constant) uniform PushConstants {
     mat4 uModel;
+    vec4 uMatParams;  // metallic, roughness, _, _ (read in frag)
 } pc;
 
 layout(location = 0) in vec3 inPosition;
