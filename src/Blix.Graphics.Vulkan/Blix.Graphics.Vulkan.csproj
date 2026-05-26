@@ -5,6 +5,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Render-graph validation is testable as pure functions on internal
+         pass + resource entries. Exposing internals to the test project
+         lets Section L exercise every validation branch without a live
+         VkDevice. -->
+    <InternalsVisibleTo Include="Blix.Test.Graphics" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Silk.NET.Core" Version="2.22.0" />
     <PackageReference Include="Silk.NET.Vulkan" Version="2.22.0" />
     <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" Version="2.22.0" />

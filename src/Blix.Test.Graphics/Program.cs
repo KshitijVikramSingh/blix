@@ -1,6 +1,12 @@
 using System.Numerics;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
+// Silk.NET.Vulkan types are used by Section N (BarrierOp value equality).
+// Aliased rather than globally imported to avoid ambiguity with
+// Blix.Graphics.Vulkan.PushConstantRange and Blix.Graphics.PrimitiveTopology.
+using VkImageLayout = Silk.NET.Vulkan.ImageLayout;
+using VkPipelineStageFlags = Silk.NET.Vulkan.PipelineStageFlags;
+using VkAccessFlags = Silk.NET.Vulkan.AccessFlags;
 
 // CLI test harness for Blix.Graphics. Currently focused on the F-016
 // matrix-convention migration acceptance criteria. After migration:
@@ -690,6 +696,460 @@ static UniformBlockLayout Mat4Block() => new(
     var withTarget = basePipe with { RenderTarget = new RenderSurfaceHandle(7) };
     t.ExpectTrue("J.4 with-update preserves RenderTarget id",
         withTarget.RenderTarget is { } h && h.Id == 7);
+}
+
+// ============================================================================
+// Section K — RenderGraph public type vocabulary (Vector B VB.i).
+// ============================================================================
+//
+// Pure-type smoke tests for the graph's small types. Pass/factory/build
+// behavior gets exercised in VB.ii once device-aware tests are wired up
+// (InternalsVisibleTo or via the demo). For now: handle equality,
+// TextureView shape + cube-face bounds, enum sanity.
+
+{
+    // K.1 — Handle equality.
+    t.ExpectTrue("K.1 GraphResourceHandle equal by id",
+        new GraphResourceHandle(7).Equals(new GraphResourceHandle(7)));
+    t.ExpectTrue("K.1 GraphResourceHandle different ids != equal",
+        !new GraphResourceHandle(7).Equals(new GraphResourceHandle(8)));
+    t.ExpectTrue("K.1 PassHandle equal by id",
+        new PassHandle(1).Equals(new PassHandle(1)));
+    t.ExpectTrue("K.1 DepthCubeHandle equal by id",
+        new DepthCubeHandle(3).Equals(new DepthCubeHandle(3)));
+}
+
+{
+    // K.2 — TextureView whole-image vs face view.
+    var handle = new GraphResourceHandle(42);
+    TextureView whole = handle;  // implicit conversion
+    t.ExpectTrue("K.2 implicit conversion produces whole-image view",
+        whole.IsWholeImage && whole.Resource.Equals(handle));
+
+    var face0 = new TextureView(handle, 0);
+    var face1 = new TextureView(handle, 1);
+    t.ExpectTrue("K.2 face views differ across faces", !face0.Equals(face1));
+    t.ExpectTrue("K.2 same-face view equality holds",
+        face0.Equals(new TextureView(handle, 0)));
+    t.ExpectTrue("K.2 face view is not whole-image", !face0.IsWholeImage);
+}
+
+{
+    // K.3 — DepthCubeHandle.Face bounds + view construction.
+    var cube = new DepthCubeHandle(5);
+    var face0 = cube.Face(0);
+    var face5 = cube.Face(5);
+    t.ExpectTrue("K.3 cube.Face(0) yields face 0 view", face0.Face == 0);
+    t.ExpectTrue("K.3 cube.Face(5) yields face 5 view", face5.Face == 5);
+    t.ExpectTrue("K.3 cube.Face view targets cube's underlying resource id",
+        face0.Resource.Id == cube.Id);
+
+    var threwBelow = false;
+    try { cube.Face(-1); } catch (ArgumentOutOfRangeException) { threwBelow = true; }
+    t.ExpectTrue("K.3 cube.Face(-1) rejected", threwBelow);
+
+    var threwAbove = false;
+    try { cube.Face(6); } catch (ArgumentOutOfRangeException) { threwAbove = true; }
+    t.ExpectTrue("K.3 cube.Face(6) rejected", threwAbove);
+}
+
+{
+    // K.4 — DepthCubeHandle implicit conversion to GraphResourceHandle
+    // (whole-cube sampling falls through to standard Read/Target path).
+    var cube = new DepthCubeHandle(11);
+    GraphResourceHandle asHandle = cube;
+    t.ExpectTrue("K.4 DepthCubeHandle implicit → GraphResourceHandle preserves id",
+        asHandle.Id == 11);
+}
+
+{
+    // K.5 — GraphSize discriminated union round-trips.
+    var fixedSize = new FixedGraphSize(800, 600);
+    t.ExpectClose("K.5 FixedGraphSize.Width", fixedSize.Width, 800);
+    t.ExpectClose("K.5 FixedGraphSize.Height", fixedSize.Height, 600);
+
+    var matchHalf = new MatchSwapchainGraphSize(0.5f);
+    t.ExpectClose("K.5 MatchSwapchainGraphSize.Scale custom", matchHalf.Scale, 0.5f);
+
+    var matchDefault = new MatchSwapchainGraphSize();
+    t.ExpectClose("K.5 MatchSwapchainGraphSize default scale = 1.0", matchDefault.Scale, 1.0f);
+}
+
+{
+    // K.6 — LoadOp / StoreOp enum values exist and are distinct.
+    t.ExpectTrue("K.6 LoadOp values distinct",
+        LoadOp.Clear != LoadOp.Load && LoadOp.Load != LoadOp.DontCare);
+    t.ExpectTrue("K.6 StoreOp values distinct",
+        StoreOp.Store != StoreOp.DontCare);
+}
+
+// ============================================================================
+// Section L — RenderGraph validation (Vector B VB.ii).
+// ============================================================================
+//
+// Pure-function validation runs at Compile(). Tests use the internal
+// parameterless RenderGraph() constructor (InternalsVisibleTo set on
+// Blix.Graphics.Vulkan.csproj). No live VkDevice needed; backend
+// allocation lands in VB.iii.
+
+// Minimal valid shader interface for Section L tests — one UBO at
+// (set 0, binding 0). Real shaders have more shape but validation
+// only cares that .Shader(...) was called with something.
+static ShaderInterface MinimalShader() => new(new[]
+{
+    new DescriptorSetSlot(
+        Set: 0, Binding: 0,
+        Type: ShaderResourceType.UniformBuffer,
+        Stages: ShaderStages.Vertex | ShaderStages.Fragment,
+        BlockLayout: new UniformBlockLayout(
+            TotalSize: 64,
+            Members: new[] { new UniformBlockMember("uViewProjection", 0, 64) })),
+});
+
+{
+    // L.1 — Happy path: minimal valid graph compiles cleanly.
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("out", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.GraphicsPass("draw")
+        .Target(color, LoadOp.Clear, StoreOp.Store)
+        .Shader(MinimalShader());
+    var threw = false;
+    try { graph.Compile(); } catch { threw = true; }
+    t.ExpectTrue("L.1 minimal valid graph compiles", !threw);
+    t.ExpectTrue("L.1 IsCompiled flips true on success", graph.IsCompiled);
+}
+
+{
+    // L.2 — Empty graph rejected with named reason.
+    var graph = new RenderGraph();
+    InvalidOperationException? caught = null;
+    try { graph.Compile(); } catch (InvalidOperationException e) { caught = e; }
+    t.ExpectTrue("L.2 empty graph rejected",
+        caught is not null && caught.Message.Contains("no declared passes"));
+    t.ExpectTrue("L.2 IsCompiled stays false after validation failure",
+        !graph.IsCompiled);
+}
+
+{
+    // L.3 — Duplicate pass name rejected with the offending name.
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.GraphicsPass("twin").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
+    graph.GraphicsPass("twin").Target(color, LoadOp.Load, StoreOp.Store).Shader(MinimalShader());
+    InvalidOperationException? caught = null;
+    try { graph.Compile(); } catch (InvalidOperationException e) { caught = e; }
+    t.ExpectTrue("L.3 duplicate pass name rejected with name in message",
+        caught is not null && caught.Message.Contains("'twin'"));
+}
+
+{
+    // L.4 — GraphicsPass with no Target or Depth rejected.
+    var graph = new RenderGraph();
+    graph.GraphicsPass("naked").Shader(MinimalShader());
+    InvalidOperationException? caught = null;
+    try { graph.Compile(); } catch (InvalidOperationException e) { caught = e; }
+    t.ExpectTrue("L.4 graphics pass without attachment rejected",
+        caught is not null && caught.Message.Contains("'naked'") && caught.Message.Contains("Target or Depth"));
+}
+
+{
+    // L.5 — GraphicsPass with no Shader declared rejected.
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.GraphicsPass("shaderless").Target(color, LoadOp.Clear, StoreOp.Store);
+    InvalidOperationException? caught = null;
+    try { graph.Compile(); } catch (InvalidOperationException e) { caught = e; }
+    t.ExpectTrue("L.5 graphics pass without shader rejected",
+        caught is not null && caught.Message.Contains("'shaderless'") && caught.Message.Contains("Shader"));
+}
+
+{
+    // L.6 — ComputePass with no Shader rejected.
+    var graph = new RenderGraph();
+    var img = graph.ColorTarget("img", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.ComputePass("compute-no-shader").Write(img);
+    InvalidOperationException? caught = null;
+    try { graph.Compile(); } catch (InvalidOperationException e) { caught = e; }
+    t.ExpectTrue("L.6 compute pass without shader rejected",
+        caught is not null && caught.Message.Contains("'compute-no-shader'"));
+}
+
+{
+    // L.7 — Read of undeclared resource rejected.
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    var phantom = new GraphResourceHandle(999); // never created via factories
+    graph.GraphicsPass("p")
+        .Target(color, LoadOp.Clear, StoreOp.Store)
+        .Read(phantom)
+        .Shader(MinimalShader());
+    InvalidOperationException? caught = null;
+    try { graph.Compile(); } catch (InvalidOperationException e) { caught = e; }
+    t.ExpectTrue("L.7 read of unknown resource rejected",
+        caught is not null && caught.Message.Contains("not declared as a Target/Depth/Write by any prior pass"));
+}
+
+{
+    // L.8 — Cycle case: Pass A reads X (produced by Pass B), but A is
+    // declared BEFORE B. Per D4 declaration-order semantics, A's read
+    // sees an empty producer set and fails with the cycle-equivalent
+    // 'not declared by any prior pass' error.
+    var graph = new RenderGraph();
+    var x = graph.ColorTarget("x", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    var y = graph.ColorTarget("y", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.GraphicsPass("A")
+        .Target(y, LoadOp.Clear, StoreOp.Store)
+        .Read(x)  // x is declared via factory but never written before A
+        .Shader(MinimalShader());
+    graph.GraphicsPass("B")
+        .Target(x, LoadOp.Clear, StoreOp.Store)
+        .Shader(MinimalShader());
+    InvalidOperationException? caught = null;
+    try { graph.Compile(); } catch (InvalidOperationException e) { caught = e; }
+    t.ExpectTrue("L.8 read of later-declared (cycle) rejected",
+        caught is not null && caught.Message.Contains("'A'") && caught.Message.Contains("'x'"));
+}
+
+{
+    // L.9 — Compile twice rejected.
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.GraphicsPass("p").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
+    graph.Compile();
+    InvalidOperationException? caught = null;
+    try { graph.Compile(); } catch (InvalidOperationException e) { caught = e; }
+    t.ExpectTrue("L.9 second Compile rejected (already frozen)",
+        caught is not null && caught.Message.Contains("Compile"));
+}
+
+{
+    // L.10 — Post-compile factory call rejected (topology frozen).
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.GraphicsPass("p").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
+    graph.Compile();
+    InvalidOperationException? caught = null;
+    try { graph.ColorTarget("late", TextureFormat.Rgba8, new FixedGraphSize(64, 64)); }
+    catch (InvalidOperationException e) { caught = e; }
+    t.ExpectTrue("L.10 post-Compile factory call rejected",
+        caught is not null && caught.Message.Contains("ColorTarget"));
+}
+
+{
+    // L.11 — Post-compile builder mutation rejected.
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    var builder = graph.GraphicsPass("p").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
+    graph.Compile();
+    InvalidOperationException? caught = null;
+    try { builder.Read(color); } catch (InvalidOperationException e) { caught = e; }
+    t.ExpectTrue("L.11 post-Compile builder mutation rejected",
+        caught is not null && caught.Message.Contains("frozen"));
+}
+
+{
+    // L.12 — Read of resource written by a prior pass is allowed.
+    var graph = new RenderGraph();
+    var shadow = graph.DepthTarget("shadow", new FixedGraphSize(2048, 2048));
+    var color = graph.ColorTarget("scene", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.GraphicsPass("shadow-pass")
+        .Depth(shadow, LoadOp.Clear, StoreOp.Store)
+        .Shader(MinimalShader());
+    graph.GraphicsPass("scene-pass")
+        .Target(color, LoadOp.Clear, StoreOp.Store)
+        .Read(shadow)
+        .Shader(MinimalShader());
+    var threw = false;
+    try { graph.Compile(); } catch { threw = true; }
+    t.ExpectTrue("L.12 read of prior-pass-declared resource accepted", !threw);
+}
+
+{
+    // L.13 — Cube face used as depth target counts as production.
+    var graph = new RenderGraph();
+    var cube = graph.DepthCube("point-shadow", faceSize: 512);
+    var hdr = graph.ColorTarget("hdr", TextureFormat.Rgba16F, new FixedGraphSize(64, 64));
+    for (var face = 0; face < 6; face++)
+    {
+        graph.GraphicsPass($"point-shadow.{face}")
+            .Depth(cube.Face(face), LoadOp.Clear, StoreOp.Store)
+            .Shader(MinimalShader());
+    }
+    graph.GraphicsPass("scene")
+        .Target(hdr, LoadOp.Clear, StoreOp.Store)
+        .Read(cube)   // whole cube sampled as samplerCube
+        .Shader(MinimalShader());
+    var threw = false;
+    try { graph.Compile(); } catch { threw = true; }
+    t.ExpectTrue("L.13 cube-face writes + whole-cube read across passes compile", !threw);
+}
+
+// ============================================================================
+// Section M — Backend-skip contract for test-mode graphs (VB.iii).
+// ============================================================================
+//
+// Test-mode graphs (constructed via the internal parameterless ctor)
+// have a null Device. Compile() runs validation but SKIPS the backend
+// phase — BackendResources / BackendPasses stay empty, BackendCompiled
+// stays false. This contract lets Section L tests run without a live
+// VkDevice. The real backend (VkImage / VkRenderPass / VkFramebuffer
+// allocation) is exercised by the demo at VB.vii.
+
+{
+    // M.1 — Test-mode Compile leaves backend state untouched.
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.GraphicsPass("p").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
+    graph.Compile();
+    t.ExpectTrue("M.1 IsCompiled true after test-mode compile", graph.IsCompiled);
+    t.ExpectTrue("M.1 BackendCompiled false in test mode (no device)", !graph.BackendCompiled);
+    t.ExpectClose("M.1 BackendResources empty in test mode", graph.BackendResources.Count, 0);
+    t.ExpectClose("M.1 BackendPasses empty in test mode", graph.BackendPasses.Count, 0);
+}
+
+{
+    // M.2 — Resources + Passes tables ARE populated post-compile
+    // (validation reads them; backend allocation in production reads
+    // them too). Test-mode just doesn't ALLOCATE the backend objects.
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    var cube = graph.DepthCube("cube", faceSize: 32);
+    graph.GraphicsPass("face0").Depth(cube.Face(0), LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
+    graph.GraphicsPass("scene").Target(color, LoadOp.Clear, StoreOp.Store).Read(cube).Shader(MinimalShader());
+    graph.Compile();
+    t.ExpectClose("M.2 Resources table populated", graph.Resources.Count, 2);
+    t.ExpectClose("M.2 GraphicsPasses table populated", graph.GraphicsPasses.Count, 2);
+    t.ExpectClose("M.2 PassOrder preserves declaration order", graph.PassOrder.Count, 2);
+}
+
+// ============================================================================
+// Section N — Barrier inference contract (VB.iv).
+// ============================================================================
+//
+// For v1 graphics-only graphs, per-pass barrier lists are empty —
+// subpass dependencies on each VkRenderPass already cover the
+// cross-pass color/depth → fragment-shader-read memory barrier. The
+// InferBarriers function ships its data shape now so the contract is
+// locked; explicit emission lights up when ComputePass.Execute does in
+// step 8.
+
+{
+    // N.1 — Empty graph produces empty per-pass barriers map. (Validation
+    // rejects empty graphs at Compile, so build a single-pass graph and
+    // assert the barrier list for that pass is empty.)
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.GraphicsPass("solo").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
+    graph.Compile();
+    t.ExpectClose("N.1 single-pass graph has one barrier list",
+        graph.PerPassBarriers.Count, 1);
+    foreach (var list in graph.PerPassBarriers.Values)
+    {
+        t.ExpectClose("N.1 graphics-only pass barriers empty (subpass deps cover)", list.Count, 0);
+    }
+}
+
+{
+    // N.2 — Multi-pass graph with a Read edge still produces no explicit
+    // barriers (the Read drives finalLayout = SHADER_READ_ONLY on the
+    // producer's color attachment + subpass deps cover the memory barrier).
+    var graph = new RenderGraph();
+    var sceneColor = graph.ColorTarget("scene", TextureFormat.Rgba16F, new FixedGraphSize(64, 64));
+    var presentColor = graph.ColorTarget("present", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.GraphicsPass("scene-pass")
+        .Target(sceneColor, LoadOp.Clear, StoreOp.Store)
+        .Shader(MinimalShader());
+    graph.GraphicsPass("present-pass")
+        .Target(presentColor, LoadOp.Clear, StoreOp.Store)
+        .Read(sceneColor)
+        .Shader(MinimalShader());
+    graph.Compile();
+    t.ExpectClose("N.2 two-pass graph has two barrier lists",
+        graph.PerPassBarriers.Count, 2);
+    var total = 0;
+    foreach (var list in graph.PerPassBarriers.Values) total += list.Count;
+    t.ExpectClose("N.2 graphics-only multi-pass: zero explicit barriers (subpass deps cover)",
+        total, 0);
+}
+
+{
+    // N.3 — BarrierOp record value equality. Pins the data shape; useful
+    // when step 8 starts emitting real BarrierOps and tests need to
+    // compare expected vs actual.
+    var a = new BarrierOp(
+        ResourceId: 7,
+        OldLayout: VkImageLayout.ColorAttachmentOptimal,
+        NewLayout: VkImageLayout.ShaderReadOnlyOptimal,
+        SrcStage: VkPipelineStageFlags.ColorAttachmentOutputBit,
+        SrcAccess: VkAccessFlags.ColorAttachmentWriteBit,
+        DstStage: VkPipelineStageFlags.FragmentShaderBit,
+        DstAccess: VkAccessFlags.ShaderReadBit);
+    var b = new BarrierOp(
+        ResourceId: 7,
+        OldLayout: VkImageLayout.ColorAttachmentOptimal,
+        NewLayout: VkImageLayout.ShaderReadOnlyOptimal,
+        SrcStage: VkPipelineStageFlags.ColorAttachmentOutputBit,
+        SrcAccess: VkAccessFlags.ColorAttachmentWriteBit,
+        DstStage: VkPipelineStageFlags.FragmentShaderBit,
+        DstAccess: VkAccessFlags.ShaderReadBit);
+    t.ExpectTrue("N.3 BarrierOp value equality holds", a.Equals(b));
+
+    var differentResource = a with { ResourceId = 8 };
+    t.ExpectTrue("N.3 BarrierOp distinguishes different ResourceId", !a.Equals(differentResource));
+}
+
+// ============================================================================
+// Section O — graph.Pass + graph.Execute lifecycle (VB.v).
+// ============================================================================
+//
+// Real graph.Pass + Execute behavior (recording scopes, emitting passes
+// into a RenderCommandList) needs a live VkDevice and is exercised by
+// the demo visual gate at VB.vii. Section O covers the error paths that
+// don't need a device.
+
+{
+    // O.1 — graph.Pass called before Compile throws.
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    var passHandle = graph.GraphicsPass("p")
+        .Target(color, LoadOp.Clear, StoreOp.Store)
+        .Shader(MinimalShader())
+        .Handle;
+    var threw = false;
+    try { graph.Pass(passHandle, _ => { }); } catch (InvalidOperationException) { threw = true; }
+    t.ExpectTrue("O.1 graph.Pass before Compile throws", threw);
+}
+
+{
+    // O.2 — graph.Execute before Compile throws.
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.GraphicsPass("p").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
+    var commandList = new RenderCommandList();
+    var threw = false;
+    try { graph.Execute(commandList); } catch (InvalidOperationException) { threw = true; }
+    t.ExpectTrue("O.2 graph.Execute before Compile throws", threw);
+}
+
+{
+    // O.3 — Test-mode graph.Execute is a no-op (Device null = no backend).
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.GraphicsPass("p").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
+    graph.Compile();
+    var commandList = new RenderCommandList();
+    var threw = false;
+    try { graph.Execute(commandList); } catch { threw = true; }
+    t.ExpectTrue("O.3 test-mode graph.Execute returns without throwing", !threw);
+}
+
+{
+    // O.4 — GetColorTexture before Compile throws.
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    var threw = false;
+    try { graph.GetColorTexture(color); } catch (InvalidOperationException) { threw = true; }
+    t.ExpectTrue("O.4 GetColorTexture before Compile throws", threw);
 }
 
 t.PrintSummary();

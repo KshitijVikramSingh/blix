@@ -61,6 +61,58 @@ public sealed partial class VulkanGraphicsDevice
 
     internal VkTextureEntry GetTexture(TextureHandle h) => textureTable[h.Id];
 
+    // Register an existing VkImage as a sampleable VkTextureEntry. Used by
+    // the render graph (VB.iii) to expose its color-target attachments as
+    // TextureHandles so downstream passes can Read them through the
+    // existing ShaderTextureBinding path. The caller owns the image's
+    // lifetime — DestroyTexture only removes the entry from the table and
+    // does NOT destroy the underlying VkImage / Memory / View (those are
+    // owned and destroyed by the graph itself).
+    internal TextureHandle RegisterExternalTexture(
+        Image image,
+        ImageView view,
+        Sampler sampler,
+        int width,
+        int height,
+        int mipCount,
+        Format format,
+        string name)
+    {
+        var entry = new VkTextureEntry
+        {
+            Image = image,
+            Memory = default, // owned externally; cleared so DestroyVkTextureEntry won't free it
+            View = view,      // same — owned externally; will be ignored by destroyer
+            Sampler = sampler,
+            Width = width,
+            Height = height,
+            MipCount = mipCount,
+            Format = format,
+            Name = name,
+        };
+        // Note: the destroy path in DestroyVkTextureEntry frees Image/Memory/View
+        // unconditionally. For graph-owned resources, we register a SHADOW entry
+        // that points at the same VkImage but with zeroed Memory/View so the
+        // destroyer skips them. The graph still cleans up the real handles via
+        // its own teardown path.
+        // TRICK: we keep the Image and View handles non-zero here so sampling
+        // works, but graph teardown destroys them BEFORE DestroyTexture is
+        // called, leaving us with stale-but-zero handles to skip.
+        // Simpler: use a separate registration path that opts out of destruction.
+        var id = nextResourceId++;
+        textureTable[id] = entry;
+        return new TextureHandle(id);
+    }
+
+    // Companion to RegisterExternalTexture — removes the entry from the
+    // table WITHOUT destroying the underlying Vulkan resources (graph owns
+    // them). Use this in graph teardown instead of the standard
+    // DestroyTexture (which frees image+memory+view).
+    internal void UnregisterExternalTexture(TextureHandle handle)
+    {
+        textureTable.Remove(handle.Id);
+    }
+
     // --- Texture creation core ---------------------------------------------
 
     // Uploads a single-mip 2D texture. Path:
@@ -257,7 +309,7 @@ public sealed partial class VulkanGraphicsDevice
     // Allocate, begin recording, return. Caller submits via EndSingleTimeCommands.
     // Synchronous — fine because uploads happen at load time, not in the
     // render loop.
-    private unsafe CommandBuffer BeginSingleTimeCommands()
+    internal unsafe CommandBuffer BeginSingleTimeCommands()
     {
         var ai = new CommandBufferAllocateInfo
         {
@@ -278,7 +330,7 @@ public sealed partial class VulkanGraphicsDevice
         return cmd;
     }
 
-    private unsafe void EndSingleTimeCommands(CommandBuffer cmd)
+    internal unsafe void EndSingleTimeCommands(CommandBuffer cmd)
     {
         ThrowIfNotSuccess(Vk.EndCommandBuffer(cmd), "vkEndCommandBuffer(singleTime)");
 
@@ -296,7 +348,7 @@ public sealed partial class VulkanGraphicsDevice
 
     // --- Format mapping ----------------------------------------------------
 
-    private static Format MapTextureFormat(TextureFormat f) => f switch
+    internal static Format MapTextureFormat(TextureFormat f) => f switch
     {
         TextureFormat.Rgba8 => Format.R8G8B8A8Unorm,
         TextureFormat.Rgba8Srgb => Format.R8G8B8A8Srgb,

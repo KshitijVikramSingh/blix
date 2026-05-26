@@ -40,6 +40,11 @@ public sealed partial class VulkanGraphicsDevice
         public Silk.NET.Vulkan.RenderPass RenderPass;
         public Framebuffer Framebuffer;
         public Format ColorFormat;
+        // External entries (set by RegisterExternalRenderSurface) shadow
+        // resources owned elsewhere — typically a RenderGraph's
+        // per-pass VkRenderPass + Framebuffer. The destruction path
+        // (DestroyAllRenderSurfaces) skips those entries.
+        public bool IsExternal;
     }
 
     public unsafe RenderSurface CreateRenderSurface(RenderSurfaceDescription description)
@@ -152,6 +157,41 @@ public sealed partial class VulkanGraphicsDevice
 
     internal VkRenderSurfaceEntry GetRenderSurface(RenderSurfaceHandle h) => renderSurfaceTable[h.Id];
 
+    // Register an existing VkRenderPass + Framebuffer as a render-surface
+    // entry without owning them. Used by RenderGraph (VB.v) to expose its
+    // per-pass machinery through the existing Target routing in the
+    // command-list Execute path. Destruction skips external entries —
+    // the graph owns the underlying objects and tears them down via its
+    // own Dispose path.
+    internal RenderSurfaceHandle RegisterExternalRenderSurface(
+        string name,
+        Silk.NET.Vulkan.RenderPass renderPass,
+        Framebuffer framebuffer,
+        uint width, uint height,
+        bool hasDepth)
+    {
+        var entry = new VkRenderSurfaceEntry
+        {
+            Name = name,
+            Width = width,
+            Height = height,
+            RenderPass = renderPass,
+            Framebuffer = framebuffer,
+            HasDepth = hasDepth,
+            IsExternal = true,
+            // Color/depth attachment ownership stays with the caller.
+            ColorAttachments = Array.Empty<TextureHandle>(),
+        };
+        var id = nextResourceId++;
+        renderSurfaceTable[id] = entry;
+        return new RenderSurfaceHandle(id);
+    }
+
+    internal void UnregisterExternalRenderSurface(RenderSurfaceHandle handle)
+    {
+        renderSurfaceTable.Remove(handle.Id);
+    }
+
     private (uint Width, uint Height) ResolveSize(RenderSurfaceSize size) => size switch
     {
         FixedRenderSurfaceSize fixedSize => ((uint)fixedSize.Width, (uint)fixedSize.Height),
@@ -161,7 +201,7 @@ public sealed partial class VulkanGraphicsDevice
         _ => throw new ArgumentException($"Unknown RenderSurfaceSize {size.GetType().Name}", nameof(size)),
     };
 
-    private unsafe (Image image, DeviceMemory memory, ImageView view) AllocateAttachmentImage(
+    internal unsafe (Image image, DeviceMemory memory, ImageView view) AllocateAttachmentImage(
         uint width, uint height,
         Format format,
         ImageUsageFlags usage,
@@ -332,6 +372,7 @@ public sealed partial class VulkanGraphicsDevice
     {
         foreach (var entry in renderSurfaceTable.Values)
         {
+            if (entry.IsExternal) continue; // graph (or other owner) handles teardown
             unsafe
             {
                 if (entry.Framebuffer.Handle != 0) Vk.DestroyFramebuffer(Device, entry.Framebuffer, null);

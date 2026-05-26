@@ -31,6 +31,8 @@ public sealed partial class VulkanGraphicsDevice
     private DeviceMemory depthMemory;
     private ImageView depthView;
     private Format depthFormat = Format.D32Sfloat;
+    // Internal accessor for cross-file consumers like the render graph backend.
+    internal Format GraphDepthFormat => depthFormat;
     // Per-swapchain-image, not per-frame-slot: present may still hold a
     // signal-pending semaphore when our frame-slot ring recycles, so reusing
     // a frame-slot's semaphore across different image indices is unsafe.
@@ -746,6 +748,13 @@ public sealed partial class VulkanGraphicsDevice
         return defaultPasses > 0;
     }
 
+    // Subscribers (currently RenderGraph) get notified after the swapchain
+    // and dependent resources have been rebuilt — they then walk their
+    // matchSwapchain-sized resources and rebuild them at the new extent.
+    // The signal fires under DeviceWaitIdle so subscribers can safely
+    // destroy + recreate without worrying about in-flight work.
+    internal event Action? SwapchainRecreated;
+
     private void RecreateSwapchain()
     {
         // Quiet the device first so we don't tear down resources still in use
@@ -760,6 +769,10 @@ public sealed partial class VulkanGraphicsDevice
         // recreate to save work; rebuild framebuffers since the attachment
         // views all changed.
         CreateFramebuffers();
+
+        // Notify graph + future subscribers. DeviceWaitIdle above already
+        // quiesced; subscribers can destroy/recreate without further sync.
+        SwapchainRecreated?.Invoke();
     }
 
     private unsafe void DestroySwapchainResources()

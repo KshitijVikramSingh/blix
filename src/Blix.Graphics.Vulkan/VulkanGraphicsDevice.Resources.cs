@@ -186,7 +186,7 @@ public sealed partial class VulkanGraphicsDevice
         if (e.Memory.Handle != 0) Vk.FreeMemory(Device, e.Memory, null);
     }
 
-    private uint FindMemoryTypeIndex(uint typeFilter, MemoryPropertyFlags required)
+    internal uint FindMemoryTypeIndex(uint typeFilter, MemoryPropertyFlags required)
     {
         Vk.GetPhysicalDeviceMemoryProperties(PhysicalDevice, out var props);
         for (uint i = 0; i < props.MemoryTypeCount; i++)
@@ -236,7 +236,7 @@ public sealed partial class VulkanGraphicsDevice
         return new ShaderProgramHandle(id);
     }
 
-    private const int MaxFramesInFlightConst = 2; // mirrors VulkanGraphicsDevice.Swapchain.cs constant
+    internal const int MaxFramesInFlightConst = 2; // mirrors VulkanGraphicsDevice.Swapchain.cs constant
 
     // Materializes per-set descriptor-set layouts, pools, and per-frame
     // descriptor sets from entry.Interface.Slots. Buffer slots also get a
@@ -405,7 +405,7 @@ public sealed partial class VulkanGraphicsDevice
         return resources;
     }
 
-    private static DescriptorType MapDescriptorType(ShaderResourceType t) => t switch
+    internal static DescriptorType MapDescriptorType(ShaderResourceType t) => t switch
     {
         ShaderResourceType.UniformBuffer => DescriptorType.UniformBuffer,
         ShaderResourceType.StorageBuffer => DescriptorType.StorageBuffer,
@@ -415,7 +415,7 @@ public sealed partial class VulkanGraphicsDevice
         _ => throw new InvalidOperationException($"Unknown ShaderResourceType {t}"),
     };
 
-    private static ShaderStageFlags MapStageFlags(ShaderStages s)
+    internal static ShaderStageFlags MapStageFlags(ShaderStages s)
     {
         var flags = ShaderStageFlags.None;
         if (s.HasFlag(ShaderStages.Vertex)) flags |= ShaderStageFlags.VertexBit;
