@@ -369,7 +369,7 @@ Disposition of contributing friction notes:
 - **F-001:** Resolved — `CreateShaderProgram` takes SPIR-V bytes + `ShaderInterface`. GLSL text path becomes optional runtime helper.
 - **F-002:** Resolved — bindings are explicit `(set, binding)`. Names survive only as cook-time aliases in material descriptors.
 - **F-007:** Resolved by classification — per-draw is push constants, per-frame/pass/material each have their own descriptor set with appropriate lifetime.
-- **F-009:** Mostly resolved — `UniformBlockMember` grows an `ElementStride` for the rare in-UBO arrays; bone palettes etc. move to SSBOs.
+- **F-009:** Resolved — `UniformBlockMember.ElementStride` shipped (default 0 for scalars, non-zero for array members documenting the std140 element stride). The array-uniform writer is deferred until the ShaderLab port's lit shader needs it; the declaration shape is complete. Bone palettes move to SSBOs as planned.
 - **F-011:** Resolved — descriptor set layout is derived from `ShaderInterface` instead of hardcoded.
 
 ### Vector B — Render graph + pass declaration
@@ -457,10 +457,14 @@ Disposition per note (this is what Vector D actually ships):
   access path is reworked in Vector A or B (the existing `<None Include>`
   copy-glob is GL-shaped; Vulkan uses glslc `-I` includes which the
   current csproj doesn't wire up).
-- **F-008 — DEFERRED to Vector A.** The matrix-convention question is
-  bigger than a doc note — see F-016 (audit discovery). Engine-wide
-  decision: row-vector .NET convention. Implementation lands with the
-  Vector A reshape since it touches the upload path on both backends.
+- **F-008 — RESOLVED.** Closed by Vector A binding model + F-016 matrix
+  migration. BlockLayout is the source of truth for UBO member offsets
+  (see Q-005 resolution); name-keyed ShaderUniform writes flow through
+  BlockLayout member lookup, no `[StructLayout]` reflection in the hot
+  path. .NET row-vector matrices are written via direct memcpy to
+  host-visible UBO memory on Vulkan and via `glUniformMatrix4(transpose:
+  false)` on GL — both paths reach GLSL as column-vector form via the
+  std140 reinterpret. Convention is settled engine-wide.
 
 ### Order of attack
 

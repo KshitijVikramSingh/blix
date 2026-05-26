@@ -57,9 +57,4 @@ public sealed partial class VulkanGraphicsDevice
         string? name = null) =>
         throw new NotImplementedException(NotYet);
 
-    public RenderSurface CreateRenderSurface(RenderSurfaceDescription description) =>
-        throw new NotImplementedException(NotYet);
-
-    public void DestroyRenderSurface(RenderSurfaceHandle handle) =>
-        throw new NotImplementedException(NotYet);
 }

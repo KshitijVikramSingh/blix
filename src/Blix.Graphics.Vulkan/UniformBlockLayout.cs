@@ -23,4 +23,14 @@ namespace Blix.Graphics.Vulkan;
 //   arrays:               each element aligned to 16
 public sealed record UniformBlockLayout(int TotalSize, IReadOnlyList<UniformBlockMember> Members);
 
-public sealed record UniformBlockMember(string Name, int Offset, int Size);
+// ElementStride documents the std140 array element stride for array
+// members (typically 16 for scalar/vec arrays, 64 for mat4 arrays —
+// std140 forces every array element to 16-byte alignment). 0 means
+// "not an array / stride irrelevant" and is the default; the backend
+// write path doesn't consume ElementStride for non-array writes.
+//
+// Array-uniform writes (e.g. uSpotVPs[4]) need ElementStride at write
+// time to translate `Span<Matrix4x4> values, index i` into a byte offset.
+// That writer is deferred to the ShaderLab port — for now ElementStride
+// is captured in the declaration so the binding contract is complete.
+public sealed record UniformBlockMember(string Name, int Offset, int Size, int ElementStride = 0);

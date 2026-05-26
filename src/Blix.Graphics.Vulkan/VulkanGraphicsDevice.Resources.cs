@@ -661,7 +661,13 @@ public sealed partial class VulkanGraphicsDevice
             PColorBlendState = &colorBlend,
             PDynamicState = &dynamicState,
             Layout = layout,
-            RenderPass = DefaultRenderPass,
+            // Pipeline's render pass picks based on description.RenderTarget.
+            // Null → swapchain DefaultRenderPass; non-null → the surface's
+            // own render pass (different attachment formats need a different
+            // render-pass compat group).
+            RenderPass = description.RenderTarget is { } target
+                ? renderSurfaceTable[target.Id].RenderPass
+                : DefaultRenderPass,
             Subpass = 0,
         };
 
@@ -758,6 +764,7 @@ public sealed partial class VulkanGraphicsDevice
         foreach (var e in vertexBufferTable.Values) DestroyVkBufferEntry(e);
         vertexBufferTable.Clear();
         DestroyAllMaterials();
+        DestroyAllRenderSurfaces();
         DestroyAllTextures();
         DestroyAllSamplers();
         foreach (var e in indexBufferTable.Values) DestroyVkBufferEntry(e);

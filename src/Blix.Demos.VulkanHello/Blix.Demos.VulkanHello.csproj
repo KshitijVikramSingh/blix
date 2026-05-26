@@ -32,6 +32,8 @@
     <GlslShader Include="Shaders\hello.frag" />
     <GlslShader Include="Shaders\cube.vert" />
     <GlslShader Include="Shaders\cube.frag" />
+    <GlslShader Include="Shaders\present.vert" />
+    <GlslShader Include="Shaders\present.frag" />
   </ItemGroup>
 
   <!-- Compile GLSL → SPIR-V directly into the output dir so the demo's

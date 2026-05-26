@@ -576,36 +576,74 @@ public sealed partial class VulkanGraphicsDevice
         var defaultPasses = 0;
         foreach (var pass in commandList.Passes)
         {
-            if (pass.Description.Target.Id != RenderSurfaceHandle.Default.Id) continue;
-            defaultPasses++;
+            // Resolve render-pass + framebuffer + extent based on Target.
+            // Default target hits the swapchain via DefaultRenderPass /
+            // OverlayRenderPass; non-default targets resolve through
+            // renderSurfaceTable. Step-4 limitation: offscreen surfaces have
+            // only the Clear render-pass variant; passes targeting them must
+            // declare clear colors. Vector B's graph will handle Load/Store
+            // declaratively.
+            VkRenderSurfaceEntry? customSurface = null;
+            if (pass.Description.Target.Id != RenderSurfaceHandle.Default.Id)
+            {
+                if (!renderSurfaceTable.TryGetValue(pass.Description.Target.Id, out customSurface))
+                {
+                    throw new InvalidOperationException(
+                        $"RenderPass '{pass.Name}' targets unknown RenderSurfaceHandle id {pass.Description.Target.Id}.");
+                }
+            }
+            else
+            {
+                defaultPasses++;
+            }
 
-            // Pass selection: a Pass(...) with empty ClearColors targets the
-            // OverlayRenderPass (LoadOp.Load), preserving the previous pass's
-            // pixels. Otherwise the default clearing pass. Framebuffers are
-            // compatible across both render passes because the attachment
-            // formats and counts match.
+            // Pass selection: a Pass(...) with empty ClearColors on the
+            // default target uses OverlayRenderPass (LoadOp.Load) — preserves
+            // the previous pass's pixels. Otherwise the default clearing
+            // pass. Custom-surface passes always use the surface's own
+            // Clear render pass.
             var hasClear = false;
             for (var ci2 = 0; ci2 < pass.Description.ClearColors.Count; ci2++)
             {
                 if (pass.Description.ClearColors[ci2].HasValue) { hasClear = true; break; }
             }
-            var renderPassToUse = hasClear ? DefaultRenderPass : OverlayRenderPass;
+            Silk.NET.Vulkan.RenderPass renderPassToUse;
+            Framebuffer framebufferToUse;
+            Extent2D extentToUse;
+            if (customSurface is { } surf)
+            {
+                renderPassToUse = surf.RenderPass;
+                framebufferToUse = surf.Framebuffer;
+                extentToUse = new Extent2D(surf.Width, surf.Height);
+                // Force-clear on offscreen for now (no Load variant yet).
+                hasClear = true;
+            }
+            else
+            {
+                renderPassToUse = hasClear ? DefaultRenderPass : OverlayRenderPass;
+                framebufferToUse = swapchainFramebuffers[imageIndex];
+                extentToUse = SwapchainExtent;
+            }
 
             clearValues[0] = default;
             clearValues[1] = default;
-            if (hasClear && pass.Description.ClearColors[0] is { } c)
+            if (hasClear && pass.Description.ClearColors.Count > 0 && pass.Description.ClearColors[0] is { } c)
             {
                 clearValues[0].Color = new ClearColorValue(c.Red, c.Green, c.Blue, c.Alpha);
             }
             clearValues[1].DepthStencil = new ClearDepthStencilValue(1.0f, 0);
+            // Number of clear values must match attachment count of the
+            // render pass: 2 for default+depth and custom-with-depth, 1 for
+            // custom-without-depth.
+            var clearCount = (uint)(hasClear ? (customSurface is { HasDepth: false } ? 1 : 2) : 0);
             var rpBegin = new RenderPassBeginInfo
             {
                 SType = StructureType.RenderPassBeginInfo,
                 RenderPass = renderPassToUse,
-                Framebuffer = swapchainFramebuffers[imageIndex],
-                RenderArea = new Rect2D(new Offset2D(0, 0), SwapchainExtent),
-                ClearValueCount = (uint)(hasClear ? 2 : 0),
-                PClearValues = hasClear ? clearValues : null,
+                Framebuffer = framebufferToUse,
+                RenderArea = new Rect2D(new Offset2D(0, 0), extentToUse),
+                ClearValueCount = clearCount,
+                PClearValues = clearCount > 0 ? clearValues : null,
             };
             var startIndex = nextQueryIndex;
             var endIndex = nextQueryIndex + 1;
@@ -625,10 +663,11 @@ public sealed partial class VulkanGraphicsDevice
 
             // Dynamic viewport+scissor — pipelines declare these as dynamic
             // so a single pipeline survives window resize. Match the current
-            // swapchain extent.
-            var viewport = new Viewport(0, 0, SwapchainExtent.Width, SwapchainExtent.Height, 0, 1);
+            // target's extent (swapchain for default, surface size for
+            // custom render-surface passes).
+            var viewport = new Viewport(0, 0, extentToUse.Width, extentToUse.Height, 0, 1);
             Vk.CmdSetViewport(f.CommandBuffer, 0, 1, in viewport);
-            var scissor = new Rect2D(new Offset2D(0, 0), SwapchainExtent);
+            var scissor = new Rect2D(new Offset2D(0, 0), extentToUse);
             Vk.CmdSetScissor(f.CommandBuffer, 0, 1, in scissor);
 
             foreach (var renderCmd in pass.Commands)
@@ -979,11 +1018,21 @@ public sealed partial class VulkanGraphicsDevice
     // ShaderTextureBinding.Slot semantics differ per backend:
     //   - GL: GL_TEXTURE0+slot texture unit; uniform sampler points at unit
     //   - Vulkan: the descriptor binding number within the slot's set
-    // For Vulkan the slot's set is inferred — we walk every declared set and
-    // match the first SampledImage slot whose Binding equals the requested
-    // number. This is the single-set assumption documented in the 2c plan;
-    // when multi-set materials land in 2d, ShaderTextureBinding needs to
-    // carry an explicit Set, or the lookup needs a name-keyed path.
+    //
+    // The set is inferred by matching against the first SampledImage slot
+    // in any declared set whose Binding equals the requested number. This
+    // works deterministically when at most one set has an image at that
+    // binding number — i.e. SETS 0 OR 1 ONLY. By engine convention set 2
+    // is material-owned (see MaterialBindings) and set 3 is per-draw push
+    // constants, so the search is unambiguous in practice as long as
+    // sampler bindings stay confined to sets 0–1 in the ShaderInterface.
+    //
+    // For materials' per-material textures (set 2 by convention),
+    // MaterialBindings.SetTexture writes the descriptor directly via
+    // explicit (binding) addressing — no name/set inference needed.
+    // That's the production path for textures going forward; this inline
+    // path remains for shaders that genuinely need a global / per-pass
+    // sampler at sets 0 or 1.
     //
     // The descriptor write happens every draw — wasteful when bindings don't
     // change between draws, fine for correctness. A "skip if unchanged"

@@ -6,7 +6,14 @@ public sealed record PipelineDescription(
     PrimitiveTopology Topology,
     DepthState Depth,
     RasterizerState Rasterizer,
-    IReadOnlyList<BlendState> ColorBlends)
+    IReadOnlyList<BlendState> ColorBlends,
+    // Vulkan-only: target render surface for this pipeline's render-pass
+    // compatibility. Null → swapchain (default). Vulkan render-pass
+    // compatibility requires matching attachment formats, so a pipeline
+    // baked against the swapchain (BGRA8) cannot be drawn into an
+    // offscreen Rgba16F surface — that needs its own pipeline. GL backend
+    // ignores this field.
+    RenderSurfaceHandle? RenderTarget = null)
 {
     public PipelineDescription(
         ShaderProgramHandle shaderProgram,

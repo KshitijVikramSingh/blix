@@ -582,6 +582,116 @@ static UniformBlockLayout Mat4Block() => new(
         threw is null);
 }
 
+// ============================================================================
+// Section I — Array-uniform ElementStride (closes F-009).
+// ============================================================================
+//
+// std140 forces every array element to 16-byte alignment regardless of the
+// element's natural size. ElementStride captures that stride so future
+// array-uniform writers (the ShaderLab lit shader's uSpotVPs[4] is the
+// motivating case) can translate (memberIndex, value) into the right byte
+// offset. The Write path itself is deferred; this section locks in the
+// declaration shape.
+
+{
+    // I.1 — ElementStride round-trips on the record. Default is 0 so
+    // existing single-value members stay unchanged.
+    var scalar = new UniformBlockMember("uTime", 0, 4);
+    t.ExpectClose("I.1 ElementStride defaults to 0 for scalar members", scalar.ElementStride, 0);
+
+    var arr = new UniformBlockMember("uSpotVPs", Offset: 80, Size: 64 * 4, ElementStride: 64);
+    t.ExpectClose("I.1 array-member ElementStride round-trips", arr.ElementStride, 64);
+    t.ExpectClose("I.1 array-member Size = ElementStride * count", arr.Size, arr.ElementStride * 4);
+}
+
+{
+    // I.2 — Lit-shape per-pass UBO (sun shadow VP + spot shadow VP array)
+    // validates cleanly via the existing ShaderInterface.Validate(). Real
+    // call site this enables is the ShaderLab lit-shader port (step 6).
+    var perPassLit = new UniformBlockLayout(
+        TotalSize: 80 + 64 * 4,
+        Members: new[]
+        {
+            new UniformBlockMember("uSunShadowVP", Offset: 0,  Size: 64),
+            new UniformBlockMember("uEnvMipCount", Offset: 64, Size: 4),
+            new UniformBlockMember("uSpotVPs",     Offset: 80, Size: 64 * 4, ElementStride: 64),
+        });
+    var iface = new ShaderInterface(new[]
+    {
+        new DescriptorSetSlot(1, 0, ShaderResourceType.UniformBuffer,
+            ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: perPassLit),
+    });
+    var threw = TryValidate(iface);
+    t.ExpectTrue("I.2 lit-shape per-pass UBO with array member validates", threw is null);
+}
+
+// ============================================================================
+// Section J — RenderSurface shape (step 4).
+// ============================================================================
+//
+// Backend tests need a live device; not run here. Cross-backend surface
+// shape coverage: handle equality, description value equality (so future
+// caching keys behave), size-type discrimination, PipelineDescription
+// RenderTarget round-trip via record with-update.
+
+{
+    // J.1 — RenderSurfaceHandle equality.
+    t.ExpectTrue("J.1 RenderSurfaceHandle id 0 == Default",
+        RenderSurfaceHandle.Default.Equals(new RenderSurfaceHandle(0)));
+    t.ExpectTrue("J.1 RenderSurfaceHandle distinct ids != equal",
+        !new RenderSurfaceHandle(1).Equals(new RenderSurfaceHandle(2)));
+}
+
+{
+    // J.2 — RenderSurfaceDescription record equality. C# records use
+    // reference equality on IReadOnlyList<T> fields, NOT deep value
+    // equality — equality holds when the underlying list reference is
+    // shared. The `with` expression preserves that reference, so a
+    // single field change still compares equal everywhere else.
+    var colors = new[]
+    {
+        new ColorAttachmentDescription(TextureFormat.Rgba16F, SamplerDescription.LinearClamp),
+    };
+    var a = new RenderSurfaceDescription(
+        Name: "a",
+        Size: new FixedRenderSurfaceSize(800, 600),
+        ColorAttachments: colors,
+        Depth: new DepthRenderbuffer());
+    var bSameRef = a with { };  // shares colors reference + same Depth (record clone)
+    t.ExpectTrue("J.2 same-reference clone is equal", a.Equals(bSameRef));
+
+    var differentSize = a with { Size = new FixedRenderSurfaceSize(1024, 768) };
+    t.ExpectTrue("J.2 different size makes them !=", !a.Equals(differentSize));
+}
+
+{
+    // J.3 — RenderSurfaceSize discriminated cases round-trip.
+    var fixedSize = new FixedRenderSurfaceSize(400, 300);
+    t.ExpectClose("J.3 FixedRenderSurfaceSize.Width", fixedSize.Width, 400);
+    t.ExpectClose("J.3 FixedRenderSurfaceSize.Height", fixedSize.Height, 300);
+
+    var match = new MatchDefaultRenderSurfaceSize(Scale: 0.5f);
+    t.ExpectClose("J.3 MatchDefaultRenderSurfaceSize.Scale", match.Scale, 0.5f);
+
+    var matchDefault = new MatchDefaultRenderSurfaceSize();
+    t.ExpectClose("J.3 MatchDefaultRenderSurfaceSize default scale = 1.0", matchDefault.Scale, 1.0f);
+}
+
+{
+    // J.4 — PipelineDescription.RenderTarget round-trips via record with-update.
+    var basePipe = new PipelineDescription(
+        new ShaderProgramHandle(1),
+        VertexPosition3Texture.Layout,
+        PrimitiveTopology.Triangles,
+        DepthState.LessEqualWrite,
+        RasterizerState.NoCulling,
+        BlendState.Disabled);
+    t.ExpectTrue("J.4 default PipelineDescription.RenderTarget is null", basePipe.RenderTarget is null);
+    var withTarget = basePipe with { RenderTarget = new RenderSurfaceHandle(7) };
+    t.ExpectTrue("J.4 with-update preserves RenderTarget id",
+        withTarget.RenderTarget is { } h && h.Id == 7);
+}
+
 t.PrintSummary();
 return t.FailedCount;
 

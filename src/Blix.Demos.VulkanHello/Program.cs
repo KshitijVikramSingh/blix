@@ -38,6 +38,15 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
     private TextureHandle albedoTexture;
     private MaterialHandle whiteMaterial;
     private MaterialHandle redMaterial;
+
+    // Step 4 — offscreen pass + present pass.
+    private RenderSurfaceHandle offscreenSurface;
+    private TextureHandle offscreenColor;
+    private ShaderProgramHandle presentShaderProgram;
+    private PipelineHandle presentPipeline;
+    private VertexBufferHandle presentVertexBuffer;
+    private IndexBufferHandle presentIndexBuffer;
+
     private int frameCount;
     private Matrix4x4 viewProj;
 
@@ -120,18 +129,37 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
                 new PushConstantRange(ShaderStages.Vertex, Offset: 0, Size: 64),
             });
 
+        // Offscreen render target — half-resolution Rgba16F with a depth
+        // attachment so the cubes' DepthState.LessEqualWrite still
+        // depth-tests. The half-res upscale at present time is the visible
+        // proof that an intermediate buffer is in the pipeline.
+        var surface = vk.CreateRenderSurface(new RenderSurfaceDescription(
+            Name: "offscreen",
+            Size: new MatchDefaultRenderSurfaceSize(Scale: 0.5f),
+            ColorAttachments: new[]
+            {
+                new ColorAttachmentDescription(TextureFormat.Rgba16F, SamplerDescription.LinearClamp),
+            },
+            Depth: new DepthRenderbuffer()));
+        offscreenSurface = surface.Handle;
+        offscreenColor = surface.ColorAttachments[0];
+
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         var vertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv"));
         var fragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv"));
         shaderProgram = vk.CreateShaderProgramFromSpv(vertSpv, fragSpv, cubeInterface, "cube");
 
+        // Cube pipeline targets the offscreen surface — different attachment
+        // formats (Rgba16F + D32 vs swapchain BGRA + D32) require a render-
+        // pass-compatible pipeline, so we bake against the surface's pass.
         pipeline = vk.CreatePipeline(new PipelineDescription(
             shaderProgram,
             VertexPosition3Texture.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
-            BlendState.Disabled), "cube");
+            new[] { BlendState.Disabled },
+            RenderTarget: offscreenSurface), "cube");
 
         // Two materials sharing the same shader interface and same texture,
         // different tint. The cube switches between them every 2 seconds
@@ -146,6 +174,46 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
             .SetUniform(binding: 0, "uTint", new Vector4(1.0f, 0.45f, 0.35f, 1.0f))
             .SetTexture(binding: 1, albedoTexture)
             .Handle;
+
+        // --- Present pipeline ---------------------------------------------
+        // Fullscreen-quad sampler that reads offscreenColor and writes the
+        // swapchain. Interface: one SampledImage at set 0 binding 0 — uses
+        // the inline ShaderTextureBinding path (set 0 is within the
+        // single-set assumption documented in Cleanup C).
+        var presentInterface = new ShaderInterface(new[]
+        {
+            new DescriptorSetSlot(
+                Set: 0, Binding: 0,
+                Type: ShaderResourceType.SampledImage,
+                Stages: ShaderStages.Fragment),
+        });
+        var presentVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv"));
+        var presentFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv"));
+        presentShaderProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, presentInterface, "present");
+
+        // Present pipeline targets the swapchain (RenderTarget defaults
+        // to null → DefaultRenderPass). No depth test — fullscreen quad.
+        presentPipeline = vk.CreatePipeline(new PipelineDescription(
+            presentShaderProgram,
+            VertexPosition3Texture.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.Disabled,
+            RasterizerState.NoCulling,
+            BlendState.Disabled), "present");
+
+        // Dummy 3-vertex / 3-index buffer. present.vert ignores inPosition
+        // and inUv — gl_VertexIndex generates the fullscreen triangle. But
+        // the engine's vertex layout requires a non-empty binding, so we
+        // ship three throwaway vertices.
+        var dummyVerts = new VertexPosition3Texture[]
+        {
+            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
+            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
+            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
+        };
+        presentVertexBuffer = vk.CreateVertexBuffer(
+            VertexPosition3Texture.CreateBufferData(dummyVerts), "present.vb");
+        presentIndexBuffer = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "present.ib");
 
         // Camera pulled back + raised so both cubes fit. Two cubes at
         // x = ±CubeSeparation; camera at (3.5, 1.9, 4.5) looking at origin.
@@ -186,15 +254,17 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
             new("uViewProjection", new Matrix4x4Uniform(viewProj)),
         };
 
+        // Pass 1 — render both cubes into the half-resolution offscreen
+        // Rgba16F surface. Surface's render pass auto-transitions the color
+        // attachment to SHADER_READ_ONLY_OPTIMAL at end-of-pass.
         commandList.Pass(
-            "cube",
+            "cube-offscreen",
             new RenderPassDescription(
-                Target: RenderSurfaceHandle.Default,
+                Target: offscreenSurface,
                 ClearColors: new GraphicsColor?[] { new GraphicsColor(0.06f, 0.08f, 0.12f, 1.0f) },
                 ClearDepth: true),
             pass =>
             {
-                // Left cube — white material, leftModel push payload.
                 pass.DrawIndexed(
                     vertexBuffer: vertexBuffer,
                     indexBuffer: indexBuffer,
@@ -205,7 +275,6 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
                     material: whiteMaterial,
                     pushConstants: leftPushBytes);
 
-                // Right cube — red material, rightModel push payload.
                 pass.DrawIndexed(
                     vertexBuffer: vertexBuffer,
                     indexBuffer: indexBuffer,
@@ -215,6 +284,29 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
                     textures: Array.Empty<ShaderTextureBinding>(),
                     material: redMaterial,
                     pushConstants: rightPushBytes);
+            });
+
+        // Pass 2 — fullscreen quad samples offscreenColor and writes the
+        // swapchain. Half-res → full-res upscale gives a slight softening
+        // which is the visible proof the intermediate buffer is real.
+        commandList.Pass(
+            "present",
+            new RenderPassDescription(
+                Target: RenderSurfaceHandle.Default,
+                ClearColors: new GraphicsColor?[] { new GraphicsColor(0, 0, 0, 1) },
+                ClearDepth: true),
+            pass =>
+            {
+                pass.DrawIndexed(
+                    vertexBuffer: presentVertexBuffer,
+                    indexBuffer: presentIndexBuffer,
+                    pipeline: presentPipeline,
+                    indexCount: 3,
+                    uniforms: Array.Empty<ShaderUniform>(),
+                    textures: new[]
+                    {
+                        new ShaderTextureBinding("uOffscreen", offscreenColor, Slot: 0),
+                    });
             });
     }
 
