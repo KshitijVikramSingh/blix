@@ -53,6 +53,132 @@ public sealed partial class VulkanGraphicsDevice
         return new TextureHandle(id);
     }
 
+    // Uploads a sampleable cubemap (6 faces, optional mip chain) from CPU
+    // bytes. Data layout is face-major then mip-major: for face 0..5, the
+    // tightly-packed mips 0..mipCount-1 (each mip sized faceSize>>level).
+    // Used for IBL (procedural sky env + irradiance) — sampled as samplerCube.
+    public unsafe TextureHandle CreateTextureCube(
+        int faceSize, TextureFormat format, int mipCount,
+        ReadOnlySpan<byte> data, SamplerDescription samplerDesc, string name)
+    {
+        var vkFormat = MapTextureFormat(format);
+
+        // Validate total size = Σ over 6 faces of Σ over mips of mipByteCount.
+        long expected = 0;
+        for (var f = 0; f < 6; f++)
+            for (var m = 0; m < mipCount; m++)
+                expected += format.MipByteCount(faceSize >> m, faceSize >> m);
+        if (data.Length != expected)
+        {
+            throw new ArgumentException(
+                $"Cube '{name}' expected {expected} bytes ({faceSize}px, {mipCount} mips, 6 faces), got {data.Length}.",
+                nameof(data));
+        }
+
+        var staging = CreateHostVisibleBuffer(data, BufferUsageFlags.TransferSrcBit, $"{name}.staging");
+
+        var imageCi = new ImageCreateInfo
+        {
+            SType = StructureType.ImageCreateInfo,
+            Flags = ImageCreateFlags.CreateCubeCompatibleBit,
+            ImageType = ImageType.Type2D,
+            Format = vkFormat,
+            Extent = new Extent3D((uint)faceSize, (uint)faceSize, 1),
+            MipLevels = (uint)mipCount,
+            ArrayLayers = 6,
+            Samples = SampleCountFlags.Count1Bit,
+            Tiling = ImageTiling.Optimal,
+            Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.SampledBit,
+            SharingMode = SharingMode.Exclusive,
+            InitialLayout = ImageLayout.Undefined,
+        };
+        Image image;
+        ThrowIfNotSuccess(Vk.CreateImage(Device, in imageCi, null, &image), $"vkCreateImage({name}.cube)");
+
+        Vk.GetImageMemoryRequirements(Device, image, out var memReq);
+        var memTypeIdx = FindMemoryTypeIndex(memReq.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit);
+        var allocCi = new MemoryAllocateInfo
+        {
+            SType = StructureType.MemoryAllocateInfo,
+            AllocationSize = memReq.Size,
+            MemoryTypeIndex = memTypeIdx,
+        };
+        DeviceMemory memory;
+        ThrowIfNotSuccess(Vk.AllocateMemory(Device, in allocCi, null, &memory), $"vkAllocateMemory({name}.cube)");
+        ThrowIfNotSuccess(Vk.BindImageMemory(Device, image, memory, 0), $"vkBindImageMemory({name}.cube)");
+
+        var cmd = BeginSingleTimeCommands();
+        TransitionImageLayout(cmd, image, mipCount, ImageLayout.Undefined, ImageLayout.TransferDstOptimal, layerCount: 6);
+
+        // One copy region per (face, mip). bufferOffset walks the data in the
+        // same face-major/mip-major order the caller packed it.
+        ulong offset = 0;
+        for (var face = 0u; face < 6u; face++)
+        {
+            for (var mip = 0; mip < mipCount; mip++)
+            {
+                var dim = (uint)(faceSize >> mip);
+                var region = new BufferImageCopy
+                {
+                    BufferOffset = offset,
+                    ImageSubresource = new ImageSubresourceLayers
+                    {
+                        AspectMask = ImageAspectFlags.ColorBit,
+                        MipLevel = (uint)mip,
+                        BaseArrayLayer = face,
+                        LayerCount = 1,
+                    },
+                    ImageOffset = new Offset3D(0, 0, 0),
+                    ImageExtent = new Extent3D(dim, dim, 1),
+                };
+                Vk.CmdCopyBufferToImage(cmd, staging.Buffer, image, ImageLayout.TransferDstOptimal, 1, in region);
+                offset += (ulong)format.MipByteCount((int)dim, (int)dim);
+            }
+        }
+
+        TransitionImageLayout(cmd, image, mipCount, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal, layerCount: 6);
+        EndSingleTimeCommands(cmd);
+
+        var viewCi = new ImageViewCreateInfo
+        {
+            SType = StructureType.ImageViewCreateInfo,
+            Image = image,
+            ViewType = ImageViewType.TypeCube,
+            Format = vkFormat,
+            Components = new ComponentMapping(
+                ComponentSwizzle.Identity, ComponentSwizzle.Identity,
+                ComponentSwizzle.Identity, ComponentSwizzle.Identity),
+            SubresourceRange = new ImageSubresourceRange
+            {
+                AspectMask = ImageAspectFlags.ColorBit,
+                BaseMipLevel = 0,
+                LevelCount = (uint)mipCount,
+                BaseArrayLayer = 0,
+                LayerCount = 6,
+            },
+        };
+        ImageView view;
+        ThrowIfNotSuccess(Vk.CreateImageView(Device, in viewCi, null, &view), $"vkCreateImageView({name}.cube)");
+
+        DestroyVkBufferEntry(staging);
+
+        var entry = new VkTextureEntry
+        {
+            Image = image,
+            Memory = memory,
+            View = view,
+            Sampler = GetOrCreateSampler(samplerDesc),
+            Width = faceSize,
+            Height = faceSize,
+            MipCount = mipCount,
+            Format = vkFormat,
+            Name = name,
+        };
+        var cid = nextResourceId++;
+        textureTable[cid] = entry;
+        return new TextureHandle(cid);
+    }
+
     public void DestroyTexture(TextureHandle handle)
     {
         if (!textureTable.Remove(handle.Id, out var e)) return;
@@ -247,7 +373,8 @@ public sealed partial class VulkanGraphicsDevice
         Image image,
         int mipCount,
         ImageLayout oldLayout,
-        ImageLayout newLayout)
+        ImageLayout newLayout,
+        int layerCount = 1)
     {
         AccessFlags srcAccess;
         AccessFlags dstAccess;
@@ -290,7 +417,7 @@ public sealed partial class VulkanGraphicsDevice
                 BaseMipLevel = 0,
                 LevelCount = (uint)mipCount,
                 BaseArrayLayer = 0,
-                LayerCount = 1,
+                LayerCount = (uint)layerCount,
             },
             SrcAccessMask = srcAccess,
             DstAccessMask = dstAccess,

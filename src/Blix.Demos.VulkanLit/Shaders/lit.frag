@@ -25,6 +25,10 @@ layout(set = 0, binding = 0) uniform Frame {
 layout(set = 1, binding = 0) uniform sampler2D uSunShadowMap;
 layout(set = 1, binding = 1) uniform sampler2D uSpotShadowMaps[2];
 layout(set = 1, binding = 2) uniform samplerCube uPointShadowCube;
+// IBL: diffuse irradiance, prefiltered specular env (mipped), split-sum LUT.
+layout(set = 1, binding = 3) uniform samplerCube uIrradiance;
+layout(set = 1, binding = 4) uniform samplerCube uPrefilteredEnv;
+layout(set = 1, binding = 5) uniform sampler2D uBrdfLut;
 
 // Set 2 = per-material.
 layout(set = 2, binding = 0) uniform LitMaterial {
@@ -112,6 +116,14 @@ float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
+
+// Roughness-aware Fresnel for the IBL ambient term (Sébastien Lagarde).
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
+    vec3 r = max(vec3(1.0 - roughness), F0);
+    return F0 + (r - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+const float MAX_REFLECTION_LOD = 6.0;  // EnvMips - 1
 
 // Cotangent-frame normal mapping (Schüler). Builds a TBN from screen-space
 // derivatives of world position + UV — no per-vertex tangent needed, so it
@@ -212,8 +224,16 @@ void main() {
         Lo += brdf(N, V, L, radiance, albedo, metallic, roughness, F0);
     }
 
-    // Flat ambient (replaced by IBL in a later step). Metals have no diffuse.
-    vec3 ambient = albedo * frame.uAmbientColor * frame.uAmbientIntensity * (1.0 - metallic);
+    // --- Image-based lighting (ambient) ---------------------------------
+    float NdotV = max(dot(N, V), 0.0);
+    vec3 R = reflect(-V, N);
+    vec3 F = fresnelSchlickRoughness(NdotV, F0, roughness);
+    vec3 kd = (vec3(1.0) - F) * (1.0 - metallic);
+    vec3 diffuseIBL = texture(uIrradiance, N).rgb * albedo;
+    vec3 prefiltered = textureLod(uPrefilteredEnv, R, roughness * MAX_REFLECTION_LOD).rgb;
+    vec2 brdf = texture(uBrdfLut, vec2(NdotV, roughness)).rg;
+    vec3 specularIBL = prefiltered * (F0 * brdf.x + brdf.y);
+    vec3 ambient = (kd * diffuseIBL + specularIBL) * frame.uAmbientIntensity;
 
     outColor = vec4(ambient + Lo, mat.uTint.a);
 }
