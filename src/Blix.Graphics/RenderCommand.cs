@@ -36,4 +36,11 @@ public sealed record DrawIndexedCommand(
     // vkCmdPushConstants once per declared range. GL rejects non-null
     // (push constants have no direct GL equivalent — emulate via uniform
     // writes in the GL backend instead).
-    byte[]? PushConstants = null) : RenderCommand;
+    byte[]? PushConstants = null,
+    // Vulkan-only: a SECOND MaterialBindings handle bound at its declared
+    // set index. The canonical use is the skinned-mesh path — Material
+    // owns set 2 (per-material albedo/tint), PerDrawMaterial owns set 3
+    // (per-draw bone palette SSBO, framesInFlight-replicated). The engine
+    // binds both at their respective SetIndex values; they must differ
+    // from each other and from any per-frame engine-owned set.
+    MaterialHandle? PerDrawMaterial = null) : RenderCommand;

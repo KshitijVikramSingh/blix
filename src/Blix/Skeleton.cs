@@ -75,7 +75,10 @@ public sealed class Skeleton
             else
             {
                 Matrix4x4.Invert(bindWorld[p], out var inverseParent);
-                locals[i] = BoneTransform.FromMatrix(inverseParent * bindWorld[i]);
+                // Row-vector composition (F-016): a vertex flows left-to-right.
+                // child-local → world via bindWorld[child], then world →
+                // parent-local via inverseParent gives child-local → parent-local.
+                locals[i] = BoneTransform.FromMatrix(bindWorld[i] * inverseParent);
             }
         }
         return new Pose(locals);
@@ -108,17 +111,22 @@ public sealed class Skeleton
                 nameof(outPalette));
         }
 
+        // Row-vector composition (F-016): a vertex flows left-to-right through
+        // the chain. For bone i, world = local[i] · local[parent] · … · local[root]
+        // so the recurrence pre-multiplies the child's local onto the parent's
+        // accumulated world. Palette then maps rest → bone-local (InverseBindPose)
+        // and bone-local → world (worldMatrices), in that left-to-right order.
         var worldMatrices = new Matrix4x4[Bones.Length];
         for (var i = 0; i < Bones.Length; i++)
         {
             var localMatrix = pose.Locals[i].ToMatrix();
             var p = Bones[i].ParentIndex;
-            worldMatrices[i] = p < 0 ? localMatrix : worldMatrices[p] * localMatrix;
+            worldMatrices[i] = p < 0 ? localMatrix : localMatrix * worldMatrices[p];
         }
 
         for (var i = 0; i < Bones.Length; i++)
         {
-            outPalette.Matrices[i] = worldMatrices[i] * Bones[i].InverseBindPose;
+            outPalette.Matrices[i] = Bones[i].InverseBindPose * worldMatrices[i];
         }
     }
 }

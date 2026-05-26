@@ -132,4 +132,65 @@ public sealed class RenderPassBuilder
         commands.Add(command);
         recorder?.OnDraw(in command);
     }
+
+    // Draw with push-constant payload but NO material (set 2 unused).
+    // Shadow / depth-only passes that only need set 0 + push constants.
+    // Vulkan-only — GL backend rejects non-null PushConstants on execute.
+    public void DrawIndexed(
+        VertexBufferHandle vertexBuffer,
+        IndexBufferHandle indexBuffer,
+        PipelineHandle pipeline,
+        int indexCount,
+        IReadOnlyList<ShaderUniform> uniforms,
+        IReadOnlyList<ShaderTextureBinding> textures,
+        byte[] pushConstants)
+    {
+        var command = new DrawIndexedCommand(
+            vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures,
+            IndexOffset: 0, Material: null, PushConstants: pushConstants);
+        commands.Add(command);
+        recorder?.OnDraw(in command);
+    }
+
+    // Skinned-draw overload: material at its SetIndex (typically 2) +
+    // perDrawMaterial at its SetIndex (typically 3, e.g. bone palette
+    // SSBO). Push constants required (uModel per draw). Vulkan-only.
+    public void DrawIndexed(
+        VertexBufferHandle vertexBuffer,
+        IndexBufferHandle indexBuffer,
+        PipelineHandle pipeline,
+        int indexCount,
+        IReadOnlyList<ShaderUniform> uniforms,
+        IReadOnlyList<ShaderTextureBinding> textures,
+        MaterialHandle material,
+        MaterialHandle perDrawMaterial,
+        byte[] pushConstants)
+    {
+        var command = new DrawIndexedCommand(
+            vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures,
+            IndexOffset: 0, Material: material, PushConstants: pushConstants,
+            PerDrawMaterial: perDrawMaterial);
+        commands.Add(command);
+        recorder?.OnDraw(in command);
+    }
+
+    // Skinned-shadow overload: per-draw bone palette only (no set-2
+    // material — shadow shader uses set 0 + set 3 only). Vulkan-only.
+    public void DrawIndexedSkinnedShadow(
+        VertexBufferHandle vertexBuffer,
+        IndexBufferHandle indexBuffer,
+        PipelineHandle pipeline,
+        int indexCount,
+        IReadOnlyList<ShaderUniform> uniforms,
+        IReadOnlyList<ShaderTextureBinding> textures,
+        MaterialHandle perDrawMaterial,
+        byte[] pushConstants)
+    {
+        var command = new DrawIndexedCommand(
+            vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures,
+            IndexOffset: 0, Material: null, PushConstants: pushConstants,
+            PerDrawMaterial: perDrawMaterial);
+        commands.Add(command);
+        recorder?.OnDraw(in command);
+    }
 }

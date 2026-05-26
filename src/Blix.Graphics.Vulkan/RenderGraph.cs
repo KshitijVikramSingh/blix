@@ -202,10 +202,6 @@ public sealed partial class RenderGraph
     // target. Use this to pass the color attachment of pass A as an
     // input to pass B via ShaderTextureBinding. Available only after
     // Compile() — the underlying VkImage doesn't exist until then.
-    //
-    // Throws if the handle isn't a graph-owned ColorTarget (depth
-    // resources aren't sampleable in v1; sampleable-depth lands when
-    // ShaderLab port needs shadow-map sampling).
     public TextureHandle GetColorTexture(GraphResourceHandle resource)
     {
         if (!IsCompiled)
@@ -218,10 +214,50 @@ public sealed partial class RenderGraph
             throw new InvalidOperationException(
                 $"Graph resource id {resource.Id} has no allocated backend. Was it created via this graph's ColorTarget factory?");
         }
+        if (Resources[resource.Id].Kind != GraphResourceKind.ColorTarget)
+        {
+            throw new InvalidOperationException(
+                $"Graph resource id {resource.Id} is not a ColorTarget. Use GetDepthTexture for depth resources.");
+        }
         if (br.SampleableHandle is not { } th)
         {
             throw new InvalidOperationException(
-                $"Graph resource id {resource.Id} is not a sampleable color target (depth resources aren't sampleable in v1).");
+                $"Graph resource id {resource.Id} has no sampleable handle. Was the resource registered correctly?");
+        }
+        return th;
+    }
+
+    // Returns the sampleable TextureHandle for a graph-managed depth
+    // target. The shadow-map sampling path: a depth pass writes the
+    // resource at ShaderReadOnlyOptimal finalLayout (handled by the
+    // graph's render pass setup), and a subsequent pass reads it via
+    // sampler2D / ShaderTextureBinding. Available only after Compile().
+    //
+    // The default sampler is LinearClamp (ClampToEdge). For hardware PCF
+    // (samplerShadow with comparison mode) a future overload will accept
+    // a SamplerDescription; current consumers do manual depth comparison
+    // in the shader, which works with the linear sampler.
+    public TextureHandle GetDepthTexture(GraphResourceHandle resource)
+    {
+        if (!IsCompiled)
+        {
+            throw new InvalidOperationException(
+                "RenderGraph.GetDepthTexture called before Compile. Depth attachments don't exist as sampleable textures until the graph has been compiled.");
+        }
+        if (!BackendResources.TryGetValue(resource.Id, out var br))
+        {
+            throw new InvalidOperationException(
+                $"Graph resource id {resource.Id} has no allocated backend. Was it created via this graph's DepthTarget factory?");
+        }
+        if (Resources[resource.Id].Kind != GraphResourceKind.DepthTarget)
+        {
+            throw new InvalidOperationException(
+                $"Graph resource id {resource.Id} is not a DepthTarget. Use GetColorTexture for color resources; sampleable depth cubes are not supported yet.");
+        }
+        if (br.SampleableHandle is not { } th)
+        {
+            throw new InvalidOperationException(
+                $"Graph resource id {resource.Id} has no sampleable handle. Was the resource registered correctly?");
         }
         return th;
     }

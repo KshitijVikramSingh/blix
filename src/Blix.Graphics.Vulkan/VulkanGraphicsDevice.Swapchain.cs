@@ -12,6 +12,14 @@ public sealed partial class VulkanGraphicsDevice
 {
     private const int MaxFramesInFlight = 2;
 
+    // Public accessors for per-frame replicated resources (e.g.
+    // MaterialBindings with framesInFlight > 1 for bone-palette SSBOs).
+    // CurrentFrameSlot is the slot index being recorded right now — write
+    // a slot's payload during OnRender and the bind path will pick it up
+    // for this frame's draws automatically.
+    public int MaxFramesInFlightCount => MaxFramesInFlight;
+    public int CurrentFrameSlot => currentFrame;
+
     internal KhrSwapchain KhrSwapchain { get; private set; } = null!;
     internal SwapchainKHR Swapchain { get; private set; }
     internal Format SwapchainFormat { get; private set; }
@@ -574,7 +582,10 @@ public sealed partial class VulkanGraphicsDevice
         // reads from the pointer at vkCmdBeginRenderPass time, so the buffer
         // only needs to be valid for the duration of that one call. Allocating
         // it inside the loop trips CA2014 (stack growth across iterations).
-        var clearValues = stackalloc ClearValue[2];
+        // Sized for the largest attachment count we currently produce:
+        // N color + 1 depth. 8 is headroom for a future multi-target G-buffer
+        // pass — bump if a pass declares more than 7 color attachments.
+        var clearValues = stackalloc ClearValue[8];
         var defaultPasses = 0;
         foreach (var pass in commandList.Passes)
         {
@@ -627,17 +638,35 @@ public sealed partial class VulkanGraphicsDevice
                 extentToUse = SwapchainExtent;
             }
 
-            clearValues[0] = default;
-            clearValues[1] = default;
-            if (hasClear && pass.Description.ClearColors.Count > 0 && pass.Description.ClearColors[0] is { } c)
+            // Attachment count for clear-values indexing. Vulkan reads
+            // pClearValues[i] as the clear for render-pass attachment i,
+            // so depth's slot is `colorCount` (not a hardcoded 1).
+            //
+            //   Default swapchain pass: 1 color + 1 depth
+            //   Custom surface pass:    ClearColors.Count color + (HasDepth ? 1 depth : 0)
+            //
+            // A shadow pass with 0 color attachments needs the depth clear
+            // at index 0, NOT index 1 — getting this wrong clears the
+            // depth target to a default ClearValue (depth=0.0 reinterpreted
+            // from a zero ClearColorValue), which makes every fragment read
+            // back depth=0 from a "shadow map" that's all near-plane.
+            var colorCount = customSurface is null ? 1 : pass.Description.ClearColors.Count;
+            var hasDepthAttachment = customSurface is null ? true : customSurface.HasDepth;
+            for (var i = 0; i < colorCount; i++)
             {
-                clearValues[0].Color = new ClearColorValue(c.Red, c.Green, c.Blue, c.Alpha);
+                clearValues[i] = default;
+                if (hasClear && i < pass.Description.ClearColors.Count
+                    && pass.Description.ClearColors[i] is { } cc)
+                {
+                    clearValues[i].Color = new ClearColorValue(cc.Red, cc.Green, cc.Blue, cc.Alpha);
+                }
             }
-            clearValues[1].DepthStencil = new ClearDepthStencilValue(1.0f, 0);
-            // Number of clear values must match attachment count of the
-            // render pass: 2 for default+depth and custom-with-depth, 1 for
-            // custom-without-depth.
-            var clearCount = (uint)(hasClear ? (customSurface is { HasDepth: false } ? 1 : 2) : 0);
+            if (hasDepthAttachment)
+            {
+                clearValues[colorCount] = default;
+                clearValues[colorCount].DepthStencil = new ClearDepthStencilValue(1.0f, 0);
+            }
+            var clearCount = (uint)(hasClear ? colorCount + (hasDepthAttachment ? 1 : 0) : 0);
             var rpBegin = new RenderPassBeginInfo
             {
                 SType = StructureType.RenderPassBeginInfo,
@@ -942,12 +971,19 @@ public sealed partial class VulkanGraphicsDevice
                 pDynamicOffsets: null);
         }
 
-        // Bind the material's static descriptor set at its declared set
-        // index. Materials own set 2 by convention.
+        // Bind the material's descriptor set at its declared set index.
+        // For static materials (FramesInFlight == 1) Sets[0] is the single
+        // long-lived set. For per-frame replicated materials, Sets[frameSlot]
+        // selects the slot whose buffer was written this frame.
+        // Material lookup helper: static materials (FramesInFlight == 1)
+        // always pick Sets[0]; per-frame replicated materials pick the
+        // slot matching the current frame index. Modulo handles both
+        // shapes uniformly so the legacy single-set static path keeps
+        // working without a special branch.
         if (d.Material is { } matHandle)
         {
             var mat = materialTable[matHandle.Id];
-            var matSet = mat.Set;
+            var matSet = mat.Sets[frameSlot % mat.FramesInFlight];
             Vk.CmdBindDescriptorSets(
                 cmd,
                 PipelineBindPoint.Graphics,
@@ -955,6 +991,20 @@ public sealed partial class VulkanGraphicsDevice
                 firstSet: (uint)mat.SetIndex,
                 descriptorSetCount: 1,
                 &matSet,
+                dynamicOffsetCount: 0,
+                pDynamicOffsets: null);
+        }
+        if (d.PerDrawMaterial is { } perDrawHandle)
+        {
+            var perDraw = materialTable[perDrawHandle.Id];
+            var perDrawSet = perDraw.Sets[frameSlot % perDraw.FramesInFlight];
+            Vk.CmdBindDescriptorSets(
+                cmd,
+                PipelineBindPoint.Graphics,
+                pipe.Layout,
+                firstSet: (uint)perDraw.SetIndex,
+                descriptorSetCount: 1,
+                &perDrawSet,
                 dynamicOffsetCount: 0,
                 pDynamicOffsets: null);
         }

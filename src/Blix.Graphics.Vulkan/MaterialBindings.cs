@@ -3,21 +3,32 @@ using Silk.NET.Vulkan;
 
 namespace Blix.Graphics.Vulkan;
 
-// Per-material descriptor-set carrier (set 2 by convention from
-// docs/vulkan-reshape-shaderlab-target.md). One instance owns ONE static
-// VkDescriptorSet (not per-frame replicated) plus host-visible UBO/SSBO
-// buffers for any buffer slots declared at its set index. Constructed
-// via VulkanGraphicsDevice.CreateMaterial; values written via SetUniform
-// / SetTexture; the handle is passed to RenderPassBuilder.DrawIndexed.
+// Per-material descriptor-set carrier. One instance owns the VkDescriptorSet
+// + host-visible UBO/SSBO buffers for the slots declared at its `SetIndex`
+// in the shader interface. Constructed via VulkanGraphicsDevice.CreateMaterial;
+// values written via SetUniform / SetTexture / WriteBuffer; the handle is
+// passed to RenderPassBuilder.DrawIndexed.
 //
-// Static-set design — no per-frame replication. The descriptor set is
-// written once during setup (SetUniform / SetTexture calls happen at
-// OnLoad, not mid-frame) and bound unchanged thereafter. Mutating a
-// MaterialBindings while a frame using it is in flight is a Vulkan
-// validation hazard — to change values safely, create a new instance.
+// Two modes:
 //
-// Per-slot addressing: binding number identifies the slot inside the
-// set (per F-002: names live in BlockLayout for UBO members, not for
+// 1) Static (FramesInFlight == 1, the default — set 2 / per-material).
+//    One pool + one set + one buffer per binding. Values are typically
+//    written ONCE during setup; mutating them while a frame using the
+//    material is in flight is a Vulkan validation hazard. Use a second
+//    instance to update.
+//
+// 2) Per-frame replicated (FramesInFlight > 1 — set 3 / per-draw SSBO).
+//    `MaxFramesInFlight` pools + sets + buffers. Each frame the caller
+//    writes the slot matching the current frame index via
+//    `WriteBuffer(frameSlot, binding, payload)` and binds the matching
+//    descriptor set via the standard DrawIndexed path; the engine selects
+//    `Sets[frameSlot]` automatically. The CPU writes a slot only when the
+//    GPU has finished using it (the swapchain's per-frame semaphore wait
+//    guarantees this), so per-frame writes are safe without an explicit
+//    fence.
+//
+// Per-slot addressing: binding number identifies the slot inside the set
+// (per F-002: names live in BlockLayout for UBO members, not for
 // descriptor lookup). SetUniform takes (binding, memberName, value)
 // where memberName is the field inside the slot's BlockLayout.
 public sealed class MaterialBindings
@@ -28,23 +39,35 @@ public sealed class MaterialBindings
     public MaterialHandle Handle { get; }
     public string Name { get; }
     public int SetIndex { get; }
+    public int FramesInFlight { get; }
 
-    internal DescriptorPool Pool;
-    internal DescriptorSet Set;
-    internal Dictionary<int, VulkanGraphicsDevice.VkBufferEntry> Buffers = new();
+    // Per-frame replicated. Length == FramesInFlight. For static materials
+    // (FramesInFlight == 1) these are single-element arrays — the binding
+    // path uses Sets[frameSlot] uniformly.
+    internal DescriptorPool[] Pools;
+    internal DescriptorSet[] Sets;
+    internal Dictionary<int, VulkanGraphicsDevice.VkBufferEntry>[] BuffersPerFrame;
 
     internal MaterialBindings(
         VulkanGraphicsDevice device,
         ShaderInterface shaderInterface,
         DescriptorSetLayout sharedLayout,
         int setIndex,
+        int framesInFlight,
         MaterialHandle handle,
         string name)
     {
+        if (framesInFlight < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(framesInFlight), framesInFlight, "framesInFlight must be >= 1.");
+        }
+
         this.device = device;
         Handle = handle;
         Name = name;
         SetIndex = setIndex;
+        FramesInFlight = framesInFlight;
 
         slots = new List<DescriptorSetSlot>();
         foreach (var s in shaderInterface.Slots)
@@ -57,15 +80,26 @@ public sealed class MaterialBindings
                 $"MaterialBindings '{name}' targets set {setIndex} but the shader interface declares no slots at that set.");
         }
 
-        AllocateDescriptorSet(sharedLayout);
-        AllocateBufferSlots();
+        Pools = new DescriptorPool[framesInFlight];
+        Sets = new DescriptorSet[framesInFlight];
+        BuffersPerFrame = new Dictionary<int, VulkanGraphicsDevice.VkBufferEntry>[framesInFlight];
+        for (var i = 0; i < framesInFlight; i++)
+        {
+            BuffersPerFrame[i] = new Dictionary<int, VulkanGraphicsDevice.VkBufferEntry>();
+        }
+
+        for (var i = 0; i < framesInFlight; i++)
+        {
+            AllocateDescriptorSet(sharedLayout, frameSlot: i);
+            AllocateBufferSlots(frameSlot: i);
+        }
     }
 
-    private unsafe void AllocateDescriptorSet(DescriptorSetLayout sharedLayout)
+    private unsafe void AllocateDescriptorSet(DescriptorSetLayout sharedLayout, int frameSlot)
     {
         // Pool sized for exactly this material's slots (one descriptor per
         // slot, possibly with Count>1 for sampler arrays). MaxSets=1 because
-        // we allocate the single material set up front.
+        // each pool feeds exactly one set (one per frame slot).
         var perTypeCount = new Dictionary<DescriptorType, uint>();
         foreach (var s in slots)
         {
@@ -89,8 +123,8 @@ public sealed class MaterialBindings
         DescriptorPool pool;
         VulkanGraphicsDevice.ThrowIfNotSuccess(
             device.Vk.CreateDescriptorPool(device.Device, in poolCi, null, &pool),
-            $"vkCreateDescriptorPool(material:{Name})");
-        Pool = pool;
+            $"vkCreateDescriptorPool(material:{Name},frame:{frameSlot})");
+        Pools[frameSlot] = pool;
 
         var layout = sharedLayout;
         var allocInfo = new DescriptorSetAllocateInfo
@@ -103,11 +137,11 @@ public sealed class MaterialBindings
         DescriptorSet set;
         VulkanGraphicsDevice.ThrowIfNotSuccess(
             device.Vk.AllocateDescriptorSets(device.Device, in allocInfo, &set),
-            $"vkAllocateDescriptorSets(material:{Name})");
-        Set = set;
+            $"vkAllocateDescriptorSets(material:{Name},frame:{frameSlot})");
+        Sets[frameSlot] = set;
     }
 
-    private unsafe void AllocateBufferSlots()
+    private unsafe void AllocateBufferSlots(int frameSlot)
     {
         foreach (var s in slots)
         {
@@ -116,8 +150,8 @@ public sealed class MaterialBindings
                 ? BufferUsageFlags.StorageBufferBit
                 : BufferUsageFlags.UniformBufferBit;
             var buf = device.CreateHostVisibleBuffer(
-                new byte[block.TotalSize], usage, $"{Name}.binding{s.Binding}.buf");
-            Buffers[s.Binding] = buf;
+                new byte[block.TotalSize], usage, $"{Name}.binding{s.Binding}.frame{frameSlot}.buf");
+            BuffersPerFrame[frameSlot][s.Binding] = buf;
 
             var bufInfo = new DescriptorBufferInfo
             {
@@ -128,7 +162,7 @@ public sealed class MaterialBindings
             var write = new WriteDescriptorSet
             {
                 SType = StructureType.WriteDescriptorSet,
-                DstSet = Set,
+                DstSet = Sets[frameSlot],
                 DstBinding = (uint)s.Binding,
                 DstArrayElement = 0,
                 DescriptorType = MapDescriptorType(s.Type),
@@ -140,6 +174,11 @@ public sealed class MaterialBindings
     }
 
     // --- Public API --------------------------------------------------------
+
+    // SetUniform / SetTexture write to ALL frame slots. The expected use
+    // is setup-time configuration (textures + persistent uniforms set
+    // once at OnLoad). For per-frame data (a fresh bone palette every
+    // frame), use WriteBuffer(frameSlot, binding, payload).
 
     public MaterialBindings SetUniform(int binding, string memberName, float value) =>
         WriteUniformBytes(binding, memberName, sizeof(float), span =>
@@ -192,17 +231,64 @@ public sealed class MaterialBindings
             ImageView = tex.View,
             ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
         };
-        var write = new WriteDescriptorSet
+        for (var i = 0; i < FramesInFlight; i++)
         {
-            SType = StructureType.WriteDescriptorSet,
-            DstSet = Set,
-            DstBinding = (uint)binding,
-            DstArrayElement = 0,
-            DescriptorType = DescriptorType.CombinedImageSampler,
-            DescriptorCount = 1,
-            PImageInfo = &imgInfo,
-        };
-        device.Vk.UpdateDescriptorSets(device.Device, 1, in write, 0, default(CopyDescriptorSet*));
+            var write = new WriteDescriptorSet
+            {
+                SType = StructureType.WriteDescriptorSet,
+                DstSet = Sets[i],
+                DstBinding = (uint)binding,
+                DstArrayElement = 0,
+                DescriptorType = DescriptorType.CombinedImageSampler,
+                DescriptorCount = 1,
+                PImageInfo = &imgInfo,
+            };
+            device.Vk.UpdateDescriptorSets(device.Device, 1, in write, 0, default(CopyDescriptorSet*));
+        }
+        return this;
+    }
+
+    // Whole-buffer overwrite at the named frame slot. The canonical use is
+    // a bone-palette SSBO: the caller computes BonePalette this frame,
+    // packs it to bytes, and writes it into the slot matching the device's
+    // CurrentFrameSlot. payload.Length must equal the binding's declared
+    // BlockLayout.TotalSize.
+    public unsafe MaterialBindings WriteBuffer(int frameSlot, int binding, ReadOnlySpan<byte> payload)
+    {
+        if (frameSlot < 0 || frameSlot >= FramesInFlight)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(frameSlot), frameSlot,
+                $"MaterialBindings '{Name}' was created with FramesInFlight={FramesInFlight}.");
+        }
+        var slot = FindSlot(binding);
+        if (slot is null)
+        {
+            throw new InvalidOperationException(
+                $"MaterialBindings '{Name}' has no slot at binding {binding}.");
+        }
+        if (slot.BlockLayout is not { } block)
+        {
+            throw new InvalidOperationException(
+                $"MaterialBindings '{Name}' binding {binding} is {slot.Type}, not a buffer slot.");
+        }
+        if (payload.Length != block.TotalSize)
+        {
+            throw new ArgumentException(
+                $"MaterialBindings '{Name}' binding {binding} expects {block.TotalSize} bytes, got {payload.Length}.",
+                nameof(payload));
+        }
+
+        var buf = BuffersPerFrame[frameSlot][binding];
+        void* ptr;
+        VulkanGraphicsDevice.ThrowIfNotSuccess(
+            device.Vk.MapMemory(device.Device, buf.Memory, 0, buf.Size, 0, &ptr),
+            $"vkMapMemory(material:{Name}.binding{binding}.frame{frameSlot})");
+        fixed (byte* src = payload)
+        {
+            System.Buffer.MemoryCopy(src, ptr, (long)buf.Size, payload.Length);
+        }
+        device.Vk.UnmapMemory(device.Device, buf.Memory);
         return this;
     }
 
@@ -243,13 +329,16 @@ public sealed class MaterialBindings
                 $"MaterialBindings '{Name}' binding {binding} member '{memberName}' declared size {member.Size} but writer expects {expectedSize}.");
         }
 
-        var buf = Buffers[binding];
-        void* ptr;
-        VulkanGraphicsDevice.ThrowIfNotSuccess(
-            device.Vk.MapMemory(device.Device, buf.Memory, 0, buf.Size, 0, &ptr),
-            $"vkMapMemory(material:{Name}.binding{binding})");
-        writer(new Span<byte>((byte*)ptr + member.Offset, expectedSize));
-        device.Vk.UnmapMemory(device.Device, buf.Memory);
+        for (var i = 0; i < FramesInFlight; i++)
+        {
+            var buf = BuffersPerFrame[i][binding];
+            void* ptr;
+            VulkanGraphicsDevice.ThrowIfNotSuccess(
+                device.Vk.MapMemory(device.Device, buf.Memory, 0, buf.Size, 0, &ptr),
+                $"vkMapMemory(material:{Name}.binding{binding}.frame{i})");
+            writer(new Span<byte>((byte*)ptr + member.Offset, expectedSize));
+            device.Vk.UnmapMemory(device.Device, buf.Memory);
+        }
         return this;
     }
 
@@ -267,7 +356,10 @@ public sealed class MaterialBindings
 
     internal unsafe void DestroyResources()
     {
-        foreach (var buf in Buffers.Values) device.DestroyVkBufferEntry(buf);
-        if (Pool.Handle != 0) device.Vk.DestroyDescriptorPool(device.Device, Pool, null);
+        for (var i = 0; i < FramesInFlight; i++)
+        {
+            foreach (var buf in BuffersPerFrame[i].Values) device.DestroyVkBufferEntry(buf);
+            if (Pools[i].Handle != 0) device.Vk.DestroyDescriptorPool(device.Device, Pools[i], null);
+        }
     }
 }

@@ -713,9 +713,16 @@ public sealed partial class VulkanGraphicsDevice
     // set (typically set 2 = per-material). The program must have declared
     // at least one slot at the target setIndex. Returns an opaque handle
     // the draw call uses to bind the material at its set index.
+    //
+    // framesInFlight: 1 (default) = static set, write once at setup.
+    // >1 = per-frame replicated: N pools + sets + buffers. Use
+    // MaxFramesInFlight from this device for the canonical replication
+    // count. The bind path picks the matching slot from CurrentFrameSlot;
+    // the caller writes per-frame data via MaterialBindings.WriteBuffer.
     public MaterialBindings CreateMaterial(
         ShaderProgramHandle programHandle,
         int setIndex = MaterialOwnedSet,
+        int framesInFlight = 1,
         string? name = null)
     {
         if (!shaderProgramTable.TryGetValue(programHandle.Id, out var prog))
@@ -735,6 +742,7 @@ public sealed partial class VulkanGraphicsDevice
             prog.Interface,
             sr.Layout,
             setIndex,
+            framesInFlight,
             handle,
             name ?? $"material{id}");
         materialTable[id] = material;

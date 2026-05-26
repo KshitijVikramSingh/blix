@@ -344,12 +344,24 @@ public sealed partial class RenderGraph : IDisposable
             ImageAspectFlags.DepthBit,
             $"graph.{resource.Name}");
 
+        // Register as a sampleable texture so downstream Reads (e.g. lit
+        // pass sampling a sun shadow map) resolve through the existing
+        // ShaderTextureBinding path. Sampler: LinearClamp matches the
+        // color-target default; shadow maps benefit from ClampToEdge so
+        // out-of-bounds shadowUv samples the border (frag shader does the
+        // [0,1] range check to skip those).
+        var sampler = device.GetOrCreateSampler(SamplerDescription.LinearClamp);
+        var handle = device.RegisterExternalTexture(
+            image, view, sampler,
+            (int)width, (int)height, mipCount: 1, device.GraphDepthFormat,
+            $"graph.{resource.Name}.tex");
+
         BackendResources[resource.Handle.Id] = new GraphBackendResource
         {
             Image = image,
             Memory = memory,
             WholeImageView = view,
-            // SampleableHandle deferred — shadow-map sampling lands in step 6.
+            SampleableHandle = handle,
             Width = width,
             Height = height,
             Format = device.GraphDepthFormat,
