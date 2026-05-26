@@ -342,7 +342,7 @@ public sealed partial class VulkanGraphicsDevice
     private static uint MakeVersion(int major, int minor, int patch) =>
         (uint)((major << 22) | (minor << 12) | patch);
 
-    private static void ThrowIfNotSuccess(Result result, string op)
+    internal static void ThrowIfNotSuccess(Result result, string op)
     {
         if (result != Result.Success)
         {

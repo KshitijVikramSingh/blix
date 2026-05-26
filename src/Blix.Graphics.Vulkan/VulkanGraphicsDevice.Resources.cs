@@ -11,11 +11,19 @@ namespace Blix.Graphics.Vulkan;
 // enough to care, but for visible-triangle-on-screen this is enough.
 public sealed partial class VulkanGraphicsDevice
 {
+    // Set 2 is per-material by engine convention (see
+    // docs/vulkan-reshape-shaderlab-target.md "set-by-lifetime"). The
+    // program creates the layout for this set so the pipeline layout
+    // stays contiguous, but skips per-frame descriptor / UBO allocation
+    // — those live on MaterialBindings instances instead.
+    internal const int MaterialOwnedSet = 2;
+
     private int nextResourceId = 1;
     private readonly Dictionary<int, VkBufferEntry> vertexBufferTable = new();
     private readonly Dictionary<int, VkBufferEntry> indexBufferTable = new();
     private readonly Dictionary<int, VkShaderProgramEntry> shaderProgramTable = new();
     private readonly Dictionary<int, VkPipelineEntry> pipelineTable = new();
+    private readonly Dictionary<int, MaterialBindings> materialTable = new();
 
     internal sealed class VkBufferEntry
     {
@@ -127,7 +135,7 @@ public sealed partial class VulkanGraphicsDevice
         DestroyVkBufferEntry(e);
     }
 
-    private unsafe VkBufferEntry CreateHostVisibleBuffer(ReadOnlySpan<byte> data, BufferUsageFlags usage, string name)
+    internal unsafe VkBufferEntry CreateHostVisibleBuffer(ReadOnlySpan<byte> data, BufferUsageFlags usage, string name)
     {
         var ci = new BufferCreateInfo
         {
@@ -172,7 +180,7 @@ public sealed partial class VulkanGraphicsDevice
         Vk.UnmapMemory(Device, mem);
     }
 
-    private unsafe void DestroyVkBufferEntry(VkBufferEntry e)
+    internal unsafe void DestroyVkBufferEntry(VkBufferEntry e)
     {
         if (e.Buffer.Handle != 0) Vk.DestroyBuffer(Device, e.Buffer, null);
         if (e.Memory.Handle != 0) Vk.FreeMemory(Device, e.Memory, null);
@@ -304,6 +312,12 @@ public sealed partial class VulkanGraphicsDevice
         // Gap sets have nothing to allocate beyond the empty layout — they
         // exist only to keep pSetLayouts contiguous for the pipeline layout.
         if (setSlots.Count == 0) return resources;
+
+        // Material-owned sets (set 2 by convention): the layout exists for
+        // the pipeline layout but per-frame descriptor sets + UBOs are
+        // allocated by MaterialBindings instances on demand. Bail before
+        // creating pool/sets/buffers.
+        if (setIdx == MaterialOwnedSet) return resources;
 
         // --- Pool sized to the union of this set's per-frame allocations ----
         // One pool size per distinct DescriptorType used in the set,
@@ -685,6 +699,53 @@ public sealed partial class VulkanGraphicsDevice
     internal VkBufferEntry GetVertexBuffer(VertexBufferHandle h) => vertexBufferTable[h.Id];
     internal VkBufferEntry GetIndexBuffer(IndexBufferHandle h) => indexBufferTable[h.Id];
     internal VkPipelineEntry GetPipeline(PipelineHandle h) => pipelineTable[h.Id];
+    internal MaterialBindings GetMaterial(MaterialHandle h) => materialTable[h.Id];
+
+    // --- Materials ---------------------------------------------------------
+
+    // Creates a MaterialBindings carrying the descriptor set + UBOs for one
+    // set (typically set 2 = per-material). The program must have declared
+    // at least one slot at the target setIndex. Returns an opaque handle
+    // the draw call uses to bind the material at its set index.
+    public MaterialBindings CreateMaterial(
+        ShaderProgramHandle programHandle,
+        int setIndex = MaterialOwnedSet,
+        string? name = null)
+    {
+        if (!shaderProgramTable.TryGetValue(programHandle.Id, out var prog))
+        {
+            throw new InvalidOperationException($"Unknown shader program handle: {programHandle.Id}");
+        }
+        if (setIndex < 0 || setIndex >= prog.Sets.Length || prog.Sets[setIndex] is not { } sr)
+        {
+            throw new InvalidOperationException(
+                $"Shader program '{prog.Name}' declares no slots at set {setIndex} — cannot create material for it.");
+        }
+
+        var id = nextResourceId++;
+        var handle = new MaterialHandle(id);
+        var material = new MaterialBindings(
+            this,
+            prog.Interface,
+            sr.Layout,
+            setIndex,
+            handle,
+            name ?? $"material{id}");
+        materialTable[id] = material;
+        return material;
+    }
+
+    public void DestroyMaterial(MaterialHandle handle)
+    {
+        if (!materialTable.Remove(handle.Id, out var mat)) return;
+        mat.DestroyResources();
+    }
+
+    private void DestroyAllMaterials()
+    {
+        foreach (var m in materialTable.Values) m.DestroyResources();
+        materialTable.Clear();
+    }
 
     // --- Cleanup -----------------------------------------------------------
 
@@ -696,6 +757,7 @@ public sealed partial class VulkanGraphicsDevice
         shaderProgramTable.Clear();
         foreach (var e in vertexBufferTable.Values) DestroyVkBufferEntry(e);
         vertexBufferTable.Clear();
+        DestroyAllMaterials();
         DestroyAllTextures();
         DestroyAllSamplers();
         foreach (var e in indexBufferTable.Values) DestroyVkBufferEntry(e);

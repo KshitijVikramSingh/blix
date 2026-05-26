@@ -1,6 +1,11 @@
 #version 450
 
-layout(set = 0, binding = 1) uniform sampler2D uAlbedo;
+// Set 2 = per-material (engine convention from
+// docs/vulkan-reshape-shaderlab-target.md).
+layout(set = 2, binding = 0) uniform CubeMaterial {
+    vec4 uTint;
+} mat;
+layout(set = 2, binding = 1) uniform sampler2D uAlbedo;
 
 layout(location = 0) in vec2 vUv;
 layout(location = 1) in vec3 vWorldPos;
@@ -22,7 +27,7 @@ void main() {
     vec3 N = normalize(cross(dy, dx));
 
     float NdotL = max(dot(N, lightDir), 0.0);
-    vec3 albedo = texture(uAlbedo, vUv).rgb;
+    vec3 albedo = texture(uAlbedo, vUv).rgb * mat.uTint.rgb;
     vec3 lit = albedo * (0.18 + 0.82 * NdotL);
-    outColor = vec4(lit, 1.0);
+    outColor = vec4(lit, mat.uTint.a);
 }

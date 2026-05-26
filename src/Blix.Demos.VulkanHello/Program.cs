@@ -36,8 +36,16 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
     private ShaderProgramHandle shaderProgram;
     private PipelineHandle pipeline;
     private TextureHandle albedoTexture;
+    private MaterialHandle whiteMaterial;
+    private MaterialHandle redMaterial;
     private int frameCount;
     private Matrix4x4 viewProj;
+
+    // Push-constant payload reused across frames. Two separate arrays so the
+    // record-then-translate flow doesn't see one draw's bytes mutated into
+    // the other's. 64 bytes each (one mat4 uModel).
+    private readonly byte[] leftPushBytes = new byte[64];
+    private readonly byte[] rightPushBytes = new byte[64];
 
     // State surfaced through IDebuggable — see Debug() below.
     private GraphicsDeviceInfo? gpuInfo;
@@ -46,8 +54,10 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
     private float fovYRadians;
     private float currentRotY;
     private float currentRotX;
-    private Matrix4x4 currentModel;
+    private Matrix4x4 leftModel;
+    private Matrix4x4 rightModel;
     private static readonly Vector3 LightDirection = Vector3.Normalize(new Vector3(0.55f, 1.0f, 0.45f));
+    private const float CubeSeparation = 1.1f; // ±X distance from origin
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
@@ -69,34 +79,46 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
             checker,
             "cube.albedo");
 
-        // Explicit UBO layout: the shader declares
-        //   layout(set=0, binding=0) uniform Frame { mat4 uViewProjection; mat4 uModel; };
-        // so members land at offset 0 and 64, total 128 bytes. The runtime
-        // routes name-keyed ShaderUniform writes to these offsets.
+        // Per-frame UBO layout — just uViewProjection now. uModel moved to
+        // push constants per the 2e per-draw lifetime tier.
         var uniformLayout = new UniformBlockLayout(
-            TotalSize: 128,
-            Members: new[]
-            {
-                new UniformBlockMember("uViewProjection", Offset: 0, Size: 64),
-                new UniformBlockMember("uModel", Offset: 64, Size: 64),
-            });
+            TotalSize: 64,
+            Members: new[] { new UniformBlockMember("uViewProjection", Offset: 0, Size: 64) });
 
-        // Declared binding contract: per-frame UBO at (set 0, binding 0) plus
-        // an albedo sampler at (set 0, binding 1). 2c's single-set assumption:
-        // ShaderTextureBinding.Slot in the draw call is matched against
-        // DescriptorSetSlot.Binding to resolve the descriptor.
-        var cubeInterface = new ShaderInterface(new[]
-        {
-            new DescriptorSetSlot(
-                Set: 0, Binding: 0,
-                Type: ShaderResourceType.UniformBuffer,
-                Stages: ShaderStages.Vertex | ShaderStages.Fragment,
-                BlockLayout: uniformLayout),
-            new DescriptorSetSlot(
-                Set: 0, Binding: 1,
-                Type: ShaderResourceType.SampledImage,
-                Stages: ShaderStages.Fragment),
-        });
+        // Per-material tint UBO layout — vec4 at offset 0, total 16 bytes.
+        var tintLayout = new UniformBlockLayout(
+            TotalSize: 16,
+            Members: new[] { new UniformBlockMember("uTint", Offset: 0, Size: 16) });
+
+        // Declared binding contract:
+        //   set 0 binding 0  per-frame   Frame { mat4 uViewProjection }
+        //   set 2 binding 0  per-material CubeMaterial { vec4 uTint }
+        //   set 2 binding 1  per-material sampler2D uAlbedo
+        //   push constants   per-draw    PushConstants { mat4 uModel } (vertex stage)
+        // Set 1 is unused (no per-pass data on the cube); the pipeline layout
+        // carries an empty layout for it to keep set indices contiguous.
+        var cubeInterface = new ShaderInterface(
+            Slots: new[]
+            {
+                new DescriptorSetSlot(
+                    Set: 0, Binding: 0,
+                    Type: ShaderResourceType.UniformBuffer,
+                    Stages: ShaderStages.Vertex | ShaderStages.Fragment,
+                    BlockLayout: uniformLayout),
+                new DescriptorSetSlot(
+                    Set: 2, Binding: 0,
+                    Type: ShaderResourceType.UniformBuffer,
+                    Stages: ShaderStages.Fragment,
+                    BlockLayout: tintLayout),
+                new DescriptorSetSlot(
+                    Set: 2, Binding: 1,
+                    Type: ShaderResourceType.SampledImage,
+                    Stages: ShaderStages.Fragment),
+            },
+            PushConstants: new[]
+            {
+                new PushConstantRange(ShaderStages.Vertex, Offset: 0, Size: 64),
+            });
 
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         var vertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv"));
@@ -111,11 +133,24 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
             RasterizerState.NoCulling,
             BlendState.Disabled), "cube");
 
-        // View-projection is constant for now. Vulkan NDC: +Y down, depth [0,1].
-        // System.Numerics' CreatePerspectiveFieldOfView returns a GL-style proj
-        // matrix; we build a Vulkan-correct one directly. See F-010 in friction notes.
+        // Two materials sharing the same shader interface and same texture,
+        // different tint. The cube switches between them every 2 seconds
+        // (see OnRender) to visually validate that the descriptor-set
+        // carrier handles multi-material lookup.
+        whiteMaterial = vk.CreateMaterial(shaderProgram, name: "cube.white")
+            .SetUniform(binding: 0, "uTint", new Vector4(1.0f, 1.0f, 1.0f, 1.0f))
+            .SetTexture(binding: 1, albedoTexture)
+            .Handle;
+
+        redMaterial = vk.CreateMaterial(shaderProgram, name: "cube.red")
+            .SetUniform(binding: 0, "uTint", new Vector4(1.0f, 0.45f, 0.35f, 1.0f))
+            .SetTexture(binding: 1, albedoTexture)
+            .Handle;
+
+        // Camera pulled back + raised so both cubes fit. Two cubes at
+        // x = ±CubeSeparation; camera at (3.5, 1.9, 4.5) looking at origin.
         var aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
-        cameraPosition = new Vector3(2.5f, 1.8f, 3.5f);
+        cameraPosition = new Vector3(3.5f, 1.9f, 4.5f);
         cameraTarget = Vector3.Zero;
         fovYRadians = MathF.PI / 3f;
         var view = Matrix4x4.CreateLookAt(cameraPosition, cameraTarget, Vector3.UnitY);
@@ -128,9 +163,28 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
         frameCount++;
         currentRotY = (float)time.Total * 0.8f;
         currentRotX = (float)time.Total * 0.3f;
-        currentModel = Matrix4x4.CreateRotationY(currentRotY)
-                     * Matrix4x4.CreateRotationX(currentRotX);
-        var model = currentModel;
+
+        // Two cubes — left spins +Y, right spins -Y, both share the X axis
+        // wobble. Counter-rotation gives each cube a distinct visual
+        // signature so it's obvious the push-constant uModel is per-draw.
+        leftModel = Matrix4x4.CreateRotationY(currentRotY)
+                  * Matrix4x4.CreateRotationX(currentRotX)
+                  * Matrix4x4.CreateTranslation(new Vector3(-CubeSeparation, 0, 0));
+        rightModel = Matrix4x4.CreateRotationY(-currentRotY)
+                   * Matrix4x4.CreateRotationX(currentRotX)
+                   * Matrix4x4.CreateTranslation(new Vector3(CubeSeparation, 0, 0));
+
+        // Pack each model matrix into its own 64-byte push-constant buffer.
+        // The buffers are pre-allocated fields; the record-then-translate
+        // flow captures the byte[] reference, so we must NOT reuse the same
+        // array for both draws this frame.
+        PackMatrix(leftModel, leftPushBytes);
+        PackMatrix(rightModel, rightPushBytes);
+
+        var perFrame = new ShaderUniform[]
+        {
+            new("uViewProjection", new Matrix4x4Uniform(viewProj)),
+        };
 
         commandList.Pass(
             "cube",
@@ -140,21 +194,33 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
                 ClearDepth: true),
             pass =>
             {
+                // Left cube — white material, leftModel push payload.
                 pass.DrawIndexed(
                     vertexBuffer: vertexBuffer,
                     indexBuffer: indexBuffer,
                     pipeline: pipeline,
                     indexCount: 36,
-                    uniforms: new ShaderUniform[]
-                    {
-                        new("uViewProjection", new Matrix4x4Uniform(viewProj)),
-                        new("uModel", new Matrix4x4Uniform(model)),
-                    },
-                    textures: new[]
-                    {
-                        new ShaderTextureBinding("uAlbedo", albedoTexture, Slot: 1),
-                    });
+                    uniforms: perFrame,
+                    textures: Array.Empty<ShaderTextureBinding>(),
+                    material: whiteMaterial,
+                    pushConstants: leftPushBytes);
+
+                // Right cube — red material, rightModel push payload.
+                pass.DrawIndexed(
+                    vertexBuffer: vertexBuffer,
+                    indexBuffer: indexBuffer,
+                    pipeline: pipeline,
+                    indexCount: 36,
+                    uniforms: perFrame,
+                    textures: Array.Empty<ShaderTextureBinding>(),
+                    material: redMaterial,
+                    pushConstants: rightPushBytes);
             });
+    }
+
+    private static void PackMatrix(Matrix4x4 m, byte[] target)
+    {
+        System.Runtime.InteropServices.MemoryMarshal.Write(target, in m);
     }
 
     public void Debug(DebugContext debug)
@@ -165,12 +231,14 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
         {
             debug.Values.Value("direction", LightDirection);
         }
-        using (debug.Scope("cube"))
+        using (debug.Scope("cubes"))
         {
+            debug.Values.Value("count", 2);
             debug.Values.Value("rotY-rad", currentRotY);
             debug.Values.Value("rotX-rad", currentRotX);
-            debug.Values.Value("vertices", 24);
-            debug.Values.Value("triangles", 12);
+            debug.Values.Value("separation", CubeSeparation);
+            debug.Values.Value("vertices-each", 24);
+            debug.Values.Value("triangles-each", 12);
         }
         using (debug.Scope("camera"))
         {
@@ -188,8 +256,8 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
             }
         }
 
-        debug.Stats.Gauge("triangles", 12);
-        debug.Stats.Gauge("vertices", 24);
+        debug.Stats.Gauge("triangles", 24);
+        debug.Stats.Gauge("vertices", 48);
 
         // === Visual debug overlays ===
         // ViewProjection is what the Vulkan-side line drawer uses to project
@@ -211,11 +279,13 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
         var lightSource = LightDirection * 2.0f;
         debug.Draw.Arrow("light/direction", lightSource, Vector3.Zero, new GraphicsColor(1.0f, 0.95f, 0.45f, 1f));
 
-        // Cube's world-space OBB tracking the actual rotation. Slightly inflated
-        // (scale 0.51 instead of 0.50) so the wireframe doesn't z-fight or get
-        // visually swallowed by the cube it outlines.
-        var obb = Matrix4x4.CreateScale(0.51f) * currentModel;
-        debug.Draw.Obb("cube/obb", obb, new GraphicsColor(1f, 1f, 1f, 0.85f));
+        // One world-space OBB per cube, tracking each cube's rotation +
+        // translation. Slightly inflated (0.51 instead of 0.50) so the
+        // wireframe doesn't z-fight or get visually swallowed.
+        var leftObb = Matrix4x4.CreateScale(0.51f) * leftModel;
+        debug.Draw.Obb("cube/left/obb", leftObb, new GraphicsColor(1f, 1f, 1f, 0.85f));
+        var rightObb = Matrix4x4.CreateScale(0.51f) * rightModel;
+        debug.Draw.Obb("cube/right/obb", rightObb, new GraphicsColor(1f, 1f, 1f, 0.85f));
     }
 
     private static (VertexPosition3Texture[] Vertices, ushort[] Indices) BuildCube()

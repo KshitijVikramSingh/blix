@@ -96,4 +96,40 @@ public sealed class RenderPassBuilder
         commands.Add(command);
         recorder?.OnDraw(in command);
     }
+
+    // Draw with a MaterialBindings handle bound at its declared set index.
+    // Vulkan-only — GL backend rejects non-null Material on execute.
+    public void DrawIndexed(
+        VertexBufferHandle vertexBuffer,
+        IndexBufferHandle indexBuffer,
+        PipelineHandle pipeline,
+        int indexCount,
+        IReadOnlyList<ShaderUniform> uniforms,
+        IReadOnlyList<ShaderTextureBinding> textures,
+        MaterialHandle material)
+    {
+        var command = new DrawIndexedCommand(
+            vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures, IndexOffset: 0, Material: material);
+        commands.Add(command);
+        recorder?.OnDraw(in command);
+    }
+
+    // Draw with material + per-draw push-constant payload. Vulkan-only —
+    // GL backend rejects non-null PushConstants on execute.
+    public void DrawIndexed(
+        VertexBufferHandle vertexBuffer,
+        IndexBufferHandle indexBuffer,
+        PipelineHandle pipeline,
+        int indexCount,
+        IReadOnlyList<ShaderUniform> uniforms,
+        IReadOnlyList<ShaderTextureBinding> textures,
+        MaterialHandle material,
+        byte[] pushConstants)
+    {
+        var command = new DrawIndexedCommand(
+            vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures,
+            IndexOffset: 0, Material: material, PushConstants: pushConstants);
+        commands.Add(command);
+        recorder?.OnDraw(in command);
+    }
 }

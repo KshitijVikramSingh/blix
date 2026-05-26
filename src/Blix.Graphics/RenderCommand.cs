@@ -23,4 +23,17 @@ public sealed record DrawIndexedCommand(
     // multiple texture partitions and issues each partition's draw with a
     // different offset. 0 means "draw from the start", which preserves the
     // historical behavior for every caller that doesn't set this.
-    int IndexOffset = 0) : RenderCommand;
+    int IndexOffset = 0,
+    // Vulkan-only: a MaterialBindings handle whose descriptor set should be
+    // bound at its declared set index for this draw. GL backend rejects
+    // non-null with a clear error — GL demos use Blix.Render.Material which
+    // flattens into Uniforms + Textures instead. Default null preserves
+    // historical behavior for every caller that doesn't set this.
+    MaterialHandle? Material = null,
+    // Vulkan-only: per-draw push-constant payload. Bytes are laid out to
+    // match the shader's declared PushConstantRange(s) — total length must
+    // equal the sum of declared range sizes. Vulkan binds via
+    // vkCmdPushConstants once per declared range. GL rejects non-null
+    // (push constants have no direct GL equivalent — emulate via uniform
+    // writes in the GL backend instead).
+    byte[]? PushConstants = null) : RenderCommand;

@@ -222,6 +222,17 @@ public sealed partial class OpenGLGraphicsDevice
                 $"DrawIndexed requested indices [{command.IndexOffset}, {command.IndexOffset + command.IndexCount}) but index buffer {command.IndexBuffer.Id} only holds {indexBuffer.Count}.");
         }
 
+        if (command.Material is not null)
+        {
+            throw new NotSupportedException(
+                "MaterialBindings is a Vulkan-only descriptor-set carrier. GL demos should use Blix.Render.Material which flattens into command.Uniforms + command.Textures.");
+        }
+        if (command.PushConstants is not null)
+        {
+            throw new NotSupportedException(
+                "Push constants are a Vulkan-only per-draw fast path. GL demos should emit per-draw values via command.Uniforms instead.");
+        }
+
         ApplyPipelineState(pipeline);
         GL.UseProgram(shaderProgram.ProgramId);
         ApplyUniforms(shaderProgram, command.Uniforms);

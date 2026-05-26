@@ -468,6 +468,120 @@ static UniformBlockLayout Mat4Block() => new(
         TextureFormat.Bc5Unorm.MipByteCount(8, 8), 2 * 2 * 16);
 }
 
+// ============================================================================
+// Section G — Material + sparse-set ShaderInterface (Vector A 2d).
+// ============================================================================
+//
+// Live MaterialBindings construction needs a real VkDevice and isn't run
+// here. What's covered:
+//   - MaterialHandle value equality (it's an opaque id; the draw command
+//     captures it by value)
+//   - DrawIndexedCommand record carries Material correctly through with-
+//     style updates
+//   - Cube demo's actual ShaderInterface (sparse — set 0 + set 2, no set 1)
+//     validates cleanly; exercises the gap-set path 2b introduced
+
+{
+    // G.1 — MaterialHandle equality.
+    var a = new MaterialHandle(42);
+    var b = new MaterialHandle(42);
+    var c = new MaterialHandle(43);
+    t.ExpectTrue("G.1 MaterialHandle equal by id", a.Equals(b));
+    t.ExpectTrue("G.1 MaterialHandle distinct ids != equal", !a.Equals(c));
+    t.ExpectTrue("G.1 MaterialHandle hashcodes match for equal", a.GetHashCode() == b.GetHashCode());
+}
+
+{
+    // G.2 — DrawIndexedCommand carries Material via record with-update.
+    var baseCmd = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(2), new PipelineHandle(3),
+        36, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>());
+    t.ExpectTrue("G.2 default DrawIndexedCommand.Material is null", baseCmd.Material is null);
+    var withMat = baseCmd with { Material = new MaterialHandle(7) };
+    t.ExpectTrue("G.2 with-update preserves Material",
+        withMat.Material is { } h && h.Id == 7);
+    t.ExpectTrue("G.2 with-update preserves Pipeline", withMat.Pipeline.Id == 3);
+}
+
+{
+    // G.3 — Sparse-set interface (cube demo shape) validates. Set 1 is
+    // skipped entirely; 2b creates an empty layout for it at pipeline-layout
+    // time. ShaderInterface.Validate() doesn't reject the gap.
+    var frameUbo = new UniformBlockLayout(
+        TotalSize: 128,
+        Members: new[]
+        {
+            new UniformBlockMember("uViewProjection", 0, 64),
+            new UniformBlockMember("uModel", 64, 64),
+        });
+    var tintUbo = new UniformBlockLayout(
+        TotalSize: 16,
+        Members: new[] { new UniformBlockMember("uTint", 0, 16) });
+    var sparseInterface = new ShaderInterface(new[]
+    {
+        new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer,
+            ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: frameUbo),
+        new DescriptorSetSlot(2, 0, ShaderResourceType.UniformBuffer,
+            ShaderStages.Fragment, BlockLayout: tintUbo),
+        new DescriptorSetSlot(2, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+    });
+    var threw = TryValidate(sparseInterface);
+    t.ExpectTrue("G.3 cube demo sparse-set interface validates (set 0 + set 2, no set 1)",
+        threw is null);
+}
+
+// ============================================================================
+// Section H — Push constants on DrawIndexedCommand (Vector A 2e).
+// ============================================================================
+//
+// vkCmdPushConstants emission needs a real device; not tested here. Surface-
+// level tests confirm the cross-backend command-record path carries the
+// payload correctly and the cube demo's full interface (sparse sets + push
+// range) passes Validate().
+
+{
+    // H.1 — Default and with-update PushConstants round-trip.
+    var baseCmd = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(2), new PipelineHandle(3),
+        36, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>());
+    t.ExpectTrue("H.1 default DrawIndexedCommand.PushConstants is null", baseCmd.PushConstants is null);
+
+    var bytes = new byte[64];
+    bytes[0] = 0xAB; bytes[63] = 0xCD;
+    var withPush = baseCmd with { PushConstants = bytes };
+    t.ExpectTrue("H.1 with-update preserves PushConstants reference",
+        ReferenceEquals(withPush.PushConstants, bytes));
+    t.ExpectClose("H.1 PushConstants[0] preserved", withPush.PushConstants![0], 0xAB);
+    t.ExpectClose("H.1 PushConstants[63] preserved", withPush.PushConstants![63], 0xCD);
+}
+
+{
+    // H.2 — Full cube demo interface (sparse sets + push-constant range)
+    // validates. Mirrors what Vulkan demo Program.cs constructs.
+    var frameUbo = new UniformBlockLayout(
+        TotalSize: 64,
+        Members: new[] { new UniformBlockMember("uViewProjection", 0, 64) });
+    var tintUbo = new UniformBlockLayout(
+        TotalSize: 16,
+        Members: new[] { new UniformBlockMember("uTint", 0, 16) });
+    var full = new ShaderInterface(
+        Slots: new[]
+        {
+            new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer,
+                ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: frameUbo),
+            new DescriptorSetSlot(2, 0, ShaderResourceType.UniformBuffer,
+                ShaderStages.Fragment, BlockLayout: tintUbo),
+            new DescriptorSetSlot(2, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+        },
+        PushConstants: new[]
+        {
+            new PushConstantRange(ShaderStages.Vertex, Offset: 0, Size: 64),
+        });
+    var threw = TryValidate(full);
+    t.ExpectTrue("H.2 cube demo full interface (sparse sets + 64B vertex push range) validates",
+        threw is null);
+}
+
 t.PrintSummary();
 return t.FailedCount;
 

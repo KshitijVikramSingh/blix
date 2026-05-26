@@ -872,8 +872,9 @@ public sealed partial class VulkanGraphicsDevice
 
         Vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, pipe.Pipeline);
 
-        // Bind every declared set at its set index. Gap sets exist only for
-        // pipeline-layout contiguity and carry no per-frame descriptor sets.
+        // Bind every declared set at its set index. Gap sets and
+        // material-owned sets (PerFrame.Length == 0) are skipped here —
+        // material-owned sets get bound below via the MaterialBindings.
         for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
         {
             if (prog.Sets[setIdx] is not { } sr || sr.PerFrame.Length == 0) continue;
@@ -887,6 +888,31 @@ public sealed partial class VulkanGraphicsDevice
                 &ds,
                 dynamicOffsetCount: 0,
                 pDynamicOffsets: null);
+        }
+
+        // Bind the material's static descriptor set at its declared set
+        // index. Materials own set 2 by convention.
+        if (d.Material is { } matHandle)
+        {
+            var mat = materialTable[matHandle.Id];
+            var matSet = mat.Set;
+            Vk.CmdBindDescriptorSets(
+                cmd,
+                PipelineBindPoint.Graphics,
+                pipe.Layout,
+                firstSet: (uint)mat.SetIndex,
+                descriptorSetCount: 1,
+                &matSet,
+                dynamicOffsetCount: 0,
+                pDynamicOffsets: null);
+        }
+
+        // Push constants — slice the byte payload across the program's
+        // declared PushConstantRanges and emit one vkCmdPushConstants per
+        // range. For the cube demo this is one range (Vertex, 0, 64).
+        if (d.PushConstants is { } pcBytes)
+        {
+            PushConstantsToCommandBuffer(cmd, pipe.Layout, prog.Interface.PushConstants, pcBytes);
         }
 
         ulong offset = 0;
@@ -1002,6 +1028,48 @@ public sealed partial class VulkanGraphicsDevice
                 PImageInfo = &imgInfo,
             };
             Vk.UpdateDescriptorSets(Device, 1, in write, 0, default(CopyDescriptorSet*));
+        }
+    }
+
+    // Emit vkCmdPushConstants for each declared PushConstantRange in the
+    // shader's interface. Bytes are sliced contiguously across ranges
+    // matching the offset+size each range declares.
+    //
+    // The cube demo declares one range (Vertex, 0, 64) carrying uModel —
+    // single push. ShaderLab's lit shader will declare two ranges (uModel,
+    // uNormalMatrix) totaling 128 bytes — two pushes per draw.
+    private unsafe void PushConstantsToCommandBuffer(
+        CommandBuffer cmd,
+        PipelineLayout layout,
+        IReadOnlyList<PushConstantRange> ranges,
+        byte[] payload)
+    {
+        if (ranges.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "DrawIndexedCommand.PushConstants supplied but the shader interface declares no push-constant ranges.");
+        }
+
+        var totalDeclared = 0;
+        foreach (var r in ranges) totalDeclared += r.Size;
+        if (payload.Length != totalDeclared)
+        {
+            throw new InvalidOperationException(
+                $"DrawIndexedCommand.PushConstants payload length {payload.Length} does not match the shader's declared total push-constant size {totalDeclared}.");
+        }
+
+        fixed (byte* basePtr = payload)
+        {
+            foreach (var r in ranges)
+            {
+                Vk.CmdPushConstants(
+                    cmd,
+                    layout,
+                    MapStageFlags(r.Stages),
+                    (uint)r.Offset,
+                    (uint)r.Size,
+                    basePtr + r.Offset);
+            }
         }
     }
 
