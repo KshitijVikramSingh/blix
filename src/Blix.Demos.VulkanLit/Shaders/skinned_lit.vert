@@ -10,10 +10,14 @@ layout(set = 0, binding = 0) uniform Frame {
     vec3 uAmbientColor;
     float uAmbientIntensity;
     mat4 uSunShadowVP;
-    mat4 uSpotViewProj;
-    vec4 uSpotPosRange;
-    vec4 uSpotDirCosInner;
-    vec4 uSpotColorCosOuter;
+    mat4 uSpot0ViewProj;
+    vec4 uSpot0PosRange;
+    vec4 uSpot0DirCosInner;
+    vec4 uSpot0ColorCosOuter;
+    mat4 uSpot1ViewProj;
+    vec4 uSpot1PosRange;
+    vec4 uSpot1DirCosInner;
+    vec4 uSpot1ColorCosOuter;
     vec4 uPointPosFar;
     vec4 uPointColorRange;
     vec4 uLightEnable;
@@ -38,7 +42,6 @@ layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec2 vUv;
 layout(location = 2) out vec4 vSunShadowCoord;
 layout(location = 3) out vec3 vWorldPos;
-layout(location = 4) out vec4 vSpotShadowCoord;
 
 void main() {
     mat4 skin = bones.m[int(inBoneIndices.x)] * inBoneWeights.x
@@ -56,5 +59,4 @@ void main() {
     vUv = inUv;
     vWorldPos = world.xyz;
     vSunShadowCoord = frame.uSunShadowVP * world;
-    vSpotShadowCoord = frame.uSpotViewProj * world;
 }

@@ -1134,7 +1134,9 @@ public sealed partial class VulkanGraphicsDevice
                 SType = StructureType.WriteDescriptorSet,
                 DstSet = sr.PerFrame[frameSlot],
                 DstBinding = (uint)binding,
-                DstArrayElement = 0,
+                // Array element for Count>1 sampler arrays (e.g. uSpotShadowMaps[N]).
+                // 0 for the common single-texture binding.
+                DstArrayElement = (uint)b.ArrayIndex,
                 DescriptorType = DescriptorType.CombinedImageSampler,
                 DescriptorCount = 1,
                 PImageInfo = &imgInfo,

@@ -95,10 +95,12 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private RenderGraph graph = null!;
     private GraphResourceHandle hdrHandle;
     private GraphResourceHandle sunShadowHandle;
-    private GraphResourceHandle spotShadowHandle;
+    private GraphResourceHandle spot0ShadowHandle;
+    private GraphResourceHandle spot1ShadowHandle;
     private DepthCubeHandle pointShadowCube;
     private PassHandle shadowPassHandle;
-    private PassHandle spotShadowPassHandle;
+    private PassHandle spot0ShadowPassHandle;
+    private PassHandle spot1ShadowPassHandle;
     private readonly PassHandle[] pointFacePassHandles = new PassHandle[6];
     private PassHandle litPassHandle;
 
@@ -119,20 +121,30 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private int frameCount;
     private Matrix4x4 viewProj;
     private Matrix4x4 sunShadowVP;
-    private Matrix4x4 spotViewProj;
+    private Matrix4x4 spot0ViewProj;
+    private Matrix4x4 spot1ViewProj;
     private Matrix4x4 cubeModel;
     private Matrix4x4 groundModel;
     private Matrix4x4 cesiumWorldModel;
 
-    // Spot light. Cone aimed at the scene from above-right; perspective
-    // shadow map. Color is pre-multiplied by intensity for the shader.
-    private static readonly Vector3 SpotPosition = new(-2.6f, 3.2f, 1.8f);
-    private static readonly Vector3 SpotTarget = new(0.2f, -0.4f, 0.2f);
-    private static readonly Vector3 SpotColor = new(1.0f, 0.45f, 0.2f); // warm
-    private const float SpotIntensity = 6.0f;
-    private const float SpotRange = 9.0f;
-    private const float SpotInnerDeg = 14f;
-    private const float SpotOuterDeg = 22f;
+    // Two spot lights, sampled through a Count=2 shadow-map array. Each is a
+    // cone aimed at the scene with a perspective shadow map. Color is
+    // pre-multiplied by intensity for the shader.
+    private static readonly Vector3 Spot0Position = new(-2.6f, 3.2f, 1.8f);
+    private static readonly Vector3 Spot0Target = new(0.2f, -0.4f, 0.2f);
+    private static readonly Vector3 Spot0Color = new(1.0f, 0.45f, 0.2f);  // warm orange
+    private const float Spot0Intensity = 6.0f;
+    private const float Spot0Range = 9.0f;
+    private const float Spot0InnerDeg = 14f;
+    private const float Spot0OuterDeg = 22f;
+
+    private static readonly Vector3 Spot1Position = new(2.8f, 3.0f, -1.6f);
+    private static readonly Vector3 Spot1Target = new(0.4f, -0.4f, 0.0f);
+    private static readonly Vector3 Spot1Color = new(0.4f, 1.0f, 0.55f);  // green
+    private const float Spot1Intensity = 6.0f;
+    private const float Spot1Range = 9.0f;
+    private const float Spot1InnerDeg = 13f;
+    private const float Spot1OuterDeg = 20f;
 
     // Point light. Cool cyan, sits low between cube and cesium to throw
     // omnidirectional shadows. Cube shadow stores linear distance / far.
@@ -241,7 +253,8 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         var shadowSize = new FixedGraphSize(ShadowMapSize, ShadowMapSize);
 
         sunShadowHandle = graph.DepthTarget("sun-shadow", shadowSize);
-        spotShadowHandle = graph.DepthTarget("spot-shadow", shadowSize);
+        spot0ShadowHandle = graph.DepthTarget("spot0-shadow", shadowSize);
+        spot1ShadowHandle = graph.DepthTarget("spot1-shadow", shadowSize);
         pointShadowCube = graph.DepthCube("point-shadow", PointShadowSize);
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
         sceneDepthHandle = graph.DepthTarget("scene-depth", fullSize);
@@ -250,22 +263,26 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         // Per-frame UBO grows with each light. vec4-packed light blocks
         // dodge the std140 vec3+float padding fragility. See lit.vert.
         var frameUbo = new UniformBlockLayout(
-            TotalSize: 320,
+            TotalSize: 432,
             Members: new[]
             {
-                new UniformBlockMember("uViewProjection",    0,   64),
-                new UniformBlockMember("uSunDirection",      64,  12),
-                new UniformBlockMember("uSunIntensity",      76,  4),
-                new UniformBlockMember("uAmbientColor",      80,  12),
-                new UniformBlockMember("uAmbientIntensity",  92,  4),
-                new UniformBlockMember("uSunShadowVP",       96,  64),
-                new UniformBlockMember("uSpotViewProj",      160, 64),
-                new UniformBlockMember("uSpotPosRange",      224, 16),
-                new UniformBlockMember("uSpotDirCosInner",   240, 16),
-                new UniformBlockMember("uSpotColorCosOuter", 256, 16),
-                new UniformBlockMember("uPointPosFar",       272, 16),
-                new UniformBlockMember("uPointColorRange",   288, 16),
-                new UniformBlockMember("uLightEnable",       304, 16),
+                new UniformBlockMember("uViewProjection",     0,   64),
+                new UniformBlockMember("uSunDirection",       64,  12),
+                new UniformBlockMember("uSunIntensity",       76,  4),
+                new UniformBlockMember("uAmbientColor",       80,  12),
+                new UniformBlockMember("uAmbientIntensity",   92,  4),
+                new UniformBlockMember("uSunShadowVP",        96,  64),
+                new UniformBlockMember("uSpot0ViewProj",      160, 64),
+                new UniformBlockMember("uSpot0PosRange",      224, 16),
+                new UniformBlockMember("uSpot0DirCosInner",   240, 16),
+                new UniformBlockMember("uSpot0ColorCosOuter", 256, 16),
+                new UniformBlockMember("uSpot1ViewProj",      272, 64),
+                new UniformBlockMember("uSpot1PosRange",      336, 16),
+                new UniformBlockMember("uSpot1DirCosInner",   352, 16),
+                new UniformBlockMember("uSpot1ColorCosOuter", 368, 16),
+                new UniformBlockMember("uPointPosFar",        384, 16),
+                new UniformBlockMember("uPointColorRange",    400, 16),
+                new UniformBlockMember("uLightEnable",        416, 16),
             });
         var tintUbo = new UniformBlockLayout(
             TotalSize: 16,
@@ -291,7 +308,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer,
                     ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: frameUbo),
                 new DescriptorSetSlot(1, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment, Count: 2),
                 new DescriptorSetSlot(1, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 new DescriptorSetSlot(2, 0, ShaderResourceType.UniformBuffer,
                     ShaderStages.Fragment, BlockLayout: tintUbo),
@@ -330,7 +347,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer,
                     ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: frameUbo),
                 new DescriptorSetSlot(1, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment, Count: 2),
                 new DescriptorSetSlot(1, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 new DescriptorSetSlot(2, 0, ShaderResourceType.UniformBuffer,
                     ShaderStages.Fragment, BlockLayout: tintUbo),
@@ -346,14 +363,18 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         });
 
         // --- Declare graph passes (shadow casters via both interfaces) --
-        // sun-shadow + spot-shadow are separate depth passes; both host the
-        // static + skinned shadow casters. The lit pass reads both.
+        // sun + 2 spot depth passes; all host the static + skinned casters.
+        // The lit pass reads every shadow map.
         shadowPassHandle = graph.GraphicsPass("sun-shadow")
             .Depth(sunShadowHandle, LoadOp.Clear, StoreOp.Store)
             .Shader(shadowInterface, skinnedShadowInterface)
             .Handle;
-        spotShadowPassHandle = graph.GraphicsPass("spot-shadow")
-            .Depth(spotShadowHandle, LoadOp.Clear, StoreOp.Store)
+        spot0ShadowPassHandle = graph.GraphicsPass("spot0-shadow")
+            .Depth(spot0ShadowHandle, LoadOp.Clear, StoreOp.Store)
+            .Shader(shadowInterface, skinnedShadowInterface)
+            .Handle;
+        spot1ShadowPassHandle = graph.GraphicsPass("spot1-shadow")
+            .Depth(spot1ShadowHandle, LoadOp.Clear, StoreOp.Store)
             .Shader(shadowInterface, skinnedShadowInterface)
             .Handle;
         // Point light: one depth pass per cube face, each targeting a face
@@ -369,7 +390,8 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             .Target(hdrHandle, LoadOp.Clear, StoreOp.Store)
             .Depth(sceneDepthHandle, LoadOp.Clear, StoreOp.Store)
             .Read(sunShadowHandle)
-            .Read(spotShadowHandle)
+            .Read(spot0ShadowHandle)
+            .Read(spot1ShadowHandle)
             .Read(pointShadowCube)
             .Shader(litInterface, skinnedLitInterface)
             .Handle;
@@ -533,10 +555,8 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
 
         // Spot shadow VP — perspective from the spot, FOV covering the outer
         // cone (×2.2 for a margin so the cone edge isn't clipped by the map).
-        var spotView = Matrix4x4.CreateLookAt(SpotPosition, SpotTarget, Vector3.UnitY);
-        var spotFov = 2f * SpotOuterDeg * (MathF.PI / 180f) * 1.1f;
-        var spotProj = GraphicsMatrices.CreatePerspectiveVulkan(spotFov, 1.0f, 0.2f, SpotRange + 4f);
-        spotViewProj = spotView * spotProj;
+        spot0ViewProj = MakeSpotVP(Spot0Position, Spot0Target, Spot0OuterDeg, Spot0Range);
+        spot1ViewProj = MakeSpotVP(Spot1Position, Spot1Target, Spot1OuterDeg, Spot1Range);
 
         // Point cube face VPs — 90° perspective per face, canonical cubemap
         // axes (+X,-X,+Y,-Y,+Z,-Z) with the standard up vectors. Static
@@ -730,35 +750,39 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         var frameSlot = vkDevice.CurrentFrameSlot;
         cesiumBonePalette.WriteBuffer(frameSlot, binding: 0, cesiumPalettePayload);
 
-        // Spot light packed into the per-frame UBO (vec4-packed).
-        var spotDir = Vector3.Normalize(SpotTarget - SpotPosition);
-        var cosInner = MathF.Cos(SpotInnerDeg * (MathF.PI / 180f));
-        var cosOuter = MathF.Cos(SpotOuterDeg * (MathF.PI / 180f));
-        var spotColorScaled = SpotColor * SpotIntensity;
-
+        // Two spot lights, vec4-packed (color pre-multiplied by intensity).
         var perFrame = new ShaderUniform[]
         {
-            new("uViewProjection",    new Matrix4x4Uniform(viewProj)),
-            new("uSunDirection",      new Vector3Uniform(SunDirection)),
-            new("uSunIntensity",      new FloatUniform(SunIntensity)),
-            new("uAmbientColor",      new Vector3Uniform(AmbientColor)),
-            new("uAmbientIntensity",  new FloatUniform(AmbientIntensity)),
-            new("uSunShadowVP",       new Matrix4x4Uniform(sunShadowVP)),
-            new("uSpotViewProj",      new Matrix4x4Uniform(spotViewProj)),
-            new("uSpotPosRange",      new Vector4Uniform(new Vector4(SpotPosition, SpotRange))),
-            new("uSpotDirCosInner",   new Vector4Uniform(new Vector4(spotDir, cosInner))),
-            new("uSpotColorCosOuter", new Vector4Uniform(new Vector4(spotColorScaled, cosOuter))),
-            new("uPointPosFar",       new Vector4Uniform(new Vector4(PointPosition, PointFar))),
-            new("uPointColorRange",   new Vector4Uniform(new Vector4(PointColor * PointIntensity, PointRange))),
-            new("uLightEnable",       new Vector4Uniform(new Vector4(
+            new("uViewProjection",     new Matrix4x4Uniform(viewProj)),
+            new("uSunDirection",       new Vector3Uniform(SunDirection)),
+            new("uSunIntensity",       new FloatUniform(SunIntensity)),
+            new("uAmbientColor",       new Vector3Uniform(AmbientColor)),
+            new("uAmbientIntensity",   new FloatUniform(AmbientIntensity)),
+            new("uSunShadowVP",        new Matrix4x4Uniform(sunShadowVP)),
+            new("uSpot0ViewProj",      new Matrix4x4Uniform(spot0ViewProj)),
+            new("uSpot0PosRange",      new Vector4Uniform(new Vector4(Spot0Position, Spot0Range))),
+            new("uSpot0DirCosInner",   new Vector4Uniform(new Vector4(
+                Vector3.Normalize(Spot0Target - Spot0Position), MathF.Cos(Spot0InnerDeg * (MathF.PI / 180f))))),
+            new("uSpot0ColorCosOuter", new Vector4Uniform(new Vector4(
+                Spot0Color * Spot0Intensity, MathF.Cos(Spot0OuterDeg * (MathF.PI / 180f))))),
+            new("uSpot1ViewProj",      new Matrix4x4Uniform(spot1ViewProj)),
+            new("uSpot1PosRange",      new Vector4Uniform(new Vector4(Spot1Position, Spot1Range))),
+            new("uSpot1DirCosInner",   new Vector4Uniform(new Vector4(
+                Vector3.Normalize(Spot1Target - Spot1Position), MathF.Cos(Spot1InnerDeg * (MathF.PI / 180f))))),
+            new("uSpot1ColorCosOuter", new Vector4Uniform(new Vector4(
+                Spot1Color * Spot1Intensity, MathF.Cos(Spot1OuterDeg * (MathF.PI / 180f))))),
+            new("uPointPosFar",        new Vector4Uniform(new Vector4(PointPosition, PointFar))),
+            new("uPointColorRange",    new Vector4Uniform(new Vector4(PointColor * PointIntensity, PointRange))),
+            new("uLightEnable",        new Vector4Uniform(new Vector4(
                 sunEnabled ? 1f : 0f, spotEnabled ? 1f : 0f, pointEnabled ? 1f : 0f, 0f))),
         };
 
-        // Sun + spot shadow passes. Each draws the same casters (cube +
+        // Sun + 2 spot shadow passes. Each draws the same casters (cube +
         // skinned cesium) but with its own shadow view-projection pushed
         // per-draw alongside the model matrix (128-byte push).
         RecordShadowPass(shadowPassHandle, sunShadowVP);
-        RecordShadowPass(spotShadowPassHandle, spotViewProj);
+        RecordShadowPass(spot0ShadowPassHandle, spot0ViewProj);
+        RecordShadowPass(spot1ShadowPassHandle, spot1ViewProj);
 
         // Point light: 6 cube face passes, each writing linear distance.
         for (var f = 0; f < 6; f++)
@@ -766,14 +790,17 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             RecordPointShadowFace(pointFacePassHandles[f], pointFaceVP[f]);
         }
 
-        // Lit pass: ground + cube + cesium, sampling all three shadow maps.
+        // Lit pass: ground + cube + cesium, sampling every shadow map. The
+        // two spot maps bind into the Count=2 array at (Slot 1, ArrayIndex 0/1).
         var sunShadowTex = graph.GetDepthTexture(sunShadowHandle);
-        var spotShadowTex = graph.GetDepthTexture(spotShadowHandle);
+        var spot0ShadowTex = graph.GetDepthTexture(spot0ShadowHandle);
+        var spot1ShadowTex = graph.GetDepthTexture(spot1ShadowHandle);
         var pointShadowTex = graph.GetDepthCubeTexture(pointShadowCube);
         var shadowBindings = new[]
         {
             new ShaderTextureBinding("uSunShadowMap", sunShadowTex, Slot: 0),
-            new ShaderTextureBinding("uSpotShadowMap", spotShadowTex, Slot: 1),
+            new ShaderTextureBinding("uSpotShadowMaps[0]", spot0ShadowTex, Slot: 1, ArrayIndex: 0),
+            new ShaderTextureBinding("uSpotShadowMaps[1]", spot1ShadowTex, Slot: 1, ArrayIndex: 1),
             new ShaderTextureBinding("uPointShadowCube", pointShadowTex, Slot: 2),
         };
         graph.Pass(litPassHandle, scope =>
@@ -820,7 +847,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         var (presentTex, presentPipe) = (View)viewMode switch
         {
             View.SunShadow => (graph.GetDepthTexture(sunShadowHandle), presentDepthPipeline),
-            View.SpotShadow => (graph.GetDepthTexture(spotShadowHandle), presentDepthPipeline),
+            View.SpotShadow => (graph.GetDepthTexture(spot0ShadowHandle), presentDepthPipeline),
             View.SceneDepth => (graph.GetDepthTexture(sceneDepthHandle), presentDepthPipeline),
             _ => (graph.GetColorTexture(hdrHandle), presentPipeline),
         };
@@ -943,7 +970,8 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             debug.Values.Value("sun [Z]", sunEnabled);
             debug.Values.Value("spot [X]", spotEnabled);
             debug.Values.Value("point [C]", pointEnabled);
-            debug.Values.Value("spot-pos", SpotPosition);
+            debug.Values.Value("spot0-pos", Spot0Position);
+            debug.Values.Value("spot1-pos", Spot1Position);
             debug.Values.Value("point-pos", PointPosition);
         }
 
@@ -1009,9 +1037,12 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
 
         // Spot light: its perspective shadow frustum + an aim arrow. The
         // frustum shows exactly the cone volume the spot shadow covers.
-        debug.Draw.Frustum("spot/frustum", spotViewProj, new GraphicsColor(1f, 0.5f, 0.2f, 0.8f));
-        debug.Draw.Arrow("spot/dir", SpotPosition, SpotTarget, new GraphicsColor(1f, 0.4f, 0.15f, 1f));
-        debug.Draw.Sphere("spot/pos", SpotPosition, 0.12f, new GraphicsColor(1f, 0.5f, 0.2f, 1f));
+        debug.Draw.Frustum("spot0/frustum", spot0ViewProj, new GraphicsColor(1f, 0.5f, 0.2f, 0.8f));
+        debug.Draw.Arrow("spot0/dir", Spot0Position, Spot0Target, new GraphicsColor(1f, 0.4f, 0.15f, 1f));
+        debug.Draw.Sphere("spot0/pos", Spot0Position, 0.12f, new GraphicsColor(1f, 0.5f, 0.2f, 1f));
+        debug.Draw.Frustum("spot1/frustum", spot1ViewProj, new GraphicsColor(0.3f, 1f, 0.45f, 0.8f));
+        debug.Draw.Arrow("spot1/dir", Spot1Position, Spot1Target, new GraphicsColor(0.25f, 0.9f, 0.4f, 1f));
+        debug.Draw.Sphere("spot1/pos", Spot1Position, 0.12f, new GraphicsColor(0.3f, 1f, 0.45f, 1f));
 
         // Point light position + range sphere (cool cyan).
         debug.Draw.Sphere("point/pos", PointPosition, 0.12f, new GraphicsColor(0.3f, 0.6f, 1f, 1f));
@@ -1025,6 +1056,16 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     public void Dispose()
     {
         graph?.Dispose();
+    }
+
+    // Perspective shadow VP for a spot light. FOV covers the outer cone with
+    // a small margin so the cone edge isn't clipped by the shadow map.
+    private static Matrix4x4 MakeSpotVP(Vector3 position, Vector3 target, float outerDeg, float range)
+    {
+        var view = Matrix4x4.CreateLookAt(position, target, Vector3.UnitY);
+        var fov = 2f * outerDeg * (MathF.PI / 180f) * 1.1f;
+        var proj = GraphicsMatrices.CreatePerspectiveVulkan(fov, 1.0f, 0.2f, range + 4f);
+        return view * proj;
     }
 
     private static Matrix4x4 CreateOrthoVulkan(float width, float height, float near, float far)
