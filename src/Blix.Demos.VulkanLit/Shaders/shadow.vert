@@ -1,21 +1,16 @@
 #version 450
 
-// Sun shadow pass — depth-only render from the sun's POV.
+// Light-agnostic depth-only shadow caster. The shadow view-projection is
+// supplied per-draw via push constants (alongside the model matrix) so a
+// SINGLE shadow pipeline serves the sun (ortho), spot lights (perspective),
+// and every point-light cube face (perspective) — the pass just pushes a
+// different uShadowViewProj. No per-frame UBO needed.
 //
-// Set 0 binding 0 = per-frame UBO (shared with lit pass). We sample
-// only uSunShadowVP here; the rest of the UBO is dead-stripped from
-// this shader's SPIR-V but the descriptor write still happens.
-layout(set = 0, binding = 0) uniform Frame {
-    mat4 uViewProjection;
-    vec3 uSunDirection;
-    float uSunIntensity;
-    vec3 uAmbientColor;
-    float uAmbientIntensity;
-    mat4 uSunShadowVP;
-} frame;
+// Push layout: mat4 uModel (offset 0), mat4 uShadowViewProj (offset 64).
 
 layout(push_constant) uniform PushConstants {
     mat4 uModel;
+    mat4 uShadowViewProj;
 } pc;
 
 layout(location = 0) in vec3 inPosition;
@@ -23,5 +18,5 @@ layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inUv;
 
 void main() {
-    gl_Position = frame.uSunShadowVP * pc.uModel * vec4(inPosition, 1.0);
+    gl_Position = pc.uShadowViewProj * pc.uModel * vec4(inPosition, 1.0);
 }

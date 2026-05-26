@@ -252,12 +252,42 @@ public sealed partial class RenderGraph
         if (Resources[resource.Id].Kind != GraphResourceKind.DepthTarget)
         {
             throw new InvalidOperationException(
-                $"Graph resource id {resource.Id} is not a DepthTarget. Use GetColorTexture for color resources; sampleable depth cubes are not supported yet.");
+                $"Graph resource id {resource.Id} is not a DepthTarget. Use GetColorTexture for color resources or GetDepthCubeTexture for depth cubes.");
         }
         if (br.SampleableHandle is not { } th)
         {
             throw new InvalidOperationException(
                 $"Graph resource id {resource.Id} has no sampleable handle. Was the resource registered correctly?");
+        }
+        return th;
+    }
+
+    // Returns the sampleable TextureHandle (samplerCube) for a graph-managed
+    // depth cube. The point-light shadow path: 6 depth passes write each
+    // cube face (linear distance from the light), then a later pass samples
+    // the whole cube with the light→fragment direction. Available only after
+    // Compile().
+    public TextureHandle GetDepthCubeTexture(DepthCubeHandle cube)
+    {
+        if (!IsCompiled)
+        {
+            throw new InvalidOperationException(
+                "RenderGraph.GetDepthCubeTexture called before Compile.");
+        }
+        if (!BackendResources.TryGetValue(cube.Id, out var br))
+        {
+            throw new InvalidOperationException(
+                $"Graph resource id {cube.Id} has no allocated backend. Was it created via this graph's DepthCube factory?");
+        }
+        if (Resources[cube.Id].Kind != GraphResourceKind.DepthCube)
+        {
+            throw new InvalidOperationException(
+                $"Graph resource id {cube.Id} is not a DepthCube.");
+        }
+        if (br.SampleableHandle is not { } th)
+        {
+            throw new InvalidOperationException(
+                $"Graph resource id {cube.Id} has no sampleable handle. Was the resource registered correctly?");
         }
         return th;
     }

@@ -434,13 +434,24 @@ public sealed partial class RenderGraph : IDisposable
             faceViews[face] = faceView;
         }
 
+        // Register the whole-cube view as a sampleable texture so the lit
+        // pass can sample it via samplerCube. RegisterExternalTexture stores
+        // the view unmodified — a TypeCube view works the same as a 2D one
+        // through the descriptor-write path. Point-light shadow sampling
+        // (step 6.d) consumes this.
+        var sampler = device.GetOrCreateSampler(SamplerDescription.LinearClamp);
+        var handle = device.RegisterExternalTexture(
+            image, wholeView, sampler,
+            (int)faceSize, (int)faceSize, mipCount: 1, format,
+            $"graph.{resource.Name}.cube.tex");
+
         BackendResources[resource.Handle.Id] = new GraphBackendResource
         {
             Image = image,
             Memory = memory,
             WholeImageView = wholeView,
             FaceViews = faceViews,
-            // SampleableHandle deferred — same as DepthTarget.
+            SampleableHandle = handle,
             Width = faceSize,
             Height = faceSize,
             Format = format,

@@ -330,9 +330,11 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
                     lineDrawer.Arrow(d.Origin, end, d.Color);
                     break;
                 case DebugDrawObb d: lineDrawer.Obb(d.Transform, d.Color); break;
-                // Sphere / Grid / Plane / Frustum / Capsule / Cone / MeshWireframe
-                // / Normals not implemented yet — silent skip rather than crash.
-                // Tracked as a follow-up; debug.Draw.* gracefully degrades.
+                case DebugDrawFrustum d: DrawFrustumLines(d.ViewProjection, d.Color); break;
+                case DebugDrawSphere d: DrawSphereLines(d.Center, d.Radius, d.Segments, d.Color); break;
+                case DebugDrawGrid d: DrawGridLines(d.Center, d.Size, d.Divisions, d.Color); break;
+                // Plane / Capsule / Cone / MeshWireframe / Normals not
+                // implemented yet — silent skip rather than crash.
             }
         }
 
@@ -358,6 +360,63 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
     }
 
     private bool warnedDebugIdentityVp;
+
+    // Expand a view-projection into its 8 frustum corners (inverse-VP applied
+    // to the NDC cube; Vulkan z ∈ [0,1]) and draw the 12 edges. The canonical
+    // gizmo for inspecting a shadow camera's covered volume.
+    private void DrawFrustumLines(global::System.Numerics.Matrix4x4 viewProj, GraphicsColor color)
+    {
+        if (!global::System.Numerics.Matrix4x4.Invert(viewProj, out var inv)) return;
+        // NDC cube corners: x,y ∈ [-1,1], z ∈ [0,1]. Index bit 0=x,1=y,2=z(near/far).
+        global::System.Numerics.Vector3 Corner(float x, float y, float z)
+        {
+            var p = global::System.Numerics.Vector4.Transform(new global::System.Numerics.Vector4(x, y, z, 1f), inv);
+            return new global::System.Numerics.Vector3(p.X, p.Y, p.Z) / p.W;
+        }
+        var c = new global::System.Numerics.Vector3[8];
+        var i = 0;
+        for (var zi = 0; zi < 2; zi++)
+        for (var yi = 0; yi < 2; yi++)
+        for (var xi = 0; xi < 2; xi++)
+            c[i++] = Corner(xi == 0 ? -1f : 1f, yi == 0 ? -1f : 1f, zi == 0 ? 0f : 1f);
+        // Near quad (z=0): 0,1,3,2  Far quad (z=1): 4,5,7,6  Connectors.
+        void E(int a, int b) => lineDrawer!.Line(c[a], c[b], color);
+        E(0, 1); E(1, 3); E(3, 2); E(2, 0);   // near
+        E(4, 5); E(5, 7); E(7, 6); E(6, 4);   // far
+        E(0, 4); E(1, 5); E(2, 6); E(3, 7);   // connectors
+    }
+
+    // Three axis-aligned rings approximating a wireframe sphere.
+    private void DrawSphereLines(global::System.Numerics.Vector3 center, float radius, int segments, GraphicsColor color)
+    {
+        if (segments < 3) segments = 3;
+        var step = MathF.PI * 2f / segments;
+        for (var s = 0; s < segments; s++)
+        {
+            var a = s * step;
+            var b = (s + 1) * step;
+            var (ca, sa) = (MathF.Cos(a) * radius, MathF.Sin(a) * radius);
+            var (cb, sb) = (MathF.Cos(b) * radius, MathF.Sin(b) * radius);
+            // XY, XZ, YZ rings.
+            lineDrawer!.Line(center + new global::System.Numerics.Vector3(ca, sa, 0), center + new global::System.Numerics.Vector3(cb, sb, 0), color);
+            lineDrawer!.Line(center + new global::System.Numerics.Vector3(ca, 0, sa), center + new global::System.Numerics.Vector3(cb, 0, sb), color);
+            lineDrawer!.Line(center + new global::System.Numerics.Vector3(0, ca, sa), center + new global::System.Numerics.Vector3(0, cb, sb), color);
+        }
+    }
+
+    // Flat grid of lines on the XZ plane at center.Y.
+    private void DrawGridLines(global::System.Numerics.Vector3 center, float size, int divisions, GraphicsColor color)
+    {
+        if (divisions < 1) divisions = 1;
+        var half = size * 0.5f;
+        var step = size / divisions;
+        for (var k = 0; k <= divisions; k++)
+        {
+            var off = -half + k * step;
+            lineDrawer!.Line(center + new global::System.Numerics.Vector3(off, 0, -half), center + new global::System.Numerics.Vector3(off, 0, half), color);
+            lineDrawer!.Line(center + new global::System.Numerics.Vector3(-half, 0, off), center + new global::System.Numerics.Vector3(half, 0, off), color);
+        }
+    }
 
     private static BlixKey MapKey(SilkKey key) => key switch
     {

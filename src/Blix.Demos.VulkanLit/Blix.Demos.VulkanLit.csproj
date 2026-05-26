@@ -28,6 +28,9 @@
     <GlslShader Include="Shaders\shadow.vert" />
     <GlslShader Include="Shaders\shadow.frag" />
     <GlslShader Include="Shaders\skinned_shadow.vert" />
+    <GlslShader Include="Shaders\point_shadow.vert" />
+    <GlslShader Include="Shaders\point_shadow.frag" />
+    <GlslShader Include="Shaders\point_skinned_shadow.vert" />
     <GlslShader Include="Shaders\lit.vert" />
     <GlslShader Include="Shaders\lit.frag" />
     <GlslShader Include="Shaders\skinned_lit.vert" />

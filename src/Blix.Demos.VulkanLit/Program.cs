@@ -95,8 +95,19 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private RenderGraph graph = null!;
     private GraphResourceHandle hdrHandle;
     private GraphResourceHandle sunShadowHandle;
+    private GraphResourceHandle spotShadowHandle;
+    private DepthCubeHandle pointShadowCube;
     private PassHandle shadowPassHandle;
+    private PassHandle spotShadowPassHandle;
+    private readonly PassHandle[] pointFacePassHandles = new PassHandle[6];
     private PassHandle litPassHandle;
+
+    // Point shadow pipelines (linear-distance cube caster).
+    private ShaderProgramHandle pointShadowProgram;
+    private PipelineHandle pointShadowPipeline;
+    private ShaderProgramHandle pointSkinnedShadowProgram;
+    private PipelineHandle pointSkinnedShadowPipeline;
+    private readonly Matrix4x4[] pointFaceVP = new Matrix4x4[6];
 
     // Present.
     private VertexBufferHandle fullscreenVB;
@@ -108,9 +119,29 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private int frameCount;
     private Matrix4x4 viewProj;
     private Matrix4x4 sunShadowVP;
+    private Matrix4x4 spotViewProj;
     private Matrix4x4 cubeModel;
     private Matrix4x4 groundModel;
     private Matrix4x4 cesiumWorldModel;
+
+    // Spot light. Cone aimed at the scene from above-right; perspective
+    // shadow map. Color is pre-multiplied by intensity for the shader.
+    private static readonly Vector3 SpotPosition = new(-2.6f, 3.2f, 1.8f);
+    private static readonly Vector3 SpotTarget = new(0.2f, -0.4f, 0.2f);
+    private static readonly Vector3 SpotColor = new(1.0f, 0.45f, 0.2f); // warm
+    private const float SpotIntensity = 6.0f;
+    private const float SpotRange = 9.0f;
+    private const float SpotInnerDeg = 14f;
+    private const float SpotOuterDeg = 22f;
+
+    // Point light. Cool cyan, sits low between cube and cesium to throw
+    // omnidirectional shadows. Cube shadow stores linear distance / far.
+    private static readonly Vector3 PointPosition = new(0.9f, 0.7f, 1.4f);
+    private static readonly Vector3 PointColor = new(0.25f, 0.6f, 1.0f); // cool
+    private const float PointIntensity = 4.0f;
+    private const float PointRange = 6.0f;
+    private const float PointFar = 8.0f;
+    private const int PointShadowSize = 512;
     private float currentRotY;
     private float currentRotX;
 
@@ -130,11 +161,17 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private Vector3 cameraForward = -Vector3.UnitZ;
 
     // Debug views: which texture the present pass shows.
-    private enum View { Final = 0, ShadowMap = 1, SceneDepth = 2 }
-    private static readonly string[] ViewLabels = { "Final (HDR)", "Sun shadow map", "Scene depth" };
+    private enum View { Final = 0, SunShadow = 1, SpotShadow = 2, SceneDepth = 3 }
+    private static readonly string[] ViewLabels = { "Final (HDR)", "Sun shadow map", "Spot shadow map", "Scene depth" };
     private int viewMode;          // index into View
     private bool animPaused;
     private GraphResourceHandle sceneDepthHandle;
+
+    // Per-light isolation toggles (debug) — switch lights off independently
+    // to attribute artifacts to a specific light.
+    private bool sunEnabled = true;
+    private bool spotEnabled = true;
+    private bool pointEnabled = true;
 
     // Scene constants.
     private static readonly Vector3 SunDirection = Vector3.Normalize(new Vector3(-0.55f, -1.0f, -0.45f));
@@ -204,33 +241,49 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         var shadowSize = new FixedGraphSize(ShadowMapSize, ShadowMapSize);
 
         sunShadowHandle = graph.DepthTarget("sun-shadow", shadowSize);
+        spotShadowHandle = graph.DepthTarget("spot-shadow", shadowSize);
+        pointShadowCube = graph.DepthCube("point-shadow", PointShadowSize);
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
         sceneDepthHandle = graph.DepthTarget("scene-depth", fullSize);
 
         // --- Shader interfaces ------------------------------------------
+        // Per-frame UBO grows with each light. vec4-packed light blocks
+        // dodge the std140 vec3+float padding fragility. See lit.vert.
         var frameUbo = new UniformBlockLayout(
-            TotalSize: 160,
+            TotalSize: 320,
             Members: new[]
             {
-                new UniformBlockMember("uViewProjection",   0,  64),
-                new UniformBlockMember("uSunDirection",     64, 12),
-                new UniformBlockMember("uSunIntensity",     76, 4),
-                new UniformBlockMember("uAmbientColor",     80, 12),
-                new UniformBlockMember("uAmbientIntensity", 92, 4),
-                new UniformBlockMember("uSunShadowVP",      96, 64),
+                new UniformBlockMember("uViewProjection",    0,   64),
+                new UniformBlockMember("uSunDirection",      64,  12),
+                new UniformBlockMember("uSunIntensity",      76,  4),
+                new UniformBlockMember("uAmbientColor",      80,  12),
+                new UniformBlockMember("uAmbientIntensity",  92,  4),
+                new UniformBlockMember("uSunShadowVP",       96,  64),
+                new UniformBlockMember("uSpotViewProj",      160, 64),
+                new UniformBlockMember("uSpotPosRange",      224, 16),
+                new UniformBlockMember("uSpotDirCosInner",   240, 16),
+                new UniformBlockMember("uSpotColorCosOuter", 256, 16),
+                new UniformBlockMember("uPointPosFar",       272, 16),
+                new UniformBlockMember("uPointColorRange",   288, 16),
+                new UniformBlockMember("uLightEnable",       304, 16),
             });
         var tintUbo = new UniformBlockLayout(
             TotalSize: 16,
             Members: new[] { new UniformBlockMember("uTint", 0, 16) });
 
-        // Static lit interface (no SSBO).
+        // Shadow caster interface — light-agnostic. No set 0; the shadow VP
+        // rides in the push constant (mat4 uModel @0, mat4 uShadowViewProj
+        // @64 = 128 bytes) so one pipeline serves sun + spot + cube faces.
         var shadowInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer,
-                    ShaderStages.Vertex, BlockLayout: frameUbo),
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+            Slots: Array.Empty<DescriptorSetSlot>(),
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 128) });
+
+        // Point cube shadow caster — writes linear distance via gl_FragDepth,
+        // so the frag stage also reads the push (light pos + far). Push is
+        // [model | faceVP | lightPosFar] = 144 bytes, Vertex+Fragment.
+        var pointShadowInterface = new ShaderInterface(
+            Slots: Array.Empty<DescriptorSetSlot>(),
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 144) });
 
         var litInterface = new ShaderInterface(
             Slots: new[]
@@ -238,6 +291,8 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer,
                     ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: frameUbo),
                 new DescriptorSetSlot(1, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                new DescriptorSetSlot(1, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 new DescriptorSetSlot(2, 0, ShaderResourceType.UniformBuffer,
                     ShaderStages.Fragment, BlockLayout: tintUbo),
                 new DescriptorSetSlot(2, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
@@ -255,12 +310,19 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         var skinnedShadowInterface = new ShaderInterface(
             Slots: new[]
             {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer,
-                    ShaderStages.Vertex, BlockLayout: frameUbo),
                 new DescriptorSetSlot(3, 0, ShaderResourceType.StorageBuffer,
                     ShaderStages.Vertex, BlockLayout: boneSsboLayout),
             },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 128) });
+
+        // Skinned point cube caster: set 3 SSBO + 144-byte Vertex|Fragment push.
+        var pointSkinnedShadowInterface = new ShaderInterface(
+            Slots: new[]
+            {
+                new DescriptorSetSlot(3, 0, ShaderResourceType.StorageBuffer,
+                    ShaderStages.Vertex, BlockLayout: boneSsboLayout),
+            },
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 144) });
 
         var skinnedLitInterface = new ShaderInterface(
             Slots: new[]
@@ -268,6 +330,8 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer,
                     ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: frameUbo),
                 new DescriptorSetSlot(1, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                new DescriptorSetSlot(1, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 new DescriptorSetSlot(2, 0, ShaderResourceType.UniformBuffer,
                     ShaderStages.Fragment, BlockLayout: tintUbo),
                 new DescriptorSetSlot(2, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
@@ -282,18 +346,31 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         });
 
         // --- Declare graph passes (shadow casters via both interfaces) --
-        // Both shadowInterface AND skinnedShadowInterface get declared on
-        // the sun-shadow pass — the pass needs to host BOTH static and
-        // skinned shadow casters, and the descriptor pool gets sized for
-        // whichever set 0/1 slots are union'd across declared shaders.
+        // sun-shadow + spot-shadow are separate depth passes; both host the
+        // static + skinned shadow casters. The lit pass reads both.
         shadowPassHandle = graph.GraphicsPass("sun-shadow")
             .Depth(sunShadowHandle, LoadOp.Clear, StoreOp.Store)
             .Shader(shadowInterface, skinnedShadowInterface)
             .Handle;
+        spotShadowPassHandle = graph.GraphicsPass("spot-shadow")
+            .Depth(spotShadowHandle, LoadOp.Clear, StoreOp.Store)
+            .Shader(shadowInterface, skinnedShadowInterface)
+            .Handle;
+        // Point light: one depth pass per cube face, each targeting a face
+        // view. Casters write linear distance via the point-shadow shaders.
+        for (var f = 0; f < 6; f++)
+        {
+            pointFacePassHandles[f] = graph.GraphicsPass($"point-shadow-face{f}")
+                .Depth(pointShadowCube.Face(f), LoadOp.Clear, StoreOp.Store)
+                .Shader(pointShadowInterface, pointSkinnedShadowInterface)
+                .Handle;
+        }
         litPassHandle = graph.GraphicsPass("lit-scene")
             .Target(hdrHandle, LoadOp.Clear, StoreOp.Store)
             .Depth(sceneDepthHandle, LoadOp.Clear, StoreOp.Store)
             .Read(sunShadowHandle)
+            .Read(spotShadowHandle)
+            .Read(pointShadowCube)
             .Shader(litInterface, skinnedLitInterface)
             .Handle;
         graph.Compile();
@@ -323,6 +400,32 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             RasterizerState.NoCulling,
             Array.Empty<BlendState>(),
             RenderTarget: graph.GetPassSurface(shadowPassHandle)), "skinned_shadow");
+
+        // Point cube shadow pipelines. Created against face-0's render pass;
+        // reused for all 6 faces (the per-face render passes are identical
+        // depth-only setups, so they're render-pass compatible).
+        var pointShadowVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "point_shadow.vert.spv"));
+        var pointShadowFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "point_shadow.frag.spv"));
+        pointShadowProgram = vk.CreateShaderProgramFromSpv(pointShadowVertSpv, pointShadowFragSpv, pointShadowInterface, "point_shadow");
+        pointShadowPipeline = vk.CreatePipeline(new PipelineDescription(
+            pointShadowProgram,
+            VertexPosition3NormalTexture.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite,
+            RasterizerState.NoCulling,
+            Array.Empty<BlendState>(),
+            RenderTarget: graph.GetPassSurface(pointFacePassHandles[0])), "point_shadow");
+
+        var pointSkinnedShadowVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "point_skinned_shadow.vert.spv"));
+        pointSkinnedShadowProgram = vk.CreateShaderProgramFromSpv(pointSkinnedShadowVertSpv, pointShadowFragSpv, pointSkinnedShadowInterface, "point_skinned_shadow");
+        pointSkinnedShadowPipeline = vk.CreatePipeline(new PipelineDescription(
+            pointSkinnedShadowProgram,
+            VertexPosition3NormalTextureSkin4Tangent.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite,
+            RasterizerState.NoCulling,
+            Array.Empty<BlendState>(),
+            RenderTarget: graph.GetPassSurface(pointFacePassHandles[0])), "point_skinned_shadow");
 
         var litVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "lit.vert.spv"));
         var litFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "lit.frag.spv"));
@@ -428,6 +531,43 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         var sunOrtho = CreateOrthoVulkan(width: 7.5f, height: 7.5f, near: 0.1f, far: 16f);
         sunShadowVP = sunView * sunOrtho;
 
+        // Spot shadow VP — perspective from the spot, FOV covering the outer
+        // cone (×2.2 for a margin so the cone edge isn't clipped by the map).
+        var spotView = Matrix4x4.CreateLookAt(SpotPosition, SpotTarget, Vector3.UnitY);
+        var spotFov = 2f * SpotOuterDeg * (MathF.PI / 180f) * 1.1f;
+        var spotProj = GraphicsMatrices.CreatePerspectiveVulkan(spotFov, 1.0f, 0.2f, SpotRange + 4f);
+        spotViewProj = spotView * spotProj;
+
+        // Point cube face VPs — 90° perspective per face, canonical cubemap
+        // axes (+X,-X,+Y,-Y,+Z,-Z) with the standard up vectors. Static
+        // because the point light doesn't move.
+        //
+        // Cube faces must NOT use the screen Y-flip. Cubemap sampling follows
+        // a fixed convention that assumes Y-up face rendering; the screen
+        // perspective's Y-flip (M22 < 0) vertically mirrors each stored face,
+        // so a direction samples a mirrored texel and reads the wrong
+        // occluder distance (a mirrored false shadow). Undo the flip while
+        // keeping Vulkan's [0,1] depth range (can't use the GL-style
+        // CreatePerspective — its z ∈ [-1,1] would clip near geometry in
+        // Vulkan). See ShaderLab's point-shadow faces (GL CreatePerspective).
+        var pointProj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 2f, 1.0f, 0.1f, PointFar);
+        pointProj.M22 = -pointProj.M22;
+        var faceDirs = new[]
+        {
+            ( new Vector3( 1, 0, 0), new Vector3(0, -1,  0) ), // +X
+            ( new Vector3(-1, 0, 0), new Vector3(0, -1,  0) ), // -X
+            ( new Vector3( 0, 1, 0), new Vector3(0,  0,  1) ), // +Y
+            ( new Vector3( 0,-1, 0), new Vector3(0,  0, -1) ), // -Y
+            ( new Vector3( 0, 0, 1), new Vector3(0, -1,  0) ), // +Z
+            ( new Vector3( 0, 0,-1), new Vector3(0, -1,  0) ), // -Z
+        };
+        for (var f = 0; f < 6; f++)
+        {
+            var (faceDir, faceUp) = faceDirs[f];
+            var faceView = Matrix4x4.CreateLookAt(PointPosition, PointPosition + faceDir, faceUp);
+            pointFaceVP[f] = faceView * pointProj;
+        }
+
         groundModel = Matrix4x4.Identity;
         System.Runtime.InteropServices.MemoryMarshal.Write(groundModelPushBytes, in groundModel);
 
@@ -495,6 +635,17 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 break;
             case Key.P:
                 animPaused = !animPaused;
+                break;
+            // Per-light isolation (the Silk runtime has no clickable HUD, so
+            // these live on the keyboard). State echoes to the console diag.
+            case Key.Z:
+                sunEnabled = !sunEnabled;
+                break;
+            case Key.X:
+                spotEnabled = !spotEnabled;
+                break;
+            case Key.C:
+                pointEnabled = !pointEnabled;
                 break;
             case Key.Escape:
                 host.RequestClose();
@@ -579,41 +730,52 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         var frameSlot = vkDevice.CurrentFrameSlot;
         cesiumBonePalette.WriteBuffer(frameSlot, binding: 0, cesiumPalettePayload);
 
+        // Spot light packed into the per-frame UBO (vec4-packed).
+        var spotDir = Vector3.Normalize(SpotTarget - SpotPosition);
+        var cosInner = MathF.Cos(SpotInnerDeg * (MathF.PI / 180f));
+        var cosOuter = MathF.Cos(SpotOuterDeg * (MathF.PI / 180f));
+        var spotColorScaled = SpotColor * SpotIntensity;
+
         var perFrame = new ShaderUniform[]
         {
-            new("uViewProjection",   new Matrix4x4Uniform(viewProj)),
-            new("uSunDirection",     new Vector3Uniform(SunDirection)),
-            new("uSunIntensity",     new FloatUniform(SunIntensity)),
-            new("uAmbientColor",     new Vector3Uniform(AmbientColor)),
-            new("uAmbientIntensity", new FloatUniform(AmbientIntensity)),
-            new("uSunShadowVP",      new Matrix4x4Uniform(sunShadowVP)),
+            new("uViewProjection",    new Matrix4x4Uniform(viewProj)),
+            new("uSunDirection",      new Vector3Uniform(SunDirection)),
+            new("uSunIntensity",      new FloatUniform(SunIntensity)),
+            new("uAmbientColor",      new Vector3Uniform(AmbientColor)),
+            new("uAmbientIntensity",  new FloatUniform(AmbientIntensity)),
+            new("uSunShadowVP",       new Matrix4x4Uniform(sunShadowVP)),
+            new("uSpotViewProj",      new Matrix4x4Uniform(spotViewProj)),
+            new("uSpotPosRange",      new Vector4Uniform(new Vector4(SpotPosition, SpotRange))),
+            new("uSpotDirCosInner",   new Vector4Uniform(new Vector4(spotDir, cosInner))),
+            new("uSpotColorCosOuter", new Vector4Uniform(new Vector4(spotColorScaled, cosOuter))),
+            new("uPointPosFar",       new Vector4Uniform(new Vector4(PointPosition, PointFar))),
+            new("uPointColorRange",   new Vector4Uniform(new Vector4(PointColor * PointIntensity, PointRange))),
+            new("uLightEnable",       new Vector4Uniform(new Vector4(
+                sunEnabled ? 1f : 0f, spotEnabled ? 1f : 0f, pointEnabled ? 1f : 0f, 0f))),
         };
 
-        // Shadow pass: cube (static) + cesium (skinned).
-        graph.Pass(shadowPassHandle, scope =>
-        {
-            scope.DrawIndexed(
-                vertexBuffer: cubeVB,
-                indexBuffer: cubeIB,
-                pipeline: shadowPipeline,
-                indexCount: 36,
-                uniforms: perFrame,
-                textures: Array.Empty<ShaderTextureBinding>(),
-                pushConstants: cubeModelPushBytes);
-            scope.DrawIndexedSkinnedShadow(
-                vertexBuffer: cesiumVB,
-                indexBuffer: cesiumIB,
-                pipeline: skinnedShadowPipeline,
-                indexCount: cesiumIndexCount,
-                uniforms: perFrame,
-                textures: Array.Empty<ShaderTextureBinding>(),
-                perDrawMaterial: cesiumBoneMaterial,
-                pushConstants: cesiumModelPushBytes);
-        });
+        // Sun + spot shadow passes. Each draws the same casters (cube +
+        // skinned cesium) but with its own shadow view-projection pushed
+        // per-draw alongside the model matrix (128-byte push).
+        RecordShadowPass(shadowPassHandle, sunShadowVP);
+        RecordShadowPass(spotShadowPassHandle, spotViewProj);
 
-        // Lit pass: ground + cube + cesium.
+        // Point light: 6 cube face passes, each writing linear distance.
+        for (var f = 0; f < 6; f++)
+        {
+            RecordPointShadowFace(pointFacePassHandles[f], pointFaceVP[f]);
+        }
+
+        // Lit pass: ground + cube + cesium, sampling all three shadow maps.
         var sunShadowTex = graph.GetDepthTexture(sunShadowHandle);
-        var shadowBinding = new ShaderTextureBinding("uSunShadowMap", sunShadowTex, Slot: 0);
+        var spotShadowTex = graph.GetDepthTexture(spotShadowHandle);
+        var pointShadowTex = graph.GetDepthCubeTexture(pointShadowCube);
+        var shadowBindings = new[]
+        {
+            new ShaderTextureBinding("uSunShadowMap", sunShadowTex, Slot: 0),
+            new ShaderTextureBinding("uSpotShadowMap", spotShadowTex, Slot: 1),
+            new ShaderTextureBinding("uPointShadowCube", pointShadowTex, Slot: 2),
+        };
         graph.Pass(litPassHandle, scope =>
         {
             scope.DrawIndexed(
@@ -622,7 +784,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 pipeline: litPipeline,
                 indexCount: 6,
                 uniforms: perFrame,
-                textures: new[] { shadowBinding },
+                textures: shadowBindings,
                 material: groundMaterial,
                 pushConstants: groundModelPushBytes);
             scope.DrawIndexed(
@@ -631,7 +793,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 pipeline: litPipeline,
                 indexCount: 36,
                 uniforms: perFrame,
-                textures: new[] { shadowBinding },
+                textures: shadowBindings,
                 material: cubeMaterial,
                 pushConstants: cubeModelPushBytes);
             // Skinned cesium: set 2 (skin material — tint + albedo) AND
@@ -644,7 +806,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 pipeline: skinnedLitPipeline,
                 indexCount: cesiumIndexCount,
                 uniforms: perFrame,
-                textures: new[] { shadowBinding },
+                textures: shadowBindings,
                 material: cesiumSkinMaterial,
                 perDrawMaterial: cesiumBoneMaterial,
                 pushConstants: cesiumModelPushBytes);
@@ -657,7 +819,8 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         // shadow map / scene depth through the grayscale visualizer.
         var (presentTex, presentPipe) = (View)viewMode switch
         {
-            View.ShadowMap => (graph.GetDepthTexture(sunShadowHandle), presentDepthPipeline),
+            View.SunShadow => (graph.GetDepthTexture(sunShadowHandle), presentDepthPipeline),
+            View.SpotShadow => (graph.GetDepthTexture(spotShadowHandle), presentDepthPipeline),
             View.SceneDepth => (graph.GetDepthTexture(sceneDepthHandle), presentDepthPipeline),
             _ => (graph.GetColorTexture(hdrHandle), presentPipeline),
         };
@@ -679,6 +842,87 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             });
     }
 
+    // Record a depth-only shadow pass for one light: draw the cube + skinned
+    // cesium, each pushing [model | shadowViewProj] (128 bytes). The same
+    // shadow pipeline serves every light because the VP rides in the push
+    // constant, not a per-light shader.
+    private void RecordShadowPass(PassHandle pass, Matrix4x4 shadowVp)
+    {
+        var cubePush = ShadowPushBytes(cubeModel, shadowVp);
+        var cesiumPush = ShadowPushBytes(cesiumWorldModel, shadowVp);
+        graph.Pass(pass, scope =>
+        {
+            scope.DrawIndexed(
+                vertexBuffer: cubeVB,
+                indexBuffer: cubeIB,
+                pipeline: shadowPipeline,
+                indexCount: 36,
+                uniforms: Array.Empty<ShaderUniform>(),
+                textures: Array.Empty<ShaderTextureBinding>(),
+                pushConstants: cubePush);
+            scope.DrawIndexedSkinnedShadow(
+                vertexBuffer: cesiumVB,
+                indexBuffer: cesiumIB,
+                pipeline: skinnedShadowPipeline,
+                indexCount: cesiumIndexCount,
+                uniforms: Array.Empty<ShaderUniform>(),
+                textures: Array.Empty<ShaderTextureBinding>(),
+                perDrawMaterial: cesiumBoneMaterial,
+                pushConstants: cesiumPush);
+        });
+    }
+
+    // [model (64 bytes) | shadowViewProj (64 bytes)] — matches the shadow
+    // shaders' push-constant block. Fresh buffer per call so each deferred
+    // graph draw captures its own bytes (the graph replays scopes at Execute).
+    private static byte[] ShadowPushBytes(Matrix4x4 model, Matrix4x4 shadowVp)
+    {
+        var bytes = new byte[128];
+        System.Runtime.InteropServices.MemoryMarshal.Write(bytes.AsSpan(0, 64), in model);
+        System.Runtime.InteropServices.MemoryMarshal.Write(bytes.AsSpan(64, 64), in shadowVp);
+        return bytes;
+    }
+
+    // Record one cube-face depth pass for the point light. Casters write
+    // linear distance (point shadow shaders) via a 144-byte push:
+    // [model | faceVP | lightPosFar].
+    private void RecordPointShadowFace(PassHandle pass, Matrix4x4 faceVp)
+    {
+        var lightPosFar = new Vector4(PointPosition, PointFar);
+        var cubePush = PointShadowPushBytes(cubeModel, faceVp, lightPosFar);
+        var cesiumPush = PointShadowPushBytes(cesiumWorldModel, faceVp, lightPosFar);
+        graph.Pass(pass, scope =>
+        {
+            scope.DrawIndexed(
+                vertexBuffer: cubeVB,
+                indexBuffer: cubeIB,
+                pipeline: pointShadowPipeline,
+                indexCount: 36,
+                uniforms: Array.Empty<ShaderUniform>(),
+                textures: Array.Empty<ShaderTextureBinding>(),
+                pushConstants: cubePush);
+            scope.DrawIndexedSkinnedShadow(
+                vertexBuffer: cesiumVB,
+                indexBuffer: cesiumIB,
+                pipeline: pointSkinnedShadowPipeline,
+                indexCount: cesiumIndexCount,
+                uniforms: Array.Empty<ShaderUniform>(),
+                textures: Array.Empty<ShaderTextureBinding>(),
+                perDrawMaterial: cesiumBoneMaterial,
+                pushConstants: cesiumPush);
+        });
+    }
+
+    // [model (64) | faceViewProj (64) | lightPosFar (16)] = 144 bytes.
+    private static byte[] PointShadowPushBytes(Matrix4x4 model, Matrix4x4 faceVp, Vector4 lightPosFar)
+    {
+        var bytes = new byte[144];
+        System.Runtime.InteropServices.MemoryMarshal.Write(bytes.AsSpan(0, 64), in model);
+        System.Runtime.InteropServices.MemoryMarshal.Write(bytes.AsSpan(64, 64), in faceVp);
+        System.Runtime.InteropServices.MemoryMarshal.Write(bytes.AsSpan(128, 16), in lightPosFar);
+        return bytes;
+    }
+
     public void Debug(DebugContext debug)
     {
         debug.Values.Value("frame", frameCount);
@@ -691,6 +935,16 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             viewMode = debug.Controls.Enum("View [V]", viewMode, ViewLabels);
             animPaused = debug.Controls.Toggle("Pause anim [P]", animPaused);
             moveSpeed = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 40f);
+        }
+        using (debug.Scope("lights"))
+        {
+            // Toggle keys Z/X/C (no clickable HUD in the Silk runtime); state
+            // echoed here so the console diag shows what's on.
+            debug.Values.Value("sun [Z]", sunEnabled);
+            debug.Values.Value("spot [X]", spotEnabled);
+            debug.Values.Value("point [C]", pointEnabled);
+            debug.Values.Value("spot-pos", SpotPosition);
+            debug.Values.Value("point-pos", PointPosition);
         }
 
         using (debug.Scope("cube"))
@@ -748,9 +1002,20 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         // pass renders. If the scene pokes outside this box, shadows clip.
         debug.Draw.Frustum("sun/frustum", sunShadowVP, new GraphicsColor(1f, 0.85f, 0.2f, 0.8f));
 
-        // Sun direction arrow at the scene origin (points the way light travels).
-        debug.Draw.Arrow("sun/dir", Vector3.Zero, SunDirection * 2.0f,
-            new GraphicsColor(1f, 0.6f, 0.1f, 1f));
+        // Sun (directional): an incoming arrow from up-sun toward the origin,
+        // so you can see which way the sunlight travels. Yellow = sun.
+        debug.Draw.Arrow("sun/incoming", -SunDirection * 4.0f, Vector3.Zero,
+            new GraphicsColor(1f, 0.92f, 0.3f, 1f));
+
+        // Spot light: its perspective shadow frustum + an aim arrow. The
+        // frustum shows exactly the cone volume the spot shadow covers.
+        debug.Draw.Frustum("spot/frustum", spotViewProj, new GraphicsColor(1f, 0.5f, 0.2f, 0.8f));
+        debug.Draw.Arrow("spot/dir", SpotPosition, SpotTarget, new GraphicsColor(1f, 0.4f, 0.15f, 1f));
+        debug.Draw.Sphere("spot/pos", SpotPosition, 0.12f, new GraphicsColor(1f, 0.5f, 0.2f, 1f));
+
+        // Point light position + range sphere (cool cyan).
+        debug.Draw.Sphere("point/pos", PointPosition, 0.12f, new GraphicsColor(0.3f, 0.6f, 1f, 1f));
+        debug.Draw.Sphere("point/range", PointPosition, PointRange, new GraphicsColor(0.25f, 0.5f, 0.9f, 0.25f));
 
         // Ground reference grid.
         debug.Draw.Grid("ground/grid", new Vector3(0, -0.6f, 0), 6f, 12,
