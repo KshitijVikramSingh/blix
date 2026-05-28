@@ -1,6 +1,8 @@
 # Renderer
 
-The renderer is split into three layers below the game code:
+This doc describes the GL renderer (`Blix.Render` + `Blix.Graphics.OpenGL` + shaders + the Sponza/ShaderLab/Walkthrough demos). For the Vulkan backend's architecture — `ShaderInterface` binding model, render graph, per-draw transient descriptor pool, `MaterialBindings` carrier — see [`vulkan-reshape-shaderlab-target.md`](vulkan-reshape-shaderlab-target.md), [`vector-b-plan.md`](vector-b-plan.md), and [`vulkan-friction.md`](vulkan-friction.md). The Vulkan-lit demo (`src/Blix.Demos.VulkanLit/`) is the working reference.
+
+The GL renderer is split into three layers below the game code:
 
 - **`Blix.Render`** — the engine-facing API. Game code talks to `Mesh`, `Material`, `MaterialResolver`, `SpriteBatch`, `Font`, `DebugDraw`. Low-level GL handles never leak into draw sites.
 - **`Blix.Graphics`** — the graphics command language. Typed handles (`PipelineHandle`, `VertexBufferHandle`, etc.), pipeline state, render surfaces, render passes, vertex layouts, shader sources, the GLSL include preprocessor.

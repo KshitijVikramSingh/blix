@@ -132,7 +132,7 @@ public static class LitShader
 
 **What this reveals:**
 - **F-002 disposition holds:** every binding is `(set, binding)` explicit. Names live inside `UniformBlockLayout` for member access, never for descriptor lookup.
-- **F-007 disposition holds:** model + normal matrix are per-draw → push constants (128 bytes, well inside the 256-byte budget). No descriptor set churn per draw.
+- **F-007 disposition (descriptor half resolved):** the per-draw transient descriptor pool (`VulkanGraphicsDevice.TransientDescriptors.cs`) gives every draw its own descriptor set, so the same program can be safely reused across draws with different texture bindings (bloom blur H+V share one program; the duplicated `bloomBlurProgramV` is gone). Model + normal matrix continue to ride push constants. UBO-byte storage is still per-program-per-frame and remains the next escalation.
 - **F-009 stress test:** the `uSpotVPs` array is in-UBO with `ElementStride: 64` — sizeof(mat4). That's clean. Bone palette would NOT fit (50+ mat4 = 3200 bytes > UBO max), so skin.lit declares it as an SSBO (see Section 2).
 - **NEW question Q-001:** how granular is the per-material set? Today materials carry their own UBO + 3 textures. Some shaders (skybox, hologram) have no textures — does set 2 just stay empty in their interface? **Tentative answer:** yes, empty per-material set is fine; the runtime skips bind when count is 0.
 
@@ -155,7 +155,7 @@ public static class SkinLitShader
 **What this reveals:**
 - **F-009 disposition firms up:** bone palettes go to SSBO. The descriptor type changes (StorageBuffer not UniformBuffer); the binding shape itself is the same. The shader does `layout(set=3, binding=0) readonly buffer Bones { mat4 m[]; } bones;`.
 - **NEW question Q-002:** SSBOs aren't required to be supported at all stages on every device. We need to require `VK_PHYSICAL_DEVICE_FEATURE_SHADER_STORAGE_BUFFER_*` at device-create time. On MoltenVK this is fine; on minimal Vulkan profiles it may not be. Worth detecting + erroring early.
-- **NEW question Q-003:** set 3 here is per-draw (one SSBO per skinned object). Per-draw descriptor sets need a transient pool that's reset per frame. How does that interact with set 3's "push constants" use elsewhere? **Tentative answer:** set 3 is a *lifetime tier* not a *resource type* — push constants are the default for ≤256B, descriptor sets allocated from a transient pool for larger. The shader interface declares which.
+- **Q-003 — SETTLED.** Set 3 is a *lifetime tier* (per-draw), not a *resource type*. Push constants serve the ≤256B case; for larger payloads (bone palette SSBO) the program declares a slot at set 3 and the demo allocates a `MaterialBindings` with `framesInFlight = MaxFramesInFlight`. The bone palette already rides this path in the lit demo. Per-draw transient descriptor allocation for set 0/1 is also live (see F-007 resolution); set 3's MaterialBindings stays per-material-instance because the payload is large enough that recycling sets across draws is the right call.
 
 ```csharp
 // Glass — no shadows, no MR maps, just env + scene-copy + a few floats.

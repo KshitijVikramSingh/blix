@@ -1,31 +1,10 @@
 namespace Blix.Graphics.Vulkan;
 
-// Render-graph validation. Pure functions over the graph's internal pass
-// + resource tables — no device required. Section L tests construct
-// graphs directly via the internal test constructor and call Validate.
-//
-// VB.ii scope:
-//   1. Pass count > 0
-//   2. Pass names unique
-//   3. Each GraphicsPass has a Target OR Depth
-//   4. Each GraphicsPass has at least one Shader declared
-//   5. Each ComputePass has a Shader declared
-//   6. Every Read references a resource declared as Target/Depth/Write
-//      by an EARLIER pass (per D4 — declaration order = execution order;
-//      this rule covers both 'undeclared resource' and 'cycle in graph'
-//      since a cycle requires a later pass to be the producer)
-//
-// DEFERRED (lands later when the trigger shape is concrete):
-//   - Set-1 layout compatibility across shaders sharing a pass.
-//     ShaderLab's "scene" pass has Lit + SkinLit + Skybox; SkinLit
-//     shares set 1 with Lit but Skybox's set 1 is a subset. Need
-//     real lit-shape data to spec the compat rule precisely
-//     (identical lists? union-of-slots? subset?). Step 6 triggers.
-//   - External-resource registration (env cubemap, BRDF LUT etc.
-//     loaded outside the graph and Read into passes). No API to
-//     register them yet — every TextureHandle cited by a Read must
-//     be a graph-owned resource declared by a prior pass. The
-//     external-resource path lands when step 6 needs IBL inputs.
+// Pure-function validation over the graph's pass + resource tables.
+// Checks: non-empty, unique pass names, color-or-depth attachment,
+// at least one shader per pass, Reads reference a resource declared
+// by an EARLIER pass (the declaration-order = execution-order rule
+// catches both unknown resources and cycles in one check).
 internal static class RenderGraphValidation
 {
     public static void Validate(RenderGraph graph)

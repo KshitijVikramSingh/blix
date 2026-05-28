@@ -198,13 +198,9 @@ public sealed partial class VulkanGraphicsDevice
 
     internal VkTextureEntry GetTexture(TextureHandle h) => textureTable[h.Id];
 
-    // Register an existing VkImage as a sampleable VkTextureEntry. Used by
-    // the render graph (VB.iii) to expose its color-target attachments as
-    // TextureHandles so downstream passes can Read them through the
-    // existing ShaderTextureBinding path. The caller owns the image's
-    // lifetime — DestroyTexture only removes the entry from the table and
-    // does NOT destroy the underlying VkImage / Memory / View (those are
-    // owned and destroyed by the graph itself).
+    // Register an externally-owned VkImage as a sampleable entry. Caller
+    // retains image/memory/view lifetime — DestroyTexture only removes the
+    // entry from the table, it does NOT destroy the underlying objects.
     internal TextureHandle RegisterExternalTexture(
         Image image,
         ImageView view,

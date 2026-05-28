@@ -3,34 +3,15 @@ using Silk.NET.Vulkan;
 
 namespace Blix.Graphics.Vulkan;
 
-// Per-material descriptor-set carrier. One instance owns the VkDescriptorSet
-// + host-visible UBO/SSBO buffers for the slots declared at its `SetIndex`
-// in the shader interface. Constructed via VulkanGraphicsDevice.CreateMaterial;
-// values written via SetUniform / SetTexture / WriteBuffer; the handle is
-// passed to RenderPassBuilder.DrawIndexed.
+// Carrier for a per-material descriptor set + its UBO/SSBO buffers.
 //
-// Two modes:
+// FramesInFlight=1 (default): one pool/set/buffer. Mutating live values
+// while the frame is in flight is a validation hazard — write at setup.
 //
-// 1) Static (FramesInFlight == 1, the default — set 2 / per-material).
-//    One pool + one set + one buffer per binding. Values are typically
-//    written ONCE during setup; mutating them while a frame using the
-//    material is in flight is a Vulkan validation hazard. Use a second
-//    instance to update.
-//
-// 2) Per-frame replicated (FramesInFlight > 1 — set 3 / per-draw SSBO).
-//    `MaxFramesInFlight` pools + sets + buffers. Each frame the caller
-//    writes the slot matching the current frame index via
-//    `WriteBuffer(frameSlot, binding, payload)` and binds the matching
-//    descriptor set via the standard DrawIndexed path; the engine selects
-//    `Sets[frameSlot]` automatically. The CPU writes a slot only when the
-//    GPU has finished using it (the swapchain's per-frame semaphore wait
-//    guarantees this), so per-frame writes are safe without an explicit
-//    fence.
-//
-// Per-slot addressing: binding number identifies the slot inside the set
-// (per F-002: names live in BlockLayout for UBO members, not for
-// descriptor lookup). SetUniform takes (binding, memberName, value)
-// where memberName is the field inside the slot's BlockLayout.
+// FramesInFlight>1: replicated per slot. Each frame the caller writes the
+// matching slot via WriteBuffer(frameSlot, ...) and the bind path picks
+// Sets[frameSlot]. CPU/GPU sync is provided by the swapchain's per-frame
+// fence — no explicit fencing needed here.
 public sealed class MaterialBindings
 {
     private readonly VulkanGraphicsDevice device;
@@ -41,9 +22,7 @@ public sealed class MaterialBindings
     public int SetIndex { get; }
     public int FramesInFlight { get; }
 
-    // Per-frame replicated. Length == FramesInFlight. For static materials
-    // (FramesInFlight == 1) these are single-element arrays — the binding
-    // path uses Sets[frameSlot] uniformly.
+    // Length == FramesInFlight; static materials carry single-element arrays.
     internal DescriptorPool[] Pools;
     internal DescriptorSet[] Sets;
     internal Dictionary<int, VulkanGraphicsDevice.VkBufferEntry>[] BuffersPerFrame;
@@ -97,9 +76,7 @@ public sealed class MaterialBindings
 
     private unsafe void AllocateDescriptorSet(DescriptorSetLayout sharedLayout, int frameSlot)
     {
-        // Pool sized for exactly this material's slots (one descriptor per
-        // slot, possibly with Count>1 for sampler arrays). MaxSets=1 because
-        // each pool feeds exactly one set (one per frame slot).
+        // One pool per frame slot; MaxSets=1 (one set per pool).
         var perTypeCount = new Dictionary<DescriptorType, uint>();
         foreach (var s in slots)
         {
@@ -175,10 +152,9 @@ public sealed class MaterialBindings
 
     // --- Public API --------------------------------------------------------
 
-    // SetUniform / SetTexture write to ALL frame slots. The expected use
-    // is setup-time configuration (textures + persistent uniforms set
-    // once at OnLoad). For per-frame data (a fresh bone palette every
-    // frame), use WriteBuffer(frameSlot, binding, payload).
+    // SetUniform / SetTexture broadcast to every frame slot — use these for
+    // setup-time configuration. For per-frame data (e.g. bone palette), use
+    // WriteBuffer(frameSlot, ...) into the current frame's slot only.
 
     public MaterialBindings SetUniform(int binding, string memberName, float value) =>
         WriteUniformBytes(binding, memberName, sizeof(float), span =>
@@ -248,11 +224,8 @@ public sealed class MaterialBindings
         return this;
     }
 
-    // Whole-buffer overwrite at the named frame slot. The canonical use is
-    // a bone-palette SSBO: the caller computes BonePalette this frame,
-    // packs it to bytes, and writes it into the slot matching the device's
-    // CurrentFrameSlot. payload.Length must equal the binding's declared
-    // BlockLayout.TotalSize.
+    // Whole-buffer overwrite at one frame slot. payload.Length must equal
+    // the binding's BlockLayout.TotalSize.
     public unsafe MaterialBindings WriteBuffer(int frameSlot, int binding, ReadOnlySpan<byte> payload)
     {
         if (frameSlot < 0 || frameSlot >= FramesInFlight)

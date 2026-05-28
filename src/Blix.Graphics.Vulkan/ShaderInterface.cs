@@ -1,20 +1,13 @@
 namespace Blix.Graphics.Vulkan;
 
-// Binding contract for a shader program: which descriptor slots it samples
-// from (organized into sets 0/1/2/3 by lifetime per
-// docs/vulkan-reshape-shaderlab-target.md Section 1) and which push-constant
-// ranges it consumes. Vertex input stays on PipelineDescription for now.
+// Binding contract for a shader program: descriptor slots and push-constant
+// ranges. Vertex input lives on PipelineDescription.
 //
-// Set-by-lifetime convention:
-//   set 0 = per-frame   (viewProjection, sun, camera, ambient)
-//   set 1 = per-pass    (shadow maps, env, BRDF LUT)
+// Set-by-lifetime convention (see docs/vulkan-reshape-shaderlab-target.md):
+//   set 0 = per-frame    (viewProjection, sun, camera, ambient)
+//   set 1 = per-pass     (shadow maps, env, BRDF LUT)
 //   set 2 = per-material (albedo/normal/MR + factors)
-//   set 3 = per-draw    (push constants for ≤256B, descriptor sets above)
-//
-// 2a scope (this file): pure type declarations + structural Validate(). No
-// backend wiring — CreateShaderProgramFromSpv still consumes the legacy
-// UniformBlockLayout. 2b lands the wiring that generates a real
-// VkDescriptorSetLayout from these declarations.
+//   set 3 = per-draw     (push constants for ≤256B; descriptor sets above)
 
 [Flags]
 public enum ShaderStages
@@ -66,22 +59,9 @@ public sealed record ShaderInterface(
     public ShaderInterface(IReadOnlyList<DescriptorSetSlot> slots)
         : this(slots, Array.Empty<PushConstantRange>()) { }
 
-    // Throws InvalidOperationException with a specific reason if the
-    // declared interface is structurally invalid. Caller-side check before
-    // the backend uses these slots to build a VkDescriptorSetLayout.
-    //
-    // Catches at this layer:
-    //   - (set, binding) collisions within the interface
-    //   - buffer slots missing BlockLayout / image+sampler slots carrying one
-    //   - ShaderStages.None on any slot or push-constant range
-    //   - negative Set / Binding / Count / Offset / Size
-    //   - zero-Size push-constant ranges
-    //   - push-constant range overlap within a shared stage
-    //
-    // Does NOT catch (deferred to backend or device-feature checks):
-    //   - maxPushConstantsSize (device-feature, checked at pipeline-layout creation)
-    //   - SSBO support (device-feature, checked at device creation)
-    //   - block-layout offset/size matching the actual SPIR-V reflection
+    // Structural checks only. Device-feature limits (maxPushConstantsSize,
+    // SSBO support) surface later at pipeline-layout / device creation.
+    // Block-layout vs SPIR-V reflection is not cross-checked here.
     public void Validate()
     {
         var seen = new HashSet<(int Set, int Binding)>();

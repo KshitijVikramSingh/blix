@@ -1,5 +1,18 @@
 # Vector B — render graph (reduced scope)
 
+**Status: shipped.** All eight implementation tasks below landed across
+commits `d10ca7d` (graph) → `2377ab5`/`60d5221`/`9bfe4a8` (shadow + skinning
+consumers). What you're reading is the original plan kept as historical
+record; the live code is the source of truth. One architectural
+divergence to flag:
+
+- Per-pass `DescriptorPool` (referenced in VB.iii below) never had a
+  callsite that allocated against it — it was allocated and immediately
+  destroyed. It was removed; descriptors flow through a device-level
+  per-frame transient pool
+  (`VulkanGraphicsDevice.TransientDescriptors.cs`) instead, allocated
+  fresh per draw. See F-007 in `vulkan-friction.md`.
+
 Status: reviewed via /plan-eng-review at commit b8ee06f. Scope reduced from
 the full graph in `docs/vulkan-reshape-shaderlab-target.md` Section 3 to
 the load-bearing subset that ShaderLab port (step 6) needs day 1, deferring
@@ -142,8 +155,9 @@ Each sub-step ends with `dotnet build` clean and tests passing.
   - `Compile()` walks passes; reuses `VkRenderSurfaceEntry`-style
     machinery (`AllocateAttachmentImage`, `CreateSurfaceRenderPass`,
     `CreateSurfaceFramebuffer` — promote those to internal helpers).
-  - Per-pass descriptor pool sized at compile time (set 0 + set 1
-    bindings × MaxFramesInFlight).
+  - (Original plan: per-pass descriptor pool. Shipped as: descriptors
+    allocated per-draw from a device-level transient pool, reset per
+    frame — see status note at top of doc.)
   - Per-pass `VkImage` + `VkImageView` for declared `ColorTarget` /
     `DepthTarget` / `DepthCube` resources.
   - Cube-face attachments use `TextureView` to pick the right
@@ -262,7 +276,7 @@ middle" — declarative I/O, baked once, parameters per frame.
 |   |   - allocate VkImage/View/Memory per graph resource    |   |
 |   |   - VkRenderPass per GraphicsPass                      |   |
 |   |   - VkFramebuffer per GraphicsPass                     |   |
-|   |   - descriptor pools sized for set 0 + set 1           |   |
+|   |   (descriptors per-draw from device transient pool)    |   |
 |   |   - barrier table from Read edges                      |   |
 |   +--------------------------------------------------------+   |
 +---------------------------------------------------------------+
@@ -398,7 +412,7 @@ Required test cases:
 Synthesized from this review's findings. Each derives from a specific
 finding or sub-step.
 
-- [ ] **T1 (P1, human: ~half day / CC: ~1h)** — `Blix.Graphics.Vulkan` —
+- [x] **T1 (P1, human: ~half day / CC: ~1h)** — `Blix.Graphics.Vulkan` —
   Declare `RenderGraph` / `GraphicsPassBuilder` / `ComputePassBuilder`
   / `GraphResourceHandle` / `TextureView` (cube-face) / `LoadOp` /
   `StoreOp` types. Pure declarations, no backend wiring.
@@ -408,14 +422,14 @@ finding or sub-step.
     `Blix.Graphics.Vulkan/TextureView.cs`
   - Verify: `dotnet build` clean
 
-- [ ] **T2 (P1, human: ~1 day / CC: ~3h)** — `Blix.Graphics.Vulkan` —
+- [x] **T2 (P1, human: ~1 day / CC: ~3h)** — `Blix.Graphics.Vulkan` —
   Graph resource factories + pure-function validation in `Compile()`.
   - Surfaced by: VB.ii + Finding 1 (TextureView ordering)
   - Files: `Blix.Graphics.Vulkan/RenderGraph.cs`,
     `Blix.Graphics.Vulkan/RenderGraph.Validate.cs`
   - Verify: Section K tests K.1-K.7 pass
 
-- [ ] **T3 (P1, human: ~1.5 days / CC: ~4h)** — `Blix.Graphics.Vulkan` —
+- [x] **T3 (P1, human: ~1.5 days / CC: ~4h)** — `Blix.Graphics.Vulkan` —
   Backend compile: `VkRenderPass` + `VkFramebuffer` + descriptor pools
   per pass. Reuse step-4's attachment helpers (promote from private to
   internal).
@@ -425,13 +439,13 @@ finding or sub-step.
     (refactor)
   - Verify: VB.vii demo builds clean (no execute path yet)
 
-- [ ] **T4 (P1, human: ~1 day / CC: ~3h)** — `Blix.Graphics.Vulkan` —
+- [x] **T4 (P1, human: ~1 day / CC: ~3h)** — `Blix.Graphics.Vulkan` —
   Barrier inference as a pure function on the compiled pass list.
   - Surfaced by: VB.iv + Finding 2 (declaration order)
   - Files: `Blix.Graphics.Vulkan/RenderGraph.BarrierInference.cs`
   - Verify: Section K tests K.8-K.10 pass
 
-- [ ] **T5 (P1, human: ~1 day / CC: ~3h)** — `Blix.Graphics.Vulkan` —
+- [x] **T5 (P1, human: ~1 day / CC: ~3h)** — `Blix.Graphics.Vulkan` —
   Per-frame execute: `SetPerFrame` / `SetPerPass` / `Pass(handle,
   scope)` / `Execute(commandList)`.
   - Surfaced by: VB.v + Finding 3 (records into existing
@@ -440,7 +454,7 @@ finding or sub-step.
     `Blix.Graphics.Vulkan/VulkanGraphicsDevice.RenderGraph.Execute.cs`
   - Verify: VB.vii demo renders one pass correctly
 
-- [ ] **T6 (P2, human: ~1 day / CC: ~3h)** —
+- [x] **T6 (P2, human: ~1 day / CC: ~3h)** —
   `Blix.Graphics.Vulkan` + `Blix.Runtime.Silk` — Resize handling:
   graph subscribes to swapchain-resize signal; reallocates
   `matchSwapchain` resources; recreates dependent pipelines (the
@@ -453,7 +467,7 @@ finding or sub-step.
   - Verify: VB.vii demo survives drag-resize with validation layer
     clean (no incompatible-render-pass warnings)
 
-- [ ] **T7 (P1, human: ~half day / CC: ~2h)** —
+- [x] **T7 (P1, human: ~half day / CC: ~2h)** —
   `Blix.Demos.VulkanGraph` (new project) — Validation graph demo:
   three-pass topology (cubes → offscreen HDR → invert → present).
   - Surfaced by: VB.vii
@@ -461,7 +475,7 @@ finding or sub-step.
   - Verify: visual gate — demo renders all three passes; window resize
     works; debug overlay still draws
 
-- [ ] **T8 (P1, human: ~half day / CC: ~2h)** — `Blix.Test.Graphics` —
+- [x] **T8 (P1, human: ~half day / CC: ~2h)** — `Blix.Test.Graphics` —
   Section K tests for pure-function validation + barrier inference.
   - Surfaced by: VB.viii
   - Files: `src/Blix.Test.Graphics/Program.cs`

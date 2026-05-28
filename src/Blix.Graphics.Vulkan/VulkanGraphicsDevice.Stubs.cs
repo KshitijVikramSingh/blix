@@ -1,11 +1,9 @@
 namespace Blix.Graphics.Vulkan;
 
-// IGraphicsDevice methods we haven't lit up yet. Buffers, shader programs,
-// and pipelines moved out to VulkanGraphicsDevice.Resources.cs as they came
-// online. What remains: textures + render surfaces (their own follow-up
-// push), and the GLSL-text CreateShaderProgram path (deferred until we
-// link libshaderc for runtime compilation; demos use pre-compiled SPIR-V
-// via CreateShaderProgramFromSpv).
+// IGraphicsDevice methods not yet lit up on the Vulkan backend.
+// CreateShaderProgram(...) needs runtime GLSL→SPIR-V (libshaderc);
+// callers should use CreateShaderProgramFromSpv. Texture creation
+// variants land alongside their first consumer.
 public sealed partial class VulkanGraphicsDevice
 {
     private const string NotYet = "Vulkan backend: this resource path is not implemented yet.";

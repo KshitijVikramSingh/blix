@@ -1,14 +1,7 @@
 namespace Blix.Graphics.Vulkan;
 
-// Public type vocabulary for the render graph (Vector B). Pure
-// declarations; behavior lives in RenderGraph + builders + backend.
-//
-// Reduced-scope per docs/vector-b-plan.md:
-// - LoadOp / StoreOp on .Target() at pass declaration time (F-012).
-// - GraphResourceHandle for 2D color + depth targets.
-// - DepthCubeHandle exposes .Face(int) → TextureView (Q-006, cube-face only).
-// - Mip-level + array-layer subviews on TextureView are deferred to step 6
-//   (bloom mip chain + IBL prefilter).
+// Public type vocabulary for the render graph. Pure declarations;
+// behavior lives in RenderGraph + builders + backend.
 
 // Attachment load operation at the start of a render pass.
 public enum LoadOp
@@ -27,8 +20,8 @@ public enum StoreOp
               // when no downstream pass reads the attachment)
 }
 
-// Discriminated union for graph resource sizing. Snapshot-on-resize for
-// MatchSwapchainGraphSize per VB.vi.
+// Graph resource sizing. MatchSwapchainGraphSize snapshots width × height
+// at the current swapchain extent on compile/resize.
 public abstract record GraphSize;
 public sealed record FixedGraphSize(int Width, int Height) : GraphSize;
 public sealed record MatchSwapchainGraphSize(float Scale = 1.0f) : GraphSize;
@@ -60,12 +53,11 @@ public readonly record struct DepthCubeHandle(int Id)
         new(h.Id);
 }
 
-// Sub-resource selector for a graph resource. Face is the only sub-resource
-// selector in reduced scope (cubes). Mip + ArrayLayer fields land when
-// step 6 needs them.
+// Sub-resource selector. Face is the only selector today (cubes); Mip and
+// ArrayLayer will land alongside their first consumer.
 //
-// Whole-image view: TextureView(handle) with Face null. Implicit conversion
-// from GraphResourceHandle constructs the whole-image view automatically.
+// Whole-image view: Face null. Implicit conversion from GraphResourceHandle
+// produces one automatically.
 public readonly record struct TextureView(GraphResourceHandle Resource, int? Face = null)
 {
     public bool IsWholeImage => Face is null;

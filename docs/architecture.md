@@ -2,7 +2,7 @@
 
 The engine is organised so that game code lives in `Blix` (the root namespace, the layer game code targets), the renderer spine lives below it (`Blix.Render` → `Blix.Graphics` → backend), and platform contracts (windowing, input, audio host, diagnostics) live below everything in `Blix.Core`.
 
-Two backends + runtimes ship today: the original OpenGL + OpenTK pair (used by the three Sponza/ShaderLab demos), and a newer Vulkan + Silk.NET pair (used by `Blix.Demos.VulkanHello`). The Vulkan path is the active development target; the engine is being reshaped around it (see [`vulkan-friction.md`](vulkan-friction.md) for the friction notes driving the reshape).
+Two backends + runtimes ship today: the original OpenGL + OpenTK pair (used by the Sponza/ShaderLab demos), and the newer Vulkan + Silk.NET pair. The Vulkan path is the active development target — `Blix.Demos.VulkanHello`, `Blix.Demos.VulkanGraph`, and `Blix.Demos.VulkanLit` cover validation, render-graph topology, and the full lit/shadow/PBR/IBL/bloom scene respectively. The engine has been progressively reshaped around the Vulkan target; see [`vulkan-friction.md`](vulkan-friction.md) for the friction notes that drove the reshape.
 
 This doc orients you. For detail:
 - Renderer architecture: [`renderer.md`](renderer.md)
@@ -17,6 +17,8 @@ Blix.Demos.Walkthrough         ← classic Sponza HDR walkthrough (flagship GL d
 Blix.Demos.SponzaModern        ← Khronos Intel Sponza + add-ons (PBR-MR scene)
 Blix.Demos.ShaderLab           ← shader-feature acceptance demo
 Blix.Demos.VulkanHello         ← Vulkan validation demo (cube + debug overlay)
+Blix.Demos.VulkanGraph         ← Vulkan render-graph topology demo (3-pass invert)
+Blix.Demos.VulkanLit           ← Vulkan PBR + IBL + shadows + skinning + bloom
         ↑
 Blix.Runtime.OpenTK            ← OpenGL window/runtime adapter
 Blix.Runtime.Silk              ← Vulkan window/runtime adapter
@@ -37,7 +39,8 @@ Blix.Graphics                  ← graphics command language
    │   │                           shader sources, GLSL preprocessor + ShaderLoader)
    │ Blix.Graphics.OpenGL       ← OpenGL backend
    Blix.Graphics.Vulkan         ← Vulkan backend (Silk.NET.Vulkan bindings,
-                                   instance/device/swapchain/descriptor sets,
+                                   instance/device/swapchain, per-draw transient
+                                   descriptor pool, RenderGraph, MaterialBindings,
                                    UniformBlockLayout for name→offset mapping)
 Blix.Graphics.Images           ← image decode + HDR IBL bake pipeline
                                   (StbImageSharp, EquirectangularToCubemap,
@@ -61,7 +64,7 @@ Blix.Audio.OpenAL              ← OpenAL Soft backend
 
 Every cross-project dependency in the source tree fits one of the arrows above. Nothing above `Blix.Core` depends on a windowing/audio backend directly — the two runtime projects (`Blix.Runtime.OpenTK`, `Blix.Runtime.Silk`) are the only ones that wire `IRenderHost`/`IAudioHost`/`IDebugHost` to concrete implementations.
 
-The Vulkan path is feature-narrow today vs. the OpenGL path (no glTF, no materials, no IBL, no SSR, no post-process), by design — it's a validation track that's revealing where the engine's API needs to reshape before the scene demos port over. The Sponza/ShaderLab demos still run on OpenGL during this transition.
+The Vulkan path has caught up on the basics: shader-interface-driven binding model, per-material descriptor sets, push constants, per-draw transient descriptor pools, a declarative render graph (`Blix.Graphics.Vulkan/RenderGraph.cs`), glTF + skinning (via the existing `Blix.Assets` importers), PBR + IBL (procedural-sky environment + irradiance cube + split-sum BRDF LUT), cascadeless directional + spot + point shadow mapping with PCF, HDR + ACES tonemap, and a separable-Gaussian bloom chain. What's still GL-only is SSR, the dual-filter bloom (the Vulkan demo uses the simpler Gaussian variant), the volumetric/froxel fog path, and SponzaModern's pipeline as a whole. Both backends coexist; nothing has been ported off GL yet.
 
 `Blix.Shaders` isn't a code project — it's a folder of `.glsl` files copied into each demo's output via `<None Include="..\Blix.Shaders\**\*.glsl" Link="Shaders\lib\...">` in the demo csproj. Demo shaders write `#include "lib/tonemap.glsl"` and the include preprocessor resolves it at load time. See [renderer.md → Shader library](renderer.md#shader-library).
 

@@ -2,39 +2,19 @@ using Silk.NET.Vulkan;
 
 namespace Blix.Graphics.Vulkan;
 
-// Backend compile + teardown for the render graph (Vector B VB.iii).
+// Backend compile + teardown for the render graph.
 //
-// Allocates Vulkan resources for each declared GraphResource (VkImage +
-// DeviceMemory + ImageView), per-pass machinery (VkRenderPass +
-// VkFramebuffer + DescriptorPool), and registers color resources as
-// sampleable VkTextureEntry so downstream passes can Read them through
-// the existing texture-binding path.
-//
-// VB.iii scope:
-//   - Resource allocation (this file)
-//   - Per-pass render pass + framebuffer + descriptor pool (this file)
-//   - MoltenVK cube-face smoke gate (this file, conditional on cube
-//     declarations)
-//   - Hooked into RenderGraph.Compile() after validation (VB.ii)
-//
-// Deferred to later sub-steps:
-//   - Pipeline creation per (pass, shader) — VB.v (graph creates these
-//     lazily on first draw or eagerly at compile, decide there)
-//   - Barrier inference for cross-pass Reads — VB.iv
-//   - Per-frame execute that records into RenderCommandList — VB.v
-//   - Resize handling + pipeline-cache invalidation — VB.vi
+// Allocates a VkImage/Memory/ImageView per declared GraphResource, builds
+// per-pass machinery (RenderPass + Framebuffer), and registers each color
+// resource as a sampleable VkTextureEntry so downstream passes can Read
+// it through the standard texture-binding path.
 
 public sealed partial class RenderGraph : IDisposable
 {
-    // Per-graph backend state, populated by CompileBackend.
     internal Dictionary<int, GraphBackendResource> BackendResources { get; } = new();
     internal Dictionary<int, GraphBackendPass> BackendPasses { get; } = new();
     internal bool BackendCompiled { get; private set; }
 
-    // VB.iii backend compile. Called from Compile() after Validate
-    // succeeds, but only when Device is non-null (test graphs that
-    // construct via the internal parameterless ctor skip this — their
-    // Compile is validation-only).
     internal void CompileBackend()
     {
         if (Device is null) return; // Test-mode graph; skip backend phase.
@@ -46,11 +26,10 @@ public sealed partial class RenderGraph : IDisposable
         BackendCompiled = true;
     }
 
-    // VB.v.b — Register each compiled graphics pass as a synthetic
-    // RenderSurface entry so the existing command-list routing
-    // (VulkanGraphicsDevice.Swapchain.cs Execute loop) can resolve
-    // RenderPassDescription.Target to the graph's VkRenderPass +
-    // Framebuffer. External entries skip device teardown.
+    // Each graphics pass exposes a synthetic RenderSurface so the command
+    // list's existing Target-routing resolves to the graph's VkRenderPass +
+    // Framebuffer. The surfaceTable entries are marked External and skip
+    // device teardown.
     private void RegisterPerPassSurfaces()
     {
         var device = Device!;
@@ -88,16 +67,10 @@ public sealed partial class RenderGraph : IDisposable
         DestroyBackend();
     }
 
-    // VB.vi — Resize handler. Fired by VulkanGraphicsDevice after the
-    // swapchain + dependent resources have been rebuilt. Walks
-    // matchSwapchain-sized graph resources, destroys the old VkImage +
-    // memory + views, allocates new at the new extent, and MUTATES the
-    // existing VkTextureEntry + VkRenderSurfaceEntry in place so cached
-    // TextureHandle / RenderSurfaceHandle ids stay valid.
-    //
-    // VkRenderPass objects stay (format unchanged on resize → render-pass
-    // compatibility unchanged → pipelines stay valid). VkFramebuffer needs
-    // recreation since it embeds VkImageView handles. Sampler stays.
+    // Reallocates matchSwapchain-sized resources at the new extent and
+    // rebuilds framebuffers. Mutates VkTextureEntry / VkRenderSurfaceEntry
+    // in place so cached TextureHandle / RenderSurfaceHandle ids stay live.
+    // VkRenderPass + samplers + pipelines survive (format-stable resize).
     private unsafe void OnSwapchainRecreated()
     {
         if (!BackendCompiled || Device is null) return;
@@ -134,9 +107,9 @@ public sealed partial class RenderGraph : IDisposable
             }
         }
 
-        // 2. Rebuild per-pass framebuffers. Render passes + descriptor
-        // pools stay (format + size-independent setup). Update each
-        // synthetic RenderSurfaceEntry in place so its handle stays valid.
+        // 2. Rebuild per-pass framebuffers; RenderPass stays (format-stable).
+        // Update each synthetic RenderSurfaceEntry in place so the handle
+        // remains live.
         foreach (var (passId, bpass) in BackendPasses)
         {
             if (bpass.Framebuffer.Handle == 0) continue; // compute pass
@@ -153,7 +126,6 @@ public sealed partial class RenderGraph : IDisposable
             // Destroy old framebuffer.
             device.Vk.DestroyFramebuffer(device.Device, bpass.Framebuffer, null);
 
-            // Recompute extent from the first attachment (matches VB.iii.c).
             var firstView = gpass.ColorTargets.Count > 0
                 ? gpass.ColorTargets[0].View
                 : gpass.Depth!.View;
@@ -238,7 +210,6 @@ public sealed partial class RenderGraph : IDisposable
             if (p.SurfaceHandle.Id != 0) device.UnregisterExternalRenderSurface(p.SurfaceHandle);
             if (p.Framebuffer.Handle != 0) device.Vk.DestroyFramebuffer(device.Device, p.Framebuffer, null);
             if (p.RenderPass.Handle != 0) device.Vk.DestroyRenderPass(device.Device, p.RenderPass, null);
-            if (p.DescriptorPool.Handle != 0) device.Vk.DestroyDescriptorPool(device.Device, p.DescriptorPool, null);
         }
         BackendPasses.Clear();
 
@@ -266,7 +237,7 @@ public sealed partial class RenderGraph : IDisposable
         BackendCompiled = false;
     }
 
-    // --- VB.iii.b — Resource allocation ----------------------------------
+    // --- Resource allocation ---------------------------------------------
 
     private unsafe void AllocateResources()
     {
@@ -314,9 +285,8 @@ public sealed partial class RenderGraph : IDisposable
             ImageAspectFlags.ColorBit,
             $"graph.{resource.Name}");
 
-        // Register as a sampleable texture for downstream Reads. Sampler
-        // default: LinearClamp matches the common "sample fullscreen
-        // intermediate" pattern (step-4 present pass uses LinearClamp).
+        // Default sampler is LinearClamp — fits the typical "sample a
+        // fullscreen intermediate" use.
         var sampler = device.GetOrCreateSampler(SamplerDescription.LinearClamp);
         var handle = device.RegisterExternalTexture(
             image, view, sampler,
@@ -344,12 +314,8 @@ public sealed partial class RenderGraph : IDisposable
             ImageAspectFlags.DepthBit,
             $"graph.{resource.Name}");
 
-        // Register as a sampleable texture so downstream Reads (e.g. lit
-        // pass sampling a sun shadow map) resolve through the existing
-        // ShaderTextureBinding path. Sampler: LinearClamp matches the
-        // color-target default; shadow maps benefit from ClampToEdge so
-        // out-of-bounds shadowUv samples the border (frag shader does the
-        // [0,1] range check to skip those).
+        // LinearClamp default; shaders do the [0,1] range check so
+        // ClampToEdge isn't strictly required for shadow sampling.
         var sampler = device.GetOrCreateSampler(SamplerDescription.LinearClamp);
         var handle = device.RegisterExternalTexture(
             image, view, sampler,
@@ -368,10 +334,9 @@ public sealed partial class RenderGraph : IDisposable
         };
     }
 
-    // Cube depth attachment: ImageType.Type2D with CubeCompatible flag,
-    // 6 array layers, 6 per-face Type2D views (for attachment use), 1
-    // whole-cube TypeCube view (for sampling — sampleable-depth wiring
-    // is step 6).
+    // Cube depth attachment: Type2D + CubeCompatible, 6 array layers,
+    // 6 per-face Type2D views (attachment use), 1 whole-cube TypeCube
+    // view (sampler use).
     private unsafe void AllocateDepthCube(GraphResourceEntry resource, uint faceSize)
     {
         var device = Device!;
@@ -434,11 +399,8 @@ public sealed partial class RenderGraph : IDisposable
             faceViews[face] = faceView;
         }
 
-        // Register the whole-cube view as a sampleable texture so the lit
-        // pass can sample it via samplerCube. RegisterExternalTexture stores
-        // the view unmodified — a TypeCube view works the same as a 2D one
-        // through the descriptor-write path. Point-light shadow sampling
-        // (step 6.d) consumes this.
+        // The TypeCube view feeds samplerCube through the standard
+        // descriptor-write path (it's just an ImageView like any other).
         var sampler = device.GetOrCreateSampler(SamplerDescription.LinearClamp);
         var handle = device.RegisterExternalTexture(
             image, wholeView, sampler,
@@ -479,7 +441,7 @@ public sealed partial class RenderGraph : IDisposable
         },
     };
 
-    // --- VB.iii.c — Per-pass render pass + framebuffer + descriptor pool ---
+    // --- Per-pass render pass + framebuffer ------------------------------
 
     private unsafe void BuildPerPassMachinery()
     {
@@ -498,11 +460,8 @@ public sealed partial class RenderGraph : IDisposable
 
     private unsafe GraphBackendPass BuildGraphicsPassBackend(GraphicsPassEntry pass)
     {
-        var device = Device!;
-        // Resolve the framebuffer extent from the first attachment. All
-        // attachments must agree on size (Vulkan requirement); VB.iii.c
-        // trusts the caller. ShaderLab port may surface a violation here;
-        // add an explicit check then.
+        // All attachments must agree on size (Vulkan requirement); the
+        // first one drives framebuffer extent.
         var firstView = pass.ColorTargets.Count > 0
             ? pass.ColorTargets[0].View
             : pass.Depth!.View;
@@ -512,15 +471,11 @@ public sealed partial class RenderGraph : IDisposable
 
         var renderPass = CreateGraphicsPassRenderPass(pass);
         var framebuffer = CreatePassFramebuffer(pass, renderPass, width, height);
-        var descriptorPool = pass.Shaders.Count > 0
-            ? CreatePerPassDescriptorPool(pass.Shaders[0])
-            : default;
 
         return new GraphBackendPass
         {
             RenderPass = renderPass,
             Framebuffer = framebuffer,
-            DescriptorPool = descriptorPool,
             Width = width,
             Height = height,
         };
@@ -528,16 +483,11 @@ public sealed partial class RenderGraph : IDisposable
 
     private unsafe GraphBackendPass BuildComputePassBackend(ComputePassEntry pass)
     {
-        // Compute passes have no render pass / framebuffer. Descriptor pool
-        // still needed for set 0 + set 1.
-        var pool = pass.Shader is { } s
-            ? CreatePerPassDescriptorPool(s)
-            : default;
+        // No render pass / framebuffer for compute.
         return new GraphBackendPass
         {
             RenderPass = default,
             Framebuffer = default,
-            DescriptorPool = pool,
             Width = 0,
             Height = 0,
         };
@@ -563,9 +513,8 @@ public sealed partial class RenderGraph : IDisposable
                 StencilLoadOp = AttachmentLoadOp.DontCare,
                 StencilStoreOp = AttachmentStoreOp.DontCare,
                 InitialLayout = ImageLayout.Undefined,
-                // Color always lands as SHADER_READ_ONLY_OPTIMAL so downstream
-                // Reads sample without a manual barrier. Matches step 4's
-                // offscreen-pass posture.
+                // FinalLayout = ShaderReadOnlyOptimal so downstream Reads
+                // sample without a manual barrier.
                 FinalLayout = ImageLayout.ShaderReadOnlyOptimal,
             };
             colorRefs[i] = new AttachmentReference((uint)i, ImageLayout.ColorAttachmentOptimal);
@@ -586,9 +535,8 @@ public sealed partial class RenderGraph : IDisposable
                 StencilLoadOp = AttachmentLoadOp.DontCare,
                 StencilStoreOp = AttachmentStoreOp.DontCare,
                 InitialLayout = ImageLayout.Undefined,
-                // Depth finalLayout: SHADER_READ_ONLY_OPTIMAL so the resource
-                // is sampleable downstream (shadow maps in step 6). Comes
-                // at no cost for pure depth-test passes that don't reuse it.
+                // Same shader-read final layout as color so depth is
+                // sampleable downstream (shadow maps).
                 FinalLayout = ImageLayout.ShaderReadOnlyOptimal,
             };
             depthRef = new AttachmentReference((uint)depthIdx, ImageLayout.DepthStencilAttachmentOptimal);
@@ -602,8 +550,8 @@ public sealed partial class RenderGraph : IDisposable
             PDepthStencilAttachment = hasDepth ? &depthRef : null,
         };
 
-        // Subpass dependency pair from step 4 — covers external↔subpass
-        // memory-barrier semantics so downstream Reads see writes.
+        // External→subpass + subpass→external pair, so downstream sampled
+        // Reads observe this pass's writes without a manual barrier.
         var deps = stackalloc SubpassDependency[2];
         deps[0] = new SubpassDependency
         {
@@ -676,44 +624,6 @@ public sealed partial class RenderGraph : IDisposable
         return fb;
     }
 
-    // Pool sized for set 0 + set 1 of the FIRST declared shader times
-    // MaxFramesInFlight. Set-1 layout compatibility across multiple
-    // shaders sharing a pass is deferred (per VB.ii note); when that
-    // check lands, this sizing widens to the union/identical-required shape.
-    private unsafe DescriptorPool CreatePerPassDescriptorPool(ShaderInterface shader)
-    {
-        var device = Device!;
-        var perTypeCount = new Dictionary<DescriptorType, uint>();
-        foreach (var slot in shader.Slots)
-        {
-            if (slot.Set != 0 && slot.Set != 1) continue; // set 2 = material; set 3 = push
-            var t = VulkanGraphicsDevice.MapDescriptorType(slot.Type);
-            perTypeCount.TryGetValue(t, out var current);
-            perTypeCount[t] = current + (uint)(slot.Count * VulkanGraphicsDevice.MaxFramesInFlightConst);
-        }
-        if (perTypeCount.Count == 0) return default;
-
-        var sizes = stackalloc DescriptorPoolSize[perTypeCount.Count];
-        var idx = 0;
-        foreach (var (type, count) in perTypeCount)
-        {
-            sizes[idx++] = new DescriptorPoolSize { Type = type, DescriptorCount = count };
-        }
-        var poolCi = new DescriptorPoolCreateInfo
-        {
-            SType = StructureType.DescriptorPoolCreateInfo,
-            PoolSizeCount = (uint)perTypeCount.Count,
-            PPoolSizes = sizes,
-            // Two sets per frame (set 0 + set 1) × MaxFramesInFlight.
-            MaxSets = 2u * (uint)VulkanGraphicsDevice.MaxFramesInFlightConst,
-        };
-        DescriptorPool pool;
-        VulkanGraphicsDevice.ThrowIfNotSuccess(
-            device.Vk.CreateDescriptorPool(device.Device, in poolCi, null, &pool),
-            $"vkCreateDescriptorPool(graph.pass)");
-        return pool;
-    }
-
     private ImageView ResolveView(TextureView view)
     {
         var resource = BackendResources[view.Resource.Id];
@@ -736,7 +646,7 @@ public sealed partial class RenderGraph : IDisposable
         _ => AttachmentStoreOp.DontCare,
     };
 
-    // --- VB.iii.e — MoltenVK cube-face smoke gate -----------------------
+    // --- MoltenVK cube-face smoke gate -----------------------------------
 
     // MoltenVK has historical quirks around VK_IMAGE_VIEW_TYPE_2D on a
     // cube image with VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT. Begin + end a
@@ -838,12 +748,10 @@ internal sealed class GraphBackendResource
     public Image Image;
     public DeviceMemory Memory;
     public ImageView WholeImageView;
-    // Empty for non-cube. For DepthCube: 6 entries, one Type2D view per face.
+    // DepthCube only: 6 Type2D face views.
     public ImageView[] FaceViews = Array.Empty<ImageView>();
-    // TextureHandle into device.textureTable for downstream sampling.
-    // Set for ColorTarget. Null for DepthTarget / DepthCube in VB.iii
-    // (sampleable-depth path lands when ShaderLab port needs shadow-map
-    // sampling — likely VB.iv or step 6).
+    // Set on color and depth targets — null only for resources never
+    // sampled downstream (none in current scope).
     public TextureHandle? SampleableHandle;
     public uint Width;
     public uint Height;
@@ -854,17 +762,13 @@ internal sealed class GraphBackendPass
 {
     public Silk.NET.Vulkan.RenderPass RenderPass;
     public Framebuffer Framebuffer;
-    public DescriptorPool DescriptorPool;
     public uint Width;
     public uint Height;
-    // Set by VB.v's CompileBackend tail — synthetic RenderSurfaceHandle
-    // registered into device.renderSurfaceTable so the existing Execute
-    // routing finds this pass's VkRenderPass + Framebuffer. Default
-    // (id 0) means "not yet registered" (compute passes, or pre-VB.v
-    // state). Unregistered at DestroyBackend.
+    // Synthetic handle registered into device.renderSurfaceTable so the
+    // command-list Execute path resolves Target→pass. Default = compute
+    // pass / unregistered.
     public RenderSurfaceHandle SurfaceHandle;
-    // Set to true if this pass has a depth attachment, mirroring
-    // VkRenderSurfaceEntry.HasDepth so the existing Execute path's
-    // clear-value count math works.
+    // Mirrors VkRenderSurfaceEntry.HasDepth for the Execute path's
+    // clear-value count math.
     public bool HasDepth;
 }

@@ -1,53 +1,38 @@
 namespace Blix.Graphics.Vulkan;
 
-// Reduced-scope render graph (Vector B per docs/vector-b-plan.md).
-// Declarative pass topology baked at engine init; per-frame Execute
-// supplies parameters and triggers draws. Backend compiles to existing
-// VkRenderPass + VkFramebuffer + descriptor-set machinery from Vector A
-// and step 4.
+// Declarative render-pass topology baked once, then re-executed per frame.
+// Compile() freezes the graph; Execute() captures per-pass scopes and
+// dispatches them through the imperative command list.
 //
-// VB.i scope (this file): public type + factory shape. Compile() and
-// Execute() are no-op stubs; their bodies land in VB.ii (validation),
-// VB.iii (backend compile), VB.iv (barrier inference), VB.v (execute).
-//
-// Pass state is stored as mutable class instances inside the graph;
-// fluent builders mutate them in place. Compile() freezes the topology;
-// after that, declared pass and resource lists are immutable.
+// Pass state is stored as mutable class instances; fluent builders mutate
+// them in place until Compile() flips IsCompiled.
 public sealed partial class RenderGraph
 {
-    // Backend access for VB.iii compile time (allocate VkImage etc.).
-    // Nullable internally because validation (VB.ii) doesn't need the
-    // device — only backend resource allocation (VB.iii+) does. Tests
-    // construct with the internal parameterless ctor; production callers
-    // must use the public one which enforces non-null.
+    // Null only in the test ctor — validation runs without a device, but
+    // backend compile/execute will reject null at the call site.
     internal VulkanGraphicsDevice? Device { get; }
 
-    // Resource + pass tables. Ids are allocated from a single counter so
-    // resource and pass handles never collide.
+    // Single id counter so resource and pass handles never collide.
     internal Dictionary<int, GraphResourceEntry> Resources { get; } = new();
     internal Dictionary<int, GraphicsPassEntry> GraphicsPasses { get; } = new();
     internal Dictionary<int, ComputePassEntry> ComputePasses { get; } = new();
 
-    // Declaration-order preservation: passes execute in the order they
-    // were declared (per D4 / D9 — declaration order = execution order;
-    // Read edges validate only, not reorder).
+    // Passes execute in declaration order. Read edges only validate
+    // reachability — they do not reorder.
     internal List<int> PassOrder { get; } = new();
 
     private int nextId = 1;
     internal bool IsCompiled { get; private set; }
 
-    // Per-pass pre-pass barrier lists populated by VB.iv InferBarriers
-    // at Compile time. Empty lists for v1 graphics-only graphs (subpass
-    // deps cover cross-pass memory + layout). VB.v emits via
-    // vkCmdPipelineBarrier before each pass's render-pass-begin.
+    // Populated at Compile time. Empty for graphics-only graphs (subpass
+    // deps cover cross-pass memory + layout); compute reads/writes add
+    // explicit vkCmdPipelineBarrier emissions.
     internal Dictionary<int, List<BarrierOp>> PerPassBarriers { get; private set; } =
         new Dictionary<int, List<BarrierOp>>();
 
-    // VB.v.c — Per-pass user-supplied scopes captured by graph.Pass().
-    // Replayed at graph.Execute() time via commandList.Pass(...). Cleared
-    // at the start of each Execute so passes that aren't redeclared this
-    // frame don't render (graphics-pass conditional skipping comes for
-    // free).
+    // Per-pass scopes captured by graph.Pass(); replayed in graph.Execute()
+    // and cleared at the start of every Execute so any pass not re-declared
+    // this frame simply doesn't render.
     private readonly Dictionary<int, (Action<Blix.Graphics.RenderPassBuilder> Scope, Blix.Graphics.GraphicsColor? ClearColor)> recordedScopes = new();
 
     public RenderGraph(VulkanGraphicsDevice device)
@@ -57,9 +42,7 @@ public sealed partial class RenderGraph
         Device.SwapchainRecreated += OnSwapchainRecreated;
     }
 
-    // Test-only constructor. Validation logic doesn't touch the device;
-    // backend allocation (VB.iii) will reject a null device at the point
-    // it actually needs one.
+    // Test-only ctor — validation paths don't need a device.
     internal RenderGraph()
     {
         Device = null;
@@ -139,45 +122,24 @@ public sealed partial class RenderGraph
         return new ComputePassBuilder(this, entry);
     }
 
-    // --- Compile + Execute (VB.i stubs) -----------------------------------
+    // --- Compile + Execute -------------------------------------------------
 
-    // Runs pure-function validation (VB.ii — see
-    // RenderGraph.Validate.cs) and then flips IsCompiled.
-    // VB.iii will add backend resource allocation here; VB.iv builds the
-    // barrier inference table; VB.vi hooks resize handling.
-    //
-    // On validation failure, IsCompiled stays false so the caller can fix
-    // the graph and retry. The thrown InvalidOperationException carries a
-    // named-entity reason ("Duplicate pass name 'foo'", etc.).
+    // Validates → allocates backend resources → infers barriers → freezes.
+    // Throws InvalidOperationException with a specific reason on failure;
+    // IsCompiled stays false so the caller can fix the graph and retry.
     public void Compile()
     {
         EnsureNotCompiled(nameof(Compile));
         RenderGraphValidation.Validate(this);
-        // Backend phase: allocates VkImage / VkRenderPass / VkFramebuffer
-        // per declared resource + pass. Test-mode graphs (constructed via
-        // the internal parameterless ctor) skip this and stay validation-only.
+        // Test-mode graphs (parameterless ctor) skip backend allocation.
         CompileBackend();
-        // Barrier inference (VB.iv). Pure function on the pass list; for
-        // v1 graphics-only graphs returns empty per-pass barrier lists
-        // (subpass deps cover the cross-pass memory + layout barrier).
-        // Real BarrierOp emission lands when ComputePass.Execute does in step 8.
         PerPassBarriers = BarrierInference.Infer(this);
         IsCompiled = true;
     }
 
-    // VB.v.c — Capture a per-frame scope for the given pass. Replayed at
-    // Execute() time. Each frame the user calls graph.Pass(handle, scope)
-    // for the passes they want to draw; passes without a recorded scope
-    // this frame skip rendering (graphics-pass-as-conditional fall-out).
-    //
-    // clearColor: optional override for the first color attachment when
-    // its declared LoadOp is Clear. Subsequent color attachments + depth
-    // use defaults (black + 1.0) for VB.v. Per-attachment clear values
-    // come when ShaderLab port needs them.
-    // Returns the synthetic RenderSurfaceHandle for a graph pass, suitable
-    // for use as PipelineDescription.RenderTarget. Pipelines created
-    // against a graph pass's render pass survive graph resize (render-pass
-    // compat unchanged on size-only changes).
+    // Synthetic RenderSurfaceHandle for a graph pass; pass it to
+    // PipelineDescription.RenderTarget. Pipelines created against a graph
+    // pass survive size-only resizes (render-pass compat is preserved).
     public RenderSurfaceHandle GetPassSurface(PassHandle pass)
     {
         if (!IsCompiled)
@@ -198,10 +160,8 @@ public sealed partial class RenderGraph
         return bp.SurfaceHandle;
     }
 
-    // Returns the sampleable TextureHandle for a graph-managed color
-    // target. Use this to pass the color attachment of pass A as an
-    // input to pass B via ShaderTextureBinding. Available only after
-    // Compile() — the underlying VkImage doesn't exist until then.
+    // Sampleable TextureHandle for a graph-managed color target. Available
+    // only after Compile() — the underlying VkImage doesn't exist until then.
     public TextureHandle GetColorTexture(GraphResourceHandle resource)
     {
         if (!IsCompiled)
@@ -227,16 +187,11 @@ public sealed partial class RenderGraph
         return th;
     }
 
-    // Returns the sampleable TextureHandle for a graph-managed depth
-    // target. The shadow-map sampling path: a depth pass writes the
-    // resource at ShaderReadOnlyOptimal finalLayout (handled by the
-    // graph's render pass setup), and a subsequent pass reads it via
-    // sampler2D / ShaderTextureBinding. Available only after Compile().
-    //
-    // The default sampler is LinearClamp (ClampToEdge). For hardware PCF
-    // (samplerShadow with comparison mode) a future overload will accept
-    // a SamplerDescription; current consumers do manual depth comparison
-    // in the shader, which works with the linear sampler.
+    // Sampleable TextureHandle for a graph-managed depth target. Final
+    // layout is ShaderReadOnlyOptimal so a downstream pass can read via
+    // sampler2D. Default sampler is LinearClamp — consumers do manual
+    // depth comparison in the shader (hardware PCF samplerShadow would
+    // need an overload taking a SamplerDescription).
     public TextureHandle GetDepthTexture(GraphResourceHandle resource)
     {
         if (!IsCompiled)
@@ -262,11 +217,9 @@ public sealed partial class RenderGraph
         return th;
     }
 
-    // Returns the sampleable TextureHandle (samplerCube) for a graph-managed
-    // depth cube. The point-light shadow path: 6 depth passes write each
-    // cube face (linear distance from the light), then a later pass samples
-    // the whole cube with the light→fragment direction. Available only after
-    // Compile().
+    // Sampleable samplerCube TextureHandle for a graph-managed depth cube
+    // (point-light shadow: six face passes write linear distance, then a
+    // later pass samples the cube by light→fragment direction).
     public TextureHandle GetDepthCubeTexture(DepthCubeHandle cube)
     {
         if (!IsCompiled)
@@ -316,19 +269,14 @@ public sealed partial class RenderGraph
         }
         if (Device is null) return; // Test-mode graph; nothing to execute.
 
-        // Iterate declared pass order. Each pass with a recorded scope
-        // emits a commandList.Pass(...) call routed at its synthetic
-        // RenderSurfaceHandle so the existing Execute path resolves the
-        // graph's VkRenderPass + Framebuffer.
         foreach (var passId in PassOrder)
         {
             if (!recordedScopes.TryGetValue(passId, out var recorded)) continue;
             if (!BackendPasses.TryGetValue(passId, out var bpass)) continue;
-            if (bpass.SurfaceHandle.Id == 0) continue; // compute passes — skip in v1
+            if (bpass.SurfaceHandle.Id == 0) continue; // compute passes — skip
 
-            // Compose ClearColors[] from declared LoadOp on each color
-            // target. For Clear LoadOp, use user override (first slot) or
-            // black default. For Load/DontCare, null entry.
+            // ClearColors[]: Clear LoadOp → user override (first slot) or
+            // black; Load/DontCare → null.
             if (!GraphicsPasses.TryGetValue(passId, out var gpass)) continue;
             var clearColors = new Blix.Graphics.GraphicsColor?[gpass.ColorTargets.Count];
             for (var i = 0; i < gpass.ColorTargets.Count; i++)
@@ -353,8 +301,6 @@ public sealed partial class RenderGraph
             commandList.Pass(gpass.Name, desc, recorded.Scope);
         }
 
-        // Per-frame scopes don't persist across frames — passes that
-        // aren't redeclared next frame fall out of execution.
         recordedScopes.Clear();
     }
 

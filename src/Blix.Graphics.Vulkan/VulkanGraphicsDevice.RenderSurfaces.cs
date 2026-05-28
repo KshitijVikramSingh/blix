@@ -2,22 +2,17 @@ using Silk.NET.Vulkan;
 
 namespace Blix.Graphics.Vulkan;
 
-// Offscreen render targets: a VkImage (color attachment + sampled) per
-// declared color slot + an optional depth attachment + a VkRenderPass +
-// VkFramebuffer. Color attachments register as VkTextureEntry in the
-// shared textureTable so downstream passes can sample them via the
-// existing TextureHandle path.
+// Offscreen render targets: one VkImage per declared color slot
+// (registered as a sampleable VkTextureEntry), an optional depth
+// attachment, plus a VkRenderPass + VkFramebuffer.
 //
-// Final color layout = SHADER_READ_ONLY_OPTIMAL: the surface's render
-// pass transitions the color image at end-of-pass, so the next pass
-// that samples it doesn't need a manual barrier. Subpass dependency
-// pair guarantees the chromatic memory write completes before the
-// next pass's fragment shader reads.
+// Color final layout is ShaderReadOnlyOptimal so a downstream sampling
+// pass doesn't need a manual barrier — the render pass + subpass dep
+// pair handles both the layout transition and the memory dependency.
 //
-// Step 4 scope: FixedRenderSurfaceSize + MatchDefaultRenderSurfaceSize
-// (snapshot at creation, no resize handling yet), single color attachment
-// (multi-color is allowed by the shape but untested), DepthRenderbuffer
-// only (DepthTexture + DepthCubeFace deferred to step 6 ShaderLab port).
+// Multi-color attachments are supported by shape but untested. Depth
+// today is render-target only (DepthRenderbuffer); DepthTexture /
+// DepthCubeFace are reserved enum cases without code paths.
 public sealed partial class VulkanGraphicsDevice
 {
     private readonly Dictionary<int, VkRenderSurfaceEntry> renderSurfaceTable = new();
@@ -28,10 +23,8 @@ public sealed partial class VulkanGraphicsDevice
         public uint Width;
         public uint Height;
         public TextureHandle[] ColorAttachments = Array.Empty<TextureHandle>();
-        // Depth attachment that doesn't go into textureTable
-        // (DepthRenderbuffer path — not sampleable). DepthTexture +
-        // DepthCubeFace paths (deferred to step 6) will add a separate
-        // sampleable TextureHandle field here.
+        // DepthRenderbuffer is not sampleable; a sampleable depth path
+        // would add a TextureHandle field alongside these.
         public Image DepthImage;
         public DeviceMemory DepthMemory;
         public ImageView DepthView;
@@ -122,7 +115,7 @@ public sealed partial class VulkanGraphicsDevice
                 case DepthTexture:
                 case DepthCubeFace:
                     throw new NotImplementedException(
-                        $"{depth.GetType().Name} render-surface depth is deferred to step 6 (ShaderLab port).");
+                        $"{depth.GetType().Name} render-surface depth not implemented — use the render graph's depth-target path.");
             }
         }
 
@@ -157,12 +150,9 @@ public sealed partial class VulkanGraphicsDevice
 
     internal VkRenderSurfaceEntry GetRenderSurface(RenderSurfaceHandle h) => renderSurfaceTable[h.Id];
 
-    // Register an existing VkRenderPass + Framebuffer as a render-surface
-    // entry without owning them. Used by RenderGraph (VB.v) to expose its
-    // per-pass machinery through the existing Target routing in the
-    // command-list Execute path. Destruction skips external entries —
-    // the graph owns the underlying objects and tears them down via its
-    // own Dispose path.
+    // Wrap an externally-owned VkRenderPass + Framebuffer as a surface
+    // entry so the Target-routing path can resolve it. Destruction skips
+    // external entries — the owner (RenderGraph) tears them down itself.
     internal RenderSurfaceHandle RegisterExternalRenderSurface(
         string name,
         Silk.NET.Vulkan.RenderPass renderPass,

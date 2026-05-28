@@ -12,11 +12,9 @@ public sealed partial class VulkanGraphicsDevice
 {
     private const int MaxFramesInFlight = 2;
 
-    // Public accessors for per-frame replicated resources (e.g.
-    // MaterialBindings with framesInFlight > 1 for bone-palette SSBOs).
-    // CurrentFrameSlot is the slot index being recorded right now — write
-    // a slot's payload during OnRender and the bind path will pick it up
-    // for this frame's draws automatically.
+    // Per-frame-replicated payloads (e.g. bone palettes) write into
+    // CurrentFrameSlot during OnRender; the bind path reads from the
+    // matching slot automatically.
     public int MaxFramesInFlightCount => MaxFramesInFlight;
     public int CurrentFrameSlot => currentFrame;
 
@@ -25,11 +23,8 @@ public sealed partial class VulkanGraphicsDevice
     internal Format SwapchainFormat { get; private set; }
     internal Extent2D SwapchainExtent { get; private set; }
     internal Silk.NET.Vulkan.RenderPass DefaultRenderPass { get; private set; }
-    // Second render pass with LoadOp.Load on color (preserve previous pass's
-    // pixels) — used when a Pass(...) has empty ClearColors. Lets the runtime
-    // append a DebugDraw / overlay pass after the main scene without wiping
-    // it. Same attachment formats as DefaultRenderPass, so framebuffers are
-    // compatible across both.
+    // LoadOp.Load variant — picked when a Pass(...) has empty ClearColors so
+    // an overlay paints over the scene. Framebuffer-compatible with DefaultRenderPass.
     internal Silk.NET.Vulkan.RenderPass OverlayRenderPass { get; private set; }
 
     private Image[] swapchainImages = Array.Empty<Image>();
@@ -39,38 +34,27 @@ public sealed partial class VulkanGraphicsDevice
     private DeviceMemory depthMemory;
     private ImageView depthView;
     private Format depthFormat = Format.D32Sfloat;
-    // Internal accessor for cross-file consumers like the render graph backend.
     internal Format GraphDepthFormat => depthFormat;
-    // Per-swapchain-image, not per-frame-slot: present may still hold a
-    // signal-pending semaphore when our frame-slot ring recycles, so reusing
-    // a frame-slot's semaphore across different image indices is unsafe.
-    // See validation guidance under VK_KHR_swapchain semaphore reuse.
+    // Keyed on swapchain-image, not frame-slot: present can still hold a
+    // signal-pending semaphore as the frame-slot ring recycles, so a
+    // frame-slot's renderFinished semaphore is unsafe to reuse across
+    // different image indices (VK_KHR_swapchain semaphore reuse rules).
     private Semaphore[] perImageRenderFinished = Array.Empty<Semaphore>();
     private CommandPool commandPool;
     private FrameResources[] frames = Array.Empty<FrameResources>();
     private int currentFrame;
     private bool needsRecreate;
 
-    // Timestamp query infrastructure. One pool sized for
-    // MaxFramesInFlight * QueriesPerFrameSlot so each slot has its own
-    // contiguous range; pendingTimingsPerSlot[i] records what was issued
-    // on slot i so the NEXT time slot i is used (fence signaled →
-    // GPU done) we can read back tick deltas and push them into
-    // pendingGpuTimings for the runtime to drain.
+    // One pool with MaxFramesInFlight contiguous slot ranges. Each slot
+    // queues PendingPassTiming entries that get drained when the slot's
+    // fence signals next cycle.
     //
-    // KNOWN macOS / MoltenVK CAVEAT — same shape as the GL-on-Mac issue
-    // documented in renderer.md. MoltenVK's vkCmdWriteTimestamp maps to
-    // Metal's MTLCounterSampleBuffer, whose resolution is sometimes still
-    // pending after our inFlight VkFence has signaled. The result is
-    // vkGetQueryPoolResults returning NotReady indefinitely on Apple
-    // Silicon even with ResultWaitBit set. The native Vulkan drivers on
-    // Linux + Windows resolve correctly. We degrade gracefully: pending
-    // entries stay queued until either (a) the queries eventually report
-    // ready (rare on macOS) or (b) the pending list exceeds
-    // MaxPendingPerSlot, after which it's flushed to avoid unbounded
-    // growth. Timings on macOS are typically absent; CPU timers (`frame`,
-    // `build-commands`, `execute`, `swap`) carry the per-frame story
-    // instead, same as the GL backend.
+    // MoltenVK caveat: vkCmdWriteTimestamp lowers to Metal counter samplers
+    // that often resolve AFTER our InFlight fence signals — vkGetQueryPoolResults
+    // returns NotReady even with ResultWaitBit. We cap the pending list at
+    // MaxPendingPerSlot and flush stale entries instead of waiting forever.
+    // Native Vulkan drivers on Linux/Windows resolve correctly. On macOS the
+    // CPU timers (frame/build-commands/execute/swap) carry the perf story.
     private const uint QueriesPerFrameSlot = 64;
     private const int MaxPendingPerSlot = 32;
     private QueryPool gpuTimingPool;
@@ -109,14 +93,13 @@ public sealed partial class VulkanGraphicsDevice
         CreateCommandPool();
         CreateFrameResources();
         CreateGpuTimingPool();
+        CreateTransientDescriptorPools();
     }
 
     private unsafe void CreateDepthBuffer()
     {
-        // D32_SFLOAT is mandatory-supported for depth attachment per the
-        // Vulkan spec, no need to probe formats. Single shared depth image
-        // is fine — we serialize per-slot rendering via inFlight fences,
-        // so no two frames touch the depth buffer simultaneously.
+        // D32_SFLOAT is spec-mandatory. Single shared depth image is safe
+        // because InFlight fences serialize per-slot rendering.
         var ci = new ImageCreateInfo
         {
             SType = StructureType.ImageCreateInfo,
@@ -162,12 +145,9 @@ public sealed partial class VulkanGraphicsDevice
 
     private unsafe void CreateGpuTimingPool()
     {
-        // Two preconditions for honest GPU timing:
-        //   1. The graphics queue family must report TimestampValidBits > 0.
-        //   2. The device must report a non-zero TimestampPeriod.
-        // Both are true on MoltenVK / Apple Silicon, but cheaper to check
-        // than to debug zeros later. If either fails we leave
-        // timestampsSupported=false and the per-frame path no-ops cleanly.
+        // Guard on TimestampValidBits > 0 and non-zero TimestampPeriod —
+        // both hold on every driver we ship on, but cheaper to gate than
+        // to debug silent zeros if a future driver lies.
         var props = Vk.GetPhysicalDeviceProperties(PhysicalDevice);
         timestampPeriodNs = props.Limits.TimestampPeriod;
 
@@ -204,9 +184,7 @@ public sealed partial class VulkanGraphicsDevice
         SurfaceCapabilitiesKHR caps;
         KhrSurface.GetPhysicalDeviceSurfaceCapabilities(PhysicalDevice, Surface, &caps);
 
-        // Pick format: prefer B8G8R8A8 sRGB so post-process linear→sRGB still
-        // works out the same as the GL path; fall back to whatever the
-        // surface offers if our preferred format isn't supported.
+        // Prefer B8G8R8A8 sRGB to match the GL backend's linear→sRGB path.
         uint fmtCount = 0;
         KhrSurface.GetPhysicalDeviceSurfaceFormats(PhysicalDevice, Surface, &fmtCount, null);
         var formats = new SurfaceFormatKHR[fmtCount];
@@ -225,11 +203,8 @@ public sealed partial class VulkanGraphicsDevice
         }
         SwapchainFormat = chosenFormat.Format;
 
-        // Present mode: prefer MailboxKhr (uncapped, no tearing) for desktop
-        // dev so the perf HUD shows true frame cost; fall back to FifoKhr
-        // (vsync) which is the universal guaranteed mode. The IRenderHost
-        // VSync toggle (set later) can swap between them — currently the
-        // swapchain is created once with our preferred mode.
+        // Prefer Mailbox (uncapped) so the perf HUD shows true frame cost;
+        // FIFO is the universal vsync fallback.
         uint pmCount = 0;
         KhrSurface.GetPhysicalDeviceSurfacePresentModes(PhysicalDevice, Surface, &pmCount, null);
         var presentModes = new PresentModeKHR[pmCount];
@@ -243,8 +218,6 @@ public sealed partial class VulkanGraphicsDevice
             if (pm == PresentModeKHR.MailboxKhr) { chosenPresent = pm; break; }
         }
 
-        // Extent: use currentExtent when the platform pins it (most do); else
-        // clamp our framebuffer size to min/max.
         var extent = caps.CurrentExtent;
         if (caps.CurrentExtent.Width == uint.MaxValue)
         {
@@ -356,11 +329,8 @@ public sealed partial class VulkanGraphicsDevice
             PColorAttachments = &colorRef,
             PDepthStencilAttachment = &depthRef,
         };
-        // External → subpass dependency. Conservative shape used identically
-        // by both DefaultRenderPass and OverlayRenderPass — the spec requires
-        // dependencies to MATCH for two render passes to be framebuffer-
-        // compatible (validator flags any diff). Shape covers both clear-
-        // and load-mode load ops plus depth attachment transitions.
+        // Framebuffer compatibility between DefaultRenderPass and
+        // OverlayRenderPass requires their subpass deps to MATCH bit-for-bit.
         var dep = SharedSubpassDependency();
 
         var ci = new RenderPassCreateInfo
@@ -392,12 +362,9 @@ public sealed partial class VulkanGraphicsDevice
 
     private unsafe void CreateOverlayRenderPass()
     {
-        // Same attachment shape, but LoadOp.Load on color so we paint OVER
-        // whatever the default pass left on the swapchain image. Depth is
-        // DontCare both ways — overlay draws don't depth-test against the
-        // scene; lines are intentionally always-on-top for debugging.
-        // initialLayout=PresentSrcKhr matches the default pass's finalLayout,
-        // so the layout transition is correct in a two-pass frame.
+        // LoadOp.Load on color (paint over the scene); depth DontCare both
+        // ways so overlay lines stay always-on-top. initialLayout matches
+        // DefaultRenderPass's finalLayout for clean two-pass transitions.
         var attachments = stackalloc AttachmentDescription[2];
         attachments[0] = new AttachmentDescription
         {
@@ -504,8 +471,7 @@ public sealed partial class VulkanGraphicsDevice
         var fenceInfo = new FenceCreateInfo
         {
             SType = StructureType.FenceCreateInfo,
-            // Signaled so the first frame's WaitForFences passes immediately
-            // instead of blocking on a fence that no submit has touched yet.
+            // Signaled so the first WaitForFences passes immediately.
             Flags = FenceCreateFlags.SignaledBit,
         };
         for (var i = 0; i < MaxFramesInFlight; i++)
@@ -523,12 +489,9 @@ public sealed partial class VulkanGraphicsDevice
         }
     }
 
-    // Walks command list, drives the per-frame Vulkan flow: wait for prior
-    // frame's GPU work, acquire next swapchain image, record clear-only
-    // commands for each pass that targets the default surface, submit, and
-    // present. Drawing per-pass (DrawIndexedCommand) is a future-push
-    // concern — current responsibility is just clearing to the requested
-    // color, which is enough to demonstrate end-to-end Vk on screen.
+    // Wait → acquire → record → submit → present. Returns true if any
+    // pass targeted the default (swapchain) surface — caller uses this to
+    // decide whether the frame actually painted something visible.
     private unsafe bool AcquireRecordSubmitPresent(RenderCommandList commandList)
     {
         if (needsRecreate)
@@ -541,8 +504,8 @@ public sealed partial class VulkanGraphicsDevice
         ref var f = ref frames[currentFrame];
         Vk.WaitForFences(Device, 1, in f.InFlight, true, ulong.MaxValue);
 
-        // GPU work on this slot's previous submission is now complete —
-        // safe to read back its timestamp queries before reusing the slot.
+        // Slot's previous GPU work is complete — drain its timestamps
+        // before reusing the query range.
         DrainSlotTimings(currentFrame);
 
         uint imageIndex;
@@ -560,6 +523,9 @@ public sealed partial class VulkanGraphicsDevice
 
         Vk.ResetFences(Device, 1, in f.InFlight);
         Vk.ResetCommandBuffer(f.CommandBuffer, 0);
+        // Fence above guarantees last cycle's transient descriptors are
+        // no longer in use — safe to recycle the whole pool.
+        ResetTransientDescriptorPool(currentFrame);
 
         var beginInfo = new CommandBufferBeginInfo
         {
@@ -568,9 +534,7 @@ public sealed partial class VulkanGraphicsDevice
         };
         ThrowIfNotSuccess(Vk.BeginCommandBuffer(f.CommandBuffer, in beginInfo), "vkBeginCommandBuffer");
 
-        // Reset this slot's range of the query pool before any writes.
-        // vkCmdResetQueryPool must run outside a render pass — convenient
-        // here because we haven't entered one yet.
+        // vkCmdResetQueryPool must run outside a render pass.
         var slotQueryBase = (uint)(currentFrame * (int)QueriesPerFrameSlot);
         if (timestampsSupported)
         {
@@ -578,24 +542,15 @@ public sealed partial class VulkanGraphicsDevice
         }
         var nextQueryIndex = slotQueryBase;
 
-        // Reused across all passes this frame — Vulkan's render-pass-begin
-        // reads from the pointer at vkCmdBeginRenderPass time, so the buffer
-        // only needs to be valid for the duration of that one call. Allocating
-        // it inside the loop trips CA2014 (stack growth across iterations).
-        // Sized for the largest attachment count we currently produce:
-        // N color + 1 depth. 8 is headroom for a future multi-target G-buffer
-        // pass — bump if a pass declares more than 7 color attachments.
+        // One stackalloc shared across passes (CA2014 — no per-iteration
+        // alloc). 8 = 7 color + 1 depth; bump for wider MRT passes.
         var clearValues = stackalloc ClearValue[8];
         var defaultPasses = 0;
         foreach (var pass in commandList.Passes)
         {
-            // Resolve render-pass + framebuffer + extent based on Target.
-            // Default target hits the swapchain via DefaultRenderPass /
-            // OverlayRenderPass; non-default targets resolve through
-            // renderSurfaceTable. Step-4 limitation: offscreen surfaces have
-            // only the Clear render-pass variant; passes targeting them must
-            // declare clear colors. Vector B's graph will handle Load/Store
-            // declaratively.
+            // Offscreen surfaces currently only have a Clear variant — passes
+            // targeting them must declare clear colors. Load/Store flexibility
+            // lives in the render graph, not the imperative path.
             VkRenderSurfaceEntry? customSurface = null;
             if (pass.Description.Target.Id != RenderSurfaceHandle.Default.Id)
             {
@@ -610,11 +565,8 @@ public sealed partial class VulkanGraphicsDevice
                 defaultPasses++;
             }
 
-            // Pass selection: a Pass(...) with empty ClearColors on the
-            // default target uses OverlayRenderPass (LoadOp.Load) — preserves
-            // the previous pass's pixels. Otherwise the default clearing
-            // pass. Custom-surface passes always use the surface's own
-            // Clear render pass.
+            // Empty ClearColors on the default target → OverlayRenderPass
+            // (LoadOp.Load). Custom surfaces always clear (no Load variant).
             var hasClear = false;
             for (var ci2 = 0; ci2 < pass.Description.ClearColors.Count; ci2++)
             {
@@ -628,7 +580,6 @@ public sealed partial class VulkanGraphicsDevice
                 renderPassToUse = surf.RenderPass;
                 framebufferToUse = surf.Framebuffer;
                 extentToUse = new Extent2D(surf.Width, surf.Height);
-                // Force-clear on offscreen for now (no Load variant yet).
                 hasClear = true;
             }
             else
@@ -638,18 +589,11 @@ public sealed partial class VulkanGraphicsDevice
                 extentToUse = SwapchainExtent;
             }
 
-            // Attachment count for clear-values indexing. Vulkan reads
-            // pClearValues[i] as the clear for render-pass attachment i,
-            // so depth's slot is `colorCount` (not a hardcoded 1).
-            //
-            //   Default swapchain pass: 1 color + 1 depth
-            //   Custom surface pass:    ClearColors.Count color + (HasDepth ? 1 depth : 0)
-            //
-            // A shadow pass with 0 color attachments needs the depth clear
-            // at index 0, NOT index 1 — getting this wrong clears the
-            // depth target to a default ClearValue (depth=0.0 reinterpreted
-            // from a zero ClearColorValue), which makes every fragment read
-            // back depth=0 from a "shadow map" that's all near-plane.
+            // pClearValues is indexed by attachment, so depth lives at
+            // `colorCount`, not a hardcoded 1. A 0-color shadow pass needs
+            // its depth clear at index 0 — getting this wrong clears depth
+            // to 0.0 (reinterpreted ClearColorValue zero) and every fragment
+            // reads back near-plane depth from the "shadow map".
             var colorCount = customSurface is null ? 1 : pass.Description.ClearColors.Count;
             var hasDepthAttachment = customSurface is null ? true : customSurface.HasDepth;
             for (var i = 0; i < colorCount; i++)
@@ -683,19 +627,14 @@ public sealed partial class VulkanGraphicsDevice
             else nextQueryIndex += 2;
 
             Vk.CmdBeginRenderPass(f.CommandBuffer, in rpBegin, SubpassContents.Inline);
-            // Timestamps INSIDE the render pass: MoltenVK maps these to
-            // Metal counter samplers that resolve at draw boundaries.
-            // ColorAttachmentOutputBit is the natural matching stage on
-            // a color-write render pass.
+            // Timestamps INSIDE the pass — MoltenVK resolves counter samplers
+            // at draw boundaries; ColorAttachmentOutputBit pairs naturally.
             if (canTimePass)
             {
                 Vk.CmdWriteTimestamp(f.CommandBuffer, PipelineStageFlags.ColorAttachmentOutputBit, gpuTimingPool, startIndex);
             }
 
-            // Dynamic viewport+scissor — pipelines declare these as dynamic
-            // so a single pipeline survives window resize. Match the current
-            // target's extent (swapchain for default, surface size for
-            // custom render-surface passes).
+            // Viewport+scissor match the current target's extent.
             var viewport = new Viewport(0, 0, extentToUse.Width, extentToUse.Height, 0, 1);
             Vk.CmdSetViewport(f.CommandBuffer, 0, 1, in viewport);
             var scissor = new Rect2D(new Offset2D(0, 0), extentToUse);
@@ -728,14 +667,9 @@ public sealed partial class VulkanGraphicsDevice
         }
         ThrowIfNotSuccess(Vk.EndCommandBuffer(f.CommandBuffer), "vkEndCommandBuffer");
 
-        // Don't submit if there was nothing to clear — keep the frame
-        // semaphore state coherent by acquiring then NOT signalling
-        // renderFinished. The next acquire would then wait on a never-
-        // signalled imageAvailable semaphore, deadlocking. Simplest fix:
-        // always submit, even an empty render pass cleared nothing.
-        // (We already begin/end an empty render pass above when there
-        // are zero default-target passes, but that path produces nothing
-        // useful. For the demo's case there's always one pass.)
+        // Always submit, even with zero default-target passes — skipping
+        // would strand the acquired imageAvailable semaphore and deadlock
+        // the next acquire.
         var waitStage = PipelineStageFlags.ColorAttachmentOutputBit;
         var imageAvail = f.ImageAvailable;
         var renderDone = perImageRenderFinished[imageIndex];
@@ -777,30 +711,20 @@ public sealed partial class VulkanGraphicsDevice
         return defaultPasses > 0;
     }
 
-    // Subscribers (currently RenderGraph) get notified after the swapchain
-    // and dependent resources have been rebuilt — they then walk their
-    // matchSwapchain-sized resources and rebuild them at the new extent.
-    // The signal fires under DeviceWaitIdle so subscribers can safely
-    // destroy + recreate without worrying about in-flight work.
+    // Fires under DeviceWaitIdle once the new swapchain is up — subscribers
+    // (e.g. RenderGraph) rebuild matchSwapchain-sized resources here.
     internal event Action? SwapchainRecreated;
 
     private void RecreateSwapchain()
     {
-        // Quiet the device first so we don't tear down resources still in use
-        // by in-flight frames. Runs only on resize so the stall is rare.
         Vk.DeviceWaitIdle(Device);
         DestroySwapchainResources();
         CreateSwapchain();
         CreateImageViews();
         CreateDepthBuffer();
-        // RenderPass + CommandPool + per-frame sync are swapchain-format-
-        // and queue-family-bound, both of which are unchanged. Skip the
-        // recreate to save work; rebuild framebuffers since the attachment
-        // views all changed.
+        // RenderPass + command pool + sync survive: format + queue family
+        // don't change on resize. Framebuffers do — attachment views changed.
         CreateFramebuffers();
-
-        // Notify graph + future subscribers. DeviceWaitIdle above already
-        // quiesced; subscribers can destroy/recreate without further sync.
         SwapchainRecreated?.Invoke();
     }
 
@@ -898,12 +822,8 @@ public sealed partial class VulkanGraphicsDevice
         var pending = pendingTimingsPerSlot[slot];
         if (pending.Count == 0) return;
 
-        // Batch-fetch the whole slot's query range in one call. The slot's
-        // previous submission has fence-signaled, but on MoltenVK the
-        // timestamp resolution is async with respect to the fence — pass
-        // WaitBit so the loader blocks until the queries are actually
-        // available. The wait is short (microseconds) because the GPU
-        // really is done by now.
+        // WaitBit because MoltenVK resolves timestamps asynchronously after
+        // the fence signals; the wait is microseconds in practice.
         var slotQueryBase = (uint)(slot * (int)QueriesPerFrameSlot);
         var results = stackalloc ulong[(int)QueriesPerFrameSlot];
         var status = Vk.GetQueryPoolResults(
@@ -913,9 +833,7 @@ public sealed partial class VulkanGraphicsDevice
             QueryResultFlags.Result64Bit | QueryResultFlags.ResultWaitBit);
         if (status != Result.Success)
         {
-            // NotReady on macOS/MoltenVK: see class-level CAVEAT. Leave
-            // entries queued for a future retry, but cap to avoid unbounded
-            // growth when the queries genuinely never resolve.
+            // NotReady on MoltenVK — retry next cycle, cap to bound growth.
             if (pending.Count > MaxPendingPerSlot) pending.Clear();
             return;
         }
@@ -938,48 +856,16 @@ public sealed partial class VulkanGraphicsDevice
         var ib = GetIndexBuffer(d.IndexBuffer);
         var prog = shaderProgramTable[pipe.ShaderProgram.Id];
 
-        // Per-draw uniforms → UBO offsets. Name-keyed writes search every
-        // buffer slot across every declared set for the first matching
-        // member; first match wins. Image/sampler slots are skipped (their
-        // binding is image-handle-based, not uniform-name based).
-        // FRICTION: today every draw clobbers the SAME per-frame UBO. Multiple
-        // draws sharing the program but with different uniform values would
-        // collide. Need either per-draw descriptor sets, dynamic-offset UBOs,
-        // or push constants — none modeled in the cross-backend API yet.
-        // (Logged as F-007 in docs/vulkan-friction.md; per-draw lifetime
-        // lands in Vector A 2e via push constants.)
+        // Per-draw uniforms still share the program's per-frame UBO bytes —
+        // two draws sharing a program but writing different uniforms will
+        // race. Push constants / dynamic-offset UBOs are the next step.
         if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
-        if (d.Textures.Count > 0) WriteTextureBindings(prog, frameSlot, d.Textures);
 
         Vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, pipe.Pipeline);
+        BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures);
 
-        // Bind every declared set at its set index. Gap sets and
-        // material-owned sets (PerFrame.Length == 0) are skipped here —
-        // material-owned sets get bound below via the MaterialBindings.
-        for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
-        {
-            if (prog.Sets[setIdx] is not { } sr || sr.PerFrame.Length == 0) continue;
-            var ds = sr.PerFrame[frameSlot];
-            Vk.CmdBindDescriptorSets(
-                cmd,
-                PipelineBindPoint.Graphics,
-                pipe.Layout,
-                firstSet: (uint)setIdx,
-                descriptorSetCount: 1,
-                &ds,
-                dynamicOffsetCount: 0,
-                pDynamicOffsets: null);
-        }
-
-        // Bind the material's descriptor set at its declared set index.
-        // For static materials (FramesInFlight == 1) Sets[0] is the single
-        // long-lived set. For per-frame replicated materials, Sets[frameSlot]
-        // selects the slot whose buffer was written this frame.
-        // Material lookup helper: static materials (FramesInFlight == 1)
-        // always pick Sets[0]; per-frame replicated materials pick the
-        // slot matching the current frame index. Modulo handles both
-        // shapes uniformly so the legacy single-set static path keeps
-        // working without a special branch.
+        // Modulo lets the static (FramesInFlight=1) and replicated cases
+        // share one bind path — static always picks Sets[0].
         if (d.Material is { } matHandle)
         {
             var mat = materialTable[matHandle.Id];
@@ -1034,29 +920,21 @@ public sealed partial class VulkanGraphicsDevice
         var buffer = vb.Buffer;
         Vk.CmdBindVertexBuffers(cmd, 0, 1, &buffer, &offset);
         Vk.CmdBindIndexBuffer(cmd, ib.Buffer, 0, ib.IndexType);
-        // vertexOffset (5th arg) carries DrawIndexedCommand.VertexOffset so a
-        // shared VB holding concatenated ImGui cmd-lists can be indexed
-        // per-list. Default 0 preserves every existing caller.
+        // vertexOffset (5th arg) lets concatenated ImGui cmd-lists index
+        // per-list off one shared vertex buffer.
         Vk.CmdDrawIndexed(cmd, (uint)d.IndexCount, 1, (uint)d.IndexOffset, d.VertexOffset, 0);
     }
 
-    // Translate name-keyed ShaderUniform writes into byte offsets across
-    // every UBO/SSBO slot the program declared. First match wins. std140
-    // layout assumed.
+    // Name-keyed ShaderUniform → byte offsets across every UBO/SSBO slot
+    // the program declares. First match wins; std140 assumed.
     //
-    // .NET's System.Numerics.Matrix4x4 stores row-major bytes; GLSL std140
-    // reads mat4 column-major. That difference IS the transpose we want:
-    // .NET's row-vector matrix M_row written directly becomes GLSL's
-    // column-vector M_col = M_row^T, and `clip = M_col * v_col` in GLSL
-    // is mathematically equivalent to `clip_row = v_row * M_row` in .NET.
-    // Writing without an explicit Transpose() is correct — see F-008.
+    // System.Numerics.Matrix4x4 is row-major bytes; GLSL std140 reads
+    // column-major. Writing the .NET matrix directly IS the transpose —
+    // M_row in memory = M_col as GLSL sees it, so `M * v` in GLSL matches
+    // `v * M` in .NET. No explicit Transpose() needed.
     //
-    // For now we map each unique buffer at most once per draw — multiple
-    // writes into the same buffer share the mapping. Buffers that receive
-    // no writes this draw are not mapped at all.
-    // Per-draw scratch reused across calls. The draw path runs on a single
-    // thread (the render thread) so one shared pair is safe and saves a
-    // dict + list allocation per draw call. Cleared, not re-allocated.
+    // Scratch is shared across calls (single-threaded render path) and
+    // cleared, not re-allocated.
     private readonly Dictionary<(int Set, int Binding), nint> uniformMappedPtrs = new();
     private readonly List<VkBufferEntry> uniformMappedBuffers = new();
 
@@ -1065,8 +943,8 @@ public sealed partial class VulkanGraphicsDevice
         int frameSlot,
         IReadOnlyList<ShaderUniform> uniforms)
     {
-        // Lazy-mapped per (set, binding) so we touch each underlying buffer
-        // exactly once across all uniform writes in this draw.
+        // Lazy-map per (set, binding): each buffer is mapped at most once
+        // per draw regardless of how many of its members are written.
         uniformMappedPtrs.Clear();
         uniformMappedBuffers.Clear();
 
@@ -1091,83 +969,130 @@ public sealed partial class VulkanGraphicsDevice
         foreach (var buf in uniformMappedBuffers) Vk.UnmapMemory(Device, buf.Memory);
     }
 
-    // Update the per-frame descriptor sets with (texture, sampler) bindings
-    // before the descriptor sets get bound for this draw.
-    //
-    // ShaderTextureBinding.Slot semantics differ per backend:
-    //   - GL: GL_TEXTURE0+slot texture unit; uniform sampler points at unit
-    //   - Vulkan: the descriptor binding number within the slot's set
-    //
-    // The set is inferred by matching against the first SampledImage slot
-    // in any declared set whose Binding equals the requested number. This
-    // works deterministically when at most one set has an image at that
-    // binding number — i.e. SETS 0 OR 1 ONLY. By engine convention set 2
-    // is material-owned (see MaterialBindings) and set 3 is per-draw push
-    // constants, so the search is unambiguous in practice as long as
-    // sampler bindings stay confined to sets 0–1 in the ShaderInterface.
-    //
-    // For materials' per-material textures (set 2 by convention),
-    // MaterialBindings.SetTexture writes the descriptor directly via
-    // explicit (binding) addressing — no name/set inference needed.
-    // That's the production path for textures going forward; this inline
-    // path remains for shaders that genuinely need a global / per-pass
-    // sampler at sets 0 or 1.
-    //
-    // The descriptor write happens every draw — wasteful when bindings don't
-    // change between draws, fine for correctness. A "skip if unchanged"
-    // cache keyed on (frameSlot, set, binding) → (texture, sampler) is a
-    // follow-up perf optimization.
-    private unsafe void WriteTextureBindings(
+    // Allocates a fresh transient set per non-material declared set, batches
+    // all UBO + texture descriptor writes for the set into one
+    // vkUpdateDescriptorSets, then binds. ShaderTextureBinding.Slot is the
+    // binding number within a set; a texture lands in any set whose layout
+    // declares an image at that binding (unique in practice, so usually
+    // one set).
+    private unsafe void BindTransientDescriptorSets(
+        CommandBuffer cmd,
         VkShaderProgramEntry prog,
+        PipelineLayout pipeLayout,
         int frameSlot,
-        IReadOnlyList<ShaderTextureBinding> bindings)
+        IReadOnlyList<ShaderTextureBinding> textures)
     {
-        foreach (var b in bindings)
+        // Hoist scratch above the loop (CA2014). Size = the widest set's
+        // potential write count.
+        var maxWritesPerSet = 0;
+        for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
         {
-            if (b.Slot < 0)
+            if (prog.Sets[setIdx] is not { } sr2) continue;
+            if (setIdx == MaterialOwnedSet) continue;
+            if (sr2.Slots.Count == 0) continue;
+            var w = sr2.Slots.Count + textures.Count;
+            if (w > maxWritesPerSet) maxWritesPerSet = w;
+        }
+        if (maxWritesPerSet == 0) return;
+
+        var writes = stackalloc WriteDescriptorSet[maxWritesPerSet];
+        var bufInfos = stackalloc DescriptorBufferInfo[maxWritesPerSet];
+        var imgInfos = stackalloc DescriptorImageInfo[maxWritesPerSet];
+
+        for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
+        {
+            if (prog.Sets[setIdx] is not { } sr) continue;
+            if (setIdx == MaterialOwnedSet) continue;
+            if (sr.Slots.Count == 0) continue;
+
+            var ds = AllocateTransientSet(frameSlot, sr.Layout);
+            var writeIdx = 0;
+
+            foreach (var slot in sr.Slots)
             {
-                throw new ArgumentOutOfRangeException(
-                    nameof(bindings),
-                    $"ShaderTextureBinding '{b.Name}' has negative Slot ({b.Slot}).");
+                if (slot.BlockLayout is not { } block) continue;
+                if (!sr.BuffersPerBinding.TryGetValue(slot.Binding, out var buffers)) continue;
+                var buf = buffers[frameSlot];
+                bufInfos[writeIdx] = new DescriptorBufferInfo
+                {
+                    Buffer = buf.Buffer,
+                    Offset = 0,
+                    Range = (ulong)block.TotalSize,
+                };
+                writes[writeIdx] = new WriteDescriptorSet
+                {
+                    SType = StructureType.WriteDescriptorSet,
+                    DstSet = ds,
+                    DstBinding = (uint)slot.Binding,
+                    DstArrayElement = 0,
+                    DescriptorType = MapDescriptorType(slot.Type),
+                    DescriptorCount = 1,
+                    PBufferInfo = &bufInfos[writeIdx],
+                };
+                writeIdx++;
             }
-            if (!FindImageSlot(prog, b.Slot, out var setIdx, out var binding))
+
+            for (var i = 0; i < textures.Count; i++)
             {
-                // No matching SampledImage slot in any declared set. Silently
-                // skip to mirror UBO-uniform behavior — programs that don't
-                // sample the texture just ignore the binding.
-                continue;
+                var b = textures[i];
+                if (b.Slot < 0)
+                {
+                    throw new ArgumentOutOfRangeException(
+                        nameof(textures),
+                        $"ShaderTextureBinding '{b.Name}' has negative Slot ({b.Slot}).");
+                }
+                if (!HasImageSlotAtBinding(sr, b.Slot)) continue;
+
+                var tex = textureTable[b.Texture.Id];
+                imgInfos[writeIdx] = new DescriptorImageInfo
+                {
+                    Sampler = tex.Sampler,
+                    ImageView = tex.View,
+                    ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
+                };
+                writes[writeIdx] = new WriteDescriptorSet
+                {
+                    SType = StructureType.WriteDescriptorSet,
+                    DstSet = ds,
+                    DstBinding = (uint)b.Slot,
+                    // Count>1 sampler arrays (e.g. uSpotShadowMaps[N]).
+                    DstArrayElement = (uint)b.ArrayIndex,
+                    DescriptorType = DescriptorType.CombinedImageSampler,
+                    DescriptorCount = 1,
+                    PImageInfo = &imgInfos[writeIdx],
+                };
+                writeIdx++;
             }
-            var tex = textureTable[b.Texture.Id];
-            var sr = prog.Sets[setIdx]!;
-            var imgInfo = new DescriptorImageInfo
+
+            if (writeIdx > 0)
             {
-                Sampler = tex.Sampler,
-                ImageView = tex.View,
-                ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
-            };
-            var write = new WriteDescriptorSet
-            {
-                SType = StructureType.WriteDescriptorSet,
-                DstSet = sr.PerFrame[frameSlot],
-                DstBinding = (uint)binding,
-                // Array element for Count>1 sampler arrays (e.g. uSpotShadowMaps[N]).
-                // 0 for the common single-texture binding.
-                DstArrayElement = (uint)b.ArrayIndex,
-                DescriptorType = DescriptorType.CombinedImageSampler,
-                DescriptorCount = 1,
-                PImageInfo = &imgInfo,
-            };
-            Vk.UpdateDescriptorSets(Device, 1, in write, 0, default(CopyDescriptorSet*));
+                Vk.UpdateDescriptorSets(Device, (uint)writeIdx, writes, 0, default(CopyDescriptorSet*));
+            }
+
+            Vk.CmdBindDescriptorSets(
+                cmd,
+                PipelineBindPoint.Graphics,
+                pipeLayout,
+                firstSet: (uint)setIdx,
+                descriptorSetCount: 1,
+                &ds,
+                dynamicOffsetCount: 0,
+                pDynamicOffsets: null);
         }
     }
 
-    // Emit vkCmdPushConstants for each declared PushConstantRange in the
-    // shader's interface. Bytes are sliced contiguously across ranges
-    // matching the offset+size each range declares.
-    //
-    // The cube demo declares one range (Vertex, 0, 64) carrying uModel —
-    // single push. ShaderLab's lit shader will declare two ranges (uModel,
-    // uNormalMatrix) totaling 128 bytes — two pushes per draw.
+    private static bool HasImageSlotAtBinding(VkShaderSetResources sr, int binding)
+    {
+        foreach (var s in sr.Slots)
+        {
+            if (s.Binding != binding) continue;
+            if (s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage or ShaderResourceType.Sampler) return true;
+        }
+        return false;
+    }
+
+    // Slices the payload across the shader's declared push-constant ranges
+    // and emits one vkCmdPushConstants per range.
     private unsafe void PushConstantsToCommandBuffer(
         CommandBuffer cmd,
         PipelineLayout layout,
@@ -1201,25 +1126,6 @@ public sealed partial class VulkanGraphicsDevice
                     basePtr + r.Offset);
             }
         }
-    }
-
-    private static bool FindImageSlot(VkShaderProgramEntry prog, int bindingNumber, out int setIdx, out int binding)
-    {
-        for (var i = 0; i < prog.Sets.Length; i++)
-        {
-            if (prog.Sets[i] is not { } sr) continue;
-            foreach (var slot in sr.Slots)
-            {
-                if (slot.Binding != bindingNumber) continue;
-                if (slot.Type is not (ShaderResourceType.SampledImage or ShaderResourceType.StorageImage or ShaderResourceType.Sampler)) continue;
-                setIdx = i;
-                binding = slot.Binding;
-                return true;
-            }
-        }
-        setIdx = 0;
-        binding = 0;
-        return false;
     }
 
     private static bool FindBufferMember(
@@ -1256,7 +1162,6 @@ public sealed partial class VulkanGraphicsDevice
         switch (value)
         {
             case Matrix4x4Uniform m:
-                // No explicit transpose — see comment on WriteUniformsToUbo.
                 var mat = m.Value;
                 fixed (byte* p = dst) *((System.Numerics.Matrix4x4*)p) = mat;
                 break;
@@ -1264,9 +1169,8 @@ public sealed partial class VulkanGraphicsDevice
                 fixed (byte* p = dst) *((System.Numerics.Vector4*)p) = v4.Value;
                 break;
             case Vector3Uniform v3:
-                // std140: vec3 occupies 12 bytes but is 16-byte-aligned —
-                // caller's UniformBlockLayout offsets reflect that padding;
-                // we only write the 12 useful bytes.
+                // std140 vec3 is 16-byte-aligned but occupies 12 bytes;
+                // UniformBlockLayout offsets bake in the trailing padding.
                 fixed (byte* p = dst) *((System.Numerics.Vector3*)p) = v3.Value;
                 break;
             case Vector2Uniform v2:
@@ -1275,8 +1179,6 @@ public sealed partial class VulkanGraphicsDevice
             case FloatUniform f:
                 fixed (byte* p = dst) *((float*)p) = f.Value;
                 break;
-            // Array variants + Matrix4x4ArrayUniform deferred — friction
-            // for the array-stride+padding cases logged as F-009.
             default:
                 throw new NotImplementedException($"Vulkan UBO write for {value.GetType().Name} not implemented yet.");
         }

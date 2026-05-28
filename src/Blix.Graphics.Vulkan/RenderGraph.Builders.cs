@@ -1,14 +1,11 @@
 namespace Blix.Graphics.Vulkan;
 
-// Fluent builders for graph pass declarations. Builders are thin proxies
-// over the graph's mutable pass entries — each fluent call mutates the
-// underlying entry and returns `this` for chaining. Once Compile() runs,
-// the graph freezes; builders held past Compile() throw if used.
+// Fluent builders for graph pass declarations. Thin proxies — each
+// chained call mutates the underlying entry and returns this. After
+// Compile() the graph freezes; builders held past that point throw.
 //
-// Compute-pass.Dispatch() throws NotImplementedException at execute time
-// (the throw lands in VB.v when Execute is wired). Declaration is
-// supported in v1 so the API + tests are stable; execution is the part
-// deferred to step 8 (froxel fog).
+// ComputePass.Dispatch() throws at execute time today — declaration is
+// stable, execution will light up when there's a real consumer.
 
 public sealed class GraphicsPassBuilder
 {
@@ -24,10 +21,8 @@ public sealed class GraphicsPassBuilder
     public PassHandle Handle => entry.Handle;
     public string Name => entry.Name;
 
-    // Declare a color render-target attachment for this pass. View may
-    // be a whole-image (implicit from GraphResourceHandle) or a sub-resource
-    // view (e.g. cube.Face(i)). LoadOp / StoreOp follow Vulkan attachment
-    // op semantics; see LoadOp / StoreOp enums in TextureView.cs.
+    // View can be whole-image (implicit GraphResourceHandle conversion) or
+    // a sub-resource (e.g. cube.Face(i)). LoadOp/StoreOp follow Vulkan.
     public GraphicsPassBuilder Target(TextureView view, LoadOp load, StoreOp store)
     {
         EnsureMutable();
@@ -50,10 +45,8 @@ public sealed class GraphicsPassBuilder
     public GraphicsPassBuilder Depth(GraphResourceHandle handle, LoadOp load, StoreOp store) =>
         Depth((TextureView)handle, load, store);
 
-    // Declare a Read edge — this pass samples / reads the view as a
-    // shader input. Drives barrier inference in VB.iv. Compile() (VB.ii)
-    // validates that the view's resource was declared by an earlier
-    // pass in declaration order.
+    // Read edge — the view must reference a resource declared by an
+    // earlier pass (validated at Compile time).
     public GraphicsPassBuilder Read(TextureView view)
     {
         EnsureMutable();
@@ -64,10 +57,8 @@ public sealed class GraphicsPassBuilder
     public GraphicsPassBuilder Read(GraphResourceHandle handle) =>
         Read((TextureView)handle);
 
-    // Declare the closed set of shader interfaces this pass supports.
-    // Compile() validates set-1 layout compatibility across all listed
-    // shaders (per Q-008 disposition). Drawing with a shader not listed
-    // here is rejected at draw time.
+    // Closed set of shaders this pass supports. Drawing with one not in
+    // the list is rejected at draw time.
     public GraphicsPassBuilder Shader(params ShaderInterface[] shaders)
     {
         EnsureMutable();

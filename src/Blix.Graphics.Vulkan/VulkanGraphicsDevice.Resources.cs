@@ -4,18 +4,14 @@ using VkBuffer = Silk.NET.Vulkan.Buffer;
 
 namespace Blix.Graphics.Vulkan;
 
-// Buffer, shader-program, and pipeline creation. Memory strategy for this
-// push is "everything host-visible + coherent" — fine for tiny static
-// geometry (a triangle's worth of vertices). The follow-up here is a real
-// staging-buffer path for device-local memory once we have anything large
-// enough to care, but for visible-triangle-on-screen this is enough.
+// Buffer, shader-program, and pipeline creation. All buffers are
+// host-visible + coherent today — staging path for device-local memory
+// is a future step once geometry sizes warrant it.
 public sealed partial class VulkanGraphicsDevice
 {
-    // Set 2 is per-material by engine convention (see
-    // docs/vulkan-reshape-shaderlab-target.md "set-by-lifetime"). The
-    // program creates the layout for this set so the pipeline layout
-    // stays contiguous, but skips per-frame descriptor / UBO allocation
-    // — those live on MaterialBindings instances instead.
+    // Set 2's layout is owned by the shader program (for pipeline-layout
+    // contiguity), but its descriptors + UBO live on MaterialBindings
+    // instances. Other set indices flow through the per-draw transient pool.
     internal const int MaterialOwnedSet = 2;
 
     private int nextResourceId = 1;
@@ -39,13 +35,10 @@ public sealed partial class VulkanGraphicsDevice
         public ShaderModule Vertex;
         public ShaderModule Fragment;
         public string Name = string.Empty;
-        // Declared binding contract. Always non-null post-2b.
         public ShaderInterface Interface = null!;
-        // Per-set resources indexed by Vulkan set number. Length = MaxSet+1
-        // (Sets is empty when the interface declares no slots). Sets that
-        // aren't declared by the interface but lie in [0, MaxSet] carry an
-        // "empty layout" entry so the pipeline layout stays contiguous —
-        // Vulkan rejects gaps in pSetLayouts.
+        // Indexed by Vulkan set number. Sets the interface skips between
+        // declared ones carry an empty-layout placeholder so pSetLayouts
+        // stays contiguous (Vulkan rejects gaps).
         public VkShaderSetResources?[] Sets = Array.Empty<VkShaderSetResources?>();
     }
 
@@ -53,13 +46,10 @@ public sealed partial class VulkanGraphicsDevice
     {
         public int Set;
         public DescriptorSetLayout Layout;
-        public DescriptorPool Pool; // default(DescriptorPool) for empty intermediate sets
-        public DescriptorSet[] PerFrame = Array.Empty<DescriptorSet>();
-        // Buffer slots in this set, keyed by binding number. Each entry is
-        // one UBO/SSBO per frame slot. Image/sampler slots in this set have
-        // no entry here (their descriptor write lands in 2c).
+        // UBO/SSBO storage per binding × frames-in-flight. Image/sampler
+        // slots have no entry here — their descriptors are written from the
+        // draw's textures into a transient set per draw.
         public Dictionary<int, VkBufferEntry[]> BuffersPerBinding = new();
-        // Slots declared at this set, for name lookup during uniform writes.
         public List<DescriptorSetSlot> Slots = new();
     }
 
@@ -214,17 +204,8 @@ public sealed partial class VulkanGraphicsDevice
 
     // --- Shader programs ---------------------------------------------------
 
-    // Caller passes raw SPIR-V words for each stage and the program's declared
-    // ShaderInterface. We don't compile GLSL at runtime — pre-compiled .spv
-    // from glslc is the dependency-light path for now. The runtime-compile
-    // path (libshaderc binding) is a future concern when we want hot reload.
-    //
-    // The ShaderInterface drives descriptor-set generation: one
-    // VkDescriptorSetLayout per declared set, one VkDescriptorPool per set,
-    // per-frame descriptor sets, and per-frame UBOs for each UniformBuffer/
-    // StorageBuffer slot. Image and sampler slots get declared in the layout
-    // but their descriptor writes land later when the texture infrastructure
-    // (Vector A 2c) lands.
+    // Pre-compiled SPIR-V only — no runtime GLSL→SPIR-V (libshaderc) path
+    // until we want hot reload.
     public ShaderProgramHandle CreateShaderProgramFromSpv(
         byte[] vertexSpv,
         byte[] fragmentSpv,
@@ -250,14 +231,13 @@ public sealed partial class VulkanGraphicsDevice
         return new ShaderProgramHandle(id);
     }
 
-    internal const int MaxFramesInFlightConst = 2; // mirrors VulkanGraphicsDevice.Swapchain.cs constant
+    // Must equal Swapchain.cs MaxFramesInFlight — UBO storage is sized off
+    // this, and the transient pool count comes from here.
+    internal const int MaxFramesInFlightConst = 2;
 
-    // Materializes per-set descriptor-set layouts, pools, and per-frame
-    // descriptor sets from entry.Interface.Slots. Buffer slots also get a
-    // per-frame VkBufferEntry (host-visible UBO/SSBO) wired into the
-    // descriptor sets via vkUpdateDescriptorSets. Image/sampler slots get
-    // their binding declared in the layout but no descriptor write yet — the
-    // texture-infrastructure step (Vector A 2c) fills those in.
+    // Builds the per-set DescriptorSetLayout + per-frame UBO storage for
+    // every set the interface declares (plus empty-layout placeholders for
+    // gaps, so pSetLayouts stays contiguous).
     private unsafe void CreateSetResources(VkShaderProgramEntry entry)
     {
         var slots = entry.Interface.Slots;
@@ -267,9 +247,6 @@ public sealed partial class VulkanGraphicsDevice
             return;
         }
 
-        // Vulkan requires pipeline-layout set indices to be contiguous from
-        // set 0. Allocate Sets[0..maxSet] and create an "empty" layout entry
-        // for any intermediate set the shader doesn't declare.
         var maxSet = 0;
         foreach (var s in slots) if (s.Set > maxSet) maxSet = s.Set;
         entry.Sets = new VkShaderSetResources?[maxSet + 1];
@@ -296,9 +273,6 @@ public sealed partial class VulkanGraphicsDevice
     {
         var resources = new VkShaderSetResources { Set = setIdx, Slots = setSlots };
 
-        // --- Descriptor set layout ------------------------------------------
-        // Empty layout (no bindings) is valid — used for "gap" sets the
-        // shader skips between declared sets, keeping pSetLayouts contiguous.
         var bindings = stackalloc DescriptorSetLayoutBinding[Math.Max(1, setSlots.Count)];
         for (var i = 0; i < setSlots.Count; i++)
         {
@@ -323,69 +297,14 @@ public sealed partial class VulkanGraphicsDevice
             $"vkCreateDescriptorSetLayout({programName}.set{setIdx})");
         resources.Layout = setLayout;
 
-        // Gap sets have nothing to allocate beyond the empty layout — they
-        // exist only to keep pSetLayouts contiguous for the pipeline layout.
+        // Gap sets carry only the empty layout (pSetLayouts contiguity).
         if (setSlots.Count == 0) return resources;
-
-        // Material-owned sets (set 2 by convention): the layout exists for
-        // the pipeline layout but per-frame descriptor sets + UBOs are
-        // allocated by MaterialBindings instances on demand. Bail before
-        // creating pool/sets/buffers.
+        // Material sets own their own UBOs + descriptors via MaterialBindings.
         if (setIdx == MaterialOwnedSet) return resources;
 
-        // --- Pool sized to the union of this set's per-frame allocations ----
-        // One pool size per distinct DescriptorType used in the set,
-        // multiplied by MaxFramesInFlightConst (one descriptor per slot per
-        // frame). Sampler arrays multiply by Count.
-        var perTypeCount = new Dictionary<DescriptorType, uint>();
         foreach (var s in setSlots)
         {
-            var t = MapDescriptorType(s.Type);
-            perTypeCount.TryGetValue(t, out var current);
-            perTypeCount[t] = current + (uint)(s.Count * MaxFramesInFlightConst);
-        }
-        var poolSizes = stackalloc DescriptorPoolSize[perTypeCount.Count];
-        var poolIdx = 0;
-        foreach (var (type, count) in perTypeCount)
-        {
-            poolSizes[poolIdx++] = new DescriptorPoolSize { Type = type, DescriptorCount = count };
-        }
-        var poolCi = new DescriptorPoolCreateInfo
-        {
-            SType = StructureType.DescriptorPoolCreateInfo,
-            PoolSizeCount = (uint)perTypeCount.Count,
-            PPoolSizes = poolSizes,
-            MaxSets = (uint)MaxFramesInFlightConst,
-        };
-        DescriptorPool pool;
-        ThrowIfNotSuccess(
-            Vk.CreateDescriptorPool(Device, in poolCi, null, &pool),
-            $"vkCreateDescriptorPool({programName}.set{setIdx})");
-        resources.Pool = pool;
-
-        // --- One descriptor set per frame, all sharing the same layout ------
-        var layouts = stackalloc DescriptorSetLayout[MaxFramesInFlightConst];
-        for (var i = 0; i < MaxFramesInFlightConst; i++) layouts[i] = setLayout;
-        var allocInfo = new DescriptorSetAllocateInfo
-        {
-            SType = StructureType.DescriptorSetAllocateInfo,
-            DescriptorPool = pool,
-            DescriptorSetCount = (uint)MaxFramesInFlightConst,
-            PSetLayouts = layouts,
-        };
-        var sets = new DescriptorSet[MaxFramesInFlightConst];
-        fixed (DescriptorSet* p = sets)
-        {
-            ThrowIfNotSuccess(
-                Vk.AllocateDescriptorSets(Device, in allocInfo, p),
-                $"vkAllocateDescriptorSets({programName}.set{setIdx})");
-        }
-        resources.PerFrame = sets;
-
-        // --- Per-frame UBO/SSBO allocation + descriptor write ---------------
-        foreach (var s in setSlots)
-        {
-            if (s.BlockLayout is not { } block) continue; // image/sampler — descriptor write deferred to 2c
+            if (s.BlockLayout is not { } block) continue;
             var usage = s.Type == ShaderResourceType.StorageBuffer
                 ? BufferUsageFlags.StorageBufferBit
                 : BufferUsageFlags.UniformBufferBit;
@@ -393,25 +312,7 @@ public sealed partial class VulkanGraphicsDevice
             var bytes = new byte[block.TotalSize];
             for (var i = 0; i < MaxFramesInFlightConst; i++)
             {
-                var buf = CreateHostVisibleBuffer(bytes, usage, $"{programName}.set{setIdx}.binding{s.Binding}.buf[{i}]");
-                buffers[i] = buf;
-                var bufInfo = new DescriptorBufferInfo
-                {
-                    Buffer = buf.Buffer,
-                    Offset = 0,
-                    Range = (ulong)block.TotalSize,
-                };
-                var write = new WriteDescriptorSet
-                {
-                    SType = StructureType.WriteDescriptorSet,
-                    DstSet = sets[i],
-                    DstBinding = (uint)s.Binding,
-                    DstArrayElement = 0,
-                    DescriptorType = MapDescriptorType(s.Type),
-                    DescriptorCount = 1,
-                    PBufferInfo = &bufInfo,
-                };
-                Vk.UpdateDescriptorSets(Device, 1, in write, 0, default(CopyDescriptorSet*));
+                buffers[i] = CreateHostVisibleBuffer(bytes, usage, $"{programName}.set{setIdx}.binding{s.Binding}.buf[{i}]");
             }
             resources.BuffersPerBinding[s.Binding] = buffers;
         }
@@ -471,7 +372,6 @@ public sealed partial class VulkanGraphicsDevice
             if (sr is null) continue;
             foreach (var buffers in sr.BuffersPerBinding.Values)
                 foreach (var b in buffers) DestroyVkBufferEntry(b);
-            if (sr.Pool.Handle != 0) Vk.DestroyDescriptorPool(Device, sr.Pool, null);
             if (sr.Layout.Handle != 0) Vk.DestroyDescriptorSetLayout(Device, sr.Layout, null);
         }
         if (e.Vertex.Handle != 0) Vk.DestroyShaderModule(Device, e.Vertex, null);
@@ -487,9 +387,6 @@ public sealed partial class VulkanGraphicsDevice
             throw new InvalidOperationException($"Unknown shader program handle {description.ShaderProgram.Id}.");
         }
 
-        // Pipeline layout pulls in every set layout the shader declared (sets
-        // 0..maxSet) plus its push-constant ranges. Gap sets carry an empty
-        // layout — Vulkan rejects gaps in pSetLayouts.
         var setLayouts = stackalloc DescriptorSetLayout[Math.Max(1, prog.Sets.Length)];
         var setCount = (uint)prog.Sets.Length;
         for (var i = 0; i < prog.Sets.Length; i++)
@@ -585,9 +482,7 @@ public sealed partial class VulkanGraphicsDevice
             PrimitiveRestartEnable = false,
         };
 
-        // Viewport + scissor are dynamic state — set per command-buffer so
-        // a single pipeline survives window resize. Standard tutorial-grade
-        // setup; cost is negligible vs the resize-recreate alternative.
+        // Viewport + scissor are dynamic so resize doesn't recreate pipelines.
         var viewportState = new PipelineViewportStateCreateInfo
         {
             SType = StructureType.PipelineViewportStateCreateInfo,
@@ -631,8 +526,7 @@ public sealed partial class VulkanGraphicsDevice
             StencilTestEnable = false,
         };
 
-        // Color blend: single attachment (default render pass). When MRT
-        // surfaces land, this fans out per ColorBlends entry.
+        // TODO MRT: when surfaces grow multiple attachments, fan out per ColorBlends entry.
         var blendState = description.ColorBlends.Count > 0 ? description.ColorBlends[0] : BlendState.Disabled;
         var colorBlendAttachment = new PipelineColorBlendAttachmentState
         {
@@ -676,10 +570,8 @@ public sealed partial class VulkanGraphicsDevice
             PColorBlendState = &colorBlend,
             PDynamicState = &dynamicState,
             Layout = layout,
-            // Pipeline's render pass picks based on description.RenderTarget.
-            // Null → swapchain DefaultRenderPass; non-null → the surface's
-            // own render pass (different attachment formats need a different
-            // render-pass compat group).
+            // Null target → swapchain default pass; offscreen surfaces carry
+            // their own pass (different attachment formats = different compat).
             RenderPass = description.RenderTarget is { } target
                 ? renderSurfaceTable[target.Id].RenderPass
                 : DefaultRenderPass,
@@ -724,16 +616,9 @@ public sealed partial class VulkanGraphicsDevice
 
     // --- Materials ---------------------------------------------------------
 
-    // Creates a MaterialBindings carrying the descriptor set + UBOs for one
-    // set (typically set 2 = per-material). The program must have declared
-    // at least one slot at the target setIndex. Returns an opaque handle
-    // the draw call uses to bind the material at its set index.
-    //
-    // framesInFlight: 1 (default) = static set, write once at setup.
-    // >1 = per-frame replicated: N pools + sets + buffers. Use
-    // MaxFramesInFlight from this device for the canonical replication
-    // count. The bind path picks the matching slot from CurrentFrameSlot;
-    // the caller writes per-frame data via MaterialBindings.WriteBuffer.
+    // framesInFlight=1: static set, written once at setup. >1: per-frame
+    // replicated (use MaxFramesInFlightCount) — caller writes the matching
+    // slot each frame via MaterialBindings.WriteBuffer.
     public MaterialBindings CreateMaterial(
         ShaderProgramHandle programHandle,
         int setIndex = MaterialOwnedSet,
@@ -792,5 +677,6 @@ public sealed partial class VulkanGraphicsDevice
         DestroyAllSamplers();
         foreach (var e in indexBufferTable.Values) DestroyVkBufferEntry(e);
         indexBufferTable.Clear();
+        DestroyTransientDescriptorPools();
     }
 }

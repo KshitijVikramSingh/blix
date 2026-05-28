@@ -15,19 +15,40 @@ No editor, no scripting, no plugin system, no asset cache, no hot reload. No shi
 
 ## Demos
 
-Four demos ship in `src/`. Each is an entry point against the engine. The Vulkan demo is the active development target; the OpenGL demos are stable but in the process of being sunset as the engine reshapes around Vulkan as the primary backend (see [`docs/vulkan-friction.md`](docs/vulkan-friction.md) for the in-flight reshape notes).
+Six demos ship in `src/`. Each is a standalone entry point. The Vulkan demos are the active development target — they exercise the new shader-interface binding model, declarative render graph, and per-draw transient descriptor pool ([`docs/vulkan-friction.md`](docs/vulkan-friction.md) tracks the in-flight reshape). The OpenGL demos still run unchanged.
 
-### Vulkan Cube (active development)
+### Vulkan Lit (active development, headline demo)
+
+```sh
+# Run via the launcher (sets DYLD_FALLBACK_LIBRARY_PATH for MoltenVK on macOS).
+prefix=$(brew --prefix) && \
+  DYLD_FALLBACK_LIBRARY_PATH="$prefix/lib" \
+  VK_ICD_FILENAMES="$prefix/etc/vulkan/icd.d/MoltenVK_icd.json" \
+  VK_LAYER_PATH="$prefix/share/vulkan/explicit_layer.d" \
+  dotnet run --project src/Blix.Demos.VulkanLit/Blix.Demos.VulkanLit.csproj
+```
+
+PBR scene end-to-end on the Vulkan backend: cube + skinned glTF + a PBR sphere rig + ground plane, lit by directional sun + two spot lights + one point light, each with PCF-filtered shadow maps. Procedural-sky IBL (env cube + diffuse irradiance + split-sum BRDF LUT), separable-Gaussian bloom chain, ACES tonemap. Free-fly camera, ImGui-driven debug surface (sun yaw/pitch, exposure, per-light toggles, per-pixel shader-channel inspection).
+
+Render graph: `sun-shadow → spot0-shadow → spot1-shadow → 6× point-cube-faces → lit-scene → bloom-bright → bloom-blurH → bloom-blurV → present`. Skinning rides a per-frame bone-palette SSBO via `MaterialBindings(framesInFlight = MaxFramesInFlight)`.
+
+### Vulkan Graph
+
+```sh
+dotnet run --project src/Blix.Demos.VulkanGraph/Blix.Demos.VulkanGraph.csproj
+```
+
+Smaller demo of the render-graph topology: `cube-offscreen → invert → present`. Validates resource handles, Read edges, `MatchSwapchainGraphSize` resizing, and the graph→imperative-command-list bridge.
+
+### Vulkan Hello
 
 ```sh
 tools/run-vulkan-hello.sh
 ```
 
-Spinning depth-tested 24-vertex cube on the Vulkan backend via MoltenVK on macOS. Exercises swapchain creation, per-frame command buffers + sync, descriptor sets + per-frame UBO ring, VkQueryPool timing infrastructure, and a debug-line overlay pass drawn on top of the scene (world axes, light direction arrow, cube OBB wireframe). Diagnostics surface (Values / Stats / Timers / GPU pass timings / Events) flows through the same `IDebuggable` API as the OpenGL demos.
+Original Vulkan validation demo. Spinning depth-tested cube via MoltenVK, swapchain + per-frame sync + VkQueryPool timing infrastructure, debug-line overlay. The narrowest known-good Vulkan call site — useful as the simplest reference when something else breaks.
 
-Runs at vsync with full validation-layer cleanliness (`BLIX_VK_VALIDATE=1` to enable Khronos validation layers). `BLIX_DIAG_INTERVAL=<frames>` controls how often the periodic console digest fires (default every 60 frames; `BLIX_DIAG=off` disables).
-
-Setup: `brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc`. The launcher script (`tools/run-vulkan-hello.sh`) sets the `DYLD_FALLBACK_LIBRARY_PATH` + `VK_ICD_FILENAMES` + `VK_LAYER_PATH` env vars before `dotnet run` since dyld snapshots `DYLD_*` at process start and won't pick them up from runtime `setenv`.
+Setup (one-time): `brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc`. `BLIX_VK_VALIDATE=1` enables Khronos validation layers. `BLIX_DIAG_INTERVAL=<frames>` controls the periodic console digest cadence (default 60; `BLIX_DIAG=off` disables).
 
 ### Sponza Walkthrough (flagship)
 

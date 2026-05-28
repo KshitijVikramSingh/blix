@@ -11,26 +11,17 @@ using Blix.Runtime.Silk;
 
 namespace Blix.Demos.VulkanLit;
 
-// Vector B step 6.a + 6.b + 6.c — ShaderLab lit shader port,
-// sun shadow map, and skinned glTF.
+// PBR lit scene end-to-end on the Vulkan backend: cube + skinned glTF +
+// PBR spheres + ground plane, lit by sun (cascade-less) + two spot lights
+// + one point light, with PCF shadows on each, procedural-sky IBL, HDR
+// bloom, and ACES tonemap.
 //
-// Two graph passes:
-//   1. "sun-shadow" (depth-only) — cube + skinned cesium → 1024×1024
-//      shadow map from sun POV.
-//   2. "lit-scene"  (color+depth) — cube + ground plane + skinned cesium
-//      → hdr (Rgba16F), reading the shadow map via set 1 binding 0.
+// Render graph: shadow passes (sun + spots + 6 point-cube faces) →
+// lit-scene → bloom (bright/blurH/blurV) → present.
 //
-// Imperative present pass samples hdr → swapchain.
-//
-// The skinned model rides the per-draw bone-palette path:
-//   - Set 3 binding 0: readonly SSBO mat4 m[] — one entry per bone.
-//   - MaterialBindings with framesInFlight = MaxFramesInFlight; each
-//     frame the demo writes the slot matching CurrentFrameSlot.
-//   - SkinnedGameObject-equivalent state: GltfModel + Pose + BonePalette
-//     + AnimationClip, sampled at frame time then composed into the SSBO.
-//
-// Visual gate: a lit cube + a walking humanoid casting moving shadows
-// on a checker ground plane. Window resize works.
+// Skinning rides the per-frame bone-palette SSBO path: a MaterialBindings
+// at set 3 with framesInFlight = MaxFramesInFlight, written into
+// CurrentFrameSlot every frame.
 public static class Program
 {
     public static void Main()
@@ -133,7 +124,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private PipelineHandle pointSkinnedShadowPipeline;
     private readonly Matrix4x4[] pointFaceVP = new Matrix4x4[6];
 
-    // Bloom: bright extract → separable Gaussian (H, V) at quarter res.
+    // Bloom: bright extract → separable Gaussian (H+V) at quarter res.
     private GraphResourceHandle bloomBrightHandle;
     private GraphResourceHandle bloomBlurHHandle;
     private GraphResourceHandle bloomBlurVHandle;
@@ -144,17 +135,8 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private PipelineHandle bloomBrightPipeline;
     private ShaderProgramHandle bloomBlurProgram;
     private PipelineHandle bloomBlurPipeline;
-    // blurV needs its own program/pipeline: a program owns a single per-frame
-    // set-0 descriptor, and two draws of the same program in one frame clobber
-    // each other's uSrc binding (the later vkUpdateDescriptorSets wins for both
-    // draws). Separate programs give each blur pass its own descriptor set.
-    private ShaderProgramHandle bloomBlurProgramV;
-    private PipelineHandle bloomBlurPipelineV;
     private bool bloomEnabled = true;
-    private const float BloomScale = 0.25f;
-    // Mutable so the tone-map debug contributor can drive it. BloomScale
-    // stays const because it sizes the bloom render targets at graph-build
-    // time and can't change at runtime without rebuilding the graph.
+    private const float BloomScale = 0.25f; // const — sizes graph render targets
     internal float BloomIntensity { get; set; } = 0.7f;
 
     // Present.
@@ -257,11 +239,9 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
 
     private const int ShadowMapSize = 1024;
 
-    // === Tunable surface exposed to debug contributors ====================
-    // Thin PascalCase pass-throughs onto the lowercase per-frame fields so a
-    // contributor can read/write them without us having to rename every
-    // internal use site. Add a new entry here whenever a new knob graduates
-    // from "hardcoded" to "tunable from the overlay."
+    // Surface exposed to debug-overlay contributors. PascalCase pass-throughs
+    // so we don't have to rename every internal use site when a knob graduates
+    // from hardcoded to tunable.
     internal float Exposure          { get => exposure;        set => exposure = value; }
     internal bool  BloomEnabled      { get => bloomEnabled;    set => bloomEnabled = value; }
     internal bool  SunEnabled        { get => sunEnabled;      set => sunEnabled = value; }
@@ -688,10 +668,10 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             RenderTarget: graph.GetPassSurface(bloomBrightPassHandle)), "bloom_bright");
 
         var bloomBlurFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "bloom_blur.frag.spv"));
-        // Two distinct programs (same SPIR-V) so blurH and blurV each own a
-        // descriptor set — see the field comment. The H and V passes are
-        // render-pass compatible, so both pipelines target blurH's surface.
-        bloomBlurProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, bloomBlurFragSpv, bloomBlurInterface, "bloom_blurH");
+        // One program shared by both blurH and blurV. The transient
+        // descriptor pool gives each draw its own set, so the two blur
+        // draws no longer clobber each other's uSrc binding.
+        bloomBlurProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, bloomBlurFragSpv, bloomBlurInterface, "bloom_blur");
         bloomBlurPipeline = vk.CreatePipeline(new PipelineDescription(
             bloomBlurProgram,
             VertexPosition3NormalTexture.Layout,
@@ -699,16 +679,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             DepthState.Disabled,
             RasterizerState.NoCulling,
             new[] { BlendState.Disabled },
-            RenderTarget: graph.GetPassSurface(bloomBlurHPassHandle)), "bloom_blurH");
-        bloomBlurProgramV = vk.CreateShaderProgramFromSpv(presentVertSpv, bloomBlurFragSpv, bloomBlurInterface, "bloom_blurV");
-        bloomBlurPipelineV = vk.CreatePipeline(new PipelineDescription(
-            bloomBlurProgramV,
-            VertexPosition3NormalTexture.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.Disabled,
-            RasterizerState.NoCulling,
-            new[] { BlendState.Disabled },
-            RenderTarget: graph.GetPassSurface(bloomBlurHPassHandle)), "bloom_blurV");
+            RenderTarget: graph.GetPassSurface(bloomBlurHPassHandle)), "bloom_blur");
 
         // --- Materials --------------------------------------------------
         cubeMaterial = vk.CreateMaterial(litShaderProgram, name: "cube.material")
@@ -1120,7 +1091,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         RecordFullscreen(bloomBlurHPassHandle, bloomBlurPipeline,
             new ShaderTextureBinding("uSrc", graph.GetColorTexture(bloomBrightHandle), Slot: 0),
             Vec2Bytes(1f / bloomW, 0f));
-        RecordFullscreen(bloomBlurVPassHandle, bloomBlurPipelineV,
+        RecordFullscreen(bloomBlurVPassHandle, bloomBlurPipeline,
             new ShaderTextureBinding("uSrc", graph.GetColorTexture(bloomBlurHHandle), Slot: 0),
             Vec2Bytes(0f, 1f / bloomH));
 
@@ -1403,10 +1374,9 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             0f,         0f,          -near / fn,   1f);
     }
 
-    // Pack BonePalette.Matrices into byte[] for the GLSL std430 SSBO.
-    // Direct row-major write (same convention as every other matrix upload
-    // in the engine): GLSL reads column-major → sees the transpose →
-    // `mat * v_col` is the row-vector operation `v_row * mat`. See F-008.
+    // Direct row-major write — GLSL std430 reads column-major so the
+    // transpose happens implicitly and `mat * v_col` in the shader equals
+    // `v_row * mat` here. Same convention as every other matrix upload.
     private static void PackPalette(BonePalette palette, byte[] dst)
     {
         if (dst.Length != palette.BoneCount * 64)

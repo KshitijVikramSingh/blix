@@ -95,21 +95,27 @@ real per-frame matrices through the cross-backend `ShaderUniform` flow.
 All observations below were captured inline in the code with `// FRICTION`
 markers pointing back to entries here.
 
-### F-007 — Per-draw UBO collision when draws share a program
+### F-007 — Per-draw collisions when draws share a program
 
-In `TranslateDrawIndexed` (Swapchain.cs) we route each draw's
-`perDrawUniforms` into the program's single per-frame UBO. Two draws
-issued in the same frame sharing the same shader program would
-overwrite each other's uniforms before either GPU draw executed. The
-hello-cube has one draw so it works; Sponza wouldn't.
-**Direction (in order of escalation):** push constants for small per-draw
-data (4 mat4s fits in 256 bytes which is the conservative push-constant
-budget); dynamic-offset UBOs with one big ring buffer for everything;
-per-draw descriptor sets allocated from a per-frame transient pool. The
-cross-backend `DrawIndexedCommand.Uniforms` shape doesn't telegraph
-which of these is intended — it implicitly assumes "set this many uniforms
-just for this draw" with no rules about lifetime. Needs explicit
-classification: per-pass vs per-material vs per-draw.
+Originally: two draws sharing a program in one frame clobbered each
+other's descriptor writes AND their UBO bytes, because the program
+owned one descriptor set + one UBO per frame slot.
+
+**Descriptor half — RESOLVED.** Non-material sets are now allocated
+per draw from a per-frame-slot transient pool
+(`VulkanGraphicsDevice.TransientDescriptors.cs`). Each draw gets its
+own descriptor set, so different texture bindings on the same program
+no longer race. The bloom-blur duplication (two programs for what was
+really one separable filter) collapsed back to one program; the same
+mechanism unlocks IBL prefilter mip chains, separable SSAO, multi-bounce
+SSR, etc.
+
+**UBO-byte half — pending.** UBO storage is still per-program-per-frame,
+so draws sharing a program but writing *different* uniform values still
+race on the underlying bytes. Next steps in escalation order: push
+constants for small per-draw scalars (≤256B budget covers e.g. model +
+normal matrix); dynamic-offset UBOs against one ring buffer for larger
+payloads.
 
 ### F-008 — `System.Numerics.Matrix4x4` row-vector ↔ GLSL column-vector
 
