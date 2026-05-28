@@ -13,9 +13,15 @@ namespace Blix.Graphics.Vulkan;
 // path; this pool handles everything else.
 public sealed partial class VulkanGraphicsDevice
 {
-    // Conservative — exhaustion surfaces as vkAllocateDescriptorSets failure,
-    // at which point bump rather than complicate with growable chained pools.
-    private const uint TransientPoolMaxSets = 1024;
+    // Exhaustion surfaces as vkAllocateDescriptorSets failure; bump rather
+    // than complicate with growable chained pools. One transient set is
+    // allocated per non-material set per draw, so set count scales with
+    // (draws × sets-per-program). VulkanSponza's cascaded-shadow scene is the
+    // current high-water mark: ~455 lit draws × 2 sets (per-frame + per-pass)
+    // plus ~1190 shadow-cascade draws × 1 set ≈ 2100 sets/frame. 4096 leaves
+    // ~2× headroom for more lights / cascades. PerType stays comfortably above
+    // the matching per-type descriptor counts (~3900 combined-image-samplers).
+    private const uint TransientPoolMaxSets = 4096;
     private const uint TransientPoolPerType = 8192;
 
     private DescriptorPool[] transientPools = Array.Empty<DescriptorPool>();
