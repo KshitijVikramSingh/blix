@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
+    <ProjectReference Include="..\Blix.Diagnostics.Overlay\Blix.Diagnostics.Overlay.csproj" />
     <ProjectReference Include="..\Blix\Blix.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
@@ -13,6 +14,7 @@
     <PackageReference Include="Silk.NET.Windowing" Version="2.22.0" />
     <PackageReference Include="Silk.NET.Input" Version="2.22.0" />
     <PackageReference Include="Silk.NET.Maths" Version="2.22.0" />
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -34,6 +36,8 @@
   <ItemGroup>
     <GlslShader Include="Shaders\debugline.vert" />
     <GlslShader Include="Shaders\debugline.frag" />
+    <GlslShader Include="Shaders\imgui.vert" />
+    <GlslShader Include="Shaders\imgui.frag" />
   </ItemGroup>
 
   <Target Name="CompileSpirV"

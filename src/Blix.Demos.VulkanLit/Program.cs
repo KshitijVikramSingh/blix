@@ -2,6 +2,7 @@ using System.Numerics;
 using Blix;
 using Blix.Assets;
 using Blix.Core;
+using Blix.Demos.VulkanLit.Debug;
 using Blix.Diagnostics;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
@@ -132,6 +133,30 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private PipelineHandle pointSkinnedShadowPipeline;
     private readonly Matrix4x4[] pointFaceVP = new Matrix4x4[6];
 
+    // Bloom: bright extract → separable Gaussian (H, V) at quarter res.
+    private GraphResourceHandle bloomBrightHandle;
+    private GraphResourceHandle bloomBlurHHandle;
+    private GraphResourceHandle bloomBlurVHandle;
+    private PassHandle bloomBrightPassHandle;
+    private PassHandle bloomBlurHPassHandle;
+    private PassHandle bloomBlurVPassHandle;
+    private ShaderProgramHandle bloomBrightProgram;
+    private PipelineHandle bloomBrightPipeline;
+    private ShaderProgramHandle bloomBlurProgram;
+    private PipelineHandle bloomBlurPipeline;
+    // blurV needs its own program/pipeline: a program owns a single per-frame
+    // set-0 descriptor, and two draws of the same program in one frame clobber
+    // each other's uSrc binding (the later vkUpdateDescriptorSets wins for both
+    // draws). Separate programs give each blur pass its own descriptor set.
+    private ShaderProgramHandle bloomBlurProgramV;
+    private PipelineHandle bloomBlurPipelineV;
+    private bool bloomEnabled = true;
+    private const float BloomScale = 0.25f;
+    // Mutable so the tone-map debug contributor can drive it. BloomScale
+    // stays const because it sizes the bloom render targets at graph-build
+    // time and can't change at runtime without rebuilding the graph.
+    internal float BloomIntensity { get; set; } = 0.7f;
+
     // Present.
     private VertexBufferHandle fullscreenVB;
     private IndexBufferHandle fullscreenIB;
@@ -149,7 +174,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     // Two spot lights, sampled through a Count=2 shadow-map array. Each is a
     // cone aimed at the scene with a perspective shadow map. Color is
     // pre-multiplied by intensity for the shader.
-    private static readonly Vector3 Spot0Position = new(-2.6f, 3.2f, 1.8f);
+    internal static readonly Vector3 Spot0Position = new(-2.6f, 3.2f, 1.8f);
     private static readonly Vector3 Spot0Target = new(0.2f, -0.4f, 0.2f);
     private static readonly Vector3 Spot0Color = new(1.0f, 0.45f, 0.2f);  // warm orange
     private const float Spot0Intensity = 6.0f;
@@ -157,7 +182,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private const float Spot0InnerDeg = 14f;
     private const float Spot0OuterDeg = 22f;
 
-    private static readonly Vector3 Spot1Position = new(2.8f, 3.0f, -1.6f);
+    internal static readonly Vector3 Spot1Position = new(2.8f, 3.0f, -1.6f);
     private static readonly Vector3 Spot1Target = new(0.4f, -0.4f, 0.0f);
     private static readonly Vector3 Spot1Color = new(0.4f, 1.0f, 0.55f);  // green
     private const float Spot1Intensity = 6.0f;
@@ -167,7 +192,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
 
     // Point light. Cool cyan, sits low between cube and cesium to throw
     // omnidirectional shadows. Cube shadow stores linear distance / far.
-    private static readonly Vector3 PointPosition = new(0.9f, 0.7f, 1.4f);
+    internal static readonly Vector3 PointPosition = new(0.9f, 0.7f, 1.4f);
     private static readonly Vector3 PointColor = new(0.25f, 0.6f, 1.0f); // cool
     private const float PointIntensity = 4.0f;
     private const float PointRange = 6.0f;
@@ -177,7 +202,6 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private float currentRotX;
 
     // Debug state.
-    private GraphicsDeviceInfo? gpuInfo;
     private Vector3 cameraPosition;
     private float fovYRadians;
 
@@ -195,6 +219,16 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private enum View { Final = 0, SunShadow = 1, SpotShadow = 2, SceneDepth = 3 }
     private static readonly string[] ViewLabels = { "Final (HDR)", "Sun shadow map", "Spot shadow map", "Scene depth" };
     private int viewMode;          // index into View
+    // Per-pixel shader debug channel — overrides lit.frag's output with one
+    // shading term so you can inspect the math. Index matches the branch in
+    // lit.frag main(); 0 = normal shading.
+    private static readonly string[] ShaderChannelLabels =
+    {
+        "Shaded", "Albedo", "World normal", "Geometric normal", "Roughness",
+        "Metallic", "NdotV", "Ambient (IBL)", "Specular (IBL)", "Diffuse (IBL)",
+        "Sun shadow", "UVs",
+    };
+    private int shaderDebugMode;   // index into ShaderChannelLabels
     private bool animPaused;
     private float exposure = 1.0f; // tonemap exposure multiplier (Up/Down keys)
     private GraphResourceHandle sceneDepthHandle;
@@ -205,13 +239,42 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private bool spotEnabled = true;
     private bool pointEnabled = true;
 
-    // Scene constants.
-    private static readonly Vector3 SunDirection = Vector3.Normalize(new Vector3(-0.55f, -1.0f, -0.45f));
-    private const float SunIntensity = 1.0f;
-    private static readonly Vector3 AmbientColor = new(0.65f, 0.7f, 0.85f);
-    private const float AmbientIntensity = 1.0f;  // IBL strength (real ambient now)
+    // Scene "constants" — promoted from static-readonly / const to
+    // internal instance properties so the SunControls debug contributor
+    // can drive them. Default values match the original consts.
+    internal Vector3 SunDirection { get; set; } = Vector3.Normalize(new Vector3(-0.55f, -1.0f, -0.45f));
+    internal float SunIntensity { get; set; } = 1.0f;
+    internal Vector3 AmbientColor { get; set; } = new(0.65f, 0.7f, 0.85f);
+    internal float AmbientIntensity { get; set; } = 1.0f;  // IBL strength (real ambient now)
+
+    // Sun direction baked into the procedural sky / IBL env cube. The IBL
+    // cubes are generated once at init (BuildEnvCubeWithMips +
+    // BuildIrradianceCube), so a live SunDirection change won't relight
+    // them — direct sun shading updates, IBL stays frozen until re-baked.
+    // Held statically so the static sky-bake helpers can reach it.
+    private static readonly Vector3 SkyBakeSunDirection =
+        Vector3.Normalize(new Vector3(-0.55f, -1.0f, -0.45f));
 
     private const int ShadowMapSize = 1024;
+
+    // === Tunable surface exposed to debug contributors ====================
+    // Thin PascalCase pass-throughs onto the lowercase per-frame fields so a
+    // contributor can read/write them without us having to rename every
+    // internal use site. Add a new entry here whenever a new knob graduates
+    // from "hardcoded" to "tunable from the overlay."
+    internal float Exposure          { get => exposure;        set => exposure = value; }
+    internal bool  BloomEnabled      { get => bloomEnabled;    set => bloomEnabled = value; }
+    internal bool  SunEnabled        { get => sunEnabled;      set => sunEnabled = value; }
+    internal bool  SpotEnabled       { get => spotEnabled;     set => spotEnabled = value; }
+    internal bool  PointEnabled      { get => pointEnabled;    set => pointEnabled = value; }
+    internal float MoveSpeed         { get => moveSpeed;       set => moveSpeed = value; }
+    internal bool  AnimPaused        { get => animPaused;      set => animPaused = value; }
+    internal int   ViewMode          { get => viewMode;        set => viewMode = value; }
+    internal int   ShaderDebugMode   { get => shaderDebugMode; set => shaderDebugMode = value; }
+    internal float FovYRadians       { get => fovYRadians;     set => fovYRadians = value; }
+
+    internal static IReadOnlyList<string> ViewModeLabels       => ViewLabels;
+    internal static IReadOnlyList<string> ShaderChannelOptions => ShaderChannelLabels;
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
@@ -219,7 +282,6 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         this.host = host;
         var vk = (VulkanGraphicsDevice)graphicsDevice;
         vkDevice = vk;
-        gpuInfo = graphicsDevice.Info;
 
         // --- Geometry: cube + ground -------------------------------------
         var (cubeVerts, cubeIndices) = BuildCube();
@@ -324,11 +386,17 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
         sceneDepthHandle = graph.DepthTarget("scene-depth", fullSize);
 
+        // Bloom targets at quarter res (bright extract + ping-pong blur).
+        var bloomSize = new MatchSwapchainGraphSize(BloomScale);
+        bloomBrightHandle = graph.ColorTarget("bloom-bright", TextureFormat.Rgba16F, bloomSize);
+        bloomBlurHHandle = graph.ColorTarget("bloom-blurH", TextureFormat.Rgba16F, bloomSize);
+        bloomBlurVHandle = graph.ColorTarget("bloom-blurV", TextureFormat.Rgba16F, bloomSize);
+
         // --- Shader interfaces ------------------------------------------
         // Per-frame UBO grows with each light. vec4-packed light blocks
         // dodge the std140 vec3+float padding fragility. See lit.vert.
         var frameUbo = new UniformBlockLayout(
-            TotalSize: 448,
+            TotalSize: 464,
             Members: new[]
             {
                 new UniformBlockMember("uViewProjection",     0,   64),
@@ -349,6 +417,9 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 new UniformBlockMember("uPointColorRange",    400, 16),
                 new UniformBlockMember("uLightEnable",        416, 16),
                 new UniformBlockMember("uCameraPos",          432, 16),
+                // Debug channel selector (x = mode). 0 = normal shading; >0
+                // overrides outColor with one shading term for inspection.
+                new UniformBlockMember("uDebug",              448, 16),
             });
         var tintUbo = new UniformBlockLayout(
             TotalSize: 16,
@@ -436,10 +507,24 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         {
             new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
         });
-        // Final present: sampler + exposure push constant (4 bytes, Fragment).
+        // Final present: hdr + bloom samplers + push (exposure, bloomIntensity).
         var presentTonemapInterface = new ShaderInterface(
+            Slots: new[]
+            {
+                new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                new DescriptorSetSlot(0, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+            },
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 8) });
+
+        // Bloom fullscreen interfaces: bright = sampler only; blur = sampler +
+        // vec2 texel-step push.
+        var bloomBrightInterface = new ShaderInterface(new[]
+        {
+            new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+        });
+        var bloomBlurInterface = new ShaderInterface(
             Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment) },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 4) });
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 8) });
 
         // --- Declare graph passes (shadow casters via both interfaces) --
         // sun + 2 spot depth passes; all host the static + skinned casters.
@@ -473,6 +558,22 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             .Read(spot1ShadowHandle)
             .Read(pointShadowCube)
             .Shader(litInterface, skinnedLitInterface)
+            .Handle;
+        // Bloom chain: bright(hdr) → blurH → blurV. Each reads the previous.
+        bloomBrightPassHandle = graph.GraphicsPass("bloom-bright")
+            .Target(bloomBrightHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(hdrHandle)
+            .Shader(bloomBrightInterface)
+            .Handle;
+        bloomBlurHPassHandle = graph.GraphicsPass("bloom-blurH")
+            .Target(bloomBlurHHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(bloomBrightHandle)
+            .Shader(bloomBlurInterface)
+            .Handle;
+        bloomBlurVPassHandle = graph.GraphicsPass("bloom-blurV")
+            .Target(bloomBlurVHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(bloomBlurHHandle)
+            .Shader(bloomBlurInterface)
             .Handle;
         graph.Compile();
 
@@ -574,6 +675,41 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             RasterizerState.NoCulling,
             BlendState.Disabled), "present_depth");
 
+        // Bloom pipelines (fullscreen, target the bloom pass surfaces).
+        var bloomBrightFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "bloom_bright.frag.spv"));
+        bloomBrightProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, bloomBrightFragSpv, bloomBrightInterface, "bloom_bright");
+        bloomBrightPipeline = vk.CreatePipeline(new PipelineDescription(
+            bloomBrightProgram,
+            VertexPosition3NormalTexture.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.Disabled,
+            RasterizerState.NoCulling,
+            new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(bloomBrightPassHandle)), "bloom_bright");
+
+        var bloomBlurFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "bloom_blur.frag.spv"));
+        // Two distinct programs (same SPIR-V) so blurH and blurV each own a
+        // descriptor set — see the field comment. The H and V passes are
+        // render-pass compatible, so both pipelines target blurH's surface.
+        bloomBlurProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, bloomBlurFragSpv, bloomBlurInterface, "bloom_blurH");
+        bloomBlurPipeline = vk.CreatePipeline(new PipelineDescription(
+            bloomBlurProgram,
+            VertexPosition3NormalTexture.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.Disabled,
+            RasterizerState.NoCulling,
+            new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(bloomBlurHPassHandle)), "bloom_blurH");
+        bloomBlurProgramV = vk.CreateShaderProgramFromSpv(presentVertSpv, bloomBlurFragSpv, bloomBlurInterface, "bloom_blurV");
+        bloomBlurPipelineV = vk.CreatePipeline(new PipelineDescription(
+            bloomBlurProgramV,
+            VertexPosition3NormalTexture.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.Disabled,
+            RasterizerState.NoCulling,
+            new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(bloomBlurHPassHandle)), "bloom_blurV");
+
         // --- Materials --------------------------------------------------
         cubeMaterial = vk.CreateMaterial(litShaderProgram, name: "cube.material")
             .SetUniform(binding: 0, "uTint", new Vector4(1.0f, 1.0f, 1.0f, 1.0f))
@@ -638,7 +774,13 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         var lightEye = -SunDirection * 8.0f;
         var sunUp = MathF.Abs(SunDirection.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
         var sunView = Matrix4x4.CreateLookAt(lightEye, Vector3.Zero, sunUp);
-        var sunOrtho = CreateOrthoVulkan(width: 7.5f, height: 7.5f, near: 0.1f, far: 16f);
+        // Fit the ortho to the whole ground seen from the sun's slant: the
+        // 6×6 floor (±3) has an ~8.5-unit diagonal, and the light looks across
+        // it at an angle, so 7.5 left the far corners outside the shadow map —
+        // past its edge sampleShadow returns "lit", a hard seam across the far
+        // floor when you look down. 11 covers the diagonal + actor height; the
+        // longer far plane keeps the full depth range in view.
+        var sunOrtho = CreateOrthoVulkan(width: 11f, height: 11f, near: 0.1f, far: 22f);
         sunShadowVP = sunView * sunOrtho;
 
         // Spot shadow VP — perspective from the spot, FOV covering the outer
@@ -684,6 +826,21 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         // asset's parent node applies.
         cesiumUserTransform =
             Matrix4x4.CreateTranslation(1.7f, -0.6f, -0.6f);
+
+        // Register the per-knob debug contributors. Each owns a focused
+        // slice of the overlay's Controls/Values surface so LitLoop.Debug()
+        // doesn't have to. Engine-default contributors (GraphicsDevice
+        // info + diagnostics) are wired in via the extension method;
+        // game-specific ones are opt-in registrations below.
+        if (host is IDebugHost debugHost && debugHost.System is { } debugSystem)
+        {
+            graphicsDevice.RegisterDebug(debugSystem);
+            debugSystem.Register(new SunControls(this));
+            debugSystem.Register(new ToneMapControls(this));
+            debugSystem.Register(new LightControls(this));
+            debugSystem.Register(new CameraTuningControls(this));
+            debugSystem.Register(new DebugViewControls(this));
+        }
     }
 
     public void OnUpdate(Time time)
@@ -753,6 +910,9 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 break;
             case Key.C:
                 pointEnabled = !pointEnabled;
+                break;
+            case Key.B:
+                bloomEnabled = !bloomEnabled;
                 break;
             case Key.Up:
                 exposure = Math.Clamp(exposure * 1.25f, 0.05f, 16f);
@@ -867,6 +1027,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             new("uLightEnable",        new Vector4Uniform(new Vector4(
                 sunEnabled ? 1f : 0f, spotEnabled ? 1f : 0f, pointEnabled ? 1f : 0f, 0f))),
             new("uCameraPos",          new Vector4Uniform(new Vector4(cameraPosition, 1f))),
+            new("uDebug",              new Vector4Uniform(new Vector4(shaderDebugMode, 0f, 0f, 0f))),
         };
 
         // Sun + 2 spot shadow passes. Each draws the same casters (cube +
@@ -950,11 +1111,23 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 pushConstants: LitPush(cesiumWorldModel, metallic: 0.0f, roughness: 0.6f));
         }, clearColor: new GraphicsColor(0.04f, 0.06f, 0.10f, 1.0f));
 
+        // Bloom chain: bright(hdr) → blurH → blurV at quarter res. texelStep
+        // is direction / bloom-target-resolution.
+        var bloomW = MathF.Max(1f, frame.Width * BloomScale);
+        var bloomH = MathF.Max(1f, frame.Height * BloomScale);
+        RecordFullscreen(bloomBrightPassHandle, bloomBrightPipeline,
+            new ShaderTextureBinding("uHdr", graph.GetColorTexture(hdrHandle), Slot: 0), null);
+        RecordFullscreen(bloomBlurHPassHandle, bloomBlurPipeline,
+            new ShaderTextureBinding("uSrc", graph.GetColorTexture(bloomBrightHandle), Slot: 0),
+            Vec2Bytes(1f / bloomW, 0f));
+        RecordFullscreen(bloomBlurVPassHandle, bloomBlurPipelineV,
+            new ShaderTextureBinding("uSrc", graph.GetColorTexture(bloomBlurHHandle), Slot: 0),
+            Vec2Bytes(0f, 1f / bloomH));
+
         graph.Execute(commandList);
 
-        // Imperative present — pick the texture + pipeline for the current
-        // debug view. Final tonemaps the lit HDR (exposure via push); the
-        // depth views show the shadow map / scene depth in grayscale.
+        // Imperative present. Final composites bloom + tonemaps the HDR
+        // (exposure, bloomIntensity via push); depth views are grayscale.
         var isFinal = (View)viewMode == View.Final;
         var (presentTex, presentPipe) = (View)viewMode switch
         {
@@ -963,8 +1136,11 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             View.SceneDepth => (graph.GetDepthTexture(sceneDepthHandle), presentDepthPipeline),
             _ => (graph.GetColorTexture(hdrHandle), presentPipeline),
         };
-        var exposureBytes = new byte[4];
-        System.Runtime.InteropServices.MemoryMarshal.Write(exposureBytes, in exposure);
+        var bloomTex = graph.GetColorTexture(bloomBlurVHandle);
+        var presentPush = new byte[8];
+        System.Runtime.InteropServices.MemoryMarshal.Write(presentPush.AsSpan(0, 4), in exposure);
+        var bloomI = bloomEnabled ? BloomIntensity : 0f;
+        System.Runtime.InteropServices.MemoryMarshal.Write(presentPush.AsSpan(4, 4), in bloomI);
         commandList.Pass(
             "present",
             new RenderPassDescription(
@@ -973,23 +1149,61 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 ClearDepth: true),
             pass =>
             {
-                var tex = new[] { new ShaderTextureBinding("uOffscreen", presentTex, Slot: 0) };
                 if (isFinal)
                 {
                     pass.DrawIndexed(
                         vertexBuffer: fullscreenVB, indexBuffer: fullscreenIB,
                         pipeline: presentPipe, indexCount: 3,
-                        uniforms: Array.Empty<ShaderUniform>(), textures: tex,
-                        pushConstants: exposureBytes);
+                        uniforms: Array.Empty<ShaderUniform>(),
+                        textures: new[]
+                        {
+                            new ShaderTextureBinding("uHdr", presentTex, Slot: 0),
+                            new ShaderTextureBinding("uBloom", bloomTex, Slot: 1),
+                        },
+                        pushConstants: presentPush);
                 }
                 else
                 {
                     pass.DrawIndexed(
                         vertexBuffer: fullscreenVB, indexBuffer: fullscreenIB,
                         pipeline: presentPipe, indexCount: 3,
-                        uniforms: Array.Empty<ShaderUniform>(), textures: tex);
+                        uniforms: Array.Empty<ShaderUniform>(),
+                        textures: new[] { new ShaderTextureBinding("uOffscreen", presentTex, Slot: 0) });
                 }
             });
+    }
+
+    // Record a fullscreen graph pass: draw the fullscreen triangle sampling
+    // one input texture, optional push payload. Used by the bloom chain.
+    private void RecordFullscreen(PassHandle pass, PipelineHandle pipeline,
+        ShaderTextureBinding input, byte[]? push)
+    {
+        graph.Pass(pass, scope =>
+        {
+            if (push is null)
+            {
+                scope.DrawIndexed(
+                    vertexBuffer: fullscreenVB, indexBuffer: fullscreenIB,
+                    pipeline: pipeline, indexCount: 3,
+                    uniforms: Array.Empty<ShaderUniform>(), textures: new[] { input });
+            }
+            else
+            {
+                scope.DrawIndexed(
+                    vertexBuffer: fullscreenVB, indexBuffer: fullscreenIB,
+                    pipeline: pipeline, indexCount: 3,
+                    uniforms: Array.Empty<ShaderUniform>(), textures: new[] { input },
+                    pushConstants: push);
+            }
+        });
+    }
+
+    private static byte[] Vec2Bytes(float x, float y)
+    {
+        var bytes = new byte[8];
+        var v = new Vector2(x, y);
+        System.Runtime.InteropServices.MemoryMarshal.Write(bytes, in v);
+        return bytes;
     }
 
     // Record a depth-only shadow pass for one light: draw the cube + skinned
@@ -1086,29 +1300,17 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
 
     public void Debug(DebugContext debug)
     {
+        // Light up the on-screen diagnostics overlay (toggle visibility with
+        // the ` key). The Vulkan backend now renders the same ImGui panels the
+        // GL demos have.
+        debug.State.Enabled = true;
         debug.Values.Value("frame", frameCount);
 
-        // Interactive controls (overlay; click when RMB-look isn't active).
-        // The returned value reflects either keyboard state (V / P keys) or
-        // a click on the widget — whichever changed this frame.
-        using (debug.Scope("controls"))
-        {
-            viewMode = debug.Controls.Enum("View [V]", viewMode, ViewLabels);
-            animPaused = debug.Controls.Toggle("Pause anim [P]", animPaused);
-            moveSpeed = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 40f);
-            debug.Values.Value("exposure [Up/Dn]", exposure);
-        }
-        using (debug.Scope("lights"))
-        {
-            // Toggle keys Z/X/C (no clickable HUD in the Silk runtime); state
-            // echoed here so the console diag shows what's on.
-            debug.Values.Value("sun [Z]", sunEnabled);
-            debug.Values.Value("spot [X]", spotEnabled);
-            debug.Values.Value("point [C]", pointEnabled);
-            debug.Values.Value("spot0-pos", Spot0Position);
-            debug.Values.Value("spot1-pos", Spot1Position);
-            debug.Values.Value("point-pos", PointPosition);
-        }
+        // Tunable knobs (view mode, shader channel, sun, tone map, lights,
+        // camera tuning) live in dedicated debug contributors in the Debug/
+        // folder — they register themselves on the DebugSystem in OnLoad
+        // and emit their own Controls/Values under top-level scopes
+        // ("sun", "tonemap", "lights", "camera-tuning", "view").
 
         using (debug.Scope("cube"))
         {
@@ -1129,29 +1331,17 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             debug.Values.Value("shadow-handle", sunShadowHandle.Id);
             debug.Values.Value("shadow-size", ShadowMapSize);
         }
-        using (debug.Scope("sun"))
-        {
-            debug.Values.Value("direction", SunDirection);
-            debug.Values.Value("intensity", SunIntensity);
-            debug.Values.Value("ambient", AmbientColor);
-            debug.Values.Value("ambient-intensity", AmbientIntensity);
-        }
         using (debug.Scope("camera"))
         {
+            // Read-only camera observability. The tunable knobs (fly speed,
+            // FOV, anim pause) live in CameraTuningControls under its own
+            // "camera-tuning" scope.
             debug.Values.Value("position", cameraPosition);
             debug.Values.Value("forward", cameraForward);
             debug.Values.Value("yaw-rad", camYaw);
             debug.Values.Value("pitch-rad", camPitch);
             debug.Values.Value("fovY-rad", fovYRadians);
             debug.Values.Value("view", ViewLabels[viewMode]);
-        }
-        if (gpuInfo is { } info)
-        {
-            using (debug.Scope("gpu"))
-            {
-                debug.Values.Value("vendor", info.Vendor);
-                debug.Values.Value("renderer", info.Renderer);
-            }
         }
 
         // --- Debug draw overlays (toggle with backtick) -----------------
@@ -1378,8 +1568,10 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             var k = Math.Clamp(-d.Y, 0f, 1f);
             baseCol = Vector3.Lerp(horizon, ground, k);
         }
-        // Sun glow: light travels along SunDirection, so it comes FROM -SunDirection.
-        var toSun = -SunDirection;
+        // Sun glow: light travels along SkyBakeSunDirection, so it comes
+        // FROM the opposite direction. Uses the bake-time constant, not
+        // the live SunDirection (see SkyBakeSunDirection comment).
+        var toSun = -SkyBakeSunDirection;
         var glow = MathF.Pow(MathF.Max(Vector3.Dot(d, toSun), 0f), 32f);
         baseCol += new Vector3(0.5f, 0.42f, 0.30f) * glow;
         return Vector3.Clamp(baseCol, Vector3.Zero, Vector3.One);

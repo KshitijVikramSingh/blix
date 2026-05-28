@@ -1,5 +1,5 @@
 using Blix.Diagnostics;
-using Blix.Runtime.OpenTK;
+using Blix.Diagnostics.Overlay;
 using ImGuiNET;
 
 // LightingDebugView lives in the default namespace to match Program.cs,

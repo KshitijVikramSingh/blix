@@ -12,7 +12,10 @@ public sealed record FrameDebugPass(
     int Height,
     bool ClearedColor,
     bool ClearedDepth,
-    IReadOnlyList<FrameDebugDraw> Draws);
+    IReadOnlyList<FrameDebugDraw> Draws,
+    // Human-readable name of the render target (e.g. "swapchain"). Optional so
+    // the GL backend, which doesn't populate it, keeps compiling.
+    string TargetName = "");
 
 public sealed record FrameDebugDraw(
     PipelineHandle Pipeline,
@@ -20,6 +23,21 @@ public sealed record FrameDebugDraw(
     IndexBufferHandle IndexBuffer,
     int IndexCount,
     IReadOnlyList<string> UniformNames,
-    IReadOnlyList<FrameDebugTexture> Textures);
+    IReadOnlyList<FrameDebugTexture> Textures,
+    // Shader-pipeline inspection fields. Optional (default empty) so any backend
+    // that doesn't populate them — and existing callers — keep compiling. The
+    // Vulkan backend fills these from each DrawIndexedCommand so the overlay's
+    // Pipeline tab can show what's actually fed to the shader this frame.
+    string Shader = "",
+    IReadOnlyList<FrameDebugUniform>? Uniforms = null,
+    IReadOnlyList<float>? PushConstants = null);
 
-public sealed record FrameDebugTexture(string Name, int Slot, TextureHandle Texture);
+// One name->formatted-value pair captured from a draw's bound uniforms.
+public sealed record FrameDebugUniform(string Name, string Value);
+
+public sealed record FrameDebugTexture(
+    string Name,
+    int Slot,
+    TextureHandle Texture,
+    // Resolved resource name of the bound texture (e.g. "hdr", "ibl.font").
+    string Resource = "");

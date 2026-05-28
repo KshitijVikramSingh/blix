@@ -24,6 +24,10 @@ public sealed partial class OpenGLGraphicsDevice
             VertexAttributeFormat.Float2 => 2,
             VertexAttributeFormat.Float3 => 3,
             VertexAttributeFormat.Float4 => 4,
+            // 4 components, but note the GL attrib path below binds them as
+            // GL_FLOAT — UByte4Norm is only consumed by the Vulkan ImGui
+            // backend today; GL's own ImGui renderer sets its attribs directly.
+            VertexAttributeFormat.UByte4Norm => 4,
             _ => throw new NotSupportedException($"Unsupported vertex attribute format: {format}")
         };
     }

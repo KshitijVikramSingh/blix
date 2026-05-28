@@ -1017,11 +1017,27 @@ public sealed partial class VulkanGraphicsDevice
             PushConstantsToCommandBuffer(cmd, pipe.Layout, prog.Interface.PushConstants, pcBytes);
         }
 
+        // Per-draw scissor (ImGui clip rects). Scissor is dynamic state on
+        // every pipeline, so we just narrow it for this draw. Clamp to >= 0
+        // because ImGui clip rects can run slightly negative at edges, which
+        // Vulkan rejects. Draws without a scissor inherit the pass-wide
+        // scissor set at pass begin.
+        if (d.Scissor is { } sc)
+        {
+            var rect = new Rect2D(
+                new Offset2D(Math.Max(0, sc.X), Math.Max(0, sc.Y)),
+                new Extent2D((uint)Math.Max(0, sc.Width), (uint)Math.Max(0, sc.Height)));
+            Vk.CmdSetScissor(cmd, 0, 1, in rect);
+        }
+
         ulong offset = 0;
         var buffer = vb.Buffer;
         Vk.CmdBindVertexBuffers(cmd, 0, 1, &buffer, &offset);
         Vk.CmdBindIndexBuffer(cmd, ib.Buffer, 0, ib.IndexType);
-        Vk.CmdDrawIndexed(cmd, (uint)d.IndexCount, 1, (uint)d.IndexOffset, 0, 0);
+        // vertexOffset (5th arg) carries DrawIndexedCommand.VertexOffset so a
+        // shared VB holding concatenated ImGui cmd-lists can be indexed
+        // per-list. Default 0 preserves every existing caller.
+        Vk.CmdDrawIndexed(cmd, (uint)d.IndexCount, 1, (uint)d.IndexOffset, d.VertexOffset, 0);
     }
 
     // Translate name-keyed ShaderUniform writes into byte offsets across

@@ -39,11 +39,22 @@ public sealed partial class VulkanGraphicsDevice
                 "Depth textures must be created via render-surface attachment, not CreateTexture2D.", nameof(description));
         }
 
+        // Generate a full mip chain (via GPU blit) for color textures whose
+        // format supports a linear blit. Without mips, minified textures
+        // (e.g. the checker floor at a grazing angle) alias into crawling
+        // moiré and thrash the texture cache. Block-compressed formats can't
+        // be blit-downsampled and must ship their own mips via the cube path;
+        // they stay single-mip here.
+        var vkFormat = MapTextureFormat(description.Format);
+        var mipCount = SupportsLinearBlit(vkFormat)
+            ? ComputeMipCount(description.Width, description.Height)
+            : 1;
+
         var entry = UploadTexture2D(
             description.Width,
             description.Height,
             description.Format,
-            mipCount: 1,
+            mipCount,
             pixels,
             description.Sampler,
             name ?? "texture2D");
@@ -280,7 +291,9 @@ public sealed partial class VulkanGraphicsDevice
             ArrayLayers = 1,
             Samples = SampleCountFlags.Count1Bit,
             Tiling = ImageTiling.Optimal,
-            Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.SampledBit,
+            // TransferSrc so each mip can be the blit source for the next when
+            // generating the chain.
+            Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.TransferSrcBit | ImageUsageFlags.SampledBit,
             SharingMode = SharingMode.Exclusive,
             InitialLayout = ImageLayout.Undefined,
         };
@@ -320,7 +333,15 @@ public sealed partial class VulkanGraphicsDevice
         };
         Vk.CmdCopyBufferToImage(cmd, staging.Buffer, image, ImageLayout.TransferDstOptimal, 1, in copyRegion);
 
-        TransitionImageLayout(cmd, image, mipCount, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal);
+        if (mipCount > 1)
+        {
+            // Blit mip 0 down the chain; leaves every level ShaderReadOnly.
+            GenerateMipmaps(cmd, image, width, height, mipCount);
+        }
+        else
+        {
+            TransitionImageLayout(cmd, image, mipCount, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal);
+        }
         EndSingleTimeCommands(cmd);
 
         // 4. View + sampler.
@@ -431,6 +452,100 @@ public sealed partial class VulkanGraphicsDevice
             1, in barrier);
     }
 
+    // --- Mip generation ----------------------------------------------------
+
+    // Full chain length: floor(log2(max(w,h))) + 1.
+    private static int ComputeMipCount(int width, int height)
+    {
+        var max = Math.Max(width, height);
+        var levels = 1;
+        while (max > 1) { max >>= 1; levels++; }
+        return levels;
+    }
+
+    // True when the format can be the SOURCE of a linear-filtered blit — what
+    // GenerateMipmaps needs to halve each level. Block-compressed (and some
+    // float) formats may lack it, in which case the texture stays single-mip.
+    private unsafe bool SupportsLinearBlit(Format format)
+    {
+        Vk.GetPhysicalDeviceFormatProperties(PhysicalDevice, format, out var props);
+        return (props.OptimalTilingFeatures & FormatFeatureFlags.SampledImageFilterLinearBit) != 0;
+    }
+
+    // Generate mips 1..mipCount-1 by successively blitting the previous level
+    // at half size. Expects every level currently in TransferDstOptimal (level
+    // 0 holding the uploaded base). Leaves every level ShaderReadOnlyOptimal.
+    private unsafe void GenerateMipmaps(CommandBuffer cmd, Image image, int width, int height, int mipCount)
+    {
+        int mipW = width, mipH = height;
+        for (uint i = 1; i < (uint)mipCount; i++)
+        {
+            // Previous level becomes the blit source.
+            var toSrc = MipBarrier(image, i - 1,
+                ImageLayout.TransferDstOptimal, ImageLayout.TransferSrcOptimal,
+                AccessFlags.TransferWriteBit, AccessFlags.TransferReadBit);
+            Vk.CmdPipelineBarrier(cmd, PipelineStageFlags.TransferBit, PipelineStageFlags.TransferBit,
+                DependencyFlags.None, 0, default(MemoryBarrier*), 0, default(BufferMemoryBarrier*), 1, in toSrc);
+
+            int dstW = Math.Max(mipW / 2, 1);
+            int dstH = Math.Max(mipH / 2, 1);
+            var blit = new ImageBlit
+            {
+                SrcSubresource = new ImageSubresourceLayers
+                {
+                    AspectMask = ImageAspectFlags.ColorBit, MipLevel = i - 1, BaseArrayLayer = 0, LayerCount = 1,
+                },
+                DstSubresource = new ImageSubresourceLayers
+                {
+                    AspectMask = ImageAspectFlags.ColorBit, MipLevel = i, BaseArrayLayer = 0, LayerCount = 1,
+                },
+            };
+            blit.SrcOffsets[0] = new Offset3D(0, 0, 0);
+            blit.SrcOffsets[1] = new Offset3D(mipW, mipH, 1);
+            blit.DstOffsets[0] = new Offset3D(0, 0, 0);
+            blit.DstOffsets[1] = new Offset3D(dstW, dstH, 1);
+            Vk.CmdBlitImage(cmd,
+                image, ImageLayout.TransferSrcOptimal,
+                image, ImageLayout.TransferDstOptimal,
+                1, in blit, Filter.Linear);
+
+            // Source level is finished — promote it to shader-read.
+            var toRead = MipBarrier(image, i - 1,
+                ImageLayout.TransferSrcOptimal, ImageLayout.ShaderReadOnlyOptimal,
+                AccessFlags.TransferReadBit, AccessFlags.ShaderReadBit);
+            Vk.CmdPipelineBarrier(cmd, PipelineStageFlags.TransferBit, PipelineStageFlags.FragmentShaderBit,
+                DependencyFlags.None, 0, default(MemoryBarrier*), 0, default(BufferMemoryBarrier*), 1, in toRead);
+
+            mipW = dstW; mipH = dstH;
+        }
+
+        // The smallest level was never a blit source, so it's still TransferDst.
+        var last = MipBarrier(image, (uint)mipCount - 1,
+            ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal,
+            AccessFlags.TransferWriteBit, AccessFlags.ShaderReadBit);
+        Vk.CmdPipelineBarrier(cmd, PipelineStageFlags.TransferBit, PipelineStageFlags.FragmentShaderBit,
+            DependencyFlags.None, 0, default(MemoryBarrier*), 0, default(BufferMemoryBarrier*), 1, in last);
+    }
+
+    private static ImageMemoryBarrier MipBarrier(Image image, uint mip,
+        ImageLayout oldLayout, ImageLayout newLayout, AccessFlags src, AccessFlags dst) =>
+        new()
+        {
+            SType = StructureType.ImageMemoryBarrier,
+            OldLayout = oldLayout,
+            NewLayout = newLayout,
+            SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            Image = image,
+            SubresourceRange = new ImageSubresourceRange
+            {
+                AspectMask = ImageAspectFlags.ColorBit,
+                BaseMipLevel = mip, LevelCount = 1, BaseArrayLayer = 0, LayerCount = 1,
+            },
+            SrcAccessMask = src,
+            DstAccessMask = dst,
+        };
+
     // --- Single-time command buffer helpers --------------------------------
 
     // Allocate, begin recording, return. Caller submits via EndSingleTimeCommands.
@@ -512,8 +627,12 @@ public sealed partial class VulkanGraphicsDevice
             AddressModeU = MapWrap(desc.WrapU),
             AddressModeV = MapWrap(desc.WrapV),
             AddressModeW = MapWrap(desc.WrapW),
-            AnisotropyEnable = false,
-            MaxAnisotropy = 1.0f,
+            // Anisotropic filtering only kicks in with linear minification and
+            // needs the device feature. Cap at 8× (plenty for the grazing-angle
+            // floor) clamped to the device limit. Nearest/compare samplers skip
+            // it — anisotropy on a shadow-compare sampler is meaningless.
+            AnisotropyEnable = AnisotropySupported && desc.MinFilter == TextureFilter.Linear && !desc.Compare,
+            MaxAnisotropy = AnisotropySupported ? MathF.Min(8.0f, MaxAnisotropy) : 1.0f,
             CompareEnable = desc.Compare,
             CompareOp = desc.Compare ? CompareOp.LessOrEqual : CompareOp.Always,
             MinLod = 0,

@@ -37,6 +37,8 @@
     <GlslShader Include="Shaders\present.vert" />
     <GlslShader Include="Shaders\present.frag" />
     <GlslShader Include="Shaders\present_depth.frag" />
+    <GlslShader Include="Shaders\bloom_bright.frag" />
+    <GlslShader Include="Shaders\bloom_blur.frag" />
   </ItemGroup>
 
   <ItemGroup>

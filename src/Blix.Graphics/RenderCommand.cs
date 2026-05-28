@@ -2,6 +2,13 @@ namespace Blix.Graphics;
 
 public abstract record RenderCommand;
 
+// Per-draw scissor rectangle in framebuffer pixels, origin top-left. Used by
+// the ImGui overlay to clip each draw command to its widget's clip rect.
+// Vulkan honors it via vkCmdSetScissor (scissor is dynamic state on every
+// pipeline); the GL backend currently ignores it (GL's ImGui path manages
+// scissor itself). null on a draw means "use the pass-wide scissor".
+public readonly record struct ScissorRect(int X, int Y, int Width, int Height);
+
 // Wrap one or more DrawIndexedCommands to scope a GL occlusion query.
 // QueryId is allocated by the graphics device's occlusion-query pool and
 // the result is read back asynchronously (typically next frame). The
@@ -43,4 +50,13 @@ public sealed record DrawIndexedCommand(
     // (per-draw bone palette SSBO, framesInFlight-replicated). The engine
     // binds both at their respective SetIndex values; they must differ
     // from each other and from any per-frame engine-owned set.
-    MaterialHandle? PerDrawMaterial = null) : RenderCommand;
+    MaterialHandle? PerDrawMaterial = null,
+    // Vulkan: vertexOffset added to every index before vertex fetch
+    // (vkCmdDrawIndexed's vertexOffset). Lets a single shared vertex buffer
+    // hold concatenated sub-meshes — the ImGui overlay packs every cmd-list's
+    // vertices into one buffer and draws each with its own base. 0 preserves
+    // historical behavior. GL backend ignores it (no GL caller sets it).
+    int VertexOffset = 0,
+    // Per-draw scissor clip (framebuffer pixels). null = pass-wide scissor.
+    // See ScissorRect. Honored by Vulkan, ignored by GL.
+    ScissorRect? Scissor = null) : RenderCommand;

@@ -38,6 +38,8 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
     private VulkanGraphicsDevice? graphicsDevice;
     private IInputContext? input;
     private VkLineDrawer? lineDrawer;
+    private VkImGuiRenderer? imguiRenderer;
+    private float lastWheel;
     private double totalTime;
 
     public Window(
@@ -110,6 +112,9 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
             // line-pipeline draw on the OverlayRenderPass. Only allocate when
             // diagnostics are live (no IDebuggable game loop → no overlay).
             lineDrawer = new VkLineDrawer(graphicsDevice);
+            // VkImGuiRenderer draws the on-screen diagnostics panels (same
+            // DebugOverlayUi the GL backend uses). Toggle with the ` key.
+            imguiRenderer = new VkImGuiRenderer(graphicsDevice);
         }
 
         input = window.CreateInput();
@@ -157,6 +162,7 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
         {
             gameLoop.OnRender(time, frame, commandList);
             AppendDebugLinesPass(commandList);
+            AppendImGuiPass(commandList, frame, (float)deltaTime);
         }
 
         FrameDebugPacket packet;
@@ -164,6 +170,8 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
         {
             packet = graphicsDevice.Execute(commandList);
         }
+        // Hand the per-pass/per-draw packet to the overlay's Pipeline tab.
+        debugSystem?.SetFramePacket(packet);
 
         if (debugSystem?.Current is { } ctx)
         {
@@ -219,13 +227,23 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
         inputHandler?.OnKeyUp(MapKey(key));
     }
 
+    // True when the diagnostics overlay is up and ImGui is hovering/dragging a
+    // panel — mouse input then drives the UI, not the game (so opening a panel
+    // doesn't also swing the camera).
+    private bool OverlayWantsMouse =>
+        imguiRenderer is { } r &&
+        debugSystem is { State.Enabled: true, State.ShowOverlay: true } &&
+        r.WantCaptureMouse;
+
     private void OnMouseDown(IMouse mouse, SilkMouseButton button)
     {
+        if (OverlayWantsMouse) return;
         inputHandler?.OnMouseDown(MapMouseButton(button));
     }
 
     private void OnMouseUp(IMouse mouse, SilkMouseButton button)
     {
+        if (OverlayWantsMouse) return;
         inputHandler?.OnMouseUp(MapMouseButton(button));
     }
 
@@ -235,11 +253,16 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
     {
         var delta = position - lastMousePosition;
         lastMousePosition = position;
+        if (OverlayWantsMouse) return;
         inputHandler?.OnMouseMove(position.X, position.Y, delta.X, delta.Y);
     }
 
     private void OnMouseScroll(IMouse mouse, ScrollWheel wheel)
     {
+        // Feed the wheel to ImGui every time (consumed next BeginFrame); only
+        // forward to the game when the overlay isn't capturing the mouse.
+        lastWheel += wheel.Y;
+        if (OverlayWantsMouse) return;
         inputHandler?.OnMouseWheel(wheel.X, wheel.Y);
     }
 
@@ -298,6 +321,7 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
 
     public void Dispose()
     {
+        imguiRenderer?.Dispose();
         lineDrawer?.Dispose();
         input?.Dispose();
         graphicsDevice?.Dispose();
@@ -357,6 +381,43 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
                 ClearColors: Array.Empty<GraphicsColor?>(),
                 ClearDepth: false),
             pass => lineDrawer.Submit(pass, viewProj));
+    }
+
+    // Build the ImGui diagnostics panels for this frame and append a swapchain
+    // overlay pass that draws them on top of the scene. Gated on the overlay
+    // toggle (` key) so the panels only render when asked for. Mirrors the GL
+    // backend's overlay hook; the panel content comes from the shared
+    // DebugOverlayUi inside VkImGuiRenderer.
+    private void AppendImGuiPass(RenderCommandList commandList, RenderFrameContext frame, float deltaTime)
+    {
+        if (imguiRenderer is null) return;
+        if (debugSystem is not { State.Enabled: true, State.ShowOverlay: true }) return;
+
+        var (logicalW, logicalH) = LogicalSize;
+        var mousePos = global::System.Numerics.Vector2.Zero;
+        bool left = false, right = false, middle = false;
+        if (input is { Mice.Count: > 0 })
+        {
+            var m = input.Mice[0];
+            mousePos = m.Position;
+            left = m.IsButtonPressed(SilkMouseButton.Left);
+            right = m.IsButtonPressed(SilkMouseButton.Right);
+            middle = m.IsButtonPressed(SilkMouseButton.Middle);
+        }
+        var wheel = lastWheel;
+        lastWheel = 0f;
+
+        imguiRenderer.BeginFrame(
+            logicalW, logicalH, frame.Width, frame.Height, deltaTime,
+            mousePos, left, right, middle, wheel, debugSystem);
+
+        commandList.Pass(
+            "imgui",
+            new RenderPassDescription(
+                Target: RenderSurfaceHandle.Default,
+                ClearColors: Array.Empty<GraphicsColor?>(),
+                ClearDepth: false),
+            pass => imguiRenderer.Submit(pass));
     }
 
     private bool warnedDebugIdentityVp;

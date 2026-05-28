@@ -95,8 +95,11 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
                         VertexBuffer: d.VertexBuffer,
                         IndexBuffer: d.IndexBuffer,
                         IndexCount: d.IndexCount,
-                        UniformNames: Array.Empty<string>(),
-                        Textures: Array.Empty<FrameDebugTexture>()));
+                        UniformNames: NamesOf(d.Uniforms),
+                        Textures: DebugTextures(d.Textures),
+                        Shader: PipelineName(d.Pipeline),
+                        Uniforms: DebugUniforms(d.Uniforms),
+                        PushConstants: DecodePushFloats(d.PushConstants)));
                 }
             }
 
@@ -113,7 +116,8 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
                 Height: defaultSurfaceHeight,
                 ClearedColor: hasColorClear,
                 ClearedDepth: pass.Description.ClearDepth,
-                Draws: draws));
+                Draws: draws,
+                TargetName: pass.Description.Target.Id == 0 ? "swapchain" : $"surface#{pass.Description.Target.Id}"));
             totalDraws += draws.Count;
         }
 
@@ -122,6 +126,77 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
             TotalDraws: totalDraws,
             Passes: passPackets);
     }
+
+    // --- Frame-packet enrichment (shader-pipeline inspector) ---------------
+    // These resolve the per-draw inputs into human-readable form for the
+    // overlay's Pipeline tab: shader name, live uniform values, decoded push
+    // constants, and the texture binding map. All best-effort — a missing
+    // handle yields a placeholder rather than throwing during diagnostics.
+
+    private string PipelineName(PipelineHandle h)
+        => pipelineTable.TryGetValue(h.Id, out var e) ? e.Name : $"pipeline#{h.Id}";
+
+    private static IReadOnlyList<string> NamesOf(IReadOnlyList<ShaderUniform> uniforms)
+    {
+        if (uniforms.Count == 0) return Array.Empty<string>();
+        var names = new string[uniforms.Count];
+        for (var i = 0; i < uniforms.Count; i++) names[i] = uniforms[i].Name;
+        return names;
+    }
+
+    private static IReadOnlyList<FrameDebugUniform> DebugUniforms(IReadOnlyList<ShaderUniform> uniforms)
+    {
+        if (uniforms.Count == 0) return Array.Empty<FrameDebugUniform>();
+        var list = new FrameDebugUniform[uniforms.Count];
+        for (var i = 0; i < uniforms.Count; i++)
+        {
+            list[i] = new FrameDebugUniform(uniforms[i].Name, FormatUniform(uniforms[i].Value));
+        }
+        return list;
+    }
+
+    private IReadOnlyList<FrameDebugTexture> DebugTextures(IReadOnlyList<ShaderTextureBinding> textures)
+    {
+        if (textures.Count == 0) return Array.Empty<FrameDebugTexture>();
+        var list = new FrameDebugTexture[textures.Count];
+        for (var i = 0; i < textures.Count; i++)
+        {
+            var t = textures[i];
+            var resource = textureTable.TryGetValue(t.Texture.Id, out var e) ? e.Name : $"tex#{t.Texture.Id}";
+            list[i] = new FrameDebugTexture(t.Name, t.Slot, t.Texture, resource);
+        }
+        return list;
+    }
+
+    // Push constants are almost always tightly-packed floats (matrices,
+    // vec4 param blocks), so decode the byte payload as a float array; the UI
+    // groups them (16 -> 4x4 matrix, 4 -> vec4, etc.).
+    private static IReadOnlyList<float> DecodePushFloats(byte[]? push)
+    {
+        if (push is null || push.Length < 4) return Array.Empty<float>();
+        var floats = new float[push.Length / 4];
+        Buffer.BlockCopy(push, 0, floats, 0, floats.Length * 4);
+        return floats;
+    }
+
+    private static string FormatUniform(ShaderUniformValue value) => value switch
+    {
+        FloatUniform f => f.Value.ToString("0.###"),
+        Vector2Uniform v => $"({v.Value.X:0.###}, {v.Value.Y:0.###})",
+        Vector3Uniform v => $"({v.Value.X:0.###}, {v.Value.Y:0.###}, {v.Value.Z:0.###})",
+        Vector4Uniform v => $"({v.Value.X:0.###}, {v.Value.Y:0.###}, {v.Value.Z:0.###}, {v.Value.W:0.###})",
+        Matrix4x4Uniform m => FormatMatrix(m.Value),
+        Matrix4x4ArrayUniform a => $"mat4[{a.Value.Length}]",
+        Vector3ArrayUniform a => $"vec3[{a.Value.Length}]",
+        FloatArrayUniform a => $"float[{a.Value.Length}]",
+        _ => value.GetType().Name,
+    };
+
+    private static string FormatMatrix(System.Numerics.Matrix4x4 m) =>
+        $"{m.M11:0.##} {m.M12:0.##} {m.M13:0.##} {m.M14:0.##}\n" +
+        $"{m.M21:0.##} {m.M22:0.##} {m.M23:0.##} {m.M24:0.##}\n" +
+        $"{m.M31:0.##} {m.M32:0.##} {m.M33:0.##} {m.M34:0.##}\n" +
+        $"{m.M41:0.##} {m.M42:0.##} {m.M43:0.##} {m.M44:0.##}";
 
     // Drains GPU timings that the device has finished resolving since the
     // last call. Symmetric with OpenGLGraphicsDevice.ConsumeAvailableGpuTimings.

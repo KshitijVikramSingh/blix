@@ -174,6 +174,30 @@ public sealed class RenderPassBuilder
         recorder?.OnDraw(in command);
     }
 
+    // ImGui overlay draw: one shared (vertex, index) buffer pair holding every
+    // cmd-list concatenated, indexed per draw via indexOffset + vertexOffset, a
+    // per-cmd clip scissor, and scale/translate push constants. Set 0 binds the
+    // font atlas; no per-frame UBO uniforms. Vulkan-only.
+    public void DrawIndexed(
+        VertexBufferHandle vertexBuffer,
+        IndexBufferHandle indexBuffer,
+        PipelineHandle pipeline,
+        int indexCount,
+        int indexOffset,
+        int vertexOffset,
+        IReadOnlyList<ShaderTextureBinding> textures,
+        byte[] pushConstants,
+        ScissorRect scissor)
+    {
+        var command = new DrawIndexedCommand(
+            vertexBuffer, indexBuffer, pipeline, indexCount,
+            Array.Empty<ShaderUniform>(), textures,
+            IndexOffset: indexOffset, Material: null, PushConstants: pushConstants,
+            PerDrawMaterial: null, VertexOffset: vertexOffset, Scissor: scissor);
+        commands.Add(command);
+        recorder?.OnDraw(in command);
+    }
+
     // Skinned-shadow overload: per-draw bone palette only (no set-2
     // material — shadow shader uses set 0 + set 3 only). Vulkan-only.
     public void DrawIndexedSkinnedShadow(

@@ -19,6 +19,7 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4 uPointColorRange;    // xyz color*intensity, w range
     vec4 uLightEnable;        // x sun, y spot, z point (0/1 debug toggles)
     vec4 uCameraPos;          // xyz world camera position
+    vec4 uDebug;              // x = per-pixel debug channel (0 = normal shading)
 } frame;
 
 // Set 1 = per-pass shadow maps. uSpotShadowMaps is a Count=2 array.
@@ -138,7 +139,13 @@ vec3 perturbNormal(vec3 N, vec3 worldPos, vec2 uv, vec3 tangentNormal) {
     vec3 dp1perp = cross(N, dp1);
     vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
     vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
-    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
+    // Degenerate frame (flat UVs / zero position derivatives at edges) makes
+    // dot(T,T)=dot(B,B)=0 → inversesqrt(0)=Inf → T*Inf=NaN. Fall back to the
+    // geometric normal so hdr never carries NaN (which the bloom chain would
+    // otherwise spread into a screen-wide green wash).
+    float m = max(dot(T, T), dot(B, B));
+    if (m < 1e-12) return N;
+    float invmax = inversesqrt(m);
     mat3 TBN = mat3(T * invmax, B * invmax, N);
     return normalize(TBN * tangentNormal);
 }
@@ -146,9 +153,15 @@ vec3 perturbNormal(vec3 N, vec3 worldPos, vec2 uv, vec3 tangentNormal) {
 // One light's outgoing radiance via Cook-Torrance.
 vec3 brdf(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo,
           float metallic, float roughness, vec3 F0) {
-    vec3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
     if (NdotL <= 0.0) return vec3(0.0);
+    // Zero-safe half-vector: V+L == 0 (back-facing surface lit opposite the
+    // view) makes normalize(0) = NaN, which the bloom chain then spreads into
+    // a screen-wide green wash. Metal's fast-math defeats any isnan() guard,
+    // so we must avoid producing the NaN rather than detect it.
+    vec3 vl = V + L;
+    float vl2 = dot(vl, vl);
+    vec3 H = vl2 > 1e-12 ? vl * inversesqrt(vl2) : N;
 
     float D = distributionGGX(N, H, roughness);
     float G = geometrySmith(N, V, L, roughness);
@@ -186,7 +199,9 @@ void main() {
     // Flat maps + scale 0 both reduce to the geometric normal.
     vec3 tn = texture(uNormalMap, vUv).xyz * 2.0 - 1.0;
     tn.xy *= pc.uMatParams.z;
-    vec3 N = perturbNormal(Ngeom, vWorldPos, vUv, normalize(tn));
+    float tn2 = dot(tn, tn);
+    vec3 tnN = tn2 > 1e-12 ? tn * inversesqrt(tn2) : vec3(0.0, 0.0, 1.0);
+    vec3 N = perturbNormal(Ngeom, vWorldPos, vUv, tnN);
     vec3 V = normalize(frame.uCameraPos.xyz - vWorldPos);
     vec3 albedo = texture(uAlbedo, vUv).rgb * mat.uTint.rgb;
     float metallic = clamp(pc.uMatParams.x, 0.0, 1.0);
@@ -236,4 +251,28 @@ void main() {
     vec3 ambient = (kd * diffuseIBL + specularIBL) * frame.uAmbientIntensity;
 
     outColor = vec4(ambient + Lo, mat.uTint.a);
+
+    // Per-pixel debug channels (overlay "Shader channel"). Isolates one term
+    // so the shading math is visible. Note: these still pass through present's
+    // exposure + ACES tonemap, so 0..1 channels read close-to-true but not raw.
+    // Index matches ShaderChannelLabels in Program.cs.
+    int dbgMode = int(frame.uDebug.x + 0.5);
+    if (dbgMode > 0) {
+        vec3 dbg = vec3(0.0);
+        if (dbgMode == 1)       dbg = albedo;
+        else if (dbgMode == 2)  dbg = N * 0.5 + 0.5;
+        else if (dbgMode == 3)  dbg = Ngeom * 0.5 + 0.5;
+        else if (dbgMode == 4)  dbg = vec3(roughness);
+        else if (dbgMode == 5)  dbg = vec3(metallic);
+        else if (dbgMode == 6)  dbg = vec3(NdotV);
+        else if (dbgMode == 7)  dbg = ambient;
+        else if (dbgMode == 8)  dbg = specularIBL * frame.uAmbientIntensity;
+        else if (dbgMode == 9)  dbg = kd * diffuseIBL * frame.uAmbientIntensity;
+        else if (dbgMode == 10) {
+            vec3 Ls = -normalize(frame.uSunDirection);
+            dbg = vec3(sampleShadow(uSunShadowMap, vSunShadowCoord, max(dot(N, Ls), 0.0)));
+        }
+        else if (dbgMode == 11) dbg = vec3(vUv, 0.0);
+        outColor = vec4(dbg, 1.0);
+    }
 }

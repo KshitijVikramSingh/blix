@@ -73,6 +73,15 @@ public sealed class DebugSystem
     // Most recent finished frame, or null until the first EndFrame.
     public DebugFrame? LatestFrame => History.Latest;
 
+    // Most recent per-pass/per-draw GPU command packet (shader name, live
+    // uniform values, push constants, texture bindings). Set by the runtime
+    // after each Execute; read by the overlay's Pipeline tab to inspect what
+    // was actually fed to the shaders. Lags the live frame by one (it's
+    // produced during Execute, after the overlay for that frame is built).
+    public FrameDebugPacket? LatestFramePacket { get; private set; }
+
+    public void SetFramePacket(FrameDebugPacket packet) => LatestFramePacket = packet;
+
     // When non-null, sinks should render this frame read-only instead of
     // Current. Held independently of the ring so it survives overwrite.
     public DebugFrame? FrozenFrame { get; private set; }

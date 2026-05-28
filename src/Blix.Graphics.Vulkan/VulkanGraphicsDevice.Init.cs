@@ -21,6 +21,9 @@ public sealed partial class VulkanGraphicsDevice
     internal Queue GraphicsQueue { get; private set; }
     internal uint GraphicsQueueFamily { get; private set; }
     internal bool PortabilitySubsetRequired { get; private set; }
+    // Anisotropic filtering capability, resolved at device creation.
+    internal bool AnisotropySupported { get; private set; }
+    internal float MaxAnisotropy { get; private set; } = 1.0f;
 
     internal KhrSurface KhrSurface { get; private set; } = null!;
     internal SurfaceKHR Surface { get; private set; }
@@ -249,7 +252,22 @@ public sealed partial class VulkanGraphicsDevice
         if (PortabilitySubsetRequired) deviceExts.Add("VK_KHR_portability_subset");
         using var extNames = new Utf8ArrayPin(deviceExts);
 
-        var features = new PhysicalDeviceFeatures();
+        // Enable anisotropic filtering when the device offers it. Without it,
+        // minified textures at grazing angles (e.g. a checker floor seen
+        // edge-on) alias into crawling moiré. samplerAnisotropy is ubiquitous
+        // (incl. MoltenVK), but gate on support so we stay portable.
+        Vk.GetPhysicalDeviceFeatures(PhysicalDevice, out var supportedFeatures);
+        AnisotropySupported = supportedFeatures.SamplerAnisotropy;
+        if (AnisotropySupported)
+        {
+            Vk.GetPhysicalDeviceProperties(PhysicalDevice, out var props);
+            MaxAnisotropy = props.Limits.MaxSamplerAnisotropy;
+        }
+
+        var features = new PhysicalDeviceFeatures
+        {
+            SamplerAnisotropy = AnisotropySupported,
+        };
         var ci = new DeviceCreateInfo
         {
             SType = StructureType.DeviceCreateInfo,

@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
+    <ProjectReference Include="..\Blix.Diagnostics.Overlay\Blix.Diagnostics.Overlay.csproj" />
     <ProjectReference Include="..\Blix\Blix.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Graphics.OpenGL\Blix.Graphics.OpenGL.csproj" />

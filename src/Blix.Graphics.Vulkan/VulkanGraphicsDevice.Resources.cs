@@ -99,6 +99,20 @@ public sealed partial class VulkanGraphicsDevice
         DestroyVkBufferEntry(e);
     }
 
+    // Re-upload bytes into an existing (host-visible) index buffer. Mirrors
+    // UpdateVertexBuffer for dynamic index streaming — the ImGui overlay
+    // rewrites its index buffer every frame. Vulkan-device-specific (not on
+    // IGraphicsDevice) since only the Vulkan ImGui backend needs it today.
+    // The buffer must have been created large enough; this does not resize.
+    public void UpdateIndexBuffer(IndexBufferHandle handle, ReadOnlySpan<byte> bytes, int byteOffset = 0)
+    {
+        if (!indexBufferTable.TryGetValue(handle.Id, out var e))
+        {
+            throw new InvalidOperationException($"Unknown index buffer handle {handle.Id}.");
+        }
+        UploadToHostVisibleBuffer(e.Memory, bytes, (ulong)byteOffset);
+    }
+
     public IndexBufferHandle CreateIndexBuffer(
         IReadOnlyList<ushort> indices,
         GraphicsBufferUsage usage = GraphicsBufferUsage.Static,
@@ -545,6 +559,7 @@ public sealed partial class VulkanGraphicsDevice
                     VertexAttributeFormat.Float2 => Format.R32G32Sfloat,
                     VertexAttributeFormat.Float3 => Format.R32G32B32Sfloat,
                     VertexAttributeFormat.Float4 => Format.R32G32B32A32Sfloat,
+                    VertexAttributeFormat.UByte4Norm => Format.R8G8B8A8Unorm,
                     _ => throw new InvalidOperationException($"Unknown vertex attribute format {a.Format}."),
                 },
             };
