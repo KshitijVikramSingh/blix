@@ -43,20 +43,26 @@ static void PrintUsage()
     Console.WriteLine("                            [--brdf-size=256] [--clamp=50]");
     Console.WriteLine("    Bake equirect-to-cube + diffuse irradiance + GGX prefilter");
     Console.WriteLine("    + BRDF LUT and write a sibling .blixprobe.");
-    Console.WriteLine("  blix-cook mesh <path>");
+    Console.WriteLine("  blix-cook mesh <path> [--flip-v]");
     Console.WriteLine("    Cook a .gltf/.glb (file) or every .gltf/.glb under a directory");
     Console.WriteLine("    (recursive) into a sibling .blixmesh. Materials remain in the");
     Console.WriteLine("    .gltf -- only the per-primitive vertex/index data is cooked.");
+    Console.WriteLine("    --flip-v canonicalises bottom-up (OpenGL) UVs to a top-down");
+    Console.WriteLine("    origin, baked into the cooked vertices.");
 }
 
 static int CookMesh(string[] args)
 {
     if (args.Length < 2)
     {
-        Console.Error.WriteLine("Usage: blix-cook mesh <gltf-or-directory>");
+        Console.Error.WriteLine("Usage: blix-cook mesh <gltf-or-directory> [--flip-v]");
         return 1;
     }
     var target = args[1];
+    // Opt-in V canonicalisation for bottom-up (OpenGL-authored) sources, baked
+    // into the cooked vertex data. Granular per invocation — mirrors
+    // AssetImportContext.FlipTextureV on the runtime-import path.
+    var flipV = args.Any(a => a.Equals("--flip-v", StringComparison.OrdinalIgnoreCase));
 
     string[] sources;
     if (Directory.Exists(target))
@@ -98,7 +104,7 @@ static int CookMesh(string[] args)
             }
         }
         var sw = Stopwatch.StartNew();
-        var count = Blix.GltfStaticImporter.CookToBlixMesh(src, outPath);
+        var count = Blix.GltfStaticImporter.CookToBlixMesh(src, outPath, flipV);
         var size = new FileInfo(outPath).Length;
         Console.WriteLine($"  cooked {Path.GetFileName(src)} -> {Path.GetFileName(outPath)} ({count} primitives, {size / 1024.0 / 1024.0:0.00} MB) in {sw.ElapsedMilliseconds} ms");
     }

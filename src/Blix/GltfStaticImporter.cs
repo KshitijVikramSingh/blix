@@ -129,7 +129,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 {
                     var prim = node.Mesh.Primitives[i];
                     var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
-                    var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix);
+                    var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix, context.FlipTextureV);
                     var material = ExtractMaterial(prim.Material, materialCache, textureCache);
                     primitives.Add(new GltfPrimitive(meshData, material));
                 }
@@ -156,7 +156,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
     // node/primitive structure the runtime importer does, packs vertices via
     // BuildStaticMeshData, and serialises each primitive's
     // (name, materialIndex, bounds, vertexBytes, indices) to disk.
-    public static int CookToBlixMesh(string gltfPath, string outPath)
+    public static int CookToBlixMesh(string gltfPath, string outPath, bool flipTextureV = false)
     {
         ArgumentNullException.ThrowIfNull(gltfPath);
         ArgumentNullException.ThrowIfNull(outPath);
@@ -173,7 +173,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             {
                 var prim = node.Mesh.Primitives[i];
                 var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
-                var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix);
+                var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix, flipTextureV);
                 var materialIndex = prim.Material?.LogicalIndex ?? BlixMesh.NoMaterial;
                 primitives.Add(new BlixMeshPrimitive(
                     Name: meshData.Name,
@@ -193,7 +193,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         return primitives.Count;
     }
 
-    public static MeshData BuildStaticMeshData(string name, MeshPrimitive primitive, Matrix4x4 world, Matrix4x4 normalMatrix)
+    public static MeshData BuildStaticMeshData(string name, MeshPrimitive primitive, Matrix4x4 world, Matrix4x4 normalMatrix, bool flipTextureV = false)
     {
         var positions = primitive.GetVertexAccessor("POSITION")?.AsVector3Array()
             ?? throw new InvalidOperationException("glTF mesh primitive missing required POSITION accessor.");
@@ -213,11 +213,19 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             var nLocal = normals is null ? Vector3.UnitY : normals[v];
             var nWorld = Vector3.Normalize(GraphicsMatrices.TransformDirection(normalMatrix, nLocal));
             var uv = uvs is null ? Vector2.Zero : uvs[v];
+            // Optional V canonicalisation (V -> 1-V), opt-in per import via
+            // AssetImportContext.FlipTextureV. Bottom-up (OpenGL-authored)
+            // sources sample vertically inverted on a top-down (Vulkan / D3D)
+            // sampler; flipping here — the single chokepoint the runtime
+            // importer and CookToBlixMesh share — bakes the correction into the
+            // vertex data so no renderer needs a per-shader V-flip. Default off
+            // leaves spec-compliant glTF untouched.
+            var vCoord = flipTextureV ? 1.0f - uv.Y : uv.Y;
 
             vertices[v] = new VertexPosition3NormalTexture(
                 new GraphicsVector3(pWorld.X, pWorld.Y, pWorld.Z),
                 new GraphicsVector3(nWorld.X, nWorld.Y, nWorld.Z),
-                new GraphicsVector2(uv.X, uv.Y));
+                new GraphicsVector2(uv.X, vCoord));
 
             minB = Vector3.Min(minB, pWorld);
             maxB = Vector3.Max(maxB, pWorld);

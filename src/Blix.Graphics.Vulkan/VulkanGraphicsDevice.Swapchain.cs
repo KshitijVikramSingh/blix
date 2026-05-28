@@ -1179,6 +1179,37 @@ public sealed partial class VulkanGraphicsDevice
             case FloatUniform f:
                 fixed (byte* p = dst) *((float*)p) = f.Value;
                 break;
+            // Array variants (F-009). std140 array layout rules:
+            //   mat4[] — element stride 64 (already 16-aligned; no padding).
+            //   vec3[] — element stride 16 (the trailing 4 bytes are pad);
+            //            write only the 12 useful bytes per element.
+            //   float[]— element stride 16 (each scalar rounded up to a vec4
+            //            slot). The caller's UniformBlockMember.Size must
+            //            reflect these strides (count × stride).
+            case Matrix4x4ArrayUniform ma:
+                fixed (byte* p = dst)
+                {
+                    var arr = ma.Value;
+                    for (var i = 0; i < arr.Length; i++)
+                        *((System.Numerics.Matrix4x4*)(p + i * 64)) = arr[i];
+                }
+                break;
+            case Vector3ArrayUniform va3:
+                fixed (byte* p = dst)
+                {
+                    var arr = va3.Value;
+                    for (var i = 0; i < arr.Length; i++)
+                        *((System.Numerics.Vector3*)(p + i * 16)) = arr[i];
+                }
+                break;
+            case FloatArrayUniform fa:
+                fixed (byte* p = dst)
+                {
+                    var arr = fa.Value;
+                    for (var i = 0; i < arr.Length; i++)
+                        *((float*)(p + i * 16)) = arr[i];
+                }
+                break;
             default:
                 throw new NotImplementedException($"Vulkan UBO write for {value.GetType().Name} not implemented yet.");
         }

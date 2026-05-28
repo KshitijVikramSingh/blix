@@ -1,0 +1,76 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Step 7 of the Vulkan reshape (see docs/vulkan-reshape-shaderlab-target.md):
+       the Khronos Intel Sponza port to the new engine surface (Vector A
+       binding model + Vector B render graph). VulkanLit ships the shape
+       diversity story (many distinct shaders); VulkanSponza ships the
+       volume story (many materials, double-sided foliage, alpha-test
+       cutouts).
+
+       Scaffold scope: window + 2-pass graph (scene HDR -> present) +
+       glTF load. PBR/IBL/cascade-shadows/post-process land in follow-up
+       pushes; the existing OpenGL Blix.Demos.SponzaModern is the
+       reference for "what eventually goes here." -->
+
+  <ItemGroup>
+    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
+    <ProjectReference Include="..\Blix.Assets\Blix.Assets.csproj" />
+    <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
+    <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />
+    <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
+    <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
+    <ProjectReference Include="..\Blix.Runtime.Silk\Blix.Runtime.Silk.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Blix.Demos.VulkanSponza</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Reuse the existing SponzaModern asset tree (populated by
+       tools/setup-sponza-modern.sh). Linked in, not copied, so a single
+       checkout sources both the GL and Vulkan demos from one ~2GB pack
+       set. CopyToOutputDirectory="PreserveNewest" mirrors what the GL
+       demo does so the Vulkan bin/ ends up self-contained at runtime. -->
+  <ItemGroup>
+    <None Include="..\Blix.Demos.SponzaModern\Assets\**\*"
+          Exclude="..\Blix.Demos.SponzaModern\Assets\.gitignore;..\Blix.Demos.SponzaModern\Assets\.gitkeep"
+          Link="Assets\%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- glslc lookup mirrors VulkanLit's. The shader library #include path
+       isn't wired up in the scaffold — these shaders are intentionally
+       self-contained until the step-6 shader library settles. -->
+  <PropertyGroup>
+    <Glslc Condition="'$(Glslc)' == '' AND Exists('/opt/homebrew/bin/glslc')">/opt/homebrew/bin/glslc</Glslc>
+    <Glslc Condition="'$(Glslc)' == '' AND Exists('/usr/local/bin/glslc')">/usr/local/bin/glslc</Glslc>
+    <Glslc Condition="'$(Glslc)' == ''">glslc</Glslc>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <GlslShader Include="Shaders\lit.vert" />
+    <GlslShader Include="Shaders\lit.frag" />
+    <GlslShader Include="Shaders\shadow.vert" />
+    <GlslShader Include="Shaders\shadow.frag" />
+    <GlslShader Include="Shaders\skybox.vert" />
+    <GlslShader Include="Shaders\skybox.frag" />
+    <GlslShader Include="Shaders\present.vert" />
+    <GlslShader Include="Shaders\present.frag" />
+  </ItemGroup>
+
+  <Target Name="CompileSpirV"
+          AfterTargets="CopyFilesToOutputDirectory"
+          Inputs="@(GlslShader)"
+          Outputs="@(GlslShader -> '$(OutDir)Shaders\%(Filename)%(Extension).spv')">
+    <MakeDir Directories="$(OutDir)Shaders" />
+    <Message Text="Compiling SPIR-V: %(GlslShader.Identity)" Importance="high" />
+    <Exec Command="&quot;$(Glslc)&quot; -o &quot;$(OutDir)Shaders\%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; &quot;%(GlslShader.Identity)&quot;" />
+  </Target>
+
+</Project>
