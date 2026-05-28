@@ -34,6 +34,7 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  uCascadeSplits;          // .xyz = far view-depth bound of cascades 0,1,2
     vec4  uShadowParams;           // .x = visualizeCascades (0/1)
     vec4  uCascadeBias;            // .xyz = per-cascade base depth bias (NDC units)
+    vec4  uShaderParams;           // x=metallicThreshold, y=normalStrength, z=biasSlopeScale
 } frame;
 
 layout(set = 1, binding = 0) uniform samplerCube uIrradiance;
@@ -153,7 +154,7 @@ float sunShadowFactor(float NdotL, out int cascadeOut) {
     // shadow texel spans more depth across the surface → more self-shadow
     // acne). Capped so steep grazing surfaces don't peter-pan.
     float slope = clamp(1.0 - NdotL, 0.0, 1.0);
-    float bias = frame.uCascadeBias[idx] * (1.0 + slope * 3.0);
+    float bias = frame.uCascadeBias[idx] * (1.0 + slope * frame.uShaderParams.z);
     return samplePickedCascade(idx, uv, current, bias);
 }
 
@@ -201,7 +202,7 @@ void main() {
     float normalMix = smoothstep(0.005, 0.02, uvDensity);
     if (normalMix > 0.0) {
         vec3 tangentN = texture(uNormalMap, uv).xyz * 2.0 - 1.0;
-        float normalScale = mat.uMaterialParams.y;
+        float normalScale = mat.uMaterialParams.y * frame.uShaderParams.y;
         tangentN.xy *= normalScale;
         tangentN = normalize(tangentN);
         vec3 perturbed = perturbNormal(N, vWorldPos, uv, tangentN);
@@ -222,8 +223,9 @@ void main() {
     // partially and crushes diffuse — surfaces darken to grey/black. A
     // step at 0.5 keeps the one genuinely-metallic asset (the iron door)
     // metallic while zero-ing the stone baseline. NOT a generic fix; it's
-    // a scaffold-level patch over an asset quirk.
-    metallic = step(0.5, metallic);
+    // a scaffold-level patch over an asset quirk. Threshold is live-tunable
+    // from the overlay (Material → Metallic threshold); 1.0 = all dielectric.
+    metallic = step(frame.uShaderParams.x, metallic);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
     vec3 V = normalize(frame.uCameraPos - vWorldPos);

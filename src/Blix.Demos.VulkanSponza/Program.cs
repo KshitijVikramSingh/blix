@@ -81,10 +81,16 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private const int ShadowMapSize = 2048;
     // How far behind the scene slab the light "eye" sits, in world units.
     // Larger keeps the whole atrium height inside each cascade's near/far.
-    private const float ShadowSunDistance = 40f;
+    // Live-tunable from the overlay (Shadows scope).
+    private float shadowSunDistance = 40f;
     // View-space depth boundaries: cascade i covers (Splits[i], Splits[i+1]).
-    // Tuned for Sponza's ~30m atrium; live-tunable later from a debug panel.
+    // [1..3] (the cascade far distances) are live-tunable from the overlay.
     private readonly float[] cascadeSplits = { 0.1f, 6f, 22f, 60f };
+    // Per-cascade frustum culling of shadow casters (overlay toggle + margin).
+    private bool cullEnabled = true;
+    private float cullMargin = 0.5f;
+    // Shadow depth-bias slope term: bias *= (1 + (1-NdotL) * slopeScale).
+    private float slopeScale = 3f;
     private readonly GraphResourceHandle[] cascadeHandles = new GraphResourceHandle[CascadeCount];
     private readonly PassHandle[] cascadePassHandles = new PassHandle[CascadeCount];
     private readonly Matrix4x4[] cascadeViewProj = new Matrix4x4[CascadeCount];
@@ -199,11 +205,24 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // SunIntensity scales the Lambert N·L term; IblIntensity scales the
     // combined diffuse + specular IBL contribution. Tuned so the atrium
     // floor reads in mid-tone without crushing the sunlit areas.
-    private readonly Vector3 sunDirection = Vector3.Normalize(new Vector3(0.35f, -0.85f, 0.25f));
+    // Sun travel direction, recomputed from sunYaw/sunPitch (overlay Sun
+    // scope). Initialised in OnLoad from the default direction below. Note the
+    // IBL cubes are baked once with SkyBakeSunDirection, so live sun changes
+    // relight the direct sun + shadows but not the indirect IBL.
+    private Vector3 sunDirection = Vector3.Normalize(new Vector3(0.35f, -0.85f, 0.25f));
+    private float sunYaw;
+    private float sunPitch;
     // Sun + IBL strength (live-tunable from the diagnostics overlay).
     private float sunIntensity = 3.0f;
     private readonly Vector3 ambientColor = new(0.42f, 0.50f, 0.62f);  // unused; kept for layout compat
     private float ambientIntensity = 1.6f;
+
+    // Shader-debug knobs surfaced as uShaderParams (overlay Material scope):
+    //   metallicThreshold — step() cutoff folding Sponza's ~0.35 "metalness"
+    //                       to 0/1 (the "metallic floor" hack); 1 = all dielectric.
+    //   normalStrength    — global multiplier on tangent-space normal x/y.
+    private float metallicThreshold = 0.5f;
+    private float normalStrength = 1.0f;
 
     private float exposure = 0.5f;
 
@@ -212,6 +231,11 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         this.host = host;
         vk = (VulkanGraphicsDevice)graphicsDevice;
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
+
+        // Seed sun yaw/pitch from the default direction so the Sun controls
+        // start matching the baked look.
+        sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1f, 1f));
+        sunYaw = MathF.Atan2(sunDirection.X, -sunDirection.Z);
 
         // Diagnostics overlay: GPU info + this loop's shadow/camera controls,
         // live values, and cascade gizmos (see Debug()). Replaces the old
@@ -313,8 +337,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         //   [320..335] vec4 cascadeSplits        (.xyz = far depth of cascade 0/1/2)
         //   [336..351] vec4 shadowParams         (.x = visualizeCascades)
         //   [352..367] vec4 cascadeBias          (.xyz = per-cascade base depth bias)
+        //   [368..383] vec4 shaderParams         (x=metallicThreshold, y=normalStrength, z=slopeScale)
         var frameUbo = new UniformBlockLayout(
-            TotalSize: 368,
+            TotalSize: 384,
             Members: new[]
             {
                 new UniformBlockMember("uViewProjection",   0,   64),
@@ -330,6 +355,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 new UniformBlockMember("uCascadeSplits",    320, 16),
                 new UniformBlockMember("uShadowParams",     336, 16),
                 new UniformBlockMember("uCascadeBias",      352, 16),
+                new UniformBlockMember("uShaderParams",     368, 16),
             });
 
         // Per-material UBO: BaseColorFactor (rgba), EmissiveFactor (rgb +
@@ -787,23 +813,35 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     public void OnUpdate(Time time)
     {
         var dt = (float)time.Delta;
+
+        // Translation: WASD + Space/Ctrl. Sprint via Cmd/Super (engine's Key
+        // enum has no Shift).
         var move = Vector3.Zero;
-        // WASD + arrow keys: forward/back on W/S/Up/Down, strafe on A/D/Left/Right.
-        if (heldKeys.Contains(Key.W) || heldKeys.Contains(Key.Up))   move += cameraForward;
-        if (heldKeys.Contains(Key.S) || heldKeys.Contains(Key.Down)) move -= cameraForward;
+        if (heldKeys.Contains(Key.W)) move += cameraForward;
+        if (heldKeys.Contains(Key.S)) move -= cameraForward;
         var right = Vector3.Normalize(Vector3.Cross(cameraForward, Vector3.UnitY));
-        if (heldKeys.Contains(Key.D) || heldKeys.Contains(Key.Right)) move += right;
-        if (heldKeys.Contains(Key.A) || heldKeys.Contains(Key.Left))  move -= right;
+        if (heldKeys.Contains(Key.D)) move += right;
+        if (heldKeys.Contains(Key.A)) move -= right;
         if (heldKeys.Contains(Key.Space)) move += Vector3.UnitY;
         if (heldKeys.Contains(Key.LeftControl)) move -= Vector3.UnitY;
-        // Sprint via Cmd / Super (matches VulkanLit; engine's Key enum
-        // doesn't define Shift).
         var sprint = heldKeys.Contains(Key.LeftSuper) || heldKeys.Contains(Key.RightSuper);
         var speed = sprint ? moveSpeed * 3f : moveSpeed;
         if (move != Vector3.Zero)
         {
             cameraPosition += Vector3.Normalize(move) * speed * dt;
         }
+
+        // Rotation: arrow keys (keyboard look — WASD already handles movement).
+        // Left/Right yaw, Up/Down pitch; matches the mouse-look sign convention.
+        const float lookSpeed = 1.8f; // rad/s
+        var look = lookSpeed * dt;
+        if (heldKeys.Contains(Key.Left))  camYaw -= look;
+        if (heldKeys.Contains(Key.Right)) camYaw += look;
+        if (heldKeys.Contains(Key.Up))    camPitch += look;
+        if (heldKeys.Contains(Key.Down))  camPitch -= look;
+        var pitchLimit = MathF.PI / 2f - 0.01f;
+        camPitch = Math.Clamp(camPitch, -pitchLimit, pitchLimit);
+
         UpdateCamera();
     }
 
@@ -819,6 +857,16 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         var proj = GraphicsMatrices.CreatePerspectiveVulkan(fovYRadians, aspect, 0.1f, 200f);
         viewProj = view * proj;
         UpdateCascades();
+    }
+
+    // Recompute the sun travel direction from the overlay-driven yaw/pitch.
+    private void UpdateSunDirection()
+    {
+        var cp = MathF.Cos(sunPitch);
+        sunDirection = Vector3.Normalize(new Vector3(
+            cp * MathF.Sin(sunYaw),
+            MathF.Sin(sunPitch),
+            -cp * MathF.Cos(sunYaw)));
     }
 
     // Refit the cascade light view-projections to the current camera. Each
@@ -870,7 +918,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
             // Texel-snap the sphere centre in light space so the ortho footprint
             // lands on a stable grid (kills the shimmer under camera motion).
-            var eye = center - L * (ShadowSunDistance + radius);
+            var eye = center - L * (shadowSunDistance + radius);
             var lightView = Matrix4x4.CreateLookAt(eye, center, sunUp);
             var texelSize = (2f * radius) / ShadowMapSize;
             var centreLight = Vector3.Transform(center, lightView);
@@ -879,9 +927,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             Matrix4x4.Invert(lightView, out var invLightView);
             var snapped = Vector3.Transform(centreLight, invLightView);
 
-            var eye2 = snapped - L * (ShadowSunDistance + radius);
+            var eye2 = snapped - L * (shadowSunDistance + radius);
             var lightView2 = Matrix4x4.CreateLookAt(eye2, snapped, sunUp);
-            var farPlane = 2f * (ShadowSunDistance + radius);
+            var farPlane = 2f * (shadowSunDistance + radius);
             var ortho = CreateOrthoVulkan(2f * radius, 2f * radius, 0.1f, farPlane);
             cascadeViewProj[c] = lightView2 * ortho;
 
@@ -946,6 +994,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 new Vector4(visualizeCascades ? 1f : 0f, 0f, 0f, 0f))),
             new("uCascadeBias",      new Vector4Uniform(
                 new Vector4(cascadeDepthBias[0], cascadeDepthBias[1], cascadeDepthBias[2], 0f))),
+            new("uShaderParams",     new Vector4Uniform(
+                new Vector4(metallicThreshold, normalStrength, slopeScale, 0f))),
         };
 
         // Per-pass set-1 bindings (IBL + shadow cascades). Same handles for
@@ -976,7 +1026,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // surfaces shouldn't cast solid shadows. Casters route by alpha mode:
         // OPAQUE → push-only pipeline (no descriptor set); MASK → alpha-cutout
         // pipeline binding the albedo, so foliage casts leaf-shaped shadows.
-        const float shadowCullMargin = 0.5f;
+        var cull = cullEnabled;
+        var margin = cullMargin;
         for (var c = 0; c < CascadeCount; c++)
         {
             var ci = c;
@@ -991,7 +1042,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 var drawn = 0;
                 foreach (var d in opaqueDrawables)
                 {
-                    if (!cascadeFrustum.Intersects(d.Bounds, shadowCullMargin)) continue;
+                    if (cull && !cascadeFrustum.Intersects(d.Bounds, margin)) continue;
                     if (d.AlphaCutoff > 0f)
                     {
                         scope.DrawIndexed(
@@ -1076,16 +1127,45 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // Draw emissions too or the cascade/sun gizmos linger when hidden.
         if (!overlayEnabled) return;
 
-        // Live tuning — the returned value feeds this frame's render. These
-        // drive the visible lighting/shadow look, so the panel actually earns
-        // its place (vs. the old trivial toggles).
-        shadowsEnabled    = debug.Controls.Toggle("Sun shadows", shadowsEnabled);
-        visualizeCascades = debug.Controls.Toggle("Visualize cascades", visualizeCascades);
-        sunIntensity      = debug.Controls.Float("Sun intensity", sunIntensity, 0f, 8f);
-        ambientIntensity  = debug.Controls.Float("Ambient (IBL)", ambientIntensity, 0f, 4f);
-        exposure          = debug.Controls.Float("Exposure", exposure, 0.05f, 16f);
-        biasTexels        = debug.Controls.Float("Shadow bias (texels)", biasTexels, 0f, 6f);
-        moveSpeed         = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 60f);
+        // Live tuning, grouped by scope. Controls are read-back: the returned
+        // value feeds this frame's render (Debug() runs before OnRender).
+        using (debug.Scope("Sun"))
+        {
+            var deg = 180f / MathF.PI;
+            sunYaw   = debug.Controls.Float("Yaw (deg)", sunYaw * deg, -180f, 180f) / deg;
+            sunPitch = debug.Controls.Float("Pitch (deg)", sunPitch * deg, -89f, -1f) / deg;
+            UpdateSunDirection();
+            sunIntensity     = debug.Controls.Float("Sun intensity", sunIntensity, 0f, 8f);
+            ambientIntensity = debug.Controls.Float("Ambient (IBL)", ambientIntensity, 0f, 4f);
+        }
+        using (debug.Scope("Shadows"))
+        {
+            shadowsEnabled    = debug.Controls.Toggle("Sun shadows", shadowsEnabled);
+            visualizeCascades = debug.Controls.Toggle("Visualize cascades", visualizeCascades);
+            biasTexels        = debug.Controls.Float("Bias (texels)", biasTexels, 0f, 6f);
+            slopeScale        = debug.Controls.Float("Bias slope scale", slopeScale, 0f, 12f);
+            shadowSunDistance = debug.Controls.Float("Sun distance", shadowSunDistance, 10f, 120f);
+        }
+        using (debug.Scope("Cascades"))
+        {
+            cullEnabled   = debug.Controls.Toggle("Frustum cull", cullEnabled);
+            cullMargin    = debug.Controls.Float("Cull margin", cullMargin, 0f, 5f);
+            // Far distance of each cascade; clamped into ascending-ish bands so
+            // the splits stay ordered as you drag.
+            cascadeSplits[1] = debug.Controls.Float("Far: cascade 0", cascadeSplits[1], 1f, 20f);
+            cascadeSplits[2] = debug.Controls.Float("Far: cascade 1", cascadeSplits[2], cascadeSplits[1], 50f);
+            cascadeSplits[3] = debug.Controls.Float("Far: cascade 2", cascadeSplits[3], cascadeSplits[2], 150f);
+        }
+        using (debug.Scope("Material"))
+        {
+            metallicThreshold = debug.Controls.Float("Metallic threshold", metallicThreshold, 0f, 1f);
+            normalStrength    = debug.Controls.Float("Normal-map strength", normalStrength, 0f, 2f);
+        }
+        using (debug.Scope("Render"))
+        {
+            exposure  = debug.Controls.Float("Exposure", exposure, 0.05f, 16f);
+            moveSpeed = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 60f);
+        }
 
         debug.Values.Value("shadow-map", $"{ShadowMapSize}²×{CascadeCount}");
         debug.Values.Value("splits-m", $"{cascadeSplits[1]:0}/{cascadeSplits[2]:0}/{cascadeSplits[3]:0}");
