@@ -242,8 +242,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // Console-log + hardcoded-key debugging.
         if (host is IDebugHost debugHost && debugHost.System is { } debugSystem)
         {
+            // Only register the GPU contributor. The runtime already runs this
+            // loop's Debug() via Run(debuggable) since it implements IDebuggable
+            // — also registering it would run (and render its controls) twice.
             graphicsDevice.RegisterDebug(debugSystem);
-            debugSystem.Register(this);
         }
 
         // --- Locate Sponza glTF -----------------------------------------
