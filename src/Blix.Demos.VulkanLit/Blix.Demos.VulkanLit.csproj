@@ -41,13 +41,27 @@
     <GlslShader Include="Shaders\bloom_blur.frag" />
   </ItemGroup>
 
+  <!-- Shader library files. NOT entry points (no main()); only included
+       via #include "foo.glsl" from the GlslShader entry shaders. Listed
+       here so CompileSpirV's Inputs picks up edits and rebuilds the
+       dependent .spv. glslc resolves the includes relative to the
+       including file's directory by default. -->
+  <ItemGroup>
+    <GlslInclude Include="Shaders\brdf.glsl" />
+    <GlslInclude Include="Shaders\shadows.glsl" />
+    <GlslInclude Include="Shaders\normal_mapping.glsl" />
+    <GlslInclude Include="Shaders\ibl.glsl" />
+    <GlslInclude Include="Shaders\debug_channels.glsl" />
+    <GlslInclude Include="Shaders\tonemap.glsl" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <Target Name="CompileSpirV"
           AfterTargets="CopyFilesToOutputDirectory"
-          Inputs="@(GlslShader)"
+          Inputs="@(GlslShader);@(GlslInclude)"
           Outputs="@(GlslShader -> '$(OutDir)Shaders\%(Filename)%(Extension).spv')">
     <MakeDir Directories="$(OutDir)Shaders" />
     <Message Text="Compiling SPIR-V: %(GlslShader.Identity)" Importance="high" />

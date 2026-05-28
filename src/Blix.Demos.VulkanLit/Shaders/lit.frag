@@ -1,5 +1,14 @@
 #version 450
 
+// Lit fragment shader. Composes direct lighting (sun + 2 spots + point)
+// with image-based ambient, optional per-pixel debug-channel override.
+// Helpers split into the .glsl library under this directory:
+//   shadows.glsl          — 2D PCF + omnidirectional cube PCF
+//   brdf.glsl             — Cook-Torrance terms + per-light helpers
+//   normal_mapping.glsl   — cotangent-frame TBN reconstruction
+//   ibl.glsl              — roughness-aware Fresnel + prefilter LOD ceiling
+//   debug_channels.glsl   — per-pixel "Shader channel" selector
+
 layout(set = 0, binding = 0) uniform Frame {
     mat4 uViewProjection;
     vec3 uSunDirection;
@@ -51,147 +60,13 @@ layout(location = 3) in vec3 vWorldPos;
 
 layout(location = 0) out vec4 outColor;
 
-const float PI = 3.14159265359;
-
-// 3×3 PCF: average 9 depth comparisons one texel apart for a soft edge
-// (and to kill the single-tap shimmer under camera motion).
-float sampleShadow(sampler2D map, vec4 coord, float NdotL) {
-    vec3 ndc = coord.xyz / coord.w;
-    vec2 uv = ndc.xy * 0.5 + 0.5;
-    float current = ndc.z;
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 ||
-        current < 0.0 || current > 1.0) {
-        return 1.0;
-    }
-    float bias = mix(0.005, 0.0005, NdotL);
-    vec2 texel = 1.0 / vec2(textureSize(map, 0));
-    float sum = 0.0;
-    for (int x = -1; x <= 1; x++)
-    for (int y = -1; y <= 1; y++) {
-        float s = texture(map, uv + vec2(x, y) * texel).r;
-        sum += (current - bias > s) ? 0.0 : 1.0;
-    }
-    return sum / 9.0;
-}
-
-// Disk PCF for the omnidirectional cube shadow: 20 fixed offset directions
-// scaled by a distance-growing radius. currentNorm = dist/far.
-const vec3 kCubeOffsets[20] = vec3[](
-    vec3( 1, 1, 1), vec3( 1,-1, 1), vec3(-1,-1, 1), vec3(-1, 1, 1),
-    vec3( 1, 1,-1), vec3( 1,-1,-1), vec3(-1,-1,-1), vec3(-1, 1,-1),
-    vec3( 1, 1, 0), vec3( 1,-1, 0), vec3(-1,-1, 0), vec3(-1, 1, 0),
-    vec3( 1, 0, 1), vec3(-1, 0, 1), vec3( 1, 0,-1), vec3(-1, 0,-1),
-    vec3( 0, 1, 1), vec3( 0,-1, 1), vec3( 0,-1,-1), vec3( 0, 1,-1));
-
-float samplePointShadow(samplerCube cube, vec3 fromLight, float currentNorm, float dist) {
-    float bias = 0.02;
-    float radius = (1.0 + dist * 0.1) * 0.01;
-    float sum = 0.0;
-    for (int i = 0; i < 20; i++) {
-        float s = texture(cube, fromLight + kCubeOffsets[i] * radius).r;
-        sum += (currentNorm - bias > s) ? 0.0 : 1.0;
-    }
-    return sum / 20.0;
-}
-
-// --- Cook-Torrance BRDF terms (metallic-roughness workflow) -------------
-float distributionGGX(vec3 N, vec3 H, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float NdotH = max(dot(N, H), 0.0);
-    float d = (NdotH * NdotH) * (a2 - 1.0) + 1.0;
-    return a2 / max(PI * d * d, 1e-7);
-}
-
-float geometrySchlickGGX(float NdotV, float roughness) {
-    float r = roughness + 1.0;
-    float k = (r * r) / 8.0;
-    return NdotV / (NdotV * (1.0 - k) + k);
-}
-
-float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
-    return geometrySchlickGGX(max(dot(N, V), 0.0), roughness)
-         * geometrySchlickGGX(max(dot(N, L), 0.0), roughness);
-}
-
-vec3 fresnelSchlick(float cosTheta, vec3 F0) {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
-
-// Roughness-aware Fresnel for the IBL ambient term (Sébastien Lagarde).
-vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
-    vec3 r = max(vec3(1.0 - roughness), F0);
-    return F0 + (r - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
-
-const float MAX_REFLECTION_LOD = 6.0;  // EnvMips - 1
-
-// Cotangent-frame normal mapping (Schüler). Builds a TBN from screen-space
-// derivatives of world position + UV — no per-vertex tangent needed, so it
-// works uniformly on the cube, ground, spheres, and skinned mesh. A flat
-// normal map (0,0,1) leaves N unchanged.
-vec3 perturbNormal(vec3 N, vec3 worldPos, vec2 uv, vec3 tangentNormal) {
-    vec3 dp1 = dFdx(worldPos);
-    vec3 dp2 = dFdy(worldPos);
-    vec2 duv1 = dFdx(uv);
-    vec2 duv2 = dFdy(uv);
-    vec3 dp2perp = cross(dp2, N);
-    vec3 dp1perp = cross(N, dp1);
-    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
-    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
-    // Degenerate frame (flat UVs / zero position derivatives at edges) makes
-    // dot(T,T)=dot(B,B)=0 → inversesqrt(0)=Inf → T*Inf=NaN. Fall back to the
-    // geometric normal so hdr never carries NaN (which the bloom chain would
-    // otherwise spread into a screen-wide green wash).
-    float m = max(dot(T, T), dot(B, B));
-    if (m < 1e-12) return N;
-    float invmax = inversesqrt(m);
-    mat3 TBN = mat3(T * invmax, B * invmax, N);
-    return normalize(TBN * tangentNormal);
-}
-
-// One light's outgoing radiance via Cook-Torrance.
-vec3 brdf(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo,
-          float metallic, float roughness, vec3 F0) {
-    float NdotL = max(dot(N, L), 0.0);
-    if (NdotL <= 0.0) return vec3(0.0);
-    // Zero-safe half-vector: V+L == 0 (back-facing surface lit opposite the
-    // view) makes normalize(0) = NaN, which the bloom chain then spreads into
-    // a screen-wide green wash. Metal's fast-math defeats any isnan() guard,
-    // so we must avoid producing the NaN rather than detect it.
-    vec3 vl = V + L;
-    float vl2 = dot(vl, vl);
-    vec3 H = vl2 > 1e-12 ? vl * inversesqrt(vl2) : N;
-
-    float D = distributionGGX(N, H, roughness);
-    float G = geometrySmith(N, V, L, roughness);
-    vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-
-    vec3 numerator = D * G * F;
-    float denom = 4.0 * max(dot(N, V), 0.0) * NdotL + 1e-4;
-    vec3 specular = numerator / denom;
-
-    vec3 kd = (vec3(1.0) - F) * (1.0 - metallic);
-    return (kd * albedo / PI + specular) * radiance * NdotL;
-}
-
-// One spot light through the BRDF: cone falloff + range atten + shadow,
-// folded into the light radiance, then Cook-Torrance.
-vec3 evalSpotBrdf(vec3 N, vec3 V, vec3 worldPos, mat4 vp,
-                  vec4 posRange, vec4 dirCosInner, vec4 colorCosOuter,
-                  sampler2D shadowMap, vec3 albedo, float metallic,
-                  float roughness, vec3 F0) {
-    vec3 toSpot = posRange.xyz - worldPos;
-    float dist = length(toSpot);
-    vec3 L = toSpot / max(dist, 1e-4);
-    float spotCos = dot(-L, normalize(dirCosInner.xyz));
-    float cone = smoothstep(colorCosOuter.w, dirCosInner.w, spotCos);
-    float range = posRange.w;
-    float atten = clamp(1.0 - (dist * dist) / (range * range), 0.0, 1.0);
-    float shadow = sampleShadow(shadowMap, vp * vec4(worldPos, 1.0), max(dot(N, L), 0.0));
-    vec3 radiance = colorCosOuter.xyz * (cone * atten * shadow);
-    return brdf(N, V, L, radiance, albedo, metallic, roughness, F0);
-}
+// Order matters: brdf's evalSpotBrdf calls sampleShadow from shadows.glsl,
+// and the IBL ambient block below uses fresnelSchlickRoughness from ibl.glsl.
+#include "shadows.glsl"
+#include "brdf.glsl"
+#include "normal_mapping.glsl"
+#include "ibl.glsl"
+#include "debug_channels.glsl"
 
 void main() {
     vec3 Ngeom = normalize(vNormal);
@@ -210,12 +85,13 @@ void main() {
 
     vec3 Lo = vec3(0.0);
 
-    // Sun (directional).
+    // Sun (directional). sunShadow hoisted out of a block scope so the
+    // debug-channel selector can reuse it without a second PCF sample.
+    vec3 sunL = -normalize(frame.uSunDirection);
+    float sunShadow = sampleShadow(uSunShadowMap, vSunShadowCoord, max(dot(N, sunL), 0.0));
     {
-        vec3 L = -normalize(frame.uSunDirection);
-        float shadow = sampleShadow(uSunShadowMap, vSunShadowCoord, max(dot(N, L), 0.0));
-        vec3 radiance = vec3(frame.uSunIntensity) * shadow * frame.uLightEnable.x;
-        Lo += brdf(N, V, L, radiance, albedo, metallic, roughness, F0);
+        vec3 radiance = vec3(frame.uSunIntensity) * sunShadow * frame.uLightEnable.x;
+        Lo += brdf(N, V, sunL, radiance, albedo, metallic, roughness, F0);
     }
 
     // Spot lights (array of 2).
@@ -246,33 +122,24 @@ void main() {
     vec3 kd = (vec3(1.0) - F) * (1.0 - metallic);
     vec3 diffuseIBL = texture(uIrradiance, N).rgb * albedo;
     vec3 prefiltered = textureLod(uPrefilteredEnv, R, roughness * MAX_REFLECTION_LOD).rgb;
-    vec2 brdf = texture(uBrdfLut, vec2(NdotV, roughness)).rg;
-    vec3 specularIBL = prefiltered * (F0 * brdf.x + brdf.y);
+    vec2 brdfLutSample = texture(uBrdfLut, vec2(NdotV, roughness)).rg;
+    vec3 specularIBL = prefiltered * (F0 * brdfLutSample.x + brdfLutSample.y);
     vec3 ambient = (kd * diffuseIBL + specularIBL) * frame.uAmbientIntensity;
 
     outColor = vec4(ambient + Lo, mat.uTint.a);
 
-    // Per-pixel debug channels (overlay "Shader channel"). Isolates one term
-    // so the shading math is visible. Note: these still pass through present's
-    // exposure + ACES tonemap, so 0..1 channels read close-to-true but not raw.
-    // Index matches ShaderChannelLabels in Program.cs.
+    // Per-pixel debug channels (overlay "Shader channel"). Isolates one
+    // term so the shading math is visible.
     int dbgMode = int(frame.uDebug.x + 0.5);
     if (dbgMode > 0) {
-        vec3 dbg = vec3(0.0);
-        if (dbgMode == 1)       dbg = albedo;
-        else if (dbgMode == 2)  dbg = N * 0.5 + 0.5;
-        else if (dbgMode == 3)  dbg = Ngeom * 0.5 + 0.5;
-        else if (dbgMode == 4)  dbg = vec3(roughness);
-        else if (dbgMode == 5)  dbg = vec3(metallic);
-        else if (dbgMode == 6)  dbg = vec3(NdotV);
-        else if (dbgMode == 7)  dbg = ambient;
-        else if (dbgMode == 8)  dbg = specularIBL * frame.uAmbientIntensity;
-        else if (dbgMode == 9)  dbg = kd * diffuseIBL * frame.uAmbientIntensity;
-        else if (dbgMode == 10) {
-            vec3 Ls = -normalize(frame.uSunDirection);
-            dbg = vec3(sampleShadow(uSunShadowMap, vSunShadowCoord, max(dot(N, Ls), 0.0)));
-        }
-        else if (dbgMode == 11) dbg = vec3(vUv, 0.0);
+        vec3 dbg = selectDebugChannel(
+            dbgMode,
+            albedo, N, Ngeom,
+            roughness, metallic, NdotV,
+            ambient,
+            specularIBL * frame.uAmbientIntensity,
+            kd * diffuseIBL * frame.uAmbientIntensity,
+            sunShadow, vUv);
         outColor = vec4(dbg, 1.0);
     }
 }
