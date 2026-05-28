@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Blix;
 using Blix.Assets;
 using Blix.Core;
+using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
@@ -34,8 +35,10 @@ public static class Program
     }
 }
 
-internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
+internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDisposable
 {
+    public string DebugName => "vulkan-sponza";
+
     private IRenderHost host = null!;
     private VulkanGraphicsDevice vk = null!;
     private RenderGraph graph = null!;
@@ -90,16 +93,23 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
     // shadow texels of slope-independent offset). The fragment shader adds a
     // grazing-angle slope term on top.
     private readonly float[] cascadeDepthBias = new float[CascadeCount];
-    private const float BiasTexels = 1.5f;
-    // Per-cascade shadow-caster survivor counts after frustum culling, logged
-    // once on the first frame to sanity-check the cull (expect roughly
-    // increasing near→far, none zero unless the view is empty).
+    // Shadow depth bias in shadow-texels (live-tunable from the overlay).
+    private float biasTexels = 1.5f;
+    // Per-cascade shadow-caster survivor counts after frustum culling,
+    // surfaced live in the diagnostics overlay (see Debug()).
     private readonly int[] cascadeDrawCounts = new int[CascadeCount];
-    private bool loggedCascadeCull;
-    private ShaderProgramHandle shadowProgram;
-    private PipelineHandle shadowPipeline;
+    // Two shadow caster pipelines: opaque casters use a push-only program (no
+    // descriptor sets → zero per-draw transient allocations), mask foliage uses
+    // the alpha-cutout program (binds albedo). Routed per drawable by cutoff.
+    private ShaderProgramHandle shadowOpaqueProgram;
+    private PipelineHandle shadowOpaquePipeline;
+    private ShaderProgramHandle shadowMaskProgram;
+    private PipelineHandle shadowMaskPipeline;
     private bool shadowsEnabled = true;
     private bool visualizeCascades;
+    // Diagnostics overlay visibility, toggled with Cmd+C. Applied to
+    // DebugState.Enabled each frame in Debug() (which runs unconditionally).
+    private bool overlayEnabled = true;
 
     // Default per-material textures used when a glTF material doesn't
     // supply the corresponding channel:
@@ -190,9 +200,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
     // combined diffuse + specular IBL contribution. Tuned so the atrium
     // floor reads in mid-tone without crushing the sunlit areas.
     private readonly Vector3 sunDirection = Vector3.Normalize(new Vector3(0.35f, -0.85f, 0.25f));
-    private const float SunIntensity = 3.0f;
+    // Sun + IBL strength (live-tunable from the diagnostics overlay).
+    private float sunIntensity = 3.0f;
     private readonly Vector3 ambientColor = new(0.42f, 0.50f, 0.62f);  // unused; kept for layout compat
-    private const float AmbientIntensity = 1.6f;
+    private float ambientIntensity = 1.6f;
 
     private float exposure = 0.5f;
 
@@ -201,6 +212,15 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
         this.host = host;
         vk = (VulkanGraphicsDevice)graphicsDevice;
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
+
+        // Diagnostics overlay: GPU info + this loop's shadow/camera controls,
+        // live values, and cascade gizmos (see Debug()). Replaces the old
+        // Console-log + hardcoded-key debugging.
+        if (host is IDebugHost debugHost && debugHost.System is { } debugSystem)
+        {
+            graphicsDevice.RegisterDebug(debugSystem);
+            debugSystem.Register(this);
+        }
 
         // --- Locate Sponza glTF -----------------------------------------
         // The setup-sponza-modern.sh script populates this path; when it
@@ -372,12 +392,16 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
             },
             PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 4) });
 
-        // Shadow interface: one albedo sampler (set 0 binding 0) for MASK-
-        // foliage alpha cutout, and a 144-byte push spanning both stages —
-        // [model | cascadeViewProj] for the vertex stage, [alphaParams] for
-        // the fragment cutout. A single range across Vertex|Fragment is the
-        // proven pattern (VulkanLit point shadows).
-        var shadowInterface = new ShaderInterface(
+        // Opaque shadow interface: push-only (model + cascadeViewProj = 128B),
+        // no descriptor sets — opaque casters allocate zero transient sets.
+        var shadowOpaqueInterface = new ShaderInterface(
+            Slots: Array.Empty<DescriptorSetSlot>(),
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 128) });
+
+        // Mask shadow interface: albedo sampler (set 0) for alpha cutout + a
+        // 144-byte push spanning both stages ([model | cascadeViewProj] vertex,
+        // [alphaParams] fragment). Only MASK foliage draws use this.
+        var shadowMaskInterface = new ShaderInterface(
             Slots: new[]
             {
                 new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
@@ -385,11 +409,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
             PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 144) });
 
         // One graphics pass per cascade, each writing its own depth target.
+        // Both shadow programs are render-pass-compatible with these passes.
         for (var c = 0; c < CascadeCount; c++)
         {
             cascadePassHandles[c] = graph.GraphicsPass($"sun-cascade{c}")
                 .Depth(cascadeHandles[c], LoadOp.Clear, StoreOp.Store)
-                .Shader(shadowInterface)
+                .Shader(shadowOpaqueInterface, shadowMaskInterface)
                 .Handle;
         }
 
@@ -470,22 +495,34 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
             new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(litPassHandle)), "skybox");
 
-        // Shadow caster pipeline. NoCulling so Sponza's double-sided foliage
+        // Shadow caster pipelines. NoCulling so Sponza's double-sided foliage
         // and thin geometry still write depth from both faces; depth-write
-        // LessEqual into the cascade target. One pipeline for all cascades —
-        // it's render-pass-compatible with each cascade pass (all depth-only,
-        // same format), so we build it against cascade 0's surface.
+        // LessEqual into the cascade target. Both are render-pass-compatible
+        // with every cascade pass (all depth-only, same format), so we build
+        // them against cascade 0's surface and reuse across cascades.
         var shadowVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow.vert.spv"));
         var shadowFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow.frag.spv"));
-        shadowProgram = vk.CreateShaderProgramFromSpv(shadowVertSpv, shadowFragSpv, shadowInterface, "shadow");
-        shadowPipeline = vk.CreatePipeline(new PipelineDescription(
-            shadowProgram,
+        shadowOpaqueProgram = vk.CreateShaderProgramFromSpv(shadowVertSpv, shadowFragSpv, shadowOpaqueInterface, "shadow.opaque");
+        shadowOpaquePipeline = vk.CreatePipeline(new PipelineDescription(
+            shadowOpaqueProgram,
             VertexPosition3NormalTexture.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
             Array.Empty<BlendState>(),
-            RenderTarget: graph.GetPassSurface(cascadePassHandles[0])), "shadow");
+            RenderTarget: graph.GetPassSurface(cascadePassHandles[0])), "shadow.opaque");
+
+        var shadowMaskVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow_mask.vert.spv"));
+        var shadowMaskFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow_mask.frag.spv"));
+        shadowMaskProgram = vk.CreateShaderProgramFromSpv(shadowMaskVertSpv, shadowMaskFragSpv, shadowMaskInterface, "shadow.mask");
+        shadowMaskPipeline = vk.CreatePipeline(new PipelineDescription(
+            shadowMaskProgram,
+            VertexPosition3NormalTexture.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite,
+            RasterizerState.NoCulling,
+            Array.Empty<BlendState>(),
+            RenderTarget: graph.GetPassSurface(cascadePassHandles[0])), "shadow.mask");
 
         var presentVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv"));
         var presentFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv"));
@@ -751,11 +788,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
     {
         var dt = (float)time.Delta;
         var move = Vector3.Zero;
-        if (heldKeys.Contains(Key.W)) move += cameraForward;
-        if (heldKeys.Contains(Key.S)) move -= cameraForward;
+        // WASD + arrow keys: forward/back on W/S/Up/Down, strafe on A/D/Left/Right.
+        if (heldKeys.Contains(Key.W) || heldKeys.Contains(Key.Up))   move += cameraForward;
+        if (heldKeys.Contains(Key.S) || heldKeys.Contains(Key.Down)) move -= cameraForward;
         var right = Vector3.Normalize(Vector3.Cross(cameraForward, Vector3.UnitY));
-        if (heldKeys.Contains(Key.D)) move += right;
-        if (heldKeys.Contains(Key.A)) move -= right;
+        if (heldKeys.Contains(Key.D) || heldKeys.Contains(Key.Right)) move += right;
+        if (heldKeys.Contains(Key.A) || heldKeys.Contains(Key.Left))  move -= right;
         if (heldKeys.Contains(Key.Space)) move += Vector3.UnitY;
         if (heldKeys.Contains(Key.LeftControl)) move -= Vector3.UnitY;
         // Sprint via Cmd / Super (matches VulkanLit; engine's Key enum
@@ -851,7 +889,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
             // converted to this cascade's NDC depth units (ortho z is linear,
             // so world→NDC depth scale is 1/farPlane). Keeps the bias visually
             // constant across cascades despite their very different extents.
-            cascadeDepthBias[c] = (BiasTexels * texelSize) / farPlane;
+            cascadeDepthBias[c] = (biasTexels * texelSize) / farPlane;
         }
     }
 
@@ -893,9 +931,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
         {
             new("uViewProjection",   new Matrix4x4Uniform(viewProj)),
             new("uSunDirection",     new Vector3Uniform(sunDirection)),
-            new("uSunIntensity",     new FloatUniform(SunIntensity)),
+            new("uSunIntensity",     new FloatUniform(sunIntensity)),
             new("uAmbientColor",     new Vector3Uniform(ambientColor)),
-            new("uIblIntensity",     new FloatUniform(AmbientIntensity)),
+            new("uIblIntensity",     new FloatUniform(ambientIntensity)),
             new("uCameraPos",        new Vector3Uniform(cameraPosition)),
             new("uEnvMipCount",      new FloatUniform(EnvMips)),
             new("uCameraForward",    new Vector3Uniform(cameraForward)),
@@ -935,8 +973,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
         // Each cascade frustum-culls the opaque set against its ortho box, so
         // the near cascade only redraws nearby geometry instead of the whole
         // scene ×3. Blend drawables (windows) are skipped — translucent
-        // surfaces shouldn't cast solid shadows. MASK foliage casts alpha-
-        // cutout shadows via shadow.frag's albedo discard.
+        // surfaces shouldn't cast solid shadows. Casters route by alpha mode:
+        // OPAQUE → push-only pipeline (no descriptor set); MASK → alpha-cutout
+        // pipeline binding the albedo, so foliage casts leaf-shaped shadows.
         const float shadowCullMargin = 0.5f;
         for (var c = 0; c < CascadeCount; c++)
         {
@@ -953,14 +992,28 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
                 foreach (var d in opaqueDrawables)
                 {
                     if (!cascadeFrustum.Intersects(d.Bounds, shadowCullMargin)) continue;
-                    scope.DrawIndexed(
-                        vertexBuffer: d.Vb,
-                        indexBuffer: d.Ib,
-                        pipeline: shadowPipeline,
-                        indexCount: d.IndexCount,
-                        uniforms: Array.Empty<ShaderUniform>(),
-                        textures: new[] { new ShaderTextureBinding("uAlbedo", d.Albedo, Slot: 0) },
-                        pushConstants: ShadowPushBytes(Matrix4x4.Identity, vp, d.AlphaCutoff, d.BaseColorAlpha));
+                    if (d.AlphaCutoff > 0f)
+                    {
+                        scope.DrawIndexed(
+                            vertexBuffer: d.Vb,
+                            indexBuffer: d.Ib,
+                            pipeline: shadowMaskPipeline,
+                            indexCount: d.IndexCount,
+                            uniforms: Array.Empty<ShaderUniform>(),
+                            textures: new[] { new ShaderTextureBinding("uAlbedo", d.Albedo, Slot: 0) },
+                            pushConstants: ShadowMaskPushBytes(Matrix4x4.Identity, vp, d.AlphaCutoff, d.BaseColorAlpha));
+                    }
+                    else
+                    {
+                        scope.DrawIndexed(
+                            vertexBuffer: d.Vb,
+                            indexBuffer: d.Ib,
+                            pipeline: shadowOpaquePipeline,
+                            indexCount: d.IndexCount,
+                            uniforms: Array.Empty<ShaderUniform>(),
+                            textures: Array.Empty<ShaderTextureBinding>(),
+                            pushConstants: ShadowOpaquePushBytes(Matrix4x4.Identity, vp));
+                    }
                     drawn++;
                 }
                 cascadeDrawCounts[ci] = drawn;
@@ -1009,14 +1062,52 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
 
         graph.Execute(commandList);
         RecordPresentPass(commandList);
+    }
 
-        if (!loggedCascadeCull)
+    // --- IDebuggable ------------------------------------------------------
+    // Replaces the old Console cull-count log + hardcoded C/L key toggles.
+    // Controls are read-back: the returned value feeds this frame's render.
+    public void Debug(DebugContext debug)
+    {
+        // Cmd+C toggles this; Debug() runs unconditionally so it re-applies.
+        debug.State.Enabled = overlayEnabled;
+        // Overlay off → emit nothing. The panels gate on State.Enabled, but the
+        // debug-line pass just renders whatever's queued, so we must skip the
+        // Draw emissions too or the cascade/sun gizmos linger when hidden.
+        if (!overlayEnabled) return;
+
+        // Live tuning — the returned value feeds this frame's render. These
+        // drive the visible lighting/shadow look, so the panel actually earns
+        // its place (vs. the old trivial toggles).
+        shadowsEnabled    = debug.Controls.Toggle("Sun shadows", shadowsEnabled);
+        visualizeCascades = debug.Controls.Toggle("Visualize cascades", visualizeCascades);
+        sunIntensity      = debug.Controls.Float("Sun intensity", sunIntensity, 0f, 8f);
+        ambientIntensity  = debug.Controls.Float("Ambient (IBL)", ambientIntensity, 0f, 4f);
+        exposure          = debug.Controls.Float("Exposure", exposure, 0.05f, 16f);
+        biasTexels        = debug.Controls.Float("Shadow bias (texels)", biasTexels, 0f, 6f);
+        moveSpeed         = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 60f);
+
+        debug.Values.Value("shadow-map", $"{ShadowMapSize}²×{CascadeCount}");
+        debug.Values.Value("splits-m", $"{cascadeSplits[1]:0}/{cascadeSplits[2]:0}/{cascadeSplits[3]:0}");
+        // Per-cascade caster counts after frustum cull (one frame stale — set
+        // during the previous OnRender's graph.Execute).
+        debug.Values.Value("cascade-casters", $"{cascadeDrawCounts[0]}/{cascadeDrawCounts[1]}/{cascadeDrawCounts[2]} of {opaqueDrawables.Count}");
+        debug.Values.Value("blend-draws", blendDrawables.Count);
+        debug.Values.Value("cam-pos", cameraPosition);
+
+        // Spatial gizmos: sun direction + the three cascade ortho boxes.
+        debug.Draw.ViewProjection = viewProj;
+        debug.Draw.Arrow("sun/dir", -sunDirection * 6f, Vector3.Zero,
+            new GraphicsColor(1f, 0.92f, 0.3f, 1f));
+        var cascadeTints = new[]
         {
-            loggedCascadeCull = true;
-            Console.WriteLine(
-                $"[VulkanSponza] cascade shadow cull (of {opaqueDrawables.Count} opaque casters): " +
-                $"c0={cascadeDrawCounts[0]}, c1={cascadeDrawCounts[1]}, c2={cascadeDrawCounts[2]}.");
-            Console.Out.Flush();
+            new GraphicsColor(1f, 0.35f, 0.35f, 0.8f),
+            new GraphicsColor(0.35f, 1f, 0.35f, 0.8f),
+            new GraphicsColor(0.4f, 0.5f, 1f, 0.8f),
+        };
+        for (var c = 0; c < CascadeCount; c++)
+        {
+            debug.Draw.Frustum($"cascade/{c}", cascadeViewProj[c], cascadeTints[c]);
         }
     }
 
@@ -1054,10 +1145,20 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
         return bytes;
     }
 
-    // Shadow caster push: [model | cascadeViewProj | alphaParams] = 144 bytes,
-    // matching the shadow shaders' PushConstants block. alphaParams.xy =
-    // (alphaCutoff, baseColorAlpha) for MASK-foliage cutout in shadow.frag.
-    private static byte[] ShadowPushBytes(
+    // Opaque shadow caster push: [model | cascadeViewProj] = 128 bytes,
+    // matching shadow.vert's PushConstants block.
+    private static byte[] ShadowOpaquePushBytes(Matrix4x4 model, Matrix4x4 cascadeViewProj)
+    {
+        var bytes = new byte[128];
+        MemoryMarshal.Write(bytes.AsSpan(0, 64), in model);
+        MemoryMarshal.Write(bytes.AsSpan(64, 64), in cascadeViewProj);
+        return bytes;
+    }
+
+    // Mask shadow caster push: [model | cascadeViewProj | alphaParams] = 144
+    // bytes, matching shadow_mask's PushConstants block. alphaParams.xy =
+    // (alphaCutoff, baseColorAlpha) for the foliage cutout discard.
+    private static byte[] ShadowMaskPushBytes(
         Matrix4x4 model, Matrix4x4 cascadeViewProj, float alphaCutoff, float baseColorAlpha)
     {
         var bytes = new byte[144];
@@ -1075,20 +1176,15 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDisposable
         heldKeys.Add(key);
         switch (key)
         {
-            case Key.Up:
-                exposure = Math.Clamp(exposure * 1.25f, 0.05f, 16f);
-                break;
-            case Key.Down:
-                exposure = Math.Clamp(exposure * 0.8f, 0.05f, 16f);
-                break;
+            // Cmd+C toggles the diagnostics overlay. Plain C does nothing.
             case Key.C:
-                visualizeCascades = !visualizeCascades;
-                Console.WriteLine($"[VulkanSponza] cascade visualization: {(visualizeCascades ? "on" : "off")}");
+                if (heldKeys.Contains(Key.LeftSuper) || heldKeys.Contains(Key.RightSuper))
+                {
+                    overlayEnabled = !overlayEnabled;
+                }
                 break;
-            case Key.L:
-                shadowsEnabled = !shadowsEnabled;
-                Console.WriteLine($"[VulkanSponza] sun shadows: {(shadowsEnabled ? "on" : "off")}");
-                break;
+            // Exposure / sun / shadow tuning live in the overlay Controls now;
+            // arrow keys drive the camera (see OnUpdate).
             case Key.Escape:
                 host.RequestClose();
                 break;
