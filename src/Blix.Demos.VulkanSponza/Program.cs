@@ -704,91 +704,195 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         }
     }
 
+    // Spatial sub-batch cap: primitives sharing a material merge into one draw,
+    // but in chunks of this many (sorted along their longest axis) so each
+    // merged drawable keeps a tight bounding box and per-cascade frustum
+    // culling stays effective. Mirrors the engine's GltfSceneInstance batcher.
+    private const int MaxPrimitivesPerBatch = 16;
+
     private void BuildDrawables(GltfModel model)
     {
-        int maskCount = 0, blendCount = 0;
-        for (var i = 0; i < model.Primitives.Length; i++)
+        // Opaque/mask primitives are batched by material (shared textures +
+        // factors + pipeline + cutout state → one Material, merged VB/IB; the
+        // importer bakes transforms into the verts so concatenation + index-
+        // rebasing is exact). Blend primitives stay per-primitive — back-to-
+        // front sorting (a deferred polish) needs per-prim granularity.
+        var opaqueByMaterial = new Dictionary<GltfMaterial, List<GltfPrimitive>>();
+        var opaqueOrder = new List<GltfMaterial>();
+        var noMaterialPrims = new List<GltfPrimitive>();  // untextured group (gm == null)
+        var blendPrims = new List<GltfPrimitive>();
+        foreach (var prim in model.Primitives)
         {
-            var prim = model.Primitives[i];
-            var mesh = prim.Mesh;
-
-            // Each primitive owns its VB. Vector C will collapse this into
-            // sub-range offsets on a shared VBO; for the scaffold one-per
-            // is simpler and the upload-once cost is paid at OnLoad anyway.
-            var vbData = new VertexBufferData(
-                new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static),
-                mesh.VertexBytes);
-            var vb = vk.CreateVertexBuffer(vbData, $"sponza.prim{i}.vb");
-
-            IndexBufferHandle ib;
-            int indexCount;
-            if (mesh.Indices32 is { } i32)
+            if (prim.Material?.AlphaMode == GltfAlphaMode.Blend)
             {
-                ib = vk.CreateIndexBuffer(i32, name: $"sponza.prim{i}.ib32");
-                indexCount = i32.Length;
+                blendPrims.Add(prim);
+            }
+            else if (prim.Material is { } gm)
+            {
+                if (!opaqueByMaterial.TryGetValue(gm, out var list))
+                {
+                    list = new List<GltfPrimitive>();
+                    opaqueByMaterial[gm] = list;
+                    opaqueOrder.Add(gm);
+                }
+                list.Add(prim);
             }
             else
             {
-                ib = vk.CreateIndexBuffer(mesh.Indices, name: $"sponza.prim{i}.ib16");
-                indexCount = mesh.Indices.Length;
-            }
-
-            var gm = prim.Material;
-            var albedo = GetOrUploadAlbedo(gm);
-            var normal = GetOrUploadNormal(gm);
-            var emissive = GetOrUploadEmissive(gm);
-            var mr = GetOrUploadMr(gm);
-            var ao = GetOrUploadAo(gm);
-
-            // Per-material UBO: BaseColorFactor (linear-space rgba),
-            // EmissiveFactor (rgb + strength multiplier in .a),
-            // MaterialParams (alphaCutoff, normalScale, reserved, reserved).
-            // Alpha-cutoff only fires for AlphaMode.Mask; opaque + blend
-            // leave it at 0 so the shader's `> 0` guard skips the discard.
-            var baseColorFactor = gm?.BaseColorFactor ?? Vector4.One;
-            var emissiveFactor = gm is null ? Vector3.Zero : gm.EmissiveFactor;
-            var emissiveStrength = gm?.EmissiveStrength ?? 1.0f;
-            var alphaCutoff = gm?.AlphaMode == GltfAlphaMode.Mask ? (gm?.AlphaCutoff ?? 0.5f) : 0.0f;
-            var normalScale = 1.0f; // glTF normalScale isn't surfaced on the engine record; default to 1.
-            // Roughness + metallic FACTORS only (no texture sampling yet).
-            // Next push wires MetallicRoughnessTexture; this push lights the
-            // scene with per-material constants which is already a big jump
-            // from the global 0.7/0.0 fallback.
-            var roughness = gm?.RoughnessFactor ?? 0.8f;
-            var metallic = gm?.MetallicFactor ?? 0.0f;
-
-            var material = vk.CreateMaterial(litProgram, name: $"sponza.prim{i}.material")
-                .SetUniform(binding: 0, "uBaseColorFactor", baseColorFactor)
-                .SetUniform(binding: 0, "uEmissiveFactor",
-                    new Vector4(emissiveFactor.X, emissiveFactor.Y, emissiveFactor.Z, emissiveStrength))
-                .SetUniform(binding: 0, "uMaterialParams",
-                    new Vector4(alphaCutoff, normalScale, roughness, metallic))
-                .SetTexture(binding: 1, albedo)
-                .SetTexture(binding: 2, normal)
-                .SetTexture(binding: 3, emissive)
-                .SetTexture(binding: 4, mr)
-                .SetTexture(binding: 5, ao)
-                .Handle;
-
-            var doubleSided = gm?.DoubleSided ?? false;
-            var pipeline = PickPipeline(gm?.AlphaMode ?? GltfAlphaMode.Opaque, doubleSided);
-            var drawable = new Drawable(
-                vb, ib, indexCount, material, pipeline,
-                mesh.Bounds, albedo, alphaCutoff, baseColorFactor.W,
-                new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) });
-
-            if (gm?.AlphaMode == GltfAlphaMode.Blend)
-            {
-                blendDrawables.Add(drawable);
-                blendCount++;
-            }
-            else
-            {
-                opaqueDrawables.Add(drawable);
-                if (gm?.AlphaMode == GltfAlphaMode.Mask) maskCount++;
+                noMaterialPrims.Add(prim);
             }
         }
 
+        foreach (var gm in opaqueOrder)
+        {
+            EmitBatchedGroup(gm, opaqueByMaterial[gm]);
+        }
+        if (noMaterialPrims.Count > 0)
+        {
+            EmitBatchedGroup(null, noMaterialPrims);
+        }
+
+        foreach (var prim in blendPrims)
+        {
+            var material = BuildMaterial(prim.Material, out var albedo, out var alphaCutoff, out var baseColorAlpha);
+            var pipeline = PickPipeline(GltfAlphaMode.Blend, prim.Material?.DoubleSided ?? false);
+            var mesh = prim.Mesh;
+            var vb = vk.CreateVertexBuffer(new VertexBufferData(
+                new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static), mesh.VertexBytes),
+                "sponza.blend.vb");
+            var ib = mesh.Indices32 is { } i32
+                ? vk.CreateIndexBuffer(i32, name: "sponza.blend.ib32")
+                : vk.CreateIndexBuffer(mesh.Indices, name: "sponza.blend.ib16");
+            var indexCount = mesh.Indices32?.Length ?? mesh.Indices.Length;
+            blendDrawables.Add(new Drawable(
+                vb, ib, indexCount, material, pipeline,
+                mesh.Bounds, albedo, alphaCutoff, baseColorAlpha,
+                new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) }));
+        }
+    }
+
+    // Emit batched opaque/mask drawables for one material group: one shared
+    // Material, then spatially-chunked merged VB/IB drawables.
+    private void EmitBatchedGroup(GltfMaterial? gm, List<GltfPrimitive> prims)
+    {
+        var material = BuildMaterial(gm, out var albedo, out var alphaCutoff, out var baseColorAlpha);
+        var pipeline = PickPipeline(gm?.AlphaMode ?? GltfAlphaMode.Opaque, gm?.DoubleSided ?? false);
+        var shadowBinding = new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) };
+        foreach (var chunk in SpatialChunks(prims))
+        {
+            var (vbBytes, indices, layout, bounds, vertCount) = MergeChunk(chunk);
+            var vb = vk.CreateVertexBuffer(new VertexBufferData(
+                new VertexBufferDescription(layout, vertCount, GraphicsBufferUsage.Static), vbBytes),
+                "sponza.batch.vb");
+            var ib = vk.CreateIndexBuffer(indices, name: "sponza.batch.ib");
+            opaqueDrawables.Add(new Drawable(
+                vb, ib, indices.Length, material, pipeline,
+                bounds, albedo, alphaCutoff, baseColorAlpha, shadowBinding));
+        }
+    }
+
+    // One engine Material per glTF material. BaseColorFactor / EmissiveFactor /
+    // MaterialParams (alphaCutoff, normalScale, roughness, metallic) UBO + the
+    // five channel textures (defaults when a channel is absent).
+    private MaterialHandle BuildMaterial(
+        GltfMaterial? gm, out TextureHandle albedo, out float alphaCutoff, out float baseColorAlpha)
+    {
+        albedo = GetOrUploadAlbedo(gm);
+        var normal = GetOrUploadNormal(gm);
+        var emissive = GetOrUploadEmissive(gm);
+        var mr = GetOrUploadMr(gm);
+        var ao = GetOrUploadAo(gm);
+
+        var baseColorFactor = gm?.BaseColorFactor ?? Vector4.One;
+        var emissiveFactor = gm is null ? Vector3.Zero : gm.EmissiveFactor;
+        var emissiveStrength = gm?.EmissiveStrength ?? 1.0f;
+        alphaCutoff = gm?.AlphaMode == GltfAlphaMode.Mask ? (gm?.AlphaCutoff ?? 0.5f) : 0.0f;
+        baseColorAlpha = baseColorFactor.W;
+        var normalScale = 1.0f;
+        var roughness = gm?.RoughnessFactor ?? 0.8f;
+        var metallic = gm?.MetallicFactor ?? 0.0f;
+
+        return vk.CreateMaterial(litProgram, name: "sponza.material")
+            .SetUniform(binding: 0, "uBaseColorFactor", baseColorFactor)
+            .SetUniform(binding: 0, "uEmissiveFactor",
+                new Vector4(emissiveFactor.X, emissiveFactor.Y, emissiveFactor.Z, emissiveStrength))
+            .SetUniform(binding: 0, "uMaterialParams",
+                new Vector4(alphaCutoff, normalScale, roughness, metallic))
+            .SetTexture(binding: 1, albedo)
+            .SetTexture(binding: 2, normal)
+            .SetTexture(binding: 3, emissive)
+            .SetTexture(binding: 4, mr)
+            .SetTexture(binding: 5, ao)
+            .Handle;
+    }
+
+    // Slice primitives into spatially-coherent chunks of <= MaxPrimitivesPerBatch,
+    // sorted by centroid along the group's longest axis so each merged batch
+    // stays compact (keeps frustum culling useful).
+    private static IEnumerable<List<GltfPrimitive>> SpatialChunks(List<GltfPrimitive> prims)
+    {
+        if (prims.Count <= MaxPrimitivesPerBatch)
+        {
+            yield return prims;
+            yield break;
+        }
+        var min = new Vector3(float.PositiveInfinity);
+        var max = new Vector3(float.NegativeInfinity);
+        foreach (var p in prims)
+        {
+            min = Vector3.Min(min, p.Mesh.Bounds.Min);
+            max = Vector3.Max(max, p.Mesh.Bounds.Max);
+        }
+        var size = max - min;
+        var axis = size.X >= size.Y && size.X >= size.Z ? 0 : size.Y >= size.Z ? 1 : 2;
+        var sorted = prims.OrderBy(p => AxisValue(p.Mesh.Bounds.Center, axis)).ToList();
+        for (var i = 0; i < sorted.Count; i += MaxPrimitivesPerBatch)
+        {
+            yield return sorted.GetRange(i, Math.Min(MaxPrimitivesPerBatch, sorted.Count - i));
+        }
+    }
+
+    private static float AxisValue(Vector3 v, int axis) => axis == 0 ? v.X : axis == 1 ? v.Y : v.Z;
+
+    // Concatenate a chunk's vertex bytes and rebase its indices into one buffer.
+    // All members share the vertex layout (48-byte tangent layout here).
+    private static (byte[] Vb, uint[] Indices, VertexLayout Layout, Bounds3 Bounds, int VertCount) MergeChunk(
+        List<GltfPrimitive> chunk)
+    {
+        var layout = chunk[0].Mesh.Layout;
+        var totalVerts = 0;
+        var totalIndices = 0;
+        foreach (var p in chunk)
+        {
+            totalVerts += p.Mesh.VertexCount;
+            totalIndices += p.Mesh.Indices32?.Length ?? p.Mesh.Indices.Length;
+        }
+
+        var vb = new byte[totalVerts * layout.Stride];
+        var indices = new uint[totalIndices];
+        var min = new Vector3(float.PositiveInfinity);
+        var max = new Vector3(float.NegativeInfinity);
+        var vByteOffset = 0;
+        var indexOffset = 0;
+        var vertexBase = 0u;
+        foreach (var p in chunk)
+        {
+            var m = p.Mesh;
+            Array.Copy(m.VertexBytes, 0, vb, vByteOffset, m.VertexBytes.Length);
+            vByteOffset += m.VertexBytes.Length;
+            if (m.Indices32 is { } i32)
+            {
+                foreach (var idx in i32) indices[indexOffset++] = idx + vertexBase;
+            }
+            else
+            {
+                foreach (var idx in m.Indices) indices[indexOffset++] = idx + vertexBase;
+            }
+            vertexBase += (uint)m.VertexCount;
+            min = Vector3.Min(min, m.Bounds.Min);
+            max = Vector3.Max(max, m.Bounds.Max);
+        }
+        return (vb, indices, layout, new Bounds3(min, max), totalVerts);
     }
 
     private PipelineHandle PickPipeline(GltfAlphaMode mode, bool doubleSided) =>
