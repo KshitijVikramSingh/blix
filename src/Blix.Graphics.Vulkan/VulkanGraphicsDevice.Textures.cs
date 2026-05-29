@@ -321,8 +321,12 @@ public sealed partial class VulkanGraphicsDevice
     }
 
     // Shared 3D image creation. When uploadData is non-empty, stages + copies
-    // it and leaves the image in ShaderReadOnly; otherwise the image is left
-    // in Undefined (a storage target the compute pre-barrier transitions).
+    // it and leaves the image in ShaderReadOnly. A storage target with no
+    // upload is also left in ShaderReadOnly (via a bare layout transition) so
+    // it's valid to bind as a sampled image before its first compute write —
+    // e.g. the froxel fog grid bound by the lit pass while fog is toggled off.
+    // The compute pre-barrier uses oldLayout=Undefined, so it discards this
+    // layout on the first dispatch regardless.
     private unsafe TextureHandle CreateImage3D(
         int width, int height, int depth, TextureFormat format, SamplerDescription samplerDesc,
         ImageUsageFlags usage, ReadOnlySpan<byte> uploadData, string name)
@@ -378,6 +382,14 @@ public sealed partial class VulkanGraphicsDevice
             TransitionImageLayout(cmd, image, 1, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal);
             EndSingleTimeCommands(cmd);
             DestroyVkBufferEntry(staging);
+        }
+        else if (usage.HasFlag(ImageUsageFlags.StorageBit))
+        {
+            // No initial data: still move out of Undefined so the image can be
+            // bound as a sampled descriptor before its first compute write.
+            var cmd = BeginSingleTimeCommands();
+            TransitionImageLayout(cmd, image, 1, ImageLayout.Undefined, ImageLayout.ShaderReadOnlyOptimal);
+            EndSingleTimeCommands(cmd);
         }
 
         var viewCi = new ImageViewCreateInfo
@@ -632,6 +644,16 @@ public sealed partial class VulkanGraphicsDevice
             // sampling is rare and would need a wider stage mask. Revisit
             // when ShaderLab introduces vertex-stage sampling.
             dstStage = PipelineStageFlags.FragmentShaderBit;
+        }
+        else if (oldLayout == ImageLayout.Undefined && newLayout == ImageLayout.ShaderReadOnlyOptimal)
+        {
+            // Bare layout move for an uninitialised image (e.g. a storage
+            // target made sampleable before its first write). No prior writes
+            // to make available; just establish the layout.
+            srcAccess = 0;
+            dstAccess = AccessFlags.ShaderReadBit;
+            srcStage = PipelineStageFlags.TopOfPipeBit;
+            dstStage = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit;
         }
         else
         {
