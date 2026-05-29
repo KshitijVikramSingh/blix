@@ -282,6 +282,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private float normalStrength = 1.0f;
 
     private float exposure = 0.5f;
+    // Present tonemap operator (overlay Render → Tonemap); index into present.frag's branch.
+    private static readonly string[] TonemapNames = { "Reinhard", "ACES", "AgX", "Hejl" };
+    private int tonemapMode = 2; // AgX
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
@@ -518,7 +521,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             {
                 new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
             },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 4) });
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 8) });
 
         // Opaque shadow interface: push-only (model + cascadeViewProj = 128B),
         // no descriptor sets — opaque casters allocate zero transient sets.
@@ -1495,8 +1498,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         }
         using (debug.Scope("Render"))
         {
-            exposure  = debug.Controls.Float("Exposure", exposure, 0.05f, 16f);
-            moveSpeed = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 60f);
+            exposure   = debug.Controls.Float("Exposure", exposure, 0.05f, 16f);
+            tonemapMode = debug.Controls.Enum("Tonemap", tonemapMode, TonemapNames);
+            moveSpeed  = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 60f);
         }
 
         debug.Values.Value("shadow-map", $"{ShadowMapSize}²×{CascadeCount}");
@@ -1528,8 +1532,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private void RecordPresentPass(RenderCommandList commandList)
     {
         var hdrTex = graph.GetColorTexture(hdrHandle);
-        var push = new byte[4];
+        var push = new byte[8];
         MemoryMarshal.Write(push.AsSpan(0, 4), in exposure);
+        var tonemap = (uint)tonemapMode;
+        MemoryMarshal.Write(push.AsSpan(4, 4), in tonemap);
         commandList.Pass(
             "present",
             new RenderPassDescription(
