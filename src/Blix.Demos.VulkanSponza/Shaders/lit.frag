@@ -69,26 +69,10 @@ layout(set = 2, binding = 5) uniform sampler2D uOcclusion;
 layout(location = 0) in vec3 vNormalWorld;
 layout(location = 1) in vec2 vUv;
 layout(location = 2) in vec3 vWorldPos;
+layout(location = 3) in vec3 vTangentWorld;   // world-space tangent (forwarded glTF TANGENT.xyz)
+layout(location = 4) in float vTangentSign;   // glTF TANGENT.w handedness
 
 layout(location = 0) out vec4 outColor;
-
-// Screen-space-derivative TBN — the engine's static-mesh vertex layout
-// doesn't carry per-vertex tangents, so we synthesise the tangent basis
-// from world-position + UV derivatives. Reference: Christian Schüler,
-// "Followup: Normal Mapping Without Precomputed Tangents."
-vec3 perturbNormal(vec3 N, vec3 worldPos, vec2 uv, vec3 tangentNormal) {
-    vec3 dp1 = dFdx(worldPos);
-    vec3 dp2 = dFdy(worldPos);
-    vec2 duv1 = dFdx(uv);
-    vec2 duv2 = dFdy(uv);
-    vec3 dp2perp = cross(dp2, N);
-    vec3 dp1perp = cross(N, dp1);
-    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
-    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
-    float invMax = inversesqrt(max(dot(T, T), dot(B, B)));
-    mat3 TBN = mat3(T * invMax, B * invMax, N);
-    return normalize(TBN * tangentNormal);
-}
 
 // Roughness-aware Fresnel-Schlick that softens edges as surfaces roughen
 // (otherwise rough metals over-glow at grazing angles where the split-sum
@@ -176,38 +160,23 @@ void main() {
     if (alphaCutoff > 0.0 && albedo4.a < alphaCutoff) discard;
     vec3 albedo = albedo4.rgb;
 
-    // --- Normal map ----------------------------------------------------
-    // Screen-space TBN normal mapping is great on tileable wall surfaces
-    // (large UV span, well-defined UV gradient per fragment) but breaks
-    // on sculpted geometry with mirrored or compressed UV islands — the
-    // dFdx/dFdy of UV degenerate, the synthesized tangent flips sign
-    // across triangle boundaries, and the perturbed normal swirls. The
-    // lavabo / lion-head fountains and other ornamental geometry hit
-    // this. Proper fix is MikkT per-vertex tangents (engine change).
-    // Scaffold fix: smoothly fade out normal mapping when UV derivatives
-    // are tiny — surfaces where the screen-space TBN can't be trusted
-    // fall back to the geometric normal.
+    // --- Normal map (real per-vertex TBN) -------------------------------
+    // Geometric normal, flipped on back faces so two-sided geometry (cypress
+    // leaf cards, curtains) lights from the inside. Single-sided geometry is
+    // back-face culled, so the flip is a no-op there.
     vec3 N = normalize(vNormalWorld);
-    // Two-sided lighting: on a back-facing fragment the geometric normal
-    // points away from the viewer, so flip it to face front. Single-sided
-    // geometry is back-face culled (gl_FrontFacing always true → no-op);
-    // this only fires on double-sided surfaces — the cypress-tree leaf cards
-    // and curtains — whose back faces were shading as N·L<0 and reading as
-    // dark/"inverted" foliage. Flip before normal mapping so the synthesized
-    // tangent frame mirrors consistently on the back side.
     if (!gl_FrontFacing) N = -N;
-    vec2 duv1 = dFdx(uv);
-    vec2 duv2 = dFdy(uv);
-    float uvDensity = length(duv1) + length(duv2);
-    float normalMix = smoothstep(0.005, 0.02, uvDensity);
-    if (normalMix > 0.0) {
-        vec3 tangentN = texture(uNormalMap, uv).xyz * 2.0 - 1.0;
-        float normalScale = mat.uMaterialParams.y * frame.uShaderParams.y;
-        tangentN.xy *= normalScale;
-        tangentN = normalize(tangentN);
-        vec3 perturbed = perturbNormal(N, vWorldPos, uv, tangentN);
-        N = normalize(mix(N, perturbed, normalMix));
-    }
+    // TBN from the forwarded glTF tangent. Gram-Schmidt re-orthonormalize the
+    // tangent against N (removes interpolation drift); bitangent handedness
+    // from TANGENT.w. This replaces the old screen-space-derivative frame,
+    // which swirled on sculpted / mirrored-UV geometry (lavabo, lion heads).
+    vec3 T = normalize(vTangentWorld - N * dot(N, vTangentWorld));
+    vec3 B = cross(N, T) * vTangentSign;
+    vec3 tangentN = texture(uNormalMap, uv).xyz * 2.0 - 1.0;
+    float normalScale = mat.uMaterialParams.y * frame.uShaderParams.y;
+    tangentN.xy *= normalScale;
+    // Default normal map is flat (0,0,1), so untextured materials keep N.
+    N = normalize(mat3(T, B, N) * normalize(tangentN));
 
     // --- PBR scalars (factor × texture) ---------------------------------
     // MR.G = roughness, MR.B = metallic. AO comes from its own sampler.

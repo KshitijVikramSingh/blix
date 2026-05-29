@@ -2,16 +2,25 @@ namespace Blix.Assets;
 
 public sealed class AssetImportContext
 {
-    public AssetImportContext(AssetId assetId, string sourcePath, bool flipTextureV = false)
+    public AssetImportContext(AssetId assetId, string sourcePath, bool flipTextureV = false, bool includeTangents = false)
     {
         AssetId = assetId;
         SourcePath = sourcePath;
         FlipTextureV = flipTextureV;
+        IncludeTangents = includeTangents;
     }
 
     public AssetId AssetId { get; }
 
     public string SourcePath { get; }
+
+    // When true, static-mesh import produces the tangent-bearing vertex layout
+    // (VertexPosition3NormalTangentTexture), forwarding the glTF TANGENT
+    // attribute (world-transformed, handedness preserved) so renderers get a
+    // real per-vertex TBN instead of a screen-space-derivative one. Falls back
+    // to a normal-derived tangent for primitives without a TANGENT attribute.
+    // Default off keeps the lean position/normal/uv layout for other consumers.
+    public bool IncludeTangents { get; }
 
     // When true, importers flip the texture V coordinate (V -> 1-V) as they
     // build vertex data, canonicalising a bottom-up (OpenGL-authored) source

@@ -497,7 +497,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // UBO's alphaCutoff > 0; opaque materials leave it at 0.
         opaqueSolidPipeline = vk.CreatePipeline(new PipelineDescription(
             litProgram,
-            VertexPosition3NormalTexture.Layout,
+            VertexPosition3NormalTangentTexture.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.BackFaceCulling,
@@ -505,7 +505,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             RenderTarget: graph.GetPassSurface(litPassHandle)), "lit.opaque");
         opaqueDoubleSidedPipeline = vk.CreatePipeline(new PipelineDescription(
             litProgram,
-            VertexPosition3NormalTexture.Layout,
+            VertexPosition3NormalTangentTexture.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
@@ -518,7 +518,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // deferred polish.
         blendSolidPipeline = vk.CreatePipeline(new PipelineDescription(
             litProgram,
-            VertexPosition3NormalTexture.Layout,
+            VertexPosition3NormalTangentTexture.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualNoWrite,
             RasterizerState.BackFaceCulling,
@@ -526,7 +526,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             RenderTarget: graph.GetPassSurface(litPassHandle)), "lit.blend");
         blendDoubleSidedPipeline = vk.CreatePipeline(new PipelineDescription(
             litProgram,
-            VertexPosition3NormalTexture.Layout,
+            VertexPosition3NormalTangentTexture.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualNoWrite,
             RasterizerState.NoCulling,
@@ -560,7 +560,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         shadowOpaqueProgram = vk.CreateShaderProgramFromSpv(shadowVertSpv, shadowFragSpv, shadowOpaqueInterface, "shadow.opaque");
         shadowOpaquePipeline = vk.CreatePipeline(new PipelineDescription(
             shadowOpaqueProgram,
-            VertexPosition3NormalTexture.Layout,
+            VertexPosition3NormalTangentTexture.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
@@ -572,7 +572,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         shadowMaskProgram = vk.CreateShaderProgramFromSpv(shadowMaskVertSpv, shadowMaskFragSpv, shadowMaskInterface, "shadow.mask");
         shadowMaskPipeline = vk.CreatePipeline(new PipelineDescription(
             shadowMaskProgram,
-            VertexPosition3NormalTexture.Layout,
+            VertexPosition3NormalTangentTexture.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
@@ -625,9 +625,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             var importer = new GltfStaticImporter();
             // flipTextureV: the Intel Sponza assets are authored bottom-up
             // (OpenGL V origin); flip to the top-down origin Vulkan samples
-            // with so textures aren't vertically inverted. Per-import config,
-            // not a global switch — see AssetImportContext.FlipTextureV.
-            var ctx = new AssetImportContext(AssetId.Parse("models/sponza_main"), gltfPath, flipTextureV: true);
+            // with so textures aren't vertically inverted. includeTangents:
+            // forward the authored glTF TANGENT so the lit shader uses a real
+            // per-vertex TBN. Per-import config — see AssetImportContext.
+            var ctx = new AssetImportContext(AssetId.Parse("models/sponza_main"), gltfPath, flipTextureV: true, includeTangents: true);
             var model = importer.Import(ctx);
             BuildDrawables(model);
             sceneLoaded = true;
@@ -672,7 +673,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         try
         {
             var model = new GltfStaticImporter().Import(
-                new AssetImportContext(AssetId.Parse(assetIdPrefix), gltf, flipTextureV: true));
+                new AssetImportContext(AssetId.Parse(assetIdPrefix), gltf, flipTextureV: true, includeTangents: true));
             var beforeOpaque = opaqueDrawables.Count;
             var beforeBlend  = blendDrawables.Count;
             BuildDrawables(model);
