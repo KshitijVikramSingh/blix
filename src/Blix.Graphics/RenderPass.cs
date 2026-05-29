@@ -8,4 +8,8 @@ public sealed record RenderPass(
 public sealed record RenderPassDescription(
     RenderSurfaceHandle Target,
     IReadOnlyList<GraphicsColor?> ClearColors,
-    bool ClearDepth);
+    bool ClearDepth,
+    // Compute pass: no framebuffer/render pass. The pass's commands are
+    // DispatchCommands; the Vulkan backend records them outside any render pass
+    // with the needed storage-image barriers. GL backend rejects compute passes.
+    bool Compute = false);

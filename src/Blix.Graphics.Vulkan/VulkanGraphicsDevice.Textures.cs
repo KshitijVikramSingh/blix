@@ -231,6 +231,69 @@ public sealed partial class VulkanGraphicsDevice
         return CreateTextureCube(baseFaceSize, TextureFormat.Rgba16F, mipCount, packed, sampler, name ?? "cube.hdr.mipped");
     }
 
+    // 2D storage image (compute-writable + sampleable). No initial data — a
+    // compute dispatch fills it; the dispatch's pre-barrier transitions it from
+    // Undefined to General each frame. Usage STORAGE|SAMPLED.
+    public unsafe TextureHandle CreateStorageTexture2D(
+        int width, int height, TextureFormat format, SamplerDescription samplerDesc, string? name = null)
+    {
+        var vkFormat = MapTextureFormat(format);
+        var imageCi = new ImageCreateInfo
+        {
+            SType = StructureType.ImageCreateInfo,
+            ImageType = ImageType.Type2D,
+            Format = vkFormat,
+            Extent = new Extent3D((uint)width, (uint)height, 1),
+            MipLevels = 1,
+            ArrayLayers = 1,
+            Samples = SampleCountFlags.Count1Bit,
+            Tiling = ImageTiling.Optimal,
+            Usage = ImageUsageFlags.StorageBit | ImageUsageFlags.SampledBit,
+            SharingMode = SharingMode.Exclusive,
+            InitialLayout = ImageLayout.Undefined,
+        };
+        Image image;
+        ThrowIfNotSuccess(Vk.CreateImage(Device, in imageCi, null, &image), $"vkCreateImage({name}.storage2d)");
+
+        Vk.GetImageMemoryRequirements(Device, image, out var memReq);
+        var allocCi = new MemoryAllocateInfo
+        {
+            SType = StructureType.MemoryAllocateInfo,
+            AllocationSize = memReq.Size,
+            MemoryTypeIndex = FindMemoryTypeIndex(memReq.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
+        };
+        DeviceMemory memory;
+        ThrowIfNotSuccess(Vk.AllocateMemory(Device, in allocCi, null, &memory), $"vkAllocateMemory({name}.storage2d)");
+        ThrowIfNotSuccess(Vk.BindImageMemory(Device, image, memory, 0), $"vkBindImageMemory({name}.storage2d)");
+
+        var viewCi = new ImageViewCreateInfo
+        {
+            SType = StructureType.ImageViewCreateInfo,
+            Image = image,
+            ViewType = ImageViewType.Type2D,
+            Format = vkFormat,
+            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1),
+        };
+        ImageView view;
+        ThrowIfNotSuccess(Vk.CreateImageView(Device, in viewCi, null, &view), $"vkCreateImageView({name}.storage2d)");
+
+        var entry = new VkTextureEntry
+        {
+            Image = image,
+            Memory = memory,
+            View = view,
+            Sampler = GetOrCreateSampler(samplerDesc),
+            Width = width,
+            Height = height,
+            MipCount = 1,
+            Format = vkFormat,
+            Name = name ?? "storage2d",
+        };
+        var id = nextResourceId++;
+        textureTable[id] = entry;
+        return new TextureHandle(id);
+    }
+
     public void DestroyTexture(TextureHandle handle)
     {
         if (!textureTable.Remove(handle.Id, out var e)) return;

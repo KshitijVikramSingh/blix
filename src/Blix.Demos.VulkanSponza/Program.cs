@@ -71,6 +71,13 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private VertexBufferHandle presentDummyVB;
     private IndexBufferHandle presentDummyIB;
 
+    // Phase-1 compute smoke test: a compute pass writes a UV gradient into this
+    // storage image each frame, exercising the dispatch path end-to-end.
+    // (Nothing samples it yet — froxel fog will be the first real consumer.)
+    private ShaderProgramHandle computeTestProgram;
+    private PipelineHandle computeTestPipeline;
+    private TextureHandle computeTestImage;
+
     // --- Cascaded sun shadow maps -----------------------------------------
     // Three depth-only cascades fitted to camera-frustum slices, snapped to
     // the texel grid for swim-free motion. One depth target + one graphics
@@ -636,6 +643,20 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         presentDummyVB = vk.CreateVertexBuffer(
             VertexPosition3NormalTexture.CreateBufferData(dummyVerts), "present.dummy.vb");
         presentDummyIB = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "present.dummy.ib");
+
+        // --- Phase-1 compute smoke test ----------------------------------
+        // Compute program writing one storage image (set 0 binding 0). Proves
+        // the dispatch path; dispatched each frame in OnRender.
+        var computeTestInterface = new ShaderInterface(
+            Slots: new[]
+            {
+                new DescriptorSetSlot(0, 0, ShaderResourceType.StorageImage, ShaderStages.Compute),
+            },
+            PushConstants: Array.Empty<PushConstantRange>());
+        var computeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "compute_test.comp.spv"));
+        computeTestProgram = vk.CreateComputeShaderProgramFromSpv(computeSpv, computeTestInterface, "compute_test");
+        computeTestPipeline = vk.CreateComputePipeline(computeTestProgram, "compute_test");
+        computeTestImage = vk.CreateStorageTexture2D(256, 256, TextureFormat.Rgba16F, SamplerDescription.LinearClamp, "sponza.compute_test");
 
         // Build the per-frame-constant buffers once (graph compiled + all
         // textures created by now). Reused every frame in OnRender.
@@ -1307,6 +1328,15 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         }, clearColor: new GraphicsColor(0.05f, 0.07f, 0.10f, 1f));
 
         graph.Execute(commandList);
+
+        // Phase-1 compute smoke test: dispatch the gradient writer over the
+        // 256×256 storage image (8×8 work groups). Exercises the compute path;
+        // result isn't sampled yet.
+        commandList.ComputePass("compute-test", new DispatchCommand(
+            computeTestPipeline, 256 / 8, 256 / 8, 1,
+            Array.Empty<ShaderUniform>(),
+            new[] { new ShaderTextureBinding("uOut", computeTestImage, Slot: 0) }));
+
         RecordPresentPass(commandList);
     }
 

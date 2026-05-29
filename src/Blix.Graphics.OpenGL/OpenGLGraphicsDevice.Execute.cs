@@ -30,6 +30,11 @@ public sealed partial class OpenGLGraphicsDevice
 
         foreach (var pass in commandList.Passes)
         {
+            if (pass.Description.Compute)
+            {
+                throw new NotSupportedException(
+                    $"Compute pass '{pass.Name}' requires the Vulkan backend; the GL backend has no compute path.");
+            }
             var passPacket = ExecutePass(pass);
             passPackets.Add(passPacket);
             totalDraws += passPacket.Draws.Count;

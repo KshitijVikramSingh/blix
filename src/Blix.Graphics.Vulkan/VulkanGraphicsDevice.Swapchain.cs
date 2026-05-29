@@ -548,6 +548,14 @@ public sealed partial class VulkanGraphicsDevice
         var defaultPasses = 0;
         foreach (var pass in commandList.Passes)
         {
+            // Compute pass: dispatch outside any render pass (the prior pass
+            // already ended its render pass). No framebuffer / clears / timing.
+            if (pass.Description.Compute)
+            {
+                TranslateComputePass(f.CommandBuffer, pass, currentFrame);
+                continue;
+            }
+
             // Offscreen surfaces currently only have a Clear variant — passes
             // targeting them must declare clear colors. Load/Store flexibility
             // lives in the render graph, not the imperative path.
@@ -938,6 +946,81 @@ public sealed partial class VulkanGraphicsDevice
     private readonly Dictionary<(int Set, int Binding), nint> uniformMappedPtrs = new();
     private readonly List<VkBufferEntry> uniformMappedBuffers = new();
 
+    // Record a compute pass: a single dispatch with the storage-image barriers
+    // it needs. Runs outside any render pass (the pass loop ends the prior
+    // render pass before this). Storage-image targets are transitioned to
+    // GENERAL (discarding prior contents — the dispatch fully rewrites them),
+    // dispatched, then transitioned to SHADER_READ so a later graphics pass can
+    // sample them.
+    private unsafe void TranslateComputePass(CommandBuffer cmd, RenderPass pass, int frameSlot)
+    {
+        foreach (var rc in pass.Commands)
+        {
+            if (rc is not DispatchCommand d) continue;
+            var pipe = GetPipeline(d.Pipeline);
+            var prog = shaderProgramTable[pipe.ShaderProgram.Id];
+
+            for (var i = 0; i < d.Textures.Count; i++)
+            {
+                var b = d.Textures[i];
+                if (!IsStorageBinding(prog, b.Slot)) continue;
+                RecordStorageBarrier(cmd, textureTable[b.Texture.Id],
+                    ImageLayout.Undefined, ImageLayout.General,
+                    PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit,
+                    PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderWriteBit);
+            }
+
+            if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
+            Vk.CmdBindPipeline(cmd, PipelineBindPoint.Compute, pipe.Pipeline);
+            BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures, PipelineBindPoint.Compute);
+            if (d.PushConstants is { } pc)
+            {
+                PushConstantsToCommandBuffer(cmd, pipe.Layout, prog.Interface.PushConstants, pc);
+            }
+            Vk.CmdDispatch(cmd, (uint)d.GroupsX, (uint)d.GroupsY, (uint)d.GroupsZ);
+
+            for (var i = 0; i < d.Textures.Count; i++)
+            {
+                var b = d.Textures[i];
+                if (!IsStorageBinding(prog, b.Slot)) continue;
+                RecordStorageBarrier(cmd, textureTable[b.Texture.Id],
+                    ImageLayout.General, ImageLayout.ShaderReadOnlyOptimal,
+                    PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderWriteBit,
+                    PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit);
+            }
+        }
+    }
+
+    private static bool IsStorageBinding(VkShaderProgramEntry prog, int binding)
+    {
+        foreach (var set in prog.Sets)
+        {
+            if (set is null) continue;
+            foreach (var s in set.Slots)
+                if (s.Binding == binding && s.Type == ShaderResourceType.StorageImage) return true;
+        }
+        return false;
+    }
+
+    private unsafe void RecordStorageBarrier(
+        CommandBuffer cmd, VkTextureEntry tex, ImageLayout oldLayout, ImageLayout newLayout,
+        PipelineStageFlags srcStage, AccessFlags srcAccess, PipelineStageFlags dstStage, AccessFlags dstAccess)
+    {
+        var barrier = new ImageMemoryBarrier
+        {
+            SType = StructureType.ImageMemoryBarrier,
+            OldLayout = oldLayout,
+            NewLayout = newLayout,
+            SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            Image = tex.Image,
+            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, (uint)tex.MipCount, 0, 1),
+            SrcAccessMask = srcAccess,
+            DstAccessMask = dstAccess,
+        };
+        Vk.CmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, null, 0, null, 1, &barrier);
+    }
+
     private unsafe void WriteUniformsAcrossSets(
         VkShaderProgramEntry prog,
         int frameSlot,
@@ -980,7 +1063,8 @@ public sealed partial class VulkanGraphicsDevice
         VkShaderProgramEntry prog,
         PipelineLayout pipeLayout,
         int frameSlot,
-        IReadOnlyList<ShaderTextureBinding> textures)
+        IReadOnlyList<ShaderTextureBinding> textures,
+        PipelineBindPoint bindPoint = PipelineBindPoint.Graphics)
     {
         // Hoist scratch above the loop (CA2014). Size = the widest set's
         // potential write count.
@@ -1041,14 +1125,19 @@ public sealed partial class VulkanGraphicsDevice
                         nameof(textures),
                         $"ShaderTextureBinding '{b.Name}' has negative Slot ({b.Slot}).");
                 }
-                if (!HasImageSlotAtBinding(sr, b.Slot)) continue;
+                var imageSlotType = ImageSlotTypeAtBinding(sr, b.Slot);
+                if (imageSlotType is null) continue;
 
                 var tex = textureTable[b.Texture.Id];
+                // Storage images bind as STORAGE_IMAGE in GENERAL layout (no
+                // sampler); sampled images as COMBINED_IMAGE_SAMPLER in
+                // shader-read layout.
+                var isStorage = imageSlotType == ShaderResourceType.StorageImage;
                 imgInfos[writeIdx] = new DescriptorImageInfo
                 {
-                    Sampler = tex.Sampler,
+                    Sampler = isStorage ? default : tex.Sampler,
                     ImageView = tex.View,
-                    ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
+                    ImageLayout = isStorage ? ImageLayout.General : ImageLayout.ShaderReadOnlyOptimal,
                 };
                 writes[writeIdx] = new WriteDescriptorSet
                 {
@@ -1057,7 +1146,7 @@ public sealed partial class VulkanGraphicsDevice
                     DstBinding = (uint)b.Slot,
                     // Count>1 sampler arrays (e.g. uSpotShadowMaps[N]).
                     DstArrayElement = (uint)b.ArrayIndex,
-                    DescriptorType = DescriptorType.CombinedImageSampler,
+                    DescriptorType = isStorage ? DescriptorType.StorageImage : DescriptorType.CombinedImageSampler,
                     DescriptorCount = 1,
                     PImageInfo = &imgInfos[writeIdx],
                 };
@@ -1071,7 +1160,7 @@ public sealed partial class VulkanGraphicsDevice
 
             Vk.CmdBindDescriptorSets(
                 cmd,
-                PipelineBindPoint.Graphics,
+                bindPoint,
                 pipeLayout,
                 firstSet: (uint)setIdx,
                 descriptorSetCount: 1,
@@ -1081,14 +1170,17 @@ public sealed partial class VulkanGraphicsDevice
         }
     }
 
-    private static bool HasImageSlotAtBinding(VkShaderSetResources sr, int binding)
+    // The image-resource type at a binding (SampledImage / StorageImage /
+    // Sampler), or null if the binding isn't an image slot in this set.
+    private static ShaderResourceType? ImageSlotTypeAtBinding(VkShaderSetResources sr, int binding)
     {
         foreach (var s in sr.Slots)
         {
             if (s.Binding != binding) continue;
-            if (s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage or ShaderResourceType.Sampler) return true;
+            if (s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage or ShaderResourceType.Sampler)
+                return s.Type;
         }
-        return false;
+        return null;
     }
 
     // Slices the payload across the shader's declared push-constant ranges

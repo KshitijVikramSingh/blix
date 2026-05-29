@@ -65,6 +65,7 @@
     <GlslShader Include="Shaders\skybox.frag" />
     <GlslShader Include="Shaders\present.vert" />
     <GlslShader Include="Shaders\present.frag" />
+    <GlslShader Include="Shaders\compute_test.comp" />
   </ItemGroup>
 
   <Target Name="CompileSpirV"

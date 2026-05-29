@@ -37,6 +37,28 @@ public sealed class RenderCommandList
             recorder?.OnPassEnd();
         }
     }
+
+    // Record a compute pass — a single dispatch with no framebuffer. Ordered
+    // in submission with the graphics passes around it (declaration order), so
+    // a compute pass that writes a storage image must be recorded before the
+    // graphics pass that samples it. Vulkan-only.
+    public void ComputePass(string name, DispatchCommand dispatch)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(dispatch);
+
+        recorder?.OnPassBegin(name);
+        try
+        {
+            var desc = new RenderPassDescription(
+                RenderSurfaceHandle.Default, Array.Empty<GraphicsColor?>(), ClearDepth: false, Compute: true);
+            passes.Add(new RenderPass(name, desc, new RenderCommand[] { dispatch }));
+        }
+        finally
+        {
+            recorder?.OnPassEnd();
+        }
+    }
 }
 
 public sealed class RenderPassBuilder
