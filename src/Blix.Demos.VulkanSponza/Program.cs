@@ -178,7 +178,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // baseColorFactor.a (glTF effective-alpha multiplier).
         TextureHandle Albedo,
         float AlphaCutoff,
-        float BaseColorAlpha);
+        float BaseColorAlpha,
+        // Pre-built once at load so the per-frame mask shadow draws don't
+        // allocate a binding array each (×3 cascades × every frame).
+        ShaderTextureBinding[] ShadowAlbedoBinding);
     // Two-bucket draw order: opaque/mask first, blend last. Within each
     // bucket draws stay in glTF primitive order; back-to-front sort for
     // the blend bucket is a deferred polish (would matter when the demo
@@ -186,6 +189,20 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private readonly List<Drawable> opaqueDrawables = new();
     private readonly List<Drawable> blendDrawables = new();
     private bool sceneLoaded;
+
+    // Per-frame-reused, content-constant buffers built once at load (avoids
+    // re-allocating them every frame). identityPush: the per-draw model push
+    // (always identity — transforms are baked into the vertices). passBindings:
+    // the lit pass's set-1 IBL + shadow-cascade textures (all stable handles).
+    private byte[] identityPush = null!;
+    private ShaderTextureBinding[] passBindings = null!;
+    // Mask shadow pushes differ per draw (alpha params), so they can't share one
+    // buffer like opaque casters. Pool + reuse the byte[]s across frames instead
+    // of allocating per draw: CmdPushConstants copies the bytes at record time,
+    // so a buffer is free for reuse once the frame's commands are recorded. The
+    // cursor resets each frame and the pool grows to the per-frame high-water mark.
+    private readonly List<byte[]> maskPushPool = new();
+    private int maskPushCursor;
 
     // Camera + input. Yaw 0 = looking down -Z; positive X is "right".
     // Initial pose aims at the +X end-wall lavabo (wall fountain) so the
@@ -575,6 +592,19 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             VertexPosition3NormalTexture.CreateBufferData(dummyVerts), "present.dummy.vb");
         presentDummyIB = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "present.dummy.ib");
 
+        // Build the per-frame-constant buffers once (graph compiled + all
+        // textures created by now). Reused every frame in OnRender.
+        identityPush = ModelPushBytes(Matrix4x4.Identity);
+        passBindings = new[]
+        {
+            new ShaderTextureBinding("uIrradiance",     irradianceCubeTexture, Slot: 0),
+            new ShaderTextureBinding("uPrefilteredEnv", envCubeTexture,        Slot: 1),
+            new ShaderTextureBinding("uBrdfLut",        brdfLutTexture,        Slot: 2),
+            new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0]), Slot: 3, ArrayIndex: 0),
+            new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1]), Slot: 3, ArrayIndex: 1),
+            new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2]), Slot: 3, ArrayIndex: 2),
+        };
+
         // --- Load Sponza geometry ---------------------------------------
         // Static-mesh importer: Sponza has no skinning. Each glTF primitive
         // becomes one engine-side mesh with a baked-in node transform.
@@ -716,7 +746,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             var pipeline = PickPipeline(gm?.AlphaMode ?? GltfAlphaMode.Opaque, doubleSided);
             var drawable = new Drawable(
                 vb, ib, indexCount, material, pipeline,
-                mesh.Bounds, albedo, alphaCutoff, baseColorFactor.W);
+                mesh.Bounds, albedo, alphaCutoff, baseColorFactor.W,
+                new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) });
 
             if (gm?.AlphaMode == GltfAlphaMode.Blend)
             {
@@ -1000,26 +1031,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 new Vector4(metallicThreshold, normalStrength, slopeScale, 0f))),
         };
 
-        // Per-pass set-1 bindings (IBL + shadow cascades). Same handles for
-        // every draw in the lit pass — Vector A's set-1 lifetime is "per-pass"
-        // so the engine could in principle bind once per pass; today's API
-        // still routes per-draw, but with stable handles the descriptor-set
-        // resolve hits the same slot every time.
-        var passBindings = new[]
-        {
-            new ShaderTextureBinding("uIrradiance",     irradianceCubeTexture, Slot: 0),
-            new ShaderTextureBinding("uPrefilteredEnv", envCubeTexture,        Slot: 1),
-            new ShaderTextureBinding("uBrdfLut",        brdfLutTexture,        Slot: 2),
-            new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0]), Slot: 3, ArrayIndex: 0),
-            new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1]), Slot: 3, ArrayIndex: 1),
-            new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2]), Slot: 3, ArrayIndex: 2),
-        };
-
-        // Single identity model matrix — the static importer bakes each
-        // primitive's node transform into its vertex positions, so the
-        // per-draw push is just identity. Live model matrices come back
-        // when the importer's per-primitive-transform hook is wired up.
-        var identityPush = ModelPushBytes(Matrix4x4.Identity);
+        // Per-pass set-1 bindings (passBindings) and the identity model push
+        // are built once at load (constant handles / identity transform) and
+        // reused here — see OnLoad.
 
         // --- Shadow passes: opaque/mask occluders into each cascade ---------
         // Each cascade frustum-culls the opaque set against its ortho box, so
@@ -1030,6 +1044,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // pipeline binding the albedo, so foliage casts leaf-shaped shadows.
         var cull = cullEnabled;
         var margin = cullMargin;
+        // Reset the mask-push pool cursor; the cascade scopes rent monotonically
+        // during graph.Execute, so each draw this frame gets a distinct buffer.
+        maskPushCursor = 0;
         for (var c = 0; c < CascadeCount; c++)
         {
             var ci = c;
@@ -1039,6 +1056,13 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             // row-vector form (clip = Vector4.Transform(world, M)), so transpose
             // to hand it the clip-coordinate generators as rows.
             var cascadeFrustum = Frustum.FromViewProjection(Matrix4x4.Transpose(vp));
+            // Every opaque caster in this cascade pushes the same bytes (identity
+            // model + this cascade's VP), so build it once per cascade instead of
+            // allocating a byte[] per caster — the dominant per-frame garbage and
+            // the source of the GC build-command spikes. Safe to share: DrawIndexed
+            // holds the push by reference, but all these draws want identical
+            // content. Mask casters still push per-draw (alpha params differ).
+            var cascadeOpaquePush = ShadowOpaquePushBytes(Matrix4x4.Identity, vp);
             graph.Pass(cascadePassHandles[ci], scope =>
             {
                 var drawn = 0;
@@ -1053,8 +1077,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                             pipeline: shadowMaskPipeline,
                             indexCount: d.IndexCount,
                             uniforms: Array.Empty<ShaderUniform>(),
-                            textures: new[] { new ShaderTextureBinding("uAlbedo", d.Albedo, Slot: 0) },
-                            pushConstants: ShadowMaskPushBytes(Matrix4x4.Identity, vp, d.AlphaCutoff, d.BaseColorAlpha));
+                            textures: d.ShadowAlbedoBinding,
+                            pushConstants: RentMaskPush(Matrix4x4.Identity, vp, d.AlphaCutoff, d.BaseColorAlpha));
                     }
                     else
                     {
@@ -1065,7 +1089,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                             indexCount: d.IndexCount,
                             uniforms: Array.Empty<ShaderUniform>(),
                             textures: Array.Empty<ShaderTextureBinding>(),
-                            pushConstants: ShadowOpaquePushBytes(Matrix4x4.Identity, vp));
+                            pushConstants: cascadeOpaquePush);
                     }
                     drawn++;
                 }
@@ -1239,11 +1263,13 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
     // Mask shadow caster push: [model | cascadeViewProj | alphaParams] = 144
     // bytes, matching shadow_mask's PushConstants block. alphaParams.xy =
-    // (alphaCutoff, baseColorAlpha) for the foliage cutout discard.
-    private static byte[] ShadowMaskPushBytes(
+    // (alphaCutoff, baseColorAlpha). Rents a pooled buffer (reset per frame via
+    // maskPushCursor) rather than allocating, since these differ per draw.
+    private byte[] RentMaskPush(
         Matrix4x4 model, Matrix4x4 cascadeViewProj, float alphaCutoff, float baseColorAlpha)
     {
-        var bytes = new byte[144];
+        if (maskPushCursor >= maskPushPool.Count) maskPushPool.Add(new byte[144]);
+        var bytes = maskPushPool[maskPushCursor++];
         MemoryMarshal.Write(bytes.AsSpan(0, 64), in model);
         MemoryMarshal.Write(bytes.AsSpan(64, 64), in cascadeViewProj);
         var alphaParams = new Vector4(alphaCutoff, baseColorAlpha, 0f, 0f);
