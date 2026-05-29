@@ -285,6 +285,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // Present tonemap operator (overlay Render → Tonemap); index into present.frag's branch.
     private static readonly string[] TonemapNames = { "Reinhard", "ACES", "AgX", "Hejl" };
     private int tonemapMode = 2; // AgX
+    // Head-on opacity floor for Fresnel glass (overlay Material → Glass opacity).
+    // Clean glass is ~96% transparent straight-on; this keeps it readable.
+    private float glassMinOpacity = 0.12f;
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
@@ -462,15 +465,17 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             });
 
         // Per-material UBO: BaseColorFactor (rgba), EmissiveFactor (rgb +
-        // strength packed into .a), MaterialParams (alphaCutoff, normalScale).
-        // std140 packs three vec4s = 48 bytes.
+        // strength packed into .a), MaterialParams (alphaCutoff, normalScale,
+        // roughness, metallic), MaterialParams2 (x = transmission). std140
+        // packs four vec4s = 64 bytes.
         var materialUbo = new UniformBlockLayout(
-            TotalSize: 48,
+            TotalSize: 64,
             Members: new[]
             {
                 new UniformBlockMember("uBaseColorFactor", 0,  16),
                 new UniformBlockMember("uEmissiveFactor",  16, 16),
                 new UniformBlockMember("uMaterialParams",  32, 16),
+                new UniformBlockMember("uMaterialParams2", 48, 16),
             });
 
         // The skybox shares the per-frame UBO and the per-pass IBL bindings
@@ -836,7 +841,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         var blendPrims = new List<GltfPrimitive>();
         foreach (var prim in model.Primitives)
         {
-            if (prim.Material?.AlphaMode == GltfAlphaMode.Blend)
+            // Blend-routed: explicit BLEND alpha mode, OR a transmissive
+            // material — glass is shaded as Fresnel-reflective + see-through,
+            // which needs the blend pipeline regardless of its declared alpha
+            // mode (Sponza's glass is authored opaque; see EffectiveTransmission).
+            var pm = prim.Material;
+            if (pm?.AlphaMode == GltfAlphaMode.Blend || EffectiveTransmission(pm) > 0f)
             {
                 blendPrims.Add(prim);
             }
@@ -904,6 +914,21 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         }
     }
 
+    // Transmission for a material, with a demo-level fallback. Intel Sponza
+    // authors its glass as an opaque, perfectly-smooth dielectric with NO
+    // KHR_materials_transmission — so it renders near-black (4% head-on
+    // Fresnel) with only grazing reflections. The asset is missing the
+    // metadata, so we tag known glass materials by name and let the generic
+    // Fresnel-glass path in lit.frag take over. (Same spirit as the metallic-
+    // threshold patch: a demo-level conformance fix over an asset quirk, not a
+    // renderer default.) Real assets that ship the extension use it directly.
+    private static float EffectiveTransmission(GltfMaterial? m)
+    {
+        if (m is null) return 0f;
+        if (m.TransmissionFactor > 0f) return m.TransmissionFactor;
+        return m.Name.ToLowerInvariant().Contains("glass") ? 1.0f : 0f;
+    }
+
     // One engine Material per glTF material. BaseColorFactor / EmissiveFactor /
     // MaterialParams (alphaCutoff, normalScale, roughness, metallic) UBO + the
     // five channel textures (defaults when a channel is absent).
@@ -924,6 +949,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         var normalScale = 1.0f;
         var roughness = gm?.RoughnessFactor ?? 0.8f;
         var metallic = gm?.MetallicFactor ?? 0.0f;
+        var transmission = EffectiveTransmission(gm);
 
         return vk.CreateMaterial(litProgram, name: "sponza.material")
             .SetUniform(binding: 0, "uBaseColorFactor", baseColorFactor)
@@ -931,6 +957,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 new Vector4(emissiveFactor.X, emissiveFactor.Y, emissiveFactor.Z, emissiveStrength))
             .SetUniform(binding: 0, "uMaterialParams",
                 new Vector4(alphaCutoff, normalScale, roughness, metallic))
+            .SetUniform(binding: 0, "uMaterialParams2",
+                new Vector4(transmission, 0f, 0f, 0f))
             .SetTexture(binding: 1, albedo)
             .SetTexture(binding: 2, normal)
             .SetTexture(binding: 3, emissive)
@@ -1277,7 +1305,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             new("uCascadeBias",      new Vector4Uniform(
                 new Vector4(cascadeDepthBias[0], cascadeDepthBias[1], cascadeDepthBias[2], 0f))),
             new("uShaderParams",     new Vector4Uniform(
-                new Vector4(metallicThreshold, normalStrength, slopeScale, 0f))),
+                new Vector4(metallicThreshold, normalStrength, slopeScale, glassMinOpacity))),
             new("uFog",              new Vector4Uniform(
                 new Vector4(frame.Width, frame.Height, fogFar, fogEnabled ? 1f : 0f))),
         };
@@ -1495,6 +1523,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         {
             metallicThreshold = debug.Controls.Float("Metallic threshold", metallicThreshold, 0f, 1f);
             normalStrength    = debug.Controls.Float("Normal-map strength", normalStrength, 0f, 2f);
+            glassMinOpacity   = debug.Controls.Float("Glass opacity", glassMinOpacity, 0f, 0.6f);
         }
         using (debug.Scope("Render"))
         {

@@ -45,7 +45,13 @@ public sealed record GltfMaterial(
     // Whether to draw both faces. Foliage, curtains, and decals typically need
     // this; back-face culling stays the default everywhere else. The renderer
     // picks a no-cull pipeline variant for materials with this set.
-    bool DoubleSided);
+    bool DoubleSided,
+    // KHR_materials_transmission: fraction of light transmitted through the
+    // surface (0 = opaque, 1 = fully transmissive, e.g. clear glass). The
+    // renderer routes transmission>0 materials through the blend pipeline and
+    // shades them as Fresnel glass. Default 0 (no extension). Appended last so
+    // existing positional constructors keep compiling.
+    float TransmissionFactor = 0f);
 
 public enum GltfAlphaMode
 {

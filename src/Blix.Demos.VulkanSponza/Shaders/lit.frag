@@ -55,6 +55,7 @@ layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
     vec4 uEmissiveFactor;
     vec4 uMaterialParams;  // x=alphaCutoff, y=normalScale, z=roughness, w=metallic
+    vec4 uMaterialParams2; // x=transmission (KHR_materials_transmission)
 } mat;
 
 layout(set = 2, binding = 1) uniform sampler2D uAlbedo;
@@ -204,6 +205,30 @@ void main() {
     vec3 V = normalize(frame.uCameraPos - vWorldPos);
     float NdotV = max(dot(N, V), 0.0);
     vec3 R = reflect(-V, N);
+
+    // --- Transmissive glass (KHR_materials_transmission) ----------------
+    // Shade as Fresnel glass: the reflected fraction (dielectric Fresnel,
+    // F0 = 0.04, ramping to 1 at grazing) becomes the blend opacity, so the
+    // environment reflection composites over the scene behind:
+    //     result = envReflection * F + background * (1 - F)
+    // The src colour is the un-weighted environment reflection; the blend
+    // multiplies it by alpha = F, giving the Fresnel split. Transmission opens
+    // the head-on view to the scene behind instead of reading near-black.
+    // (No refraction/absorption tint yet — that's the KHR transmission pass.)
+    float transmission = mat.uMaterialParams2.x;
+    if (transmission > 0.0) {
+        float lod = roughness * (frame.uEnvMipCount - 1.0);
+        vec3 envRefl = textureLod(uPrefilteredEnv, R, lod).rgb * frame.uIblIntensity;
+        float fresnel = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
+        float glassAlpha = mix(albedo4.a, fresnel, transmission);
+        // Physically clean glass is ~96% transparent head-on, which reads as
+        // "no glass at all". Lift it by a tunable floor (uShaderParams.w) so
+        // the panes keep a faint reflective sheen straight-on. Grazing angles
+        // already saturate to opaque, so this only affects the head-on view.
+        glassAlpha = max(glassAlpha, frame.uShaderParams.w);
+        outColor = vec4(envRefl, glassAlpha);
+        return;
+    }
 
     // --- Direct sun (Lambert) + cascaded shadow -------------------------
     vec3 L = -normalize(frame.uSunDirection);
