@@ -333,11 +333,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // sampled specular + cosine irradiance + split-sum BRDF LUT, RGBA16F).
         // Falls back to the procedural analytic-sky bake when no probe is
         // present (vanilla checkout that hasn't run the cook step).
-        // Prefer the rogland overcast probe (sunless, bright daylight fill that
-        // reaches the atrium); the directional sun stays ours (the probe carries
-        // no usable sun, so we don't align to it). Falls back to the old sky
-        // probe, then to the procedural bake.
-        string[] probeCandidates = { "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe" };
+        // Probe preference: autumn_field (has a sun → high light/dark contrast
+        // for punchy shadows; we align our directional sun to its detected sun)
+        // → rogland overcast (sunless ambient, our own sun) → old sky → procedural.
+        // The sun-alignment is automatic: HdrSunFinder returns null for skies
+        // with no clear sun, so we only align when the probe actually has one.
+        string[] probeCandidates = { "autumn_field_4k.blixprobe", "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe" };
         var probePath = probeCandidates
             .Select(p => Path.Combine(assetsRoot, "textures", p))
             .FirstOrDefault(File.Exists);
@@ -351,6 +352,16 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 brdfLutTexture = baked.BrdfLut;
                 iblPrefilterMips = baked.Probe.PrefilteredSpecularMipCount;
                 Console.WriteLine($"[VulkanSponza] IBL: cooked probe {Path.GetFileName(probePath)} ({iblPrefilterMips} GGX prefilter mips).");
+                // Align the directional sun (key light + shadow caster) to the
+                // probe's detected sun so cast shadows match the visible sky sun.
+                // FROM-sun-into-scene convention, matching sunDirection.
+                if (baked.Probe.SunDirectionFromEquirect is { } hdrSun)
+                {
+                    sunDirection = Vector3.Normalize(hdrSun);
+                    sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1f, 1f));
+                    sunYaw = MathF.Atan2(sunDirection.X, -sunDirection.Z);
+                    Console.WriteLine($"[VulkanSponza]   sun aligned to probe: {sunDirection}");
+                }
             }
             catch (Exception ex)
             {

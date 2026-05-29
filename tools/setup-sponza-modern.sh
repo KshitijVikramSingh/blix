@@ -142,13 +142,14 @@ fi
 
 # Cook the HDR sky into a .blixprobe (real GGX-prefiltered specular +
 # irradiance + BRDF LUT) so VulkanSponza gets proper IBL instead of the
-# procedural-sky fallback. Prefer the rogland overcast map (sunless, bright
-# daylight that fills the atrium — the directional sun is supplied at runtime);
-# fall back to sky_hdr. Best-effort: skipped if dotnet/HDR is missing, and the
-# demo falls back to the procedural bake when no probe is present.
-# (rogland_overcast_4k.hdr is from Poly Haven; drop it in $DEST/textures.)
+# procedural-sky fallback. Prefer autumn_field (has a sun → high contrast for
+# crisp shadows; the demo aligns its directional sun to it) → rogland overcast
+# (sunless ambient) → sky_hdr. Best-effort: skipped if dotnet/HDR is missing,
+# and the demo falls back to the procedural bake when no probe is present.
+# (autumn_field_4k.hdr / rogland_overcast_4k.hdr are from Poly Haven; drop into
+# $DEST/textures.)
 HDR=""
-for cand in rogland_overcast_4k sky_hdr; do
+for cand in autumn_field_4k rogland_overcast_4k sky_hdr; do
     if [[ -f "$DEST/textures/$cand.hdr" ]]; then HDR="$DEST/textures/$cand.hdr"; break; fi
 done
 if [[ -n "$HDR" ]] && command -v dotnet >/dev/null 2>&1; then
