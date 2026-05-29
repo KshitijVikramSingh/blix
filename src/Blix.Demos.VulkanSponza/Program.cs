@@ -94,6 +94,16 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private readonly GraphResourceHandle[] cascadeHandles = new GraphResourceHandle[CascadeCount];
     private readonly PassHandle[] cascadePassHandles = new PassHandle[CascadeCount];
     private readonly Matrix4x4[] cascadeViewProj = new Matrix4x4[CascadeCount];
+    // Shadow-map caching: the last VP a cascade's depth map was rendered with.
+    // A cascade's texel-snapped VP is bit-identical frame-to-frame while the
+    // camera + sun + splits hold (and for sub-texel camera moves, thanks to the
+    // snap), so we skip re-rendering an unchanged cascade and let the lit pass
+    // sample the persisted depth target. Drops the full ~11.5M-tri redraw per
+    // static cascade — the dominant GPU cost when the view is still.
+    private readonly Matrix4x4[] cachedCascadeViewProj = new Matrix4x4[CascadeCount];
+    // Whether each cascade re-rendered this frame (vs. served from cache) —
+    // surfaced in the overlay so the caching is visible.
+    private readonly bool[] cascadeRendered = new bool[CascadeCount];
     // Per-cascade base depth bias in NDC units, derived each frame from that
     // cascade's world-space texel size ÷ ortho depth range (≈ BiasTexels
     // shadow texels of slope-independent offset). The fragment shader adds a
@@ -1050,7 +1060,26 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         for (var c = 0; c < CascadeCount; c++)
         {
             var ci = c;
-            var vp = cascadeViewProj[c];
+            // Shadows off: skip the pass (the lit shader early-outs without
+            // sampling) and invalidate the cache so re-enabling forces a redraw.
+            if (!shadowsEnabled)
+            {
+                cachedCascadeViewProj[ci] = default;
+                cascadeRendered[ci] = false;
+                continue;
+            }
+            var vp = cascadeViewProj[ci];
+            // Cached: this cascade's VP is unchanged since it was last rendered,
+            // so its depth target still holds the right result — skip the pass
+            // entirely (no begin-render-pass → contents persist in ShaderReadOnly,
+            // which is exactly what the lit pass samples).
+            if (vp == cachedCascadeViewProj[ci])
+            {
+                cascadeRendered[ci] = false;
+                continue;
+            }
+            cachedCascadeViewProj[ci] = vp;
+            cascadeRendered[ci] = true;
             // Frustum.FromViewProjection expects a column-vector clip matrix
             // (clip = M·world); our cascade VP is the System.Numerics
             // row-vector form (clip = Vector4.Transform(world, M)), so transpose
@@ -1198,6 +1227,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // Per-cascade caster counts after frustum cull (one frame stale — set
         // during the previous OnRender's graph.Execute).
         debug.Values.Value("cascade-casters", $"{cascadeDrawCounts[0]}/{cascadeDrawCounts[1]}/{cascadeDrawCounts[2]} of {opaqueDrawables.Count}");
+        // Shadow-map cache hits: R = re-rendered this frame, · = served cached.
+        debug.Values.Value("cascade-cache", $"{(cascadeRendered[0] ? 'R' : '·')}{(cascadeRendered[1] ? 'R' : '·')}{(cascadeRendered[2] ? 'R' : '·')}");
         debug.Values.Value("blend-draws", blendDrawables.Count);
         debug.Values.Value("cam-pos", cameraPosition);
 
