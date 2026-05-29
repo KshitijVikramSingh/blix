@@ -656,7 +656,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         var computeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "compute_test.comp.spv"));
         computeTestProgram = vk.CreateComputeShaderProgramFromSpv(computeSpv, computeTestInterface, "compute_test");
         computeTestPipeline = vk.CreateComputePipeline(computeTestProgram, "compute_test");
-        computeTestImage = vk.CreateStorageTexture2D(256, 256, TextureFormat.Rgba16F, SamplerDescription.LinearClamp, "sponza.compute_test");
+        // 3D storage texture (precursor to the froxel grid): compute writes it.
+        computeTestImage = vk.CreateStorageTexture3D(64, 64, 32, TextureFormat.Rgba16F, SamplerDescription.LinearClamp, "sponza.compute_test");
 
         // Build the per-frame-constant buffers once (graph compiled + all
         // textures created by now). Reused every frame in OnRender.
@@ -1329,11 +1330,11 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
         graph.Execute(commandList);
 
-        // Phase-1 compute smoke test: dispatch the gradient writer over the
-        // 256×256 storage image (8×8 work groups). Exercises the compute path;
-        // result isn't sampled yet.
+        // Compute smoke test: dispatch the gradient writer over the 64×64×32 3D
+        // storage texture (4×4×4 work groups). Exercises the 3D compute path;
+        // result isn't sampled yet (froxel fog will be the first consumer).
         commandList.ComputePass("compute-test", new DispatchCommand(
-            computeTestPipeline, 256 / 8, 256 / 8, 1,
+            computeTestPipeline, 64 / 4, 64 / 4, 32 / 4,
             Array.Empty<ShaderUniform>(),
             new[] { new ShaderTextureBinding("uOut", computeTestImage, Slot: 0) }));
 

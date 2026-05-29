@@ -1,18 +1,18 @@
 #version 450
 
-// Phase-1 compute smoke test: write a UV gradient into a storage image. Proves
-// the end-to-end compute path (program + pipeline + dispatch + storage-image
-// descriptor in GENERAL layout + barriers). Nothing samples the result yet —
-// the froxel-fog grid will be the first real consumer.
+// Phase-2 compute smoke test: write a UVW gradient into a 3D storage image.
+// Proves the 3D compute path (CreateStorageTexture3D + Type3D storage
+// descriptor in GENERAL + 3D imageStore + barriers) — the precursor to the
+// froxel-fog grid. Nothing samples the result yet.
 
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
-layout(set = 0, binding = 0, rgba16f) uniform writeonly image2D uOut;
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image3D uOut;
 
 void main() {
-    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(uOut);
-    if (p.x >= size.x || p.y >= size.y) return;
-    vec2 uv = vec2(p) / vec2(size);
-    imageStore(uOut, p, vec4(uv, 0.0, 1.0));
+    ivec3 p = ivec3(gl_GlobalInvocationID);
+    ivec3 size = imageSize(uOut);
+    if (p.x >= size.x || p.y >= size.y || p.z >= size.z) return;
+    vec3 uvw = vec3(p) / vec3(size);
+    imageStore(uOut, p, vec4(uvw, 1.0));
 }

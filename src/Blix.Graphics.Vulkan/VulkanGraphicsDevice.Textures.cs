@@ -294,6 +294,120 @@ public sealed partial class VulkanGraphicsDevice
         return new TextureHandle(id);
     }
 
+    // 3D storage image (compute-writable + sampleable) — e.g. a froxel/volume
+    // grid. No initial data; the compute dispatch's pre-barrier moves it from
+    // Undefined to General each frame. Usage STORAGE|SAMPLED, single mip/layer
+    // (depth lives in the extent, not array layers — barriers use layerCount 1).
+    public unsafe TextureHandle CreateStorageTexture3D(
+        int width, int height, int depth, TextureFormat format, SamplerDescription samplerDesc, string? name = null) =>
+        CreateImage3D(width, height, depth, format, samplerDesc,
+            ImageUsageFlags.StorageBit | ImageUsageFlags.SampledBit,
+            uploadData: default, name ?? "storage3d");
+
+    // Sampled 3D texture with initial data (RGBA-per-texel in the format's
+    // layout, z-major then row-major). Fulfils the IGraphicsDevice stub.
+    public unsafe TextureHandle CreateTexture3D(
+        int width, int height, int depth, TextureFormat format,
+        SamplerDescription sampler, ReadOnlySpan<byte> pixels, string? name = null)
+    {
+        var expected = format.MipByteCount(width, height) * depth;
+        if (pixels.Length != expected)
+        {
+            throw new ArgumentException(
+                $"Texture3D '{name}' expected {expected} bytes ({width}x{height}x{depth}), got {pixels.Length}.", nameof(pixels));
+        }
+        return CreateImage3D(width, height, depth, format, sampler,
+            ImageUsageFlags.SampledBit | ImageUsageFlags.TransferDstBit, pixels, name ?? "texture3d");
+    }
+
+    // Shared 3D image creation. When uploadData is non-empty, stages + copies
+    // it and leaves the image in ShaderReadOnly; otherwise the image is left
+    // in Undefined (a storage target the compute pre-barrier transitions).
+    private unsafe TextureHandle CreateImage3D(
+        int width, int height, int depth, TextureFormat format, SamplerDescription samplerDesc,
+        ImageUsageFlags usage, ReadOnlySpan<byte> uploadData, string name)
+    {
+        var vkFormat = MapTextureFormat(format);
+        var imageCi = new ImageCreateInfo
+        {
+            SType = StructureType.ImageCreateInfo,
+            ImageType = ImageType.Type3D,
+            Format = vkFormat,
+            Extent = new Extent3D((uint)width, (uint)height, (uint)depth),
+            MipLevels = 1,
+            ArrayLayers = 1,
+            Samples = SampleCountFlags.Count1Bit,
+            Tiling = ImageTiling.Optimal,
+            Usage = usage,
+            SharingMode = SharingMode.Exclusive,
+            InitialLayout = ImageLayout.Undefined,
+        };
+        Image image;
+        ThrowIfNotSuccess(Vk.CreateImage(Device, in imageCi, null, &image), $"vkCreateImage({name}.3d)");
+
+        Vk.GetImageMemoryRequirements(Device, image, out var memReq);
+        var allocCi = new MemoryAllocateInfo
+        {
+            SType = StructureType.MemoryAllocateInfo,
+            AllocationSize = memReq.Size,
+            MemoryTypeIndex = FindMemoryTypeIndex(memReq.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
+        };
+        DeviceMemory memory;
+        ThrowIfNotSuccess(Vk.AllocateMemory(Device, in allocCi, null, &memory), $"vkAllocateMemory({name}.3d)");
+        ThrowIfNotSuccess(Vk.BindImageMemory(Device, image, memory, 0), $"vkBindImageMemory({name}.3d)");
+
+        if (!uploadData.IsEmpty)
+        {
+            var staging = CreateHostVisibleBuffer(uploadData, BufferUsageFlags.TransferSrcBit, $"{name}.staging");
+            var cmd = BeginSingleTimeCommands();
+            TransitionImageLayout(cmd, image, 1, ImageLayout.Undefined, ImageLayout.TransferDstOptimal);
+            var region = new BufferImageCopy
+            {
+                BufferOffset = 0,
+                ImageSubresource = new ImageSubresourceLayers
+                {
+                    AspectMask = ImageAspectFlags.ColorBit,
+                    MipLevel = 0,
+                    BaseArrayLayer = 0,
+                    LayerCount = 1,
+                },
+                ImageOffset = new Offset3D(0, 0, 0),
+                ImageExtent = new Extent3D((uint)width, (uint)height, (uint)depth),
+            };
+            Vk.CmdCopyBufferToImage(cmd, staging.Buffer, image, ImageLayout.TransferDstOptimal, 1, in region);
+            TransitionImageLayout(cmd, image, 1, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal);
+            EndSingleTimeCommands(cmd);
+            DestroyVkBufferEntry(staging);
+        }
+
+        var viewCi = new ImageViewCreateInfo
+        {
+            SType = StructureType.ImageViewCreateInfo,
+            Image = image,
+            ViewType = ImageViewType.Type3D,
+            Format = vkFormat,
+            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1),
+        };
+        ImageView view;
+        ThrowIfNotSuccess(Vk.CreateImageView(Device, in viewCi, null, &view), $"vkCreateImageView({name}.3d)");
+
+        var entry = new VkTextureEntry
+        {
+            Image = image,
+            Memory = memory,
+            View = view,
+            Sampler = GetOrCreateSampler(samplerDesc),
+            Width = width,
+            Height = height,
+            MipCount = 1,
+            Format = vkFormat,
+            Name = name,
+        };
+        var id = nextResourceId++;
+        textureTable[id] = entry;
+        return new TextureHandle(id);
+    }
+
     public void DestroyTexture(TextureHandle handle)
     {
         if (!textureTable.Remove(handle.Id, out var e)) return;
