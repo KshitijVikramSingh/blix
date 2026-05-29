@@ -984,6 +984,27 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("L.13 cube-face writes + whole-cube read across passes compile", !threw);
 }
 
+{
+    // L.14 — Dispatch contract: recording a dispatch against a graphics-pass
+    // handle is rejected; against a compute-pass handle it's accepted. Pure
+    // topology check, so no live device is needed.
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    var grid = graph.ColorTarget("grid", TextureFormat.Rgba16F, new FixedGraphSize(64, 64));
+    var gfx = graph.GraphicsPass("draw").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader()).Handle;
+    var comp = graph.ComputePass("cs").Write(grid).Shader(MinimalShader()).Handle;
+    graph.Compile();
+    var dispatch = new DispatchCommand(
+        default, 1, 1, 1, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>());
+    InvalidOperationException? caught = null;
+    try { graph.Dispatch(gfx, dispatch); } catch (InvalidOperationException e) { caught = e; }
+    t.ExpectTrue("L.14 Dispatch on a graphics-pass handle rejected",
+        caught is not null && caught.Message.Contains("not a ComputePass"));
+    var threw = false;
+    try { graph.Dispatch(comp, dispatch); } catch { threw = true; }
+    t.ExpectTrue("L.14 Dispatch on a compute-pass handle accepted", !threw);
+}
+
 // ============================================================================
 // Section M — Backend-skip contract for test-mode graphs (VB.iii).
 // ============================================================================
