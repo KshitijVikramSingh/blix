@@ -76,18 +76,18 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // transmittance (shadow-aware, sampling the cascade maps), ordered after
     // the shadow passes and before the lit pass, which composites it per
     // fragment. The first real consumer of the compute layer + 3D textures.
-    private const int FroxelGridX = 160;
-    private const int FroxelGridY = 90;
-    private const int FroxelGridZ = 64;
+    private const int FroxelGridX = 128;
+    private const int FroxelGridY = 72;
+    private const int FroxelGridZ = 48;
     private ShaderProgramHandle froxelProgram;
     private PipelineHandle froxelPipeline;
     private TextureHandle froxelGridTexture;
     private PassHandle froxelPassHandle;
-    private bool fogEnabled = true;
-    private float fogDensity = 0.06f;   // extinction scale
-    private float fogScatter = 0.9f;    // scattering albedo
-    private float fogPhaseG = 0.6f;     // Henyey-Greenstein anisotropy
-    private float fogAmbient = 0.02f;   // ambient in-scatter floor
+    private bool fogEnabled = false;    // demo toggle (compute cost); off by default
+    private float fogDensity = 0.018f;  // extinction scale — subtle haze, not a wash
+    private float fogScatter = 0.6f;    // scattering albedo
+    private float fogPhaseG = 0.6f;     // Henyey-Greenstein anisotropy (forward)
+    private float fogAmbient = 0.005f;  // ambient in-scatter floor
     private float fogFar = 60f;         // grid far distance (metres)
 
     // --- Cascaded sun shadow maps -----------------------------------------
@@ -283,6 +283,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         this.host = host;
         vk = (VulkanGraphicsDevice)graphicsDevice;
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
+
+        // Volumetric fog is off by default (it adds a per-frame compute pass);
+        // launch with --fog to start with it on, or toggle it in the overlay.
+        if (Environment.GetCommandLineArgs().Contains("--fog")) fogEnabled = true;
 
         // Seed sun yaw/pitch from the default direction so the Sun controls
         // start matching the baked look.

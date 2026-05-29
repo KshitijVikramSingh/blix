@@ -92,7 +92,10 @@ void main()
     vec3 farW = farH.xyz / farH.w;
     vec3 rayDir = normalize(farW - camPos);
 
-    float phase = phaseHG(dot(rayDir, sunInto), g);
+    // HG angle is between the light's travel direction and the scattered ray
+    // travelling toward the camera (-rayDir). Forward scatter (g>0) then peaks
+    // when looking toward the sun, giving crepuscular shafts on the right side.
+    float phase = phaseHG(-dot(rayDir, sunInto), g);
     float dt = fogFar / float(numSlices);              // world step length
     float ext = max(density * scatter, 1e-5);          // extinction coeff
 
