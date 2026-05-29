@@ -333,8 +333,15 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // sampled specular + cosine irradiance + split-sum BRDF LUT, RGBA16F).
         // Falls back to the procedural analytic-sky bake when no probe is
         // present (vanilla checkout that hasn't run the cook step).
-        var probePath = Path.Combine(assetsRoot, "textures", "sky_hdr.blixprobe");
-        if (File.Exists(probePath))
+        // Prefer the rogland overcast probe (sunless, bright daylight fill that
+        // reaches the atrium); the directional sun stays ours (the probe carries
+        // no usable sun, so we don't align to it). Falls back to the old sky
+        // probe, then to the procedural bake.
+        string[] probeCandidates = { "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe" };
+        var probePath = probeCandidates
+            .Select(p => Path.Combine(assetsRoot, "textures", p))
+            .FirstOrDefault(File.Exists);
+        if (probePath is not null)
         {
             try
             {

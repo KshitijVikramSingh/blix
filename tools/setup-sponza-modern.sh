@@ -142,15 +142,22 @@ fi
 
 # Cook the HDR sky into a .blixprobe (real GGX-prefiltered specular +
 # irradiance + BRDF LUT) so VulkanSponza gets proper IBL instead of the
-# procedural-sky fallback. Best-effort: skipped if dotnet/HDR is missing, and
-# the demo falls back to the procedural bake when the probe isn't present.
-HDR="$DEST/textures/sky_hdr.hdr"
-if [[ -f "$HDR" ]] && command -v dotnet >/dev/null 2>&1; then
-    echo "Cooking IBL probe from sky_hdr.hdr ..."
+# procedural-sky fallback. Prefer the rogland overcast map (sunless, bright
+# daylight that fills the atrium — the directional sun is supplied at runtime);
+# fall back to sky_hdr. Best-effort: skipped if dotnet/HDR is missing, and the
+# demo falls back to the procedural bake when no probe is present.
+# (rogland_overcast_4k.hdr is from Poly Haven; drop it in $DEST/textures.)
+HDR=""
+for cand in rogland_overcast_4k sky_hdr; do
+    if [[ -f "$DEST/textures/$cand.hdr" ]]; then HDR="$DEST/textures/$cand.hdr"; break; fi
+done
+if [[ -n "$HDR" ]] && command -v dotnet >/dev/null 2>&1; then
+    echo "Cooking IBL probe from $(basename "$HDR") ..."
     COOK="$REPO_ROOT/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj"
     if dotnet build "$COOK" -c Debug --nologo -v:q >/dev/null 2>&1; then
         COOK_DLL="$REPO_ROOT/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll"
-        dotnet "$COOK_DLL" probe "$HDR" && echo "  cooked: sky_hdr.blixprobe" \
+        dotnet "$COOK_DLL" probe "$HDR" --env-face=512 --prefilter-base=256 --prefilter-mips=5 \
+            && echo "  cooked: $(basename "${HDR%.hdr}.blixprobe")" \
             || echo "  (probe cook failed — demo will use procedural IBL)"
     else
         echo "  (cook tool build failed — demo will use procedural IBL)"
