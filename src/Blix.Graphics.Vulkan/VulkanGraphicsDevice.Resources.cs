@@ -60,6 +60,9 @@ public sealed partial class VulkanGraphicsDevice
         public PipelineLayout Layout;
         public string Name = string.Empty;
         public ShaderProgramHandle ShaderProgram;
+        // Bind point this pipeline was created for. Guards against binding a
+        // compute pipeline for a draw or a graphics pipeline for a dispatch.
+        public bool IsCompute;
     }
 
     // --- Buffer creation ---------------------------------------------------
@@ -480,6 +483,7 @@ public sealed partial class VulkanGraphicsDevice
             Layout = layout,
             Name = name ?? prog.Name,
             ShaderProgram = program,
+            IsCompute = true,
         };
         var id = nextResourceId++;
         pipelineTable[id] = entry;

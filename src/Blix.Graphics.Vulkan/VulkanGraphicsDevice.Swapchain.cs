@@ -654,6 +654,11 @@ public sealed partial class VulkanGraphicsDevice
                 {
                     TranslateDrawIndexed(f.CommandBuffer, d, currentFrame);
                 }
+                else if (renderCmd is DispatchCommand)
+                {
+                    throw new InvalidOperationException(
+                        $"Graphics pass '{pass.Name}' contains a DispatchCommand. Dispatches belong in a compute pass (RenderCommandList.ComputePass / RenderGraph.Dispatch).");
+                }
             }
 
             if (canTimePass)
@@ -860,6 +865,11 @@ public sealed partial class VulkanGraphicsDevice
     private unsafe void TranslateDrawIndexed(CommandBuffer cmd, DrawIndexedCommand d, int frameSlot)
     {
         var pipe = GetPipeline(d.Pipeline);
+        if (pipe.IsCompute)
+        {
+            throw new InvalidOperationException(
+                $"DrawIndexed bound a compute pipeline '{pipe.Name}'. Compute pipelines can only be dispatched (RenderCommandList.ComputePass / RenderGraph.Dispatch).");
+        }
         var vb = GetVertexBuffer(d.VertexBuffer);
         var ib = GetIndexBuffer(d.IndexBuffer);
         var prog = shaderProgramTable[pipe.ShaderProgram.Id];
@@ -956,8 +966,17 @@ public sealed partial class VulkanGraphicsDevice
     {
         foreach (var rc in pass.Commands)
         {
-            if (rc is not DispatchCommand d) continue;
+            if (rc is not DispatchCommand d)
+            {
+                throw new InvalidOperationException(
+                    $"Compute pass '{pass.Name}' contains a {rc.GetType().Name}; compute passes may only contain DispatchCommands.");
+            }
             var pipe = GetPipeline(d.Pipeline);
+            if (!pipe.IsCompute)
+            {
+                throw new InvalidOperationException(
+                    $"Dispatch in compute pass '{pass.Name}' bound a graphics pipeline '{pipe.Name}'. Use a compute pipeline (CreateComputePipeline).");
+            }
             var prog = shaderProgramTable[pipe.ShaderProgram.Id];
 
             for (var i = 0; i < d.Textures.Count; i++)

@@ -12,8 +12,16 @@
 //
 // Reconstruction uses the camera's inverse view-projection (same matrix the
 // scene renders with), so the Vulkan clip-space Y flip is handled for free and
-// the grid aligns with gl_FragCoord in the lit shader. Slices are linear in
-// world distance along each pixel ray.
+// the grid aligns with gl_FragCoord in the lit shader.
+//
+// v1 simplifications (intentional — prove the pipeline first):
+//  - Slices are LINEAR in world distance. Logarithmic/exponential depth
+//    distribution gives better near-camera quality per slice; revisit once
+//    the pipeline is proven.
+//  - Shadow lookup is a single cascade texel with a fixed bias (no PCF). If
+//    the shafts shimmer or look harsh, widen this to a small PCF kernel.
+//  - Grid resolution is fixed; it should become a renderer quality preset
+//    (quarter/half/full) since the z-march cost scales with it.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 

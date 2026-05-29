@@ -76,6 +76,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // transmittance (shadow-aware, sampling the cascade maps), ordered after
     // the shadow passes and before the lit pass, which composites it per
     // fragment. The first real consumer of the compute layer + 3D textures.
+    // Grid resolution. Each (x,y) thread marches all Z slices sampling the
+    // cascades, so cost scales with X*Y*Z — this should become a renderer
+    // quality preset (quarter/half/full) rather than a fixed size.
     private const int FroxelGridX = 128;
     private const int FroxelGridY = 72;
     private const int FroxelGridZ = 48;
@@ -84,6 +87,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private TextureHandle froxelGridTexture;
     private PassHandle froxelPassHandle;
     private bool fogEnabled = false;    // demo toggle (compute cost); off by default
+    private bool fogStress;             // --fog-stress: auto-toggle fog to exercise the on/off barrier transitions under validation
+    private int fogStressFrame;
     private float fogDensity = 0.018f;  // extinction scale — subtle haze, not a wash
     private float fogScatter = 0.6f;    // scattering albedo
     private float fogPhaseG = 0.6f;     // Henyey-Greenstein anisotropy (forward)
@@ -286,7 +291,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
         // Volumetric fog is off by default (it adds a per-frame compute pass);
         // launch with --fog to start with it on, or toggle it in the overlay.
-        if (Environment.GetCommandLineArgs().Contains("--fog")) fogEnabled = true;
+        var cmdArgs = Environment.GetCommandLineArgs();
+        if (cmdArgs.Contains("--fog")) fogEnabled = true;
+        // --fog-stress flips fog on/off every ~90 frames so a validation run
+        // exercises the compute storage-image layout transitions across the
+        // disabled↔enabled boundary (the highest-risk sync path).
+        if (cmdArgs.Contains("--fog-stress")) { fogStress = true; fogEnabled = true; }
 
         // Seed sun yaw/pitch from the default direction so the Sun controls
         // start matching the baked look.
@@ -1240,6 +1250,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             return;
         }
 
+        // Stress hook: flip fog every 90 frames to exercise the on/off barrier
+        // transitions under validation (no effect without --fog-stress).
+        if (fogStress && (++fogStressFrame % 90 == 0)) fogEnabled = !fogEnabled;
+
         var perFrame = new ShaderUniform[]
         {
             new("uViewProjection",   new Matrix4x4Uniform(viewProj)),
@@ -1350,6 +1364,35 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             });
         }
 
+        // Froxel fog: fill the 3D scattering grid. Recorded here — after the
+        // shadow scopes, before the lit scope — so this code reads in frame
+        // order. (Execution is by graph declaration order regardless: the
+        // froxel ComputePass is declared between the cascades and the lit pass,
+        // so it dispatches after the shadow maps render and before the lit pass
+        // samples the grid.) Skipped when fog is off — and the lit shader gates
+        // on uFog.w, so when disabled the grid is never sampled (its contents
+        // are undefined/stale; "disabled" must mean "never sample").
+        if (fogEnabled)
+        {
+            Matrix4x4.Invert(viewProj, out var invViewProj);
+            var froxelUniforms = new ShaderUniform[]
+            {
+                new("uInvViewProj",   new Matrix4x4Uniform(invViewProj)),
+                new("uCamPos",        new Vector4Uniform(new Vector4(cameraPosition, fogFar))),
+                new("uCamForward",    new Vector4Uniform(new Vector4(cameraForward, fogDensity))),
+                new("uSunDir",        new Vector4Uniform(new Vector4(sunDirection, sunIntensity))),
+                new("uSunColor",      new Vector4Uniform(new Vector4(1f, 1f, 1f, fogScatter))),
+                new("uFogParams",     new Vector4Uniform(new Vector4(fogPhaseG, fogAmbient, 0f, 0f))),
+                new("uCascadeVP",     new Matrix4x4ArrayUniform(cascadeViewProj)),
+                new("uCascadeSplits", new Vector4Uniform(
+                    new Vector4(cascadeSplits[1], cascadeSplits[2], cascadeSplits[3], 0f))),
+            };
+            graph.Dispatch(froxelPassHandle, new DispatchCommand(
+                froxelPipeline,
+                (FroxelGridX + 7) / 8, (FroxelGridY + 7) / 8, 1,
+                froxelUniforms, froxelBindings));
+        }
+
         graph.Pass(litPassHandle, scope =>
         {
             // Opaque + Mask first (depth-write enabled), then Blend
@@ -1389,32 +1432,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                     pushConstants: identityPush);
             }
         }, clearColor: new GraphicsColor(0.05f, 0.07f, 0.10f, 1f));
-
-        // Froxel fog: fill the 3D scattering grid. Recorded as the graph's
-        // compute pass (declared between the cascades and the lit pass), so it
-        // dispatches after the shadow maps render and before the lit pass
-        // samples the grid. Skipped when fog is toggled off (the lit shader
-        // also gates on uFog.w, so the stale grid is simply not composited).
-        if (fogEnabled)
-        {
-            Matrix4x4.Invert(viewProj, out var invViewProj);
-            var froxelUniforms = new ShaderUniform[]
-            {
-                new("uInvViewProj",   new Matrix4x4Uniform(invViewProj)),
-                new("uCamPos",        new Vector4Uniform(new Vector4(cameraPosition, fogFar))),
-                new("uCamForward",    new Vector4Uniform(new Vector4(cameraForward, fogDensity))),
-                new("uSunDir",        new Vector4Uniform(new Vector4(sunDirection, sunIntensity))),
-                new("uSunColor",      new Vector4Uniform(new Vector4(1f, 1f, 1f, fogScatter))),
-                new("uFogParams",     new Vector4Uniform(new Vector4(fogPhaseG, fogAmbient, 0f, 0f))),
-                new("uCascadeVP",     new Matrix4x4ArrayUniform(cascadeViewProj)),
-                new("uCascadeSplits", new Vector4Uniform(
-                    new Vector4(cascadeSplits[1], cascadeSplits[2], cascadeSplits[3], 0f))),
-            };
-            graph.Dispatch(froxelPassHandle, new DispatchCommand(
-                froxelPipeline,
-                (FroxelGridX + 7) / 8, (FroxelGridY + 7) / 8, 1,
-                froxelUniforms, froxelBindings));
-        }
 
         graph.Execute(commandList);
 

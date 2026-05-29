@@ -275,6 +275,11 @@ public sealed partial class RenderGraph
             throw new InvalidOperationException(
                 "RenderGraph.Dispatch called before Compile.");
         }
+        if (!ComputePasses.ContainsKey(handle.Id))
+        {
+            throw new InvalidOperationException(
+                $"RenderGraph.Dispatch targets pass {handle.Id}, which is not a ComputePass. Declare it with graph.ComputePass(...).");
+        }
         recordedDispatches[handle.Id] = dispatch;
     }
 
