@@ -19,6 +19,7 @@
     <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
     <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
+    <ProjectReference Include="..\Blix.Graphics.Images\Blix.Graphics.Images.csproj" />
     <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
     <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
     <ProjectReference Include="..\Blix.Runtime.Silk\Blix.Runtime.Silk.csproj" />

@@ -140,5 +140,22 @@ if [[ -f "$WALK_HDR" ]]; then
     echo "  copied: walkthrough sky_hdr.hdr"
 fi
 
+# Cook the HDR sky into a .blixprobe (real GGX-prefiltered specular +
+# irradiance + BRDF LUT) so VulkanSponza gets proper IBL instead of the
+# procedural-sky fallback. Best-effort: skipped if dotnet/HDR is missing, and
+# the demo falls back to the procedural bake when the probe isn't present.
+HDR="$DEST/textures/sky_hdr.hdr"
+if [[ -f "$HDR" ]] && command -v dotnet >/dev/null 2>&1; then
+    echo "Cooking IBL probe from sky_hdr.hdr ..."
+    COOK="$REPO_ROOT/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj"
+    if dotnet build "$COOK" -c Debug --nologo -v:q >/dev/null 2>&1; then
+        COOK_DLL="$REPO_ROOT/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll"
+        dotnet "$COOK_DLL" probe "$HDR" && echo "  cooked: sky_hdr.blixprobe" \
+            || echo "  (probe cook failed — demo will use procedural IBL)"
+    else
+        echo "  (cook tool build failed — demo will use procedural IBL)"
+    fi
+fi
+
 du -sh "$DEST" 2>/dev/null | awk '{print "Total: " $1}'
 echo "Done."

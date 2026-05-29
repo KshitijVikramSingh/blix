@@ -45,14 +45,7 @@ public sealed partial class VulkanGraphicsDevice
     public TextureHandle CreateTextureCubeDepth(int faceSize, SamplerDescription sampler, string? name = null) =>
         throw new NotImplementedException(NotYet);
 
-    public TextureHandle CreateTextureCubeHdr(int faceSize, ReadOnlySpan<Half> faces, SamplerDescription sampler, string? name = null) =>
-        throw new NotImplementedException(NotYet);
-
-    public TextureHandle CreateTextureCubeHdrMipped(
-        int baseFaceSize,
-        IReadOnlyList<Half[]> mipFaces,
-        SamplerDescription sampler,
-        string? name = null) =>
-        throw new NotImplementedException(NotYet);
-
+    // CreateTextureCubeHdr / CreateTextureCubeHdrMipped are implemented in
+    // VulkanGraphicsDevice.Textures.cs (real RGBA16F cube uploads for cooked
+    // .blixprobe IBL).
 }

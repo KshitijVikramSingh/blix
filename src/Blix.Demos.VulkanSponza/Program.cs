@@ -6,6 +6,7 @@ using Blix.Core;
 using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
+using Blix.Graphics.Images;
 using Blix.Graphics.Vulkan;
 using Blix.Runtime.Silk;
 
@@ -152,6 +153,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private const int EnvMips = 7;            // log2(64) + 1
     private const int IrradianceFaceSize = 16;
     private const int BrdfLutSize = 128;
+    // Mip count of whatever's bound to uPrefilteredEnv — the procedural env
+    // cube (EnvMips) by default, or the cooked probe's GGX-prefilter mip count
+    // when a .blixprobe is loaded. Drives the roughness→LOD mapping in lit.frag.
+    private float iblPrefilterMips = EnvMips;
 
     // Bake-time sun direction (the irradiance + env cubes are baked once
     // with this sun position; live changes to the runtime sun direction
@@ -323,22 +328,34 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearRepeat),
             new byte[] { 255, 255, 255, 255 }, "sponza.default.ao");
 
-        // --- IBL precompute (procedural sky) ----------------------------
-        // CPU-bakes a cube + its mip chain (specular at increasing
-        // roughness), the cosine-weighted diffuse irradiance cube, and the
-        // split-sum BRDF LUT. ~80ms one-shot work at startup; the textures
-        // then live for the session.
-        envCubeTexture = vk.CreateTextureCube(
-            EnvFaceSize, TextureFormat.Rgba8, EnvMips,
-            BuildEnvCubeWithMips(EnvFaceSize, EnvMips),
-            SamplerDescription.LinearClamp, "sponza.ibl.env");
-        irradianceCubeTexture = vk.CreateTextureCube(
-            IrradianceFaceSize, TextureFormat.Rgba8, 1,
-            BuildIrradianceCube(IrradianceFaceSize),
-            SamplerDescription.LinearClamp, "sponza.ibl.irradiance");
-        brdfLutTexture = vk.CreateTexture2D(
-            new TextureDescription(BrdfLutSize, BrdfLutSize, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
-            BuildBrdfLut(BrdfLutSize), "sponza.ibl.brdfLut");
+        // --- IBL: cooked .blixprobe (real GGX prefilter) or procedural ------
+        // Prefer a cooked probe baked from the HDR sky (real GGX importance-
+        // sampled specular + cosine irradiance + split-sum BRDF LUT, RGBA16F).
+        // Falls back to the procedural analytic-sky bake when no probe is
+        // present (vanilla checkout that hasn't run the cook step).
+        var probePath = Path.Combine(assetsRoot, "textures", "sky_hdr.blixprobe");
+        if (File.Exists(probePath))
+        {
+            try
+            {
+                var baked = EnvironmentBaker.UploadCookedProbe(vk, BlixProbeReader.Read(probePath), "sponza.ibl");
+                envCubeTexture = baked.Probe.PrefilteredSpecular;
+                irradianceCubeTexture = baked.Probe.DiffuseIrradiance;
+                brdfLutTexture = baked.BrdfLut;
+                iblPrefilterMips = baked.Probe.PrefilteredSpecularMipCount;
+                Console.WriteLine($"[VulkanSponza] IBL: cooked probe {Path.GetFileName(probePath)} ({iblPrefilterMips} GGX prefilter mips).");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[VulkanSponza] probe load failed ({ex.Message}); using procedural IBL.");
+                BakeProceduralIbl();
+            }
+        }
+        else
+        {
+            Console.WriteLine("[VulkanSponza] IBL: no cooked probe (run tools/setup-sponza-modern.sh / blix-cook probe); using procedural sky.");
+            BakeProceduralIbl();
+        }
 
         // --- Render graph ------------------------------------------------
         graph = new RenderGraph(vk);
@@ -1027,7 +1044,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             new("uAmbientColor",     new Vector3Uniform(ambientColor)),
             new("uIblIntensity",     new FloatUniform(ambientIntensity)),
             new("uCameraPos",        new Vector3Uniform(cameraPosition)),
-            new("uEnvMipCount",      new FloatUniform(EnvMips)),
+            new("uEnvMipCount",      new FloatUniform(iblPrefilterMips)),
             new("uCameraForward",    new Vector3Uniform(cameraForward)),
             new("uShadowStrength",   new FloatUniform(shadowsEnabled ? 1f : 0f)),
             new("uCascadeViewProj",  new Matrix4x4ArrayUniform(cascadeViewProj)),
@@ -1368,6 +1385,25 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     }
 
     public void Dispose() { }
+
+    // Procedural-sky IBL fallback: the analytic-sky env cube (specular
+    // stand-in), cosine irradiance cube, and split-sum BRDF LUT. Used when no
+    // cooked .blixprobe is present. iblPrefilterMips stays EnvMips here.
+    private void BakeProceduralIbl()
+    {
+        envCubeTexture = vk.CreateTextureCube(
+            EnvFaceSize, TextureFormat.Rgba8, EnvMips,
+            BuildEnvCubeWithMips(EnvFaceSize, EnvMips),
+            SamplerDescription.LinearClamp, "sponza.ibl.env");
+        irradianceCubeTexture = vk.CreateTextureCube(
+            IrradianceFaceSize, TextureFormat.Rgba8, 1,
+            BuildIrradianceCube(IrradianceFaceSize),
+            SamplerDescription.LinearClamp, "sponza.ibl.irradiance");
+        brdfLutTexture = vk.CreateTexture2D(
+            new TextureDescription(BrdfLutSize, BrdfLutSize, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
+            BuildBrdfLut(BrdfLutSize), "sponza.ibl.brdfLut");
+        iblPrefilterMips = EnvMips;
+    }
 
     // ===================================================================
     // IBL bake helpers. Pure CPU math; runs once at OnLoad. Adapted from
