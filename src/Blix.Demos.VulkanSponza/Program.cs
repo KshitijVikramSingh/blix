@@ -103,7 +103,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // lit pass samples all three via a Count=3 sampler array at set 1
     // binding 3 and picks one per fragment by view-space depth.
     private const int CascadeCount = 3;
-    private const int ShadowMapSize = 2048;
+    // Per-cascade shadow-map resolution. Near two cascades stay sharp; the far
+    // cascade covers a huge world area where per-texel detail matters least, so
+    // it drops to 512². The lit/froxel PCF reads textureSize() so it adapts to
+    // each map automatically; only texel-snapping + bias need the per-cascade
+    // size (see UpdateCascades).
+    private static readonly int[] ShadowMapSizes = { 1024, 1024, 512 };
     // How far behind the scene slab the light "eye" sits, in world units.
     // Larger keeps the whole atrium height inside each cascade's near/far.
     // Live-tunable from the overlay (Shadows scope).
@@ -422,12 +427,13 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
         depthHandle = graph.DepthTarget("scene-depth", fullSize);
 
-        // One fixed-size depth target per cascade (no 2D-array creation API
-        // yet; the lit pass binds the three as a Count=3 sampler array).
-        var shadowSize = new FixedGraphSize(ShadowMapSize, ShadowMapSize);
+        // One depth target per cascade, sized per ShadowMapSizes (no 2D-array
+        // creation API yet; the lit pass binds the three as a Count=3 sampler
+        // array — mixed sizes are fine, each has its own view).
         for (var c = 0; c < CascadeCount; c++)
         {
-            cascadeHandles[c] = graph.DepthTarget($"sun-cascade{c}", shadowSize);
+            cascadeHandles[c] = graph.DepthTarget($"sun-cascade{c}",
+                new FixedGraphSize(ShadowMapSizes[c], ShadowMapSizes[c]));
         }
 
         // Per-frame UBO carries view-projection + sun + IBL strength + camera
@@ -1227,7 +1233,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             // lands on a stable grid (kills the shimmer under camera motion).
             var eye = center - L * (shadowSunDistance + radius);
             var lightView = Matrix4x4.CreateLookAt(eye, center, sunUp);
-            var texelSize = (2f * radius) / ShadowMapSize;
+            var texelSize = (2f * radius) / ShadowMapSizes[c];
             var centreLight = Vector3.Transform(center, lightView);
             centreLight.X = MathF.Round(centreLight.X / texelSize) * texelSize;
             centreLight.Y = MathF.Round(centreLight.Y / texelSize) * texelSize;
@@ -1533,7 +1539,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             moveSpeed  = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 60f);
         }
 
-        debug.Values.Value("shadow-map", $"{ShadowMapSize}²×{CascadeCount}");
+        debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");
         debug.Values.Value("splits-m", $"{cascadeSplits[1]:0}/{cascadeSplits[2]:0}/{cascadeSplits[3]:0}");
         // Per-cascade caster counts after frustum cull (one frame stale — set
         // during the previous OnRender's graph.Execute).
