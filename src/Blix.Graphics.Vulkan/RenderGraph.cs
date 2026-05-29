@@ -34,6 +34,10 @@ public sealed partial class RenderGraph
     // and cleared at the start of every Execute so any pass not re-declared
     // this frame simply doesn't render.
     private readonly Dictionary<int, (Action<Blix.Graphics.RenderPassBuilder> Scope, Blix.Graphics.GraphicsColor? ClearColor)> recordedScopes = new();
+    // Per-frame compute dispatches keyed by ComputePass handle. Executed in
+    // PassOrder (declaration order) alongside graphics passes, so a compute
+    // pass declared before a graphics pass that samples its output runs first.
+    private readonly Dictionary<int, Blix.Graphics.DispatchCommand> recordedDispatches = new();
 
     public RenderGraph(VulkanGraphicsDevice device)
     {
@@ -259,6 +263,21 @@ public sealed partial class RenderGraph
         recordedScopes[handle.Id] = (scope, clearColor);
     }
 
+    // Record a compute pass's dispatch for this frame. The pipeline must be a
+    // compute pipeline whose program matches the ComputePass's declared Shader
+    // interface. Emitted at Execute time as a RenderCommandList.ComputePass in
+    // declaration order.
+    public void Dispatch(PassHandle handle, Blix.Graphics.DispatchCommand dispatch)
+    {
+        ArgumentNullException.ThrowIfNull(dispatch);
+        if (!IsCompiled)
+        {
+            throw new InvalidOperationException(
+                "RenderGraph.Dispatch called before Compile.");
+        }
+        recordedDispatches[handle.Id] = dispatch;
+    }
+
     public void Execute(Blix.Graphics.RenderCommandList commandList)
     {
         ArgumentNullException.ThrowIfNull(commandList);
@@ -271,9 +290,21 @@ public sealed partial class RenderGraph
 
         foreach (var passId in PassOrder)
         {
+            // Compute pass: emit its recorded dispatch (if any) in order. The
+            // Vulkan backend records it outside a render pass with the storage
+            // barriers; a graphics pass declared after it samples the result.
+            if (ComputePasses.TryGetValue(passId, out var cpass))
+            {
+                if (recordedDispatches.TryGetValue(passId, out var dispatch))
+                {
+                    commandList.ComputePass(cpass.Name, dispatch);
+                }
+                continue;
+            }
+
             if (!recordedScopes.TryGetValue(passId, out var recorded)) continue;
             if (!BackendPasses.TryGetValue(passId, out var bpass)) continue;
-            if (bpass.SurfaceHandle.Id == 0) continue; // compute passes — skip
+            if (bpass.SurfaceHandle.Id == 0) continue; // safety: non-graphics
 
             // ClearColors[]: Clear LoadOp → user override (first slot) or
             // black; Load/DontCare → null.
@@ -302,6 +333,7 @@ public sealed partial class RenderGraph
         }
 
         recordedScopes.Clear();
+        recordedDispatches.Clear();
     }
 
     private void EnsureNotCompiled(string operation)

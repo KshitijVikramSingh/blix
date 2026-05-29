@@ -71,12 +71,24 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private VertexBufferHandle presentDummyVB;
     private IndexBufferHandle presentDummyIB;
 
-    // Phase-1 compute smoke test: a compute pass writes a UV gradient into this
-    // storage image each frame, exercising the dispatch path end-to-end.
-    // (Nothing samples it yet — froxel fog will be the first real consumer.)
-    private ShaderProgramHandle computeTestProgram;
-    private PipelineHandle computeTestPipeline;
-    private TextureHandle computeTestImage;
+    // --- Froxel volumetric fog --------------------------------------------
+    // A compute pass fills a view-aligned 3D grid with sun in-scattering and
+    // transmittance (shadow-aware, sampling the cascade maps), ordered after
+    // the shadow passes and before the lit pass, which composites it per
+    // fragment. The first real consumer of the compute layer + 3D textures.
+    private const int FroxelGridX = 160;
+    private const int FroxelGridY = 90;
+    private const int FroxelGridZ = 64;
+    private ShaderProgramHandle froxelProgram;
+    private PipelineHandle froxelPipeline;
+    private TextureHandle froxelGridTexture;
+    private PassHandle froxelPassHandle;
+    private bool fogEnabled = true;
+    private float fogDensity = 0.06f;   // extinction scale
+    private float fogScatter = 0.9f;    // scattering albedo
+    private float fogPhaseG = 0.6f;     // Henyey-Greenstein anisotropy
+    private float fogAmbient = 0.02f;   // ambient in-scatter floor
+    private float fogFar = 60f;         // grid far distance (metres)
 
     // --- Cascaded sun shadow maps -----------------------------------------
     // Three depth-only cascades fitted to camera-frustum slices, snapped to
@@ -218,6 +230,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // the lit pass's set-1 IBL + shadow-cascade textures (all stable handles).
     private byte[] identityPush = null!;
     private ShaderTextureBinding[] passBindings = null!;
+    private ShaderTextureBinding[] froxelBindings = null!;
     // Mask shadow pushes differ per draw (alpha params), so they can't share one
     // buffer like opaque casters. Pool + reuse the byte[]s across frames instead
     // of allocating per draw: CmdPushConstants copies the bytes at record time,
@@ -409,8 +422,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         //   [336..351] vec4 shadowParams         (.x = visualizeCascades)
         //   [352..367] vec4 cascadeBias          (.xyz = per-cascade base depth bias)
         //   [368..383] vec4 shaderParams         (x=metallicThreshold, y=normalStrength, z=slopeScale)
+        //   [384..399] vec4 fog                  (x=screenW, y=screenH, z=fogFar, w=enabled)
         var frameUbo = new UniformBlockLayout(
-            TotalSize: 384,
+            TotalSize: 400,
             Members: new[]
             {
                 new UniformBlockMember("uViewProjection",   0,   64),
@@ -427,6 +441,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 new UniformBlockMember("uShadowParams",     336, 16),
                 new UniformBlockMember("uCascadeBias",      352, 16),
                 new UniformBlockMember("uShaderParams",     368, 16),
+                new UniformBlockMember("uFog",              384, 16),
             });
 
         // Per-material UBO: BaseColorFactor (rgba), EmissiveFactor (rgb +
@@ -454,8 +469,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 new DescriptorSetSlot(1, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 // Declared for set-1 layout compatibility with the lit pipeline
-                // sharing this pass; the sky shader never samples it.
+                // sharing this pass; the sky shader never samples these.
                 new DescriptorSetSlot(1, 3, ShaderResourceType.SampledImage, ShaderStages.Fragment, Count: CascadeCount),
+                new DescriptorSetSlot(1, 4, ShaderResourceType.SampledImage, ShaderStages.Fragment), // uFroxelGrid (3D)
             },
             PushConstants: Array.Empty<PushConstantRange>());
 
@@ -471,6 +487,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment), // uPrefilteredEnv (cube)
                 new DescriptorSetSlot(1, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment), // uBrdfLut (2D)
                 new DescriptorSetSlot(1, 3, ShaderResourceType.SampledImage, ShaderStages.Fragment, Count: CascadeCount), // uCascadeShadowMaps[3]
+                new DescriptorSetSlot(1, 4, ShaderResourceType.SampledImage, ShaderStages.Fragment), // uFroxelGrid (3D fog grid)
                 // Set 2 — per-material.
                 new DescriptorSetSlot(2, 0, ShaderResourceType.UniformBuffer,
                     ShaderStages.Fragment, BlockLayout: materialUbo),
@@ -514,6 +531,39 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 .Shader(shadowOpaqueInterface, shadowMaskInterface)
                 .Handle;
         }
+
+        // Froxel fog compute pass — fills the 3D scattering grid. Declared
+        // between the cascade passes and the lit pass so it runs after the
+        // shadow maps are rendered (it samples them) and before the lit pass
+        // composites its result. Set 0: UBO (binding 0), the storage grid
+        // (binding 1), the cascade shadow maps (binding 2, Count=3).
+        var froxelUbo = new UniformBlockLayout(
+            TotalSize: 352,
+            Members: new[]
+            {
+                new UniformBlockMember("uInvViewProj",   0,   64),
+                new UniformBlockMember("uCamPos",        64,  16), // xyz pos, w = fogFar
+                new UniformBlockMember("uCamForward",    80,  16), // xyz fwd, w = density
+                new UniformBlockMember("uSunDir",        96,  16), // xyz into-scene, w = intensity
+                new UniformBlockMember("uSunColor",      112, 16), // rgb, w = scatter
+                new UniformBlockMember("uFogParams",     128, 16), // x=phaseG, y=ambient
+                new UniformBlockMember("uCascadeVP",     144, 192),
+                new UniformBlockMember("uCascadeSplits", 336, 16),
+            });
+        var froxelInterface = new ShaderInterface(
+            Slots: new[]
+            {
+                new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer, ShaderStages.Compute, BlockLayout: froxelUbo),
+                new DescriptorSetSlot(0, 1, ShaderResourceType.StorageImage, ShaderStages.Compute),
+                new DescriptorSetSlot(0, 2, ShaderResourceType.SampledImage, ShaderStages.Compute, Count: CascadeCount),
+            },
+            PushConstants: Array.Empty<PushConstantRange>());
+        var froxelPass = graph.ComputePass("froxel-fog").Shader(froxelInterface);
+        for (var c = 0; c < CascadeCount; c++)
+        {
+            froxelPass = froxelPass.Read(cascadeHandles[c]);
+        }
+        froxelPassHandle = froxelPass.Handle;
 
         var litPass = graph.GraphicsPass("lit-scene")
             .Target(hdrHandle, LoadOp.Clear, StoreOp.Store)
@@ -644,20 +694,14 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             VertexPosition3NormalTexture.CreateBufferData(dummyVerts), "present.dummy.vb");
         presentDummyIB = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "present.dummy.ib");
 
-        // --- Phase-1 compute smoke test ----------------------------------
-        // Compute program writing one storage image (set 0 binding 0). Proves
-        // the dispatch path; dispatched each frame in OnRender.
-        var computeTestInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.StorageImage, ShaderStages.Compute),
-            },
-            PushConstants: Array.Empty<PushConstantRange>());
-        var computeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "compute_test.comp.spv"));
-        computeTestProgram = vk.CreateComputeShaderProgramFromSpv(computeSpv, computeTestInterface, "compute_test");
-        computeTestPipeline = vk.CreateComputePipeline(computeTestProgram, "compute_test");
-        // 3D storage texture (precursor to the froxel grid): compute writes it.
-        computeTestImage = vk.CreateStorageTexture3D(64, 64, 32, TextureFormat.Rgba16F, SamplerDescription.LinearClamp, "sponza.compute_test");
+        // --- Froxel fog compute program + grid ---------------------------
+        var froxelSpv = File.ReadAllBytes(Path.Combine(shaderDir, "froxel.comp.spv"));
+        froxelProgram = vk.CreateComputeShaderProgramFromSpv(froxelSpv, froxelInterface, "froxel");
+        froxelPipeline = vk.CreateComputePipeline(froxelProgram, "froxel");
+        // View-aligned 3D scattering grid, sampled trilinearly by the lit pass.
+        froxelGridTexture = vk.CreateStorageTexture3D(
+            FroxelGridX, FroxelGridY, FroxelGridZ,
+            TextureFormat.Rgba16F, SamplerDescription.LinearClamp, "sponza.froxel_grid");
 
         // Build the per-frame-constant buffers once (graph compiled + all
         // textures created by now). Reused every frame in OnRender.
@@ -670,6 +714,18 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0]), Slot: 3, ArrayIndex: 0),
             new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1]), Slot: 3, ArrayIndex: 1),
             new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2]), Slot: 3, ArrayIndex: 2),
+            new ShaderTextureBinding("uFroxelGrid",           froxelGridTexture, Slot: 4),
+        };
+
+        // Froxel compute set-0 image bindings (constant handles): the storage
+        // grid it writes (binding 1) + the cascade shadow maps it samples
+        // (binding 2, Count=3). The UBO (binding 0) is written per frame.
+        froxelBindings = new[]
+        {
+            new ShaderTextureBinding("uGrid", froxelGridTexture, Slot: 1),
+            new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0]), Slot: 2, ArrayIndex: 0),
+            new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1]), Slot: 2, ArrayIndex: 1),
+            new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2]), Slot: 2, ArrayIndex: 2),
         };
 
         // --- Load Sponza geometry ---------------------------------------
@@ -1201,6 +1257,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 new Vector4(cascadeDepthBias[0], cascadeDepthBias[1], cascadeDepthBias[2], 0f))),
             new("uShaderParams",     new Vector4Uniform(
                 new Vector4(metallicThreshold, normalStrength, slopeScale, 0f))),
+            new("uFog",              new Vector4Uniform(
+                new Vector4(frame.Width, frame.Height, fogFar, fogEnabled ? 1f : 0f))),
         };
 
         // Per-pass set-1 bindings (passBindings) and the identity model push
@@ -1328,15 +1386,33 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             }
         }, clearColor: new GraphicsColor(0.05f, 0.07f, 0.10f, 1f));
 
-        graph.Execute(commandList);
+        // Froxel fog: fill the 3D scattering grid. Recorded as the graph's
+        // compute pass (declared between the cascades and the lit pass), so it
+        // dispatches after the shadow maps render and before the lit pass
+        // samples the grid. Skipped when fog is toggled off (the lit shader
+        // also gates on uFog.w, so the stale grid is simply not composited).
+        if (fogEnabled)
+        {
+            Matrix4x4.Invert(viewProj, out var invViewProj);
+            var froxelUniforms = new ShaderUniform[]
+            {
+                new("uInvViewProj",   new Matrix4x4Uniform(invViewProj)),
+                new("uCamPos",        new Vector4Uniform(new Vector4(cameraPosition, fogFar))),
+                new("uCamForward",    new Vector4Uniform(new Vector4(cameraForward, fogDensity))),
+                new("uSunDir",        new Vector4Uniform(new Vector4(sunDirection, sunIntensity))),
+                new("uSunColor",      new Vector4Uniform(new Vector4(1f, 1f, 1f, fogScatter))),
+                new("uFogParams",     new Vector4Uniform(new Vector4(fogPhaseG, fogAmbient, 0f, 0f))),
+                new("uCascadeVP",     new Matrix4x4ArrayUniform(cascadeViewProj)),
+                new("uCascadeSplits", new Vector4Uniform(
+                    new Vector4(cascadeSplits[1], cascadeSplits[2], cascadeSplits[3], 0f))),
+            };
+            graph.Dispatch(froxelPassHandle, new DispatchCommand(
+                froxelPipeline,
+                (FroxelGridX + 7) / 8, (FroxelGridY + 7) / 8, 1,
+                froxelUniforms, froxelBindings));
+        }
 
-        // Compute smoke test: dispatch the gradient writer over the 64×64×32 3D
-        // storage texture (4×4×4 work groups). Exercises the 3D compute path;
-        // result isn't sampled yet (froxel fog will be the first consumer).
-        commandList.ComputePass("compute-test", new DispatchCommand(
-            computeTestPipeline, 64 / 4, 64 / 4, 32 / 4,
-            Array.Empty<ShaderUniform>(),
-            new[] { new ShaderTextureBinding("uOut", computeTestImage, Slot: 0) }));
+        graph.Execute(commandList);
 
         RecordPresentPass(commandList);
     }
@@ -1381,6 +1457,15 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             cascadeSplits[1] = debug.Controls.Float("Far: cascade 0", cascadeSplits[1], 1f, 20f);
             cascadeSplits[2] = debug.Controls.Float("Far: cascade 1", cascadeSplits[2], cascadeSplits[1], 50f);
             cascadeSplits[3] = debug.Controls.Float("Far: cascade 2", cascadeSplits[3], cascadeSplits[2], 150f);
+        }
+        using (debug.Scope("Fog"))
+        {
+            fogEnabled = debug.Controls.Toggle("Volumetric fog", fogEnabled);
+            fogDensity = debug.Controls.Float("Density", fogDensity, 0f, 0.5f);
+            fogScatter = debug.Controls.Float("Scatter albedo", fogScatter, 0f, 1f);
+            fogPhaseG  = debug.Controls.Float("Phase g", fogPhaseG, -0.9f, 0.9f);
+            fogAmbient = debug.Controls.Float("Ambient scatter", fogAmbient, 0f, 0.2f);
+            fogFar     = debug.Controls.Float("Far distance", fogFar, 10f, 150f);
         }
         using (debug.Scope("Material"))
         {

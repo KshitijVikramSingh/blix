@@ -557,7 +557,10 @@ public sealed partial class RenderGraph : IDisposable
         {
             SrcSubpass = Vk.SubpassExternal,
             DstSubpass = 0,
-            SrcStageMask = PipelineStageFlags.FragmentShaderBit,
+            // Compute included: a prior compute pass may have sampled this
+            // target (e.g. froxel fog reading shadow maps) and must finish
+            // before we overwrite it.
+            SrcStageMask = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit,
             SrcAccessMask = AccessFlags.ShaderReadBit,
             DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.EarlyFragmentTestsBit,
             DstAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit,
@@ -569,7 +572,9 @@ public sealed partial class RenderGraph : IDisposable
             DstSubpass = Vk.SubpassExternal,
             SrcStageMask = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.LateFragmentTestsBit,
             SrcAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit,
-            DstStageMask = PipelineStageFlags.FragmentShaderBit,
+            // Compute included so a downstream compute pass (froxel fog) can
+            // sample this pass's colour/depth output without a manual barrier.
+            DstStageMask = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit,
             DstAccessMask = AccessFlags.ShaderReadBit,
             DependencyFlags = DependencyFlags.ByRegionBit,
         };

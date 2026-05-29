@@ -1,0 +1,120 @@
+#version 450
+
+// Froxel volumetric fog — single fused scatter+integrate pass.
+//
+// The grid is a view-aligned 3D texture: (x,y) = screen tiles, z = distance
+// slices from the camera out to uCamPos.w (fog far). One thread owns a screen
+// column (x,y) and marches z front-to-back, accumulating sun in-scattering
+// (shadow-aware, via the cascade maps) and Beer-Lambert transmittance. Each
+// slice stores the *integrated* result up to that distance, so the lit pass
+// samples one trilinear texel per fragment:
+//     litColor = litColor * fog.a + fog.rgb
+//
+// Reconstruction uses the camera's inverse view-projection (same matrix the
+// scene renders with), so the Vulkan clip-space Y flip is handled for free and
+// the grid aligns with gl_FragCoord in the lit shader. Slices are linear in
+// world distance along each pixel ray.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform Froxel {
+    mat4 uInvViewProj;
+    vec4 uCamPos;        // xyz camera world pos, w = fog far distance
+    vec4 uCamForward;    // xyz camera forward, w = density
+    vec4 uSunDir;        // xyz direction into scene, w = sun intensity
+    vec4 uSunColor;      // rgb sun colour, w = scatter coefficient
+    vec4 uFogParams;     // x = phase g, y = ambient, z/w unused
+    mat4 uCascadeVP[3];
+    vec4 uCascadeSplits; // xyz far view-depth bounds per cascade
+} f;
+
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image3D uGrid;
+layout(set = 0, binding = 2) uniform sampler2D uCascadeShadowMaps[3];
+
+const float PI = 3.14159265359;
+
+// Henyey-Greenstein phase function (g>0 forward-scatters toward the sun).
+float phaseHG(float cosT, float g)
+{
+    float g2 = g * g;
+    float denom = 1.0 + g2 - 2.0 * g * cosT;
+    return (1.0 - g2) / (4.0 * PI * max(pow(denom, 1.5), 1e-4));
+}
+
+float sampleCascade(int idx, vec3 worldPos)
+{
+    vec4 p = f.uCascadeVP[idx] * vec4(worldPos, 1.0);
+    vec3 ndc = p.xyz / p.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0)
+        return 1.0;
+    const float bias = 0.0015;
+    float closest;
+    if (idx == 0)      closest = texture(uCascadeShadowMaps[0], uv).r;
+    else if (idx == 1) closest = texture(uCascadeShadowMaps[1], uv).r;
+    else               closest = texture(uCascadeShadowMaps[2], uv).r;
+    return (ndc.z - bias > closest) ? 0.0 : 1.0;
+}
+
+// Cascade pick by view depth (distance along camera forward), matching the lit
+// pass's selection.
+float sunVisibility(vec3 worldPos, float viewDepth)
+{
+    int idx = -1;
+    for (int i = 0; i < 3; i++)
+    {
+        if (viewDepth <= f.uCascadeSplits[i]) { idx = i; break; }
+    }
+    if (idx < 0) return 1.0;
+    return sampleCascade(idx, worldPos);
+}
+
+void main()
+{
+    ivec3 gsize = imageSize(uGrid);
+    ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
+    if (xy.x >= gsize.x || xy.y >= gsize.y) return;
+
+    int   numSlices = gsize.z;
+    float fogFar    = f.uCamPos.w;
+    vec3  camPos    = f.uCamPos.xyz;
+    vec3  forward   = normalize(f.uCamForward.xyz);
+    float density   = f.uCamForward.w;
+    float scatter   = f.uSunColor.w;
+    float g         = f.uFogParams.x;
+    float ambient   = f.uFogParams.y;
+    vec3  sunInto   = normalize(f.uSunDir.xyz);
+
+    // Pixel-ray direction via inverse view-projection (handles the clip Y flip).
+    vec2 uv  = (vec2(xy) + 0.5) / vec2(gsize.xy);
+    vec2 ndc = uv * 2.0 - 1.0;
+    vec4 farH = f.uInvViewProj * vec4(ndc, 1.0, 1.0);
+    vec3 farW = farH.xyz / farH.w;
+    vec3 rayDir = normalize(farW - camPos);
+
+    float phase = phaseHG(dot(rayDir, sunInto), g);
+    float dt = fogFar / float(numSlices);              // world step length
+    float ext = max(density * scatter, 1e-5);          // extinction coeff
+
+    vec3  accum = vec3(0.0);
+    float transmittance = 1.0;
+
+    for (int z = 0; z < numSlices; z++)
+    {
+        float dist = (float(z) + 0.5) * dt;            // world distance along ray
+        vec3 worldPos = camPos + rayDir * dist;
+        float viewDepth = dot(worldPos - camPos, forward);
+
+        float vis = sunVisibility(worldPos, viewDepth);
+        vec3 sunLit = f.uSunColor.rgb * f.uSunDir.w * phase * vis;
+        vec3 stepScatter = (sunLit + ambient) * scatter * density;
+
+        // Energy-conserving slice integral of in-scattering under extinction.
+        float sliceT = exp(-ext * dt);
+        vec3 sliceIntegral = stepScatter * (1.0 - sliceT) / ext;
+        accum += transmittance * sliceIntegral;
+        transmittance *= sliceT;
+
+        imageStore(uGrid, ivec3(xy, z), vec4(accum, transmittance));
+    }
+}
