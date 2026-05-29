@@ -275,8 +275,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private float ambientIntensity = 1.6f;
 
     // Shader-debug knobs surfaced as uShaderParams (overlay Material scope):
-    //   metallicThreshold — step() cutoff folding Sponza's ~0.35 "metalness"
-    //                       to 0/1 (the "metallic floor" hack); 1 = all dielectric.
+    //   metallicThreshold — metalness noise-gate cutoff: below it -> 0, at/above
+    //                       passes through unchanged. Cleans Sponza's stray
+    //                       ~0.35 stone metalness; 0 = trust the glTF verbatim.
     //   normalStrength    — global multiplier on tangent-space normal x/y.
     private float metallicThreshold = 0.5f;
     private float normalStrength = 1.0f;

@@ -1,24 +1,25 @@
 #version 450
 
-// Scaffold lit fragment shader — Cook-Torrance split-sum IBL on top of a
-// Lambert N·L sun term.
+// Lit fragment shader — Cook-Torrance split-sum IBL on top of a Lambert N·L
+// sun term, with cascaded shadows, a Fresnel-glass branch, and froxel-fog
+// composite.
 //
-//   set 0 binding 0 : per-frame UBO (viewProj, sun, IBL strength, camera)
-//   set 1 binding 0 : samplerCube uIrradiance   (diffuse IBL)
-//   set 1 binding 1 : samplerCube uPrefilteredEnv (specular IBL, mip chain
-//                                                  = roughness-LOD stand-in)
-//   set 1 binding 2 : sampler2D   uBrdfLut      (split-sum BRDF integration)
+//   set 0 binding 0 : per-frame UBO (viewProj, sun, IBL strength, camera, fog)
+//   set 1 binding 0 : samplerCube uIrradiance      (diffuse IBL)
+//   set 1 binding 1 : samplerCube uPrefilteredEnv  (specular IBL; mip = roughness LOD)
+//   set 1 binding 2 : sampler2D   uBrdfLut         (split-sum BRDF integration)
+//   set 1 binding 3 : sampler2D   uCascadeShadowMaps[3]
+//   set 1 binding 4 : sampler3D   uFroxelGrid      (volumetric fog)
 //   set 2 binding 0 : per-material UBO (BaseColorFactor, EmissiveFactor,
-//                                       MaterialParams = alphaCutoff,
-//                                       normalScale, roughness, metallic)
+//                                       MaterialParams = alphaCutoff/normalScale/
+//                                       roughness/metallic, MaterialParams2 = transmission)
 //   set 2 binding 1 : albedo  (sRGB)
 //   set 2 binding 2 : normal  (linear; tangent-space)
 //   set 2 binding 3 : emissive (sRGB)
+//   set 2 binding 4 : metallic-roughness (linear; G=rough, B=metal)
+//   set 2 binding 5 : occlusion (linear; R=AO)
 //
-// IBL replaces the prior hemispherical-ambient stand-in. Specular response
-// uses the per-material roughness + metallic FACTORS today; metallic-
-// roughness TEXTURE sampling lands in the next push (same shader, just
-// multiplies texture × factor and replaces the constant).
+// Roughness/metallic are sampled from the MR texture × per-material factors.
 
 layout(set = 0, binding = 0) uniform Frame {
     mat4  uViewProjection;
@@ -190,16 +191,17 @@ void main() {
     float roughness = clamp(mat.uMaterialParams.z * mrSample.g, 0.04, 1.0);
     float metallic  = clamp(mat.uMaterialParams.w * mrSample.b, 0.0, 1.0);
 
-    // Sponza-specific compensation: most of Sponza Modern's "metalness"
-    // textures cap at ~0.35 for stone/brick/columns (authored under a
-    // pipeline where the metallic channel doubled as specular-intensity).
-    // Treating those values as real glTF metalness mixes albedo into F0
-    // partially and crushes diffuse — surfaces darken to grey/black. A
-    // step at 0.5 keeps the one genuinely-metallic asset (the iron door)
-    // metallic while zero-ing the stone baseline. NOT a generic fix; it's
-    // a scaffold-level patch over an asset quirk. Threshold is live-tunable
-    // from the overlay (Material → Metallic threshold); 1.0 = all dielectric.
-    metallic = step(frame.uShaderParams.x, metallic);
+    // Metalness noise-gate (asset conformance, not a global look hack).
+    // Sponza Modern leaves a stray ~0.35 metalness on dielectric stone/brick
+    // (its metallic channel doubled as a specular-intensity dial under the
+    // authoring pipeline); read as real glTF metalness it mixes albedo into F0
+    // and dulls the diffuse. The gate treats metalness below uShaderParams.x
+    // as noise -> 0, but passes values at/above through UNCHANGED — unlike the
+    // old binary step() it no longer slams genuine partial metals to fully
+    // metal. Threshold 0 trusts the glTF verbatim (the standard); the default
+    // (0.5) keeps Sponza's stone clean. Live-tunable: Material -> Metallic
+    // threshold.
+    metallic = metallic >= frame.uShaderParams.x ? metallic : 0.0;
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
     vec3 V = normalize(frame.uCameraPos - vWorldPos);
