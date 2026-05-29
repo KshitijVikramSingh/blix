@@ -88,18 +88,34 @@ vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
 }
 
 // --- Cascaded sun shadows -----------------------------------------------
-// 3×3 PCF average on one cascade. current/s are Vulkan NDC depth in [0,1];
-// the ortho projection is linear in z so a constant bias maps to a constant
+// Rotated Vogel-disk PCF: 8 evenly-spread taps on a unit disk, rotated per
+// pixel by an interleaved-gradient-noise angle. The per-pixel rotation turns
+// the old hard 3×3 grid into a fine dither the eye reads as a smooth penumbra
+// (and hides the low-res 512² far cascade). 8 taps keeps it near the previous
+// 9-tap cost; 16 was ~3× the lit-pass time. current/d are Vulkan NDC depth in
+// [0,1]; the ortho projection is linear in z so a constant bias is a constant
 // world-space offset.
+const int   PCF_TAPS   = 8;
+const float PCF_RADIUS = 2.5;   // texels; larger = softer penumbra
+
+// Interleaved gradient noise (Jimenez) -> a [0,1) value per pixel.
+float interleavedGradientNoise(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+
 float pcfCascade(sampler2D map, vec2 uv, float current, float bias) {
     vec2 texel = 1.0 / vec2(textureSize(map, 0));
+    float phi = interleavedGradientNoise(gl_FragCoord.xy) * 6.28318530718;
     float sum = 0.0;
-    for (int x = -1; x <= 1; x++)
-    for (int y = -1; y <= 1; y++) {
-        float s = texture(map, uv + vec2(x, y) * texel).r;
-        sum += (current - bias > s) ? 0.0 : 1.0;
+    for (int i = 0; i < PCF_TAPS; i++) {
+        // Vogel (sunflower) disk: even coverage, no precomputed table.
+        float r = sqrt((float(i) + 0.5) / float(PCF_TAPS));
+        float theta = float(i) * 2.39996323 + phi;   // golden angle
+        vec2 off = r * vec2(cos(theta), sin(theta)) * texel * PCF_RADIUS;
+        float d = texture(map, uv + off).r;
+        sum += (current - bias > d) ? 0.0 : 1.0;
     }
-    return sum / 9.0;
+    return sum / float(PCF_TAPS);
 }
 
 // Constant-index dispatch (see binding-3 comment): non-uniform dynamic
