@@ -100,16 +100,20 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 // is fine, we own the buffer after BlixMeshReader returns it).
                 // Lets us fix asset-level UV corruption without re-running the
                 // cook step.
-                // Cooked meshes use the 32-byte VertexPosition3NormalTexture
-                // layout (UV at offset 24); the tangent layout isn't cooked.
-                SanitizePackedUVs(p.VertexBytes, p.VertexCount, stride: 32, uvOffset: 24, p.Name);
+                // UV offset comes from the cooked layout (32-byte → 24,
+                // 48-byte tangent → 40), not hardcoded.
+                var uvAttr = cooked.Layout.Attributes.First(a => a.Location == 3);
+                SanitizePackedUVs(p.VertexBytes, p.VertexCount, stride: cooked.Layout.Stride, uvOffset: uvAttr.Offset, p.Name);
+                // Runtime uses LOD0 (full) for now; the demo will pick a LOD by
+                // distance once de-batched. The cooked file carries all levels.
+                var lod0 = p.Lods[0];
                 var meshData = new MeshData(
                     p.Name,
                     p.VertexBytes,
-                    p.Indices16,
+                    lod0.Indices16 ?? Array.Empty<ushort>(),
                     cooked.Layout,
                     p.Bounds,
-                    Indices32: p.Indices32);
+                    Indices32: lod0.Indices32);
                 var gltfMat = p.MaterialIndex >= 0 && p.MaterialIndex < model.LogicalMaterials.Count
                     ? model.LogicalMaterials[p.MaterialIndex]
                     : null;
@@ -158,11 +162,27 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
     // node/primitive structure the runtime importer does, packs vertices via
     // BuildStaticMeshData, and serialises each primitive's
     // (name, materialIndex, bounds, vertexBytes, indices) to disk.
-    public static int CookToBlixMesh(string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false)
+    // Target triangle ratios for the LOD chain (relative to full detail). The
+    // chain stops early if a level doesn't reduce or falls below MinLodIndices.
+    private static readonly float[] LodRatios = { 0.5f, 0.25f, 0.125f };
+    private const int MinLodIndices = 96; // 32 triangles — below this, no point
+
+    // Simplify callback: (positions xyz tight float[3*vtx], indices, vertexCount,
+    // targetRatio) -> reduced index list sharing the same vertices. The cook
+    // tool supplies a meshoptimizer-backed implementation; when null, the file
+    // is written LOD0-only (Blix has no simplifier of its own).
+    public delegate uint[] SimplifyFn(float[] positions, uint[] indices, int vertexCount, float targetRatio);
+
+    public static int CookToBlixMesh(
+        string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false,
+        SimplifyFn? simplify = null)
     {
         ArgumentNullException.ThrowIfNull(gltfPath);
         ArgumentNullException.ThrowIfNull(outPath);
 
+        var layout = includeTangents
+            ? VertexPosition3NormalTangentTexture.Layout
+            : VertexPosition3NormalTexture.Layout;
         var model = ModelRoot.Load(gltfPath);
         var primitives = new List<BlixMeshPrimitive>();
         foreach (var node in model.LogicalNodes)
@@ -184,17 +204,45 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                     VertexCount: meshData.VertexCount,
                     VertexBytes: meshData.VertexBytes,
                     IndexFormat: meshData.IndexFormat,
-                    Indices16: meshData.Indices,
-                    Indices32: meshData.Indices32));
+                    Lods: BuildLods(meshData, layout.Stride, simplify)));
             }
         }
 
-        BlixMeshWriter.Write(outPath, new BlixMeshFile(
-            includeTangents
-                ? VertexPosition3NormalTangentTexture.Layout
-                : VertexPosition3NormalTexture.Layout,
-            primitives));
+        BlixMeshWriter.Write(outPath, new BlixMeshFile(layout, primitives));
         return primitives.Count;
+    }
+
+    // LOD0 (full) + decimated levels via the injected simplifier. All levels
+    // share the primitive's index format (decimated indices reference the same
+    // vertex buffer, so a u16 primitive stays u16).
+    private static IReadOnlyList<BlixMeshLod> BuildLods(MeshData meshData, int stride, SimplifyFn? simplify)
+    {
+        var lods = new List<BlixMeshLod> { new(meshData.Indices, meshData.Indices32) };
+        if (simplify is null) return lods;
+
+        var baseIndices = meshData.Indices32 ?? Array.ConvertAll(meshData.Indices, idx => (uint)idx);
+        if (baseIndices.Length < MinLodIndices) return lods;
+
+        var positions = new float[meshData.VertexCount * 3];
+        for (var v = 0; v < meshData.VertexCount; v++)
+        {
+            var o = v * stride;
+            positions[v * 3 + 0] = BitConverter.ToSingle(meshData.VertexBytes, o);
+            positions[v * 3 + 1] = BitConverter.ToSingle(meshData.VertexBytes, o + 4);
+            positions[v * 3 + 2] = BitConverter.ToSingle(meshData.VertexBytes, o + 8);
+        }
+
+        var prevCount = baseIndices.Length;
+        foreach (var ratio in LodRatios)
+        {
+            var reduced = simplify(positions, baseIndices, meshData.VertexCount, ratio);
+            if (reduced.Length < MinLodIndices || reduced.Length >= prevCount) break;
+            prevCount = reduced.Length;
+            lods.Add(meshData.IndexFormat == IndexFormat.UInt32
+                ? new BlixMeshLod(null, reduced)
+                : new BlixMeshLod(Array.ConvertAll(reduced, idx => (ushort)idx), null));
+        }
+        return lods;
     }
 
     public static MeshData BuildStaticMeshData(string name, MeshPrimitive primitive, Matrix4x4 world, Matrix4x4 normalMatrix, bool flipTextureV = false, bool includeTangents = false)

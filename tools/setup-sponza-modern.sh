@@ -174,6 +174,13 @@ if dotnet build "$COOK" -c Release --nologo -v:q >/dev/null 2>&1; then
     echo "Cooking textures to BC7/BC5 .blixtex (multi-mip) ..."
     dotnet run --project "$COOK" -c Release -- textures "$DEST" \
         || echo "  (texture cook failed — demo will runtime-decode PNG/JPEG)"
+    # Cook geometry to .blixmesh (tangent layout + meshoptimizer LOD chains).
+    # The demo loads cooked vertex/index data (skips glTF accessor walking) and
+    # — once LOD selection lands — picks a triangle level by distance. Falls
+    # back to runtime glTF import for any .gltf without a .blixmesh.
+    echo "Cooking geometry to .blixmesh (tangent + LOD chains) ..."
+    dotnet run --project "$COOK" -c Release -- mesh "$DEST" --tangents \
+        || echo "  (mesh cook failed — demo will runtime-import glTF)"
 else
     echo "  (cook tool build failed — demo will runtime-decode textures)"
 fi

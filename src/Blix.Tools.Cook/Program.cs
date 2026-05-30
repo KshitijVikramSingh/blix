@@ -101,6 +101,9 @@ static int CookMesh(string[] args)
     // into the cooked vertex data. Granular per invocation — mirrors
     // AssetImportContext.FlipTextureV on the runtime-import path.
     var flipV = args.Any(a => a.Equals("--flip-v", StringComparison.OrdinalIgnoreCase));
+    // Cook the 48-byte tangent layout (VulkanSponza needs it for normal
+    // mapping). GL's non-tangent path is sunsetting.
+    var tangents = args.Any(a => a.Equals("--tangents", StringComparison.OrdinalIgnoreCase));
 
     string[] sources;
     if (Directory.Exists(target))
@@ -142,9 +145,16 @@ static int CookMesh(string[] args)
             }
         }
         var sw = Stopwatch.StartNew();
-        var count = Blix.GltfStaticImporter.CookToBlixMesh(src, outPath, flipV);
+        var count = Blix.GltfStaticImporter.CookToBlixMesh(src, outPath, flipV, tangents,
+            simplify: (positions, indices, vertexCount, ratio) =>
+                Blix.Tools.Cook.MeshoptNative.Simplify(indices, positions, vertexCount, 3, ratio,
+                    targetError: 1.0f, Blix.Tools.Cook.MeshoptNative.Options.LockBorder, out _));
         var size = new FileInfo(outPath).Length;
-        Console.WriteLine($"  cooked {Path.GetFileName(src)} -> {Path.GetFileName(outPath)} ({count} primitives, {size / 1024.0 / 1024.0:0.00} MB) in {sw.ElapsedMilliseconds} ms");
+        // Quick LOD readout: levels + triangle reduction on the largest primitive.
+        var file = Blix.Assets.BlixMeshReader.Read(outPath);
+        var biggest = file.Primitives.OrderByDescending(p => p.Lods[0].IndexCount).First();
+        var lodCounts = string.Join("/", biggest.Lods.Select(l => l.IndexCount / 3));
+        Console.WriteLine($"  cooked {Path.GetFileName(src)} -> {Path.GetFileName(outPath)} ({count} prims, {size / 1024.0 / 1024.0:0.00} MB, {tangents}-tan) in {sw.ElapsedMilliseconds} ms; LOD tris (biggest prim): {lodCounts}");
     }
     return 0;
 }
