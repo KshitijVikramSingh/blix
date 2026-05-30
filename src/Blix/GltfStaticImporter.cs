@@ -104,16 +104,20 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 // 48-byte tangent → 40), not hardcoded.
                 var uvAttr = cooked.Layout.Attributes.First(a => a.Location == 3);
                 SanitizePackedUVs(p.VertexBytes, p.VertexCount, stride: cooked.Layout.Stride, uvOffset: uvAttr.Offset, p.Name);
-                // Runtime uses LOD0 (full) for now; the demo will pick a LOD by
-                // distance once de-batched. The cooked file carries all levels.
+                // LOD0 is the default index buffer; the full chain rides along
+                // in Lods for the demo's distance-based selection.
                 var lod0 = p.Lods[0];
+                var lods = new MeshLod[p.Lods.Count];
+                for (var l = 0; l < p.Lods.Count; l++)
+                    lods[l] = new MeshLod(p.Lods[l].Indices16, p.Lods[l].Indices32);
                 var meshData = new MeshData(
                     p.Name,
                     p.VertexBytes,
                     lod0.Indices16 ?? Array.Empty<ushort>(),
                     cooked.Layout,
                     p.Bounds,
-                    Indices32: lod0.Indices32);
+                    Indices32: lod0.Indices32,
+                    Lods: lods);
                 var gltfMat = p.MaterialIndex >= 0 && p.MaterialIndex < model.LogicalMaterials.Count
                     ? model.LogicalMaterials[p.MaterialIndex]
                     : null;

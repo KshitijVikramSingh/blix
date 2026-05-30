@@ -221,13 +221,15 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // time from the material's AlphaMode + DoubleSided combination.
     private sealed record Drawable(
         VertexBufferHandle Vb,
-        IndexBufferHandle Ib,
-        int IndexCount,
+        // One index buffer per LOD level (LodIbs[0] = full detail). All share
+        // the single vertex buffer above; LOD selection just swaps the IB.
+        IndexBufferHandle[] LodIbs,
+        int[] LodIndexCounts,
         MaterialHandle Material,
         PipelineHandle Pipeline,
         // World-space AABB (the static importer bakes node transforms into the
         // vertices, so object bounds == world bounds) — used for per-cascade
-        // shadow frustum culling.
+        // shadow frustum culling AND distance-based LOD selection.
         Bounds3 Bounds,
         // Shadow-caster cutout inputs: the albedo handle the shadow.frag
         // samples for MASK foliage, the alpha cutoff (0 for OPAQUE), and
@@ -237,7 +239,19 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         float BaseColorAlpha,
         // Pre-built once at load so the per-frame mask shadow draws don't
         // allocate a binding array each (×3 cascades × every frame).
-        ShaderTextureBinding[] ShadowAlbedoBinding);
+        ShaderTextureBinding[] ShadowAlbedoBinding)
+    {
+        // LOD by camera distance to the bounds centre. lodDistance world units
+        // per level; clamped to the available levels. Used identically across
+        // the lit, depth-pre-pass, and shadow passes so the depth stays
+        // invariant. 1-LOD drawables (runtime-imported, uncooked) always pick 0.
+        public int PickLod(Vector3 cameraPos, float lodDistance)
+        {
+            if (LodIbs.Length <= 1 || lodDistance <= 0f) return 0;
+            var dist = (Bounds.Center - cameraPos).Length();
+            return Math.Clamp((int)(dist / lodDistance), 0, LodIbs.Length - 1);
+        }
+    }
     // Two-bucket draw order: opaque/mask first, blend last. Within each
     // bucket draws stay in glTF primitive order; back-to-front sort for
     // the blend bucket is a deferred polish (would matter when the demo
@@ -271,6 +285,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private float aspect = 16f / 9f;
     private float fovYRadians = MathF.PI / 3f;
     private float moveSpeed = 4.5f;
+    // Distance (world units) per LOD step: a drawable at N×lodDistance from the
+    // camera uses LOD N (clamped to its available levels). 0 disables LOD.
+    private float lodDistance = 14f;
     private bool mouseLook;
     private readonly HashSet<Key> heldKeys = new();
     private Matrix4x4 viewProj;
@@ -892,88 +909,75 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
     private void BuildDrawables(GltfModel model)
     {
-        // Opaque/mask primitives are batched by material (shared textures +
-        // factors + pipeline + cutout state → one Material, merged VB/IB; the
-        // importer bakes transforms into the verts so concatenation + index-
-        // rebasing is exact). Blend primitives stay per-primitive — back-to-
-        // front sorting (a deferred polish) needs per-prim granularity.
-        var opaqueByMaterial = new Dictionary<GltfMaterial, List<GltfPrimitive>>();
-        var opaqueOrder = new List<GltfMaterial>();
-        var noMaterialPrims = new List<GltfPrimitive>();  // untextured group (gm == null)
-        var blendPrims = new List<GltfPrimitive>();
+        // De-batched: one Drawable per primitive (no per-material merging), so
+        // each carries its own cooked LOD index chain and selects a level by
+        // distance. Batching is deliberately discarded here — to be re-assessed
+        // once LOD is correct. Materials are cached by GltfMaterial so per-prim
+        // drawables sharing a material still reuse one handle + descriptor set.
         foreach (var prim in model.Primitives)
         {
-            // Blend-routed: explicit BLEND alpha mode, OR a transmissive
-            // material — glass is shaded as Fresnel-reflective + see-through,
-            // which needs the blend pipeline regardless of its declared alpha
-            // mode (Sponza's glass is authored opaque; see EffectiveTransmission).
             var pm = prim.Material;
-            if (pm?.AlphaMode == GltfAlphaMode.Blend || EffectiveTransmission(pm) > 0f)
-            {
-                blendPrims.Add(prim);
-            }
-            else if (prim.Material is { } gm)
-            {
-                if (!opaqueByMaterial.TryGetValue(gm, out var list))
-                {
-                    list = new List<GltfPrimitive>();
-                    opaqueByMaterial[gm] = list;
-                    opaqueOrder.Add(gm);
-                }
-                list.Add(prim);
-            }
-            else
-            {
-                noMaterialPrims.Add(prim);
-            }
-        }
-
-        foreach (var gm in opaqueOrder)
-        {
-            EmitBatchedGroup(gm, opaqueByMaterial[gm]);
-        }
-        if (noMaterialPrims.Count > 0)
-        {
-            EmitBatchedGroup(null, noMaterialPrims);
-        }
-
-        foreach (var prim in blendPrims)
-        {
-            var material = BuildMaterial(prim.Material, out var albedo, out var alphaCutoff, out var baseColorAlpha);
-            var pipeline = PickPipeline(GltfAlphaMode.Blend, prim.Material?.DoubleSided ?? false);
             var mesh = prim.Mesh;
+            // Glass/transmissive routes to the blend pipeline regardless of its
+            // declared alpha mode (see EffectiveTransmission).
+            var isBlend = pm?.AlphaMode == GltfAlphaMode.Blend || EffectiveTransmission(pm) > 0f;
+            var material = GetMaterial(pm, out var albedo, out var alphaCutoff, out var baseColorAlpha);
+            var alphaMode = isBlend ? GltfAlphaMode.Blend : (pm?.AlphaMode ?? GltfAlphaMode.Opaque);
+            var pipeline = PickPipeline(alphaMode, pm?.DoubleSided ?? false);
+
             var vb = vk.CreateVertexBuffer(new VertexBufferData(
                 new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static), mesh.VertexBytes),
-                "sponza.blend.vb");
-            var ib = mesh.Indices32 is { } i32
-                ? vk.CreateIndexBuffer(i32, name: "sponza.blend.ib32")
-                : vk.CreateIndexBuffer(mesh.Indices, name: "sponza.blend.ib16");
-            var indexCount = mesh.Indices32?.Length ?? mesh.Indices.Length;
-            blendDrawables.Add(new Drawable(
-                vb, ib, indexCount, material, pipeline,
-                mesh.Bounds, albedo, alphaCutoff, baseColorAlpha,
-                new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) }));
+                "sponza.vb");
+            var (lodIbs, lodCounts) = BuildLodBuffers(mesh);
+            var drawable = new Drawable(
+                vb, lodIbs, lodCounts, material, pipeline, mesh.Bounds,
+                albedo, alphaCutoff, baseColorAlpha,
+                new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) });
+            (isBlend ? blendDrawables : opaqueDrawables).Add(drawable);
         }
     }
 
-    // Emit batched opaque/mask drawables for one material group: one shared
-    // Material, then spatially-chunked merged VB/IB drawables.
-    private void EmitBatchedGroup(GltfMaterial? gm, List<GltfPrimitive> prims)
+    // Per-primitive LOD index buffers over one shared vertex buffer. Uses the
+    // cooked LOD chain when present (.blixmesh); otherwise a single level from
+    // the mesh's own indices (runtime glTF-import path).
+    private (IndexBufferHandle[] Ibs, int[] Counts) BuildLodBuffers(MeshData mesh)
     {
-        var material = BuildMaterial(gm, out var albedo, out var alphaCutoff, out var baseColorAlpha);
-        var pipeline = PickPipeline(gm?.AlphaMode ?? GltfAlphaMode.Opaque, gm?.DoubleSided ?? false);
-        var shadowBinding = new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) };
-        foreach (var chunk in SpatialChunks(prims))
+        var lods = mesh.Lods ?? new[]
         {
-            var (vbBytes, indices, layout, bounds, vertCount) = MergeChunk(chunk);
-            var vb = vk.CreateVertexBuffer(new VertexBufferData(
-                new VertexBufferDescription(layout, vertCount, GraphicsBufferUsage.Static), vbBytes),
-                "sponza.batch.vb");
-            var ib = vk.CreateIndexBuffer(indices, name: "sponza.batch.ib");
-            opaqueDrawables.Add(new Drawable(
-                vb, ib, indices.Length, material, pipeline,
-                bounds, albedo, alphaCutoff, baseColorAlpha, shadowBinding));
+            mesh.Indices32 is { } i32 ? new MeshLod(null, i32) : new MeshLod(mesh.Indices, null)
+        };
+        var ibs = new IndexBufferHandle[lods.Count];
+        var counts = new int[lods.Count];
+        for (var i = 0; i < lods.Count; i++)
+        {
+            ibs[i] = lods[i].Indices32 is { } lodU32
+                ? vk.CreateIndexBuffer(lodU32, name: "sponza.ib32")
+                : vk.CreateIndexBuffer(lods[i].Indices16!, name: "sponza.ib16");
+            counts[i] = lods[i].IndexCount;
         }
+        return (ibs, counts);
+    }
+
+    // Material handle cached by glTF material (and a slot for the null/untextured
+    // fallback) so de-batched per-primitive drawables don't build duplicates.
+    private readonly Dictionary<GltfMaterial, (MaterialHandle Mat, TextureHandle Albedo, float Cutoff, float Alpha)> materialCache = new();
+    private (MaterialHandle Mat, TextureHandle Albedo, float Cutoff, float Alpha)? noMaterialCache;
+    private MaterialHandle GetMaterial(GltfMaterial? gm, out TextureHandle albedo, out float alphaCutoff, out float baseColorAlpha)
+    {
+        if (gm is not null && materialCache.TryGetValue(gm, out var c))
+        {
+            (albedo, alphaCutoff, baseColorAlpha) = (c.Albedo, c.Cutoff, c.Alpha);
+            return c.Mat;
+        }
+        if (gm is null && noMaterialCache is { } nc)
+        {
+            (albedo, alphaCutoff, baseColorAlpha) = (nc.Albedo, nc.Cutoff, nc.Alpha);
+            return nc.Mat;
+        }
+        var mat = BuildMaterial(gm, out albedo, out alphaCutoff, out baseColorAlpha);
+        var entry = (mat, albedo, alphaCutoff, baseColorAlpha);
+        if (gm is not null) materialCache[gm] = entry; else noMaterialCache = entry;
+        return mat;
     }
 
     // Transmission for a material, with a demo-level fallback. Intel Sponza
@@ -1448,13 +1452,16 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 foreach (var d in opaqueDrawables)
                 {
                     if (cull && !cascadeFrustum.Intersects(d.Bounds, margin)) continue;
+                    // Same camera-distance LOD as the lit/pre-pass so shadow
+                    // depth matches the shaded geometry's silhouette.
+                    var lod = d.PickLod(cameraPosition, lodDistance);
                     if (d.AlphaCutoff > 0f)
                     {
                         scope.DrawIndexed(
                             vertexBuffer: d.Vb,
-                            indexBuffer: d.Ib,
+                            indexBuffer: d.LodIbs[lod],
                             pipeline: shadowMaskPipeline,
-                            indexCount: d.IndexCount,
+                            indexCount: d.LodIndexCounts[lod],
                             uniforms: Array.Empty<ShaderUniform>(),
                             textures: d.ShadowAlbedoBinding,
                             pushConstants: RentMaskPush(Matrix4x4.Identity, vp, d.AlphaCutoff, d.BaseColorAlpha));
@@ -1463,9 +1470,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                     {
                         scope.DrawIndexed(
                             vertexBuffer: d.Vb,
-                            indexBuffer: d.Ib,
+                            indexBuffer: d.LodIbs[lod],
                             pipeline: shadowOpaquePipeline,
-                            indexCount: d.IndexCount,
+                            indexCount: d.LodIndexCounts[lod],
                             uniforms: Array.Empty<ShaderUniform>(),
                             textures: Array.Empty<ShaderTextureBinding>(),
                             pushConstants: cascadeOpaquePush);
@@ -1513,19 +1520,20 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         {
             foreach (var d in opaqueDrawables)
             {
+                var lod = d.PickLod(cameraPosition, lodDistance);
                 if (d.AlphaCutoff > 0f)
                 {
                     scope.DrawIndexed(
-                        vertexBuffer: d.Vb, indexBuffer: d.Ib, pipeline: prepassMaskPipeline,
-                        indexCount: d.IndexCount, uniforms: perFrame,
+                        vertexBuffer: d.Vb, indexBuffer: d.LodIbs[lod], pipeline: prepassMaskPipeline,
+                        indexCount: d.LodIndexCounts[lod], uniforms: perFrame,
                         textures: Array.Empty<ShaderTextureBinding>(),
                         material: d.Material, pushConstants: identityPush);
                 }
                 else
                 {
                     scope.DrawIndexed(
-                        vertexBuffer: d.Vb, indexBuffer: d.Ib, pipeline: prepassOpaquePipeline,
-                        indexCount: d.IndexCount, uniforms: perFrame,
+                        vertexBuffer: d.Vb, indexBuffer: d.LodIbs[lod], pipeline: prepassOpaquePipeline,
+                        indexCount: d.LodIndexCounts[lod], uniforms: perFrame,
                         textures: Array.Empty<ShaderTextureBinding>(), pushConstants: identityPush);
                 }
             }
@@ -1538,11 +1546,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             // over the resolved opaque depth without writing into it.
             foreach (var d in opaqueDrawables)
             {
+                var lod = d.PickLod(cameraPosition, lodDistance);
                 scope.DrawIndexed(
                     vertexBuffer: d.Vb,
-                    indexBuffer: d.Ib,
+                    indexBuffer: d.LodIbs[lod],
                     pipeline: d.Pipeline,
-                    indexCount: d.IndexCount,
+                    indexCount: d.LodIndexCounts[lod],
                     uniforms: perFrame,
                     textures: passBindings,
                     material: d.Material,
@@ -1559,11 +1568,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 textures: passBindings);
             foreach (var d in blendDrawables)
             {
+                var lod = d.PickLod(cameraPosition, lodDistance);
                 scope.DrawIndexed(
                     vertexBuffer: d.Vb,
-                    indexBuffer: d.Ib,
+                    indexBuffer: d.LodIbs[lod],
                     pipeline: d.Pipeline,
-                    indexCount: d.IndexCount,
+                    indexCount: d.LodIndexCounts[lod],
                     uniforms: perFrame,
                     textures: passBindings,
                     material: d.Material,
@@ -1637,6 +1647,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             exposure   = debug.Controls.Float("Exposure", exposure, 0.05f, 16f);
             tonemapMode = debug.Controls.Enum("Tonemap", tonemapMode, TonemapNames);
             moveSpeed  = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 60f);
+            // LOD distance per step; 0 forces full detail. Drop it low to watch
+            // the triangle count fall as geometry recedes.
+            lodDistance = debug.Controls.Float("LOD distance", lodDistance, 0f, 80f);
         }
 
         debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");
