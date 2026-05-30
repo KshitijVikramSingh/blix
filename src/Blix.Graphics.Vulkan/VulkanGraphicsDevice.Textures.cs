@@ -64,6 +64,114 @@ public sealed partial class VulkanGraphicsDevice
         return new TextureHandle(id);
     }
 
+    // Mipped 2D texture from a pre-built mip chain — the cooked .blixtex path.
+    // mipBytes[i] is level i's tightly-packed bytes (BC blocks or Rgba8); the
+    // view exposes all levels for trilinear sampling. BC formats can't be
+    // blit-downsampled, so they MUST arrive with their mips already encoded
+    // (the cook does this); this path just uploads them verbatim. ImageExtent
+    // is in texels — Vulkan handles BC 4×4 block addressing.
+    public unsafe TextureHandle CreateTexture2DMipped(
+        TextureDescription description,
+        IReadOnlyList<byte[]> mipBytes,
+        string? name = null)
+    {
+        if (mipBytes is null || mipBytes.Count == 0)
+            throw new ArgumentException("CreateTexture2DMipped requires at least one mip level.", nameof(mipBytes));
+        var label = name ?? "texture2D.mipped";
+        var vkFormat = MapTextureFormat(description.Format);
+        var mipCount = mipBytes.Count;
+
+        // Concatenate the mip chain (mip-major) into one staging buffer.
+        long total = 0;
+        foreach (var m in mipBytes) total += m.Length;
+        var concat = new byte[total];
+        long c = 0;
+        foreach (var m in mipBytes) { Array.Copy(m, 0L, concat, c, m.Length); c += m.Length; }
+        var staging = CreateHostVisibleBuffer(concat, BufferUsageFlags.TransferSrcBit, $"{label}.staging");
+
+        var imageCi = new ImageCreateInfo
+        {
+            SType = StructureType.ImageCreateInfo,
+            ImageType = ImageType.Type2D,
+            Format = vkFormat,
+            Extent = new Extent3D((uint)description.Width, (uint)description.Height, 1),
+            MipLevels = (uint)mipCount,
+            ArrayLayers = 1,
+            Samples = SampleCountFlags.Count1Bit,
+            Tiling = ImageTiling.Optimal,
+            Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.SampledBit,
+            SharingMode = SharingMode.Exclusive,
+            InitialLayout = ImageLayout.Undefined,
+        };
+        Image image;
+        ThrowIfNotSuccess(Vk.CreateImage(Device, in imageCi, null, &image), $"vkCreateImage({label})");
+
+        Vk.GetImageMemoryRequirements(Device, image, out var memReq);
+        var allocCi = new MemoryAllocateInfo
+        {
+            SType = StructureType.MemoryAllocateInfo,
+            AllocationSize = memReq.Size,
+            MemoryTypeIndex = FindMemoryTypeIndex(memReq.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
+        };
+        DeviceMemory memory;
+        ThrowIfNotSuccess(Vk.AllocateMemory(Device, in allocCi, null, &memory), $"vkAllocateMemory({label})");
+        ThrowIfNotSuccess(Vk.BindImageMemory(Device, image, memory, 0), $"vkBindImageMemory({label})");
+
+        var cmd = BeginSingleTimeCommands();
+        TransitionImageLayout(cmd, image, mipCount, ImageLayout.Undefined, ImageLayout.TransferDstOptimal);
+        ulong offset = 0;
+        for (var mip = 0; mip < mipCount; mip++)
+        {
+            var w = (uint)Math.Max(1, description.Width >> mip);
+            var h = (uint)Math.Max(1, description.Height >> mip);
+            var region = new BufferImageCopy
+            {
+                BufferOffset = offset,
+                ImageSubresource = new ImageSubresourceLayers
+                {
+                    AspectMask = ImageAspectFlags.ColorBit,
+                    MipLevel = (uint)mip,
+                    BaseArrayLayer = 0,
+                    LayerCount = 1,
+                },
+                ImageOffset = new Offset3D(0, 0, 0),
+                ImageExtent = new Extent3D(w, h, 1),
+            };
+            Vk.CmdCopyBufferToImage(cmd, staging.Buffer, image, ImageLayout.TransferDstOptimal, 1, in region);
+            offset += (ulong)mipBytes[mip].Length;
+        }
+        TransitionImageLayout(cmd, image, mipCount, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal);
+        EndSingleTimeCommands(cmd);
+        DestroyVkBufferEntry(staging);
+
+        var viewCi = new ImageViewCreateInfo
+        {
+            SType = StructureType.ImageViewCreateInfo,
+            Image = image,
+            ViewType = ImageViewType.Type2D,
+            Format = vkFormat,
+            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, (uint)mipCount, 0, 1),
+        };
+        ImageView view;
+        ThrowIfNotSuccess(Vk.CreateImageView(Device, in viewCi, null, &view), $"vkCreateImageView({label})");
+
+        var entry = new VkTextureEntry
+        {
+            Image = image,
+            Memory = memory,
+            View = view,
+            Sampler = GetOrCreateSampler(description.Sampler),
+            Width = description.Width,
+            Height = description.Height,
+            MipCount = mipCount,
+            Format = vkFormat,
+            Name = label,
+        };
+        var id = nextResourceId++;
+        textureTable[id] = entry;
+        return new TextureHandle(id);
+    }
+
     // Uploads a sampleable cubemap (6 faces, optional mip chain) from CPU
     // bytes. Data layout is face-major then mip-major: for face 0..5, the
     // tightly-packed mips 0..mipCount-1 (each mip sized faceSize>>level).

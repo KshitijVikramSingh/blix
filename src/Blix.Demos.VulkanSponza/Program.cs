@@ -1152,17 +1152,36 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     {
         if (tex is null) return fallback;
         if (cache.TryGetValue(tex, out var cached)) return cached;
-        if (tex.MipBytes is not { Count: > 0 } mips || tex.Format != TextureFormat.Rgba8)
+
+        var label = $"sponza.{channelTag}.{tex.Name}";
+        TextureHandle handle;
+        if (tex.LazyHandle is { } lazy)
         {
-            // Cooked-.blixtex compressed path or already-released CPU bytes
-            // — not handled by this scaffold.
+            // Cooked .blixtex: pre-baked BC (or Rgba8) mip chain on disk. Pull
+            // each mip and upload as a mipped texture. tex.Format already
+            // encodes the sRGB choice (BC7Srgb albedo vs BC7Unorm MR, BC5
+            // normal), so use it directly rather than the source uploadFormat.
+            var mips = new byte[tex.MipCount][];
+            for (var i = 0; i < tex.MipCount; i++) mips[i] = BlixTexReader.ReadMip(lazy, i);
+            handle = vk.CreateTexture2DMipped(
+                new TextureDescription(tex.Width, tex.Height, tex.Format, SamplerDescription.LinearRepeat),
+                mips, label);
+        }
+        else if (tex.MipBytes is { Count: > 0 } mips)
+        {
+            // Eager path: source-PNG decode (single Rgba8 mip — CreateTexture2D
+            // blit-generates the chain) or an eager .blixtex read.
+            handle = tex.MipCount > 1
+                ? vk.CreateTexture2DMipped(
+                    new TextureDescription(tex.Width, tex.Height, tex.Format, SamplerDescription.LinearRepeat), mips, label)
+                : vk.CreateTexture2D(
+                    new TextureDescription(tex.Width, tex.Height, uploadFormat, SamplerDescription.LinearRepeat), mips[0], label);
+        }
+        else
+        {
             cache[tex] = fallback;
             return fallback;
         }
-        var handle = vk.CreateTexture2D(
-            new TextureDescription(tex.Width, tex.Height, uploadFormat, SamplerDescription.LinearRepeat),
-            mips[0],
-            $"sponza.{channelTag}.{tex.Name}");
         cache[tex] = handle;
         return handle;
     }

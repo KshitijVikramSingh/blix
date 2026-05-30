@@ -165,5 +165,18 @@ if [[ -n "$HDR" ]] && command -v dotnet >/dev/null 2>&1; then
     fi
 fi
 
+# Cook the scene textures to BC7/BC5 .blixtex siblings (multi-mip). The demo
+# loads these with no decode (44s of stb_image decode -> ~1ms lazy index) and
+# ~3-4x less GPU memory than RGBA8; it falls back to runtime PNG/JPEG decode
+# for any texture without a .blixtex. The cook re-cooks only stale outputs.
+COOK="$REPO_ROOT/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj"
+if dotnet build "$COOK" -c Release --nologo -v:q >/dev/null 2>&1; then
+    echo "Cooking textures to BC7/BC5 .blixtex (multi-mip) ..."
+    dotnet run --project "$COOK" -c Release -- textures "$DEST" \
+        || echo "  (texture cook failed — demo will runtime-decode PNG/JPEG)"
+else
+    echo "  (cook tool build failed — demo will runtime-decode textures)"
+fi
+
 du -sh "$DEST" 2>/dev/null | awk '{print "Total: " $1}'
 echo "Done."
