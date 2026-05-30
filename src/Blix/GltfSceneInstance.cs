@@ -719,9 +719,14 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
                 // Lazy path: bytes stay on disk until the uploader's pump
                 // hits each mip. Captures `lazy` so the mip reads happen
                 // at process-time, not enqueue-time.
+                // One file open per texture (not per mip): the uploader pumps
+                // mips descending to 0, and CreateBufferedMipReader seeks within
+                // a single open handle, closing it after the finest mip. Avoids
+                // MipCount opens per texture — costly on high-open-latency
+                // volumes like an external SSD.
                 uploader.EnqueueLazy(
                     uploadFormat, source.Width, source.Height, source.MipCount,
-                    mipReader: level => BlixTexReader.ReadMip(lazy, level),
+                    mipReader: BlixTexReader.CreateBufferedMipReader(lazy),
                     options.Sampler, name, OnUploaded);
                 return;
             }
@@ -744,9 +749,8 @@ public sealed class GltfSceneInstance : IDebugGeometrySource, IDebugSelectable, 
         IReadOnlyList<byte[]> bytesForSync;
         if (source.LazyHandle is { } syncLazy)
         {
-            var loaded = new byte[syncLazy.MipCount][];
-            for (var i = 0; i < syncLazy.MipCount; i++) loaded[i] = BlixTexReader.ReadMip(syncLazy, i);
-            bytesForSync = loaded;
+            // One file open for the whole chain, not one per mip.
+            bytesForSync = BlixTexReader.ReadAllMips(syncLazy);
         }
         else
         {

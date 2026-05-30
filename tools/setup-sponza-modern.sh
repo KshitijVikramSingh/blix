@@ -32,7 +32,12 @@ set -euo pipefail
 
 SOURCE_ROOT="${1:-$HOME/Downloads}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEST="$REPO_ROOT/src/Blix.Demos.SponzaModern/Assets"
+# Destination is the shared external SSD by default — the demos read from the
+# same BLIX_SPONZA_ASSETS path at runtime and skip the bin copy when it's set,
+# so the ~19GB pack set lives in exactly one place across machines. Export the
+# var to override (e.g. the iMac mounting the drive under a different name).
+export BLIX_SPONZA_ASSETS="${BLIX_SPONZA_ASSETS:-/Volumes/data bag/blix-assets/sponza}"
+DEST="$BLIX_SPONZA_ASSETS"
 SCRATCH="$(mktemp -d -t blix-sponza-extract.XXXXXX)"
 trap 'rm -rf "$SCRATCH"' EXIT
 

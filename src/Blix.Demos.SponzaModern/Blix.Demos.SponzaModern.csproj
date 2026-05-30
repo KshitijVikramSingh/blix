@@ -16,8 +16,13 @@
   <ItemGroup>
     <!-- Assets/ holds Sponza Modern's main glTF + add-on packs (curtains,
          ivy, trees). Multi-GB of textures so they're gitignored; populate
-         locally via tools/setup-sponza-modern.sh. -->
+         locally via tools/setup-sponza-modern.sh.
+
+         When BLIX_SPONZA_ASSETS is set (pack set kept on an external SSD
+         shared across machines), skip the copy entirely — the runtime
+         reads straight from that path. See Program.cs OnLoad(). -->
     <None Include="Assets/**/*"
+          Condition="'$(BLIX_SPONZA_ASSETS)' == ''"
           Exclude="Assets/.gitignore;Assets/.gitkeep"
           CopyToOutputDirectory="PreserveNewest" />
     <None Include="Shaders/**/*" CopyToOutputDirectory="PreserveNewest" />

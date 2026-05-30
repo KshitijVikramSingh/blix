@@ -274,14 +274,21 @@ internal sealed class SponzaModernGame : Game, IInputHandler, IDebuggable
 
     protected override void OnLoad()
     {
-        var assetsDir = Path.Combine(AppContext.BaseDirectory, "Assets");
+        // BLIX_SPONZA_ASSETS lets the (~19GB) pack set live on an external
+        // SSD shared across machines: when set, the runtime reads straight
+        // from it and the csproj skips copying anything into bin/. Falls
+        // back to the bin-local Assets/ copy when the var is unset.
+        var assetsDir = Environment.GetEnvironmentVariable("BLIX_SPONZA_ASSETS") is { Length: > 0 } envAssetsDir
+            ? envAssetsDir
+            : Path.Combine(AppContext.BaseDirectory, "Assets");
         var mainGltfPath = Path.Combine(assetsDir, "main_sponza", "NewSponza_Main_glTF_003.gltf");
         if (!File.Exists(mainGltfPath))
         {
             Console.WriteLine("Sponza Modern assets not found.");
             Console.WriteLine($"  expected: {mainGltfPath}");
             Console.WriteLine("Run `tools/setup-sponza-modern.sh` (with your local download of the");
-            Console.WriteLine("Khronos Intel Sponza packs in ~/Downloads) to populate the Assets dir.");
+            Console.WriteLine("Khronos Intel Sponza packs in ~/Downloads) to populate the Assets dir,");
+            Console.WriteLine("or set BLIX_SPONZA_ASSETS to an existing pack dir (e.g. on an external SSD).");
             (Host as IRenderHost)?.RequestClose();
             return;
         }
