@@ -316,6 +316,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private readonly record struct OpaqueGroup(
         PipelineHandle Pipeline, MaterialHandle Material, bool IsU32, bool IsMask, int Start, int Count);
     private readonly List<OpaqueGroup> opaqueGroups = new();
+    // Blend (glass) groups + buffer — same per-(pipeline,material,width) grouping,
+    // no cull, drawn after opaque + sky in the lit pass.
+    private readonly List<OpaqueGroup> blendGroups = new();
+    private IndirectBufferHandle blendIndirect;
     private IndirectBufferHandle opaqueIndirect;
     // One indirect buffer per shadow cascade — each culls against its own frustum
     // (culled objects get instanceCount 0), so the per-cascade visible sets differ.
@@ -1136,45 +1140,50 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 s.ShadowAlbedoBinding));
         }
 
-        // Opaque emitted grouped by (pipeline, material, index-width) → each
-        // group is a contiguous run, drawable by one indirect call. Blend stays
-        // ungrouped (direct path). OrderBy is stable, so prims keep their
-        // relative order within a group.
+        // Both buckets emitted grouped by (pipeline, material, index-width) → each
+        // group is a contiguous run, drawable by one indirect call. OrderBy is
+        // stable, so prims keep their relative order within a group.
         static bool StagingIsU32(DrawableStaging s) => s.Lods[0].Indices32 is not null;
-        var orderedOpaque = staging.Where(s => !s.IsBlend)
-            .OrderBy(s => s.Pipeline.Id).ThenBy(s => s.Material.Id).ThenBy(s => StagingIsU32(s) ? 1 : 0)
-            .ToList();
-        foreach (var s in orderedOpaque) Emit(s, opaqueDrawables);
-        foreach (var s in staging) if (s.IsBlend) Emit(s, blendDrawables);
+        static IEnumerable<DrawableStaging> Grouped(IEnumerable<DrawableStaging> src) => src
+            .OrderBy(s => s.Pipeline.Id).ThenBy(s => s.Material.Id).ThenBy(s => StagingIsU32(s) ? 1 : 0);
+        foreach (var s in Grouped(staging.Where(s => !s.IsBlend))) Emit(s, opaqueDrawables);
+        foreach (var s in Grouped(staging.Where(s => s.IsBlend))) Emit(s, blendDrawables);
 
-        // Build the contiguous (pipeline, material, width) groups over the now-
-        // sorted opaqueDrawables.
-        opaqueGroups.Clear();
-        for (var i = 0; i < opaqueDrawables.Count;)
+        // Contiguous (pipeline, material, width) groups over the sorted lists. A
+        // material is uniformly mask-or-not, so the group is too (lets the depth
+        // pre-pass pick its mask/opaque pipeline + material bind per group).
+        static void BuildGroups(List<Drawable> list, List<OpaqueGroup> into)
         {
-            var d = opaqueDrawables[i];
-            var j = i + 1;
-            while (j < opaqueDrawables.Count
-                && opaqueDrawables[j].Pipeline == d.Pipeline
-                && opaqueDrawables[j].Material == d.Material
-                && opaqueDrawables[j].IndicesAreU32 == d.IndicesAreU32) j++;
-            // A material is uniformly mask-or-not, so the group is too — lets the
-            // depth pre-pass pick its mask/opaque pipeline + material bind per group.
-            opaqueGroups.Add(new OpaqueGroup(d.Pipeline, d.Material, d.IndicesAreU32, d.AlphaCutoff > 0f, i, j - i));
-            i = j;
+            into.Clear();
+            for (var i = 0; i < list.Count;)
+            {
+                var d = list[i];
+                var j = i + 1;
+                while (j < list.Count
+                    && list[j].Pipeline == d.Pipeline
+                    && list[j].Material == d.Material
+                    && list[j].IndicesAreU32 == d.IndicesAreU32) j++;
+                into.Add(new OpaqueGroup(d.Pipeline, d.Material, d.IndicesAreU32, d.AlphaCutoff > 0f, i, j - i));
+                i = j;
+            }
         }
+        BuildGroups(opaqueDrawables, opaqueGroups);
+        BuildGroups(blendDrawables, blendGroups);
 
         sharedVb = vk.CreateVertexBuffer(new VertexBufferData(
             new VertexBufferDescription(sharedLayout, vCursor, GraphicsBufferUsage.Static), vbytes),
             "sponza.shared.vb");
         if (u16Total > 0) sharedIbU16 = vk.CreateIndexBuffer(u16, name: "sponza.shared.ib16");
         if (u32Total > 0) sharedIbU32 = vk.CreateIndexBuffer(u32, name: "sponza.shared.ib32");
-        // One indirect command per opaque drawable, refilled each frame (camera
-        // set + one per shadow cascade).
+        // One indirect command per drawable, refilled each frame (camera opaque +
+        // one per shadow cascade + blend). indirectScratch is sized for the
+        // largest list (opaque) and reused for the smaller fills.
         opaqueIndirect = vk.CreateIndirectBuffer(opaqueDrawables.Count, "sponza.opaque.indirect");
         for (var c = 0; c < CascadeCount; c++)
             cascadeIndirect[c] = vk.CreateIndirectBuffer(opaqueDrawables.Count, $"sponza.cascade{c}.indirect");
-        indirectScratch = new byte[opaqueDrawables.Count * VulkanGraphicsDevice.IndirectCommandStride];
+        if (blendDrawables.Count > 0)
+            blendIndirect = vk.CreateIndirectBuffer(blendDrawables.Count, "sponza.blend.indirect");
+        indirectScratch = new byte[Math.Max(opaqueDrawables.Count, blendDrawables.Count) * VulkanGraphicsDevice.IndirectCommandStride];
         staging.Clear();
         Console.WriteLine($"[VulkanSponza] consolidated geometry: 1 VB ({vertexByteTotal / 1024.0 / 1024.0:0.0} MB, {vCursor} verts) + {(u16Total > 0 ? 1 : 0)} u16 IB ({u16Total} idx) + {(u32Total > 0 ? 1 : 0)} u32 IB ({u32Total} idx); {opaqueGroups.Count} opaque indirect groups over {opaqueDrawables.Count} draws.");
     }
@@ -1187,13 +1196,13 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // frustum is given, culled objects get instanceCount 0 (drawn as a GPU no-op
     // — no compaction needed, so group offsets stay fixed). Written to the
     // current frame slot. Returns the visible count (for the diagnostic).
-    private int FillIndirect(IndirectBufferHandle buffer, Frustum? cull, float margin)
+    private int FillIndirect(List<Drawable> drawables, IndirectBufferHandle buffer, Frustum? cull, float margin)
     {
         var cmds = MemoryMarshal.Cast<byte, uint>(indirectScratch.AsSpan());
         var visible = 0;
-        for (var i = 0; i < opaqueDrawables.Count; i++)
+        for (var i = 0; i < drawables.Count; i++)
         {
-            var d = opaqueDrawables[i];
+            var d = drawables[i];
             var vis = cull is not { } f || f.Intersects(d.Bounds, margin);
             var lod = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
             var o = i * 5;
@@ -1204,7 +1213,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             cmds[o + 4] = 0;                           // firstInstance
             if (vis) visible++;
         }
-        vk.WriteIndirectCommands(buffer, indirectScratch);
+        // Write exactly this list's prefix; the buffer is sized to its count,
+        // and indirectScratch is sized for the largest (opaque) list.
+        vk.WriteIndirectCommands(buffer, indirectScratch.AsSpan(0, drawables.Count * VulkanGraphicsDevice.IndirectCommandStride));
         return visible;
     }
 
@@ -1631,7 +1642,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             // Fill this cascade's indirect buffer (per-cascade frustum cull → 0
             // instanceCount; same SSE LOD as the lit/pre-pass so shadow depth
             // matches the shaded silhouette). Then one indirect draw per group.
-            cascadeDrawCounts[ci] = FillIndirect(cascadeIndirect[ci], cull ? cascadeFrustum : null, margin);
+            cascadeDrawCounts[ci] = FillIndirect(opaqueDrawables, cascadeIndirect[ci], cull ? cascadeFrustum : null, margin);
             // Opaque casters all push the same bytes (identity model + this
             // cascade's VP); mask casters push per-material alpha params, so one
             // mask push per group (constant within a material).
@@ -1697,7 +1708,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // Fill the camera opaque indirect commands once per frame (LOD by SSE, no
         // cull); both the depth pre-pass and the lit pass consume this buffer —
         // they draw the identical opaque set at identical LODs.
-        FillIndirect(opaqueIndirect, cull: null, margin: 0f);
+        FillIndirect(opaqueDrawables, opaqueIndirect, cull: null, margin: 0f);
+        if (blendDrawables.Count > 0) FillIndirect(blendDrawables, blendIndirect, cull: null, margin: 0f);
 
         // Depth pre-pass: same non-blend set as the lit pass (no cull, so the
         // depth the lit pass loads covers exactly what it shades), depth only.
@@ -1755,17 +1767,20 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 indexCount: 3,
                 uniforms: perFrame,
                 textures: passBindings);
-            foreach (var d in blendDrawables)
+            // Blend (glass), depth-test only, after opaque + sky. One indirect
+            // draw per (pipeline, material) group, same as opaque.
+            foreach (var g in blendGroups)
             {
-                var lod = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
-                scope.DrawIndexed(
+                scope.DrawIndexedIndirect(
                     vertexBuffer: sharedVb,
-                    indexBuffer: SharedIb(d),
-                    pipeline: d.Pipeline,
-                    indexCount: d.LodIndexCounts[lod], indexOffset: d.LodFirstIndex[lod], vertexOffset: d.BaseVertex,
+                    indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
+                    pipeline: g.Pipeline,
+                    indirectBuffer: blendIndirect,
+                    indirectByteOffset: g.Start * VulkanGraphicsDevice.IndirectCommandStride,
+                    drawCount: g.Count,
                     uniforms: perFrame,
                     textures: passBindings,
-                    material: d.Material,
+                    material: g.Material,
                     pushConstants: identityPush);
             }
         }, clearColor: new GraphicsColor(0.05f, 0.07f, 0.10f, 1f));
