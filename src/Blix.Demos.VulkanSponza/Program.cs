@@ -229,6 +229,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // the single vertex buffer above; LOD selection just swaps the IB.
         IndexBufferHandle[] LodIbs,
         int[] LodIndexCounts,
+        // World-space geometric error per LOD level (0 for LOD0). Drives
+        // screen-space-error selection in PickLod.
+        float[] LodErrors,
         MaterialHandle Material,
         PipelineHandle Pipeline,
         // World-space AABB (the static importer bakes node transforms into the
@@ -245,15 +248,30 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // allocate a binding array each (×3 cascades × every frame).
         ShaderTextureBinding[] ShadowAlbedoBinding)
     {
-        // LOD by camera distance to the bounds centre. lodDistance world units
-        // per level; clamped to the available levels. Used identically across
-        // the lit, depth-pre-pass, and shadow passes so the depth stays
-        // invariant. 1-LOD drawables (runtime-imported, uncooked) always pick 0.
-        public int PickLod(Vector3 cameraPos, float lodDistance)
+        // Screen-space-error LOD: pick the COARSEST level whose stored world
+        // error projects to ≤ errorPixels at the nearest point of the bounds.
+        //   errorScale = viewportH / (2·tan(fovY/2))  → pixels-per-world at unit
+        //   distance; pixels-per-world at distance d = errorScale / d.
+        // errorPixels ≤ 0 forces full detail. Distance is to the NEAREST point
+        // on the AABB (not the centre) so a big primitive you stand inside stays
+        // detailed where it matters instead of coarsening on a far centre.
+        // Identical across lit, depth-pre-pass, and shadow passes so depth stays
+        // invariant. 1-LOD drawables (uncooked) always pick 0.
+        public int PickLod(Vector3 cameraPos, float errorScale, float errorPixels)
         {
-            if (LodIbs.Length <= 1 || lodDistance <= 0f) return 0;
-            var dist = (Bounds.Center - cameraPos).Length();
-            return Math.Clamp((int)(dist / lodDistance), 0, LodIbs.Length - 1);
+            if (LodIbs.Length <= 1 || errorPixels <= 0f) return 0;
+            var nearest = Vector3.Clamp(cameraPos, Bounds.Min, Bounds.Max);
+            var d = MathF.Max((cameraPos - nearest).Length(), 0.01f);
+            var pixelsPerWorld = errorScale / d;
+            var level = 0;
+            // Errors increase monotonically with level, so stop at the first
+            // level that exceeds the budget — all coarser ones do too.
+            for (var l = 1; l < LodIbs.Length; l++)
+            {
+                if (LodErrors[l] * pixelsPerWorld <= errorPixels) level = l;
+                else break;
+            }
+            return level;
         }
     }
     // Two-bucket draw order: opaque/mask first, blend last. Within each
@@ -288,13 +306,20 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private float camPitch;
     private float aspect = 16f / 9f;
     private float fovYRadians = MathF.PI / 3f;
+    private float renderHeightPx = 810f; // updated on resize; drives screen-space-error LOD
     private float moveSpeed = 4.5f;
-    // Distance (world units) per LOD step: a drawable at N×lodDistance from the
-    // camera uses LOD N (clamped to its available levels). 0 disables LOD.
-    // 10 trims the interior view ~35% (12.8M→8.3M tris); raise toward 20+ if
-    // popping on large primitives is distracting (per-prim LOD is coarse on
-    // Sponza's big surfaces — sub-primitive LOD would fix that).
-    private float lodDistance = 10f;
+    // Screen-space-error LOD threshold: a level is used when its baked geometric
+    // error projects to ≤ this many pixels at the viewing distance. ~1px is the
+    // "imperceptible" target; raise to trim more aggressively, 0 forces full
+    // detail. Replaces the old metres-per-level distance — this is resolution-,
+    // FOV-, and primitive-size-aware (a big surface you stand on stays detailed;
+    // a small far prop drops early). NOTE: a single huge primitive still gets one
+    // level (its near edge pins it), which is why cook-time spatial split (B) is
+    // the next step — this metric just makes selection principled.
+    private float lodErrorPixels = 1.0f;
+    // pixels-per-world at unit distance = viewportH / (2·tan(fovY/2)); PickLod
+    // divides by the view distance. Recomputed lazily from the fields above.
+    private float LodErrorScale => renderHeightPx * 0.5f / MathF.Tan(fovYRadians * 0.5f);
     private bool mouseLook;
     private readonly HashSet<Key> heldKeys = new();
     private Matrix4x4 viewProj;
@@ -336,6 +361,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         this.host = host;
         vk = (VulkanGraphicsDevice)graphicsDevice;
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
+        renderHeightPx = host.LogicalSize.Height;
 
         // Volumetric fog is off by default (it adds a per-frame compute pass);
         // launch with --fog to start with it on, or toggle it in the overlay.
@@ -976,9 +1002,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             var vb = vk.CreateVertexBuffer(new VertexBufferData(
                 new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static), mesh.VertexBytes),
                 "sponza.vb");
-            var (lodIbs, lodCounts) = BuildLodBuffers(mesh);
+            var (lodIbs, lodCounts, lodErrors) = BuildLodBuffers(mesh);
             var drawable = new Drawable(
-                vb, lodIbs, lodCounts, material, pipeline, mesh.Bounds,
+                vb, lodIbs, lodCounts, lodErrors, material, pipeline, mesh.Bounds,
                 albedo, alphaCutoff, baseColorAlpha,
                 new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) });
             (isBlend ? blendDrawables : opaqueDrawables).Add(drawable);
@@ -988,7 +1014,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // Per-primitive LOD index buffers over one shared vertex buffer. Uses the
     // cooked LOD chain when present (.blixmesh); otherwise a single level from
     // the mesh's own indices (runtime glTF-import path).
-    private (IndexBufferHandle[] Ibs, int[] Counts) BuildLodBuffers(MeshData mesh)
+    private (IndexBufferHandle[] Ibs, int[] Counts, float[] Errors) BuildLodBuffers(MeshData mesh)
     {
         var lods = mesh.Lods ?? new[]
         {
@@ -996,14 +1022,16 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         };
         var ibs = new IndexBufferHandle[lods.Count];
         var counts = new int[lods.Count];
+        var errors = new float[lods.Count];
         for (var i = 0; i < lods.Count; i++)
         {
             ibs[i] = lods[i].Indices32 is { } lodU32
                 ? vk.CreateIndexBuffer(lodU32, name: "sponza.ib32")
                 : vk.CreateIndexBuffer(lods[i].Indices16!, name: "sponza.ib16");
             counts[i] = lods[i].IndexCount;
+            errors[i] = lods[i].Error;
         }
-        return (ibs, counts);
+        return (ibs, counts, errors);
     }
 
     // Material handle cached by glTF material (and a slot for the null/untextured
@@ -1397,6 +1425,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         if (height > 0)
         {
             aspect = width / (float)height;
+            renderHeightPx = height;
             UpdateCamera();
         }
     }
@@ -1502,7 +1531,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                     if (cull && !cascadeFrustum.Intersects(d.Bounds, margin)) continue;
                     // Same camera-distance LOD as the lit/pre-pass so shadow
                     // depth matches the shaded geometry's silhouette.
-                    var lod = d.PickLod(cameraPosition, lodDistance);
+                    var lod = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
                     if (d.AlphaCutoff > 0f)
                     {
                         scope.DrawIndexed(
@@ -1568,7 +1597,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         {
             foreach (var d in opaqueDrawables)
             {
-                var lod = d.PickLod(cameraPosition, lodDistance);
+                var lod = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
                 if (d.AlphaCutoff > 0f)
                 {
                     scope.DrawIndexed(
@@ -1594,7 +1623,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             // over the resolved opaque depth without writing into it.
             foreach (var d in opaqueDrawables)
             {
-                var lod = d.PickLod(cameraPosition, lodDistance);
+                var lod = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
                 scope.DrawIndexed(
                     vertexBuffer: d.Vb,
                     indexBuffer: d.LodIbs[lod],
@@ -1616,7 +1645,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 textures: passBindings);
             foreach (var d in blendDrawables)
             {
-                var lod = d.PickLod(cameraPosition, lodDistance);
+                var lod = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
                 scope.DrawIndexed(
                     vertexBuffer: d.Vb,
                     indexBuffer: d.LodIbs[lod],
@@ -1695,9 +1724,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             exposure   = debug.Controls.Float("Exposure", exposure, 0.05f, 16f);
             tonemapMode = debug.Controls.Enum("Tonemap", tonemapMode, TonemapNames);
             moveSpeed  = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 60f);
-            // LOD distance per step; 0 forces full detail. Drop it low to watch
-            // the triangle count fall as geometry recedes.
-            lodDistance = debug.Controls.Float("LOD distance", lodDistance, 0f, 80f);
+            // Screen-space-error budget in pixels; 0 forces full detail. Raise it
+            // to trim more aggressively and watch the triangle count fall.
+            lodErrorPixels = debug.Controls.Float("LOD error (px)", lodErrorPixels, 0f, 8f);
         }
 
         debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");
@@ -1710,17 +1739,17 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         debug.Values.Value("blend-draws", blendDrawables.Count);
         debug.Values.Value("cam-pos", cameraPosition);
         // LOD diagnostic: max levels available + histogram of selected levels
-        // across opaque drawables at the current camera/lodDistance.
+        // across opaque drawables at the current camera + pixel-error budget.
         var maxLevels = 0;
         var hist = new int[8];
         foreach (var d in opaqueDrawables)
         {
             maxLevels = Math.Max(maxLevels, d.LodIbs.Length);
-            var lv = d.PickLod(cameraPosition, lodDistance);
+            var lv = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
             if (lv < hist.Length) hist[lv]++;
         }
         debug.Values.Value("lod-maxlevels", maxLevels);
-        debug.Values.Value("lod-hist", $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]} (dist={lodDistance:0})");
+        debug.Values.Value("lod-hist", $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]} (err={lodErrorPixels:0.0}px)");
 
         // --- Perf instrumentation: weigh where the frame actually goes -------
         // CPU-phase split of the bundled `execute` timer. encode is the only

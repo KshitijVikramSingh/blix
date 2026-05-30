@@ -74,4 +74,17 @@ internal static unsafe class MeshoptNative
         Array.Resize(ref dest, (int)count);
         return dest;
     }
+
+    // Mesh extent meshopt normalises simplification error against. Multiply a
+    // relative resultError by this to get a world-space deviation (used to drive
+    // screen-space-error LOD selection at runtime). Depends only on positions,
+    // so it's constant across a primitive's LOD ratios.
+    public static float SimplifyScale(float[] positions, int vertexCount, int positionStrideFloats)
+    {
+        fixed (float* pos = positions)
+        {
+            return meshopt_simplifyScale(
+                pos, (nuint)vertexCount, (nuint)(positionStrideFloats * sizeof(float)));
+        }
+    }
 }

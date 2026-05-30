@@ -3,9 +3,10 @@ using Blix.Graphics;
 
 namespace Blix.Assets;
 
-// One LOD level's index buffer (over the mesh's shared vertex buffer).
+// One LOD level's index buffer (over the mesh's shared vertex buffer), plus
+// the world-space geometric error decimating to it introduced (0 for LOD0).
 // Exactly one of the two arrays is set, matching MeshData.IndexFormat.
-public sealed record MeshLod(ushort[]? Indices16, uint[]? Indices32)
+public sealed record MeshLod(ushort[]? Indices16, uint[]? Indices32, float Error = 0f)
 {
     public int IndexCount => Indices32?.Length ?? Indices16!.Length;
 }

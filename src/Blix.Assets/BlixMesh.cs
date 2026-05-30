@@ -46,10 +46,12 @@ public static class BlixMesh
 {
     public const uint Magic = 0x4D584C42; // "BLXM" little-endian
     // v2: tangent-layout support + per-primitive LOD index chains (one shared
-    // vertex buffer, N index buffers, coarsest selected by distance at
-    // runtime). No v1 read path — re-cook to migrate (the cook is fast, and
-    // nothing ships v1 files).
-    public const uint Version2 = 2;
+    // vertex buffer, N index buffers, coarsest selected by distance at runtime).
+    // v3: each LOD level also carries its world-space geometric error (a float
+    // after indexCount) so the runtime can do screen-space-error selection
+    // instead of a magic metres-per-level distance. No back-read path — re-cook
+    // to migrate (the cook is fast, and nothing ships older files).
+    public const uint Version3 = 3;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
 
@@ -66,9 +68,11 @@ public static class BlixMesh
     };
 }
 
-// One LOD level: an index buffer over the primitive's shared vertex buffer.
-// Lods[0] is full detail; higher indices are progressively decimated.
-public sealed record BlixMeshLod(ushort[]? Indices16, uint[]? Indices32)
+// One LOD level: an index buffer over the primitive's shared vertex buffer,
+// plus the world-space geometric error decimating to this level introduced
+// (0 for LOD0, the original surface). Lods[0] is full detail; higher indices
+// are progressively decimated with monotonically increasing error.
+public sealed record BlixMeshLod(ushort[]? Indices16, uint[]? Indices32, float Error = 0f)
 {
     public int IndexCount => Indices32?.Length ?? Indices16!.Length;
 }
@@ -98,7 +102,7 @@ public static class BlixMeshWriter
         using var bw = new BinaryWriter(fs);
 
         bw.Write(BlixMesh.Magic);
-        bw.Write(BlixMesh.Version2);
+        bw.Write(BlixMesh.Version3);
         bw.Write(layoutId);
         bw.Write(file.Primitives.Count);
 
@@ -126,6 +130,7 @@ public static class BlixMeshWriter
                     if (lod.Indices32 is null)
                         throw new ArgumentException($"Primitive '{p.Name}' LOD has IndexFormat=UInt32 but Indices32 is null.", nameof(file));
                     bw.Write(lod.Indices32.Length);
+                    bw.Write(lod.Error);
                     bw.Write(MemoryMarshal.AsBytes(lod.Indices32.AsSpan()));
                 }
                 else
@@ -133,6 +138,7 @@ public static class BlixMeshWriter
                     if (lod.Indices16 is null)
                         throw new ArgumentException($"Primitive '{p.Name}' LOD has IndexFormat=UInt16 but Indices16 is null.", nameof(file));
                     bw.Write(lod.Indices16.Length);
+                    bw.Write(lod.Error);
                     bw.Write(MemoryMarshal.AsBytes(lod.Indices16.AsSpan()));
                 }
             }
@@ -156,10 +162,10 @@ public static class BlixMeshReader
                 $"'{path}' is not a .blixmesh file (magic mismatch: got 0x{magic:X8}).");
         }
         var version = br.ReadUInt32();
-        if (version != BlixMesh.Version2)
+        if (version != BlixMesh.Version3)
         {
             throw new InvalidDataException(
-                $"'{path}' has unsupported .blixmesh version {version}; expected {BlixMesh.Version2}. Re-run blix-cook mesh.");
+                $"'{path}' has unsupported .blixmesh version {version}; expected {BlixMesh.Version3}. Re-run blix-cook mesh.");
         }
         var layoutId = br.ReadUInt32();
         var layout = layoutId switch
@@ -199,17 +205,18 @@ public static class BlixMeshReader
             for (var l = 0; l < lodCount; l++)
             {
                 var indexCount = br.ReadInt32();
+                var error = br.ReadSingle();
                 if (isU32)
                 {
                     var indices32 = new uint[indexCount];
                     br.ReadBytes(indexCount * 4).AsSpan().CopyTo(MemoryMarshal.AsBytes(indices32.AsSpan()));
-                    lods[l] = new BlixMeshLod(null, indices32);
+                    lods[l] = new BlixMeshLod(null, indices32, error);
                 }
                 else
                 {
                     var indices16 = new ushort[indexCount];
                     br.ReadBytes(indexCount * 2).AsSpan().CopyTo(MemoryMarshal.AsBytes(indices16.AsSpan()));
-                    lods[l] = new BlixMeshLod(indices16, null);
+                    lods[l] = new BlixMeshLod(indices16, null, error);
                 }
             }
 

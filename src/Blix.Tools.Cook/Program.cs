@@ -147,8 +147,14 @@ static int CookMesh(string[] args)
         var sw = Stopwatch.StartNew();
         var count = Blix.GltfStaticImporter.CookToBlixMesh(src, outPath, flipV, tangents,
             simplify: (positions, indices, vertexCount, ratio) =>
-                Blix.Tools.Cook.MeshoptNative.Simplify(indices, positions, vertexCount, 3, ratio,
-                    targetError: 1.0f, Blix.Tools.Cook.MeshoptNative.Options.LockBorder, out _));
+            {
+                var reduced = Blix.Tools.Cook.MeshoptNative.Simplify(indices, positions, vertexCount, 3, ratio,
+                    targetError: 1.0f, Blix.Tools.Cook.MeshoptNative.Options.LockBorder, out var relError);
+                // meshopt's resultError is relative to the mesh extent; scale to
+                // world units so the runtime can project it to screen pixels.
+                var scale = Blix.Tools.Cook.MeshoptNative.SimplifyScale(positions, vertexCount, 3);
+                return new Blix.GltfStaticImporter.SimplifyResult(reduced, relError * scale);
+            });
         var size = new FileInfo(outPath).Length;
         // Quick LOD readout: levels + triangle reduction on the largest primitive.
         var file = Blix.Assets.BlixMeshReader.Read(outPath);

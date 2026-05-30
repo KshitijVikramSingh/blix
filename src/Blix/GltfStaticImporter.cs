@@ -109,7 +109,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 var lod0 = p.Lods[0];
                 var lods = new MeshLod[p.Lods.Count];
                 for (var l = 0; l < p.Lods.Count; l++)
-                    lods[l] = new MeshLod(p.Lods[l].Indices16, p.Lods[l].Indices32);
+                    lods[l] = new MeshLod(p.Lods[l].Indices16, p.Lods[l].Indices32, p.Lods[l].Error);
                 var meshData = new MeshData(
                     p.Name,
                     p.VertexBytes,
@@ -171,11 +171,17 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
     private static readonly float[] LodRatios = { 0.5f, 0.25f, 0.125f };
     private const int MinLodIndices = 96; // 32 triangles — below this, no point
 
+    // Reduced index list + the world-space geometric error it introduced
+    // (max deviation from the original surface, in mesh units). Error drives
+    // screen-space-error LOD selection: project it to pixels at the view
+    // distance and switch when it's below a pixel threshold.
+    public readonly record struct SimplifyResult(uint[] Indices, float WorldError);
+
     // Simplify callback: (positions xyz tight float[3*vtx], indices, vertexCount,
-    // targetRatio) -> reduced index list sharing the same vertices. The cook
-    // tool supplies a meshoptimizer-backed implementation; when null, the file
-    // is written LOD0-only (Blix has no simplifier of its own).
-    public delegate uint[] SimplifyFn(float[] positions, uint[] indices, int vertexCount, float targetRatio);
+    // targetRatio) -> reduced index list + its world error, sharing the same
+    // vertices. The cook tool supplies a meshoptimizer-backed implementation;
+    // when null, the file is written LOD0-only (Blix has no simplifier of its own).
+    public delegate SimplifyResult SimplifyFn(float[] positions, uint[] indices, int vertexCount, float targetRatio);
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false,
@@ -221,7 +227,8 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
     // vertex buffer, so a u16 primitive stays u16).
     private static IReadOnlyList<BlixMeshLod> BuildLods(MeshData meshData, int stride, SimplifyFn? simplify)
     {
-        var lods = new List<BlixMeshLod> { new(meshData.Indices, meshData.Indices32) };
+        // LOD0 is the original surface: zero geometric error.
+        var lods = new List<BlixMeshLod> { new(meshData.Indices, meshData.Indices32, Error: 0f) };
         if (simplify is null) return lods;
 
         var baseIndices = meshData.Indices32 ?? Array.ConvertAll(meshData.Indices, idx => (uint)idx);
@@ -239,12 +246,13 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         var prevCount = baseIndices.Length;
         foreach (var ratio in LodRatios)
         {
-            var reduced = simplify(positions, baseIndices, meshData.VertexCount, ratio);
+            var result = simplify(positions, baseIndices, meshData.VertexCount, ratio);
+            var reduced = result.Indices;
             if (reduced.Length < MinLodIndices || reduced.Length >= prevCount) break;
             prevCount = reduced.Length;
             lods.Add(meshData.IndexFormat == IndexFormat.UInt32
-                ? new BlixMeshLod(null, reduced)
-                : new BlixMeshLod(Array.ConvertAll(reduced, idx => (ushort)idx), null));
+                ? new BlixMeshLod(null, reduced, result.WorldError)
+                : new BlixMeshLod(Array.ConvertAll(reduced, idx => (ushort)idx), null, result.WorldError));
         }
         return lods;
     }
