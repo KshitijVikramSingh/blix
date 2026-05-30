@@ -15,7 +15,7 @@ No editor, no scripting, no plugin system, no asset cache, no hot reload. No shi
 
 ## Demos
 
-Six demos ship in `src/`. Each is a standalone entry point. The Vulkan demos are the active development target — they exercise the new shader-interface binding model, declarative render graph, and per-draw transient descriptor pool ([`docs/vulkan-friction.md`](docs/vulkan-friction.md) tracks the in-flight reshape). The OpenGL demos still run unchanged.
+Seven demos ship in `src/`. Each is a standalone entry point. The Vulkan demos are the active development target — they exercise the new shader-interface binding model, declarative render graph, and per-draw transient descriptor pool ([`docs/vulkan-friction.md`](docs/vulkan-friction.md) tracks the in-flight reshape). The OpenGL demos still run unchanged.
 
 ### Vulkan Lit (active development, headline demo)
 
@@ -31,6 +31,16 @@ prefix=$(brew --prefix) && \
 PBR scene end-to-end on the Vulkan backend: cube + skinned glTF + a PBR sphere rig + ground plane, lit by directional sun + two spot lights + one point light, each with PCF-filtered shadow maps. Procedural-sky IBL (env cube + diffuse irradiance + split-sum BRDF LUT), separable-Gaussian bloom chain, ACES tonemap. Free-fly camera, ImGui-driven debug surface (sun yaw/pitch, exposure, per-light toggles, per-pixel shader-channel inspection).
 
 Render graph: `sun-shadow → spot0-shadow → spot1-shadow → 6× point-cube-faces → lit-scene → bloom-bright → bloom-blurH → bloom-blurV → present`. Skinning rides a per-frame bone-palette SSBO via `MaterialBindings(framesInFlight = MaxFramesInFlight)`.
+
+### Vulkan Sponza (perf target)
+
+```sh
+tools/run-vulkan-sponza.sh
+```
+
+The Khronos Intel Sponza scene (main + curtains + ivy + trees packs) on the Vulkan backend — the renderer's performance and asset-pipeline proving ground. Loads cooked siblings only (`.blixtex` BC7/BC5 textures, `.blixprobe` IBL, `.blixmesh` geometry with LOD): 3-cascade directional shadows with per-cascade resolution + rotated-Vogel PCF, depth pre-pass, R11G11B10F HDR scene target at 4× MSAA, GGX/IBL + Fresnel glass, ACES/AgX tonemap, and an optional froxel volumetric-fog compute pass (`--fog`). Geometry uses screen-space-error LOD over cook-time meshopt chains + spatial split. The diagnostics overlay surfaces per-pass draw/triangle counts, the LOD histogram, and a CPU-phase frame breakdown (`cpu-wait` / `cpu-encode` / `cpu-submit`) for separating GPU-bound from draw-encode-bound frames.
+
+Assets are multi-GB and not committed — run `tools/setup-sponza-modern.sh` once to populate + cook from a local Khronos download.
 
 ### Vulkan Graph
 
@@ -99,9 +109,11 @@ Three sibling binary formats let the runtime skip the slow paths (PNG decode, eq
 | --- | --- | --- | --- |
 | `.blixtex` | PNG / JPEG | StbImage decode + glGenerateMipmap; supports BC7/BC5 | `src/Blix.Graphics.Images/BlixTex.cs` |
 | `.blixprobe` | HDR equirect | Equirect → cube + diffuse irradiance + GGX prefilter + BRDF LUT bake | `src/Blix.Graphics.Images/BlixProbe.cs` |
-| `.blixmesh` | `.gltf` / `.glb` | SharpGLTF `.bin` validation + per-accessor walk + vertex packing | `src/Blix.Assets/BlixMesh.cs` |
+| `.blixmesh` | `.gltf` / `.glb` | SharpGLTF `.bin` validation + per-accessor walk + vertex packing; also bakes a meshopt LOD chain (+ optional spatial split) per primitive | `src/Blix.Assets/BlixMesh.cs` |
 
 When a `.blixmesh` sibling exists, the importer also switches `ModelRoot.Load` to a lite path (`ReadContext.Create` + `ValidationMode.Skip` + an empty buffer reader) — the JSON still parses for material descriptors, but the multi-megabyte `.bin` validation is skipped entirely. Textures upload progressively through `ResourceUploader`, smallest mip first, so materials bind a usable-if-blurry texture within a frame and sharpen over the next few.
+
+`.blixmesh` also carries geometry LOD: `blix-cook mesh` bakes a meshoptimizer-decimated chain per primitive (each level tagged with its world-space geometric error) and, with `--split N`, recursively splits oversized primitives into spatial chunks so a huge floor/wall/ivy mesh can coarsen its far half independently of its near half. The runtime picks a level by screen-space error. See [`docs/renderer.md` → Geometry LOD](docs/renderer.md#geometry-lod).
 
 ## Build
 
