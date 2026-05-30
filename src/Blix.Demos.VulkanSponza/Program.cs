@@ -332,6 +332,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private readonly List<Drawable> opaqueDrawables = new();
     private readonly List<Drawable> blendDrawables = new();
     private bool sceneLoaded;
+    // Background pack parse (started in OnLoad, drained on the main thread by
+    // TryFinishLoad in OnUpdate). Null once a fresh scene hasn't been kicked off.
+    private System.Threading.Tasks.Task<List<(string Name, GltfModel Model)>>? packParseTask;
 
     // Per-frame-reused, content-constant buffers built once at load (avoids
     // re-allocating them every frame). identityPush: the per-draw model push
@@ -927,77 +930,109 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // becomes one engine-side mesh with a baked-in node transform; its glTF
         // material (BaseColor/normal/MR/AO/emissive + alpha mode) is resolved
         // and cached by GetMaterial.
-        try
+        // Parse every pack's geometry/materials on a background thread, in
+        // parallel — the ~7s .blixmesh parse + UV-sanitize was the bulk of an
+        // ~8s synchronous load that froze the window. Parsing is pure CPU (no
+        // GPU), so it's safe off-thread; the GPU work (BuildDrawables +
+        // ConsolidateBuffers) stays on the main thread, run by TryFinishLoad
+        // from OnUpdate once parsing completes. Until then sceneLoaded stays
+        // false and OnRender shows a responsive clear (loading screen).
+        // Candles intentionally excluded (no light source in this renderer).
+        var packsToParse = new List<(string Name, string Path, string AssetId)>
         {
-            var importer = new GltfStaticImporter();
-            // flipTextureV: the Intel Sponza assets are authored bottom-up
-            // (OpenGL V origin); flip to the top-down origin Vulkan samples
-            // with so textures aren't vertically inverted. includeTangents:
-            // forward the authored glTF TANGENT so the lit shader uses a real
-            // per-vertex TBN. Per-import config — see AssetImportContext.
-            var ctx = new AssetImportContext(AssetId.Parse("models/sponza_main"), gltfPath, flipTextureV: true, includeTangents: true);
-            var model = importer.Import(ctx);
-            BuildDrawables(model);
-            sceneLoaded = true;
-            Console.WriteLine($"[VulkanSponza] main pack: {model.Primitives.Length} primitives from {Path.GetFileName(gltfPath)}.");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[VulkanSponza] Failed to load {gltfPath}: {ex.Message}");
-            Console.WriteLine("[VulkanSponza] Continuing with empty scene; window will render the clear color.");
-        }
-
-        // Optional add-on packs. Each ships its own glTF + bin + textures
-        // under Assets/<packname>/ and is loaded through the same static
-        // importer + BuildDrawables path. Missing packs are silent — the
-        // setup script skips them when their source folder isn't present.
-        LoadOptionalPack(assetsRoot, "curtains", "addons/curtains");
-        LoadOptionalPack(assetsRoot, "ivy",      "addons/ivy");
-        LoadOptionalPack(assetsRoot, "trees",    "addons/trees");
-        // Candles intentionally not loaded — they're tiny emissive point-light
-        // stand-ins with no actual light source in this renderer, so they just
-        // add draw count without contributing to the daylight + sun-shadow look
-        // we're building toward.
-
-        // Stage 0 of GPU-driven rendering: now that every pack is staged, pack
-        // it all into the shared VB/IB the draw loops (and, later, indirect
-        // draws) range into.
-        ConsolidateBuffers();
-
-        Console.WriteLine($"[VulkanSponza] textures cached: {albedoCache.Count} albedo, {normalCache.Count} normal, {mrCache.Count} MR, {aoCache.Count} AO, {emissiveCache.Count} emissive.");
-        Console.WriteLine($"[VulkanSponza] total draws: {opaqueDrawables.Count} opaque/mask, {blendDrawables.Count} blend.");
-        LogPrimitiveSizeHistogram();
+            ("main", gltfPath, "models/sponza_main"),
+        };
+        AddOptionalPackPath(packsToParse, assetsRoot, "curtains", "addons/curtains");
+        AddOptionalPackPath(packsToParse, assetsRoot, "ivy",      "addons/ivy");
+        AddOptionalPackPath(packsToParse, assetsRoot, "trees",    "addons/trees");
+        packParseTask = System.Threading.Tasks.Task.Run(() => ParsePacksParallel(packsToParse));
 
         UpdateCamera();
     }
 
-    private void LoadOptionalPack(string assetsRoot, string packDirName, string assetIdPrefix)
+    private static void AddOptionalPackPath(
+        List<(string Name, string Path, string AssetId)> packs, string assetsRoot, string packDirName, string assetId)
     {
         var packDir = Path.Combine(assetsRoot, packDirName);
-        if (!Directory.Exists(packDir))
-        {
-            return;
-        }
+        if (!Directory.Exists(packDir)) return;
         var gltf = Directory.EnumerateFiles(packDir, "*.gltf", SearchOption.TopDirectoryOnly).FirstOrDefault();
-        if (gltf is null)
+        if (gltf is not null) packs.Add((packDirName, gltf, assetId));
+    }
+
+    // Background, parallel: each pack gets its own importer (no shared state) and
+    // is parsed to CPU geometry/material data. flipTextureV matches the cook's
+    // --flip-v (Intel Sponza is bottom-up); includeTangents forwards the glTF
+    // TANGENT for the lit TBN. Returns models in pack order (main first).
+    private static List<(string Name, GltfModel Model)> ParsePacksParallel(
+        List<(string Name, string Path, string AssetId)> packs)
+    {
+        var parsed = new (string Name, GltfModel Model)?[packs.Count];
+        System.Threading.Tasks.Parallel.For(0, packs.Count, i =>
         {
+            var p = packs[i];
+            try
+            {
+                var model = new GltfStaticImporter().Import(
+                    new AssetImportContext(AssetId.Parse(p.AssetId), p.Path, flipTextureV: true, includeTangents: true));
+                parsed[i] = (p.Name, model);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[VulkanSponza] {p.Name} pack failed to parse: {ex.Message}");
+            }
+        });
+        return parsed.Where(r => r.HasValue).Select(r => r!.Value).ToList();
+    }
+
+    // Main thread (from OnUpdate): drain the background-parsed packs into GPU
+    // resources WITHOUT freezing. The bulk of the cost is per-material texture
+    // read+upload (~7s if done at once), so we time-slice it: enqueue every
+    // primitive once parsing finishes, then stage only a few-ms budget of them
+    // per frame. The window renders its loading clear (responsive) between
+    // chunks; once the queue drains we consolidate the shared buffers and flip
+    // sceneLoaded. (Backgrounding the texture reads or placeholder-streaming
+    // would make the scene *appear* sooner — see the PR notes — but this fully
+    // removes the freeze with no extra plumbing.)
+    private const double LoadBudgetMs = 8.0;
+    private readonly Queue<GltfPrimitive> buildQueue = new();
+    private bool buildStarted;
+
+    private void TryFinishLoad()
+    {
+        if (sceneLoaded || packParseTask is not { IsCompleted: true }) return;
+        if (packParseTask.IsFaulted)
+        {
+            Console.WriteLine($"[VulkanSponza] load failed: {packParseTask.Exception?.GetBaseException().Message}");
+            sceneLoaded = true; // give up → render the empty clear
             return;
         }
-        try
+
+        if (!buildStarted)
         {
-            var model = new GltfStaticImporter().Import(
-                new AssetImportContext(AssetId.Parse(assetIdPrefix), gltf, flipTextureV: true, includeTangents: true));
-            var beforeOpaque = opaqueDrawables.Count;
-            var beforeBlend  = blendDrawables.Count;
-            BuildDrawables(model);
-            var addedOpaque = opaqueDrawables.Count - beforeOpaque;
-            var addedBlend  = blendDrawables.Count - beforeBlend;
-            Console.WriteLine($"[VulkanSponza] {packDirName} pack: +{addedOpaque} opaque/mask, +{addedBlend} blend ({model.Primitives.Length} primitives total from {Path.GetFileName(gltf)}).");
+            foreach (var (name, model) in packParseTask.Result)
+            {
+                foreach (var prim in model.Primitives) buildQueue.Enqueue(prim);
+                Console.WriteLine($"[VulkanSponza] {name} pack: {model.Primitives.Length} primitives.");
+            }
+            buildStarted = true;
         }
-        catch (Exception ex)
+
+        // Stage prims until the per-frame budget is spent (a new material's
+        // texture read+upload is ~tens of ms, so a few per frame).
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (buildQueue.Count > 0 && sw.Elapsed.TotalMilliseconds < LoadBudgetMs)
         {
-            Console.WriteLine($"[VulkanSponza] {packDirName} pack failed to load: {ex.Message}");
+            StageDrawable(buildQueue.Dequeue());
         }
+        if (buildQueue.Count > 0) return; // more next frame
+
+        // Everything staged → build the shared buffers + finish.
+        ConsolidateBuffers();
+        Console.WriteLine($"[VulkanSponza] textures cached: {albedoCache.Count} albedo, {normalCache.Count} normal, {mrCache.Count} MR, {aoCache.Count} AO, {emissiveCache.Count} emissive.");
+        Console.WriteLine($"[VulkanSponza] total draws: {opaqueDrawables.Count} opaque/mask, {blendDrawables.Count} blend.");
+        LogPrimitiveSizeHistogram();
+        UpdateCamera();
+        sceneLoaded = true;
     }
 
     // Per-primitive LOD0 triangle-size distribution across all opaque drawables.
@@ -1036,16 +1071,15 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         }
     }
 
-    private void BuildDrawables(GltfModel model)
+    // Stage one primitive (or spatial-split chunk): resolve/upload its material
+    // and queue its geometry. Each carries its own cooked LOD index chain and
+    // selects a level by screen-space error; geometry is concatenated into the
+    // shared VB/IB by ConsolidateBuffers, so a draw is just a sub-range.
+    // Materials are cached by GltfMaterial so primitives sharing a material reuse
+    // one handle + descriptor set. Called incrementally (time-sliced) during the
+    // streaming load — the material's texture read+upload is the bulk of the cost.
+    private void StageDrawable(GltfPrimitive prim)
     {
-        // One Drawable per primitive (or per spatial-split chunk): each carries
-        // its own cooked LOD index chain and selects a level by screen-space
-        // error. Geometry is later concatenated into the shared VB/IB by
-        // ConsolidateBuffers, so a draw is just a sub-range. Materials are cached
-        // by GltfMaterial so primitives sharing a material reuse one handle +
-        // descriptor set. (Collapsing the per-object draws into per-material
-        // indirect batches is the next step — see the PR's "next steps".)
-        foreach (var prim in model.Primitives)
         {
             var pm = prim.Material;
             var mesh = prim.Mesh;
@@ -1402,6 +1436,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
     public void OnUpdate(Time time)
     {
+        // Promote the background-parsed packs to GPU resources on the main thread
+        // the frame they're ready (one ~0.7s hitch, then sceneLoaded flips).
+        TryFinishLoad();
+
         var dt = (float)time.Delta;
 
         // Translation: WASD + Space/Ctrl. Sprint via Cmd/Super (engine's Key
