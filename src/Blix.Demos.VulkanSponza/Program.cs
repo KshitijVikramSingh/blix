@@ -224,10 +224,14 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // Per-primitive draw payload. PipelineHandle is picked once at load
     // time from the material's AlphaMode + DoubleSided combination.
     private sealed record Drawable(
-        VertexBufferHandle Vb,
-        // One index buffer per LOD level (LodIbs[0] = full detail). All share
-        // the single vertex buffer above; LOD selection just swaps the IB.
-        IndexBufferHandle[] LodIbs,
+        // GPU-driven-rendering Stage 0: all primitives' vertices live in one
+        // shared VB and their LOD indices in one shared IB (u16 or u32 per
+        // drawable). A draw is now a sub-range: vertexOffset = BaseVertex,
+        // indexOffset = LodFirstIndex[lod]. No per-prim buffers.
+        bool IndicesAreU32,
+        int BaseVertex,
+        // Per-LOD firstIndex into the shared IB (LodFirstIndex[0] = full detail).
+        int[] LodFirstIndex,
         int[] LodIndexCounts,
         // World-space geometric error per LOD level (0 for LOD0). Drives
         // screen-space-error selection in PickLod.
@@ -259,14 +263,14 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // invariant. 1-LOD drawables (uncooked) always pick 0.
         public int PickLod(Vector3 cameraPos, float errorScale, float errorPixels)
         {
-            if (LodIbs.Length <= 1 || errorPixels <= 0f) return 0;
+            if (LodIndexCounts.Length <= 1 || errorPixels <= 0f) return 0;
             var nearest = Vector3.Clamp(cameraPos, Bounds.Min, Bounds.Max);
             var d = MathF.Max((cameraPos - nearest).Length(), 0.01f);
             var pixelsPerWorld = errorScale / d;
             var level = 0;
             // Errors increase monotonically with level, so stop at the first
             // level that exceeds the budget — all coarser ones do too.
-            for (var l = 1; l < LodIbs.Length; l++)
+            for (var l = 1; l < LodIndexCounts.Length; l++)
             {
                 if (LodErrors[l] * pixelsPerWorld <= errorPixels) level = l;
                 else break;
@@ -274,6 +278,30 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             return level;
         }
     }
+
+    // Staging captured per primitive during load; consolidated into the shared
+    // buffers once all packs are in (so the big VB/IB span every pack).
+    private sealed record DrawableStaging(
+        byte[] VertexBytes,
+        int VertexCount,
+        IReadOnlyList<MeshLod> Lods,
+        MaterialHandle Material,
+        PipelineHandle Pipeline,
+        Bounds3 Bounds,
+        TextureHandle Albedo,
+        float AlphaCutoff,
+        float BaseColorAlpha,
+        ShaderTextureBinding[] ShadowAlbedoBinding,
+        bool IsBlend);
+
+    // Stage 0 shared geometry buffers (one VB + one IB per index width), built
+    // by ConsolidateBuffers from the staging lists. The eventual indirect path
+    // draws ranges out of these; today the per-drawable loops do.
+    private readonly List<DrawableStaging> staging = new();
+    private VertexBufferHandle sharedVb;
+    private IndexBufferHandle sharedIbU16;
+    private IndexBufferHandle sharedIbU32;
+    private VertexLayout sharedLayout = VertexPosition3NormalTangentTexture.Layout;
     // Two-bucket draw order: opaque/mask first, blend last. Within each
     // bucket draws stay in glTF primitive order; back-to-front sort for
     // the blend bucket is a deferred polish (would matter when the demo
@@ -903,6 +931,11 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // add draw count without contributing to the daylight + sun-shadow look
         // we're building toward.
 
+        // Stage 0 of GPU-driven rendering: now that every pack is staged, pack
+        // it all into the shared VB/IB the draw loops (and, later, indirect
+        // draws) range into.
+        ConsolidateBuffers();
+
         Console.WriteLine($"[VulkanSponza] textures cached: {albedoCache.Count} albedo, {normalCache.Count} normal, {mrCache.Count} MR, {aoCache.Count} AO, {emissiveCache.Count} emissive.");
         Console.WriteLine($"[VulkanSponza] total draws: {opaqueDrawables.Count} opaque/mask, {blendDrawables.Count} blend.");
         LogPrimitiveSizeHistogram();
@@ -999,40 +1032,96 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             var alphaMode = isBlend ? GltfAlphaMode.Blend : (pm?.AlphaMode ?? GltfAlphaMode.Opaque);
             var pipeline = PickPipeline(alphaMode, pm?.DoubleSided ?? false);
 
-            var vb = vk.CreateVertexBuffer(new VertexBufferData(
-                new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static), mesh.VertexBytes),
-                "sponza.vb");
-            var (lodIbs, lodCounts, lodErrors) = BuildLodBuffers(mesh);
-            var drawable = new Drawable(
-                vb, lodIbs, lodCounts, lodErrors, material, pipeline, mesh.Bounds,
+            sharedLayout = mesh.Layout; // uniform across packs (all cooked --tangents)
+            // Cooked LOD chain, or a single level from the runtime-import indices.
+            var lods = mesh.Lods ?? new[]
+            {
+                mesh.Indices32 is { } i32 ? new MeshLod(null, i32) : new MeshLod(mesh.Indices, null)
+            };
+            // No GPU buffers yet — stage the CPU bytes; ConsolidateBuffers packs
+            // every pack into the shared VB/IB once loading is done.
+            staging.Add(new DrawableStaging(
+                mesh.VertexBytes, mesh.VertexCount, lods, material, pipeline, mesh.Bounds,
                 albedo, alphaCutoff, baseColorAlpha,
-                new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) });
-            (isBlend ? blendDrawables : opaqueDrawables).Add(drawable);
+                new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) }, isBlend));
         }
     }
 
-    // Per-primitive LOD index buffers over one shared vertex buffer. Uses the
-    // cooked LOD chain when present (.blixmesh); otherwise a single level from
-    // the mesh's own indices (runtime glTF-import path).
-    private (IndexBufferHandle[] Ibs, int[] Counts, float[] Errors) BuildLodBuffers(MeshData mesh)
+    // Stage 0: concatenate every staged primitive into one shared vertex buffer
+    // + one shared index buffer per width (u16/u32), and turn each staging into
+    // a Drawable that draws a sub-range (BaseVertex + per-LOD firstIndex). Index
+    // values stay primitive-local; vkCmdDrawIndexed's vertexOffset (= BaseVertex)
+    // rebases them into the shared VB, so u16 indices keep working even though
+    // the shared VB spans millions of vertices. Opaque first, then blend, so the
+    // two draw buckets stay contiguous.
+    private void ConsolidateBuffers()
     {
-        var lods = mesh.Lods ?? new[]
+        if (staging.Count == 0) return;
+
+        long vertexByteTotal = 0; var u16Total = 0; var u32Total = 0;
+        foreach (var s in staging)
         {
-            mesh.Indices32 is { } i32 ? new MeshLod(null, i32) : new MeshLod(mesh.Indices, null)
-        };
-        var ibs = new IndexBufferHandle[lods.Count];
-        var counts = new int[lods.Count];
-        var errors = new float[lods.Count];
-        for (var i = 0; i < lods.Count; i++)
-        {
-            ibs[i] = lods[i].Indices32 is { } lodU32
-                ? vk.CreateIndexBuffer(lodU32, name: "sponza.ib32")
-                : vk.CreateIndexBuffer(lods[i].Indices16!, name: "sponza.ib16");
-            counts[i] = lods[i].IndexCount;
-            errors[i] = lods[i].Error;
+            vertexByteTotal += s.VertexBytes.Length;
+            var isU32 = s.Lods[0].Indices32 is not null;
+            foreach (var lod in s.Lods)
+                if (isU32) u32Total += lod.Indices32!.Length; else u16Total += lod.Indices16!.Length;
         }
-        return (ibs, counts, errors);
+
+        var vbytes = new byte[vertexByteTotal];
+        var u16 = new ushort[u16Total];
+        var u32 = new uint[u32Total];
+        var vByteCursor = 0; var vCursor = 0; var i16 = 0; var i32c = 0;
+
+        void Emit(DrawableStaging s, List<Drawable> dest)
+        {
+            var baseVertex = vCursor;
+            Buffer.BlockCopy(s.VertexBytes, 0, vbytes, vByteCursor, s.VertexBytes.Length);
+            vByteCursor += s.VertexBytes.Length;
+            vCursor += s.VertexCount;
+
+            var isU32 = s.Lods[0].Indices32 is not null;
+            var firstIndex = new int[s.Lods.Count];
+            var counts = new int[s.Lods.Count];
+            var errors = new float[s.Lods.Count];
+            for (var l = 0; l < s.Lods.Count; l++)
+            {
+                var lod = s.Lods[l];
+                errors[l] = lod.Error;
+                if (isU32)
+                {
+                    firstIndex[l] = i32c;
+                    lod.Indices32!.CopyTo(u32, i32c);
+                    i32c += lod.Indices32.Length;
+                    counts[l] = lod.Indices32.Length;
+                }
+                else
+                {
+                    firstIndex[l] = i16;
+                    lod.Indices16!.CopyTo(u16, i16);
+                    i16 += lod.Indices16.Length;
+                    counts[l] = lod.Indices16.Length;
+                }
+            }
+            dest.Add(new Drawable(
+                isU32, baseVertex, firstIndex, counts, errors,
+                s.Material, s.Pipeline, s.Bounds, s.Albedo, s.AlphaCutoff, s.BaseColorAlpha,
+                s.ShadowAlbedoBinding));
+        }
+
+        foreach (var s in staging) if (!s.IsBlend) Emit(s, opaqueDrawables);
+        foreach (var s in staging) if (s.IsBlend) Emit(s, blendDrawables);
+
+        sharedVb = vk.CreateVertexBuffer(new VertexBufferData(
+            new VertexBufferDescription(sharedLayout, vCursor, GraphicsBufferUsage.Static), vbytes),
+            "sponza.shared.vb");
+        if (u16Total > 0) sharedIbU16 = vk.CreateIndexBuffer(u16, name: "sponza.shared.ib16");
+        if (u32Total > 0) sharedIbU32 = vk.CreateIndexBuffer(u32, name: "sponza.shared.ib32");
+        staging.Clear();
+        Console.WriteLine($"[VulkanSponza] consolidated geometry: 1 VB ({vertexByteTotal / 1024.0 / 1024.0:0.0} MB, {vCursor} verts) + {(u16Total > 0 ? 1 : 0)} u16 IB ({u16Total} idx) + {(u32Total > 0 ? 1 : 0)} u32 IB ({u32Total} idx).");
     }
+
+    // Index buffer a drawable's LOD indices live in (chosen at consolidation).
+    private IndexBufferHandle SharedIb(Drawable d) => d.IndicesAreU32 ? sharedIbU32 : sharedIbU16;
 
     // Material handle cached by glTF material (and a slot for the null/untextured
     // fallback) so de-batched per-primitive drawables don't build duplicates.
@@ -1535,10 +1624,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                     if (d.AlphaCutoff > 0f)
                     {
                         scope.DrawIndexed(
-                            vertexBuffer: d.Vb,
-                            indexBuffer: d.LodIbs[lod],
+                            vertexBuffer: sharedVb,
+                            indexBuffer: SharedIb(d),
                             pipeline: shadowMaskPipeline,
-                            indexCount: d.LodIndexCounts[lod],
+                            indexCount: d.LodIndexCounts[lod], indexOffset: d.LodFirstIndex[lod], vertexOffset: d.BaseVertex,
                             uniforms: Array.Empty<ShaderUniform>(),
                             textures: d.ShadowAlbedoBinding,
                             pushConstants: RentMaskPush(Matrix4x4.Identity, vp, d.AlphaCutoff, d.BaseColorAlpha));
@@ -1546,10 +1635,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                     else
                     {
                         scope.DrawIndexed(
-                            vertexBuffer: d.Vb,
-                            indexBuffer: d.LodIbs[lod],
+                            vertexBuffer: sharedVb,
+                            indexBuffer: SharedIb(d),
                             pipeline: shadowOpaquePipeline,
-                            indexCount: d.LodIndexCounts[lod],
+                            indexCount: d.LodIndexCounts[lod], indexOffset: d.LodFirstIndex[lod], vertexOffset: d.BaseVertex,
                             uniforms: Array.Empty<ShaderUniform>(),
                             textures: Array.Empty<ShaderTextureBinding>(),
                             pushConstants: cascadeOpaquePush);
@@ -1601,16 +1690,16 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 if (d.AlphaCutoff > 0f)
                 {
                     scope.DrawIndexed(
-                        vertexBuffer: d.Vb, indexBuffer: d.LodIbs[lod], pipeline: prepassMaskPipeline,
-                        indexCount: d.LodIndexCounts[lod], uniforms: perFrame,
+                        vertexBuffer: sharedVb, indexBuffer: SharedIb(d), pipeline: prepassMaskPipeline,
+                        indexCount: d.LodIndexCounts[lod], indexOffset: d.LodFirstIndex[lod], vertexOffset: d.BaseVertex, uniforms: perFrame,
                         textures: Array.Empty<ShaderTextureBinding>(),
                         material: d.Material, pushConstants: identityPush);
                 }
                 else
                 {
                     scope.DrawIndexed(
-                        vertexBuffer: d.Vb, indexBuffer: d.LodIbs[lod], pipeline: prepassOpaquePipeline,
-                        indexCount: d.LodIndexCounts[lod], uniforms: perFrame,
+                        vertexBuffer: sharedVb, indexBuffer: SharedIb(d), pipeline: prepassOpaquePipeline,
+                        indexCount: d.LodIndexCounts[lod], indexOffset: d.LodFirstIndex[lod], vertexOffset: d.BaseVertex, uniforms: perFrame,
                         textures: Array.Empty<ShaderTextureBinding>(), pushConstants: identityPush);
                 }
             }
@@ -1625,10 +1714,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             {
                 var lod = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
                 scope.DrawIndexed(
-                    vertexBuffer: d.Vb,
-                    indexBuffer: d.LodIbs[lod],
+                    vertexBuffer: sharedVb,
+                    indexBuffer: SharedIb(d),
                     pipeline: d.Pipeline,
-                    indexCount: d.LodIndexCounts[lod],
+                    indexCount: d.LodIndexCounts[lod], indexOffset: d.LodFirstIndex[lod], vertexOffset: d.BaseVertex,
                     uniforms: perFrame,
                     textures: passBindings,
                     material: d.Material,
@@ -1647,10 +1736,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             {
                 var lod = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
                 scope.DrawIndexed(
-                    vertexBuffer: d.Vb,
-                    indexBuffer: d.LodIbs[lod],
+                    vertexBuffer: sharedVb,
+                    indexBuffer: SharedIb(d),
                     pipeline: d.Pipeline,
-                    indexCount: d.LodIndexCounts[lod],
+                    indexCount: d.LodIndexCounts[lod], indexOffset: d.LodFirstIndex[lod], vertexOffset: d.BaseVertex,
                     uniforms: perFrame,
                     textures: passBindings,
                     material: d.Material,
@@ -1744,7 +1833,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         var hist = new int[8];
         foreach (var d in opaqueDrawables)
         {
-            maxLevels = Math.Max(maxLevels, d.LodIbs.Length);
+            maxLevels = Math.Max(maxLevels, d.LodIndexCounts.Length);
             var lv = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
             if (lv < hist.Length) hist[lv]++;
         }

@@ -146,11 +146,17 @@ public sealed class RenderPassBuilder
         IReadOnlyList<ShaderUniform> uniforms,
         IReadOnlyList<ShaderTextureBinding> textures,
         MaterialHandle material,
-        byte[] pushConstants)
+        byte[] pushConstants,
+        // Shared-buffer sub-range: firstIndex into the index buffer + vertexOffset
+        // added to every index (vkCmdDrawIndexed). Lets many primitives draw out
+        // of one consolidated (VB, IB) pair. 0/0 preserves whole-buffer behavior.
+        int indexOffset = 0,
+        int vertexOffset = 0)
     {
         var command = new DrawIndexedCommand(
             vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures,
-            IndexOffset: 0, Material: material, PushConstants: pushConstants);
+            IndexOffset: indexOffset, Material: material, PushConstants: pushConstants,
+            VertexOffset: vertexOffset);
         commands.Add(command);
         recorder?.OnDraw(in command);
     }
@@ -165,11 +171,15 @@ public sealed class RenderPassBuilder
         int indexCount,
         IReadOnlyList<ShaderUniform> uniforms,
         IReadOnlyList<ShaderTextureBinding> textures,
-        byte[] pushConstants)
+        byte[] pushConstants,
+        // Shared-buffer sub-range (see the material overload above).
+        int indexOffset = 0,
+        int vertexOffset = 0)
     {
         var command = new DrawIndexedCommand(
             vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures,
-            IndexOffset: 0, Material: null, PushConstants: pushConstants);
+            IndexOffset: indexOffset, Material: null, PushConstants: pushConstants,
+            VertexOffset: vertexOffset);
         commands.Add(command);
         recorder?.OnDraw(in command);
     }
