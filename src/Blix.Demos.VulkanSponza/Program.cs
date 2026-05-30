@@ -314,7 +314,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // VkDrawIndexedIndirectCommand per opaque drawable (LOD picked by SSE), then
     // issue ONE vkCmdDrawIndexedIndirect per group instead of a draw per object.
     private readonly record struct OpaqueGroup(
-        PipelineHandle Pipeline, MaterialHandle Material, bool IsU32, int Start, int Count);
+        PipelineHandle Pipeline, MaterialHandle Material, bool IsU32, bool IsMask, int Start, int Count);
     private readonly List<OpaqueGroup> opaqueGroups = new();
     private IndirectBufferHandle opaqueIndirect;
     private byte[] indirectScratch = System.Array.Empty<byte>();
@@ -1155,7 +1155,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 && opaqueDrawables[j].Pipeline == d.Pipeline
                 && opaqueDrawables[j].Material == d.Material
                 && opaqueDrawables[j].IndicesAreU32 == d.IndicesAreU32) j++;
-            opaqueGroups.Add(new OpaqueGroup(d.Pipeline, d.Material, d.IndicesAreU32, i, j - i));
+            // A material is uniformly mask-or-not, so the group is too — lets the
+            // depth pre-pass pick its mask/opaque pipeline + material bind per group.
+            opaqueGroups.Add(new OpaqueGroup(d.Pipeline, d.Material, d.IndicesAreU32, d.AlphaCutoff > 0f, i, j - i));
             i = j;
         }
 
@@ -1689,30 +1691,30 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 froxelUniforms, froxelBindings));
         }
 
-        // Depth pre-pass: same non-blend draw set as the lit pass (no cull, so
-        // the depth the lit pass loads covers exactly what it shades), depth
-        // only. Mask draws bind the material (set 2 albedo) for the alpha
-        // discard; opaque draws need only the per-frame UBO + model push.
+        // Fill the opaque indirect commands once per frame (LOD by SSE); both the
+        // depth pre-pass and the lit pass consume the same buffer — they draw the
+        // identical opaque set at the identical LODs, so the commands match.
+        FillOpaqueIndirect();
+
+        // Depth pre-pass: same non-blend set as the lit pass (no cull, so the
+        // depth the lit pass loads covers exactly what it shades), depth only.
+        // Per group: mask binds the material (set 2 albedo) for the alpha
+        // discard + the mask pipeline; opaque needs only set 0 + model push.
         graph.Pass(depthPrepassHandle, scope =>
         {
-            foreach (var d in opaqueDrawables)
+            foreach (var g in opaqueGroups)
             {
-                var lod = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
-                if (d.AlphaCutoff > 0f)
-                {
-                    scope.DrawIndexed(
-                        vertexBuffer: sharedVb, indexBuffer: SharedIb(d), pipeline: prepassMaskPipeline,
-                        indexCount: d.LodIndexCounts[lod], indexOffset: d.LodFirstIndex[lod], vertexOffset: d.BaseVertex, uniforms: perFrame,
-                        textures: Array.Empty<ShaderTextureBinding>(),
-                        material: d.Material, pushConstants: identityPush);
-                }
-                else
-                {
-                    scope.DrawIndexed(
-                        vertexBuffer: sharedVb, indexBuffer: SharedIb(d), pipeline: prepassOpaquePipeline,
-                        indexCount: d.LodIndexCounts[lod], indexOffset: d.LodFirstIndex[lod], vertexOffset: d.BaseVertex, uniforms: perFrame,
-                        textures: Array.Empty<ShaderTextureBinding>(), pushConstants: identityPush);
-                }
+                scope.DrawIndexedIndirect(
+                    vertexBuffer: sharedVb,
+                    indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
+                    pipeline: g.IsMask ? prepassMaskPipeline : prepassOpaquePipeline,
+                    indirectBuffer: opaqueIndirect,
+                    indirectByteOffset: g.Start * VulkanGraphicsDevice.IndirectCommandStride,
+                    drawCount: g.Count,
+                    uniforms: perFrame,
+                    textures: Array.Empty<ShaderTextureBinding>(),
+                    material: g.IsMask ? g.Material : null,
+                    pushConstants: identityPush);
             }
         });
 
@@ -1722,13 +1724,11 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             // then Blend (depth-test only), so translucent surfaces composite
             // over the resolved opaque depth without writing into it.
             //
-            // GPU-driven Stage 1: fill one indirect command per opaque drawable
-            // (LOD by SSE) into this frame's slot, then issue ONE indirect draw
-            // per (pipeline, material) group — ~800 per-object draws collapse to
-            // ~one per material. All draws in a group share set0 + set2(material)
-            // + identity push (the static importer bakes transforms), which is
+            // GPU-driven Stage 1: one indirect draw per (pipeline, material)
+            // group over the buffer filled above — ~800 per-object draws collapse
+            // to ~one per material. All draws in a group share set0 + set2
+            // (material) + identity push (the static importer bakes transforms),
             // exactly the indirect-multidraw constraint.
-            FillOpaqueIndirect();
             foreach (var g in opaqueGroups)
             {
                 scope.DrawIndexedIndirect(
