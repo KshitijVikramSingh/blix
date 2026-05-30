@@ -31,13 +31,8 @@ public sealed partial class VulkanGraphicsDevice
         string? name = null) =>
         throw new NotImplementedException(NotYet);
 
-    public TextureHandle CreateTexture3D(
-        int width, int height, int depth,
-        TextureFormat format,
-        SamplerDescription sampler,
-        ReadOnlySpan<byte> pixels,
-        string? name = null) =>
-        throw new NotImplementedException(NotYet);
+    // CreateTexture3D / CreateStorageTexture3D are implemented in
+    // VulkanGraphicsDevice.Textures.cs (Type3D images).
 
     public TextureHandle CreateTextureCube(int faceSize, ReadOnlySpan<byte> faces, SamplerDescription sampler, string? name = null) =>
         throw new NotImplementedException(NotYet);

@@ -18,6 +18,22 @@ public readonly record struct ScissorRect(int X, int Y, int Width, int Height);
 public sealed record BeginOcclusionQueryCommand(int QueryId) : RenderCommand;
 public sealed record EndOcclusionQueryCommand : RenderCommand;
 
+// A compute dispatch (Vulkan-only). The pipeline is a compute pipeline; the
+// work-group counts are the vkCmdDispatch arguments. Uniforms write the
+// program's UBOs; Textures bind sampled (read) and storage (read/write) images
+// — the backend picks the descriptor type from the program's interface slot
+// (StorageImage → bound in GENERAL and barriered for compute write, SampledImage
+// → combined sampler). PushConstants matches the declared ranges. Recorded as a
+// compute pass via RenderCommandList.ComputePass; GL rejects it.
+public sealed record DispatchCommand(
+    PipelineHandle Pipeline,
+    int GroupsX,
+    int GroupsY,
+    int GroupsZ,
+    IReadOnlyList<ShaderUniform> Uniforms,
+    IReadOnlyList<ShaderTextureBinding> Textures,
+    byte[]? PushConstants = null) : RenderCommand;
+
 public sealed record DrawIndexedCommand(
     VertexBufferHandle VertexBuffer,
     IndexBufferHandle IndexBuffer,

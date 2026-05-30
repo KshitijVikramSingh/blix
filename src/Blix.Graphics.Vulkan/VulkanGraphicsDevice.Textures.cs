@@ -231,6 +231,195 @@ public sealed partial class VulkanGraphicsDevice
         return CreateTextureCube(baseFaceSize, TextureFormat.Rgba16F, mipCount, packed, sampler, name ?? "cube.hdr.mipped");
     }
 
+    // 2D storage image (compute-writable + sampleable). No initial data — a
+    // compute dispatch fills it; the dispatch's pre-barrier transitions it from
+    // Undefined to General each frame. Usage STORAGE|SAMPLED.
+    public unsafe TextureHandle CreateStorageTexture2D(
+        int width, int height, TextureFormat format, SamplerDescription samplerDesc, string? name = null)
+    {
+        var vkFormat = MapTextureFormat(format);
+        var imageCi = new ImageCreateInfo
+        {
+            SType = StructureType.ImageCreateInfo,
+            ImageType = ImageType.Type2D,
+            Format = vkFormat,
+            Extent = new Extent3D((uint)width, (uint)height, 1),
+            MipLevels = 1,
+            ArrayLayers = 1,
+            Samples = SampleCountFlags.Count1Bit,
+            Tiling = ImageTiling.Optimal,
+            Usage = ImageUsageFlags.StorageBit | ImageUsageFlags.SampledBit,
+            SharingMode = SharingMode.Exclusive,
+            InitialLayout = ImageLayout.Undefined,
+        };
+        Image image;
+        ThrowIfNotSuccess(Vk.CreateImage(Device, in imageCi, null, &image), $"vkCreateImage({name}.storage2d)");
+
+        Vk.GetImageMemoryRequirements(Device, image, out var memReq);
+        var allocCi = new MemoryAllocateInfo
+        {
+            SType = StructureType.MemoryAllocateInfo,
+            AllocationSize = memReq.Size,
+            MemoryTypeIndex = FindMemoryTypeIndex(memReq.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
+        };
+        DeviceMemory memory;
+        ThrowIfNotSuccess(Vk.AllocateMemory(Device, in allocCi, null, &memory), $"vkAllocateMemory({name}.storage2d)");
+        ThrowIfNotSuccess(Vk.BindImageMemory(Device, image, memory, 0), $"vkBindImageMemory({name}.storage2d)");
+
+        var viewCi = new ImageViewCreateInfo
+        {
+            SType = StructureType.ImageViewCreateInfo,
+            Image = image,
+            ViewType = ImageViewType.Type2D,
+            Format = vkFormat,
+            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1),
+        };
+        ImageView view;
+        ThrowIfNotSuccess(Vk.CreateImageView(Device, in viewCi, null, &view), $"vkCreateImageView({name}.storage2d)");
+
+        var entry = new VkTextureEntry
+        {
+            Image = image,
+            Memory = memory,
+            View = view,
+            Sampler = GetOrCreateSampler(samplerDesc),
+            Width = width,
+            Height = height,
+            MipCount = 1,
+            Format = vkFormat,
+            Name = name ?? "storage2d",
+        };
+        var id = nextResourceId++;
+        textureTable[id] = entry;
+        return new TextureHandle(id);
+    }
+
+    // 3D storage image (compute-writable + sampleable) — e.g. a froxel/volume
+    // grid. No initial data; the compute dispatch's pre-barrier moves it from
+    // Undefined to General each frame. Usage STORAGE|SAMPLED, single mip/layer
+    // (depth lives in the extent, not array layers — barriers use layerCount 1).
+    public unsafe TextureHandle CreateStorageTexture3D(
+        int width, int height, int depth, TextureFormat format, SamplerDescription samplerDesc, string? name = null) =>
+        CreateImage3D(width, height, depth, format, samplerDesc,
+            ImageUsageFlags.StorageBit | ImageUsageFlags.SampledBit,
+            uploadData: default, name ?? "storage3d");
+
+    // Sampled 3D texture with initial data (RGBA-per-texel in the format's
+    // layout, z-major then row-major). Fulfils the IGraphicsDevice stub.
+    public unsafe TextureHandle CreateTexture3D(
+        int width, int height, int depth, TextureFormat format,
+        SamplerDescription sampler, ReadOnlySpan<byte> pixels, string? name = null)
+    {
+        var expected = format.MipByteCount(width, height) * depth;
+        if (pixels.Length != expected)
+        {
+            throw new ArgumentException(
+                $"Texture3D '{name}' expected {expected} bytes ({width}x{height}x{depth}), got {pixels.Length}.", nameof(pixels));
+        }
+        return CreateImage3D(width, height, depth, format, sampler,
+            ImageUsageFlags.SampledBit | ImageUsageFlags.TransferDstBit, pixels, name ?? "texture3d");
+    }
+
+    // Shared 3D image creation. When uploadData is non-empty, stages + copies
+    // it and leaves the image in ShaderReadOnly. A storage target with no
+    // upload is also left in ShaderReadOnly (via a bare layout transition) so
+    // it's valid to bind as a sampled image before its first compute write —
+    // e.g. the froxel fog grid bound by the lit pass while fog is toggled off.
+    // The compute pre-barrier uses oldLayout=Undefined, so it discards this
+    // layout on the first dispatch regardless.
+    private unsafe TextureHandle CreateImage3D(
+        int width, int height, int depth, TextureFormat format, SamplerDescription samplerDesc,
+        ImageUsageFlags usage, ReadOnlySpan<byte> uploadData, string name)
+    {
+        var vkFormat = MapTextureFormat(format);
+        var imageCi = new ImageCreateInfo
+        {
+            SType = StructureType.ImageCreateInfo,
+            ImageType = ImageType.Type3D,
+            Format = vkFormat,
+            Extent = new Extent3D((uint)width, (uint)height, (uint)depth),
+            MipLevels = 1,
+            ArrayLayers = 1,
+            Samples = SampleCountFlags.Count1Bit,
+            Tiling = ImageTiling.Optimal,
+            Usage = usage,
+            SharingMode = SharingMode.Exclusive,
+            InitialLayout = ImageLayout.Undefined,
+        };
+        Image image;
+        ThrowIfNotSuccess(Vk.CreateImage(Device, in imageCi, null, &image), $"vkCreateImage({name}.3d)");
+
+        Vk.GetImageMemoryRequirements(Device, image, out var memReq);
+        var allocCi = new MemoryAllocateInfo
+        {
+            SType = StructureType.MemoryAllocateInfo,
+            AllocationSize = memReq.Size,
+            MemoryTypeIndex = FindMemoryTypeIndex(memReq.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
+        };
+        DeviceMemory memory;
+        ThrowIfNotSuccess(Vk.AllocateMemory(Device, in allocCi, null, &memory), $"vkAllocateMemory({name}.3d)");
+        ThrowIfNotSuccess(Vk.BindImageMemory(Device, image, memory, 0), $"vkBindImageMemory({name}.3d)");
+
+        if (!uploadData.IsEmpty)
+        {
+            var staging = CreateHostVisibleBuffer(uploadData, BufferUsageFlags.TransferSrcBit, $"{name}.staging");
+            var cmd = BeginSingleTimeCommands();
+            TransitionImageLayout(cmd, image, 1, ImageLayout.Undefined, ImageLayout.TransferDstOptimal);
+            var region = new BufferImageCopy
+            {
+                BufferOffset = 0,
+                ImageSubresource = new ImageSubresourceLayers
+                {
+                    AspectMask = ImageAspectFlags.ColorBit,
+                    MipLevel = 0,
+                    BaseArrayLayer = 0,
+                    LayerCount = 1,
+                },
+                ImageOffset = new Offset3D(0, 0, 0),
+                ImageExtent = new Extent3D((uint)width, (uint)height, (uint)depth),
+            };
+            Vk.CmdCopyBufferToImage(cmd, staging.Buffer, image, ImageLayout.TransferDstOptimal, 1, in region);
+            TransitionImageLayout(cmd, image, 1, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal);
+            EndSingleTimeCommands(cmd);
+            DestroyVkBufferEntry(staging);
+        }
+        else if (usage.HasFlag(ImageUsageFlags.StorageBit))
+        {
+            // No initial data: still move out of Undefined so the image can be
+            // bound as a sampled descriptor before its first compute write.
+            var cmd = BeginSingleTimeCommands();
+            TransitionImageLayout(cmd, image, 1, ImageLayout.Undefined, ImageLayout.ShaderReadOnlyOptimal);
+            EndSingleTimeCommands(cmd);
+        }
+
+        var viewCi = new ImageViewCreateInfo
+        {
+            SType = StructureType.ImageViewCreateInfo,
+            Image = image,
+            ViewType = ImageViewType.Type3D,
+            Format = vkFormat,
+            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1),
+        };
+        ImageView view;
+        ThrowIfNotSuccess(Vk.CreateImageView(Device, in viewCi, null, &view), $"vkCreateImageView({name}.3d)");
+
+        var entry = new VkTextureEntry
+        {
+            Image = image,
+            Memory = memory,
+            View = view,
+            Sampler = GetOrCreateSampler(samplerDesc),
+            Width = width,
+            Height = height,
+            MipCount = 1,
+            Format = vkFormat,
+            Name = name,
+        };
+        var id = nextResourceId++;
+        textureTable[id] = entry;
+        return new TextureHandle(id);
+    }
+
     public void DestroyTexture(TextureHandle handle)
     {
         if (!textureTable.Remove(handle.Id, out var e)) return;
@@ -455,6 +644,16 @@ public sealed partial class VulkanGraphicsDevice
             // sampling is rare and would need a wider stage mask. Revisit
             // when ShaderLab introduces vertex-stage sampling.
             dstStage = PipelineStageFlags.FragmentShaderBit;
+        }
+        else if (oldLayout == ImageLayout.Undefined && newLayout == ImageLayout.ShaderReadOnlyOptimal)
+        {
+            // Bare layout move for an uninitialised image (e.g. a storage
+            // target made sampleable before its first write). No prior writes
+            // to make available; just establish the layout.
+            srcAccess = 0;
+            dstAccess = AccessFlags.ShaderReadBit;
+            srcStage = PipelineStageFlags.TopOfPipeBit;
+            dstStage = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit;
         }
         else
         {

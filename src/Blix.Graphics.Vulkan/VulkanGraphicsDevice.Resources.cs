@@ -34,6 +34,7 @@ public sealed partial class VulkanGraphicsDevice
     {
         public ShaderModule Vertex;
         public ShaderModule Fragment;
+        public ShaderModule Compute;   // set for compute-only programs
         public string Name = string.Empty;
         public ShaderInterface Interface = null!;
         // Indexed by Vulkan set number. Sets the interface skips between
@@ -59,6 +60,9 @@ public sealed partial class VulkanGraphicsDevice
         public PipelineLayout Layout;
         public string Name = string.Empty;
         public ShaderProgramHandle ShaderProgram;
+        // Bind point this pipeline was created for. Guards against binding a
+        // compute pipeline for a draw or a graphics pipeline for a dispatch.
+        public bool IsCompute;
     }
 
     // --- Buffer creation ---------------------------------------------------
@@ -231,6 +235,29 @@ public sealed partial class VulkanGraphicsDevice
         return new ShaderProgramHandle(id);
     }
 
+    // Compute-only shader program. Single compute stage; same descriptor-set
+    // layout machinery as graphics (the interface declares storage images /
+    // SSBOs / UBOs the compute shader binds). Pair with CreateComputePipeline.
+    public ShaderProgramHandle CreateComputeShaderProgramFromSpv(
+        byte[] computeSpv, ShaderInterface shaderInterface, string? name = null)
+    {
+        ArgumentNullException.ThrowIfNull(shaderInterface);
+        shaderInterface.Validate();
+
+        var comp = CreateShaderModule(computeSpv, $"{name ?? "compute"}.comp");
+        var entry = new VkShaderProgramEntry
+        {
+            Compute = comp,
+            Name = name ?? "compute",
+            Interface = shaderInterface,
+        };
+        CreateSetResources(entry);
+
+        var id = nextResourceId++;
+        shaderProgramTable[id] = entry;
+        return new ShaderProgramHandle(id);
+    }
+
     // Must equal Swapchain.cs MaxFramesInFlight — UBO storage is sized off
     // this, and the transient pool count comes from here.
     internal const int MaxFramesInFlightConst = 2;
@@ -376,17 +403,15 @@ public sealed partial class VulkanGraphicsDevice
         }
         if (e.Vertex.Handle != 0) Vk.DestroyShaderModule(Device, e.Vertex, null);
         if (e.Fragment.Handle != 0) Vk.DestroyShaderModule(Device, e.Fragment, null);
+        if (e.Compute.Handle != 0) Vk.DestroyShaderModule(Device, e.Compute, null);
     }
 
     // --- Pipelines ---------------------------------------------------------
 
-    public unsafe PipelineHandle CreatePipeline(PipelineDescription description, string? name = null)
+    // Pipeline layout (descriptor set layouts + push-constant ranges) from a
+    // program's interface. Shared by graphics + compute pipeline creation.
+    private unsafe PipelineLayout BuildPipelineLayout(VkShaderProgramEntry prog)
     {
-        if (!shaderProgramTable.TryGetValue(description.ShaderProgram.Id, out var prog))
-        {
-            throw new InvalidOperationException($"Unknown shader program handle {description.ShaderProgram.Id}.");
-        }
-
         var setLayouts = stackalloc DescriptorSetLayout[Math.Max(1, prog.Sets.Length)];
         var setCount = (uint)prog.Sets.Length;
         for (var i = 0; i < prog.Sets.Length; i++)
@@ -417,6 +442,62 @@ public sealed partial class VulkanGraphicsDevice
         };
         PipelineLayout layout;
         ThrowIfNotSuccess(Vk.CreatePipelineLayout(Device, in layoutCi, null, &layout), "vkCreatePipelineLayout");
+        return layout;
+    }
+
+    // Compute pipeline from a compute shader program (entry point "main").
+    public unsafe PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null)
+    {
+        if (!shaderProgramTable.TryGetValue(program.Id, out var prog))
+        {
+            throw new InvalidOperationException($"Unknown shader program handle {program.Id}.");
+        }
+        if (prog.Compute.Handle == 0)
+        {
+            throw new InvalidOperationException($"Shader program '{prog.Name}' is not a compute program.");
+        }
+
+        var layout = BuildPipelineLayout(prog);
+        using var entryName = new Utf8Pin("main");
+        var stage = new PipelineShaderStageCreateInfo
+        {
+            SType = StructureType.PipelineShaderStageCreateInfo,
+            Stage = ShaderStageFlags.ComputeBit,
+            Module = prog.Compute,
+            PName = entryName.Ptr,
+        };
+        var ci = new ComputePipelineCreateInfo
+        {
+            SType = StructureType.ComputePipelineCreateInfo,
+            Stage = stage,
+            Layout = layout,
+        };
+        Pipeline pipeline;
+        ThrowIfNotSuccess(
+            Vk.CreateComputePipelines(Device, default, 1, in ci, null, &pipeline),
+            $"vkCreateComputePipelines({name ?? prog.Name})");
+
+        var entry = new VkPipelineEntry
+        {
+            Pipeline = pipeline,
+            Layout = layout,
+            Name = name ?? prog.Name,
+            ShaderProgram = program,
+            IsCompute = true,
+        };
+        var id = nextResourceId++;
+        pipelineTable[id] = entry;
+        return new PipelineHandle(id);
+    }
+
+    public unsafe PipelineHandle CreatePipeline(PipelineDescription description, string? name = null)
+    {
+        if (!shaderProgramTable.TryGetValue(description.ShaderProgram.Id, out var prog))
+        {
+            throw new InvalidOperationException($"Unknown shader program handle {description.ShaderProgram.Id}.");
+        }
+
+        var layout = BuildPipelineLayout(prog);
 
         using var entryName = new Utf8Pin("main");
         var vertStage = new PipelineShaderStageCreateInfo

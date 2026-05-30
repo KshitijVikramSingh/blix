@@ -35,6 +35,7 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  uShadowParams;           // .x = visualizeCascades (0/1)
     vec4  uCascadeBias;            // .xyz = per-cascade base depth bias (NDC units)
     vec4  uShaderParams;           // x=metallicThreshold, y=normalStrength, z=biasSlopeScale
+    vec4  uFog;                    // x=screenW, y=screenH, z=fogFar, w=enabled(0/1)
 } frame;
 
 layout(set = 1, binding = 0) uniform samplerCube uIrradiance;
@@ -46,6 +47,9 @@ layout(set = 1, binding = 2) uniform sampler2D   uBrdfLut;
 // array, so the picker dispatches with constant indices (MoltenVK-safe).
 layout(set = 1, binding = 3) uniform sampler2D   uCascadeShadowMaps[3];
 #define CASCADE_COUNT 3
+// Froxel volumetric fog grid: (xy) = screen UV, z = world distance / fogFar.
+// .rgb = integrated in-scattering to that distance, .a = transmittance.
+layout(set = 1, binding = 4) uniform sampler3D   uFroxelGrid;
 
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
@@ -237,6 +241,18 @@ void main() {
     // near→far). Helps confirm split placement + texel-snap stability.
     if (frame.uShadowParams.x > 0.5 && shadowCascade >= 0) {
         color = mix(color, kCascadeTint[shadowCascade] * (0.5 + 0.5 * NdotL * sunShadow), 0.4);
+    }
+
+    // --- Froxel fog composite -------------------------------------------
+    // Sample the pre-integrated scattering grid at this fragment's screen UV
+    // and radial distance, then apply: lit*transmittance + in-scatter. The
+    // grid is filled by the froxel compute pass earlier this frame.
+    if (frame.uFog.w > 0.5) {
+        vec2 fuv = gl_FragCoord.xy / frame.uFog.xy;
+        float dist = length(vWorldPos - frame.uCameraPos);
+        float w = clamp(dist / frame.uFog.z, 0.0, 1.0);
+        vec4 fog = texture(uFroxelGrid, vec3(fuv, w));
+        color = color * fog.a + fog.rgb;
     }
 
     outColor = vec4(color, albedo4.a);
