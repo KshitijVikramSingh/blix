@@ -760,6 +760,10 @@ public sealed partial class VulkanGraphicsDevice
         lastCpuFrameTiming = new VkCpuFrameTiming(waitMs, encodeMs, submitPresentMs);
 
         currentFrame = (currentFrame + 1) % MaxFramesInFlight;
+        // Advance the indirect ring in lockstep (only on a real presented frame,
+        // not the early-out recreate path above) so the next frame's fill lands
+        // on a slot no in-flight frame is reading.
+        AdvanceIndirectSlot();
         return defaultPasses > 0;
     }
 
@@ -1022,7 +1026,7 @@ public sealed partial class VulkanGraphicsDevice
         Vk.CmdBindVertexBuffers(cmd, 0, 1, &buffer, &offset);
         Vk.CmdBindIndexBuffer(cmd, ib.Buffer, 0, ib.IndexType);
 
-        var indirect = GetIndirectBuffer(d.IndirectBuffer, frameSlot);
+        var indirect = GetIndirectBuffer(d.IndirectBuffer);
         Vk.CmdDrawIndexedIndirect(
             cmd, indirect.Buffer, (ulong)d.IndirectByteOffset,
             (uint)d.DrawCount, (uint)IndirectCommandStride);
