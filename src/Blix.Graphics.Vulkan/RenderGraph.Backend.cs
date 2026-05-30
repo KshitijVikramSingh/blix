@@ -46,9 +46,11 @@ public sealed partial class RenderGraph : IDisposable
             // Sample count for pipelines created against this pass — taken from
             // its (first) colour target so rasterizationSamples matches the
             // render pass.
-            var passSamples = gpass is { ColorTargets.Count: > 0 }
-                ? SampleCount(Resources[gpass.ColorTargets[0].View.Resource.Id].Samples)
-                : SampleCountFlags.Count1Bit;
+            var passSamples = SampleCountFlags.Count1Bit;
+            if (gpass is { ColorTargets.Count: > 0 })
+                passSamples = SampleCount(Resources[gpass.ColorTargets[0].View.Resource.Id].Samples);
+            else if (gpass?.Depth is not null)   // depth-only pass (e.g. MSAA depth pre-pass)
+                passSamples = SampleCount(Resources[gpass.Depth.View.Resource.Id].Samples);
             bpass.SurfaceHandle = device.RegisterExternalRenderSurface(
                 name: $"graph.{passName}",
                 renderPass: bpass.RenderPass,
@@ -576,7 +578,12 @@ public sealed partial class RenderGraph : IDisposable
                 StoreOp = MapStoreOp(pass.Depth.Store),
                 StencilLoadOp = AttachmentLoadOp.DontCare,
                 StencilStoreOp = AttachmentStoreOp.DontCare,
-                InitialLayout = ImageLayout.Undefined,
+                // LoadOp.Load preserves a prior pass's depth (depth pre-pass →
+                // lit), so the initial layout must already be the depth layout —
+                // Undefined would discard it. Clear/DontCare start fresh.
+                InitialLayout = pass.Depth.Load == LoadOp.Load
+                    ? ImageLayout.DepthStencilAttachmentOptimal
+                    : ImageLayout.Undefined,
                 // Non-MSAA depth stays shader-readable (shadow maps); MSAA
                 // depth isn't sampled, so leave it a depth attachment.
                 FinalLayout = msaaDepth ? ImageLayout.DepthStencilAttachmentOptimal : ImageLayout.ShaderReadOnlyOptimal,
@@ -623,11 +630,13 @@ public sealed partial class RenderGraph : IDisposable
             DstSubpass = 0,
             // Compute included: a prior compute pass may have sampled this
             // target (e.g. froxel fog reading shadow maps) and must finish
-            // before we overwrite it.
-            SrcStageMask = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit,
-            SrcAccessMask = AccessFlags.ShaderReadBit,
+            // before we overwrite it. LateFragmentTests+DepthWrite included so
+            // a prior pass's depth write (depth pre-pass) is available to this
+            // pass's depth load/test (EarlyFragmentTests).
+            SrcStageMask = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.LateFragmentTestsBit,
+            SrcAccessMask = AccessFlags.ShaderReadBit | AccessFlags.DepthStencilAttachmentWriteBit,
             DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.EarlyFragmentTestsBit,
-            DstAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit,
+            DstAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit | AccessFlags.DepthStencilAttachmentReadBit,
             DependencyFlags = DependencyFlags.ByRegionBit,
         };
         deps[1] = new SubpassDependency
