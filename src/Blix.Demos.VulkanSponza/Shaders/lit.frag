@@ -194,11 +194,15 @@ void main() {
     // which swirled on sculpted / mirrored-UV geometry (lavabo, lion heads).
     vec3 T = normalize(vTangentWorld - N * dot(N, vTangentWorld));
     vec3 B = cross(N, T) * vTangentSign;
-    vec3 tangentN = texture(uNormalMap, uv).xyz * 2.0 - 1.0;
+    // Reconstruct Z from XY. Cooked normals are BC5 (2-channel RG, blue
+    // dropped), so the sampled .z is meaningless — derive it from the
+    // unit-length constraint. This is also correct for RGBA8 normal maps
+    // (their stored Z ≈ sqrt(1 - x² - y²)), so it works for both paths.
     float normalScale = mat.uMaterialParams.y * frame.uShaderParams.y;
-    tangentN.xy *= normalScale;
+    vec2 nxy = (texture(uNormalMap, uv).xy * 2.0 - 1.0) * normalScale;
+    float nz = sqrt(max(0.0, 1.0 - dot(nxy, nxy)));
     // Default normal map is flat (0,0,1), so untextured materials keep N.
-    N = normalize(mat3(T, B, N) * normalize(tangentN));
+    N = normalize(mat3(T, B, N) * vec3(nxy, nz));
 
     // --- PBR scalars (factor × texture) ---------------------------------
     // MR.G = roughness, MR.B = metallic. AO comes from its own sampler.
