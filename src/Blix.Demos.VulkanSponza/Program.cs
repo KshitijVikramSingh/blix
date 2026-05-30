@@ -287,7 +287,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private float moveSpeed = 4.5f;
     // Distance (world units) per LOD step: a drawable at N×lodDistance from the
     // camera uses LOD N (clamped to its available levels). 0 disables LOD.
-    private float lodDistance = 14f;
+    // 10 trims the interior view ~35% (12.8M→8.3M tris); raise toward 20+ if
+    // popping on large primitives is distracting (per-prim LOD is coarse on
+    // Sponza's big surfaces — sub-primitive LOD would fix that).
+    private float lodDistance = 10f;
     private bool mouseLook;
     private readonly HashSet<Key> heldKeys = new();
     private Matrix4x4 viewProj;
@@ -1661,6 +1664,18 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         debug.Values.Value("cascade-cache", $"{(cascadeRendered[0] ? 'R' : '·')}{(cascadeRendered[1] ? 'R' : '·')}{(cascadeRendered[2] ? 'R' : '·')}");
         debug.Values.Value("blend-draws", blendDrawables.Count);
         debug.Values.Value("cam-pos", cameraPosition);
+        // LOD diagnostic: max levels available + histogram of selected levels
+        // across opaque drawables at the current camera/lodDistance.
+        var maxLevels = 0;
+        var hist = new int[8];
+        foreach (var d in opaqueDrawables)
+        {
+            maxLevels = Math.Max(maxLevels, d.LodIbs.Length);
+            var lv = d.PickLod(cameraPosition, lodDistance);
+            if (lv < hist.Length) hist[lv]++;
+        }
+        debug.Values.Value("lod-maxlevels", maxLevels);
+        debug.Values.Value("lod-hist", $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]} (dist={lodDistance:0})");
 
         // Spatial gizmos: sun direction + the three cascade ortho boxes.
         debug.Draw.ViewProjection = viewProj;
