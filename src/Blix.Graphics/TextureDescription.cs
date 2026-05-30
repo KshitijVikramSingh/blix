@@ -14,6 +14,14 @@ public enum TextureFormat
     // the prerequisite for HDR pipelines (bloom bright-pass, tone mapping). Not
     // user-uploadable from byte arrays; create via render-surface attachments.
     Rgba16F,
+    // Packed 32-bit unsigned-float HDR: 11 bits R, 11 bits G, 10 bits B, no alpha
+    // (VK_FORMAT_B10G11R11_UFLOAT_PACK32 / GL_R11F_G11F_B10F). Half the bandwidth +
+    // tile footprint of Rgba16F, which matters most for MSAA scene-colour targets on
+    // TBDR GPUs (the on-chip tile holds samples × bytes-per-pixel). Trades fp16's
+    // 10-bit mantissa for 5/5/5-bit mantissas and drops alpha — fine for an opaque
+    // HDR radiance target sampled .rgb by tonemap; unsigned, so radiance only (no
+    // negatives). Render-surface attachment only, not byte-uploadable.
+    R11G11B10F,
     // Single-channel 8-bit unsigned, GL_R8. Used by volumetric textures storing a
     // density scalar per voxel; sampled in GLSL as the .r component of a vec4.
     R8,
@@ -63,6 +71,7 @@ public static class TextureFormatExtensions
         TextureFormat.Rgba8 => width * height * 4,
         TextureFormat.Rgba8Srgb => width * height * 4,
         TextureFormat.Rgba16F => width * height * 8,
+        TextureFormat.R11G11B10F => width * height * 4,
         TextureFormat.R8 => width * height,
         // BC7 / BC5 / BC6h are all 16 bytes per 4x4 block.
         TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm

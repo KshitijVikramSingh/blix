@@ -46,8 +46,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
     // Graph resources + passes.
     private GraphResourceHandle hdrHandle;       // 1× resolve target (present samples this)
-    private GraphResourceHandle hdrMsaaHandle;   // 4× MSAA colour the lit pass renders into
-    private GraphResourceHandle depthHandle;     // 4× MSAA depth (matches hdrMsaa)
+    private GraphResourceHandle hdrMsaaHandle;   // MSAA colour the lit pass renders into
+    private GraphResourceHandle depthHandle;     // MSAA depth (matches hdrMsaa)
+    // 4× MSAA. Measured geometry-bound (cutting MSAA 4→2 left frame time flat —
+    // the GPU wall is triangle/binning cost, not fragment/MSAA), so 2× bought no
+    // frame time and we keep 4× for edge quality. R11G11B10F already quarters the
+    // scene-colour tile vs the old 4×/Rgba16F, recovering the memory/bandwidth.
     private const int MsaaSamples = 4;
     private PassHandle litPassHandle;
 
@@ -456,9 +460,13 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // --- Render graph ------------------------------------------------
         graph = new RenderGraph(vk);
         var fullSize = new MatchSwapchainGraphSize(1.0f);
-        hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
-        // 4× MSAA colour + depth the lit pass renders into; resolves to hdr.
-        hdrMsaaHandle = graph.ColorTarget("hdr-msaa", TextureFormat.Rgba16F, fullSize, samples: MsaaSamples);
+        // R11G11B10F (not Rgba16F): half the bytes/pixel → half the MSAA tile
+        // footprint + resolve bandwidth on TBDR, for an opaque HDR radiance
+        // target only ever sampled .rgb by tonemap. No alpha (glass blends with
+        // source alpha, which needs no dst-alpha channel).
+        hdrHandle = graph.ColorTarget("hdr", TextureFormat.R11G11B10F, fullSize);
+        // MSAA colour + depth the lit pass renders into; resolves to hdr.
+        hdrMsaaHandle = graph.ColorTarget("hdr-msaa", TextureFormat.R11G11B10F, fullSize, samples: MsaaSamples);
         depthHandle = graph.DepthTarget("scene-depth", fullSize, samples: MsaaSamples);
 
         // One depth target per cascade, sized per ShadowMapSizes (no 2D-array
@@ -1676,6 +1684,22 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         }
         debug.Values.Value("lod-maxlevels", maxLevels);
         debug.Values.Value("lod-hist", $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]} (dist={lodDistance:0})");
+
+        // --- Perf instrumentation: weigh where the frame actually goes -------
+        // CPU-phase split of the bundled `execute` timer. encode is the only
+        // phase draw-COUNT moves (recording vkCmds → Metal encoder calls), so
+        // it's the number A (batching) / B (GPU-driven indirect) would change;
+        // wait is the GPU/vsync throttle (high = GPU-bound, can't be cut by
+        // batching); submit is queue submit + present enqueue.
+        //
+        // The other half — per-pass GPU ms — is surfaced by the runtime under
+        // the `gpu/passes` timer scope (Window drains ConsumeAvailableGpuTimings
+        // each frame); the periodic console sink prints it. We deliberately do
+        // NOT drain it here too — that would race the runtime and steal frames.
+        var cpu = vk.LastCpuFrameTiming;
+        debug.Values.Value("cpu-wait", $"{cpu.WaitMs:0.00}ms");
+        debug.Values.Value("cpu-encode", $"{cpu.EncodeMs:0.00}ms");
+        debug.Values.Value("cpu-submit", $"{cpu.SubmitPresentMs:0.00}ms");
 
         // Spatial gizmos: sun direction + the three cascade ortho boxes.
         debug.Draw.ViewProjection = viewProj;
