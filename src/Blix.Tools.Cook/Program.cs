@@ -398,13 +398,17 @@ static string FormatDuration(double seconds)
 static void CookOne(string source, string destination, out long sourceLen, out long destLen)
 {
     var verbose = Environment.GetEnvironmentVariable("BLIX_COOK_VERBOSE") != null;
-    // Cook format selection. Default Rgba8 multi-mip -- fast cook, larger
-    // files. Set BLIX_COOK_FORMAT=bc7 to BC7-encode for ~4x smaller GPU
-    // memory + disk; the BCnEncoder.Net encoder is slow (multiple minutes
-    // per 4K texture), so this is opt-in until a faster encoder lands.
-    var bcMode = string.Equals(
-        Environment.GetEnvironmentVariable("BLIX_COOK_FORMAT"), "bc7",
-        StringComparison.OrdinalIgnoreCase);
+    // Cook format selection. BC7 is 4x smaller than Rgba8 on disk + in GPU
+    // memory and is the DEFAULT when the fast native encoder (Bc7Native, the
+    // vendored bc7enc) is available — it BC7-encodes a 4K texture in a second
+    // or so. Without the native lib we fall back to Rgba8 rather than the
+    // managed BCnEncoder.Net path (minutes per 4K texture). Override:
+    //   BLIX_COOK_FORMAT=bc7   force BC7 (managed fallback if no native lib)
+    //   BLIX_COOK_FORMAT=rgba8 force uncompressed Rgba8
+    var formatEnv = Environment.GetEnvironmentVariable("BLIX_COOK_FORMAT");
+    var bcMode = formatEnv is not null
+        ? formatEnv.Equals("bc7", StringComparison.OrdinalIgnoreCase)
+        : Blix.Tools.Cook.Bc7Native.Available;
     var name = Path.GetFileName(source);
     sourceLen = new FileInfo(source).Length;
     using var probe = File.OpenRead(source);
@@ -436,10 +440,29 @@ static void CookOne(string source, string destination, out long sourceLen, out l
         if (verbose) Console.WriteLine($"\r    mipped  {name} {mipsRgba.Count} levels in {mipSw.ElapsedMilliseconds} ms");
 
         byte[][] encodedMips;
-        if (bcMode)
+        if (bcMode && bcFormat is TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm && Blix.Tools.Cook.Bc7Native.Available)
         {
-            // Compress each mip with the chosen BCn variant. Encoder-internal
-            // parallelism is OFF -- the outer Parallel.ForEach handles cores.
+            // Fast native BC7 (bc7enc). Perceptual YCbCr weighting for sRGB
+            // color maps; linear weighting for normal/data maps. Single-threaded
+            // per texture -- the outer Parallel.ForEach over textures already
+            // saturates cores.
+            var perceptual = (flags & BlixTex.Flags.Srgb) != 0;
+            var quality = Bc7Quality();
+            encodedMips = new byte[mipsRgba.Count][];
+            for (var i = 0; i < mipsRgba.Count; i++)
+            {
+                var (pixels, w, h) = mipsRgba[i];
+                var encodeSw = Stopwatch.StartNew();
+                encodedMips[i] = Blix.Tools.Cook.Bc7Native.EncodeImage(pixels, w, h, perceptual, quality, numThreads: 1);
+                if (verbose) Console.WriteLine($"\r    bc7(native q{quality}) {name} mip{i} {w}x{h} -> {encodedMips[i].Length} bytes in {encodeSw.ElapsedMilliseconds} ms");
+            }
+        }
+        else if (bcMode)
+        {
+            // Managed fallback (no native lib, or a non-BC7 target). Encoder-
+            // internal parallelism is OFF -- the outer Parallel.ForEach handles
+            // cores. Slow (minutes per 4K texture); only hit when Bc7Native is
+            // unavailable.
             var encoder = new BcEncoder
             {
                 Options = { IsParallel = false },
@@ -475,6 +498,13 @@ static void CookOne(string source, string destination, out long sourceLen, out l
     }
     destLen = new FileInfo(destination).Length;
 }
+
+// Native BC7 quality knob: 0 fastest, 1 balanced (default), 2 high. Set
+// BLIX_BC7_QUALITY to override. Higher = slower cook, better quality.
+static int Bc7Quality() =>
+    int.TryParse(Environment.GetEnvironmentVariable("BLIX_BC7_QUALITY"), out var q)
+        ? Math.Clamp(q, 0, 2)
+        : 1;
 
 // Picks a BCn format + flags based on the heuristic role classification.
 static (TextureFormat Format, BlixTex.Flags Flags) PickFormat(TextureRole role) => role switch
