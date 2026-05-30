@@ -12,27 +12,50 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-# Cooks the same pack dir the setup script populated and the demos read at
-# runtime: the in-repo Assets dir by default, or BLIX_SPONZA_ASSETS when set
-# (e.g. an external SSD shared across machines). Export it to override.
-ASSETS="${BLIX_SPONZA_ASSETS:-$REPO/src/Blix.Demos.SponzaModern/Assets}"
+# COOKED is where the runtime-ready .blix* land (the in-repo Assets dir by
+# default, or BLIX_SPONZA_ASSETS when set — e.g. an external SSD).
+COOKED="${BLIX_SPONZA_ASSETS:-$REPO/src/Blix.Demos.SponzaModern/Assets}"
+# SRC is the raw-source tree to cook FROM. BLIX_SPONZA_SRC, else a "-src" sibling
+# of COOKED when it exists (the split layout: sponza-src/ holds .png/.bin/.gltf/
+# .hdr, sponza/ holds the cooked output), else COOKED itself (legacy in-place,
+# sources + cooked interleaved). When SRC != COOKED the cook writes out-of-place
+# via --out, mirroring the source tree's structure into COOKED.
+SRC="${BLIX_SPONZA_SRC:-${COOKED%/}-src}"
+[[ -d "$SRC" ]] || SRC="$COOKED"
 
-if [[ ! -d "$ASSETS" ]]; then
-    echo "Sponza Modern assets dir not found: $ASSETS" >&2
+if [[ ! -d "$SRC" ]]; then
+    echo "Sponza source dir not found: $SRC" >&2
     echo "Run tools/setup-sponza-modern.sh first." >&2
     exit 1
 fi
 
-dotnet run --project "$REPO/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj" \
-    --configuration Release -- textures "$ASSETS"
+# OUTDIR is empty for in-place cooking; set to COOKED for out-of-place. The
+# wrapper appends --out only when set (keeps empty-array expansion out of the
+# way under bash 3.2 + set -u).
+OUTDIR=""
+if [[ "$SRC" != "$COOKED" ]]; then
+    echo "Out-of-place cook: sources '$SRC' -> cooked '$COOKED'"
+    OUTDIR="$COOKED"
+    mkdir -p "$COOKED"
+fi
 
-HDR="$ASSETS/textures/sky_hdr.hdr"
+cook() {
+    if [[ -n "$OUTDIR" ]]; then
+        dotnet run --project "$REPO/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj" \
+            --configuration Release -- "$@" --out "$OUTDIR"
+    else
+        dotnet run --project "$REPO/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj" \
+            --configuration Release -- "$@"
+    fi
+}
+
+cook textures "$SRC"
+
+HDR="$SRC/textures/sky_hdr.hdr"
 if [[ -f "$HDR" ]]; then
-    dotnet run --project "$REPO/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj" \
-        --configuration Release -- probe "$HDR"
+    cook probe "$HDR"
 else
     echo "No HDR sky at $HDR -- skipping .blixprobe cook."
 fi
 
-dotnet run --project "$REPO/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj" \
-    --configuration Release -- mesh "$ASSETS"
+cook mesh "$SRC"

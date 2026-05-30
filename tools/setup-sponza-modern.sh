@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# Populates src/Blix.Demos.SponzaModern/Assets/ from a local copy of the
-# Khronos Intel Sponza repo packs.
+# Populates the Sponza Modern assets from a local copy of the Khronos Intel
+# Sponza repo packs, producing a split layout: raw sources (.png/.bin/.gltf/
+# .hdr) land in a SRC tree and are cooked out-of-place into a COOKED tree of
+# runtime .blix* (the demos read COOKED; SRC is only re-cook input). By default
+# COOKED = src/Blix.Demos.SponzaModern/Assets and SRC = its "-src" sibling; set
+# BLIX_SPONZA_ASSETS (cooked dir) and/or BLIX_SPONZA_SRC (source dir) to place
+# them elsewhere — e.g. an external SSD. BLIX_SPONZA_SRC=$BLIX_SPONZA_ASSETS
+# keeps the legacy combined layout (raw + cooked in one dir).
 #
 # Usage:
 #   tools/setup-sponza-modern.sh [SOURCE_ROOT]
@@ -32,11 +38,15 @@ set -euo pipefail
 
 SOURCE_ROOT="${1:-$HOME/Downloads}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# Populate the in-repo Assets dir by default, or BLIX_SPONZA_ASSETS when set —
-# e.g. an external SSD shared across machines, which the demos read from the
-# same var at runtime (skipping the bin copy). Export it to populate there
-# instead, keeping the large pack set out of the repo.
-DEST="${BLIX_SPONZA_ASSETS:-$REPO_ROOT/src/Blix.Demos.SponzaModern/Assets}"
+# COOKED holds the runtime-ready .blix* (the in-repo Assets dir by default, or
+# BLIX_SPONZA_ASSETS when set — e.g. an external SSD the demos read from at
+# runtime, skipping the bin copy). SRC holds the raw sources we extract + cook
+# FROM (.png/.bin/.gltf/.hdr); it defaults to a "-src" sibling of COOKED so the
+# cooked set and raw set stay separated on disk (BLIX_SPONZA_SRC overrides).
+# Set BLIX_SPONZA_SRC=$BLIX_SPONZA_ASSETS for the legacy combined layout (raw +
+# cooked interleaved in one dir).
+COOKED="${BLIX_SPONZA_ASSETS:-$REPO_ROOT/src/Blix.Demos.SponzaModern/Assets}"
+SRC="${BLIX_SPONZA_SRC:-${COOKED%/}-src}"
 SCRATCH="$(mktemp -d -t blix-sponza-extract.XXXXXX)"
 trap 'rm -rf "$SCRATCH"' EXIT
 
@@ -45,7 +55,7 @@ if [[ ! -d "$SOURCE_ROOT" ]]; then
     exit 1
 fi
 
-mkdir -p "$DEST"
+mkdir -p "$COOKED" "$SRC"
 
 # Returns the path to a usable pack source — either an existing directory
 # under SOURCE_ROOT, or a freshly-extracted scratch directory from a sibling
@@ -98,7 +108,7 @@ copy_pack() {
         echo "  skipping (no source dir or zip): $pack"
         return 0
     fi
-    local dest="$DEST/$dest_name"
+    local dest="$SRC/$dest_name"
     mkdir -p "$dest"
     # glTF + .bin from the pack root. rsync (not cp) because APFS-on-Mac's
     # cp does clonefile-style metadata copies for large files that can land
@@ -139,8 +149,8 @@ copy_pack "pkg_d_10k_candles"  "candles"     "pkg_d_10k_candles"
 # bake IBL probes from frame one. Skip if it isn't present.
 WALK_HDR="$REPO_ROOT/src/Blix.Demos.Walkthrough/Assets/textures/sky_hdr.hdr"
 if [[ -f "$WALK_HDR" ]]; then
-    mkdir -p "$DEST/textures"
-    cp -p "$WALK_HDR" "$DEST/textures/sky_hdr.hdr"
+    mkdir -p "$SRC/textures"
+    cp -p "$WALK_HDR" "$SRC/textures/sky_hdr.hdr"
     echo "  copied: walkthrough sky_hdr.hdr"
 fi
 
@@ -151,53 +161,70 @@ fi
 # (sunless ambient) → sky_hdr. Best-effort: skipped if dotnet/HDR is missing,
 # and the demo falls back to the procedural bake when no probe is present.
 # (autumn_field_4k.hdr / rogland_overcast_4k.hdr are from Poly Haven; drop into
-# $DEST/textures.)
+# $SRC/textures.)
 HDR=""
 for cand in autumn_field_4k rogland_overcast_4k sky_hdr; do
-    if [[ -f "$DEST/textures/$cand.hdr" ]]; then HDR="$DEST/textures/$cand.hdr"; break; fi
+    if [[ -f "$SRC/textures/$cand.hdr" ]]; then HDR="$SRC/textures/$cand.hdr"; break; fi
 done
-if [[ -n "$HDR" ]] && command -v dotnet >/dev/null 2>&1; then
-    echo "Cooking IBL probe from $(basename "$HDR") ..."
-    COOK="$REPO_ROOT/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj"
-    if dotnet build "$COOK" -c Debug --nologo -v:q >/dev/null 2>&1; then
-        COOK_DLL="$REPO_ROOT/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll"
-        dotnet "$COOK_DLL" probe "$HDR" --env-face=512 --prefilter-base=256 --prefilter-mips=5 \
+
+# Cook raw sources (in SRC) into runtime .blix* (in COOKED). When SRC != COOKED
+# the cook writes out-of-place via --out, mirroring SRC's structure into COOKED
+# (and copying each .gltf, which the runtime needs beside the .blixmesh); the
+# raw .png/.bin/.hdr stay in SRC and never reach COOKED.
+COOK="$REPO_ROOT/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj"
+if command -v dotnet >/dev/null 2>&1 && dotnet build "$COOK" -c Release --nologo -v:q >/dev/null 2>&1; then
+    OUTDIR=""
+    [[ "$SRC" != "$COOKED" ]] && OUTDIR="$COOKED"
+    # Appends --out only when set — keeps empty-array expansion out of the way
+    # under bash 3.2 + set -u.
+    cook_run() {
+        if [[ -n "$OUTDIR" ]]; then
+            dotnet run --project "$COOK" -c Release --no-build -- "$@" --out "$OUTDIR"
+        else
+            dotnet run --project "$COOK" -c Release --no-build -- "$@"
+        fi
+    }
+
+    # IBL probe: GGX-prefiltered specular + diffuse irradiance + BRDF LUT, so
+    # the demo gets real IBL instead of the procedural-sky fallback. Best-effort.
+    if [[ -n "$HDR" ]]; then
+        echo "Cooking IBL probe from $(basename "$HDR") ..."
+        cook_run probe "$HDR" --env-face=512 --prefilter-base=256 --prefilter-mips=5 \
             && echo "  cooked: $(basename "${HDR%.hdr}.blixprobe")" \
             || echo "  (probe cook failed — demo will use procedural IBL)"
-    else
-        echo "  (cook tool build failed — demo will use procedural IBL)"
     fi
-fi
 
-# Cook the scene textures to BC7/BC5 .blixtex siblings (multi-mip). The demo
-# loads these with no decode (44s of stb_image decode -> ~1ms lazy index) and
-# ~3-4x less GPU memory than RGBA8; it falls back to runtime PNG/JPEG decode
-# for any texture without a .blixtex. The cook re-cooks only stale outputs.
-COOK="$REPO_ROOT/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj"
-if dotnet build "$COOK" -c Release --nologo -v:q >/dev/null 2>&1; then
-    echo "Cooking textures to BC7/BC5 .blixtex (multi-mip) ..."
-    dotnet run --project "$COOK" -c Release -- textures "$DEST" \
+    # Scene textures -> BC7 .blixtex (multi-mip). The demo loads these with no
+    # decode (44s of stb_image decode -> ~1ms lazy index) and ~4x less GPU
+    # memory than RGBA8; falls back to runtime PNG/JPEG decode for any texture
+    # without a .blixtex. Re-cooks only stale outputs.
+    echo "Cooking textures to BC7 .blixtex (multi-mip) ..."
+    cook_run textures "$SRC" \
         || echo "  (texture cook failed — demo will runtime-decode PNG/JPEG)"
-    # Cook geometry to .blixmesh (tangent layout + meshoptimizer LOD chains).
-    # The demo loads cooked vertex/index data (skips glTF accessor walking) and
-    # — once LOD selection lands — picks a triangle level by distance. Falls
-    # back to runtime glTF import for any .gltf without a .blixmesh.
+
+    # Geometry -> .blixmesh (tangent layout + meshoptimizer LOD chains). The demo
+    # loads cooked vertex/index data (skips glTF accessor walking) and picks a
+    # triangle level by distance. Falls back to runtime glTF import for any .gltf
+    # without a .blixmesh.
     # --flip-v matches the demo's runtime import (AssetImportContext
-    # flipTextureV: true) — Intel Sponza is bottom-up/OpenGL-authored. Without
-    # it the cooked UVs + tangent handedness are wrong and normal maps sample
-    # the flipped V.
+    # flipTextureV: true) — Intel Sponza is bottom-up/OpenGL-authored. Without it
+    # the cooked UVs + tangent handedness are wrong and normal maps sample the
+    # flipped V.
     # --split N spatially partitions primitives over N triangles into chunks
-    # (each its own LOD chain), so per-prim screen-space-error LOD gets
-    # fine-grained — a huge floor/wall/ivy mesh becomes many chunks whose far
-    # halves coarsen independently. Crack-free via meshopt LockBorder on the
-    # duplicated seam verts. 32k is the current default; foliage is split too for
-    # now (--no-split-foliage will exclude it once the impostor track lands).
+    # (each its own LOD chain) so per-prim screen-space-error LOD gets
+    # fine-grained. Crack-free via meshopt LockBorder on the duplicated seam
+    # verts. 32k default; foliage split too for now.
     echo "Cooking geometry to .blixmesh (tangent + LOD chains + spatial split) ..."
-    dotnet run --project "$COOK" -c Release -- mesh "$DEST" --tangents --flip-v --split 32768 \
+    cook_run mesh "$SRC" --tangents --flip-v --split 32768 \
         || echo "  (mesh cook failed — demo will runtime-import glTF)"
 else
-    echo "  (cook tool build failed — demo will runtime-decode textures)"
+    echo "  (no dotnet or cook build failed — demo will runtime-decode assets)"
 fi
 
-du -sh "$DEST" 2>/dev/null | awk '{print "Total: " $1}'
+if [[ "$SRC" != "$COOKED" ]]; then
+    echo "Cooked (runtime): $(du -sh "$COOKED" 2>/dev/null | cut -f1)  $COOKED"
+    echo "Raw (re-cook src): $(du -sh "$SRC" 2>/dev/null | cut -f1)  $SRC"
+else
+    du -sh "$COOKED" 2>/dev/null | awk '{print "Total: " $1}'
+fi
 echo "Done."

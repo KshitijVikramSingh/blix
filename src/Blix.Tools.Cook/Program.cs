@@ -87,36 +87,45 @@ static void PrintUsage()
     Console.WriteLine("    .gltf -- only the per-primitive vertex/index data is cooked.");
     Console.WriteLine("    --flip-v canonicalises bottom-up (OpenGL) UVs to a top-down");
     Console.WriteLine("    origin, baked into the cooked vertices.");
+    Console.WriteLine();
+    Console.WriteLine("  --out <dir>  (textures/probe/mesh) write cooked output into a separate");
+    Console.WriteLine("    tree, mirroring each source's path relative to the input root, instead");
+    Console.WriteLine("    of as siblings. Keeps cooked assets apart from raw sources (e.g. a");
+    Console.WriteLine("    cooked sponza/ vs a raw sponza-src/). mesh also copies the .gltf into");
+    Console.WriteLine("    the output tree, which the runtime needs alongside the .blixmesh.");
 }
 
 static int CookMesh(string[] args)
 {
-    if (args.Length < 2)
+    var (outDir, a) = ExtractOutDir(args);
+    if (a.Length < 2)
     {
-        Console.Error.WriteLine("Usage: blix-cook mesh <gltf-or-directory> [--flip-v]");
+        Console.Error.WriteLine("Usage: blix-cook mesh <gltf-or-directory> [--out <dir>] [--flip-v] [--tangents] [--split N]");
         return 1;
     }
-    var target = args[1];
+    var target = a[1];
     // Opt-in V canonicalisation for bottom-up (OpenGL-authored) sources, baked
     // into the cooked vertex data. Granular per invocation — mirrors
     // AssetImportContext.FlipTextureV on the runtime-import path.
-    var flipV = args.Any(a => a.Equals("--flip-v", StringComparison.OrdinalIgnoreCase));
+    var flipV = a.Any(x => x.Equals("--flip-v", StringComparison.OrdinalIgnoreCase));
     // Cook the 48-byte tangent layout (VulkanSponza needs it for normal
     // mapping). GL's non-tangent path is sunsetting.
-    var tangents = args.Any(a => a.Equals("--tangents", StringComparison.OrdinalIgnoreCase));
+    var tangents = a.Any(x => x.Equals("--tangents", StringComparison.OrdinalIgnoreCase));
     // Spatial split: primitives over this triangle budget are recursively
     // partitioned into chunks (each its own LOD chain) so per-prim distance LOD
     // gets fine-grained. 0/absent = off. --no-split-foliage leaves non-OPAQUE
     // (masked/blended) prims whole for the impostor track to own.
     var splitBudget = 0;
-    var splitIdx = Array.FindIndex(args, a => a.Equals("--split", StringComparison.OrdinalIgnoreCase));
-    if (splitIdx >= 0 && splitIdx + 1 < args.Length && int.TryParse(args[splitIdx + 1], out var sb))
+    var splitIdx = Array.FindIndex(a, x => x.Equals("--split", StringComparison.OrdinalIgnoreCase));
+    if (splitIdx >= 0 && splitIdx + 1 < a.Length && int.TryParse(a[splitIdx + 1], out var sb))
         splitBudget = sb;
-    var splitFoliage = !args.Any(a => a.Equals("--no-split-foliage", StringComparison.OrdinalIgnoreCase));
+    var splitFoliage = !a.Any(x => x.Equals("--no-split-foliage", StringComparison.OrdinalIgnoreCase));
 
     string[] sources;
+    string inRoot;
     if (Directory.Exists(target))
     {
+        inRoot = Path.GetFullPath(target);
         sources = Directory
             .EnumerateFiles(target, "*.*", SearchOption.AllDirectories)
             .Where(p =>
@@ -129,6 +138,7 @@ static int CookMesh(string[] args)
     }
     else if (File.Exists(target))
     {
+        inRoot = Path.GetDirectoryName(Path.GetFullPath(target)) ?? string.Empty;
         sources = new[] { target };
     }
     else
@@ -136,12 +146,23 @@ static int CookMesh(string[] args)
         Console.Error.WriteLine($"Path not found: {target}");
         return 1;
     }
+    if (outDir is not null) Console.WriteLine($"  writing cooked .blixmesh (+ .gltf) into {outDir}");
 
     if (sources.Length == 0) return 0;
 
     foreach (var src in sources)
     {
-        var outPath = Path.ChangeExtension(src, ".blixmesh");
+        var outPath = ResolveDest(src, inRoot, outDir, ".blixmesh");
+        // Out-of-place: the runtime reads the .gltf (material/image metadata +
+        // node graph) from the cooked tree, so copy it alongside the .blixmesh.
+        // The .bin stays behind — with a .blixmesh present the importer never
+        // reads it (GltfStaticImporter returns empty for buffer requests).
+        if (outDir is not null)
+        {
+            var gltfDest = ResolveDest(src, inRoot, outDir, Path.GetExtension(src));
+            if (!string.Equals(Path.GetFullPath(gltfDest), Path.GetFullPath(src), StringComparison.Ordinal))
+                File.Copy(src, gltfDest, overwrite: true);
+        }
         // Skip if .blixmesh is newer than its .gltf source.
         if (File.Exists(outPath))
         {
@@ -180,12 +201,13 @@ static int CookMesh(string[] args)
 
 static int CookProbe(string[] args)
 {
-    if (args.Length < 2)
+    var (outDir, args2) = ExtractOutDir(args);
+    if (args2.Length < 2)
     {
-        Console.Error.WriteLine("Usage: blix-cook probe <hdr-path> [options]");
+        Console.Error.WriteLine("Usage: blix-cook probe <hdr-path> [--out <dir>] [options]");
         return 1;
     }
-    var hdrPath = args[1];
+    var hdrPath = args2[1];
     if (!File.Exists(hdrPath))
     {
         Console.Error.WriteLine($"HDR not found: {hdrPath}");
@@ -194,7 +216,7 @@ static int CookProbe(string[] args)
 
     int envFace = 256, irrFace = 32, prefilterBase = 128, prefilterMips = 5, brdfSize = 256;
     float clamp = 50.0f;
-    foreach (var a in args.Skip(2))
+    foreach (var a in args2.Skip(2))
     {
         if (a.StartsWith("--env-face=")) envFace = int.Parse(a.AsSpan("--env-face=".Length));
         else if (a.StartsWith("--irr-face=")) irrFace = int.Parse(a.AsSpan("--irr-face=".Length));
@@ -205,7 +227,22 @@ static int CookProbe(string[] args)
         else { Console.Error.WriteLine($"Unknown option: {a}"); return 1; }
     }
 
-    var outPath = Path.ChangeExtension(hdrPath, ".blixprobe");
+    string outPath;
+    if (string.IsNullOrEmpty(outDir))
+    {
+        outPath = Path.ChangeExtension(hdrPath, ".blixprobe");
+    }
+    else
+    {
+        // Single-file input (no input root to mirror against): preserve the
+        // HDR's immediate parent dir under outDir — e.g. <src>/textures/x.hdr ->
+        // <out>/textures/x.blixprobe — so it lands where the runtime looks
+        // (<assetsRoot>/textures/).
+        var parent = Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(hdrPath)) ?? string.Empty);
+        var destDir = string.IsNullOrEmpty(parent) ? outDir : Path.Combine(outDir, parent);
+        Directory.CreateDirectory(destDir);
+        outPath = Path.Combine(destDir, Path.GetFileNameWithoutExtension(hdrPath) + ".blixprobe");
+    }
     Console.WriteLine($"Cooking probe: {hdrPath} -> {outPath}");
     Console.WriteLine($"  env={envFace} irr={irrFace} prefilter={prefilterBase}/{prefilterMips} brdf={brdfSize} clamp={clamp}");
 
@@ -244,15 +281,51 @@ static int UnknownVerb(string verb)
     return 1;
 }
 
+// --- Out-of-place cooking -------------------------------------------------
+// `--out <dir>` makes a verb write its outputs into a separate tree, mirroring
+// each source's path relative to the input root, instead of as siblings of the
+// source. Lets the cooked set (what the runtime reads) live apart from the raw
+// sources (the re-cook set) — e.g. sponza/ (cooked) vs sponza-src/ (raw).
+// Returns the output root (created) and `args` with `--out <dir>` removed, so
+// each verb's own argument parser doesn't trip over the flag or its value.
+static (string? OutDir, string[] Remaining) ExtractOutDir(string[] args)
+{
+    var i = Array.FindIndex(args, a => a.Equals("--out", StringComparison.OrdinalIgnoreCase));
+    if (i < 0) return (null, args);
+    if (i + 1 >= args.Length)
+    {
+        Console.Error.WriteLine("--out requires a directory argument.");
+        Environment.Exit(1);
+    }
+    var dir = Path.GetFullPath(args[i + 1]);
+    Directory.CreateDirectory(dir);
+    var rest = args.Where((_, idx) => idx != i && idx != i + 1).ToArray();
+    return (dir, rest);
+}
+
+// Resolve a cooked output path. In-place (outDir null/empty): a sibling of
+// `source` with `newExt`. Out-of-place: mirror source's path relative to
+// `inRoot` under `outDir`, with `newExt`; the destination directory is created.
+static string ResolveDest(string source, string inRoot, string? outDir, string newExt)
+{
+    if (string.IsNullOrEmpty(outDir))
+        return Path.ChangeExtension(source, newExt);
+    var rel = Path.GetRelativePath(inRoot, Path.ChangeExtension(source, newExt));
+    var dest = Path.Combine(outDir, rel);
+    Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+    return dest;
+}
+
 static int CookTextures(string[] args)
 {
-    if (args.Length < 2)
+    var (outDir, a) = ExtractOutDir(args);
+    if (a.Length < 2)
     {
-        Console.Error.WriteLine("Usage: blix-cook textures <directory> [--force]");
+        Console.Error.WriteLine("Usage: blix-cook textures <directory> [--out <dir>] [--force]");
         return 1;
     }
-    var root = args[1];
-    var force = args.Skip(2).Any(a => a == "--force" || a == "-f");
+    var root = a[1];
+    var force = a.Skip(2).Any(x => x == "--force" || x == "-f");
     if (!Directory.Exists(root))
     {
         Console.Error.WriteLine($"Directory not found: {root}");
@@ -273,6 +346,7 @@ static int CookTextures(string[] args)
         .ToArray();
 
     Console.WriteLine($"Found {sources.Length} source images under {root}");
+    if (outDir is not null) Console.WriteLine($"  writing cooked .blixtex into {outDir}");
     if (sources.Length == 0) return 0;
 
     var totalWatch = Stopwatch.StartNew();
@@ -323,7 +397,7 @@ static int CookTextures(string[] args)
 
     void ProcessOne(string source)
     {
-        var destination = Path.ChangeExtension(source, ".blixtex");
+        var destination = ResolveDest(source, root, outDir, ".blixtex");
         if (File.Exists(destination) && !force)
         {
             var sourceWrite = File.GetLastWriteTimeUtc(source);
