@@ -174,6 +174,23 @@ if dotnet build "$COOK" -c Release --nologo -v:q >/dev/null 2>&1; then
     echo "Cooking textures to BC7/BC5 .blixtex (multi-mip) ..."
     dotnet run --project "$COOK" -c Release -- textures "$DEST" \
         || echo "  (texture cook failed — demo will runtime-decode PNG/JPEG)"
+    # Cook geometry to .blixmesh (tangent layout + meshoptimizer LOD chains).
+    # The demo loads cooked vertex/index data (skips glTF accessor walking) and
+    # — once LOD selection lands — picks a triangle level by distance. Falls
+    # back to runtime glTF import for any .gltf without a .blixmesh.
+    # --flip-v matches the demo's runtime import (AssetImportContext
+    # flipTextureV: true) — Intel Sponza is bottom-up/OpenGL-authored. Without
+    # it the cooked UVs + tangent handedness are wrong and normal maps sample
+    # the flipped V.
+    # --split N spatially partitions primitives over N triangles into chunks
+    # (each its own LOD chain), so per-prim screen-space-error LOD gets
+    # fine-grained — a huge floor/wall/ivy mesh becomes many chunks whose far
+    # halves coarsen independently. Crack-free via meshopt LockBorder on the
+    # duplicated seam verts. 32k is the current default; foliage is split too for
+    # now (--no-split-foliage will exclude it once the impostor track lands).
+    echo "Cooking geometry to .blixmesh (tangent + LOD chains + spatial split) ..."
+    dotnet run --project "$COOK" -c Release -- mesh "$DEST" --tangents --flip-v --split 32768 \
+        || echo "  (mesh cook failed — demo will runtime-import glTF)"
 else
     echo "  (cook tool build failed — demo will runtime-decode textures)"
 fi

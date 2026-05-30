@@ -23,6 +23,7 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
     private int defaultSurfaceHeight = 1;
     private int currentGpuFrameNumber;
     private readonly List<VkGpuPassTiming> pendingGpuTimings = new();
+    private VkCpuFrameTiming lastCpuFrameTiming = new(0, 0, 0);
 
     public VulkanGraphicsDevice(IVkSurface windowSurface, int initialWidth, int initialHeight)
     {
@@ -211,6 +212,12 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
         pendingGpuTimings.Clear();
         return copy;
     }
+
+    // CPU-phase breakdown of the most recent frame's AcquireRecordSubmitPresent
+    // (wait / encode / submit-present). Lets a diagnostics surface separate the
+    // draw-encode cost — the part batching/indirect would move — from the GPU/
+    // vsync wait that dominates `execute` when the renderer is GPU-bound.
+    public VkCpuFrameTiming LastCpuFrameTiming => lastCpuFrameTiming;
 
     public void Dispose()
     {

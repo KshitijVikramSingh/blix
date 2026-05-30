@@ -17,6 +17,24 @@
     <UseAppHost>false</UseAppHost>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <MeshoptSrc>$(MSBuildProjectDirectory)/../../third_party/meshoptimizer/src</MeshoptSrc>
   </PropertyGroup>
+
+  <!-- Build vendored meshoptimizer into a dylib next to the cook exe so the
+       mesh-LOD P/Invoke (MeshoptNative) resolves it. macOS/clang only for now;
+       Linux/Windows would add a .so/.dll branch. Rebuilds when a source is
+       newer than the dylib. $(TargetDir) is absolute (unlike $(OutDir) at
+       property-eval time) so the dylib lands in the real output directory. -->
+  <ItemGroup>
+    <MeshoptCpp Include="$(MeshoptSrc)/*.cpp" />
+  </ItemGroup>
+  <Target Name="BuildMeshopt" AfterTargets="Build"
+          Condition="'$([MSBuild]::IsOSPlatform(OSX))' == 'true'"
+          Inputs="@(MeshoptCpp);$(MeshoptSrc)/meshoptimizer.h"
+          Outputs="$(TargetDir)libmeshoptimizer.dylib">
+    <Message Text="Building libmeshoptimizer.dylib (clang++)" Importance="high" />
+    <Exec Command="clang++ -O2 -std=c++14 -dynamiclib @(MeshoptCpp->'&quot;%(FullPath)&quot;', ' ') -o &quot;$(TargetDir)libmeshoptimizer.dylib&quot;" />
+  </Target>
 
 </Project>

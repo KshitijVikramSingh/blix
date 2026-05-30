@@ -179,7 +179,16 @@ void main() {
     vec4 sampled = texture(uAlbedo, uv);
     vec4 albedo4 = sampled * mat.uBaseColorFactor;
     float alphaCutoff = mat.uMaterialParams.x;
-    if (alphaCutoff > 0.0 && albedo4.a < alphaCutoff) discard;
+    // Alpha-to-coverage edge for cutout materials (alphaCutoff > 0): sharpen the
+    // sampled alpha to ~1px around the cutoff via its screen-space derivative,
+    // so the lit pipeline's alpha-to-coverage turns it into a smooth MSAA leaf
+    // silhouette instead of a hard binary edge. Fully-outside texels discard.
+    // Opaque (alphaCutoff == 0) keeps coverage 1 → alpha-to-coverage is a no-op.
+    float coverage = 1.0;
+    if (alphaCutoff > 0.0) {
+        coverage = clamp((albedo4.a - alphaCutoff) / max(fwidth(albedo4.a), 1e-5) + 0.5, 0.0, 1.0);
+        if (coverage <= 0.0) discard;
+    }
     vec3 albedo = albedo4.rgb;
 
     // --- Normal map (real per-vertex TBN) -------------------------------
@@ -302,5 +311,7 @@ void main() {
         color = color * fog.a + fog.rgb;
     }
 
-    outColor = vec4(color, albedo4.a);
+    // Output coverage (not raw alpha) so alpha-to-coverage gets the sharpened
+    // cutout edge; opaque keeps coverage 1.0 → fully covered.
+    outColor = vec4(color, coverage);
 }

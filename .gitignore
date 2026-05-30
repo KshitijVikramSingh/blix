@@ -11,3 +11,6 @@ imgui.ini
 * 2.*
 * 2
 .claude/
+third_party/**/*.dylib
+third_party/**/*.so
+third_party/**/*.dll

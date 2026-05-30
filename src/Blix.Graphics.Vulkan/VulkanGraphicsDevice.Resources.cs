@@ -599,6 +599,9 @@ public sealed partial class VulkanGraphicsDevice
         {
             SType = StructureType.PipelineMultisampleStateCreateInfo,
             RasterizationSamples = rasterSamples,
+            // Alpha-to-coverage: the lit mask pipelines enable this so foliage
+            // cutout edges antialias against the MSAA samples. No-op at 1×.
+            AlphaToCoverageEnable = description.AlphaToCoverage,
         };
 
         var depthStencil = new PipelineDepthStencilStateCreateInfo

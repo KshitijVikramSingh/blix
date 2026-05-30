@@ -45,12 +45,36 @@ namespace Blix.Assets;
 public static class BlixMesh
 {
     public const uint Magic = 0x4D584C42; // "BLXM" little-endian
-    public const uint Version1 = 1;
-    public const uint LayoutPosition3NormalTexture = 1;
+    // v2: tangent-layout support + per-primitive LOD index chains (one shared
+    // vertex buffer, N index buffers, coarsest selected by distance at runtime).
+    // v3: each LOD level also carries its world-space geometric error (a float
+    // after indexCount) so the runtime can do screen-space-error selection
+    // instead of a magic metres-per-level distance. No back-read path — re-cook
+    // to migrate (the cook is fast, and nothing ships older files).
+    public const uint Version3 = 3;
+    public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
+    public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
 
     public const int NoMaterial = -1;
     public const byte IndexFormatU16 = 0;
     public const byte IndexFormatU32 = 1;
+
+    // Layout id ↔ stride. The only two layouts the cook emits.
+    public static uint LayoutIdForStride(int stride) => stride switch
+    {
+        32 => LayoutPosition3NormalTexture,
+        48 => LayoutPosition3NormalTangentTexture,
+        _ => throw new ArgumentException($"No BlixMesh layout id for vertex stride {stride}.", nameof(stride)),
+    };
+}
+
+// One LOD level: an index buffer over the primitive's shared vertex buffer,
+// plus the world-space geometric error decimating to this level introduced
+// (0 for LOD0, the original surface). Lods[0] is full detail; higher indices
+// are progressively decimated with monotonically increasing error.
+public sealed record BlixMeshLod(ushort[]? Indices16, uint[]? Indices32, float Error = 0f)
+{
+    public int IndexCount => Indices32?.Length ?? Indices16!.Length;
 }
 
 public sealed record BlixMeshPrimitive(
@@ -60,8 +84,7 @@ public sealed record BlixMeshPrimitive(
     int VertexCount,
     byte[] VertexBytes,
     IndexFormat IndexFormat,
-    ushort[] Indices16,
-    uint[]? Indices32);
+    IReadOnlyList<BlixMeshLod> Lods);
 
 public sealed record BlixMeshFile(
     VertexLayout Layout,
@@ -73,22 +96,14 @@ public static class BlixMeshWriter
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
-        // Only one layout is recognised today. Bake the assumption in until
-        // a second consumer demands the table; the format already carries
-        // a layoutId so adding new layouts is additive.
-        if (file.Layout.Stride != VertexPosition3NormalTexture.Layout.Stride)
-        {
-            throw new ArgumentException(
-                $"BlixMesh v1 only supports the VertexPosition3NormalTexture layout (stride {VertexPosition3NormalTexture.Layout.Stride}); got stride {file.Layout.Stride}.",
-                nameof(file));
-        }
+        var layoutId = BlixMesh.LayoutIdForStride(file.Layout.Stride);
 
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(BlixMesh.Magic);
-        bw.Write(BlixMesh.Version1);
-        bw.Write(BlixMesh.LayoutPosition3NormalTexture);
+        bw.Write(BlixMesh.Version3);
+        bw.Write(layoutId);
         bw.Write(file.Primitives.Count);
 
         foreach (var p in file.Primitives)
@@ -102,23 +117,30 @@ public static class BlixMeshWriter
             bw.Write(p.VertexCount);
             bw.Write(p.VertexBytes.Length);
             bw.Write(p.VertexBytes);
-            if (p.IndexFormat == IndexFormat.UInt32)
+            bw.Write((byte)(p.IndexFormat == IndexFormat.UInt32 ? BlixMesh.IndexFormatU32 : BlixMesh.IndexFormatU16));
+            if (p.Lods is null || p.Lods.Count == 0)
             {
-                if (p.Indices32 is null)
-                {
-                    throw new ArgumentException(
-                        $"Primitive '{p.Name}' has IndexFormat=UInt32 but Indices32 is null.",
-                        nameof(file));
-                }
-                bw.Write(BlixMesh.IndexFormatU32);
-                bw.Write(p.Indices32.Length);
-                bw.Write(MemoryMarshal.AsBytes(p.Indices32.AsSpan()));
+                throw new ArgumentException($"Primitive '{p.Name}' has no LOD levels.", nameof(file));
             }
-            else
+            bw.Write(p.Lods.Count);
+            foreach (var lod in p.Lods)
             {
-                bw.Write(BlixMesh.IndexFormatU16);
-                bw.Write(p.Indices16.Length);
-                bw.Write(MemoryMarshal.AsBytes(p.Indices16.AsSpan()));
+                if (p.IndexFormat == IndexFormat.UInt32)
+                {
+                    if (lod.Indices32 is null)
+                        throw new ArgumentException($"Primitive '{p.Name}' LOD has IndexFormat=UInt32 but Indices32 is null.", nameof(file));
+                    bw.Write(lod.Indices32.Length);
+                    bw.Write(lod.Error);
+                    bw.Write(MemoryMarshal.AsBytes(lod.Indices32.AsSpan()));
+                }
+                else
+                {
+                    if (lod.Indices16 is null)
+                        throw new ArgumentException($"Primitive '{p.Name}' LOD has IndexFormat=UInt16 but Indices16 is null.", nameof(file));
+                    bw.Write(lod.Indices16.Length);
+                    bw.Write(lod.Error);
+                    bw.Write(MemoryMarshal.AsBytes(lod.Indices16.AsSpan()));
+                }
             }
         }
     }
@@ -140,17 +162,18 @@ public static class BlixMeshReader
                 $"'{path}' is not a .blixmesh file (magic mismatch: got 0x{magic:X8}).");
         }
         var version = br.ReadUInt32();
-        if (version != BlixMesh.Version1)
+        if (version != BlixMesh.Version3)
         {
             throw new InvalidDataException(
-                $"'{path}' has unsupported .blixmesh version {version}; expected {BlixMesh.Version1}.");
+                $"'{path}' has unsupported .blixmesh version {version}; expected {BlixMesh.Version3}. Re-run blix-cook mesh.");
         }
         var layoutId = br.ReadUInt32();
-        if (layoutId != BlixMesh.LayoutPosition3NormalTexture)
+        var layout = layoutId switch
         {
-            throw new InvalidDataException(
-                $"'{path}' uses unrecognised layout id {layoutId}.");
-        }
+            BlixMesh.LayoutPosition3NormalTexture => VertexPosition3NormalTexture.Layout,
+            BlixMesh.LayoutPosition3NormalTangentTexture => VertexPosition3NormalTangentTexture.Layout,
+            _ => throw new InvalidDataException($"'{path}' uses unrecognised layout id {layoutId}."),
+        };
         var primitiveCount = br.ReadInt32();
         if (primitiveCount < 0)
         {
@@ -172,22 +195,29 @@ public static class BlixMeshReader
             var vertexBytesLen = br.ReadInt32();
             var vertexBytes = br.ReadBytes(vertexBytesLen);
             var indexFormatByte = br.ReadByte();
-            var indexCount = br.ReadInt32();
-            ushort[] indices16;
-            uint[]? indices32;
-            if (indexFormatByte == BlixMesh.IndexFormatU32)
+            var isU32 = indexFormatByte == BlixMesh.IndexFormatU32;
+            var lodCount = br.ReadInt32();
+            if (lodCount < 1)
             {
-                indices32 = new uint[indexCount];
-                var raw = br.ReadBytes(indexCount * 4);
-                raw.AsSpan().CopyTo(MemoryMarshal.AsBytes(indices32.AsSpan()));
-                indices16 = Array.Empty<ushort>();
+                throw new InvalidDataException($"'{path}' primitive '{name}' has invalid LOD count {lodCount}.");
             }
-            else
+            var lods = new BlixMeshLod[lodCount];
+            for (var l = 0; l < lodCount; l++)
             {
-                indices32 = null;
-                indices16 = new ushort[indexCount];
-                var raw = br.ReadBytes(indexCount * 2);
-                raw.AsSpan().CopyTo(MemoryMarshal.AsBytes(indices16.AsSpan()));
+                var indexCount = br.ReadInt32();
+                var error = br.ReadSingle();
+                if (isU32)
+                {
+                    var indices32 = new uint[indexCount];
+                    br.ReadBytes(indexCount * 4).AsSpan().CopyTo(MemoryMarshal.AsBytes(indices32.AsSpan()));
+                    lods[l] = new BlixMeshLod(null, indices32, error);
+                }
+                else
+                {
+                    var indices16 = new ushort[indexCount];
+                    br.ReadBytes(indexCount * 2).AsSpan().CopyTo(MemoryMarshal.AsBytes(indices16.AsSpan()));
+                    lods[l] = new BlixMeshLod(indices16, null, error);
+                }
             }
 
             primitives[i] = new BlixMeshPrimitive(
@@ -196,11 +226,10 @@ public static class BlixMeshReader
                 Bounds: bounds,
                 VertexCount: vertexCount,
                 VertexBytes: vertexBytes,
-                IndexFormat: indexFormatByte == BlixMesh.IndexFormatU32 ? IndexFormat.UInt32 : IndexFormat.UInt16,
-                Indices16: indices16,
-                Indices32: indices32);
+                IndexFormat: isU32 ? IndexFormat.UInt32 : IndexFormat.UInt16,
+                Lods: lods);
         }
 
-        return new BlixMeshFile(VertexPosition3NormalTexture.Layout, primitives);
+        return new BlixMeshFile(layout, primitives);
     }
 }

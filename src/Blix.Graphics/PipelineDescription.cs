@@ -13,7 +13,12 @@ public sealed record PipelineDescription(
     // baked against the swapchain (BGRA8) cannot be drawn into an
     // offscreen Rgba16F surface — that needs its own pipeline. GL backend
     // ignores this field.
-    RenderSurfaceHandle? RenderTarget = null)
+    RenderSurfaceHandle? RenderTarget = null,
+    // Vulkan: enable alpha-to-coverage — the fragment's output alpha is
+    // converted to an MSAA coverage mask, giving antialiased alpha-cutout
+    // edges (foliage) without the cost/order-dependence of blending. No effect
+    // without MSAA. GL backend ignores it. Default false preserves behavior.
+    bool AlphaToCoverage = false)
 {
     public PipelineDescription(
         ShaderProgramHandle shaderProgram,

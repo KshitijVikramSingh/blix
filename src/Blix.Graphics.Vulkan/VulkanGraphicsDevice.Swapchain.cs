@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Silk.NET.Vulkan;
 using Silk.NET.Vulkan.Extensions.KHR;
 using Semaphore = Silk.NET.Vulkan.Semaphore;
@@ -502,6 +503,10 @@ public sealed partial class VulkanGraphicsDevice
         }
 
         ref var f = ref frames[currentFrame];
+        // CPU-phase timing: wait (fence/vsync throttle) → encode (record vkCmds)
+        // → submit/present. Surfaced via LastCpuFrameTiming so a diagnostics pass
+        // can isolate the draw-encode cost from the GPU-bound wait.
+        var swWait = Stopwatch.GetTimestamp();
         Vk.WaitForFences(Device, 1, in f.InFlight, true, ulong.MaxValue);
 
         // Slot's previous GPU work is complete — drain its timestamps
@@ -526,6 +531,9 @@ public sealed partial class VulkanGraphicsDevice
         // Fence above guarantees last cycle's transient descriptors are
         // no longer in use — safe to recycle the whole pool.
         ResetTransientDescriptorPool(currentFrame);
+
+        var swEncode = Stopwatch.GetTimestamp();
+        var waitMs = Stopwatch.GetElapsedTime(swWait, swEncode).TotalMilliseconds;
 
         var beginInfo = new CommandBufferBeginInfo
         {
@@ -679,6 +687,8 @@ public sealed partial class VulkanGraphicsDevice
             }
         }
         ThrowIfNotSuccess(Vk.EndCommandBuffer(f.CommandBuffer), "vkEndCommandBuffer");
+        var swSubmit = Stopwatch.GetTimestamp();
+        var encodeMs = Stopwatch.GetElapsedTime(swEncode, swSubmit).TotalMilliseconds;
 
         // Always submit, even with zero default-target passes — skipping
         // would strand the acquired imageAvailable semaphore and deadlock
@@ -719,6 +729,9 @@ public sealed partial class VulkanGraphicsDevice
         {
             ThrowIfNotSuccess(presentResult, "vkQueuePresentKHR");
         }
+
+        var submitPresentMs = Stopwatch.GetElapsedTime(swSubmit, Stopwatch.GetTimestamp()).TotalMilliseconds;
+        lastCpuFrameTiming = new VkCpuFrameTiming(waitMs, encodeMs, submitPresentMs);
 
         currentFrame = (currentFrame + 1) % MaxFramesInFlight;
         return defaultPasses > 0;

@@ -854,9 +854,37 @@ Uniform values are typed by JSON shape: a number becomes `FloatUniform`, a 2-ele
 ### Outstanding limits
 
 - No caching at the `AssetDatabase` layer — every `Load` re-imports.
-- No cooked binary formats; runtime parses source files directly.
+- Cooked binary formats (`.blixtex` / `.blixprobe` / `.blixmesh`) exist as a **separate** fast path (the `blix-cook` tool + lazy loaders the Sponza demos use directly), not wired through `AssetDatabase` — the manifest path still parses source files.
 - No hot reload.
 - Sibling-asset lookup (an importer requesting another asset by ID) is not wired. `MaterialImporter` produces `MaterialTextureBinding(name, AssetId, slot)` and the consumer (`MaterialResolver`) resolves the asset reference. Works because the resolver is the right place to cache textures.
+
+## Geometry LOD
+
+Cooked `.blixmesh` primitives carry a discrete LOD chain, generated offline and selected per frame by screen-space error.
+
+**Cook-time chain (meshoptimizer).** `blix-cook mesh` decimates each primitive to ratios 0.5 / 0.25 / 0.125 via `meshopt_simplify` (QEM, with `LockBorder` so primitive boundaries stay watertight). Each level stores the world-space geometric error it introduced (`resultError × meshopt_simplifyScale`); LOD0 is the original surface, error 0. The chain stops early if a level fails to reduce or drops below 32 triangles. `.blixmesh` is **v3** — a float per level after the index count. meshoptimizer is vendored (`third_party/meshoptimizer`), built to a dylib by the cook's `BuildMeshopt` MSBuild target, and linked **cook-time only**; the runtime never sees it.
+
+**Cook-time spatial split (`--split N`).** A primitive authored as one big mesh — a whole floor slab, a wall, the 4.9M-triangle Sponza ivy — gets a single LOD level for its entire extent, which is useless when half the surface is near the camera and half is far. `--split N` recursively partitions any primitive over `N` triangles along the longest triangle-centroid axis until each chunk is under budget, emitting each chunk as its own primitive with its own LOD chain. Chunks share no vertices: each gathers and reindexes the vertices it uses, so seam vertices are duplicated, and combined with `LockBorder` this keeps chunk boundaries crack-free even when adjacent chunks pick different levels (the group-locked-edge idea Nanite uses, in miniature). No format change — v3 already stores N primitives each with a chain, so a chunk is just another primitive. `--no-split-foliage` leaves non-`OPAQUE` primitives whole.
+
+**Runtime selection (screen-space error).** A drawable picks the coarsest level whose stored world error projects to ≤ a pixel budget (default 1 px) at the nearest point of its bounds:
+
+```
+pixels = error × (viewportHeight / (2·tan(fovY/2))) / distance
+```
+
+Resolution-, FOV-, and primitive-size-aware; nearest-point (not centre) distance keeps a surface you stand on detailed where it matters. The same level is chosen across the lit, depth-pre-pass, and shadow passes so depth stays invariant. Currently implemented in the VulkanSponza demo's draw loop; not yet lifted into `Blix.Render`.
+
+**Parked — foliage impostors.** Billboard/impostor LODs would decimate alpha-cutout foliage (ivy, curtains) far better than QEM, which barely reduces it. Deliberately **not built**: impostors are a far-distance technique (a flat card reads wrong up close), and nothing in the current Sponza view is distant enough to benefit — foliage is spatially split like everything else for now. Revisit when a scene actually views foliage at range; an always-near object like the cypress tree would stay real geometry regardless.
+
+## Draw submission + overdraw
+
+Three Vulkan-backend / VulkanSponza techniques that turned out to matter far more than triangle count on the M4's TBDR.
+
+**Shared-buffer consolidation.** Binding a distinct `VkBuffer` per draw is expensive on MoltenVK — it re-encodes Metal buffer bindings, and a de-batched Sponza issues ~800 prims × passes ≈ 4000 unique binds/frame. Concatenating every primitive's vertices into one shared vertex buffer and its LOD indices into one shared index buffer (per index width), then drawing each as a sub-range via `DrawIndexedCommand.IndexOffset` + `VertexOffset` (indices stay primitive-local; `vkCmdDrawIndexed`'s `vertexOffset` rebases them, so u16 indices keep working though the buffer spans millions of verts), made every bind identical and collapsed that cost — a ~3× frame-time drop with zero behavior change. This is also the prerequisite for the per-material indirect path (one buffer to draw ranges of).
+
+**Cutout foliage = depth-writing MASK, not BLEND.** Foliage authored as `AlphaMode.Blend` (double-sided, depth-non-writing) makes every overlapping leaf layer run the full lit shader — crippling overdraw when it fills the screen, and invisible to the depth pre-pass. Routing cutout foliage (blend *without* transmission) to the MASK/opaque bucket lets it write depth and ride the pre-pass early-Z, so occluded layers die. Glass (transmissive) stays blend. Edges use **alpha-to-coverage** (`PipelineDescription.AlphaToCoverage` → Vulkan `alphaToCoverageEnable`): the lit shader sharpens the cutout alpha to a ~1px coverage edge via `fwidth` and outputs it as coverage (opaque outputs 1.0 → no-op), giving smooth MSAA leaf silhouettes without blend's cost or order-dependence. The depth pre-pass keeps a hard-cutoff discard (no color attachment → no alpha-to-coverage there).
+
+**CPU-phase frame timing.** `VulkanGraphicsDevice.LastCpuFrameTiming` splits the frame's CPU cost into wait (in-flight fence — GPU/vsync throttle), encode (`vkCmd` recording — what draw count drives), and submit. Indispensable for telling a GPU-bound frame (fragment/overdraw — fix shading) from a draw-encode-bound one (fix draw count) instead of guessing; the VulkanSponza overlay surfaces it as `cpu-wait` / `cpu-encode` / `cpu-submit`. Per-pass GPU timestamps stay unavailable on MoltenVK (counters resolve after the fence), so this CPU split is the usable signal.
 
 ## Outstanding renderer work
 
@@ -867,11 +895,9 @@ Not in priority order; each lands when there's a real consumer.
 - **Stencil support** — would let SSR / fog / volume passes mask via stencil bits instead of (or alongside) the material G-buffer.
 - **Pipeline definitions as assets** — material JSON references pipelines by name; pipelines themselves are still constructed in code.
 - **Configurable blend factors on `BlendState`** — currently fixed `SrcAlpha / OneMinusSrcAlpha` and `One / One`. Per-attachment write-masking would also live here.
-- **`IndexFormat.UInt32`** — enables imported meshes >65 535 vertices.
-- **Cooked binary mesh format** (offline import → `.meshbin` for fast load).
 - **Per-material sampler control** on textures (resolver currently uses one `defaultSampler` for every cached texture).
 - **`Sprite` runtime type + texture cache** so `SpriteData` resolves to GPU handles without manual bridging.
 - **Depth-tested debug-draw mode** for occlusion-aware overlays.
 - **Hot reload** for shaders. The preprocessor returns a stable source map, so the diagnostic story is in place; the missing piece is a watcher + rebuild path.
 
-Done since the initial doc pass: GGX-prefiltered specular IBL + BRDF LUT (Karis split-sum), cascade shadow maps, screen-space reflections, dual-filter bloom, ACES/AgX/Reinhard/Neutral tonemap, material G-buffer, GLSL `#include` preprocessor with `#pragma once` + `#line` directives, `ShaderLoader`, the `Blix.Shaders` library.
+Done since the initial doc pass: GGX-prefiltered specular IBL + BRDF LUT (Karis split-sum), cascade shadow maps, screen-space reflections, dual-filter bloom, ACES/AgX/Reinhard/Neutral tonemap, material G-buffer, GLSL `#include` preprocessor with `#pragma once` + `#line` directives, `ShaderLoader`, the `Blix.Shaders` library, `IndexFormat.UInt32`, cooked binary formats (`.blixtex` / `.blixprobe` / `.blixmesh`), `.blixmesh` geometry LOD (meshopt chains + screen-space-error selection + cook-time spatial split — see [Geometry LOD](#geometry-lod)), shared-buffer geometry consolidation, alpha-to-coverage cutout foliage, the R11G11B10F render-target format, and CPU-phase frame timing (see [Draw submission + overdraw](#draw-submission--overdraw)).

@@ -128,6 +128,7 @@ public sealed partial class OpenGLGraphicsDevice
             TextureFormat.Rgba8Srgb => PixelInternalFormat.Srgb8Alpha8,
             TextureFormat.Depth24 => PixelInternalFormat.DepthComponent24,
             TextureFormat.Rgba16F => PixelInternalFormat.Rgba16f,
+            TextureFormat.R11G11B10F => PixelInternalFormat.R11fG11fB10f,
             TextureFormat.R8 => PixelInternalFormat.R8,
             // BPTC sRGB variant uses the sRGB-decoding compressed format so
             // filtering happens in linear space (same rationale as
@@ -149,6 +150,7 @@ public sealed partial class OpenGLGraphicsDevice
             TextureFormat.Rgba8Srgb => PixelFormat.Rgba,
             TextureFormat.Depth24 => PixelFormat.DepthComponent,
             TextureFormat.Rgba16F => PixelFormat.Rgba,
+            TextureFormat.R11G11B10F => PixelFormat.Rgb,
             TextureFormat.R8 => PixelFormat.Red,
             // Compressed formats don't take a separate client-side PixelFormat;
             // these values are only consumed when the path goes through
@@ -171,6 +173,9 @@ public sealed partial class OpenGLGraphicsDevice
             TextureFormat.Rgba8Srgb => PixelType.UnsignedByte,
             TextureFormat.Depth24 => PixelType.UnsignedInt,
             TextureFormat.Rgba16F => PixelType.HalfFloat,
+            // Packed 10/11-bit float target; the matching GL upload type. No
+            // bytes are ever uploaded (render-surface only), but keep it honest.
+            TextureFormat.R11G11B10F => PixelType.UnsignedInt10F11F11FRev,
             TextureFormat.R8 => PixelType.UnsignedByte,
             // Compressed formats: PixelType is unused by glCompressedTexImage2D.
             // Return a sane default for the rare path that asks anyway.
