@@ -1854,6 +1854,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             // Screen-space-error budget in pixels; 0 forces full detail. Raise it
             // to trim more aggressively and watch the triangle count fall.
             lodErrorPixels = debug.Controls.Float("LOD error (px)", lodErrorPixels, 0f, 8f);
+            // Vsync on → FIFO (no tearing, capped at refresh). Off → Mailbox
+            // (uncapped; cpu-wait then reads as true GPU frame cost, but tears on
+            // MoltenVK). Toggling recreates the swapchain next frame.
+            vk.VsyncEnabled = debug.Controls.Toggle("Vsync", vk.VsyncEnabled);
         }
 
         debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");

@@ -19,6 +19,23 @@ public sealed partial class VulkanGraphicsDevice
     public int MaxFramesInFlightCount => MaxFramesInFlight;
     public int CurrentFrameSlot => currentFrame;
 
+    // Present mode: true → FIFO (vsync, no tearing, capped at the display
+    // refresh); false → Mailbox if available (uncapped, shows true GPU frame
+    // cost on the perf HUD, but tears on MoltenVK — no vsync). Default vsync so
+    // the out-of-box experience is tear-free; flip it for measurement. Changing
+    // it at runtime triggers a swapchain recreate on the next frame.
+    private bool vsyncEnabled = true;
+    public bool VsyncEnabled
+    {
+        get => vsyncEnabled;
+        set
+        {
+            if (vsyncEnabled == value) return;
+            vsyncEnabled = value;
+            MarkSwapchainOutOfDate();
+        }
+    }
+
     internal KhrSwapchain KhrSwapchain { get; private set; } = null!;
     internal SwapchainKHR Swapchain { get; private set; }
     internal Format SwapchainFormat { get; private set; }
@@ -204,8 +221,10 @@ public sealed partial class VulkanGraphicsDevice
         }
         SwapchainFormat = chosenFormat.Format;
 
-        // Prefer Mailbox (uncapped) so the perf HUD shows true frame cost;
-        // FIFO is the universal vsync fallback.
+        // FIFO (vsync) by default — no tearing, always supported. When vsync is
+        // off, prefer Mailbox (uncapped, true frame cost on the HUD) if the
+        // surface offers it. On MoltenVK Mailbox has no vsync, hence the tearing
+        // it trades for honest timing.
         uint pmCount = 0;
         KhrSurface.GetPhysicalDeviceSurfacePresentModes(PhysicalDevice, Surface, &pmCount, null);
         var presentModes = new PresentModeKHR[pmCount];
@@ -214,9 +233,12 @@ public sealed partial class VulkanGraphicsDevice
             KhrSurface.GetPhysicalDeviceSurfacePresentModes(PhysicalDevice, Surface, &pmCount, p);
         }
         var chosenPresent = PresentModeKHR.FifoKhr;
-        foreach (var pm in presentModes)
+        if (!vsyncEnabled)
         {
-            if (pm == PresentModeKHR.MailboxKhr) { chosenPresent = pm; break; }
+            foreach (var pm in presentModes)
+            {
+                if (pm == PresentModeKHR.MailboxKhr) { chosenPresent = pm; break; }
+            }
         }
 
         var extent = caps.CurrentExtent;
