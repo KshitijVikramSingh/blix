@@ -54,8 +54,11 @@ public sealed partial class RenderGraph
 
     // --- Resource factories -----------------------------------------------
 
-    // Persistent color render-target resource managed by the graph.
-    public GraphResourceHandle ColorTarget(string name, TextureFormat format, GraphSize size)
+    // Persistent color render-target resource managed by the graph. samples>1
+    // makes it an MSAA attachment — render into it, then resolve into a 1×
+    // target via GraphicsPassBuilder.ResolveColor. MSAA targets aren't
+    // sampleable (GetColorTexture throws); sample the resolve target instead.
+    public GraphResourceHandle ColorTarget(string name, TextureFormat format, GraphSize size, int samples = 1)
     {
         EnsureNotCompiled(nameof(ColorTarget));
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
@@ -63,12 +66,13 @@ public sealed partial class RenderGraph
 
         var id = nextId++;
         Resources[id] = new GraphResourceEntry(
-            new GraphResourceHandle(id), name, GraphResourceKind.ColorTarget, format, size);
+            new GraphResourceHandle(id), name, GraphResourceKind.ColorTarget, format, size, samples);
         return new GraphResourceHandle(id);
     }
 
-    // Persistent depth render-target resource (2D).
-    public GraphResourceHandle DepthTarget(string name, GraphSize size)
+    // Persistent depth render-target resource (2D). samples>1 = MSAA depth
+    // (matches the pass's MSAA colour; depth isn't resolved).
+    public GraphResourceHandle DepthTarget(string name, GraphSize size, int samples = 1)
     {
         EnsureNotCompiled(nameof(DepthTarget));
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
@@ -76,7 +80,7 @@ public sealed partial class RenderGraph
 
         var id = nextId++;
         Resources[id] = new GraphResourceEntry(
-            new GraphResourceHandle(id), name, GraphResourceKind.DepthTarget, null, size);
+            new GraphResourceHandle(id), name, GraphResourceKind.DepthTarget, null, size, samples);
         return new GraphResourceHandle(id);
     }
 
@@ -365,7 +369,8 @@ internal sealed record GraphResourceEntry(
     string Name,
     GraphResourceKind Kind,
     TextureFormat? Format,    // null for depth resources
-    GraphSize Size);
+    GraphSize Size,
+    int Samples = 1);         // >1 = MSAA attachment (not sampleable; resolve into a 1× target)
 
 internal sealed record ColorAttachmentBinding(TextureView View, LoadOp Load, StoreOp Store);
 internal sealed record DepthAttachmentBinding(TextureView View, LoadOp Load, StoreOp Store);
@@ -379,6 +384,9 @@ internal sealed class GraphicsPassEntry
     public DepthAttachmentBinding? Depth { get; set; }
     public List<TextureView> Reads { get; } = new();
     public List<ShaderInterface> Shaders { get; } = new();
+    // Single-sample resolve destinations for MSAA color targets, parallel to
+    // ColorTargets (resolve i ← color i). Empty when the pass isn't MSAA.
+    public List<TextureView> ResolveTargets { get; } = new();
 }
 
 internal sealed class ComputePassEntry

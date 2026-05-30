@@ -16,11 +16,8 @@ public sealed partial class VulkanGraphicsDevice
         throw new NotImplementedException(
             NotYet + " Use CreateShaderProgramFromSpv(byte[] vertSpv, byte[] fragSpv) until runtime GLSL→SPIR-V compilation is wired.");
 
-    public TextureHandle CreateTexture2DMipped(
-        TextureDescription description,
-        IReadOnlyList<byte[]> mipBytes,
-        string? name = null) =>
-        throw new NotImplementedException(NotYet);
+    // CreateTexture2DMipped is implemented in VulkanGraphicsDevice.Textures.cs
+    // (cooked .blixtex mip-chain upload, incl. BC formats).
 
     public void UploadTextureMip(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes) =>
         throw new NotImplementedException(NotYet);

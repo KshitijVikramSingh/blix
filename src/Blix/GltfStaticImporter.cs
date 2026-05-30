@@ -566,6 +566,18 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             _                                  => GltfAlphaMode.Opaque,
         };
 
+        // KHR_materials_transmission: SharpGLTF surfaces it as a "Transmission"
+        // channel with a "TransmissionFactor" parameter. Absent => 0 (opaque).
+        var transmission = 0.0f;
+        var transmissionChannel = material.FindChannel("Transmission");
+        if (transmissionChannel.HasValue)
+        {
+            foreach (var p in transmissionChannel.Value.Parameters)
+            {
+                if (p.Name == "TransmissionFactor") transmission = (float)Convert.ToDouble(p.Value);
+            }
+        }
+
         var result = new GltfMaterial(
             material.Name ?? $"material_{material.LogicalIndex}",
             baseColorFactor,
@@ -581,7 +593,8 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             emissiveStrength,
             alphaMode,
             material.AlphaCutoff,
-            material.DoubleSided);
+            material.DoubleSided,
+            transmission);
         materialCache[material.LogicalIndex] = result;
         return result;
     }

@@ -42,14 +42,23 @@ public sealed partial class RenderGraph : IDisposable
             var passName = GraphicsPasses.TryGetValue(passId, out var gpass)
                 ? gpass.Name
                 : $"<pass:{passId}>";
-            bpass.HasDepth = GraphicsPasses.TryGetValue(passId, out var gp) && gp.Depth is not null;
+            bpass.HasDepth = gpass is not null && gpass.Depth is not null;
+            // Sample count for pipelines created against this pass — taken from
+            // its (first) colour target so rasterizationSamples matches the
+            // render pass.
+            var passSamples = SampleCountFlags.Count1Bit;
+            if (gpass is { ColorTargets.Count: > 0 })
+                passSamples = SampleCount(Resources[gpass.ColorTargets[0].View.Resource.Id].Samples);
+            else if (gpass?.Depth is not null)   // depth-only pass (e.g. MSAA depth pre-pass)
+                passSamples = SampleCount(Resources[gpass.Depth.View.Resource.Id].Samples);
             bpass.SurfaceHandle = device.RegisterExternalRenderSurface(
                 name: $"graph.{passName}",
                 renderPass: bpass.RenderPass,
                 framebuffer: bpass.Framebuffer,
                 width: bpass.Width,
                 height: bpass.Height,
-                hasDepth: bpass.HasDepth);
+                hasDepth: bpass.HasDepth,
+                samples: passSamples);
         }
     }
 
@@ -279,19 +288,28 @@ public sealed partial class RenderGraph : IDisposable
     {
         var device = Device!;
         var format = VulkanGraphicsDevice.MapTextureFormat(resource.Format!.Value);
+        var msaa = resource.Samples > 1;
+        // MSAA colour is render-and-resolve only — never sampled, so no
+        // SampledBit and no sampleable handle. Add TransientAttachment so a
+        // tiler can keep it in tile memory (it's resolved before store).
+        var usage = msaa
+            ? ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.TransientAttachmentBit
+            : ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.SampledBit;
         var (image, memory, view) = device.AllocateAttachmentImage(
-            width, height, format,
-            ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.SampledBit,
-            ImageAspectFlags.ColorBit,
-            $"graph.{resource.Name}");
+            width, height, format, usage, ImageAspectFlags.ColorBit,
+            $"graph.{resource.Name}", SampleCount(resource.Samples));
 
-        // Default sampler is LinearClamp — fits the typical "sample a
-        // fullscreen intermediate" use.
-        var sampler = device.GetOrCreateSampler(SamplerDescription.LinearClamp);
-        var handle = device.RegisterExternalTexture(
-            image, view, sampler,
-            (int)width, (int)height, mipCount: 1, format,
-            $"graph.{resource.Name}.tex");
+        TextureHandle? handle = null;
+        if (!msaa)
+        {
+            // Default sampler is LinearClamp — fits the typical "sample a
+            // fullscreen intermediate" use.
+            var sampler = device.GetOrCreateSampler(SamplerDescription.LinearClamp);
+            handle = device.RegisterExternalTexture(
+                image, view, sampler,
+                (int)width, (int)height, mipCount: 1, format,
+                $"graph.{resource.Name}.tex");
+        }
 
         BackendResources[resource.Handle.Id] = new GraphBackendResource
         {
@@ -305,22 +323,38 @@ public sealed partial class RenderGraph : IDisposable
         };
     }
 
+    // Map an integer sample count to the Vulkan flag.
+    private static SampleCountFlags SampleCount(int samples) => samples switch
+    {
+        <= 1 => SampleCountFlags.Count1Bit,
+        2 => SampleCountFlags.Count2Bit,
+        4 => SampleCountFlags.Count4Bit,
+        8 => SampleCountFlags.Count8Bit,
+        _ => throw new ArgumentException($"Unsupported MSAA sample count {samples} (use 1/2/4/8)."),
+    };
+
     private unsafe void AllocateDepthTarget(GraphResourceEntry resource, uint width, uint height)
     {
         var device = Device!;
+        var msaa = resource.Samples > 1;
+        var usage = msaa
+            ? ImageUsageFlags.DepthStencilAttachmentBit | ImageUsageFlags.TransientAttachmentBit
+            : ImageUsageFlags.DepthStencilAttachmentBit | ImageUsageFlags.SampledBit;
         var (image, memory, view) = device.AllocateAttachmentImage(
-            width, height, device.GraphDepthFormat,
-            ImageUsageFlags.DepthStencilAttachmentBit | ImageUsageFlags.SampledBit,
-            ImageAspectFlags.DepthBit,
-            $"graph.{resource.Name}");
+            width, height, device.GraphDepthFormat, usage, ImageAspectFlags.DepthBit,
+            $"graph.{resource.Name}", SampleCount(resource.Samples));
 
-        // LinearClamp default; shaders do the [0,1] range check so
-        // ClampToEdge isn't strictly required for shadow sampling.
-        var sampler = device.GetOrCreateSampler(SamplerDescription.LinearClamp);
-        var handle = device.RegisterExternalTexture(
-            image, view, sampler,
-            (int)width, (int)height, mipCount: 1, device.GraphDepthFormat,
-            $"graph.{resource.Name}.tex");
+        TextureHandle? handle = null;
+        if (!msaa)
+        {
+            // LinearClamp default; shaders do the [0,1] range check so
+            // ClampToEdge isn't strictly required for shadow sampling.
+            var sampler = device.GetOrCreateSampler(SamplerDescription.LinearClamp);
+            handle = device.RegisterExternalTexture(
+                image, view, sampler,
+                (int)width, (int)height, mipCount: 1, device.GraphDepthFormat,
+                $"graph.{resource.Name}.tex");
+        }
 
         BackendResources[resource.Handle.Id] = new GraphBackendResource
         {
@@ -496,57 +530,94 @@ public sealed partial class RenderGraph : IDisposable
     private unsafe Silk.NET.Vulkan.RenderPass CreateGraphicsPassRenderPass(GraphicsPassEntry pass)
     {
         var device = Device!;
-        var attachmentCount = pass.ColorTargets.Count + (pass.Depth is not null ? 1 : 0);
+        var colorCount = pass.ColorTargets.Count;
+        var hasDepth = pass.Depth is not null;
+        var resolveCount = pass.ResolveTargets.Count;
+        var attachmentCount = colorCount + (hasDepth ? 1 : 0) + resolveCount;
         var attachments = stackalloc AttachmentDescription[attachmentCount];
-        var colorRefs = stackalloc AttachmentReference[Math.Max(1, pass.ColorTargets.Count)];
+        var colorRefs = stackalloc AttachmentReference[Math.Max(1, colorCount)];
+        var resolveRefs = stackalloc AttachmentReference[Math.Max(1, colorCount)];
 
-        for (var i = 0; i < pass.ColorTargets.Count; i++)
+        for (var i = 0; i < colorCount; i++)
         {
             var target = pass.ColorTargets[i];
             var resource = BackendResources[target.View.Resource.Id];
+            var samples = Resources[target.View.Resource.Id].Samples;
+            var msaa = samples > 1;
             attachments[i] = new AttachmentDescription
             {
                 Format = resource.Format,
-                Samples = SampleCountFlags.Count1Bit,
+                Samples = SampleCount(samples),
                 LoadOp = MapLoadOp(target.Load),
-                StoreOp = MapStoreOp(target.Store),
+                // MSAA colour is resolved (not stored/sampled), so DontCare on
+                // store; non-MSAA stores for downstream sampling.
+                StoreOp = msaa ? AttachmentStoreOp.DontCare : MapStoreOp(target.Store),
                 StencilLoadOp = AttachmentLoadOp.DontCare,
                 StencilStoreOp = AttachmentStoreOp.DontCare,
                 InitialLayout = ImageLayout.Undefined,
-                // FinalLayout = ShaderReadOnlyOptimal so downstream Reads
-                // sample without a manual barrier.
-                FinalLayout = ImageLayout.ShaderReadOnlyOptimal,
+                // Non-MSAA → ShaderReadOnly for downstream Reads. MSAA stays a
+                // colour attachment (only the resolve target is sampled).
+                FinalLayout = msaa ? ImageLayout.ColorAttachmentOptimal : ImageLayout.ShaderReadOnlyOptimal,
             };
             colorRefs[i] = new AttachmentReference((uint)i, ImageLayout.ColorAttachmentOptimal);
+            resolveRefs[i] = new AttachmentReference(Vk.AttachmentUnused, ImageLayout.Undefined);
         }
 
         AttachmentReference depthRef = default;
-        var hasDepth = pass.Depth is not null;
         if (hasDepth)
         {
-            var depthIdx = pass.ColorTargets.Count;
+            var depthIdx = colorCount;
             var depthResource = BackendResources[pass.Depth!.View.Resource.Id];
+            var depthSamples = Resources[pass.Depth!.View.Resource.Id].Samples;
+            var msaaDepth = depthSamples > 1;
             attachments[depthIdx] = new AttachmentDescription
             {
                 Format = depthResource.Format,
-                Samples = SampleCountFlags.Count1Bit,
+                Samples = SampleCount(depthSamples),
                 LoadOp = MapLoadOp(pass.Depth.Load),
                 StoreOp = MapStoreOp(pass.Depth.Store),
                 StencilLoadOp = AttachmentLoadOp.DontCare,
                 StencilStoreOp = AttachmentStoreOp.DontCare,
-                InitialLayout = ImageLayout.Undefined,
-                // Same shader-read final layout as color so depth is
-                // sampleable downstream (shadow maps).
-                FinalLayout = ImageLayout.ShaderReadOnlyOptimal,
+                // LoadOp.Load preserves a prior pass's depth (depth pre-pass →
+                // lit), so the initial layout must already be the depth layout —
+                // Undefined would discard it. Clear/DontCare start fresh.
+                InitialLayout = pass.Depth.Load == LoadOp.Load
+                    ? ImageLayout.DepthStencilAttachmentOptimal
+                    : ImageLayout.Undefined,
+                // Non-MSAA depth stays shader-readable (shadow maps); MSAA
+                // depth isn't sampled, so leave it a depth attachment.
+                FinalLayout = msaaDepth ? ImageLayout.DepthStencilAttachmentOptimal : ImageLayout.ShaderReadOnlyOptimal,
             };
             depthRef = new AttachmentReference((uint)depthIdx, ImageLayout.DepthStencilAttachmentOptimal);
+        }
+
+        // Resolve attachments: 1× destinations for the MSAA colour targets,
+        // mapped to colour i by index. Placed after colour + depth.
+        var resolveBase = colorCount + (hasDepth ? 1 : 0);
+        for (var i = 0; i < resolveCount; i++)
+        {
+            var resource = BackendResources[pass.ResolveTargets[i].Resource.Id];
+            var idx = resolveBase + i;
+            attachments[idx] = new AttachmentDescription
+            {
+                Format = resource.Format,
+                Samples = SampleCountFlags.Count1Bit,
+                LoadOp = AttachmentLoadOp.DontCare,
+                StoreOp = AttachmentStoreOp.Store,
+                StencilLoadOp = AttachmentLoadOp.DontCare,
+                StencilStoreOp = AttachmentStoreOp.DontCare,
+                InitialLayout = ImageLayout.Undefined,
+                FinalLayout = ImageLayout.ShaderReadOnlyOptimal,
+            };
+            resolveRefs[i] = new AttachmentReference((uint)idx, ImageLayout.ColorAttachmentOptimal);
         }
 
         var subpass = new SubpassDescription
         {
             PipelineBindPoint = PipelineBindPoint.Graphics,
-            ColorAttachmentCount = (uint)pass.ColorTargets.Count,
-            PColorAttachments = pass.ColorTargets.Count > 0 ? colorRefs : null,
+            ColorAttachmentCount = (uint)colorCount,
+            PColorAttachments = colorCount > 0 ? colorRefs : null,
+            PResolveAttachments = resolveCount > 0 ? resolveRefs : null,
             PDepthStencilAttachment = hasDepth ? &depthRef : null,
         };
 
@@ -559,11 +630,13 @@ public sealed partial class RenderGraph : IDisposable
             DstSubpass = 0,
             // Compute included: a prior compute pass may have sampled this
             // target (e.g. froxel fog reading shadow maps) and must finish
-            // before we overwrite it.
-            SrcStageMask = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit,
-            SrcAccessMask = AccessFlags.ShaderReadBit,
+            // before we overwrite it. LateFragmentTests+DepthWrite included so
+            // a prior pass's depth write (depth pre-pass) is available to this
+            // pass's depth load/test (EarlyFragmentTests).
+            SrcStageMask = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.LateFragmentTestsBit,
+            SrcAccessMask = AccessFlags.ShaderReadBit | AccessFlags.DepthStencilAttachmentWriteBit,
             DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.EarlyFragmentTestsBit,
-            DstAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit,
+            DstAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit | AccessFlags.DepthStencilAttachmentReadBit,
             DependencyFlags = DependencyFlags.ByRegionBit,
         };
         deps[1] = new SubpassDependency
@@ -602,15 +675,25 @@ public sealed partial class RenderGraph : IDisposable
         uint width, uint height)
     {
         var device = Device!;
-        var viewCount = pass.ColorTargets.Count + (pass.Depth is not null ? 1 : 0);
+        var colorCount = pass.ColorTargets.Count;
+        var hasDepth = pass.Depth is not null;
+        var resolveCount = pass.ResolveTargets.Count;
+        // Attachment order must match CreateGraphicsPassRenderPass:
+        // [colour…, depth, resolve…].
+        var viewCount = colorCount + (hasDepth ? 1 : 0) + resolveCount;
         var views = stackalloc ImageView[viewCount];
-        for (var i = 0; i < pass.ColorTargets.Count; i++)
+        for (var i = 0; i < colorCount; i++)
         {
             views[i] = ResolveView(pass.ColorTargets[i].View);
         }
         if (pass.Depth is { } d)
         {
-            views[pass.ColorTargets.Count] = ResolveView(d.View);
+            views[colorCount] = ResolveView(d.View);
+        }
+        var resolveBase = colorCount + (hasDepth ? 1 : 0);
+        for (var i = 0; i < resolveCount; i++)
+        {
+            views[resolveBase + i] = ResolveView(pass.ResolveTargets[i]);
         }
         var ci = new FramebufferCreateInfo
         {

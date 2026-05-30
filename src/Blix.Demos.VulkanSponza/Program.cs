@@ -45,9 +45,21 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private RenderGraph graph = null!;
 
     // Graph resources + passes.
-    private GraphResourceHandle hdrHandle;
-    private GraphResourceHandle depthHandle;
+    private GraphResourceHandle hdrHandle;       // 1× resolve target (present samples this)
+    private GraphResourceHandle hdrMsaaHandle;   // 4× MSAA colour the lit pass renders into
+    private GraphResourceHandle depthHandle;     // 4× MSAA depth (matches hdrMsaa)
+    private const int MsaaSamples = 4;
     private PassHandle litPassHandle;
+
+    // Depth pre-pass: renders non-blend geometry depth-only into depthHandle
+    // before the lit pass, so the expensive lit fragments run only on visible
+    // pixels (kills Sponza overdraw). Reuses lit.vert (invariant gl_Position)
+    // so the lit pass's LessEqual test matches the pre-pass depth exactly.
+    private PassHandle depthPrepassHandle;
+    private ShaderProgramHandle prepassOpaqueProgram;
+    private ShaderProgramHandle prepassMaskProgram;
+    private PipelineHandle prepassOpaquePipeline;
+    private PipelineHandle prepassMaskPipeline;
 
     // Lit pipelines — four variants spanning (Opaque|Mask vs Blend) ×
     // (BackFaceCulling vs NoCulling). All share one shader program; only
@@ -103,7 +115,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // lit pass samples all three via a Count=3 sampler array at set 1
     // binding 3 and picks one per fragment by view-space depth.
     private const int CascadeCount = 3;
-    private const int ShadowMapSize = 2048;
+    // Per-cascade shadow-map resolution. The near two cascades carry the
+    // detail the eye lands on, so they stay at 2048²; the far cascade covers a
+    // huge world area where per-texel detail matters least, so it's 1024². The
+    // lit/froxel PCF reads textureSize() so it adapts to each map automatically;
+    // only texel-snapping + bias need the per-cascade size (see UpdateCascades).
+    private static readonly int[] ShadowMapSizes = { 2048, 2048, 1024 };
     // How far behind the scene slab the light "eye" sits, in world units.
     // Larger keeps the whole atrium height inside each cascade's near/far.
     // Live-tunable from the overlay (Shadows scope).
@@ -275,13 +292,20 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private float ambientIntensity = 1.6f;
 
     // Shader-debug knobs surfaced as uShaderParams (overlay Material scope):
-    //   metallicThreshold — step() cutoff folding Sponza's ~0.35 "metalness"
-    //                       to 0/1 (the "metallic floor" hack); 1 = all dielectric.
+    //   metallicThreshold — metalness noise-gate cutoff: below it -> 0, at/above
+    //                       passes through unchanged. Cleans Sponza's stray
+    //                       ~0.35 stone metalness; 0 = trust the glTF verbatim.
     //   normalStrength    — global multiplier on tangent-space normal x/y.
     private float metallicThreshold = 0.5f;
     private float normalStrength = 1.0f;
 
     private float exposure = 0.5f;
+    // Present tonemap operator (overlay Render → Tonemap); index into present.frag's branch.
+    private static readonly string[] TonemapNames = { "Reinhard", "ACES", "AgX", "Hejl" };
+    private int tonemapMode = 2; // AgX
+    // Head-on opacity floor for Fresnel glass (overlay Material → Glass opacity).
+    // Clean glass is ~96% transparent straight-on; this keeps it readable.
+    private float glassMinOpacity = 0.12f;
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
@@ -413,14 +437,17 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         graph = new RenderGraph(vk);
         var fullSize = new MatchSwapchainGraphSize(1.0f);
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
-        depthHandle = graph.DepthTarget("scene-depth", fullSize);
+        // 4× MSAA colour + depth the lit pass renders into; resolves to hdr.
+        hdrMsaaHandle = graph.ColorTarget("hdr-msaa", TextureFormat.Rgba16F, fullSize, samples: MsaaSamples);
+        depthHandle = graph.DepthTarget("scene-depth", fullSize, samples: MsaaSamples);
 
-        // One fixed-size depth target per cascade (no 2D-array creation API
-        // yet; the lit pass binds the three as a Count=3 sampler array).
-        var shadowSize = new FixedGraphSize(ShadowMapSize, ShadowMapSize);
+        // One depth target per cascade, sized per ShadowMapSizes (no 2D-array
+        // creation API yet; the lit pass binds the three as a Count=3 sampler
+        // array — mixed sizes are fine, each has its own view).
         for (var c = 0; c < CascadeCount; c++)
         {
-            cascadeHandles[c] = graph.DepthTarget($"sun-cascade{c}", shadowSize);
+            cascadeHandles[c] = graph.DepthTarget($"sun-cascade{c}",
+                new FixedGraphSize(ShadowMapSizes[c], ShadowMapSizes[c]));
         }
 
         // Per-frame UBO carries view-projection + sun + IBL strength + camera
@@ -459,15 +486,17 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             });
 
         // Per-material UBO: BaseColorFactor (rgba), EmissiveFactor (rgb +
-        // strength packed into .a), MaterialParams (alphaCutoff, normalScale).
-        // std140 packs three vec4s = 48 bytes.
+        // strength packed into .a), MaterialParams (alphaCutoff, normalScale,
+        // roughness, metallic), MaterialParams2 (x = transmission). std140
+        // packs four vec4s = 64 bytes.
         var materialUbo = new UniformBlockLayout(
-            TotalSize: 48,
+            TotalSize: 64,
             Members: new[]
             {
                 new UniformBlockMember("uBaseColorFactor", 0,  16),
                 new UniformBlockMember("uEmissiveFactor",  16, 16),
                 new UniformBlockMember("uMaterialParams",  32, 16),
+                new UniformBlockMember("uMaterialParams2", 48, 16),
             });
 
         // The skybox shares the per-frame UBO and the per-pass IBL bindings
@@ -518,7 +547,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             {
                 new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
             },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 4) });
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 8) });
 
         // Opaque shadow interface: push-only (model + cascadeViewProj = 128B),
         // no descriptor sets — opaque casters allocate zero transient sets.
@@ -579,9 +608,20 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         }
         froxelPassHandle = froxelPass.Handle;
 
-        var litPass = graph.GraphicsPass("lit-scene")
-            .Target(hdrHandle, LoadOp.Clear, StoreOp.Store)
+        // Depth pre-pass — declared before lit; clears + writes the (4× MSAA)
+        // scene depth for all non-blend geometry. Both pre-pass programs reuse
+        // litInterface (lit.vert needs set 0 + the model push; the trivial
+        // fragments use a subset), so the lit material descriptor set binds to
+        // the mask variant unchanged.
+        depthPrepassHandle = graph.GraphicsPass("depth-prepass")
             .Depth(depthHandle, LoadOp.Clear, StoreOp.Store)
+            .Shader(litInterface)
+            .Handle;
+
+        var litPass = graph.GraphicsPass("lit-scene")
+            .Target(hdrMsaaHandle, LoadOp.Clear, StoreOp.Store)   // render 4× MSAA
+            .ResolveColor(hdrHandle)                              // resolve to 1× for present
+            .Depth(depthHandle, LoadOp.Load, StoreOp.Store)       // load the pre-pass depth
             .Shader(litInterface, skyInterface);
         // Declare the cascade depth targets as inputs so the graph orders the
         // shadow passes before the lit pass and transitions them to
@@ -598,14 +638,16 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         var litVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "lit.vert.spv"));
         var litFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "lit.frag.spv"));
         litProgram = vk.CreateShaderProgramFromSpv(litVertSpv, litFragSpv, litInterface, "lit");
-        // Opaque + Mask share the depth-write, no-blend pipeline group.
-        // Mask materials trigger the discard branch via the per-material
-        // UBO's alphaCutoff > 0; opaque materials leave it at 0.
+        // Opaque + Mask share the no-blend pipeline group. Depth is now
+        // LessEqual + NO write: the depth pre-pass already wrote the complete
+        // scene depth, so the lit pass only shades the front-most fragment
+        // (overdraw killed). Mask materials trigger the discard branch via the
+        // per-material UBO's alphaCutoff > 0; opaque materials leave it at 0.
         opaqueSolidPipeline = vk.CreatePipeline(new PipelineDescription(
             litProgram,
             VertexPosition3NormalTangentTexture.Layout,
             PrimitiveTopology.Triangles,
-            DepthState.LessEqualWrite,
+            DepthState.LessEqualNoWrite,
             RasterizerState.BackFaceCulling,
             new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(litPassHandle)), "lit.opaque");
@@ -613,7 +655,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             litProgram,
             VertexPosition3NormalTangentTexture.Layout,
             PrimitiveTopology.Triangles,
-            DepthState.LessEqualWrite,
+            DepthState.LessEqualNoWrite,
             RasterizerState.NoCulling,
             new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(litPassHandle)), "lit.opaque.doubleSided");
@@ -684,6 +726,34 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             RasterizerState.NoCulling,
             Array.Empty<BlendState>(),
             RenderTarget: graph.GetPassSurface(cascadePassHandles[0])), "shadow.mask");
+
+        // Depth pre-pass pipelines — lit.vert (shared → invariant depth) + a
+        // trivial fragment, depth-only into the 4× MSAA pre-pass surface. No
+        // culling: solid geometry's nearest face still wins the depth test
+        // (matching lit's back-cull front face), and double-sided geometry
+        // always writes depth from either view side so the sky never overdraws
+        // a back-facing curtain. LessEqualWrite; the lit pass then reads it.
+        var prepassOpaqueFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "depth_prepass.frag.spv"));
+        prepassOpaqueProgram = vk.CreateShaderProgramFromSpv(litVertSpv, prepassOpaqueFragSpv, litInterface, "depth_prepass");
+        prepassOpaquePipeline = vk.CreatePipeline(new PipelineDescription(
+            prepassOpaqueProgram,
+            VertexPosition3NormalTangentTexture.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite,
+            RasterizerState.NoCulling,
+            Array.Empty<BlendState>(),
+            RenderTarget: graph.GetPassSurface(depthPrepassHandle)), "depth_prepass");
+
+        var prepassMaskFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "depth_prepass_mask.frag.spv"));
+        prepassMaskProgram = vk.CreateShaderProgramFromSpv(litVertSpv, prepassMaskFragSpv, litInterface, "depth_prepass_mask");
+        prepassMaskPipeline = vk.CreatePipeline(new PipelineDescription(
+            prepassMaskProgram,
+            VertexPosition3NormalTangentTexture.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite,
+            RasterizerState.NoCulling,
+            Array.Empty<BlendState>(),
+            RenderTarget: graph.GetPassSurface(depthPrepassHandle)), "depth_prepass_mask");
 
         var presentVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv"));
         var presentFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv"));
@@ -833,7 +903,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         var blendPrims = new List<GltfPrimitive>();
         foreach (var prim in model.Primitives)
         {
-            if (prim.Material?.AlphaMode == GltfAlphaMode.Blend)
+            // Blend-routed: explicit BLEND alpha mode, OR a transmissive
+            // material — glass is shaded as Fresnel-reflective + see-through,
+            // which needs the blend pipeline regardless of its declared alpha
+            // mode (Sponza's glass is authored opaque; see EffectiveTransmission).
+            var pm = prim.Material;
+            if (pm?.AlphaMode == GltfAlphaMode.Blend || EffectiveTransmission(pm) > 0f)
             {
                 blendPrims.Add(prim);
             }
@@ -901,6 +976,21 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         }
     }
 
+    // Transmission for a material, with a demo-level fallback. Intel Sponza
+    // authors its glass as an opaque, perfectly-smooth dielectric with NO
+    // KHR_materials_transmission — so it renders near-black (4% head-on
+    // Fresnel) with only grazing reflections. The asset is missing the
+    // metadata, so we tag known glass materials by name and let the generic
+    // Fresnel-glass path in lit.frag take over. (Same spirit as the metallic-
+    // threshold patch: a demo-level conformance fix over an asset quirk, not a
+    // renderer default.) Real assets that ship the extension use it directly.
+    private static float EffectiveTransmission(GltfMaterial? m)
+    {
+        if (m is null) return 0f;
+        if (m.TransmissionFactor > 0f) return m.TransmissionFactor;
+        return m.Name.ToLowerInvariant().Contains("glass") ? 1.0f : 0f;
+    }
+
     // One engine Material per glTF material. BaseColorFactor / EmissiveFactor /
     // MaterialParams (alphaCutoff, normalScale, roughness, metallic) UBO + the
     // five channel textures (defaults when a channel is absent).
@@ -921,6 +1011,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         var normalScale = 1.0f;
         var roughness = gm?.RoughnessFactor ?? 0.8f;
         var metallic = gm?.MetallicFactor ?? 0.0f;
+        var transmission = EffectiveTransmission(gm);
 
         return vk.CreateMaterial(litProgram, name: "sponza.material")
             .SetUniform(binding: 0, "uBaseColorFactor", baseColorFactor)
@@ -928,6 +1019,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 new Vector4(emissiveFactor.X, emissiveFactor.Y, emissiveFactor.Z, emissiveStrength))
             .SetUniform(binding: 0, "uMaterialParams",
                 new Vector4(alphaCutoff, normalScale, roughness, metallic))
+            .SetUniform(binding: 0, "uMaterialParams2",
+                new Vector4(transmission, 0f, 0f, 0f))
             .SetTexture(binding: 1, albedo)
             .SetTexture(binding: 2, normal)
             .SetTexture(binding: 3, emissive)
@@ -1059,17 +1152,36 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     {
         if (tex is null) return fallback;
         if (cache.TryGetValue(tex, out var cached)) return cached;
-        if (tex.MipBytes is not { Count: > 0 } mips || tex.Format != TextureFormat.Rgba8)
+
+        var label = $"sponza.{channelTag}.{tex.Name}";
+        TextureHandle handle;
+        if (tex.LazyHandle is { } lazy)
         {
-            // Cooked-.blixtex compressed path or already-released CPU bytes
-            // — not handled by this scaffold.
+            // Cooked .blixtex: pre-baked BC (or Rgba8) mip chain on disk. Pull
+            // each mip and upload as a mipped texture. tex.Format already
+            // encodes the sRGB choice (BC7Srgb albedo vs BC7Unorm MR, BC5
+            // normal), so use it directly rather than the source uploadFormat.
+            var mips = new byte[tex.MipCount][];
+            for (var i = 0; i < tex.MipCount; i++) mips[i] = BlixTexReader.ReadMip(lazy, i);
+            handle = vk.CreateTexture2DMipped(
+                new TextureDescription(tex.Width, tex.Height, tex.Format, SamplerDescription.LinearRepeat),
+                mips, label);
+        }
+        else if (tex.MipBytes is { Count: > 0 } mips)
+        {
+            // Eager path: source-PNG decode (single Rgba8 mip — CreateTexture2D
+            // blit-generates the chain) or an eager .blixtex read.
+            handle = tex.MipCount > 1
+                ? vk.CreateTexture2DMipped(
+                    new TextureDescription(tex.Width, tex.Height, tex.Format, SamplerDescription.LinearRepeat), mips, label)
+                : vk.CreateTexture2D(
+                    new TextureDescription(tex.Width, tex.Height, uploadFormat, SamplerDescription.LinearRepeat), mips[0], label);
+        }
+        else
+        {
             cache[tex] = fallback;
             return fallback;
         }
-        var handle = vk.CreateTexture2D(
-            new TextureDescription(tex.Width, tex.Height, uploadFormat, SamplerDescription.LinearRepeat),
-            mips[0],
-            $"sponza.{channelTag}.{tex.Name}");
         cache[tex] = handle;
         return handle;
     }
@@ -1195,7 +1307,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             // lands on a stable grid (kills the shimmer under camera motion).
             var eye = center - L * (shadowSunDistance + radius);
             var lightView = Matrix4x4.CreateLookAt(eye, center, sunUp);
-            var texelSize = (2f * radius) / ShadowMapSize;
+            var texelSize = (2f * radius) / ShadowMapSizes[c];
             var centreLight = Vector3.Transform(center, lightView);
             centreLight.X = MathF.Round(centreLight.X / texelSize) * texelSize;
             centreLight.Y = MathF.Round(centreLight.Y / texelSize) * texelSize;
@@ -1274,7 +1386,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             new("uCascadeBias",      new Vector4Uniform(
                 new Vector4(cascadeDepthBias[0], cascadeDepthBias[1], cascadeDepthBias[2], 0f))),
             new("uShaderParams",     new Vector4Uniform(
-                new Vector4(metallicThreshold, normalStrength, slopeScale, 0f))),
+                new Vector4(metallicThreshold, normalStrength, slopeScale, glassMinOpacity))),
             new("uFog",              new Vector4Uniform(
                 new Vector4(frame.Width, frame.Height, fogFar, fogEnabled ? 1f : 0f))),
         };
@@ -1393,11 +1505,37 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 froxelUniforms, froxelBindings));
         }
 
+        // Depth pre-pass: same non-blend draw set as the lit pass (no cull, so
+        // the depth the lit pass loads covers exactly what it shades), depth
+        // only. Mask draws bind the material (set 2 albedo) for the alpha
+        // discard; opaque draws need only the per-frame UBO + model push.
+        graph.Pass(depthPrepassHandle, scope =>
+        {
+            foreach (var d in opaqueDrawables)
+            {
+                if (d.AlphaCutoff > 0f)
+                {
+                    scope.DrawIndexed(
+                        vertexBuffer: d.Vb, indexBuffer: d.Ib, pipeline: prepassMaskPipeline,
+                        indexCount: d.IndexCount, uniforms: perFrame,
+                        textures: Array.Empty<ShaderTextureBinding>(),
+                        material: d.Material, pushConstants: identityPush);
+                }
+                else
+                {
+                    scope.DrawIndexed(
+                        vertexBuffer: d.Vb, indexBuffer: d.Ib, pipeline: prepassOpaquePipeline,
+                        indexCount: d.IndexCount, uniforms: perFrame,
+                        textures: Array.Empty<ShaderTextureBinding>(), pushConstants: identityPush);
+                }
+            }
+        });
+
         graph.Pass(litPassHandle, scope =>
         {
-            // Opaque + Mask first (depth-write enabled), then Blend
-            // (depth-test only), so translucent surfaces composite over
-            // the resolved opaque depth without writing into it.
+            // Opaque + Mask first (depth-test, no write — pre-pass wrote depth),
+            // then Blend (depth-test only), so translucent surfaces composite
+            // over the resolved opaque depth without writing into it.
             foreach (var d in opaqueDrawables)
             {
                 scope.DrawIndexed(
@@ -1492,14 +1630,16 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         {
             metallicThreshold = debug.Controls.Float("Metallic threshold", metallicThreshold, 0f, 1f);
             normalStrength    = debug.Controls.Float("Normal-map strength", normalStrength, 0f, 2f);
+            glassMinOpacity   = debug.Controls.Float("Glass opacity", glassMinOpacity, 0f, 0.6f);
         }
         using (debug.Scope("Render"))
         {
-            exposure  = debug.Controls.Float("Exposure", exposure, 0.05f, 16f);
-            moveSpeed = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 60f);
+            exposure   = debug.Controls.Float("Exposure", exposure, 0.05f, 16f);
+            tonemapMode = debug.Controls.Enum("Tonemap", tonemapMode, TonemapNames);
+            moveSpeed  = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 60f);
         }
 
-        debug.Values.Value("shadow-map", $"{ShadowMapSize}²×{CascadeCount}");
+        debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");
         debug.Values.Value("splits-m", $"{cascadeSplits[1]:0}/{cascadeSplits[2]:0}/{cascadeSplits[3]:0}");
         // Per-cascade caster counts after frustum cull (one frame stale — set
         // during the previous OnRender's graph.Execute).
@@ -1528,8 +1668,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private void RecordPresentPass(RenderCommandList commandList)
     {
         var hdrTex = graph.GetColorTexture(hdrHandle);
-        var push = new byte[4];
+        var push = new byte[8];
         MemoryMarshal.Write(push.AsSpan(0, 4), in exposure);
+        var tonemap = (uint)tonemapMode;
+        MemoryMarshal.Write(push.AsSpan(4, 4), in tonemap);
         commandList.Pass(
             "present",
             new RenderPassDescription(
