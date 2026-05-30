@@ -178,8 +178,12 @@ if dotnet build "$COOK" -c Release --nologo -v:q >/dev/null 2>&1; then
     # The demo loads cooked vertex/index data (skips glTF accessor walking) and
     # — once LOD selection lands — picks a triangle level by distance. Falls
     # back to runtime glTF import for any .gltf without a .blixmesh.
+    # --flip-v matches the demo's runtime import (AssetImportContext
+    # flipTextureV: true) — Intel Sponza is bottom-up/OpenGL-authored. Without
+    # it the cooked UVs + tangent handedness are wrong and normal maps sample
+    # the flipped V.
     echo "Cooking geometry to .blixmesh (tangent + LOD chains) ..."
-    dotnet run --project "$COOK" -c Release -- mesh "$DEST" --tangents \
+    dotnet run --project "$COOK" -c Release -- mesh "$DEST" --tangents --flip-v \
         || echo "  (mesh cook failed — demo will runtime-import glTF)"
 else
     echo "  (cook tool build failed — demo will runtime-decode textures)"
