@@ -172,6 +172,119 @@ public sealed partial class VulkanGraphicsDevice
         return new TextureHandle(id);
     }
 
+    // Allocate a mipped 2D texture with NO data uploaded yet — storage + view +
+    // sampler only. Mips are filled afterwards, one at a time, by
+    // UploadTextureMip. Backs the streamed load (ResourceUploader): the smallest
+    // mip lands first and finer mips stream in over frames. The image is left in
+    // ShaderReadOnly so it's bindable immediately; callers must not SAMPLE it
+    // until the level they read has been uploaded (the demo binds a texture only
+    // once its chain is complete — contents are undefined until then).
+    public unsafe TextureHandle AllocateTexture2DMips(
+        TextureDescription description,
+        int mipCount,
+        string? name = null)
+    {
+        if (mipCount < 1) throw new ArgumentOutOfRangeException(nameof(mipCount));
+        var label = name ?? "texture2D.mips";
+        var vkFormat = MapTextureFormat(description.Format);
+
+        var imageCi = new ImageCreateInfo
+        {
+            SType = StructureType.ImageCreateInfo,
+            ImageType = ImageType.Type2D,
+            Format = vkFormat,
+            Extent = new Extent3D((uint)description.Width, (uint)description.Height, 1),
+            MipLevels = (uint)mipCount,
+            ArrayLayers = 1,
+            Samples = SampleCountFlags.Count1Bit,
+            Tiling = ImageTiling.Optimal,
+            Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.SampledBit,
+            SharingMode = SharingMode.Exclusive,
+            InitialLayout = ImageLayout.Undefined,
+        };
+        Image image;
+        ThrowIfNotSuccess(Vk.CreateImage(Device, in imageCi, null, &image), $"vkCreateImage({label})");
+
+        Vk.GetImageMemoryRequirements(Device, image, out var memReq);
+        var allocCi = new MemoryAllocateInfo
+        {
+            SType = StructureType.MemoryAllocateInfo,
+            AllocationSize = memReq.Size,
+            MemoryTypeIndex = FindMemoryTypeIndex(memReq.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
+        };
+        DeviceMemory memory;
+        ThrowIfNotSuccess(Vk.AllocateMemory(Device, in allocCi, null, &memory), $"vkAllocateMemory({label})");
+        ThrowIfNotSuccess(Vk.BindImageMemory(Device, image, memory, 0), $"vkBindImageMemory({label})");
+
+        // Straight to ShaderReadOnly so it's bindable; UploadTextureMip flips
+        // back to TransferDst per upload.
+        var cmd = BeginSingleTimeCommands();
+        TransitionImageLayout(cmd, image, mipCount, ImageLayout.Undefined, ImageLayout.ShaderReadOnlyOptimal);
+        EndSingleTimeCommands(cmd);
+
+        var viewCi = new ImageViewCreateInfo
+        {
+            SType = StructureType.ImageViewCreateInfo,
+            Image = image,
+            ViewType = ImageViewType.Type2D,
+            Format = vkFormat,
+            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, (uint)mipCount, 0, 1),
+        };
+        ImageView view;
+        ThrowIfNotSuccess(Vk.CreateImageView(Device, in viewCi, null, &view), $"vkCreateImageView({label})");
+
+        var entry = new VkTextureEntry
+        {
+            Image = image,
+            Memory = memory,
+            View = view,
+            Sampler = GetOrCreateSampler(description.Sampler),
+            Width = description.Width,
+            Height = description.Height,
+            MipCount = mipCount,
+            Format = vkFormat,
+            Name = label,
+        };
+        var id = nextResourceId++;
+        textureTable[id] = entry;
+        return new TextureHandle(id);
+    }
+
+    // Upload one mip level of a texture created by AllocateTexture2DMips. Flips
+    // the whole image to TransferDst, copies this level, flips back to
+    // ShaderReadOnly. Safe to do per-mip because the texture isn't sampled until
+    // its chain is complete (the upload runs on a single-time command that the
+    // device waits on, so it never overlaps a sampling frame on this image).
+    public unsafe void UploadTextureMip(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes)
+    {
+        if (mipLevel < 0) throw new ArgumentOutOfRangeException(nameof(mipLevel));
+        var e = textureTable[handle.Id];
+        if (mipLevel >= e.MipCount)
+            throw new ArgumentOutOfRangeException(nameof(mipLevel), $"texture '{e.Name}' has {e.MipCount} mips.");
+
+        var staging = CreateHostVisibleBuffer(bytes, BufferUsageFlags.TransferSrcBit, $"{e.Name}.mip{mipLevel}.staging");
+        var cmd = BeginSingleTimeCommands();
+        TransitionImageLayout(cmd, e.Image, e.MipCount, ImageLayout.ShaderReadOnlyOptimal, ImageLayout.TransferDstOptimal);
+        var region = new BufferImageCopy
+        {
+            BufferOffset = 0,
+            ImageSubresource = new ImageSubresourceLayers
+            {
+                AspectMask = ImageAspectFlags.ColorBit,
+                MipLevel = (uint)mipLevel,
+                BaseArrayLayer = 0,
+                LayerCount = 1,
+            },
+            ImageOffset = new Offset3D(0, 0, 0),
+            ImageExtent = new Extent3D(
+                (uint)Math.Max(1, e.Width >> mipLevel), (uint)Math.Max(1, e.Height >> mipLevel), 1),
+        };
+        Vk.CmdCopyBufferToImage(cmd, staging.Buffer, e.Image, ImageLayout.TransferDstOptimal, 1, in region);
+        TransitionImageLayout(cmd, e.Image, e.MipCount, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal);
+        EndSingleTimeCommands(cmd);
+        DestroyVkBufferEntry(staging);
+    }
+
     // Uploads a sampleable cubemap (6 faces, optional mip chain) from CPU
     // bytes. Data layout is face-major then mip-major: for face 0..5, the
     // tightly-packed mips 0..mipCount-1 (each mip sized faceSize>>level).
@@ -752,6 +865,15 @@ public sealed partial class VulkanGraphicsDevice
             // sampling is rare and would need a wider stage mask. Revisit
             // when ShaderLab introduces vertex-stage sampling.
             dstStage = PipelineStageFlags.FragmentShaderBit;
+        }
+        else if (oldLayout == ImageLayout.ShaderReadOnlyOptimal && newLayout == ImageLayout.TransferDstOptimal)
+        {
+            // Streamed per-mip upload (UploadTextureMip): make the prior sampled
+            // reads complete before we overwrite a mip level.
+            srcAccess = AccessFlags.ShaderReadBit;
+            dstAccess = AccessFlags.TransferWriteBit;
+            srcStage = PipelineStageFlags.FragmentShaderBit;
+            dstStage = PipelineStageFlags.TransferBit;
         }
         else if (oldLayout == ImageLayout.Undefined && newLayout == ImageLayout.ShaderReadOnlyOptimal)
         {
