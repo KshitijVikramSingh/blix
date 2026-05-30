@@ -25,17 +25,19 @@ PROJECT="$REPO_ROOT/src/Blix.Demos.VulkanSponza/Blix.Demos.VulkanSponza.csproj"
 PUBLISH_DIR="$REPO_ROOT/src/Blix.Demos.VulkanSponza/bin/Publish"
 RID="osx-arm64"
 
-# The ~19GB Sponza pack set lives on an external SSD shared across machines,
-# not in the repo. BLIX_SPONZA_ASSETS points both the publish build (which
-# then skips copying anything into bin/) and the launched process (which
-# reads textures straight off the SSD) at it. Override by exporting the var
-# before running — e.g. if the iMac mounts the drive under a different name.
-export BLIX_SPONZA_ASSETS="${BLIX_SPONZA_ASSETS:-/Volumes/data bag/blix-assets/sponza}"
-if [ ! -d "$BLIX_SPONZA_ASSETS/main_sponza" ]; then
-    echo "Sponza assets not found at: $BLIX_SPONZA_ASSETS" >&2
-    echo "  Mount the shared SSD, or export BLIX_SPONZA_ASSETS to the pack dir." >&2
-    echo "  Populate a fresh location with tools/setup-sponza-modern.sh." >&2
-    exit 1
+# The Sponza pack set is large and typically kept outside the repo (e.g. on an
+# external SSD shared across machines). Point BLIX_SPONZA_ASSETS at it — export
+# it in your shell (~/.zshrc) or inline before this command. When set, the
+# publish build skips copying it into bin/ and the process reads straight from
+# that path; when unset, the build falls back to the in-repo Assets/ copy.
+# Populate either location with tools/setup-sponza-modern.sh.
+if [ -n "${BLIX_SPONZA_ASSETS:-}" ]; then
+    if [ ! -d "$BLIX_SPONZA_ASSETS/main_sponza" ]; then
+        echo "BLIX_SPONZA_ASSETS=$BLIX_SPONZA_ASSETS but $BLIX_SPONZA_ASSETS/main_sponza is missing." >&2
+        echo "  Is the drive mounted? Populate with tools/setup-sponza-modern.sh." >&2
+        exit 1
+    fi
+    export BLIX_SPONZA_ASSETS
 fi
 
 prefix=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")

@@ -12,11 +12,10 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-# Cooks the same shared-SSD pack dir the setup script populated and the demos
-# read at runtime. Defaults to the external SSD; export BLIX_SPONZA_ASSETS to
-# override (e.g. the iMac mounting the drive under a different name).
-export BLIX_SPONZA_ASSETS="${BLIX_SPONZA_ASSETS:-/Volumes/data bag/blix-assets/sponza}"
-ASSETS="$BLIX_SPONZA_ASSETS"
+# Cooks the same pack dir the setup script populated and the demos read at
+# runtime: the in-repo Assets dir by default, or BLIX_SPONZA_ASSETS when set
+# (e.g. an external SSD shared across machines). Export it to override.
+ASSETS="${BLIX_SPONZA_ASSETS:-$REPO/src/Blix.Demos.SponzaModern/Assets}"
 
 if [[ ! -d "$ASSETS" ]]; then
     echo "Sponza Modern assets dir not found: $ASSETS" >&2
