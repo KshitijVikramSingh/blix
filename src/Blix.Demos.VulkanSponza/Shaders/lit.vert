@@ -29,6 +29,11 @@ layout(location = 2) out vec3 vWorldPos;
 layout(location = 3) out vec3 vTangentWorld;
 layout(location = 4) out float vTangentSign;
 
+// gl_Position must be bit-identical to the depth pre-pass (which reuses this
+// vertex shader) so the lit pass's LessEqual depth test matches the pre-pass
+// depth exactly — no precision-mismatch holes.
+invariant gl_Position;
+
 void main() {
     vec4 world = pc.uModel * vec4(inPosition, 1.0);
     gl_Position = frame.uViewProjection * world;
