@@ -15,6 +15,8 @@ third_party/**/*.dylib
 third_party/**/*.so
 third_party/**/*.dll
 
-# Sponza Modern's ~19GB pack set lives on an external SSD (BLIX_SPONZA_ASSETS),
+# Sponza Modern's multi-GB pack set lives on an external SSD (BLIX_SPONZA_ASSETS),
 # never in the repo. Guard against an accidental local copy getting committed.
+# Assets/ = cooked (runtime); Assets-src/ = raw sources (setup's default split).
 src/Blix.Demos.SponzaModern/Assets/
+src/Blix.Demos.SponzaModern/Assets-src/

@@ -227,8 +227,22 @@ static int CookProbe(string[] args)
         else { Console.Error.WriteLine($"Unknown option: {a}"); return 1; }
     }
 
-    var probeInRoot = Path.GetDirectoryName(Path.GetFullPath(hdrPath)) ?? string.Empty;
-    var outPath = ResolveDest(hdrPath, probeInRoot, outDir, ".blixprobe");
+    string outPath;
+    if (string.IsNullOrEmpty(outDir))
+    {
+        outPath = Path.ChangeExtension(hdrPath, ".blixprobe");
+    }
+    else
+    {
+        // Single-file input (no input root to mirror against): preserve the
+        // HDR's immediate parent dir under outDir — e.g. <src>/textures/x.hdr ->
+        // <out>/textures/x.blixprobe — so it lands where the runtime looks
+        // (<assetsRoot>/textures/).
+        var parent = Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(hdrPath)) ?? string.Empty);
+        var destDir = string.IsNullOrEmpty(parent) ? outDir : Path.Combine(outDir, parent);
+        Directory.CreateDirectory(destDir);
+        outPath = Path.Combine(destDir, Path.GetFileNameWithoutExtension(hdrPath) + ".blixprobe");
+    }
     Console.WriteLine($"Cooking probe: {hdrPath} -> {outPath}");
     Console.WriteLine($"  env={envFace} irr={irrFace} prefilter={prefilterBase}/{prefilterMips} brdf={brdfSize} clamp={clamp}");
 
