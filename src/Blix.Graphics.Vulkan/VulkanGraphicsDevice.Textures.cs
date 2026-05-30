@@ -190,6 +190,47 @@ public sealed partial class VulkanGraphicsDevice
         return new TextureHandle(cid);
     }
 
+    // Single-mip RGBA16F cube (cooked .blixprobe env / irradiance). The Half[]
+    // is face-major, RGBA-interleaved — exactly the byte layout the mipped
+    // CreateTextureCube expects for one mip, so reinterpret and forward.
+    public TextureHandle CreateTextureCubeHdr(
+        int faceSize, ReadOnlySpan<Half> faces, SamplerDescription sampler, string? name = null)
+    {
+        var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(faces);
+        return CreateTextureCube(faceSize, TextureFormat.Rgba16F, 1, bytes, sampler, name ?? "cube.hdr");
+    }
+
+    // Mipped RGBA16F cube (cooked GGX-prefiltered specular). mipFaces is
+    // mip-major (mipFaces[k] = all 6 faces at mip k, each face-major); the
+    // upload path wants face-major then mip-major, so re-pack once.
+    public TextureHandle CreateTextureCubeHdrMipped(
+        int baseFaceSize, IReadOnlyList<Half[]> mipFaces, SamplerDescription sampler, string? name = null)
+    {
+        var mipCount = mipFaces.Count;
+        long total = 0;
+        for (var f = 0; f < 6; f++)
+            for (var m = 0; m < mipCount; m++)
+            {
+                var s = Math.Max(1, baseFaceSize >> m);
+                total += (long)s * s * 4 * sizeof(ushort); // RGBA16F = 4 halves
+            }
+        var packed = new byte[total];
+        var dst = 0;
+        for (var f = 0; f < 6; f++)
+        {
+            for (var m = 0; m < mipCount; m++)
+            {
+                var s = Math.Max(1, baseFaceSize >> m);
+                var halvesPerFace = s * s * 4;
+                var src = System.Runtime.InteropServices.MemoryMarshal.AsBytes(
+                    mipFaces[m].AsSpan(f * halvesPerFace, halvesPerFace));
+                src.CopyTo(packed.AsSpan(dst));
+                dst += src.Length;
+            }
+        }
+        return CreateTextureCube(baseFaceSize, TextureFormat.Rgba16F, mipCount, packed, sampler, name ?? "cube.hdr.mipped");
+    }
+
     public void DestroyTexture(TextureHandle handle)
     {
         if (!textureTable.Remove(handle.Id, out var e)) return;

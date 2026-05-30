@@ -100,7 +100,9 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 // is fine, we own the buffer after BlixMeshReader returns it).
                 // Lets us fix asset-level UV corruption without re-running the
                 // cook step.
-                SanitizePackedUVs(p.VertexBytes, p.VertexCount, p.Name);
+                // Cooked meshes use the 32-byte VertexPosition3NormalTexture
+                // layout (UV at offset 24); the tangent layout isn't cooked.
+                SanitizePackedUVs(p.VertexBytes, p.VertexCount, stride: 32, uvOffset: 24, p.Name);
                 var meshData = new MeshData(
                     p.Name,
                     p.VertexBytes,
@@ -129,7 +131,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 {
                     var prim = node.Mesh.Primitives[i];
                     var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
-                    var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix);
+                    var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix, context.FlipTextureV, context.IncludeTangents);
                     var material = ExtractMaterial(prim.Material, materialCache, textureCache);
                     primitives.Add(new GltfPrimitive(meshData, material));
                 }
@@ -156,7 +158,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
     // node/primitive structure the runtime importer does, packs vertices via
     // BuildStaticMeshData, and serialises each primitive's
     // (name, materialIndex, bounds, vertexBytes, indices) to disk.
-    public static int CookToBlixMesh(string gltfPath, string outPath)
+    public static int CookToBlixMesh(string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false)
     {
         ArgumentNullException.ThrowIfNull(gltfPath);
         ArgumentNullException.ThrowIfNull(outPath);
@@ -173,7 +175,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             {
                 var prim = node.Mesh.Primitives[i];
                 var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
-                var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix);
+                var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix, flipTextureV, includeTangents);
                 var materialIndex = prim.Material?.LogicalIndex ?? BlixMesh.NoMaterial;
                 primitives.Add(new BlixMeshPrimitive(
                     Name: meshData.Name,
@@ -188,39 +190,98 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         }
 
         BlixMeshWriter.Write(outPath, new BlixMeshFile(
-            VertexPosition3NormalTexture.Layout,
+            includeTangents
+                ? VertexPosition3NormalTangentTexture.Layout
+                : VertexPosition3NormalTexture.Layout,
             primitives));
         return primitives.Count;
     }
 
-    public static MeshData BuildStaticMeshData(string name, MeshPrimitive primitive, Matrix4x4 world, Matrix4x4 normalMatrix)
+    public static MeshData BuildStaticMeshData(string name, MeshPrimitive primitive, Matrix4x4 world, Matrix4x4 normalMatrix, bool flipTextureV = false, bool includeTangents = false)
     {
         var positions = primitive.GetVertexAccessor("POSITION")?.AsVector3Array()
             ?? throw new InvalidOperationException("glTF mesh primitive missing required POSITION accessor.");
         var normals = primitive.GetVertexAccessor("NORMAL")?.AsVector3Array();
         var uvs = primitive.GetVertexAccessor("TEXCOORD_0")?.AsVector2Array();
+        // Authored tangents (glTF vec4: xyz dir + w handedness). MikkTSpace-
+        // compatible per spec, so forwarding beats recomputing.
+        var tangents = includeTangents ? primitive.GetVertexAccessor("TANGENT")?.AsVector4Array() : null;
 
         var vertexCount = positions.Count;
-        var vertices = new VertexPosition3NormalTexture[vertexCount];
 
         var minB = new Vector3(float.PositiveInfinity);
         var maxB = new Vector3(float.NegativeInfinity);
 
-        for (var v = 0; v < vertexCount; v++)
+        // V canonicalisation (V -> 1-V), opt-in per import via FlipTextureV.
+        // Bottom-up (OpenGL-authored) sources sample vertically inverted on a
+        // top-down (Vulkan / D3D) sampler; baking the flip here is the single
+        // chokepoint the runtime importer and CookToBlixMesh share.
+        Vector2 BuildUv(int v)
         {
-            var pLocal = positions[v];
-            var pWorld = GraphicsMatrices.TransformPoint(world, pLocal);
-            var nLocal = normals is null ? Vector3.UnitY : normals[v];
-            var nWorld = Vector3.Normalize(GraphicsMatrices.TransformDirection(normalMatrix, nLocal));
             var uv = uvs is null ? Vector2.Zero : uvs[v];
+            return new Vector2(uv.X, flipTextureV ? 1.0f - uv.Y : uv.Y);
+        }
+        Vector3 BuildNormal(int v) =>
+            Vector3.Normalize(GraphicsMatrices.TransformDirection(normalMatrix, normals is null ? Vector3.UnitY : normals[v]));
 
-            vertices[v] = new VertexPosition3NormalTexture(
-                new GraphicsVector3(pWorld.X, pWorld.Y, pWorld.Z),
-                new GraphicsVector3(nWorld.X, nWorld.Y, nWorld.Z),
-                new GraphicsVector2(uv.X, uv.Y));
-
-            minB = Vector3.Min(minB, pWorld);
-            maxB = Vector3.Max(maxB, pWorld);
+        byte[] packed;
+        VertexLayout layout;
+        int uvOffset;
+        if (includeTangents)
+        {
+            var verts = new VertexPosition3NormalTangentTexture[vertexCount];
+            for (var v = 0; v < vertexCount; v++)
+            {
+                var pWorld = GraphicsMatrices.TransformPoint(world, positions[v]);
+                var nWorld = BuildNormal(v);
+                // Tangent direction transforms by the model's linear part (NOT
+                // the inverse-transpose used for normals). Preserve the w sign.
+                Vector3 tDir;
+                float tSign;
+                if (tangents is not null)
+                {
+                    var t = tangents[v];
+                    tDir = Vector3.Normalize(GraphicsMatrices.TransformDirection(world, new Vector3(t.X, t.Y, t.Z)));
+                    tSign = t.W < 0f ? -1f : 1f;
+                }
+                else
+                {
+                    // No authored tangent — pick any axis perpendicular to N.
+                    var up = MathF.Abs(nWorld.Y) > 0.99f ? Vector3.UnitX : Vector3.UnitY;
+                    tDir = Vector3.Normalize(Vector3.Cross(up, nWorld));
+                    tSign = 1f;
+                }
+                var uv = BuildUv(v);
+                verts[v] = new VertexPosition3NormalTangentTexture(
+                    new GraphicsVector3(pWorld.X, pWorld.Y, pWorld.Z),
+                    new GraphicsVector3(nWorld.X, nWorld.Y, nWorld.Z),
+                    new GraphicsVector4(tDir.X, tDir.Y, tDir.Z, tSign),
+                    new GraphicsVector2(uv.X, uv.Y));
+                minB = Vector3.Min(minB, pWorld);
+                maxB = Vector3.Max(maxB, pWorld);
+            }
+            packed = VertexPosition3NormalTangentTexture.Pack(verts);
+            layout = VertexPosition3NormalTangentTexture.Layout;
+            uvOffset = 10 * sizeof(float);
+        }
+        else
+        {
+            var verts = new VertexPosition3NormalTexture[vertexCount];
+            for (var v = 0; v < vertexCount; v++)
+            {
+                var pWorld = GraphicsMatrices.TransformPoint(world, positions[v]);
+                var nWorld = BuildNormal(v);
+                var uv = BuildUv(v);
+                verts[v] = new VertexPosition3NormalTexture(
+                    new GraphicsVector3(pWorld.X, pWorld.Y, pWorld.Z),
+                    new GraphicsVector3(nWorld.X, nWorld.Y, nWorld.Z),
+                    new GraphicsVector2(uv.X, uv.Y));
+                minB = Vector3.Min(minB, pWorld);
+                maxB = Vector3.Max(maxB, pWorld);
+            }
+            packed = VertexPosition3NormalTexture.Pack(verts);
+            layout = VertexPosition3NormalTexture.Layout;
+            uvOffset = 6 * sizeof(float);
         }
 
         var indicesSrc = primitive.GetIndices();
@@ -250,13 +311,12 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         }
 
         var bounds = vertexCount == 0 ? Bounds3.Empty : new Bounds3(minB, maxB);
-        var packed = VertexPosition3NormalTexture.Pack(vertices);
-        SanitizePackedUVs(packed, vertexCount, name);
+        SanitizePackedUVs(packed, vertexCount, layout.Stride, uvOffset, name);
         return new MeshData(
             name,
             packed,
             indices16,
-            VertexPosition3NormalTexture.Layout,
+            layout,
             bounds,
             Indices32: indices32);
     }
@@ -271,15 +331,13 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
     // frac is the same value modulo 1.
     private const float MaxReasonableUV = 100.0f;
 
-    private static int SanitizePackedUVs(byte[] vertexBytes, int vertexCount, string ownerName)
+    private static int SanitizePackedUVs(byte[] vertexBytes, int vertexCount, int stride, int uvOffset, string ownerName)
     {
-        const int Stride = 32; // VertexPosition3NormalTexture
-        const int UvOffset = 24;
         var touched = 0;
         var span = vertexBytes.AsSpan();
         for (var v = 0; v < vertexCount; v++)
         {
-            var slot = span.Slice(v * Stride + UvOffset, 8);
+            var slot = span.Slice(v * stride + uvOffset, 8);
             var u = System.Runtime.InteropServices.MemoryMarshal.Read<float>(slot);
             var vv = System.Runtime.InteropServices.MemoryMarshal.Read<float>(slot.Slice(4));
             var fix = false;
