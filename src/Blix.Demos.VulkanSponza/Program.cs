@@ -725,6 +725,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // scene depth, so the lit pass only shades the front-most fragment
         // (overdraw killed). Mask materials trigger the discard branch via the
         // per-material UBO's alphaCutoff > 0; opaque materials leave it at 0.
+        // AlphaToCoverage on the opaque/mask pipelines: cutout foliage (the
+        // reclassified blend) outputs a sharpened coverage alpha → antialiased
+        // leaf edges under MSAA; solid opaque outputs coverage 1.0 → no effect.
         opaqueSolidPipeline = vk.CreatePipeline(new PipelineDescription(
             litProgram,
             VertexPosition3NormalTangentTexture.Layout,
@@ -732,7 +735,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             DepthState.LessEqualNoWrite,
             RasterizerState.BackFaceCulling,
             new[] { BlendState.Disabled },
-            RenderTarget: graph.GetPassSurface(litPassHandle)), "lit.opaque");
+            RenderTarget: graph.GetPassSurface(litPassHandle),
+            AlphaToCoverage: true), "lit.opaque");
         opaqueDoubleSidedPipeline = vk.CreatePipeline(new PipelineDescription(
             litProgram,
             VertexPosition3NormalTangentTexture.Layout,
@@ -740,7 +744,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             DepthState.LessEqualNoWrite,
             RasterizerState.NoCulling,
             new[] { BlendState.Disabled },
-            RenderTarget: graph.GetPassSurface(litPassHandle)), "lit.opaque.doubleSided");
+            RenderTarget: graph.GetPassSurface(litPassHandle),
+            AlphaToCoverage: true), "lit.opaque.doubleSided");
 
         // Blend: depth-test (so windows don't draw behind walls) but no
         // depth-write (so successive translucent fragments don't z-fight),
@@ -1027,9 +1032,17 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             var mesh = prim.Mesh;
             // Glass/transmissive routes to the blend pipeline regardless of its
             // declared alpha mode (see EffectiveTransmission).
-            var isBlend = pm?.AlphaMode == GltfAlphaMode.Blend || EffectiveTransmission(pm) > 0f;
+            // Only genuinely transmissive materials (glass) need alpha blending.
+            // Cutout foliage authored as BLEND (the cypress, etc.) is treated as
+            // MASK so it lands in the opaque bucket → written by the depth
+            // pre-pass → early-Z. That kills the layered double-sided foliage
+            // overdraw that makes the hero tree fragment-bound at Retina res.
+            // Its alphaCutoff (set in BuildMaterial) drives the shader discard.
+            var isBlend = EffectiveTransmission(pm) > 0f;
             var material = GetMaterial(pm, out var albedo, out var alphaCutoff, out var baseColorAlpha);
-            var alphaMode = isBlend ? GltfAlphaMode.Blend : (pm?.AlphaMode ?? GltfAlphaMode.Opaque);
+            var alphaMode = isBlend ? GltfAlphaMode.Blend
+                : alphaCutoff > 0f ? GltfAlphaMode.Mask
+                : (pm?.AlphaMode ?? GltfAlphaMode.Opaque);
             var pipeline = PickPipeline(alphaMode, pm?.DoubleSided ?? false);
 
             sharedLayout = mesh.Layout; // uniform across packs (all cooked --tangents)
@@ -1175,7 +1188,14 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         var baseColorFactor = gm?.BaseColorFactor ?? Vector4.One;
         var emissiveFactor = gm is null ? Vector3.Zero : gm.EmissiveFactor;
         var emissiveStrength = gm?.EmissiveStrength ?? 1.0f;
-        alphaCutoff = gm?.AlphaMode == GltfAlphaMode.Mask ? (gm?.AlphaCutoff ?? 0.5f) : 0.0f;
+        // Cutout cutoff. MASK uses its authored cutoff. Non-glass BLEND (foliage
+        // authored as blend) is treated as cutout at 0.5 so it can depth-write +
+        // early-Z instead of overdrawing. Glass (transmissive) keeps 0 → no
+        // discard, true alpha blend.
+        alphaCutoff = EffectiveTransmission(gm) > 0f ? 0.0f
+            : gm?.AlphaMode == GltfAlphaMode.Mask ? (gm?.AlphaCutoff ?? 0.5f)
+            : gm?.AlphaMode == GltfAlphaMode.Blend ? 0.5f
+            : 0.0f;
         baseColorAlpha = baseColorFactor.W;
         var normalScale = 1.0f;
         var roughness = gm?.RoughnessFactor ?? 0.8f;
