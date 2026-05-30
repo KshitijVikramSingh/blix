@@ -104,6 +104,15 @@ static int CookMesh(string[] args)
     // Cook the 48-byte tangent layout (VulkanSponza needs it for normal
     // mapping). GL's non-tangent path is sunsetting.
     var tangents = args.Any(a => a.Equals("--tangents", StringComparison.OrdinalIgnoreCase));
+    // Spatial split: primitives over this triangle budget are recursively
+    // partitioned into chunks (each its own LOD chain) so per-prim distance LOD
+    // gets fine-grained. 0/absent = off. --no-split-foliage leaves non-OPAQUE
+    // (masked/blended) prims whole for the impostor track to own.
+    var splitBudget = 0;
+    var splitIdx = Array.FindIndex(args, a => a.Equals("--split", StringComparison.OrdinalIgnoreCase));
+    if (splitIdx >= 0 && splitIdx + 1 < args.Length && int.TryParse(args[splitIdx + 1], out var sb))
+        splitBudget = sb;
+    var splitFoliage = !args.Any(a => a.Equals("--no-split-foliage", StringComparison.OrdinalIgnoreCase));
 
     string[] sources;
     if (Directory.Exists(target))
@@ -154,13 +163,17 @@ static int CookMesh(string[] args)
                 // world units so the runtime can project it to screen pixels.
                 var scale = Blix.Tools.Cook.MeshoptNative.SimplifyScale(positions, vertexCount, 3);
                 return new Blix.GltfStaticImporter.SimplifyResult(reduced, relError * scale);
-            });
+            },
+            splitTriBudget: splitBudget, splitFoliage: splitFoliage);
         var size = new FileInfo(outPath).Length;
         // Quick LOD readout: levels + triangle reduction on the largest primitive.
         var file = Blix.Assets.BlixMeshReader.Read(outPath);
         var biggest = file.Primitives.OrderByDescending(p => p.Lods[0].IndexCount).First();
         var lodCounts = string.Join("/", biggest.Lods.Select(l => l.IndexCount / 3));
-        Console.WriteLine($"  cooked {Path.GetFileName(src)} -> {Path.GetFileName(outPath)} ({count} prims, {size / 1024.0 / 1024.0:0.00} MB, {tangents}-tan) in {sw.ElapsedMilliseconds} ms; LOD tris (biggest prim): {lodCounts}");
+        var splitNote = splitBudget > 0
+            ? $", split@{splitBudget / 1000}k → biggest chunk {biggest.Lods[0].IndexCount / 3} tris"
+            : "";
+        Console.WriteLine($"  cooked {Path.GetFileName(src)} -> {Path.GetFileName(outPath)} ({count} prims, {size / 1024.0 / 1024.0:0.00} MB, {tangents}-tan) in {sw.ElapsedMilliseconds} ms; LOD tris (biggest prim): {lodCounts}{splitNote}");
     }
     return 0;
 }
