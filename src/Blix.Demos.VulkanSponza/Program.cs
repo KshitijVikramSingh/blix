@@ -70,6 +70,15 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private PipelineHandle prepassOpaquePipeline;
     private PipelineHandle prepassMaskPipeline;
 
+    // Streamed-load preview: textures upload over frames via the uploader; until
+    // they finish, the geometry renders flat (lit.vert + flat.frag, no material
+    // textures sampled) and shadows/IBL/fog are skipped. The full lit+shadow
+    // loop starts once textureUploader.PendingCount hits 0.
+    private Blix.Render.ResourceUploader textureUploader = null!;
+    private ShaderProgramHandle flatProgram;
+    private PipelineHandle flatPipeline;
+    private bool fullyLoaded; // textures all streamed → full render path
+
     // Lit pipelines — four variants spanning (Opaque|Mask vs Blend) ×
     // (BackFaceCulling vs NoCulling). All share one shader program; only
     // the depth/blend/rasterizer state varies. AlphaMode.Mask runs through
@@ -414,6 +423,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     {
         this.host = host;
         vk = (VulkanGraphicsDevice)graphicsDevice;
+        textureUploader = new Blix.Render.ResourceUploader(vk);
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         renderHeightPx = host.LogicalSize.Height;
 
@@ -846,6 +856,21 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // (matching lit's back-cull front face), and double-sided geometry
         // always writes depth from either view side so the sky never overdraws
         // a back-facing curtain. LessEqualWrite; the lit pass then reads it.
+        // Flat preview pipeline (streamed-load phase): lit.vert + flat.frag, lit
+        // surface, depth-test no-write (the pre-pass wrote depth). Reuses
+        // litInterface; flat.frag samples nothing, so set1/set2 stay unbound (as
+        // with the trivial pre-pass program).
+        var flatFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "flat.frag.spv"));
+        flatProgram = vk.CreateShaderProgramFromSpv(litVertSpv, flatFragSpv, litInterface, "flat");
+        flatPipeline = vk.CreatePipeline(new PipelineDescription(
+            flatProgram,
+            VertexPosition3NormalTangentTexture.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.LessEqualNoWrite,
+            RasterizerState.NoCulling,
+            new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(litPassHandle)), "flat");
+
         var prepassOpaqueFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "depth_prepass.frag.spv"));
         prepassOpaqueProgram = vk.CreateShaderProgramFromSpv(litVertSpv, prepassOpaqueFragSpv, litInterface, "depth_prepass");
         prepassOpaquePipeline = vk.CreatePipeline(new PipelineDescription(
@@ -1398,11 +1423,18 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             // each mip and upload as a mipped texture. tex.Format already
             // encodes the sRGB choice (BC7Srgb albedo vs BC7Unorm MR, BC5
             // normal), so use it directly rather than the source uploadFormat.
-            var mips = new byte[tex.MipCount][];
-            for (var i = 0; i < tex.MipCount; i++) mips[i] = BlixTexReader.ReadMip(lazy, i);
-            handle = vk.CreateTexture2DMipped(
+            // Streamed: allocate the mip chain now (so materials bind a real,
+            // stable handle immediately) and queue the per-mip uploads to run
+            // budgeted over the next frames. The geometry renders flat until
+            // every texture finishes (the chain is undefined until uploaded), so
+            // these handles aren't sampled by the lit pass before they're ready.
+            handle = vk.AllocateTexture2DMips(
                 new TextureDescription(tex.Width, tex.Height, tex.Format, SamplerDescription.LinearRepeat),
-                mips, label);
+                tex.MipCount, label);
+            var lazyHandle = lazy;
+            textureUploader.EnqueueInto(
+                handle, tex.Format, tex.Width, tex.Height, tex.MipCount,
+                level => BlixTexReader.ReadMip(lazyHandle, level));
         }
         else if (tex.MipBytes is { Count: > 0 } mips)
         {
@@ -1437,8 +1469,16 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     public void OnUpdate(Time time)
     {
         // Promote the background-parsed packs to GPU resources on the main thread
-        // the frame they're ready (one ~0.7s hitch, then sceneLoaded flips).
+        // (time-sliced; geometry + flat preview appears in ~1s).
         TryFinishLoad();
+        // Stream texture mips into their pre-allocated handles, budgeted per
+        // frame; the flat preview holds until this drains. Once empty, the full
+        // lit+shadow loop takes over (fullyLoaded).
+        if (sceneLoaded && !fullyLoaded)
+        {
+            textureUploader.Drain(budgetMillis: 6.0);
+            if (textureUploader.PendingCount == 0) fullyLoaded = true;
+        }
 
         var dt = (float)time.Delta;
 
@@ -1636,6 +1676,41 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // Per-pass set-1 bindings (passBindings) and the identity model push
         // are built once at load (constant handles / identity transform) and
         // reused here — see OnLoad.
+
+        // --- Streamed-load preview: flat geometry while textures upload ------
+        // Geometry is built but its textures are still streaming into their
+        // (allocated, undefined) handles, so we render the opaque set flat
+        // (lit.vert + flat.frag, no material/IBL/shadow sampling) over the
+        // pre-pass depth. No shadow cascades or fog yet — those start once
+        // fullyLoaded. The pre-pass treats everything as solid opaque (no mask
+        // discard against the not-yet-uploaded albedo).
+        if (!fullyLoaded)
+        {
+            FillIndirect(opaqueDrawables, opaqueIndirect, cull: null, margin: 0f);
+            graph.Pass(depthPrepassHandle, scope =>
+            {
+                foreach (var g in opaqueGroups)
+                    scope.DrawIndexedIndirect(
+                        vertexBuffer: sharedVb, indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
+                        pipeline: prepassOpaquePipeline, indirectBuffer: opaqueIndirect,
+                        indirectByteOffset: g.Start * VulkanGraphicsDevice.IndirectCommandStride, drawCount: g.Count,
+                        uniforms: perFrame, textures: Array.Empty<ShaderTextureBinding>(),
+                        material: null, pushConstants: identityPush);
+            });
+            graph.Pass(litPassHandle, scope =>
+            {
+                foreach (var g in opaqueGroups)
+                    scope.DrawIndexedIndirect(
+                        vertexBuffer: sharedVb, indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
+                        pipeline: flatPipeline, indirectBuffer: opaqueIndirect,
+                        indirectByteOffset: g.Start * VulkanGraphicsDevice.IndirectCommandStride, drawCount: g.Count,
+                        uniforms: perFrame, textures: Array.Empty<ShaderTextureBinding>(),
+                        material: null, pushConstants: identityPush);
+            }, clearColor: new GraphicsColor(0.05f, 0.07f, 0.10f, 1f));
+            graph.Execute(commandList);
+            RecordPresentPass(commandList);
+            return;
+        }
 
         // --- Shadow passes: opaque/mask occluders into each cascade ---------
         // Each cascade frustum-culls the opaque set against its ortho box, so
