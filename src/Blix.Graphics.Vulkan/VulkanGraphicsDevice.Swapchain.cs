@@ -19,6 +19,23 @@ public sealed partial class VulkanGraphicsDevice
     public int MaxFramesInFlightCount => MaxFramesInFlight;
     public int CurrentFrameSlot => currentFrame;
 
+    // Present mode: true → FIFO (vsync, no tearing, capped at the display
+    // refresh); false → Mailbox if available (uncapped, shows true GPU frame
+    // cost on the perf HUD, but tears on MoltenVK — no vsync). Default vsync so
+    // the out-of-box experience is tear-free; flip it for measurement. Changing
+    // it at runtime triggers a swapchain recreate on the next frame.
+    private bool vsyncEnabled = true;
+    public bool VsyncEnabled
+    {
+        get => vsyncEnabled;
+        set
+        {
+            if (vsyncEnabled == value) return;
+            vsyncEnabled = value;
+            MarkSwapchainOutOfDate();
+        }
+    }
+
     internal KhrSwapchain KhrSwapchain { get; private set; } = null!;
     internal SwapchainKHR Swapchain { get; private set; }
     internal Format SwapchainFormat { get; private set; }
@@ -204,8 +221,10 @@ public sealed partial class VulkanGraphicsDevice
         }
         SwapchainFormat = chosenFormat.Format;
 
-        // Prefer Mailbox (uncapped) so the perf HUD shows true frame cost;
-        // FIFO is the universal vsync fallback.
+        // FIFO (vsync) by default — no tearing, always supported. When vsync is
+        // off, prefer Mailbox (uncapped, true frame cost on the HUD) if the
+        // surface offers it. On MoltenVK Mailbox has no vsync, hence the tearing
+        // it trades for honest timing.
         uint pmCount = 0;
         KhrSurface.GetPhysicalDeviceSurfacePresentModes(PhysicalDevice, Surface, &pmCount, null);
         var presentModes = new PresentModeKHR[pmCount];
@@ -214,9 +233,12 @@ public sealed partial class VulkanGraphicsDevice
             KhrSurface.GetPhysicalDeviceSurfacePresentModes(PhysicalDevice, Surface, &pmCount, p);
         }
         var chosenPresent = PresentModeKHR.FifoKhr;
-        foreach (var pm in presentModes)
+        if (!vsyncEnabled)
         {
-            if (pm == PresentModeKHR.MailboxKhr) { chosenPresent = pm; break; }
+            foreach (var pm in presentModes)
+            {
+                if (pm == PresentModeKHR.MailboxKhr) { chosenPresent = pm; break; }
+            }
         }
 
         var extent = caps.CurrentExtent;
@@ -662,6 +684,10 @@ public sealed partial class VulkanGraphicsDevice
                 {
                     TranslateDrawIndexed(f.CommandBuffer, d, currentFrame);
                 }
+                else if (renderCmd is DrawIndexedIndirectCommand di)
+                {
+                    TranslateDrawIndexedIndirect(f.CommandBuffer, di, currentFrame);
+                }
                 else if (renderCmd is DispatchCommand)
                 {
                     throw new InvalidOperationException(
@@ -734,6 +760,10 @@ public sealed partial class VulkanGraphicsDevice
         lastCpuFrameTiming = new VkCpuFrameTiming(waitMs, encodeMs, submitPresentMs);
 
         currentFrame = (currentFrame + 1) % MaxFramesInFlight;
+        // Advance the indirect ring in lockstep (only on a real presented frame,
+        // not the early-out recreate path above) so the next frame's fill lands
+        // on a slot no in-flight frame is reading.
+        AdvanceIndirectSlot();
         return defaultPasses > 0;
     }
 
@@ -954,6 +984,52 @@ public sealed partial class VulkanGraphicsDevice
         // vertexOffset (5th arg) lets concatenated ImGui cmd-lists index
         // per-list off one shared vertex buffer.
         Vk.CmdDrawIndexed(cmd, (uint)d.IndexCount, 1, (uint)d.IndexOffset, d.VertexOffset, 0);
+    }
+
+    // Per-material indirect multi-draw. Identical bind sequence to
+    // TranslateDrawIndexed (pipeline / set0 uniforms+textures / set2 material /
+    // push / shared VB+IB), then one vkCmdDrawIndexedIndirect reading drawCount
+    // commands from the current frame's slot of the indirect buffer.
+    private unsafe void TranslateDrawIndexedIndirect(CommandBuffer cmd, DrawIndexedIndirectCommand d, int frameSlot)
+    {
+        var pipe = GetPipeline(d.Pipeline);
+        if (pipe.IsCompute)
+        {
+            throw new InvalidOperationException(
+                $"DrawIndexedIndirect bound a compute pipeline '{pipe.Name}'.");
+        }
+        var vb = GetVertexBuffer(d.VertexBuffer);
+        var ib = GetIndexBuffer(d.IndexBuffer);
+        var prog = shaderProgramTable[pipe.ShaderProgram.Id];
+
+        if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
+
+        Vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, pipe.Pipeline);
+        BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures);
+
+        if (d.Material is { } matHandle)
+        {
+            var mat = materialTable[matHandle.Id];
+            var matSet = mat.Sets[frameSlot % mat.FramesInFlight];
+            Vk.CmdBindDescriptorSets(
+                cmd, PipelineBindPoint.Graphics, pipe.Layout,
+                firstSet: (uint)mat.SetIndex, descriptorSetCount: 1, &matSet,
+                dynamicOffsetCount: 0, pDynamicOffsets: null);
+        }
+        if (d.PushConstants is { } pcBytes)
+        {
+            PushConstantsToCommandBuffer(cmd, pipe.Layout, prog.Interface.PushConstants, pcBytes);
+        }
+
+        ulong offset = 0;
+        var buffer = vb.Buffer;
+        Vk.CmdBindVertexBuffers(cmd, 0, 1, &buffer, &offset);
+        Vk.CmdBindIndexBuffer(cmd, ib.Buffer, 0, ib.IndexType);
+
+        var indirect = GetIndirectBuffer(d.IndirectBuffer);
+        Vk.CmdDrawIndexedIndirect(
+            cmd, indirect.Buffer, (ulong)d.IndirectByteOffset,
+            (uint)d.DrawCount, (uint)IndirectCommandStride);
     }
 
     // Name-keyed ShaderUniform → byte offsets across every UBO/SSBO slot

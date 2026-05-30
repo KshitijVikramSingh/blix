@@ -42,6 +42,17 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
     private float lastWheel;
     private double totalTime;
 
+    // Lightweight perf HUD (F1): a debounced real-FPS readout drawn without the
+    // DebugOverlayUi panels, so it measures actual frame rate at minimal cost.
+    // FPS is averaged over a window (raw per-frame deltas are too jittery to read)
+    // and refreshed a few times a second.
+    private bool perfHudVisible;
+    private double fpsAccumTime;
+    private int fpsAccumFrames;
+    private double fpsDisplay;
+    private double frameMsDisplay;
+    private const double FpsRefreshSeconds = 0.4;
+
     public Window(
         IGameLoop gameLoop,
         BlixWindowOptions? options = null,
@@ -145,6 +156,18 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
     {
         if (graphicsDevice is null) return;
 
+        // Debounced real FPS from the actual frame delta (wall clock), averaged
+        // over a short window so the number is readable.
+        fpsAccumTime += deltaTime;
+        fpsAccumFrames++;
+        if (fpsAccumTime >= FpsRefreshSeconds)
+        {
+            fpsDisplay = fpsAccumFrames / fpsAccumTime;
+            frameMsDisplay = fpsAccumTime / fpsAccumFrames * 1000.0;
+            fpsAccumTime = 0;
+            fpsAccumFrames = 0;
+        }
+
         var time = new Time(totalTime, deltaTime);
         var frame = CreateFrameContext();
 
@@ -214,6 +237,11 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
     private void OnKeyDown(IKeyboard kbd, SilkKey key, int scancode)
     {
         if (key == SilkKey.F12 && TryDumpCurrentFrame()) return;
+        if (key == SilkKey.F1)
+        {
+            perfHudVisible = !perfHudVisible;
+            return;
+        }
         if (key == SilkKey.GraveAccent && debugSystem is not null)
         {
             debugSystem.State.ShowOverlay = !debugSystem.State.ShowOverlay;
@@ -391,7 +419,26 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
     private void AppendImGuiPass(RenderCommandList commandList, RenderFrameContext frame, float deltaTime)
     {
         if (imguiRenderer is null) return;
-        if (debugSystem is not { State.Enabled: true, State.ShowOverlay: true }) return;
+        var overlayUp = debugSystem is { State.Enabled: true, State.ShowOverlay: true };
+
+        // Perf HUD: only when the full overlay is NOT up (the panels already show
+        // frame time, and the point of the HUD is a minimal-cost measurement).
+        if (!overlayUp)
+        {
+            if (!perfHudVisible) return;
+            var (w, h) = LogicalSize;
+            imguiRenderer.BeginFramePerfHud(
+                w, h, frame.Width, frame.Height, deltaTime,
+                $"{fpsDisplay:0} FPS  ({frameMsDisplay:0.0} ms)");
+            commandList.Pass(
+                "perf-hud",
+                new RenderPassDescription(
+                    Target: RenderSurfaceHandle.Default,
+                    ClearColors: Array.Empty<GraphicsColor?>(),
+                    ClearDepth: false),
+                pass => imguiRenderer.Submit(pass));
+            return;
+        }
 
         var (logicalW, logicalH) = LogicalSize;
         var mousePos = global::System.Numerics.Vector2.Zero;
@@ -409,7 +456,7 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
 
         imguiRenderer.BeginFrame(
             logicalW, logicalH, frame.Width, frame.Height, deltaTime,
-            mousePos, left, right, middle, wheel, debugSystem);
+            mousePos, left, right, middle, wheel, debugSystem!); // overlayUp ⇒ non-null
 
         commandList.Pass(
             "imgui",

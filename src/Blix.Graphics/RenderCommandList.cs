@@ -86,6 +86,27 @@ public sealed class RenderPassBuilder
         recorder?.OnDraw(in command);
     }
 
+    // Per-material indirect multi-draw: one call issuing drawCount sub-draws from
+    // an indirect buffer, all sharing the bound state (pipeline + shared VB/IB +
+    // set0 uniforms/textures + set2 material + push). Vulkan-only. See
+    // DrawIndexedIndirectCommand.
+    public void DrawIndexedIndirect(
+        VertexBufferHandle vertexBuffer,
+        IndexBufferHandle indexBuffer,
+        PipelineHandle pipeline,
+        IndirectBufferHandle indirectBuffer,
+        int indirectByteOffset,
+        int drawCount,
+        IReadOnlyList<ShaderUniform> uniforms,
+        IReadOnlyList<ShaderTextureBinding> textures,
+        MaterialHandle? material = null,
+        byte[]? pushConstants = null)
+    {
+        commands.Add(new DrawIndexedIndirectCommand(
+            vertexBuffer, indexBuffer, pipeline, indirectBuffer, indirectByteOffset, drawCount,
+            uniforms, textures, material, pushConstants));
+    }
+
     // Scope an occlusion query around the draws that follow until
     // EndOcclusionQuery(). The QueryId must come from the graphics
     // device's occlusion-query pool; the backend issues GL begin/end

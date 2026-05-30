@@ -137,6 +137,31 @@ public sealed class ResourceUploader : IDebuggable
         }
     }
 
+    // Stream mips into an ALREADY-allocated texture (from AllocateTexture2DMips),
+    // smallest-first, budgeted by Drain. Unlike EnqueueLazy this does NOT
+    // allocate or fire a callback — the caller already has the handle and can
+    // bind it immediately; the contents just fill in over the next frames. The
+    // caller is responsible for not SAMPLING a level before it's uploaded (e.g.
+    // render a flat preview until PendingCount hits 0).
+    public void EnqueueInto(
+        TextureHandle handle, TextureFormat format, int width, int height, int mipCount,
+        Func<int, byte[]> mipReader)
+    {
+        ArgumentNullException.ThrowIfNull(mipReader);
+        if (mipCount <= 0) throw new ArgumentOutOfRangeException(nameof(mipCount));
+        // Sampler/name are unused here (no allocation happens — Handle is pre-set
+        // so ProcessOne only uploads), but the context requires non-null values.
+        var ctx = new TextureUploadContext(
+            format, width, height, SamplerDescription.LinearClamp, string.Empty, mipCount, mipReader, _ => { })
+        {
+            Handle = handle, // pre-set → ProcessOne uploads only, never allocates
+        };
+        for (var level = mipCount - 1; level >= 0; level--)
+        {
+            queue.Enqueue(new MipUpload(ctx, level));
+        }
+    }
+
     public void Drain(double budgetMillis)
     {
         if (queue.Count == 0)

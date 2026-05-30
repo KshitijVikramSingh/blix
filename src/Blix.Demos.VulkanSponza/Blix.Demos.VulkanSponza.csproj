@@ -62,6 +62,7 @@
     <GlslShader Include="Shaders\shadow_mask.vert" />
     <GlslShader Include="Shaders\shadow_mask.frag" />
     <GlslShader Include="Shaders\depth_prepass.frag" />
+    <GlslShader Include="Shaders\flat.frag" />
     <GlslShader Include="Shaders\depth_prepass_mask.frag" />
     <GlslShader Include="Shaders\skybox.vert" />
     <GlslShader Include="Shaders\skybox.frag" />

@@ -34,6 +34,24 @@ public sealed record DispatchCommand(
     IReadOnlyList<ShaderTextureBinding> Textures,
     byte[]? PushConstants = null) : RenderCommand;
 
+// Per-material indirect multi-draw (Vulkan-only). Binds the same state as a
+// DrawIndexedCommand (pipeline, shared VB/IB, set0 uniforms/textures, set2
+// material, push constants), then issues one vkCmdDrawIndexedIndirect that reads
+// DrawCount VkDrawIndexedIndirectCommand structs from IndirectBuffer starting at
+// IndirectByteOffset. All sub-draws share the bound state — group objects by
+// (pipeline, material) and emit one of these per group. GL backend rejects it.
+public sealed record DrawIndexedIndirectCommand(
+    VertexBufferHandle VertexBuffer,
+    IndexBufferHandle IndexBuffer,
+    PipelineHandle Pipeline,
+    IndirectBufferHandle IndirectBuffer,
+    int IndirectByteOffset,
+    int DrawCount,
+    IReadOnlyList<ShaderUniform> Uniforms,
+    IReadOnlyList<ShaderTextureBinding> Textures,
+    MaterialHandle? Material = null,
+    byte[]? PushConstants = null) : RenderCommand;
+
 public sealed record DrawIndexedCommand(
     VertexBufferHandle VertexBuffer,
     IndexBufferHandle IndexBuffer,

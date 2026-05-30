@@ -124,6 +124,34 @@ public sealed class VkImGuiRenderer : IDisposable
         ImGui.Render();
     }
 
+    // Minimal perf-HUD frame: just a debounced FPS readout drawn into the
+    // foreground draw list — NO DebugOverlayUi panels (ui.Layout is skipped), so
+    // the overlay's own cost doesn't skew the measurement. Same Submit path.
+    public void BeginFramePerfHud(
+        int windowWidth, int windowHeight,
+        int framebufferWidth, int framebufferHeight,
+        float deltaTime, string text)
+    {
+        var logicalW = Math.Max(windowWidth, 1);
+        var logicalH = Math.Max(windowHeight, 1);
+        var io = ImGui.GetIO();
+        io.DisplaySize = new Vector2(logicalW, logicalH);
+        io.DisplayFramebufferScale = new Vector2(
+            Math.Max(framebufferWidth, 1) / (float)logicalW,
+            Math.Max(framebufferHeight, 1) / (float)logicalH);
+        io.DeltaTime = deltaTime > 0.0f ? deltaTime : 1.0f / 60.0f;
+
+        ImGui.NewFrame();
+        var dl = ImGui.GetForegroundDrawList();
+        var font = ImGui.GetFont();
+        const float size = 22f;
+        var pos = new Vector2(10f, 8f);
+        // 1px drop shadow for legibility over any scene colour (ABGR packing).
+        dl.AddText(font, size, pos + new Vector2(1.5f, 1.5f), 0xFF000000u, text);
+        dl.AddText(font, size, pos, 0xFFFFFFFFu, text);
+        ImGui.Render();
+    }
+
     // Record the current frame's ImGui draw data into the given overlay pass.
     // Reads ImGui.GetDrawData() (valid until the next BeginFrame).
     public unsafe void Submit(RenderPassBuilder pass)
