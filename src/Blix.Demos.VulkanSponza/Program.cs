@@ -45,8 +45,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private RenderGraph graph = null!;
 
     // Graph resources + passes.
-    private GraphResourceHandle hdrHandle;
-    private GraphResourceHandle depthHandle;
+    private GraphResourceHandle hdrHandle;       // 1× resolve target (present samples this)
+    private GraphResourceHandle hdrMsaaHandle;   // 4× MSAA colour the lit pass renders into
+    private GraphResourceHandle depthHandle;     // 4× MSAA depth (matches hdrMsaa)
+    private const int MsaaSamples = 4;
     private PassHandle litPassHandle;
 
     // Lit pipelines — four variants spanning (Opaque|Mask vs Blend) ×
@@ -425,7 +427,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         graph = new RenderGraph(vk);
         var fullSize = new MatchSwapchainGraphSize(1.0f);
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
-        depthHandle = graph.DepthTarget("scene-depth", fullSize);
+        // 4× MSAA colour + depth the lit pass renders into; resolves to hdr.
+        hdrMsaaHandle = graph.ColorTarget("hdr-msaa", TextureFormat.Rgba16F, fullSize, samples: MsaaSamples);
+        depthHandle = graph.DepthTarget("scene-depth", fullSize, samples: MsaaSamples);
 
         // One depth target per cascade, sized per ShadowMapSizes (no 2D-array
         // creation API yet; the lit pass binds the three as a Count=3 sampler
@@ -595,7 +599,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         froxelPassHandle = froxelPass.Handle;
 
         var litPass = graph.GraphicsPass("lit-scene")
-            .Target(hdrHandle, LoadOp.Clear, StoreOp.Store)
+            .Target(hdrMsaaHandle, LoadOp.Clear, StoreOp.Store)   // render 4× MSAA
+            .ResolveColor(hdrHandle)                              // resolve to 1× for present
             .Depth(depthHandle, LoadOp.Clear, StoreOp.Store)
             .Shader(litInterface, skyInterface);
         // Declare the cascade depth targets as inputs so the graph orders the

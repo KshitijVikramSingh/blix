@@ -589,10 +589,16 @@ public sealed partial class VulkanGraphicsDevice
             LineWidth = 1.0f,
         };
 
+        // rasterizationSamples must match the target render pass. Offscreen
+        // surfaces carry their sample count (MSAA passes); the swapchain
+        // default pass is single-sample.
+        var rasterSamples = description.RenderTarget is { } rt && renderSurfaceTable.TryGetValue(rt.Id, out var rtEntry)
+            ? rtEntry.Samples
+            : SampleCountFlags.Count1Bit;
         var multisample = new PipelineMultisampleStateCreateInfo
         {
             SType = StructureType.PipelineMultisampleStateCreateInfo,
-            RasterizationSamples = SampleCountFlags.Count1Bit,
+            RasterizationSamples = rasterSamples,
         };
 
         var depthStencil = new PipelineDepthStencilStateCreateInfo
