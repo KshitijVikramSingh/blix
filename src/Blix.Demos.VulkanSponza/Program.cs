@@ -12,16 +12,21 @@ using Blix.Runtime.Silk;
 
 namespace Blix.Demos.VulkanSponza;
 
-// Step 7 of the Vulkan reshape: SponzaModern port onto the Vector A
-// binding model + Vector B render graph. This file is the SCAFFOLD —
-// just enough wiring to load the main Sponza glTF, push every primitive
-// through the lit shader, and present an HDR-tonemapped result. Cascade
-// shadows, IBL, per-material variation, post-process, and the add-on
-// packs are deliberately out of scope — each lands in a follow-up.
+// The Khronos Intel Sponza scene on the Vulkan backend — the renderer's
+// performance + asset-pipeline proving ground (Vector A binding model + Vector B
+// render graph). Loads cooked siblings only (.blixtex BC textures, .blixprobe
+// IBL, .blixmesh geometry with LOD chains + spatial split) across the main +
+// curtains + ivy + trees packs.
 //
-// Graph topology (v1):
-//   lit-scene  : HDR Rgba16F + depth   (one draw per glTF primitive)
-//   present    : imperative -> swapchain  (HDR -> Reinhard -> sRGB)
+// Render graph: shadow cascades (×3) → froxel fog (optional compute) →
+// depth pre-pass → lit-scene (R11G11B10F, 4× MSAA → resolve) → present (tonemap).
+//
+// Performance shape (see docs/renderer.md → Geometry LOD + the PR that landed
+// this): screen-space-error LOD over meshopt chains, cook-time spatial split of
+// oversized primitives, all geometry consolidated into one shared VB/IB (draws
+// are sub-ranges), and cutout foliage routed to depth-writing MASK + alpha-to-
+// coverage so the hero tree isn't overdraw-bound. CPU-phase timing
+// (cpu-wait/encode/submit) is surfaced in the diagnostics overlay.
 //
 // Asset story: shares the existing Blix.Demos.SponzaModern/Assets tree
 // (csproj links it in, runtime reads from the demo's own Assets/ copy
@@ -31,7 +36,7 @@ public static class Program
     public static void Main()
     {
         var loop = new SponzaLoop();
-        using var window = new Window(loop, new WindowOptions("Blix — Vulkan Sponza (scaffold)", 1440, 810));
+        using var window = new Window(loop, new WindowOptions("Blix — Vulkan Sponza", 1440, 810));
         window.Run();
     }
 }
@@ -901,9 +906,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
         // --- Load Sponza geometry ---------------------------------------
         // Static-mesh importer: Sponza has no skinning. Each glTF primitive
-        // becomes one engine-side mesh with a baked-in node transform.
-        // Materials are deferred for v1 — every primitive uses the fallback
-        // albedo through one shared MaterialHandle.
+        // becomes one engine-side mesh with a baked-in node transform; its glTF
+        // material (BaseColor/normal/MR/AO/emissive + alpha mode) is resolved
+        // and cached by GetMaterial.
         try
         {
             var importer = new GltfStaticImporter();
@@ -977,12 +982,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         }
     }
 
-    // Spatial sub-batch cap: primitives sharing a material merge into one draw,
-    // but in chunks of this many (sorted along their longest axis) so each
-    // merged drawable keeps a tight bounding box and per-cascade frustum
-    // culling stays effective. Mirrors the engine's GltfSceneInstance batcher.
-    private const int MaxPrimitivesPerBatch = 16;
-
     // Per-primitive LOD0 triangle-size distribution across all opaque drawables.
     // Sponza's geometry is dominated by a few very large primitives (whole floor
     // slabs / walls), which is exactly what makes per-prim center-distance LOD
@@ -1021,11 +1020,13 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
     private void BuildDrawables(GltfModel model)
     {
-        // De-batched: one Drawable per primitive (no per-material merging), so
-        // each carries its own cooked LOD index chain and selects a level by
-        // distance. Batching is deliberately discarded here — to be re-assessed
-        // once LOD is correct. Materials are cached by GltfMaterial so per-prim
-        // drawables sharing a material still reuse one handle + descriptor set.
+        // One Drawable per primitive (or per spatial-split chunk): each carries
+        // its own cooked LOD index chain and selects a level by screen-space
+        // error. Geometry is later concatenated into the shared VB/IB by
+        // ConsolidateBuffers, so a draw is just a sub-range. Materials are cached
+        // by GltfMaterial so primitives sharing a material reuse one handle +
+        // descriptor set. (Collapsing the per-object draws into per-material
+        // indirect batches is the next step — see the PR's "next steps".)
         foreach (var prim in model.Primitives)
         {
             var pm = prim.Material;
@@ -1216,75 +1217,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             .SetTexture(binding: 4, mr)
             .SetTexture(binding: 5, ao)
             .Handle;
-    }
-
-    // Slice primitives into spatially-coherent chunks of <= MaxPrimitivesPerBatch,
-    // sorted by centroid along the group's longest axis so each merged batch
-    // stays compact (keeps frustum culling useful).
-    private static IEnumerable<List<GltfPrimitive>> SpatialChunks(List<GltfPrimitive> prims)
-    {
-        if (prims.Count <= MaxPrimitivesPerBatch)
-        {
-            yield return prims;
-            yield break;
-        }
-        var min = new Vector3(float.PositiveInfinity);
-        var max = new Vector3(float.NegativeInfinity);
-        foreach (var p in prims)
-        {
-            min = Vector3.Min(min, p.Mesh.Bounds.Min);
-            max = Vector3.Max(max, p.Mesh.Bounds.Max);
-        }
-        var size = max - min;
-        var axis = size.X >= size.Y && size.X >= size.Z ? 0 : size.Y >= size.Z ? 1 : 2;
-        var sorted = prims.OrderBy(p => AxisValue(p.Mesh.Bounds.Center, axis)).ToList();
-        for (var i = 0; i < sorted.Count; i += MaxPrimitivesPerBatch)
-        {
-            yield return sorted.GetRange(i, Math.Min(MaxPrimitivesPerBatch, sorted.Count - i));
-        }
-    }
-
-    private static float AxisValue(Vector3 v, int axis) => axis == 0 ? v.X : axis == 1 ? v.Y : v.Z;
-
-    // Concatenate a chunk's vertex bytes and rebase its indices into one buffer.
-    // All members share the vertex layout (48-byte tangent layout here).
-    private static (byte[] Vb, uint[] Indices, VertexLayout Layout, Bounds3 Bounds, int VertCount) MergeChunk(
-        List<GltfPrimitive> chunk)
-    {
-        var layout = chunk[0].Mesh.Layout;
-        var totalVerts = 0;
-        var totalIndices = 0;
-        foreach (var p in chunk)
-        {
-            totalVerts += p.Mesh.VertexCount;
-            totalIndices += p.Mesh.Indices32?.Length ?? p.Mesh.Indices.Length;
-        }
-
-        var vb = new byte[totalVerts * layout.Stride];
-        var indices = new uint[totalIndices];
-        var min = new Vector3(float.PositiveInfinity);
-        var max = new Vector3(float.NegativeInfinity);
-        var vByteOffset = 0;
-        var indexOffset = 0;
-        var vertexBase = 0u;
-        foreach (var p in chunk)
-        {
-            var m = p.Mesh;
-            Array.Copy(m.VertexBytes, 0, vb, vByteOffset, m.VertexBytes.Length);
-            vByteOffset += m.VertexBytes.Length;
-            if (m.Indices32 is { } i32)
-            {
-                foreach (var idx in i32) indices[indexOffset++] = idx + vertexBase;
-            }
-            else
-            {
-                foreach (var idx in m.Indices) indices[indexOffset++] = idx + vertexBase;
-            }
-            vertexBase += (uint)m.VertexCount;
-            min = Vector3.Min(min, m.Bounds.Min);
-            max = Vector3.Max(max, m.Bounds.Max);
-        }
-        return (vb, indices, layout, new Bounds3(min, max), totalVerts);
     }
 
     private PipelineHandle PickPipeline(GltfAlphaMode mode, bool doubleSided) =>
