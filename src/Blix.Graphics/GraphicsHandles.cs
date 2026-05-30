@@ -4,6 +4,12 @@ public readonly record struct VertexBufferHandle(int Id);
 
 public readonly record struct IndexBufferHandle(int Id);
 
+// A GPU buffer of VkDrawIndexedIndirectCommand structs, replicated per
+// frame-in-flight and rewritten each frame (CPU-filled indirect path). Consumed
+// by DrawIndexedIndirectCommand. Vulkan-only; created via
+// VulkanGraphicsDevice.CreateIndirectBuffer.
+public readonly record struct IndirectBufferHandle(int Id);
+
 public readonly record struct ShaderProgramHandle(int Id);
 
 public readonly record struct PipelineHandle(int Id);

@@ -307,6 +307,17 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private IndexBufferHandle sharedIbU16;
     private IndexBufferHandle sharedIbU32;
     private VertexLayout sharedLayout = VertexPosition3NormalTangentTexture.Layout;
+
+    // GPU-driven Stage 1: opaque drawables are emitted grouped by
+    // (pipeline, material, index-width) so each group is a contiguous run in the
+    // shared buffers + the indirect buffer. Each frame we fill one
+    // VkDrawIndexedIndirectCommand per opaque drawable (LOD picked by SSE), then
+    // issue ONE vkCmdDrawIndexedIndirect per group instead of a draw per object.
+    private readonly record struct OpaqueGroup(
+        PipelineHandle Pipeline, MaterialHandle Material, bool IsU32, int Start, int Count);
+    private readonly List<OpaqueGroup> opaqueGroups = new();
+    private IndirectBufferHandle opaqueIndirect;
+    private byte[] indirectScratch = System.Array.Empty<byte>();
     // Two-bucket draw order: opaque/mask first, blend last. Within each
     // bucket draws stay in glTF primitive order; back-to-front sort for
     // the blend bucket is a deferred polish (would matter when the demo
@@ -1122,20 +1133,68 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 s.ShadowAlbedoBinding));
         }
 
-        foreach (var s in staging) if (!s.IsBlend) Emit(s, opaqueDrawables);
+        // Opaque emitted grouped by (pipeline, material, index-width) → each
+        // group is a contiguous run, drawable by one indirect call. Blend stays
+        // ungrouped (direct path). OrderBy is stable, so prims keep their
+        // relative order within a group.
+        static bool StagingIsU32(DrawableStaging s) => s.Lods[0].Indices32 is not null;
+        var orderedOpaque = staging.Where(s => !s.IsBlend)
+            .OrderBy(s => s.Pipeline.Id).ThenBy(s => s.Material.Id).ThenBy(s => StagingIsU32(s) ? 1 : 0)
+            .ToList();
+        foreach (var s in orderedOpaque) Emit(s, opaqueDrawables);
         foreach (var s in staging) if (s.IsBlend) Emit(s, blendDrawables);
+
+        // Build the contiguous (pipeline, material, width) groups over the now-
+        // sorted opaqueDrawables.
+        opaqueGroups.Clear();
+        for (var i = 0; i < opaqueDrawables.Count;)
+        {
+            var d = opaqueDrawables[i];
+            var j = i + 1;
+            while (j < opaqueDrawables.Count
+                && opaqueDrawables[j].Pipeline == d.Pipeline
+                && opaqueDrawables[j].Material == d.Material
+                && opaqueDrawables[j].IndicesAreU32 == d.IndicesAreU32) j++;
+            opaqueGroups.Add(new OpaqueGroup(d.Pipeline, d.Material, d.IndicesAreU32, i, j - i));
+            i = j;
+        }
 
         sharedVb = vk.CreateVertexBuffer(new VertexBufferData(
             new VertexBufferDescription(sharedLayout, vCursor, GraphicsBufferUsage.Static), vbytes),
             "sponza.shared.vb");
         if (u16Total > 0) sharedIbU16 = vk.CreateIndexBuffer(u16, name: "sponza.shared.ib16");
         if (u32Total > 0) sharedIbU32 = vk.CreateIndexBuffer(u32, name: "sponza.shared.ib32");
+        // One indirect command per opaque drawable, refilled each frame.
+        opaqueIndirect = vk.CreateIndirectBuffer(opaqueDrawables.Count, "sponza.opaque.indirect");
+        indirectScratch = new byte[opaqueDrawables.Count * VulkanGraphicsDevice.IndirectCommandStride];
         staging.Clear();
-        Console.WriteLine($"[VulkanSponza] consolidated geometry: 1 VB ({vertexByteTotal / 1024.0 / 1024.0:0.0} MB, {vCursor} verts) + {(u16Total > 0 ? 1 : 0)} u16 IB ({u16Total} idx) + {(u32Total > 0 ? 1 : 0)} u32 IB ({u32Total} idx).");
+        Console.WriteLine($"[VulkanSponza] consolidated geometry: 1 VB ({vertexByteTotal / 1024.0 / 1024.0:0.0} MB, {vCursor} verts) + {(u16Total > 0 ? 1 : 0)} u16 IB ({u16Total} idx) + {(u32Total > 0 ? 1 : 0)} u32 IB ({u32Total} idx); {opaqueGroups.Count} opaque indirect groups over {opaqueDrawables.Count} draws.");
     }
 
     // Index buffer a drawable's LOD indices live in (chosen at consolidation).
     private IndexBufferHandle SharedIb(Drawable d) => d.IndicesAreU32 ? sharedIbU32 : sharedIbU16;
+
+    // Fill the opaque indirect buffer: one VkDrawIndexedIndirectCommand per
+    // opaque drawable (in grouped order), LOD picked by screen-space error. No
+    // frustum cull in the camera-opaque set (matches the direct pre-pass loop).
+    // Written to the current frame slot; consumed by the per-group indirect draws
+    // in the lit pass this frame.
+    private void FillOpaqueIndirect()
+    {
+        var cmds = MemoryMarshal.Cast<byte, uint>(indirectScratch.AsSpan());
+        for (var i = 0; i < opaqueDrawables.Count; i++)
+        {
+            var d = opaqueDrawables[i];
+            var lod = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
+            var o = i * 5;
+            cmds[o + 0] = (uint)d.LodIndexCounts[lod]; // indexCount
+            cmds[o + 1] = 1;                           // instanceCount (1 = drawn)
+            cmds[o + 2] = (uint)d.LodFirstIndex[lod];  // firstIndex
+            cmds[o + 3] = (uint)d.BaseVertex;          // vertexOffset
+            cmds[o + 4] = 0;                           // firstInstance
+        }
+        vk.WriteIndirectCommands(opaqueIndirect, indirectScratch);
+    }
 
     // Material handle cached by glTF material (and a slot for the null/untextured
     // fallback) so de-batched per-primitive drawables don't build duplicates.
@@ -1662,17 +1721,26 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             // Opaque + Mask first (depth-test, no write — pre-pass wrote depth),
             // then Blend (depth-test only), so translucent surfaces composite
             // over the resolved opaque depth without writing into it.
-            foreach (var d in opaqueDrawables)
+            //
+            // GPU-driven Stage 1: fill one indirect command per opaque drawable
+            // (LOD by SSE) into this frame's slot, then issue ONE indirect draw
+            // per (pipeline, material) group — ~800 per-object draws collapse to
+            // ~one per material. All draws in a group share set0 + set2(material)
+            // + identity push (the static importer bakes transforms), which is
+            // exactly the indirect-multidraw constraint.
+            FillOpaqueIndirect();
+            foreach (var g in opaqueGroups)
             {
-                var lod = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
-                scope.DrawIndexed(
+                scope.DrawIndexedIndirect(
                     vertexBuffer: sharedVb,
-                    indexBuffer: SharedIb(d),
-                    pipeline: d.Pipeline,
-                    indexCount: d.LodIndexCounts[lod], indexOffset: d.LodFirstIndex[lod], vertexOffset: d.BaseVertex,
+                    indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
+                    pipeline: g.Pipeline,
+                    indirectBuffer: opaqueIndirect,
+                    indirectByteOffset: g.Start * VulkanGraphicsDevice.IndirectCommandStride,
+                    drawCount: g.Count,
                     uniforms: perFrame,
                     textures: passBindings,
-                    material: d.Material,
+                    material: g.Material,
                     pushConstants: identityPush);
             }
             // Sky after opaque, before blend. Fullscreen triangle drawn

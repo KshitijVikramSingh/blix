@@ -24,6 +24,9 @@ public sealed partial class VulkanGraphicsDevice
     // Anisotropic filtering capability, resolved at device creation.
     internal bool AnisotropySupported { get; private set; }
     internal float MaxAnisotropy { get; private set; } = 1.0f;
+    // Whether vkCmdDrawIndexedIndirect with drawCount>1 is available (enabled at
+    // device creation when supported). Gates the per-material indirect path.
+    internal bool MultiDrawIndirectSupported { get; private set; }
 
     internal KhrSurface KhrSurface { get; private set; } = null!;
     internal SurfaceKHR Surface { get; private set; }
@@ -264,9 +267,13 @@ public sealed partial class VulkanGraphicsDevice
             MaxAnisotropy = props.Limits.MaxSamplerAnisotropy;
         }
 
+        // multiDrawIndirect: one vkCmdDrawIndexedIndirect issuing drawCount>1
+        // sub-draws from a buffer — the basis of the per-material indirect path.
+        MultiDrawIndirectSupported = supportedFeatures.MultiDrawIndirect;
         var features = new PhysicalDeviceFeatures
         {
             SamplerAnisotropy = AnisotropySupported,
+            MultiDrawIndirect = MultiDrawIndirectSupported,
         };
         var ci = new DeviceCreateInfo
         {

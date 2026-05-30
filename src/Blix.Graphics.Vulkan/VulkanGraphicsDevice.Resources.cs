@@ -767,6 +767,7 @@ public sealed partial class VulkanGraphicsDevice
         DestroyAllSamplers();
         foreach (var e in indexBufferTable.Values) DestroyVkBufferEntry(e);
         indexBufferTable.Clear();
+        DestroyIndirectBuffers();
         DestroyTransientDescriptorPools();
     }
 }
