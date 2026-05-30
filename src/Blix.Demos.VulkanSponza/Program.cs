@@ -879,6 +879,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
         Console.WriteLine($"[VulkanSponza] textures cached: {albedoCache.Count} albedo, {normalCache.Count} normal, {mrCache.Count} MR, {aoCache.Count} AO, {emissiveCache.Count} emissive.");
         Console.WriteLine($"[VulkanSponza] total draws: {opaqueDrawables.Count} opaque/mask, {blendDrawables.Count} blend.");
+        LogPrimitiveSizeHistogram();
 
         UpdateCamera();
     }
@@ -917,6 +918,42 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // merged drawable keeps a tight bounding box and per-cascade frustum
     // culling stays effective. Mirrors the engine's GltfSceneInstance batcher.
     private const int MaxPrimitivesPerBatch = 16;
+
+    // Per-primitive LOD0 triangle-size distribution across all opaque drawables.
+    // Sponza's geometry is dominated by a few very large primitives (whole floor
+    // slabs / walls), which is exactly what makes per-prim center-distance LOD
+    // coarse — one level for a huge prim. This histogram sets the threshold for
+    // cook-time spatial splitting (only split prims above the fat bucket) and
+    // shows how concentrated the triangle budget is in the tail.
+    private void LogPrimitiveSizeHistogram()
+    {
+        // Buckets by LOD0 triangle count. Tracks prim count + summed tris per
+        // bucket so we can see where the budget actually lives (count vs mass).
+        var edges = new[] { 1_000, 5_000, 20_000, 50_000, int.MaxValue };
+        var labels = new[] { "<1k", "1-5k", "5-20k", "20-50k", ">50k" };
+        var counts = new int[edges.Length];
+        var tris = new long[edges.Length];
+        long totalTris = 0;
+        var fattest = new List<int>();
+        foreach (var d in opaqueDrawables)
+        {
+            var t = d.LodIndexCounts[0] / 3;
+            totalTris += t;
+            fattest.Add(t);
+            for (var i = 0; i < edges.Length; i++)
+            {
+                if (t < edges[i]) { counts[i]++; tris[i] += t; break; }
+            }
+        }
+        fattest.Sort((a, b) => b.CompareTo(a));
+        var top = string.Join("/", fattest.Take(5).Select(t => $"{t / 1000.0:0.0}k"));
+        Console.WriteLine($"[VulkanSponza] opaque LOD0 tris: {totalTris / 1_000_000.0:0.00}M across {opaqueDrawables.Count} prims; top5={top}");
+        for (var i = 0; i < edges.Length; i++)
+        {
+            var pct = totalTris > 0 ? 100.0 * tris[i] / totalTris : 0;
+            Console.WriteLine($"[VulkanSponza]   {labels[i],-7}: {counts[i],4} prims, {tris[i] / 1_000_000.0:0.00}M tris ({pct:0}% of budget)");
+        }
+    }
 
     private void BuildDrawables(GltfModel model)
     {
