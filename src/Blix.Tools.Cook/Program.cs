@@ -28,9 +28,47 @@ return args[0] switch
     "textures" => CookTextures(args),
     "probe" => CookProbe(args),
     "mesh" => CookMesh(args),
+    "meshopt-selftest" => MeshoptSelfTest(),
     "help" or "-h" or "--help" => Help(),
     _ => UnknownVerb(args[0]),
 };
+
+// Proves the meshoptimizer P/Invoke + dylib load end-to-end: builds a
+// subdivided grid, simplifies it, prints original vs reduced triangle counts.
+static int MeshoptSelfTest()
+{
+    const int n = 64; // (n+1)^2 verts, 2*n*n tris
+    var verts = (n + 1) * (n + 1);
+    var positions = new float[verts * 3];
+    for (var y = 0; y <= n; y++)
+        for (var x = 0; x <= n; x++)
+        {
+            var i = (y * (n + 1) + x) * 3;
+            positions[i] = x / (float)n;
+            positions[i + 1] = MathF.Sin(x * 0.3f) * MathF.Cos(y * 0.3f) * 0.2f; // some relief to simplify
+            positions[i + 2] = y / (float)n;
+        }
+    var indices = new uint[n * n * 6];
+    var k = 0;
+    for (var y = 0; y < n; y++)
+        for (var x = 0; x < n; x++)
+        {
+            uint a = (uint)(y * (n + 1) + x), b = a + 1, c = a + (uint)(n + 1), d = c + 1;
+            indices[k++] = a; indices[k++] = c; indices[k++] = b;
+            indices[k++] = b; indices[k++] = c; indices[k++] = d;
+        }
+
+    Console.WriteLine($"meshopt self-test: grid {verts} verts, {indices.Length / 3} tris");
+    foreach (var ratio in new[] { 0.5f, 0.25f, 0.1f })
+    {
+        var lod = Blix.Tools.Cook.MeshoptNative.Simplify(
+            indices, positions, verts, 3, ratio, targetError: 1.0f,
+            Blix.Tools.Cook.MeshoptNative.Options.LockBorder, out var err);
+        Console.WriteLine($"  ratio {ratio:0.00} -> {lod.Length / 3} tris (error {err:0.0000})");
+    }
+    Console.WriteLine("meshopt P/Invoke OK.");
+    return 0;
+}
 
 static void PrintUsage()
 {
