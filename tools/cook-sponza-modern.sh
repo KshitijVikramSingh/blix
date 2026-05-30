@@ -12,7 +12,10 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-ASSETS="$REPO/src/Blix.Demos.SponzaModern/Assets"
+# Cooks the same pack dir the setup script populated and the demos read at
+# runtime: the in-repo Assets dir by default, or BLIX_SPONZA_ASSETS when set
+# (e.g. an external SSD shared across machines). Export it to override.
+ASSETS="${BLIX_SPONZA_ASSETS:-$REPO/src/Blix.Demos.SponzaModern/Assets}"
 
 if [[ ! -d "$ASSETS" ]]; then
     echo "Sponza Modern assets dir not found: $ASSETS" >&2

@@ -25,6 +25,21 @@ PROJECT="$REPO_ROOT/src/Blix.Demos.VulkanSponza/Blix.Demos.VulkanSponza.csproj"
 PUBLISH_DIR="$REPO_ROOT/src/Blix.Demos.VulkanSponza/bin/Publish"
 RID="osx-arm64"
 
+# The Sponza pack set is large and typically kept outside the repo (e.g. on an
+# external SSD shared across machines). Point BLIX_SPONZA_ASSETS at it — export
+# it in your shell (~/.zshrc) or inline before this command. When set, the
+# publish build skips copying it into bin/ and the process reads straight from
+# that path; when unset, the build falls back to the in-repo Assets/ copy.
+# Populate either location with tools/setup-sponza-modern.sh.
+if [ -n "${BLIX_SPONZA_ASSETS:-}" ]; then
+    if [ ! -d "$BLIX_SPONZA_ASSETS/main_sponza" ]; then
+        echo "BLIX_SPONZA_ASSETS=$BLIX_SPONZA_ASSETS but $BLIX_SPONZA_ASSETS/main_sponza is missing." >&2
+        echo "  Is the drive mounted? Populate with tools/setup-sponza-modern.sh." >&2
+        exit 1
+    fi
+    export BLIX_SPONZA_ASSETS
+fi
+
 prefix=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")
 if [ ! -f "$prefix/lib/libvulkan.dylib" ]; then
     echo "libvulkan.dylib not found under $prefix/lib — install with:" >&2

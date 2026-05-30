@@ -37,8 +37,12 @@
        tools/setup-sponza-modern.sh). Linked in, not copied, so a single
        checkout sources both the GL and Vulkan demos from one ~2GB pack
        set. CopyToOutputDirectory="PreserveNewest" mirrors what the GL
-       demo does so the Vulkan bin/ ends up self-contained at runtime. -->
-  <ItemGroup>
+       demo does so the Vulkan bin/ ends up self-contained at runtime.
+
+       When BLIX_SPONZA_ASSETS is set (pack set kept on an external SSD
+       shared across machines), skip the copy entirely — the runtime
+       reads straight from that path. See Program.cs OnLoad(). -->
+  <ItemGroup Condition="'$(BLIX_SPONZA_ASSETS)' == ''">
     <None Include="..\Blix.Demos.SponzaModern\Assets\**\*"
           Exclude="..\Blix.Demos.SponzaModern\Assets\.gitignore;..\Blix.Demos.SponzaModern\Assets\.gitkeep"
           Link="Assets\%(RecursiveDir)%(Filename)%(Extension)"

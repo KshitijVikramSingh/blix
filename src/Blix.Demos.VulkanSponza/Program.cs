@@ -457,12 +457,20 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // hasn't been run, exit cleanly so CI on a vanilla checkout doesn't
         // fail. The glTF filename varies across Khronos pack revisions, so
         // we glob for the first .gltf under main_sponza/.
-        var assetsRoot = Path.Combine(AppContext.BaseDirectory, "Assets");
+        //
+        // BLIX_SPONZA_ASSETS lets the (~19GB) pack set live on an external
+        // SSD shared across machines: when set, the runtime reads straight
+        // from it and the csproj skips copying anything into bin/. Falls
+        // back to the bin-local Assets/ copy when the var is unset.
+        var assetsRoot = Environment.GetEnvironmentVariable("BLIX_SPONZA_ASSETS") is { Length: > 0 } envAssetsRoot
+            ? envAssetsRoot
+            : Path.Combine(AppContext.BaseDirectory, "Assets");
         var mainPackDir = Path.Combine(assetsRoot, "main_sponza");
         if (!Directory.Exists(mainPackDir))
         {
             Console.WriteLine($"[VulkanSponza] Main Sponza assets not found at {mainPackDir}.");
-            Console.WriteLine("[VulkanSponza] Run tools/setup-sponza-modern.sh once to populate from your local Khronos packs.");
+            Console.WriteLine("[VulkanSponza] Run tools/setup-sponza-modern.sh once to populate from your local Khronos packs,");
+            Console.WriteLine("[VulkanSponza] or set BLIX_SPONZA_ASSETS to an existing pack dir (e.g. on an external SSD).");
             host.RequestClose();
             return;
         }
@@ -1431,10 +1439,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             handle = vk.AllocateTexture2DMips(
                 new TextureDescription(tex.Width, tex.Height, tex.Format, SamplerDescription.LinearRepeat),
                 tex.MipCount, label);
-            var lazyHandle = lazy;
+            // One file open per texture (not per mip) — critical when the
+            // pack set lives on an external SSD, where per-open latency would
+            // otherwise dominate the streamed load. See CreateBufferedMipReader.
             textureUploader.EnqueueInto(
                 handle, tex.Format, tex.Width, tex.Height, tex.MipCount,
-                level => BlixTexReader.ReadMip(lazyHandle, level));
+                BlixTexReader.CreateBufferedMipReader(lazy));
         }
         else if (tex.MipBytes is { Count: > 0 } mips)
         {

@@ -198,6 +198,70 @@ public static class BlixTexReader
         return buf;
     }
 
+    // Returns a mip reader that opens the .blixtex ONCE -- on the first mip
+    // request -- and serves every subsequent mip by seeking within that same
+    // open handle, instead of re-opening the file per mip like ReadMip does.
+    //
+    // Why this exists: the streamed-upload path requests mips one at a time,
+    // smallest (mipCount-1) first down to finest (0). ReadMip's open-per-call
+    // pattern means MipCount opens per texture; across a scene that's thousands
+    // of file opens. On a volume with high per-open latency but ample bandwidth
+    // (e.g. an external SSD: ~1.3ms/open vs ~0.01ms internal, but multi-GB/s
+    // sequential), those opens dominate load time and starve the per-frame
+    // upload budget. Collapsing to one open per texture removes that cost while
+    // keeping per-mip granularity for the GPU uploads.
+    //
+    // The handle is closed once the finest mip (level 0) has been served -- the
+    // upload queue enqueues levels descending to 0, so 0 is always last. RAM
+    // stays at one open FileStream (no whole-file buffering); since the upload
+    // queue drains a texture's mips contiguously, only one stream is open at a
+    // time. Intended for the streamed (descending) path; for an ascending or
+    // random read of all mips, use ReadAllMips.
+    public static Func<int, byte[]> CreateBufferedMipReader(BlixTexLazyHandle handle)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        FileStream? stream = null;
+        return level =>
+        {
+            if (level < 0 || level >= handle.MipCount)
+            {
+                throw new ArgumentOutOfRangeException(nameof(level));
+            }
+            stream ??= File.OpenRead(handle.Path);
+            var (offset, length) = handle.MipExtents[level];
+            var buf = new byte[length];
+            stream.Seek(offset, SeekOrigin.Begin);
+            stream.ReadExactly(buf, 0, length);
+            if (level == 0)
+            {
+                // Finest mip served last: release the handle now rather than
+                // waiting for the closure to be GC'd.
+                stream.Dispose();
+                stream = null;
+            }
+            return buf;
+        };
+    }
+
+    // Reads every mip in one file open (vs ReadMip's open-per-mip). For the
+    // synchronous "load all mips now" path; the streamed path uses
+    // CreateBufferedMipReader instead.
+    public static byte[][] ReadAllMips(BlixTexLazyHandle handle)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        using var stream = File.OpenRead(handle.Path);
+        var mips = new byte[handle.MipCount][];
+        for (var level = 0; level < handle.MipCount; level++)
+        {
+            var (offset, length) = handle.MipExtents[level];
+            var buf = new byte[length];
+            stream.Seek(offset, SeekOrigin.Begin);
+            stream.ReadExactly(buf, 0, length);
+            mips[level] = buf;
+        }
+        return mips;
+    }
+
     public static BlixTexImage Read(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
