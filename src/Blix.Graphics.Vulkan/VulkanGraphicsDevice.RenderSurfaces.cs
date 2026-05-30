@@ -29,6 +29,9 @@ public sealed partial class VulkanGraphicsDevice
         public DeviceMemory DepthMemory;
         public ImageView DepthView;
         public bool HasDepth;
+        // MSAA sample count of this surface's colour attachments; pipelines
+        // created against it must set rasterizationSamples to match.
+        public SampleCountFlags Samples = SampleCountFlags.Count1Bit;
         // Per-surface render pass + framebuffer.
         public Silk.NET.Vulkan.RenderPass RenderPass;
         public Framebuffer Framebuffer;
@@ -158,7 +161,8 @@ public sealed partial class VulkanGraphicsDevice
         Silk.NET.Vulkan.RenderPass renderPass,
         Framebuffer framebuffer,
         uint width, uint height,
-        bool hasDepth)
+        bool hasDepth,
+        SampleCountFlags samples = SampleCountFlags.Count1Bit)
     {
         var entry = new VkRenderSurfaceEntry
         {
@@ -168,6 +172,7 @@ public sealed partial class VulkanGraphicsDevice
             RenderPass = renderPass,
             Framebuffer = framebuffer,
             HasDepth = hasDepth,
+            Samples = samples,
             IsExternal = true,
             // Color/depth attachment ownership stays with the caller.
             ColorAttachments = Array.Empty<TextureHandle>(),
@@ -196,7 +201,8 @@ public sealed partial class VulkanGraphicsDevice
         Format format,
         ImageUsageFlags usage,
         ImageAspectFlags aspect,
-        string label)
+        string label,
+        SampleCountFlags samples = SampleCountFlags.Count1Bit)
     {
         var imageCi = new ImageCreateInfo
         {
@@ -206,7 +212,7 @@ public sealed partial class VulkanGraphicsDevice
             Extent = new Extent3D(width, height, 1),
             MipLevels = 1,
             ArrayLayers = 1,
-            Samples = SampleCountFlags.Count1Bit,
+            Samples = samples,
             Tiling = ImageTiling.Optimal,
             Usage = usage,
             SharingMode = SharingMode.Exclusive,

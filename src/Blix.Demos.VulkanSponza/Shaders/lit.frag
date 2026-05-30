@@ -1,24 +1,25 @@
 #version 450
 
-// Scaffold lit fragment shader — Cook-Torrance split-sum IBL on top of a
-// Lambert N·L sun term.
+// Lit fragment shader — Cook-Torrance split-sum IBL on top of a Lambert N·L
+// sun term, with cascaded shadows, a Fresnel-glass branch, and froxel-fog
+// composite.
 //
-//   set 0 binding 0 : per-frame UBO (viewProj, sun, IBL strength, camera)
-//   set 1 binding 0 : samplerCube uIrradiance   (diffuse IBL)
-//   set 1 binding 1 : samplerCube uPrefilteredEnv (specular IBL, mip chain
-//                                                  = roughness-LOD stand-in)
-//   set 1 binding 2 : sampler2D   uBrdfLut      (split-sum BRDF integration)
+//   set 0 binding 0 : per-frame UBO (viewProj, sun, IBL strength, camera, fog)
+//   set 1 binding 0 : samplerCube uIrradiance      (diffuse IBL)
+//   set 1 binding 1 : samplerCube uPrefilteredEnv  (specular IBL; mip = roughness LOD)
+//   set 1 binding 2 : sampler2D   uBrdfLut         (split-sum BRDF integration)
+//   set 1 binding 3 : sampler2D   uCascadeShadowMaps[3]
+//   set 1 binding 4 : sampler3D   uFroxelGrid      (volumetric fog)
 //   set 2 binding 0 : per-material UBO (BaseColorFactor, EmissiveFactor,
-//                                       MaterialParams = alphaCutoff,
-//                                       normalScale, roughness, metallic)
+//                                       MaterialParams = alphaCutoff/normalScale/
+//                                       roughness/metallic, MaterialParams2 = transmission)
 //   set 2 binding 1 : albedo  (sRGB)
 //   set 2 binding 2 : normal  (linear; tangent-space)
 //   set 2 binding 3 : emissive (sRGB)
+//   set 2 binding 4 : metallic-roughness (linear; G=rough, B=metal)
+//   set 2 binding 5 : occlusion (linear; R=AO)
 //
-// IBL replaces the prior hemispherical-ambient stand-in. Specular response
-// uses the per-material roughness + metallic FACTORS today; metallic-
-// roughness TEXTURE sampling lands in the next push (same shader, just
-// multiplies texture × factor and replaces the constant).
+// Roughness/metallic are sampled from the MR texture × per-material factors.
 
 layout(set = 0, binding = 0) uniform Frame {
     mat4  uViewProjection;
@@ -55,6 +56,7 @@ layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
     vec4 uEmissiveFactor;
     vec4 uMaterialParams;  // x=alphaCutoff, y=normalScale, z=roughness, w=metallic
+    vec4 uMaterialParams2; // x=transmission (KHR_materials_transmission)
 } mat;
 
 layout(set = 2, binding = 1) uniform sampler2D uAlbedo;
@@ -86,18 +88,34 @@ vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
 }
 
 // --- Cascaded sun shadows -----------------------------------------------
-// 3×3 PCF average on one cascade. current/s are Vulkan NDC depth in [0,1];
-// the ortho projection is linear in z so a constant bias maps to a constant
+// Rotated Vogel-disk PCF: 8 evenly-spread taps on a unit disk, rotated per
+// pixel by an interleaved-gradient-noise angle. The per-pixel rotation turns
+// the old hard 3×3 grid into a fine dither the eye reads as a smooth penumbra
+// (and hides the low-res 512² far cascade). 8 taps keeps it near the previous
+// 9-tap cost; 16 was ~3× the lit-pass time. current/d are Vulkan NDC depth in
+// [0,1]; the ortho projection is linear in z so a constant bias is a constant
 // world-space offset.
+const int   PCF_TAPS   = 8;
+const float PCF_RADIUS = 2.5;   // texels; larger = softer penumbra
+
+// Interleaved gradient noise (Jimenez) -> a [0,1) value per pixel.
+float interleavedGradientNoise(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+
 float pcfCascade(sampler2D map, vec2 uv, float current, float bias) {
     vec2 texel = 1.0 / vec2(textureSize(map, 0));
+    float phi = interleavedGradientNoise(gl_FragCoord.xy) * 6.28318530718;
     float sum = 0.0;
-    for (int x = -1; x <= 1; x++)
-    for (int y = -1; y <= 1; y++) {
-        float s = texture(map, uv + vec2(x, y) * texel).r;
-        sum += (current - bias > s) ? 0.0 : 1.0;
+    for (int i = 0; i < PCF_TAPS; i++) {
+        // Vogel (sunflower) disk: even coverage, no precomputed table.
+        float r = sqrt((float(i) + 0.5) / float(PCF_TAPS));
+        float theta = float(i) * 2.39996323 + phi;   // golden angle
+        vec2 off = r * vec2(cos(theta), sin(theta)) * texel * PCF_RADIUS;
+        float d = texture(map, uv + off).r;
+        sum += (current - bias > d) ? 0.0 : 1.0;
     }
-    return sum / 9.0;
+    return sum / float(PCF_TAPS);
 }
 
 // Constant-index dispatch (see binding-3 comment): non-uniform dynamic
@@ -189,21 +207,46 @@ void main() {
     float roughness = clamp(mat.uMaterialParams.z * mrSample.g, 0.04, 1.0);
     float metallic  = clamp(mat.uMaterialParams.w * mrSample.b, 0.0, 1.0);
 
-    // Sponza-specific compensation: most of Sponza Modern's "metalness"
-    // textures cap at ~0.35 for stone/brick/columns (authored under a
-    // pipeline where the metallic channel doubled as specular-intensity).
-    // Treating those values as real glTF metalness mixes albedo into F0
-    // partially and crushes diffuse — surfaces darken to grey/black. A
-    // step at 0.5 keeps the one genuinely-metallic asset (the iron door)
-    // metallic while zero-ing the stone baseline. NOT a generic fix; it's
-    // a scaffold-level patch over an asset quirk. Threshold is live-tunable
-    // from the overlay (Material → Metallic threshold); 1.0 = all dielectric.
-    metallic = step(frame.uShaderParams.x, metallic);
+    // Metalness noise-gate (asset conformance, not a global look hack).
+    // Sponza Modern leaves a stray ~0.35 metalness on dielectric stone/brick
+    // (its metallic channel doubled as a specular-intensity dial under the
+    // authoring pipeline); read as real glTF metalness it mixes albedo into F0
+    // and dulls the diffuse. The gate treats metalness below uShaderParams.x
+    // as noise -> 0, but passes values at/above through UNCHANGED — unlike the
+    // old binary step() it no longer slams genuine partial metals to fully
+    // metal. Threshold 0 trusts the glTF verbatim (the standard); the default
+    // (0.5) keeps Sponza's stone clean. Live-tunable: Material -> Metallic
+    // threshold.
+    metallic = metallic >= frame.uShaderParams.x ? metallic : 0.0;
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
     vec3 V = normalize(frame.uCameraPos - vWorldPos);
     float NdotV = max(dot(N, V), 0.0);
     vec3 R = reflect(-V, N);
+
+    // --- Transmissive glass (KHR_materials_transmission) ----------------
+    // Shade as Fresnel glass: the reflected fraction (dielectric Fresnel,
+    // F0 = 0.04, ramping to 1 at grazing) becomes the blend opacity, so the
+    // environment reflection composites over the scene behind:
+    //     result = envReflection * F + background * (1 - F)
+    // The src colour is the un-weighted environment reflection; the blend
+    // multiplies it by alpha = F, giving the Fresnel split. Transmission opens
+    // the head-on view to the scene behind instead of reading near-black.
+    // (No refraction/absorption tint yet — that's the KHR transmission pass.)
+    float transmission = mat.uMaterialParams2.x;
+    if (transmission > 0.0) {
+        float lod = roughness * (frame.uEnvMipCount - 1.0);
+        vec3 envRefl = textureLod(uPrefilteredEnv, R, lod).rgb * frame.uIblIntensity;
+        float fresnel = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
+        float glassAlpha = mix(albedo4.a, fresnel, transmission);
+        // Physically clean glass is ~96% transparent head-on, which reads as
+        // "no glass at all". Lift it by a tunable floor (uShaderParams.w) so
+        // the panes keep a faint reflective sheen straight-on. Grazing angles
+        // already saturate to opaque, so this only affects the head-on view.
+        glassAlpha = max(glassAlpha, frame.uShaderParams.w);
+        outColor = vec4(envRefl, glassAlpha);
+        return;
+    }
 
     // --- Direct sun (Lambert) + cascaded shadow -------------------------
     vec3 L = -normalize(frame.uSunDirection);

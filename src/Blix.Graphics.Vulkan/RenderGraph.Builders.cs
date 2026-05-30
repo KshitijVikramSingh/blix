@@ -33,6 +33,19 @@ public sealed class GraphicsPassBuilder
     public GraphicsPassBuilder Target(GraphResourceHandle handle, LoadOp load, StoreOp store) =>
         Target((TextureView)handle, load, store);
 
+    // MSAA resolve destination for the color target at the same index. The
+    // pass renders into its (multisample) Target and resolves into this 1×
+    // target on store; downstream passes sample the resolve target.
+    public GraphicsPassBuilder ResolveColor(TextureView view)
+    {
+        EnsureMutable();
+        entry.ResolveTargets.Add(view);
+        return this;
+    }
+
+    public GraphicsPassBuilder ResolveColor(GraphResourceHandle handle) =>
+        ResolveColor((TextureView)handle);
+
     // Declare the depth attachment for this pass. At most one per pass;
     // a second call replaces the previous declaration.
     public GraphicsPassBuilder Depth(TextureView view, LoadOp load, StoreOp store)
