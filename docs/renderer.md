@@ -1,6 +1,8 @@
 # Renderer
 
-This doc describes the GL renderer (`Blix.Render` + `Blix.Graphics.OpenGL` + shaders + the Sponza/ShaderLab/Walkthrough demos). For the Vulkan backend's architecture — `ShaderInterface` binding model, render graph, per-draw transient descriptor pool, `MaterialBindings` carrier — see [`vulkan-reshape-shaderlab-target.md`](vulkan-reshape-shaderlab-target.md), [`vector-b-plan.md`](vector-b-plan.md), and [`vulkan-friction.md`](vulkan-friction.md). The Vulkan-lit demo (`src/Blix.Demos.VulkanLit/`) is the working reference.
+> **HISTORICAL — the OpenGL renderer was sunset.** This document describes the OpenGL renderer (`Blix.Graphics.OpenGL`), its engine-facing API (`Blix.Render`'s `Material` / `MaterialResolver` / `PostProcessStack` / `SpriteBatch` / `Font` / `DebugDraw` / the `DrawMesh` path), and the five GL demos — **all of which have been removed from the codebase.** It is retained for its rendering-technique writeups (PBR, shadows, IBL, tonemap, bloom) as reference material; the engine-API descriptions no longer match shipping code. `GameObject.Material` / `Submesh.Material` now hold a backend-neutral `MaterialHandle`, not the `Material` bag described here. For the current Vulkan backend see [`vulkan-friction.md`](vulkan-friction.md), [`vulkan-reshape-shaderlab-target.md`](vulkan-reshape-shaderlab-target.md), [`vector-b-plan.md`](vector-b-plan.md), and [`architecture.md`](architecture.md). The Vulkan-lit demo (`src/Blix.Demos.VulkanLit/`) and VulkanSponza (`src/Blix.Demos.VulkanSponza/`) are the working references.
+
+This doc describes the GL renderer (`Blix.Render` + `Blix.Graphics.OpenGL` + shaders + the Sponza/ShaderLab/Walkthrough demos).
 
 The GL renderer is split into three layers below the game code:
 
