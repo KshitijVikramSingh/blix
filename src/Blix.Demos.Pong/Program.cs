@@ -26,12 +26,13 @@ internal sealed class PongGame : Game, IInputHandler
     // post-FX downsamples it to the swapchain. Fixed so uTexel is constant.
     private const int OffscreenWidth = 1920;
     private const int OffscreenHeight = 960;
-    // Tight bezel — the play rect fills 95% of each axis; the post-FX frames
-    // the rest with a vignette gradient. In screen UVs (left, bottom, right, top).
-    private const float PlayRectLeft = 0.025f;
-    private const float PlayRectRight = 0.975f;
-    private const float PlayRectBottom = 0.025f;
-    private const float PlayRectTop = 0.975f;
+    // Play rect fills the whole frame (no bezel border). In screen UVs
+    // (left, bottom, right, top). Set to a sub-rect (e.g. 0.025..0.975) to
+    // reintroduce the framed-bezel look.
+    private const float PlayRectLeft = 0.0f;
+    private const float PlayRectRight = 1.0f;
+    private const float PlayRectBottom = 0.0f;
+    private const float PlayRectTop = 1.0f;
     // Font crispness knob (DrawText picks a baked size near pixelSize*dpiScale).
     private const float FontDpiScale = OffscreenHeight / PlayfieldHeight;
 
