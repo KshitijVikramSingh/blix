@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Blix;
 using Blix.Assets;
 using Blix.Audio;
@@ -21,9 +22,18 @@ internal sealed class PongGame : Game, IInputHandler
     // is 960x480 (2:1), so the play rect fills the window without letterboxing.
     private const float PlayfieldWidth = 960.0f;
     private const float PlayfieldHeight = 480.0f;
+    // Offscreen render target: 2x the playfield for free AA, then the CRT
+    // post-FX downsamples it to the swapchain. Fixed so uTexel is constant.
+    private const int OffscreenWidth = 1920;
+    private const int OffscreenHeight = 960;
+    // Tight bezel — the play rect fills 95% of each axis; the post-FX frames
+    // the rest with a vignette gradient. In screen UVs (left, bottom, right, top).
+    private const float PlayRectLeft = 0.025f;
+    private const float PlayRectRight = 0.975f;
+    private const float PlayRectBottom = 0.025f;
+    private const float PlayRectTop = 0.975f;
     // Font crispness knob (DrawText picks a baked size near pixelSize*dpiScale).
-    // ~2x the window logical px per playfield unit on a retina display.
-    private const float FontDpiScale = 2.0f;
+    private const float FontDpiScale = OffscreenHeight / PlayfieldHeight;
 
     private const float PaddleWidth = 12.0f;
     private const float PaddleHeight = 88.0f;
@@ -90,6 +100,17 @@ internal sealed class PongGame : Game, IInputHandler
     private TextureHandle whitePixel;
     private Font? hudFont;
 
+    // Render graph: sprites -> offscreen (graph pass), then a CRT post-FX
+    // present (imperative) samples that offscreen into the swapchain.
+    private RenderGraph graph = null!;
+    private GraphResourceHandle sceneColor;
+    private PassHandle spritePass;
+    private ShaderProgramHandle postfxShader;
+    private PipelineHandle postfxPipeline;
+    private VertexBufferHandle fullscreenVB;
+    private IndexBufferHandle fullscreenIB;
+    private readonly byte[] postfxPush = new byte[64];
+
     private AudioClipHandle paddleClip = AudioClipHandle.Invalid;
     private AudioClipHandle wallClip = AudioClipHandle.Invalid;
     private AudioClipHandle scoreClip = AudioClipHandle.Invalid;
@@ -101,14 +122,59 @@ internal sealed class PongGame : Game, IInputHandler
     {
         Host.SetTitle("Blix · Pong");
 
-        // Sprites render straight to the swapchain (renderTarget: null). The CRT
-        // post-FX pass the GL build had (offscreen + chromatic aberration + bloom
-        // + scanlines) is deferred — gameplay first, polish later.
-        spriteBatch = new SpriteBatch((VulkanGraphicsDevice)GraphicsDevice, renderTarget: null);
+        var vk = (VulkanGraphicsDevice)GraphicsDevice;
+
+        // Graph: one offscreen color target + a sprite pass that draws into it.
+        // The post-FX present (imperative, below) samples it into the swapchain.
+        graph = new RenderGraph(vk);
+        sceneColor = graph.ColorTarget("pong.scene", TextureFormat.Rgba8,
+            new FixedGraphSize(OffscreenWidth, OffscreenHeight));
+        spritePass = graph.GraphicsPass("pong.sprites")
+            .Target(sceneColor, LoadOp.Clear, StoreOp.Store)
+            .Handle;
+        graph.Compile();
+
+        // SpriteBatch's pipeline bakes against the sprite pass's offscreen
+        // surface (Rgba8) for render-pass compatibility.
+        spriteBatch = new SpriteBatch(vk, renderTarget: graph.GetPassSurface(spritePass));
         whitePixel = GraphicsDevice.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.PixelatedRepeat),
             new byte[] { 255, 255, 255, 255 },
             name: "pong.white");
+
+        // CRT post-FX present pipeline: fullscreen triangle (gl_VertexIndex),
+        // offscreen sampled at set 0 / slot 0, params via a fragment push
+        // constant. Targets the swapchain (RenderTarget: null).
+        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var postfxInterface = new ShaderInterface(
+            Slots: new[]
+            {
+                new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+            },
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 64) });
+        postfxShader = vk.CreateShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "postfx.vert.spv")),
+            File.ReadAllBytes(Path.Combine(shaderDir, "postfx.frag.spv")),
+            postfxInterface, "pong.postfx");
+        postfxPipeline = vk.CreatePipeline(new PipelineDescription(
+            postfxShader,
+            VertexPosition3Texture.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.Disabled,
+            RasterizerState.NoCulling,
+            BlendState.Disabled), "pong.postfx");
+
+        // Dummy 3-vertex buffers — the fullscreen-triangle vertex shader
+        // generates positions from gl_VertexIndex and ignores these.
+        var dummyVerts = new VertexPosition3Texture[]
+        {
+            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
+            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
+            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
+        };
+        fullscreenVB = vk.CreateVertexBuffer(
+            VertexPosition3Texture.CreateBufferData(dummyVerts), "pong.fs.vb");
+        fullscreenIB = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "pong.fs.ib");
 
         try
         {
@@ -141,6 +207,7 @@ internal sealed class PongGame : Game, IInputHandler
     public override void OnUnload()
     {
         spriteBatch?.Dispose();
+        graph?.Dispose();
         if (AudioDevice is { } audio)
         {
             paddleSource?.Dispose(audio);
@@ -366,31 +433,67 @@ internal sealed class PongGame : Game, IInputHandler
     {
         if (frame.Width <= 0 || frame.Height <= 0) return;
 
-        // Vulkan-NDC screen ortho: maps the virtual playfield over the swapchain,
-        // top-left origin, Y down. (The GL build rendered into a 2x offscreen for
-        // AA then ran a CRT post-FX present; that path is a deferred follow-up.)
+        // Vulkan-NDC screen ortho: maps the virtual playfield over the offscreen
+        // target, top-left origin, Y down.
         var gameOrtho = GraphicsMatrices.CreateOrthographicOffCenterVulkan(
             left: 0.0f, right: PlayfieldWidth,
             bottom: PlayfieldHeight, top: 0.0f,
             nearPlane: -1.0f, farPlane: 1.0f);
 
+        // Sprites -> offscreen (graph pass). The graph leaves the stored color
+        // target sampleable for the post-FX present below.
+        graph.Pass(spritePass, scope =>
+        {
+            spriteBatch.Begin(gameOrtho);
+            DrawScores();
+            DrawCentreNet();
+            DrawPaddle(PaddleInset, leftPaddleY, leftPaddleRecoil);
+            DrawPaddle(PlayfieldWidth - PaddleInset - PaddleWidth, rightPaddleY, rightPaddleRecoil);
+            DrawTrail();
+            DrawBall();
+            DrawHud();
+            spriteBatch.End(scope);
+        }, clearColor: new GraphicsColor(0.03f, 0.02f, 0.06f, 1.0f));
+
+        graph.Execute(commandList);
+
+        // CRT post-FX present (imperative): sample the offscreen into the
+        // swapchain. Params go in a fragment push constant (see postfx.frag's
+        // Push block layout: uPlayRect@0, uTexel@16, uShake@24, uWinFlash@32,
+        // uTime@48).
+        var sceneTex = graph.GetColorTexture(sceneColor);
+        var flashT = winFlashTimer / WinFlashDuration;
+        // Win flash: rgb = winner's side colour (cyan for P1, magenta for P2).
+        var flashRgb = winner < 0
+            ? new Vector3(0.30f, 0.85f, 1.0f)
+            : new Vector3(1.0f, 0.45f, 0.85f);
+        var playRect = new Vector4(PlayRectLeft, PlayRectBottom, PlayRectRight, PlayRectTop);
+        var texel = new Vector2(1.0f / OffscreenWidth, 1.0f / OffscreenHeight);
+        var winFlash = new Vector4(flashRgb.X, flashRgb.Y, flashRgb.Z, flashT);
+        var elapsed = (float)totalTime;
+        var push = postfxPush.AsSpan();
+        MemoryMarshal.Write(push.Slice(0, 16), in playRect);
+        MemoryMarshal.Write(push.Slice(16, 8), in texel);
+        MemoryMarshal.Write(push.Slice(24, 8), in shakeOffset);
+        MemoryMarshal.Write(push.Slice(32, 16), in winFlash);
+        MemoryMarshal.Write(push.Slice(48, 4), in elapsed);
+
         commandList.Pass(
-            "pong.scene",
+            "pong.postfx",
             new RenderPassDescription(
                 RenderSurfaceHandle.Default,
-                ClearColors: new GraphicsColor?[] { new(0.03f, 0.02f, 0.06f, 1.0f) },
+                ClearColors: new GraphicsColor?[] { new(0, 0, 0, 1) },
                 ClearDepth: true),
             pass =>
             {
-                spriteBatch.Begin(gameOrtho);
-                DrawScores();
-                DrawCentreNet();
-                DrawPaddle(PaddleInset, leftPaddleY, leftPaddleRecoil);
-                DrawPaddle(PlayfieldWidth - PaddleInset - PaddleWidth, rightPaddleY, rightPaddleRecoil);
-                DrawTrail();
-                DrawBall();
-                DrawHud();
-                spriteBatch.End(pass);
+                pass.DrawIndexed(
+                    fullscreenVB,
+                    fullscreenIB,
+                    postfxPipeline,
+                    indexCount: 3,
+                    Array.Empty<ShaderUniform>(),
+                    new ShaderTextureBinding[] { new("uScene", sceneTex, Slot: 0) },
+                    postfxPush);
             });
     }
 
