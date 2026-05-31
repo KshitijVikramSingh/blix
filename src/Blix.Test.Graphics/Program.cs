@@ -1459,6 +1459,48 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectClose("T.4 B's first index stays local (0)", packed.Indices16[3], 0);
 }
 
+// ============================================================================
+// Section U — AsyncLoadQueue (Blix.Render): off-thread produce + budgeted drain.
+// ============================================================================
+{
+    static void SpinUntilReady<T>(AsyncLoadQueue<T> q)
+    {
+        for (var i = 0; i < 5000 && q.IsProducing; i++) System.Threading.Thread.Sleep(1);
+    }
+
+    // U.0 — produce a list off-thread; a generous-budget Drain processes all,
+    // in order, and reports fully-loaded.
+    var q0 = new AsyncLoadQueue<int>();
+    q0.Start(() => new[] { 1, 2, 3, 4, 5 });
+    SpinUntilReady(q0);
+    var got = new List<int>();
+    var done = q0.Drain(1000.0, got.Add);
+    t.ExpectTrue("U.0 fully loaded after a generous drain", done);
+    t.ExpectClose("U.0 all five processed", got.Count, 5);
+    t.ExpectTrue("U.0 in producer order", got.SequenceEqual(new[] { 1, 2, 3, 4, 5 }));
+    t.ExpectClose("U.0 nothing pending", q0.PendingCount, 0);
+
+    // U.1 — a tiny budget still drains ≥1 per call (no starvation) and reports
+    // not-yet-done until the queue empties.
+    var q1 = new AsyncLoadQueue<int>();
+    q1.Start(() => new[] { 10, 20, 30 });
+    SpinUntilReady(q1);
+    var collected = new List<int>();
+    var d1 = q1.Drain(0.0, collected.Add);   // 0ms budget → exactly one
+    t.ExpectClose("U.1 zero-budget drains one", collected.Count, 1);
+    t.ExpectTrue("U.1 not done yet", !d1);
+    while (!q1.Drain(0.0, collected.Add)) { }  // finish it off, one per call
+    t.ExpectClose("U.1 all drained across calls", collected.Count, 3);
+
+    // U.2 — a faulting producer surfaces as IsFaulted; Drain does nothing.
+    var q2 = new AsyncLoadQueue<int>();
+    q2.Start(() => throw new InvalidOperationException("parse boom"));
+    for (var i = 0; i < 5000 && !q2.IsFaulted; i++) System.Threading.Thread.Sleep(1);
+    t.ExpectTrue("U.2 producer fault surfaced", q2.IsFaulted);
+    t.ExpectTrue("U.2 fault message preserved", q2.Fault?.Message == "parse boom");
+    t.ExpectTrue("U.2 faulted Drain processes nothing / not done", !q2.Drain(1000.0, _ => { }));
+}
+
 t.PrintSummary();
 return t.FailedCount;
 
