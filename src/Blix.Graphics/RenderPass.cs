@@ -10,6 +10,6 @@ public sealed record RenderPassDescription(
     IReadOnlyList<GraphicsColor?> ClearColors,
     bool ClearDepth,
     // Compute pass: no framebuffer/render pass. The pass's commands are
-    // DispatchCommands; the Vulkan backend records them outside any render pass
-    // with the needed storage-image barriers. GL backend rejects compute passes.
+    // DispatchCommands; the backend records them outside any render pass
+    // with the needed storage-image barriers.
     bool Compute = false);

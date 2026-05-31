@@ -11,7 +11,7 @@ namespace Blix.Runtime.Silk;
 
 // Vulkan-native ImGui backend. Owns the ImGui context, the font-atlas texture,
 // and a fullscreen-overlay pipeline; renders the shared DebugOverlayUi panels
-// (same source the OpenGL backend uses) onto the swapchain.
+// onto the swapchain.
 //
 // Shape mirrors VkLineDrawer: pre-compiled SPIR-V from the lib's Shaders/ dir,
 // dynamic host-visible vertex/index buffers re-uploaded each frame, drawn into

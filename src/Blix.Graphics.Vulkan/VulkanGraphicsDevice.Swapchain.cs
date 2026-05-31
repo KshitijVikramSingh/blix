@@ -202,7 +202,7 @@ public sealed partial class VulkanGraphicsDevice
         SurfaceCapabilitiesKHR caps;
         KhrSurface.GetPhysicalDeviceSurfaceCapabilities(PhysicalDevice, Surface, &caps);
 
-        // Prefer B8G8R8A8 sRGB to match the GL backend's linear→sRGB path.
+        // Prefer B8G8R8A8 sRGB so the present surface does the linear→sRGB encode.
         uint fmtCount = 0;
         KhrSurface.GetPhysicalDeviceSurfaceFormats(PhysicalDevice, Surface, &fmtCount, null);
         var formats = new SurfaceFormatKHR[fmtCount];

@@ -27,7 +27,7 @@ namespace Blix.Graphics;
 // comments and intent are gone. The binding (offset/type) comes from SPIR-V
 // reflection; this intent comes from the source. The diagnostics layer joins the
 // two by name. GLSL-source tooling lives here in Blix.Graphics (next to the GLSL
-// preprocessor / ShaderLoader), backend-neutral — GL and Vulkan share it.
+// preprocessor / ShaderLoader), independent of any backend.
 public enum TunableKind { Float, Int, Enum }
 
 public sealed record ShaderTunable(

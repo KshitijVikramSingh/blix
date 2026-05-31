@@ -2,11 +2,10 @@ using Silk.NET.Core.Contexts;
 
 namespace Blix.Graphics.Vulkan;
 
-// Vulkan backend, sibling to Blix.Graphics.OpenGL.OpenGLGraphicsDevice. On
-// macOS this runs through MoltenVK (Vulkan-to-Metal translation); on Linux
-// and Windows it talks to a native Vulkan driver. The IGraphicsDevice
-// surface is intentionally the same as the GL backend — game code shouldn't
-// care which one is under it.
+// The graphics backend — the sole IGraphicsDevice implementation. On macOS
+// this runs through MoltenVK (Vulkan-to-Metal translation); on Linux and
+// Windows it talks to a native Vulkan driver. The IGraphicsDevice surface is
+// kept backend-neutral so game code doesn't depend on Vulkan specifics.
 //
 // Implementation lives across partial classes:
 // - VulkanGraphicsDevice.cs (this file) — public lifecycle (ctor / Dispose),
@@ -65,11 +64,10 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
             renderSurfaceEntries: Array.Empty<RenderSurfaceEntry>());
     }
 
-    // Execute the per-frame command list. Symmetric with
-    // OpenGLGraphicsDevice.Execute: walks each pass, builds a FrameDebugPacket
-    // for the runtime's diagnostics adapter, and (eventually) records +
-    // submits Vk command buffers. Until the swapchain integration lands the
-    // body is metadata-only — it produces a valid FrameDebugPacket so the
+    // Execute the per-frame command list: walks each pass, builds a
+    // FrameDebugPacket for the runtime's diagnostics adapter, and (eventually)
+    // records + submits Vk command buffers. Until the swapchain integration
+    // lands the body is metadata-only — it produces a valid FrameDebugPacket so the
     // diagnostic surface stays observable, but no GPU work is issued.
     public FrameDebugPacket Execute(RenderCommandList commandList)
     {
@@ -200,8 +198,7 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
         $"{m.M41:0.##} {m.M42:0.##} {m.M43:0.##} {m.M44:0.##}";
 
     // Drains GPU timings that the device has finished resolving since the
-    // last call. Symmetric with OpenGLGraphicsDevice.ConsumeAvailableGpuTimings.
-    // Empty until VkQueryPool wiring lands.
+    // last call. Empty until VkQueryPool wiring lands.
     public IReadOnlyList<VkGpuPassTiming> ConsumeAvailableGpuTimings()
     {
         if (pendingGpuTimings.Count == 0)

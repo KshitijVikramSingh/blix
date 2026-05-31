@@ -21,8 +21,7 @@ namespace Blix.Demos.VulkanSponza;
 // Render graph: shadow cascades (×3) → froxel fog (optional compute) →
 // depth pre-pass → lit-scene (R11G11B10F, 4× MSAA → resolve) → present (tonemap).
 //
-// Performance shape (see docs/renderer.md → Geometry LOD + the PR that landed
-// this): screen-space-error LOD over meshopt chains, cook-time spatial split of
+// Performance shape: screen-space-error LOD over meshopt chains, cook-time spatial split of
 // oversized primitives, all geometry consolidated into one shared VB/IB (draws
 // are sub-ranges), and cutout foliage routed to depth-writing MASK + alpha-to-
 // coverage so the hero tree isn't overdraw-bound. CPU-phase timing

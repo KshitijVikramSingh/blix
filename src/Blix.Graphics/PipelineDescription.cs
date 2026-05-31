@@ -7,17 +7,16 @@ public sealed record PipelineDescription(
     DepthState Depth,
     RasterizerState Rasterizer,
     IReadOnlyList<BlendState> ColorBlends,
-    // Vulkan-only: target render surface for this pipeline's render-pass
-    // compatibility. Null → swapchain (default). Vulkan render-pass
-    // compatibility requires matching attachment formats, so a pipeline
-    // baked against the swapchain (BGRA8) cannot be drawn into an
-    // offscreen Rgba16F surface — that needs its own pipeline. GL backend
-    // ignores this field.
+    // Target render surface for this pipeline's render-pass compatibility.
+    // Null → swapchain (default). Render-pass compatibility requires matching
+    // attachment formats, so a pipeline baked against the swapchain (BGRA8)
+    // cannot be drawn into an offscreen Rgba16F surface — that needs its own
+    // pipeline.
     RenderSurfaceHandle? RenderTarget = null,
-    // Vulkan: enable alpha-to-coverage — the fragment's output alpha is
-    // converted to an MSAA coverage mask, giving antialiased alpha-cutout
-    // edges (foliage) without the cost/order-dependence of blending. No effect
-    // without MSAA. GL backend ignores it. Default false preserves behavior.
+    // Enable alpha-to-coverage — the fragment's output alpha is converted to an
+    // MSAA coverage mask, giving antialiased alpha-cutout edges (foliage)
+    // without the cost/order-dependence of blending. No effect without MSAA.
+    // Default false preserves behavior.
     bool AlphaToCoverage = false)
 {
     public PipelineDescription(

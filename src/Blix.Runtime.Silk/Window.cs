@@ -18,9 +18,8 @@ using SilkMouseButton = Silk.NET.Input.MouseButton;
 
 namespace Blix.Runtime.Silk;
 
-// Sibling to Blix.Runtime.OpenTK.Window. Owns a Silk.NET window in
-// "Vulkan API" mode, pumps the IGameLoop, and wires the diagnostics
-// surface so it stays identical across backends.
+// The Vulkan window/runtime adapter. Owns a Silk.NET window in
+// "Vulkan API" mode, pumps the IGameLoop, and wires the diagnostics surface.
 //
 // Scope today: window opens, loop ticks, IDebuggable producers run,
 // console + JSON dump sinks fire. Vulkan instance/surface/swapchain
@@ -126,8 +125,8 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             // line-pipeline draw on the OverlayRenderPass. Only allocate when
             // diagnostics are live (no IDebuggable game loop → no overlay).
             lineDrawer = new VkLineDrawer(graphicsDevice);
-            // VkImGuiRenderer draws the on-screen diagnostics panels (same
-            // DebugOverlayUi the GL backend uses). Toggle with the ` key.
+            // VkImGuiRenderer draws the on-screen diagnostics panels (the
+            // shared DebugOverlayUi). Toggle with the ` key.
             imguiRenderer = new VkImGuiRenderer(graphicsDevice);
         }
 

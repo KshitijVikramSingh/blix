@@ -9,10 +9,9 @@ namespace Blix.Geometry;
 // n.z*P.z + n.w >= 0`. Used by the renderer to skip drawing submeshes
 // whose AABB is fully outside the camera or cascade frustum.
 //
-// Plane derivation (OpenGL clip convention: z in [-1, 1], assumed by the
-// Blix backend). Blix uses COLUMN-vector matrices (see GraphicsMatrices.cs)
-// stored in System.Numerics Matrix4x4 with Mij = row i, col j. The
-// canonical transform is `clip = vp * world` (column vector), so:
+// Plane derivation (Vulkan/D3D clip convention: z in [0, 1], which the Blix
+// projection produces). Callers pass the TRANSPOSE of the row-vector clip
+// matrix so the planes fall out of its rows (Mij = row i, col j):
 //   clip.x = row1(vp) . world
 //   clip.w = row4(vp) . world
 // And each plane is a sum/difference of rows:
@@ -20,7 +19,7 @@ namespace Blix.Geometry;
 //   right  = row4 - row1   (clip.w - clip.x >= 0)
 //   bottom = row4 + row2
 //   top    = row4 - row2
-//   near   = row4 + row3   (GL near = -w; D3D would use row3 alone)
+//   near   = row3          (clip.z >= 0 for [0,1] depth; GL [-1,1] would be row4 + row3)
 //   far    = row4 - row3
 //
 // Row k components in Blix naming: (Mk1, Mk2, Mk3, Mk4).
@@ -47,7 +46,7 @@ public readonly struct Frustum
         var rightP  = new Vector4(vp.M41 - vp.M11, vp.M42 - vp.M12, vp.M43 - vp.M13, vp.M44 - vp.M14);
         var bottomP = new Vector4(vp.M41 + vp.M21, vp.M42 + vp.M22, vp.M43 + vp.M23, vp.M44 + vp.M24);
         var topP    = new Vector4(vp.M41 - vp.M21, vp.M42 - vp.M22, vp.M43 - vp.M23, vp.M44 - vp.M24);
-        var nearP   = new Vector4(vp.M41 + vp.M31, vp.M42 + vp.M32, vp.M43 + vp.M33, vp.M44 + vp.M34);
+        var nearP   = new Vector4(vp.M31, vp.M32, vp.M33, vp.M34);
         var farP    = new Vector4(vp.M41 - vp.M31, vp.M42 - vp.M32, vp.M43 - vp.M33, vp.M44 - vp.M34);
         return new Frustum(
             NormalizePlane(leftP),

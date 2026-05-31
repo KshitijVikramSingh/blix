@@ -22,8 +22,8 @@ using VkAccessFlags = Silk.NET.Vulkan.AccessFlags;
 //   - GLSL std140 column-major reading reinterprets row-major bytes as
 //     column-major reads = transpose = column-vector form, which is what
 //     GLSL's `M * v_col` expects.
-//   - CreatePerspective rewritten to row-vector form (M34=-1, M43=z-translation
-//     instead of M43=-1, M34=z-translation as today's column-vector form).
+//   - CreatePerspectiveVulkan in row-vector form (M34=-1, M43=z-translation),
+//     Vulkan Y-down (M22=-focalLength) and [0,1] depth.
 //   - CreateNormalMatrix returns just Invert(model) — no Transpose, because
 //     row-vector M's inverse already corresponds to column-vector M^-T after
 //     the natural memory-layout transpose on upload.
@@ -71,19 +71,7 @@ var t = new TestRunner();
 // ============================================================================
 
 {
-    // CreatePerspective should be in row-vector form: M34 = -1 (perspective
-    // divide flag in last column of last row), M43 = z-translation.
-    // (Pre-migration: M43 = -1 and M34 = z-translation — column-vector form.)
-    var proj = GraphicsMatrices.CreatePerspective(MathF.PI / 3f, 16f / 9f, 0.1f, 100f);
-    t.ExpectClose("CreatePerspective M34 == -1 (row-vector perspective-divide flag)", proj.M34, -1f);
-    t.ExpectClose("CreatePerspective M43 != -1 (z-translation lives here in row-vector form)",
-        proj.M43, (2f * 100f * 0.1f) / (0.1f - 100f));
-    t.ExpectClose("CreatePerspective M22 = +focalLength (GL Y up)",
-        proj.M22, 1f / MathF.Tan((MathF.PI / 3f) * 0.5f));
-}
-
-{
-    // CreatePerspectiveVulkan stays as Vector D shipped — already row-vector form.
+    // CreatePerspectiveVulkan: row-vector form, Vulkan Y-down + [0,1] depth.
     var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, 16f / 9f, 0.1f, 100f);
     t.ExpectClose("CreatePerspectiveVulkan M34 == -1 (row-vector form)", proj.M34, -1f);
     t.ExpectClose("CreatePerspectiveVulkan M22 = -focalLength (Vulkan Y down)",
@@ -197,41 +185,6 @@ var t = new TestRunner();
 }
 
 // ============================================================================
-// Section D — GL transpose-flag semantics (regression for the transpose:true
-//             vs transpose:false confusion that broke GL demos after F-016).
-// ============================================================================
-//
-// The byte-level tests above don't exercise the GL.UniformMatrix4 transpose
-// flag — they only check what GLSL sees AFTER GL's internal reinterpretation.
-// The actual flag value matters: for .NET row-major bytes to land as
-// column-vector form in GLSL, GL must read them as column-major
-// (transpose: false). The opposite (transpose: true) leaves the matrix as
-// row-vector form in GLSL, which silently breaks every M*v multiplication.
-
-{
-    var m = Matrix4x4.CreateTranslation(new Vector3(10, 20, 30));
-
-    var bytes = new float[16];
-    var span = System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref m, 1);
-    var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<Matrix4x4, float>(span);
-    floats.CopyTo(bytes);
-
-    // Simulate GL.UniformMatrix4(transpose: false): input treated as column-major.
-    // GLSL math(r, c) = bytes[4*c + r].
-    var origin = new Vector4(0, 0, 0, 1);
-    var glslTransposeFalse = GlslMulColumnMajor(bytes, origin);
-    t.ExpectClose("GL transpose:false + row-major .NET bytes ⇒ GLSL translates correctly",
-        glslTransposeFalse, new Vector4(10, 20, 30, 1));
-
-    // Simulate GL.UniformMatrix4(transpose: true): input treated as row-major.
-    // GLSL math(r, c) = bytes[4*r + c]. For .NET row-vector matrix this leaves
-    // translation in row 3 — column-vector M*v_col then produces NO translation.
-    var glslTransposeTrue = GlslMulRowMajor(bytes, origin);
-    t.ExpectClose("GL transpose:true + row-major .NET bytes ⇒ GLSL DOES NOT translate (regression marker)",
-        glslTransposeTrue, new Vector4(0, 0, 0, 1));
-}
-
-// ============================================================================
 // Section E — ShaderInterface structural validation (Vector A 2a).
 // ============================================================================
 //
@@ -266,9 +219,9 @@ static UniformBlockLayout Mat4Block() => new(
 }
 
 // E.2 — Lit-shader-shape fixture: per-frame UBO + per-pass UBO + sampler array
-// + per-material UBO + per-material samplers + push constants. Mirrors
-// docs/vulkan-reshape-shaderlab-target.md Section 1. Proves the type composes
-// for the real downstream use case.
+// + per-material UBO + per-material samplers + push constants. Exercises the
+// set-by-lifetime layout (docs/architecture.md → the Vulkan binding model) and
+// proves the type composes for the real downstream use case.
 {
     var lit = new ShaderInterface(
         Slots: new[]
@@ -1501,6 +1454,38 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("U.2 faulted Drain processes nothing / not done", !q2.Drain(1000.0, _ => { }));
 }
 
+// ============================================================================
+// Section V — Frustum near-plane against Vulkan [0,1] clip.
+// ============================================================================
+//
+// Regression for the near-plane derivation: the projection produces [0,1]
+// depth, so the near plane is row3 (clip.z >= 0), NOT GL's row4 + row3. A box
+// in front of the near plane must survive culling; a box between the camera
+// and the near plane (closer than near) must be rejected by the near plane.
+{
+    // Camera at origin looking down -Z; near = 1, far = 100.
+    var view = GraphicsMatrices.CreateView(Vector3.Zero, Quaternion.Identity);
+    var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 2f, 1.0f, 1.0f, 100f);
+    var vp = view * proj;
+    // FromViewProjection wants the planes as rows → transpose the row-vector VP.
+    var frustum = Frustum.FromViewProjection(Matrix4x4.Transpose(vp));
+
+    Bounds3 Box(Vector3 c, float r) => new(c - new Vector3(r), c + new Vector3(r));
+
+    t.ExpectTrue("Frustum: box well inside the view volume intersects",
+        frustum.Intersects(Box(new Vector3(0, 0, -10f), 1f)));
+    t.ExpectTrue("Frustum: box behind the camera is culled",
+        !frustum.Intersects(Box(new Vector3(0, 0, 10f), 1f)));
+    // The near-plane fix: a box at view-z ∈ [-0.8,-0.6] is in front of the camera
+    // but nearer than near=1, so it must be culled. This band is exactly where the
+    // correct [0,1] near plane (row3) and the buggy GL one (row4 + row3, which
+    // puts the plane at view-z ≈ -0.5) disagree — the GL form wrongly keeps it.
+    t.ExpectTrue("Frustum: box nearer than the near plane is culled (row3, [0,1] clip)",
+        !frustum.Intersects(Box(new Vector3(0, 0, -0.7f), 0.1f)));
+    t.ExpectTrue("Frustum: box just past the near plane survives",
+        frustum.Intersects(Box(new Vector3(0, 0, -2f), 0.4f)));
+}
+
 t.PrintSummary();
 return t.FailedCount;
 
@@ -1511,28 +1496,6 @@ static InvalidOperationException? TryValidate(ShaderInterface iface)
 {
     try { iface.Validate(); return null; }
     catch (InvalidOperationException e) { return e; }
-}
-
-// GLSL M*v_col interpretation when GL stored the bytes as column-major
-// (transpose:false in UniformMatrix4). math(r, c) = bytes[4*c + r].
-static Vector4 GlslMulColumnMajor(float[] bytes, Vector4 v)
-{
-    var rx = bytes[0]  * v.X + bytes[4]  * v.Y + bytes[8]   * v.Z + bytes[12] * v.W;
-    var ry = bytes[1]  * v.X + bytes[5]  * v.Y + bytes[9]   * v.Z + bytes[13] * v.W;
-    var rz = bytes[2]  * v.X + bytes[6]  * v.Y + bytes[10]  * v.Z + bytes[14] * v.W;
-    var rw = bytes[3]  * v.X + bytes[7]  * v.Y + bytes[11]  * v.Z + bytes[15] * v.W;
-    return new Vector4(rx, ry, rz, rw);
-}
-
-// GLSL M*v_col when GL was told transpose:true (input was row-major).
-// math(r, c) = bytes[4*r + c]. result[r] = sum_c M[r,c] * v[c] = sum_c bytes[4*r+c] * v[c].
-static Vector4 GlslMulRowMajor(float[] bytes, Vector4 v)
-{
-    var rx = bytes[0]  * v.X + bytes[1]  * v.Y + bytes[2]   * v.Z + bytes[3]  * v.W;
-    var ry = bytes[4]  * v.X + bytes[5]  * v.Y + bytes[6]   * v.Z + bytes[7]  * v.W;
-    var rz = bytes[8]  * v.X + bytes[9]  * v.Y + bytes[10]  * v.Z + bytes[11] * v.W;
-    var rw = bytes[12] * v.X + bytes[13] * v.Y + bytes[14]  * v.Z + bytes[15] * v.W;
-    return new Vector4(rx, ry, rz, rw);
 }
 
 // Simulate GLSL's `M * v_col` with M read column-major from a flat float buffer.

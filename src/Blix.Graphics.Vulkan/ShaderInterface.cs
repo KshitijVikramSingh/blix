@@ -3,7 +3,7 @@ namespace Blix.Graphics.Vulkan;
 // Binding contract for a shader program: descriptor slots and push-constant
 // ranges. Vertex input lives on PipelineDescription.
 //
-// Set-by-lifetime convention (see docs/vulkan-reshape-shaderlab-target.md):
+// Set-by-lifetime convention (see docs/architecture.md → the Vulkan binding model):
 //   set 0 = per-frame    (viewProjection, sun, camera, ambient)
 //   set 1 = per-pass     (shadow maps, env, BRDF LUT)
 //   set 2 = per-material (albedo/normal/MR + factors)

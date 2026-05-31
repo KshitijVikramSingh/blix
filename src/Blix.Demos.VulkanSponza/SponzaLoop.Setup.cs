@@ -92,7 +92,7 @@ internal sealed partial class SponzaLoop
         // Shader binding interfaces — descriptor sets, std140 UBO layouts, and
         // push-constant ranges — are reflected from the compiled SPIR-V at
         // build time (spirv-cross sidecars next to each .spv), not hand-
-        // authored. See docs/renderer.md "SPIR-V reflection". Each program
+        // authored. See docs/architecture.md → the Vulkan binding model. Each program
         // reflects exactly what its stages declare; per-draw descriptor binding
         // skips any per-pass texture a program doesn't sample, so the skybox
         // no longer has to restate the lit pass's set-1 bindings for "layout

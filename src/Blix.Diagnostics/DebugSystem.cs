@@ -113,8 +113,8 @@ public sealed class DebugSystem
     // Register a contributor for the life of the system. Each frame:
     //   - if it implements IDebuggable, Run() calls Debug() inside an
     //     auto-scope of its DebugName;
-    //   - if it implements a UI-layer interface (IDebugUi in the OpenTK
-    //     runtime), the runtime discovers it via Contributors.
+    //   - if it implements a UI-layer interface (IDebugUi in the overlay
+    //     layer), the runtime discovers it via Contributors.
     //
     // Re-registering the same instance is a no-op rather than a duplicate;
     // we'd otherwise produce duplicate scopes on the same frame.
