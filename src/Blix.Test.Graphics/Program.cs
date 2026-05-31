@@ -1,6 +1,10 @@
 using System.Numerics;
+using Blix.Assets;
+using Blix.Diagnostics;
+using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
+using Blix.Render;
 // Silk.NET.Vulkan types are used by Section N (BarrierOp value equality).
 // Aliased rather than globally imported to avoid ambiguity with
 // Blix.Graphics.Vulkan.PushConstantRange and Blix.Graphics.PrimitiveTopology.
@@ -1173,6 +1177,330 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("O.4 GetColorTexture before Compile throws", threw);
 }
 
+// ============================================================================
+// Section P — SPIR-V reflection (build-time .refl.json → binding records).
+// ============================================================================
+//
+// Golden gate before VulkanSponza's hand-authored UniformBlockLayout /
+// ShaderInterface are deleted: ShaderReflection must reproduce those tables
+// exactly from the spirv-cross --reflect sidecars. Fixtures are checked into
+// fixtures/ (see csproj). The known-good values below are copied from
+// VulkanSponza/Program.cs's hand-authored Frame/Material layouts.
+{
+    var fxDir = Path.Combine(AppContext.BaseDirectory, "fixtures");
+    var vert = ShaderReflection.Load(Path.Combine(fxDir, "lit.vert.refl.json"));
+    var frag = ShaderReflection.Load(Path.Combine(fxDir, "lit.frag.refl.json"));
+    var iface = ShaderReflection.MergeStages(vert, frag);
+
+    DescriptorSetSlot? Slot(int set, int binding) =>
+        iface.Slots.FirstOrDefault(s => s.Set == set && s.Binding == binding);
+    UniformBlockMember? Member(UniformBlockLayout? b, string name) =>
+        b?.Members.FirstOrDefault(m => m.Name == name);
+
+    // P.0 — merged interface passes the same structural validation as the
+    // hand-authored ones, and the vert↔frag Frame block merged to the FULLER
+    // layout (frag's 416, not vert's 96 prefix).
+    t.ExpectTrue("P.0 reflected lit interface validates", TryValidate(iface) is null);
+
+    var frame = Slot(0, 0);
+    t.ExpectTrue("P.0 Frame UBO at (0,0) is a UniformBuffer", frame is { Type: ShaderResourceType.UniformBuffer });
+    t.ExpectTrue("P.0 Frame UBO merged to both stages",
+        frame is { } fr && fr.Stages.HasFlag(ShaderStages.Vertex) && fr.Stages.HasFlag(ShaderStages.Fragment));
+
+    // P.1 — Frame UBO std140 offsets reflect correctly. lit.frag's tunables are
+    // named float members (no packed uShaderParams/uShadowParams/uIblParams
+    // vec4s), so the block is 396 and the grab-bags are gone — see P.6.
+    var fb = frame?.BlockLayout;
+    t.ExpectClose("P.1 Frame TotalSize 396", fb?.TotalSize ?? -1, 396);
+    t.ExpectClose("P.1 uViewProjection @0", Member(fb, "uViewProjection")?.Offset ?? -1, 0);
+    t.ExpectClose("P.1 uViewProjection size 64", Member(fb, "uViewProjection")?.Size ?? -1, 64);
+    t.ExpectClose("P.1 uSunDirection @64", Member(fb, "uSunDirection")?.Offset ?? -1, 64);
+    t.ExpectClose("P.1 uSunIntensity @76", Member(fb, "uSunIntensity")?.Offset ?? -1, 76);
+    t.ExpectClose("P.1 uCascadeViewProj @128", Member(fb, "uCascadeViewProj")?.Offset ?? -1, 128);
+    t.ExpectClose("P.1 uCascadeViewProj size 192 (mat4[3])", Member(fb, "uCascadeViewProj")?.Size ?? -1, 192);
+    t.ExpectClose("P.1 uCascadeViewProj ElementStride 64", Member(fb, "uCascadeViewProj")?.ElementStride ?? -1, 64);
+    t.ExpectTrue("P.1 packed uShaderParams gone (un-packed to named members)", Member(fb, "uShaderParams") is null);
+
+    // P.2 — Material UBO (set 2, binding 0): four vec4s, 64 bytes.
+    var matSlot = Slot(2, 0);
+    t.ExpectClose("P.2 Material UBO TotalSize 64", matSlot?.BlockLayout?.TotalSize ?? -1, 64);
+    t.ExpectClose("P.2 uMaterialParams @32", Member(matSlot?.BlockLayout, "uMaterialParams")?.Offset ?? -1, 32);
+
+    // P.3 — set 1 IBL samplers + cascade-array Count.
+    t.ExpectTrue("P.3 uIrradiance at (1,0)", Slot(1, 0) is { Type: ShaderResourceType.SampledImage });
+    t.ExpectTrue("P.3 uPrefilteredEnv at (1,1)", Slot(1, 1) is { Type: ShaderResourceType.SampledImage });
+    t.ExpectTrue("P.3 uBrdfLut at (1,2)", Slot(1, 2) is { Type: ShaderResourceType.SampledImage });
+    t.ExpectClose("P.3 uCascadeShadowMaps at (1,3) Count==3", Slot(1, 3)?.Count ?? -1, 3);
+    t.ExpectTrue("P.3 uFroxelGrid at (1,4)", Slot(1, 4) is { Type: ShaderResourceType.SampledImage });
+
+    // P.4 — per-material textures on set 2.
+    t.ExpectTrue("P.4 uAlbedo at (2,1) Count 1", Slot(2, 1) is { Type: ShaderResourceType.SampledImage, Count: 1 });
+    t.ExpectTrue("P.4 uOcclusion at (2,5)", Slot(2, 5) is { Type: ShaderResourceType.SampledImage });
+
+    // P.5 — push-constant coalescing (regression). shadow_mask declares one
+    // [0,144) push block referenced by BOTH stages, so each stage reflects the
+    // full block; MergeStages must coalesce them into ONE range with OR'd
+    // stages — not two ranges that the emit path's sum-of-sizes would total to
+    // 288 and reject against the 144B payload.
+    var shadowMask = ShaderReflection.MergeStages(
+        ShaderReflection.Load(Path.Combine(fxDir, "shadow_mask.vert.refl.json")),
+        ShaderReflection.Load(Path.Combine(fxDir, "shadow_mask.frag.refl.json")));
+    t.ExpectClose("P.5 shadow_mask has exactly ONE push range", shadowMask.PushConstants.Count, 1);
+    var pc = shadowMask.PushConstants.Count > 0 ? shadowMask.PushConstants[0] : null;
+    t.ExpectClose("P.5 push range Offset 0", pc?.Offset ?? -1, 0);
+    t.ExpectClose("P.5 push range Size 144 (matches payload, not 288)", pc?.Size ?? -1, 144);
+    t.ExpectTrue("P.5 push range spans Vertex+Fragment",
+        pc is { } r && r.Stages.HasFlag(ShaderStages.Vertex) && r.Stages.HasFlag(ShaderStages.Fragment));
+
+    // P.6 — the former vec4 grab-bags are now named float members the tune
+    // scanner + overlay can bind individually.
+    t.ExpectTrue("P.6 uMetallicThreshold is a named member", Member(fb, "uMetallicThreshold") is not null);
+    t.ExpectTrue("P.6 uIndirectShadowBase is a named member", Member(fb, "uIndirectShadowBase") is not null);
+    t.ExpectClose("P.6 uVisualizeCascades size 4 (float)", Member(fb, "uVisualizeCascades")?.Size ?? -1, 4);
+}
+
+// ============================================================================
+// Section Q — `//@tune` shader-tunable decorator scan (Blix.Graphics).
+// ============================================================================
+//
+// The scanner reads GLSL source for the opt-in tuning decorator the diagnostics
+// overlay auto-binds. Asserts: only tagged members surface, range/default and
+// enum payloads parse, group = enclosing block name, label inferred from name.
+{
+    const string glsl = """
+        layout(set = 0, binding = 0) uniform Tune {
+            //@tune 0..16 = 9.42
+            float uSunIntensity;
+            //@tune 0..1 = 0.5
+            float uMetallicThreshold;
+            // engine-driven, no tag → must be ignored
+            float uEngineThing;
+            //@tune enum{ PBR, Albedo, Normal, Roughness, Cascade }
+            int   uDebugView;
+        } tune;
+
+        // A bare uniform outside any block, still tunable.
+        //@tune 0..4 = 2
+        uniform int uLodBias;
+        """;
+
+    var tunables = ShaderTunables.Scan(glsl);
+    ShaderTunable? Find(string n)
+    {
+        foreach (var x in tunables) if (x.Name == n) return x;
+        return null;
+    }
+
+    // Q.0 — only the four tagged decls surface; uEngineThing is dropped.
+    t.ExpectClose("Q.0 four tunables found (untagged ignored)", tunables.Count, 4);
+    t.ExpectTrue("Q.0 untagged uEngineThing excluded", Find("uEngineThing") is null);
+
+    // Q.1 — float range + default + inferred group/label.
+    var sun = Find("uSunIntensity");
+    t.ExpectTrue("Q.1 uSunIntensity is Float", sun is { Kind: TunableKind.Float });
+    t.ExpectClose("Q.1 min 0", sun?.Min ?? -1, 0);
+    t.ExpectClose("Q.1 max 16", sun?.Max ?? -1, 16);
+    t.ExpectClose("Q.1 default 9.42", sun?.Default ?? -1, 9.42f);
+    t.ExpectTrue("Q.1 group = block name 'Tune'", sun?.Block == "Tune");
+    t.ExpectTrue("Q.1 label inferred 'Sun intensity'", sun?.Label == "Sun intensity");
+
+    var metal = Find("uMetallicThreshold");
+    t.ExpectClose("Q.1 metallic default 0.5", metal?.Default ?? -1, 0.5f);
+    t.ExpectTrue("Q.1 metallic label 'Metallic threshold'", metal?.Label == "Metallic threshold");
+
+    // Q.2 — int enum: kind, options, range.
+    var dv = Find("uDebugView");
+    t.ExpectTrue("Q.2 uDebugView is Enum", dv is { Kind: TunableKind.Enum });
+    t.ExpectClose("Q.2 enum has 5 options", dv?.EnumNames?.Count ?? -1, 5);
+    t.ExpectTrue("Q.2 first option 'PBR'", dv?.EnumNames is { Count: > 0 } e && e[0] == "PBR");
+    t.ExpectTrue("Q.2 last option 'Cascade'", dv?.EnumNames is { Count: 5 } e2 && e2[4] == "Cascade");
+    t.ExpectClose("Q.2 enum max = count-1", dv?.Max ?? -1, 4);
+
+    // Q.3 — bare uniform outside a block: Int kind, empty group.
+    var lod = Find("uLodBias");
+    t.ExpectTrue("Q.3 uLodBias is Int", lod is { Kind: TunableKind.Int });
+    t.ExpectClose("Q.3 uLodBias default 2", lod?.Default ?? -1, 2);
+    t.ExpectTrue("Q.3 uLodBias has no block group", lod?.Block == "");
+}
+
+// ============================================================================
+// Section R — ShaderTunablePanel (Blix.Diagnostics): seeding + uniform emit.
+// ============================================================================
+//
+// The panel auto-binds //@tune decorators to overlay dials and feeds live
+// values back as named uniforms. UI binding (BuildControls) needs a live
+// DebugContext and is exercised in the demo; here we lock the value contract:
+// defaults seed from the tags, and AppendUniforms emits one named float each.
+{
+    var panelTunables = ShaderTunables.Scan("""
+        layout(set = 0, binding = 0) uniform Tune {
+            //@tune 0..16 = 9.42
+            float uSunIntensity;
+            //@tune 0..1 = 0.5
+            float uMetallicThreshold;
+        } tune;
+        """);
+    var panel = new ShaderTunablePanel(panelTunables);
+
+    // R.1 — values seed from the tag defaults; unknown name → 0.
+    t.ExpectClose("R.1 uSunIntensity seeded to 9.42", panel.Value("uSunIntensity"), 9.42f);
+    t.ExpectClose("R.1 uMetallicThreshold seeded to 0.5", panel.Value("uMetallicThreshold"), 0.5f);
+    t.ExpectClose("R.1 unknown name → 0", panel.Value("uNope"), 0f);
+
+    // R.2 — AppendUniforms emits one named float uniform per tunable.
+    var uniforms = new List<ShaderUniform>();
+    panel.AppendUniforms(uniforms);
+    t.ExpectClose("R.2 two uniforms appended", uniforms.Count, 2);
+    var sunU = uniforms.FirstOrDefault(u => u.Name == "uSunIntensity");
+    t.ExpectTrue("R.2 uSunIntensity present as FloatUniform", sunU?.Value is FloatUniform);
+    t.ExpectClose("R.2 uSunIntensity value 9.42", (sunU?.Value as FloatUniform)?.Value ?? -1, 9.42f);
+}
+
+// ============================================================================
+// Section S — [Tune] attribute reflection (Blix.Diagnostics): CPU tunables.
+// ============================================================================
+//
+// The CPU twin of shader //@tune: an attribute on a field/property that the
+// overlay reflects into a live dial. Locks: tagged-only surfacing, range +
+// label inference, and that editing Value writes back through the member
+// (with int rounding).
+{
+    var fixture = new TuneFixture();
+    var fields = TuneReflection.Reflect(fixture);
+    TunableField? FindF(string n)
+    {
+        foreach (var f in fields) if (f.Name == n) return f;
+        return null;
+    }
+
+    // S.0 — only [Tune] members surface (NotTunable excluded).
+    t.ExpectClose("S.0 five tunables found", fields.Count, 5);
+    t.ExpectTrue("S.0 untagged field excluded", FindF("NotTunable") is null);
+
+    // S.1 — range + inferred labels (PascalCase + camelCase).
+    var density = FindF("Density");
+    t.ExpectClose("S.1 Density min 0", density?.Min ?? -1, 0);
+    t.ExpectClose("S.1 Density max 0.5", density?.Max ?? -1, 0.5f);
+    t.ExpectTrue("S.1 label 'Density'", density?.Label == "Density");
+    t.ExpectTrue("S.1 camelCase label 'Fly speed'", FindF("flySpeed")?.Label == "Fly speed");
+    t.ExpectClose("S.1 get reads the live field", density?.Value ?? -1, 0.1f);
+
+    // S.2 — set writes back through the member; ints round.
+    if (density is not null) density.Value = 0.3f;
+    t.ExpectClose("S.2 float set wrote the field", fixture.Density, 0.3f);
+    var steps = FindF("Steps");
+    t.ExpectTrue("S.2 int member is Int kind", steps is { Kind: TuneKind.Int });
+    if (steps is not null) steps.Value = 2.6f;
+    t.ExpectClose("S.2 int set rounds to 3", fixture.Steps, 3);
+
+    // S.3 — bool member → toggle (0/1), set writes back.
+    var wire = FindF("Wireframe");
+    t.ExpectTrue("S.3 bool member is Bool kind", wire is { Kind: TuneKind.Bool });
+    t.ExpectClose("S.3 bool false reads 0", wire?.Value ?? -1, 0f);
+    if (wire is not null) wire.Value = 1f;
+    t.ExpectTrue("S.3 bool set wrote true", fixture.Wireframe);
+
+    // S.4 — enum member → dropdown (option index), set writes the enum value.
+    var mode = FindF("Mode");
+    t.ExpectTrue("S.4 enum member is Enum kind", mode is { Kind: TuneKind.Enum });
+    t.ExpectClose("S.4 three enum options", mode?.EnumNames?.Count ?? -1, 3);
+    t.ExpectClose("S.4 default B reads index 1", mode?.Value ?? -1, 1f);
+    if (mode is not null) mode.Value = 2f;
+    t.ExpectTrue("S.4 enum set wrote C", fixture.Mode == TuneFixtureMode.C);
+}
+
+// ============================================================================
+// Section T — MeshBundler.Pack (Blix.Render): geometry bundling.
+// ============================================================================
+//
+// Packs N primitives into one shared vertex buffer + per-width index buffers,
+// order-preserving, indices kept primitive-local. The CPU surface is pure
+// (no device), so we assert the byte/offset math directly.
+{
+    // A: 2 verts, u16 [0,1,2]. B: 3 verts, two LODs (u16). C: 4 verts, u32.
+    var a = new MeshGeometryInput(new byte[8], 2,
+        new[] { new MeshLod(new ushort[] { 0, 1, 2 }, null) }, default);
+    var b = new MeshGeometryInput(new byte[12], 3,
+        new[]
+        {
+            new MeshLod(new ushort[] { 0, 1, 2, 1, 2, 0 }, null),
+            new MeshLod(new ushort[] { 0, 1, 2 }, null, 0.5f),
+        }, default);
+    var c = new MeshGeometryInput(new byte[16], 4,
+        new[] { new MeshLod(null, new uint[] { 0, 1, 2, 3 }) }, default);
+    var packed = MeshBundler.Pack(new[] { a, b, c });
+
+    // T.0 — buffers concatenated; widths split.
+    t.ExpectClose("T.0 vertex bytes concatenated (8+12+16)", packed.VertexBytes.Length, 36);
+    t.ExpectClose("T.0 vertex count summed (2+3+4)", packed.VertexCount, 9);
+    t.ExpectClose("T.0 u16 indices (3+6+3)", packed.Indices16.Length, 12);
+    t.ExpectClose("T.0 u32 indices (4)", packed.Indices32.Length, 4);
+    t.ExpectClose("T.0 three bundled meshes", packed.Meshes.Count, 3);
+
+    // T.1 — BaseVertex accumulates in input order.
+    t.ExpectClose("T.1 A BaseVertex 0", packed.Meshes[0].BaseVertex, 0);
+    t.ExpectClose("T.1 B BaseVertex 2", packed.Meshes[1].BaseVertex, 2);
+    t.ExpectClose("T.1 C BaseVertex 5", packed.Meshes[2].BaseVertex, 5);
+
+    // T.2 — per-LOD firstIndex/counts into the width buffer; B's two LODs.
+    t.ExpectClose("T.2 A LOD0 firstIndex 0", packed.Meshes[0].LodFirstIndex[0], 0);
+    t.ExpectClose("T.2 B LOD0 firstIndex 3", packed.Meshes[1].LodFirstIndex[0], 3);
+    t.ExpectClose("T.2 B LOD0 count 6", packed.Meshes[1].LodIndexCounts[0], 6);
+    t.ExpectClose("T.2 B LOD1 firstIndex 9", packed.Meshes[1].LodFirstIndex[1], 9);
+    t.ExpectClose("T.2 B LOD1 error 0.5", packed.Meshes[1].LodErrors[1], 0.5f);
+
+    // T.3 — u16/u32 split: C indexes the u32 buffer (firstIndex 0 there).
+    t.ExpectTrue("T.3 A is u16", !packed.Meshes[0].IndicesAreU32);
+    t.ExpectTrue("T.3 C is u32", packed.Meshes[2].IndicesAreU32);
+    t.ExpectClose("T.3 C LOD0 firstIndex 0 (u32 buffer)", packed.Meshes[2].LodFirstIndex[0], 0);
+
+    // T.4 — indices stay primitive-local (NOT rebased by BaseVertex): B's LOD0
+    // at u16[3] is still 0, not 2.
+    t.ExpectClose("T.4 B's first index stays local (0)", packed.Indices16[3], 0);
+}
+
+// ============================================================================
+// Section U — AsyncLoadQueue (Blix.Render): off-thread produce + budgeted drain.
+// ============================================================================
+{
+    static void SpinUntilReady<T>(AsyncLoadQueue<T> q)
+    {
+        for (var i = 0; i < 5000 && q.IsProducing; i++) System.Threading.Thread.Sleep(1);
+    }
+
+    // U.0 — produce a list off-thread; a generous-budget Drain processes all,
+    // in order, and reports fully-loaded.
+    var q0 = new AsyncLoadQueue<int>();
+    q0.Start(() => new[] { 1, 2, 3, 4, 5 });
+    SpinUntilReady(q0);
+    var got = new List<int>();
+    var done = q0.Drain(1000.0, got.Add);
+    t.ExpectTrue("U.0 fully loaded after a generous drain", done);
+    t.ExpectClose("U.0 all five processed", got.Count, 5);
+    t.ExpectTrue("U.0 in producer order", got.SequenceEqual(new[] { 1, 2, 3, 4, 5 }));
+    t.ExpectClose("U.0 nothing pending", q0.PendingCount, 0);
+
+    // U.1 — a tiny budget still drains ≥1 per call (no starvation) and reports
+    // not-yet-done until the queue empties.
+    var q1 = new AsyncLoadQueue<int>();
+    q1.Start(() => new[] { 10, 20, 30 });
+    SpinUntilReady(q1);
+    var collected = new List<int>();
+    var d1 = q1.Drain(0.0, collected.Add);   // 0ms budget → exactly one
+    t.ExpectClose("U.1 zero-budget drains one", collected.Count, 1);
+    t.ExpectTrue("U.1 not done yet", !d1);
+    while (!q1.Drain(0.0, collected.Add)) { }  // finish it off, one per call
+    t.ExpectClose("U.1 all drained across calls", collected.Count, 3);
+
+    // U.2 — a faulting producer surfaces as IsFaulted; Drain does nothing.
+    var q2 = new AsyncLoadQueue<int>();
+    q2.Start(() => throw new InvalidOperationException("parse boom"));
+    for (var i = 0; i < 5000 && !q2.IsFaulted; i++) System.Threading.Thread.Sleep(1);
+    t.ExpectTrue("U.2 producer fault surfaced", q2.IsFaulted);
+    t.ExpectTrue("U.2 fault message preserved", q2.Fault?.Message == "parse boom");
+    t.ExpectTrue("U.2 faulted Drain processes nothing / not done", !q2.Drain(1000.0, _ => { }));
+}
+
 t.PrintSummary();
 return t.FailedCount;
 
@@ -1259,4 +1587,16 @@ sealed class TestRunner
         Console.WriteLine();
         Console.WriteLine($"{passed}/{passed + failed} passed, {failed} failed");
     }
+}
+
+// Fixture for Section S: a [Tune]-tagged object the reflector should surface.
+enum TuneFixtureMode { A, B, C }
+sealed class TuneFixture
+{
+    [Tune(0, 0.5)] public float Density = 0.1f;
+    [Tune(0, 5)]   public int Steps = 1;
+    [Tune(0, 60)]  public float flySpeed = 4.5f;
+    [Tune]         public bool Wireframe = false;
+    [Tune]         public TuneFixtureMode Mode = TuneFixtureMode.B;
+    public float NotTunable = 9f;   // no attribute → must be ignored
 }

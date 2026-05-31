@@ -3,6 +3,16 @@
   <ItemGroup>
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
+    <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
+  </ItemGroup>
+
+  <!-- Golden reflection fixtures: spirv-cross reflect output for VulkanSponza's
+       lit.vert/frag, checked in so Section P can assert the managed reflector
+       reproduces the hand-authored binding tables. Regenerate by running
+       spirv-cross with the reflect flag if those shaders' interfaces change. -->
+  <ItemGroup>
+    <Content Include="fixtures\*.refl.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <PropertyGroup>

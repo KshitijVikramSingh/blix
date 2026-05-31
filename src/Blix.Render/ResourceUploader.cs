@@ -5,14 +5,17 @@ using Blix.Graphics;
 namespace Blix.Render;
 
 // Spreads GPU-side texture uploads over multiple frames so the main thread
-// doesn't stall on a synchronous wall of glTexImage2D / glCompressedTexImage2D
-// + glGenerateMipmap calls during scene load. Scene loaders enqueue an
-// upload + a callback; each frame the runtime calls Drain(budgetMs), which
-// processes pending work items until the budget runs out.
+// doesn't stall on a synchronous wall of per-mip upload calls (GL
+// glTexImage2D / glCompressedTexImage2D + glGenerateMipmap, or the Vulkan
+// staged copies) during scene load. Backend-agnostic — it drives an
+// IGraphicsDevice — and is the pump underneath the Vulkan GltfTextureLoader as
+// well as the GL scene loaders. Callers enqueue an upload + a callback; each
+// frame the runtime calls Drain(budgetMs), which processes pending work items
+// until the budget runs out.
 //
 // Per-mip granularity is the key trick. Each Enqueue splits into N work
 // items (one per mip level), so Drain's "do at least one item" guarantee
-// means at most one mip's-worth of GL work per Drain iteration. A 4K
+// means at most one mip's-worth of device work per Drain iteration. A 4K
 // texture has ~11 mips at descending sizes; the smallest mips (4x4, 8x8,
 // ...) are microseconds each, so Drain can chew through many of them in
 // 4ms. The biggest mip (full 4K = ~64MB) might be 100-200ms on its own,
@@ -28,7 +31,7 @@ namespace Blix.Render;
 //
 // Deliberate non-goals:
 // - Not a streaming system. Every enqueue is unconditional.
-// - Not thread-safe. All Drain + Enqueue calls run on the GL thread.
+// - Not thread-safe. All Drain + Enqueue calls run on the render thread.
 public sealed class ResourceUploader : IDebuggable
 {
     private readonly IGraphicsDevice device;

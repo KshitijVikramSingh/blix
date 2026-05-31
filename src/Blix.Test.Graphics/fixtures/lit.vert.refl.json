@@ -1,0 +1,150 @@
+{
+    "entryPoints" : [
+        {
+            "name" : "main",
+            "mode" : "vert"
+        }
+    ],
+    "types" : {
+        "_11" : {
+            "name" : "PushConstants",
+            "members" : [
+                {
+                    "name" : "uModel",
+                    "type" : "mat4",
+                    "offset" : 0,
+                    "matrix_stride" : 16
+                }
+            ]
+        },
+        "_32" : {
+            "name" : "gl_PerVertex",
+            "members" : [
+                {
+                    "name" : "gl_Position",
+                    "type" : "vec4"
+                },
+                {
+                    "name" : "gl_PointSize",
+                    "type" : "float"
+                },
+                {
+                    "name" : "gl_ClipDistance",
+                    "type" : "float",
+                    "array" : [
+                        1
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ]
+                },
+                {
+                    "name" : "gl_CullDistance",
+                    "type" : "float",
+                    "array" : [
+                        1
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ]
+                }
+            ]
+        },
+        "_35" : {
+            "name" : "Frame",
+            "members" : [
+                {
+                    "name" : "uViewProjection",
+                    "type" : "mat4",
+                    "offset" : 0,
+                    "matrix_stride" : 16
+                },
+                {
+                    "name" : "uSunDirection",
+                    "type" : "vec3",
+                    "offset" : 64
+                },
+                {
+                    "name" : "uSunIntensity",
+                    "type" : "float",
+                    "offset" : 76
+                },
+                {
+                    "name" : "uAmbientColor",
+                    "type" : "vec3",
+                    "offset" : 80
+                },
+                {
+                    "name" : "uAmbientIntensity",
+                    "type" : "float",
+                    "offset" : 92
+                }
+            ]
+        }
+    },
+    "inputs" : [
+        {
+            "type" : "vec3",
+            "name" : "inPosition",
+            "location" : 0
+        },
+        {
+            "type" : "vec3",
+            "name" : "inNormal",
+            "location" : 1
+        },
+        {
+            "type" : "vec4",
+            "name" : "inTangent",
+            "location" : 2
+        },
+        {
+            "type" : "vec2",
+            "name" : "inUv",
+            "location" : 3
+        }
+    ],
+    "outputs" : [
+        {
+            "type" : "vec3",
+            "name" : "vNormalWorld",
+            "location" : 0
+        },
+        {
+            "type" : "vec3",
+            "name" : "vTangentWorld",
+            "location" : 3
+        },
+        {
+            "type" : "float",
+            "name" : "vTangentSign",
+            "location" : 4
+        },
+        {
+            "type" : "vec2",
+            "name" : "vUv",
+            "location" : 1
+        },
+        {
+            "type" : "vec3",
+            "name" : "vWorldPos",
+            "location" : 2
+        }
+    ],
+    "ubos" : [
+        {
+            "type" : "_35",
+            "name" : "Frame",
+            "block_size" : 96,
+            "set" : 0,
+            "binding" : 0
+        }
+    ],
+    "push_constants" : [
+        {
+            "type" : "_11",
+            "name" : "pc",
+            "push_constant" : true
+        }
+    ]
+}
