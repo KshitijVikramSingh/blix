@@ -1,4 +1,5 @@
 using System.Numerics;
+using Blix;
 using Blix.Assets;
 using Blix.Diagnostics;
 using Blix.Geometry;
@@ -1484,6 +1485,184 @@ static ShaderInterface MinimalShader() => new(new[]
         !frustum.Intersects(Box(new Vector3(0, 0, -0.7f), 0.1f)));
     t.ExpectTrue("Frustum: box just past the near plane survives",
         frustum.Intersects(Box(new Vector3(0, 0, -2f), 0.4f)));
+}
+
+// ============================================================================
+// Section W — Frustum: the other five planes (complements V's near plane).
+// ============================================================================
+//
+// V locked the near plane against the [0,1]-clip regression. W exercises the
+// remaining five so the whole Gribb-Hartmann extraction is pinned: left/right/
+// top/bottom from the symmetric fov (at view depth d the half-extent is d since
+// tan(45°)=1), and far from the [0,1] far plane (row4 - row3). Each plane gets a
+// box just outside it (must cull); the inside cases keep the extraction honest.
+{
+    var view = GraphicsMatrices.CreateView(Vector3.Zero, Quaternion.Identity);
+    var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 2f, 1.0f, 1.0f, 100f);
+    var frustum = Frustum.FromViewProjection(Matrix4x4.Transpose(view * proj));
+
+    Bounds3 Box(Vector3 c, float r) => new(c - new Vector3(r), c + new Vector3(r));
+
+    // 90° vertical fov, aspect 1 → at view depth 10 the frustum spans x,y ∈ [-10, 10].
+    t.ExpectTrue("Frustum: centred box at depth 10 is inside all planes",
+        frustum.Intersects(Box(new Vector3(0, 0, -10f), 1f)));
+
+    t.ExpectTrue("Frustum: box past the right plane is culled",
+        !frustum.Intersects(Box(new Vector3(12f, 0, -10f), 0.5f)));
+    t.ExpectTrue("Frustum: box just inside the right plane survives",
+        frustum.Intersects(Box(new Vector3(9f, 0, -10f), 0.5f)));
+    t.ExpectTrue("Frustum: box past the left plane is culled",
+        !frustum.Intersects(Box(new Vector3(-12f, 0, -10f), 0.5f)));
+    t.ExpectTrue("Frustum: box past the top plane is culled",
+        !frustum.Intersects(Box(new Vector3(0, 12f, -10f), 0.5f)));
+    t.ExpectTrue("Frustum: box past the bottom plane is culled",
+        !frustum.Intersects(Box(new Vector3(0, -12f, -10f), 0.5f)));
+
+    // Far plane = row4 - row3 for [0,1] clip: beyond far=100 (view-z < -100) culls.
+    t.ExpectTrue("Frustum: box beyond the far plane is culled",
+        !frustum.Intersects(Box(new Vector3(0, 0, -101f), 0.4f)));
+    t.ExpectTrue("Frustum: box just inside the far plane survives",
+        frustum.Intersects(Box(new Vector3(0, 0, -99f), 0.4f)));
+}
+
+// ============================================================================
+// Section X — Camera projection ↔ unprojection round-trip (ScreenPointToRay).
+// ============================================================================
+//
+// ScreenPointToRay had zero coverage and is exactly what the GL sunset touched.
+// Project a known world point through the camera's viewProj, perspective-divide
+// to NDC, map NDC → screen pixel, then unproject that pixel back to a ray: the
+// ray must aim from the camera straight through the original point. Also pins
+// the [0,1] depth endpoints — near plane → NDC z 0, far plane → NDC z 1 (GL's
+// [-1,1] would put near at -1).
+{
+    var camera = new Camera3D();           // origin, identity pose, fov π/3, near 0.1, far 100
+    const float W = 1600f, H = 900f;
+    var vp = camera.GetViewProjection(W / H);
+
+    Vector3 ProjectToNdc(Vector3 world)
+    {
+        var clip = Vector4.Transform(new Vector4(world, 1f), vp);
+        return new Vector3(clip.X / clip.W, clip.Y / clip.W, clip.Z / clip.W);
+    }
+
+    var p = new Vector3(2f, 1f, -10f);     // off-axis, in front of the camera
+    var ndc = ProjectToNdc(p);
+    t.ExpectTrue("X round-trip: projected NDC depth within [0,1]", ndc.Z >= 0f && ndc.Z <= 1f);
+
+    var screenX = (ndc.X + 1f) * 0.5f * W;
+    var screenY = (ndc.Y + 1f) * 0.5f * H;
+    var ray = camera.ScreenPointToRay(screenX, screenY, W, H);
+
+    t.ExpectClose("X round-trip: ray direction points back at the world point",
+        new Vector4(ray.Direction, 0f), new Vector4(Vector3.Normalize(p), 0f));
+    t.ExpectTrue("X round-trip: ray origin sits on the near plane, ahead of the camera",
+        ray.Origin.Z < 0f);
+
+    var nearNdc = ProjectToNdc(new Vector3(0f, 0f, -camera.NearPlane));
+    var farNdc = ProjectToNdc(new Vector3(0f, 0f, -camera.FarPlane));
+    t.ExpectClose("X depth: near plane → NDC z 0 (Vulkan [0,1], not GL -1)", nearNdc.Z, 0f);
+    t.ExpectClose("X depth: far plane → NDC z 1", farNdc.Z, 1f);
+}
+
+// ============================================================================
+// Section Y — Screen ↔ NDC ↔ world axis mapping (Y-down, no flip).
+// ============================================================================
+//
+// The exact axis the GL sunset broke: screen uses a top-left origin (Y grows
+// down), which matches Vulkan's Y-down NDC, so the screen→NDC map applies NO Y
+// flip — and the projection's own Y-flip then sends screen-top to world-up.
+// Asserted through ScreenPointToRay direction signs so the whole chain is pinned.
+{
+    var camera = new Camera3D();
+    const float W = 1600f, H = 900f;
+
+    var centre = camera.ScreenPointToRay(W / 2f, H / 2f, W, H);
+    t.ExpectClose("Y centre pixel → ray straight down -Z",
+        new Vector4(centre.Direction, 0f), new Vector4(0f, 0f, -1f, 0f));
+
+    var top = camera.ScreenPointToRay(W / 2f, 0f, W, H);
+    t.ExpectTrue("Y screen top → ray points up (+Y) and forward (-Z)",
+        top.Direction.Y > 0f && top.Direction.Z < 0f);
+    var bottom = camera.ScreenPointToRay(W / 2f, H, W, H);
+    t.ExpectTrue("Y screen bottom → ray points down (-Y)", bottom.Direction.Y < 0f);
+
+    var left = camera.ScreenPointToRay(0f, H / 2f, W, H);
+    t.ExpectTrue("Y screen left → ray points left (-X)", left.Direction.X < 0f);
+    var rightRay = camera.ScreenPointToRay(W, H / 2f, W, H);
+    t.ExpectTrue("Y screen right → ray points right (+X)", rightRay.Direction.X > 0f);
+}
+
+// ============================================================================
+// Section Z — SpriteBatch ortho: screen-corner → NDC-corner mapping.
+// ============================================================================
+//
+// CreateOrthographicOffCenterVulkan(0, w, h, 0, ...) is what SpriteBatch feeds
+// as its view-projection: it must reproduce the ImGui (x*2/w-1, y*2/h-1) screen
+// map — top-left (0,0) → NDC (-1,-1), bottom-right (w,h) → (1,1), centre → (0,0)
+// — with depth in [0,1]. Row-vector: apply via Vector4.Transform.
+{
+    const float w = 800f, h = 600f;
+    var ortho = GraphicsMatrices.CreateOrthographicOffCenterVulkan(0f, w, h, 0f, 0f, 1f);
+    Vector4 Map(float x, float y, float z) => Vector4.Transform(new Vector4(x, y, z, 1f), ortho);
+
+    t.ExpectClose("Z top-left (0,0) → NDC (-1,-1)", Map(0f, 0f, 0f), new Vector4(-1f, -1f, 0f, 1f));
+    t.ExpectClose("Z bottom-right (w,h) → NDC (1,1)", Map(w, h, 0f), new Vector4(1f, 1f, 0f, 1f));
+    t.ExpectClose("Z top-right (w,0) → NDC (1,-1)", Map(w, 0f, 0f), new Vector4(1f, -1f, 0f, 1f));
+    t.ExpectClose("Z centre (w/2,h/2) → NDC origin", Map(w / 2f, h / 2f, 0f), new Vector4(0f, 0f, 0f, 1f));
+    t.ExpectClose("Z far depth (z=1) → NDC z 1 ([0,1] clip)", Map(0f, 0f, 1f).Z, 1f);
+}
+
+// ============================================================================
+// Section AA — CreateOrthographicVulkan (shadow-cascade / spot-light proj).
+// ============================================================================
+//
+// The symmetric Vulkan ortho was duplicated verbatim in two demos (VulkanLit +
+// VulkanSponza cascades) with no test; now promoted to GraphicsMatrices. Pin its
+// invariants: x/y map [-w/2,w/2] → [-1,1] with +Y DOWN (top of slab → -1), depth
+// maps near → 0 / far → 1 ([0,1] clip), and w stays 1 (no perspective divide).
+{
+    var ortho = GraphicsMatrices.CreateOrthographicVulkan(10f, 10f, 0f, 10f);
+    Vector4 Map(float x, float y, float z) => Vector4.Transform(new Vector4(x, y, z, 1f), ortho);
+
+    t.ExpectClose("AA right edge (+x) → NDC +1", Map(5f, 0f, 0f).X, 1f);
+    t.ExpectClose("AA left edge (-x) → NDC -1", Map(-5f, 0f, 0f).X, -1f);
+    t.ExpectClose("AA top (+Y world) → NDC -1 (Y-down flip)", Map(0f, 5f, 0f).Y, -1f);
+    t.ExpectClose("AA bottom (-Y world) → NDC +1", Map(0f, -5f, 0f).Y, 1f);
+    t.ExpectClose("AA near plane (view-z 0) → NDC z 0", Map(0f, 0f, 0f).Z, 0f);
+    t.ExpectClose("AA far plane (view-z -10) → NDC z 1", Map(0f, 0f, -10f).Z, 1f);
+    t.ExpectClose("AA orthographic keeps w = 1 (no perspective divide)", Map(3f, -4f, -5f).W, 1f);
+
+    // Rejects degenerate extents (matches the sibling projection builders).
+    var threwW = false;
+    try { GraphicsMatrices.CreateOrthographicVulkan(0f, 10f, 0f, 10f); }
+    catch (ArgumentOutOfRangeException) { threwW = true; }
+    t.ExpectTrue("AA zero width rejected", threwW);
+    var threwDepth = false;
+    try { GraphicsMatrices.CreateOrthographicVulkan(10f, 10f, 5f, 5f); }
+    catch (ArgumentOutOfRangeException) { threwDepth = true; }
+    t.ExpectTrue("AA far <= near rejected", threwDepth);
+}
+
+// ============================================================================
+// Section AB — TextureFormat.TextureByteCount (diagnostics footprint math).
+// ============================================================================
+//
+// SnapshotResources reports each texture's GPU footprint via this mip-chain
+// sum. Pin the math: the chain halves dims (floored, min 1) per level, BCn
+// rounds each level up to a 4×4 block, and a single mip equals MipByteCount.
+{
+    // Rgba8 4×4: 64 + 16 + 4 = 84 over 3 mips; 64 for one.
+    t.ExpectClose("AB Rgba8 4×4 single mip == 64", TextureFormat.Rgba8.TextureByteCount(4, 4, 1), 64);
+    t.ExpectClose("AB Rgba8 4×4 three mips == 64+16+4", TextureFormat.Rgba8.TextureByteCount(4, 4, 3), 84);
+    t.ExpectClose("AB R8 256×256 single mip == 65536", TextureFormat.R8.TextureByteCount(256, 256, 1), 256 * 256);
+    // Bc7 4×4: every level pads up to one 16-byte block → 16 × 3 = 48.
+    t.ExpectClose("AB Bc7Srgb 4×4 three mips (each pads to a block)",
+        TextureFormat.Bc7Srgb.TextureByteCount(4, 4, 3), 48);
+
+    var threw = false;
+    try { TextureFormat.Rgba8.TextureByteCount(4, 4, 0); } catch (ArgumentOutOfRangeException) { threw = true; }
+    t.ExpectTrue("AB mipCount 0 rejected", threw);
 }
 
 t.PrintSummary();

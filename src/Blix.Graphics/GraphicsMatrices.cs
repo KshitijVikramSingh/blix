@@ -187,6 +187,40 @@ public static class GraphicsMatrices
             0.0f,         0.0f,          -(farPlane + nearPlane) / depth, 1.0f);
     }
 
+    // Symmetric Vulkan-NDC orthographic centred on the origin: x/y map
+    // [-width/2, width/2] × [-height/2, height/2] onto [-1, 1] with +Y DOWN
+    // (top of the world slab → NDC -1, matching CreatePerspectiveVulkan's
+    // Y-flip), and view-space depth maps to [0, 1] (near → 0, far → 1) rather
+    // than GL's [-1, 1]. This is the shadow-cascade / spot-light projection:
+    // pair it with CreateLookAt to build a light's view-projection. Row-vector
+    // form (z-translation in M43); written raw to a UBO and read column-major
+    // by GLSL so `mat * v_col` == `v_row * mat`.
+    public static Matrix4x4 CreateOrthographicVulkan(float width, float height, float nearPlane, float farPlane)
+    {
+        if (width <= 0.0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(width), "Orthographic width must be greater than zero.");
+        }
+
+        if (height <= 0.0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(height), "Orthographic height must be greater than zero.");
+        }
+
+        if (farPlane <= nearPlane)
+        {
+            throw new ArgumentOutOfRangeException(nameof(farPlane), "Far plane must be greater than the near plane.");
+        }
+
+        var fn = farPlane - nearPlane;
+
+        return new Matrix4x4(
+            2.0f / width, 0.0f,           0.0f,                0.0f,
+            0.0f,        -2.0f / height,  0.0f,                0.0f,
+            0.0f,         0.0f,          -1.0f / fn,           0.0f,
+            0.0f,         0.0f,          -nearPlane / fn,      1.0f);
+    }
+
     // Vulkan-NDC perspective: +Y points DOWN in clip space (the projection
     // flips Y so screen Y matches framebuffer Y-down convention) and depth
     // maps to [0, 1] (the Vulkan/D3D convention, not OpenGL's [-1, 1]). Built
