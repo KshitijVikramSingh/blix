@@ -15,7 +15,7 @@ No editor, no scripting, no plugin system, no asset cache, no hot reload. No shi
 
 ## Demos
 
-Four demos ship in `src/`, all on the Vulkan backend. Each is a standalone entry point. They exercise the shader-interface binding model, declarative render graph, and per-draw transient descriptor pool ([`docs/vulkan-friction.md`](docs/vulkan-friction.md) tracks the reshape). The OpenGL backend and its demos were sunset.
+Five demos ship in `src/`, all on the Vulkan backend. Each is a standalone entry point. They exercise the shader-interface binding model, declarative render graph, and per-draw transient descriptor pool ([`docs/vulkan-friction.md`](docs/vulkan-friction.md) tracks the reshape). The OpenGL backend and its four heavy demos were sunset; Pong was ported to the Vulkan `SpriteBatch` and kept as the gameplay demo.
 
 ### Vulkan Lit (active development, headline demo)
 
@@ -59,6 +59,17 @@ tools/run-vulkan-hello.sh
 Original Vulkan validation demo. Spinning depth-tested cube via MoltenVK, swapchain + per-frame sync + VkQueryPool timing infrastructure, debug-line overlay. The narrowest known-good Vulkan call site — useful as the simplest reference when something else breaks.
 
 Setup (one-time): `brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc`. `BLIX_VK_VALIDATE=1` enables Khronos validation layers. `BLIX_DIAG_INTERVAL=<frames>` controls the periodic console digest cadence (default 60; `BLIX_DIAG=off` disables).
+
+### Pong (gameplay demo)
+
+```sh
+tools/run-pong.sh
+```
+
+The engine's gameplay demo and the `SpriteBatch` + `Font` proving ground: two-player Pong with 1/120s fixed-step paddle physics, five-zone quantised deflection, ball speed ramp, squash/stretch, hitstop, screen-shake, a fading ball trail, first-to-11 scoring, and a win flash. Renders entirely through the 2D path — solid rects and bitmap text drawn to the swapchain via `SpriteBatch` (one alpha-blended pipeline, texture at set 0, view-projection via push constant) and `DrawText` over a baked `Font` atlas.
+
+- `W` / `S` — left paddle. `↑` / `↓` — right paddle. `Space` — serve / new match. `R` — reset. `Esc` — quit.
+- Audio is silent for now (the Silk runtime isn't an `IAudioHost` yet); the GL build's CRT post-FX present (offscreen supersample + chromatic aberration + bloom + scanlines) is a deferred follow-up.
 
 ## Cooked asset pipeline
 
