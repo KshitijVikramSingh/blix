@@ -125,6 +125,41 @@ public static class GraphicsMatrices
             -(right + left) / rl,     -(top + bottom) / tb,     -(farPlane + nearPlane) / fn,    1.0f);
     }
 
+    // Vulkan-NDC off-center orthographic for screen-space 2D (SpriteBatch). vs
+    // the GL CreateOrthographicOffCenter: +Y points DOWN in clip space (top of
+    // screen -> NDC -1) and depth maps to [0, 1] instead of [-1, 1]. Called with
+    // (0, width, height, 0, ...) it reproduces the ImGui scale/translate mapping
+    // (x*2/w - 1, y*2/h - 1) that renders right-side-up on this backend.
+    // Row-vector form (translation in last row), written raw to a push constant
+    // / UBO; GLSL reads it column-major so `mat * v_col` == `v_row * mat`.
+    public static Matrix4x4 CreateOrthographicOffCenterVulkan(float left, float right, float bottom, float top, float nearPlane, float farPlane)
+    {
+        if (left == right)
+        {
+            throw new ArgumentException("Orthographic left and right must differ.", nameof(left));
+        }
+
+        if (bottom == top)
+        {
+            throw new ArgumentException("Orthographic bottom and top must differ.", nameof(bottom));
+        }
+
+        if (farPlane <= nearPlane)
+        {
+            throw new ArgumentOutOfRangeException(nameof(farPlane), "Far plane must be greater than the near plane.");
+        }
+
+        var rl = right - left;
+        var bt = bottom - top;   // Y-down: divide by (bottom - top), not (top - bottom)
+        var fn = farPlane - nearPlane;
+
+        return new Matrix4x4(
+            2.0f / rl,                0.0f,                     0.0f,               0.0f,
+            0.0f,                     2.0f / bt,                0.0f,               0.0f,
+            0.0f,                     0.0f,                     1.0f / fn,          0.0f,
+            -(right + left) / rl,     -(top + bottom) / bt,     -nearPlane / fn,    1.0f);
+    }
+
     public static Matrix4x4 CreateOrthographic(float width, float height, float nearPlane, float farPlane)
     {
         if (width <= 0.0f)
