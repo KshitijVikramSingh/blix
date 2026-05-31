@@ -70,11 +70,11 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private PipelineHandle prepassOpaquePipeline;
     private PipelineHandle prepassMaskPipeline;
 
-    // Streamed-load preview: textures upload over frames via the uploader; until
-    // they finish, the geometry renders flat (lit.vert + flat.frag, no material
-    // textures sampled) and shadows/IBL/fog are skipped. The full lit+shadow
-    // loop starts once textureUploader.PendingCount hits 0.
-    private Blix.Render.ResourceUploader textureUploader = null!;
+    // Streamed-load preview: textures upload over frames via the loader's queue;
+    // until they finish, the geometry renders flat (lit.vert + flat.frag, no
+    // material textures sampled) and shadows/IBL/fog are skipped. The full
+    // lit+shadow loop starts once textureLoader.PendingCount hits 0.
+    private GltfTextureLoader textureLoader = null!;
     private ShaderProgramHandle flatProgram;
     private PipelineHandle flatPipeline;
     private bool fullyLoaded; // textures all streamed → full render path
@@ -180,18 +180,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // DebugState.Enabled each frame in Debug() (which runs unconditionally).
     private bool overlayEnabled = true;
 
-    // Default per-material textures used when a glTF material doesn't
-    // supply the corresponding channel:
-    //   fallbackAlbedo   1×1 white sRGB           — falls back to BaseColorFactor
-    //   flatNormal       1×1 (128,128,255) linear — tangent-space "up"
-    //   blackEmissive    1×1 (0,0,0) sRGB         — no glow
-    //   defaultMr        1×1 (255,255,255) linear — (ao=1, roughnessFactor*1, metallicFactor*1)
-    //   defaultAo        1×1 (255,_,_) linear      — no occlusion
-    private TextureHandle fallbackAlbedo;
-    private TextureHandle flatNormal;
-    private TextureHandle blackEmissive;
-    private TextureHandle defaultMr;
-    private TextureHandle defaultAo;
 
     // IBL textures (procedural sky bake, CPU-side, generated once at load).
     //   envCube           prefiltered specular stand-in (mip chain at increasing roughness)
@@ -211,18 +199,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // don't relight the IBL). Matches the runtime sun for consistency.
     private static readonly Vector3 SkyBakeSunDirection =
         Vector3.Normalize(new Vector3(0.35f, -0.85f, 0.25f));
-
-    // Per-source-texture upload caches, one per material channel. The
-    // static importer dedupes by glTF image index, so two materials
-    // referencing the same image share one GltfTexture instance — we
-    // mirror that on the GPU side so each unique PNG uploads exactly
-    // once. Across Sponza Main's 405 primitives the BaseColor channel
-    // collapses to ~25 uniques; normal + MR are smaller; emissive is empty.
-    private readonly Dictionary<GltfTexture, TextureHandle> albedoCache = new();
-    private readonly Dictionary<GltfTexture, TextureHandle> normalCache = new();
-    private readonly Dictionary<GltfTexture, TextureHandle> emissiveCache = new();
-    private readonly Dictionary<GltfTexture, TextureHandle> mrCache = new();
-    private readonly Dictionary<GltfTexture, TextureHandle> aoCache = new();
 
     // Per-primitive draw payload. PipelineHandle is picked once at load
     // time from the material's AlphaMode + DoubleSided combination.
@@ -333,9 +309,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private readonly List<Drawable> opaqueDrawables = new();
     private readonly List<Drawable> blendDrawables = new();
     private bool sceneLoaded;
-    // Background pack parse (started in OnLoad, drained on the main thread by
-    // TryFinishLoad in OnUpdate). Null once a fresh scene hasn't been kicked off.
-    private System.Threading.Tasks.Task<List<(string Name, GltfModel Model)>>? packParseTask;
+    // Background pack parse + budgeted main-thread drain (engine primitive):
+    // started in OnLoad, drained by TryFinishLoad in OnUpdate. Produces the flat
+    // primitive list off-thread; staging runs on the render thread.
+    private readonly Blix.Render.AsyncLoadQueue<GltfPrimitive> meshLoad = new();
 
     // Per-frame-reused, content-constant buffers built once at load (avoids
     // re-allocating them every frame). identityPush: the per-draw model push
@@ -415,7 +392,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     {
         this.host = host;
         vk = (VulkanGraphicsDevice)graphicsDevice;
-        textureUploader = new Blix.Render.ResourceUploader(vk);
+        textureLoader = new GltfTextureLoader(vk);
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         renderHeightPx = host.LogicalSize.Height;
 
@@ -476,32 +453,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             host.RequestClose();
             return;
         }
-
-        // --- Default per-material textures ------------------------------
-        // 1×1 stand-ins routed to set-2 bindings when a material doesn't
-        // supply the corresponding channel. The lit fragment shader always
-        // samples all three; defaults keep the math well-defined without
-        // shader branching.
-        fallbackAlbedo = CreateFallbackAlbedoTexture(vk);
-        flatNormal = vk.CreateTexture2D(
-            new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearRepeat),
-            new byte[] { 128, 128, 255, 255 }, "sponza.default.normal");
-        blackEmissive = vk.CreateTexture2D(
-            new TextureDescription(1, 1, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
-            new byte[] { 0, 0, 0, 255 }, "sponza.default.emissive");
-        // Default MR (occlusion-roughness-metallic packed). All-ones so
-        // materials without an MR texture pass the per-material factors
-        // through unchanged: roughness = roughnessFactor × 1, metallic =
-        // metallicFactor × 1, AO = 1 (no occlusion).
-        defaultMr = vk.CreateTexture2D(
-            new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearRepeat),
-            new byte[] { 255, 255, 255, 255 }, "sponza.default.mr");
-        // Default AO = 1.0 (full unobstructed light). Used for materials
-        // without an OcclusionTexture; Sponza Modern packs MR into a single
-        // PNG but ships AO as a separate channel-only texture.
-        defaultAo = vk.CreateTexture2D(
-            new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearRepeat),
-            new byte[] { 255, 255, 255, 255 }, "sponza.default.ao");
 
         // --- IBL: cooked .blixprobe (real GGX prefilter) or procedural ------
         // Prefer a cooked probe baked from the HDR sky (real GGX importance-
@@ -870,7 +821,16 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         AddOptionalPackPath(packsToParse, assetsRoot, "curtains", "addons/curtains");
         AddOptionalPackPath(packsToParse, assetsRoot, "ivy",      "addons/ivy");
         AddOptionalPackPath(packsToParse, assetsRoot, "trees",    "addons/trees");
-        packParseTask = System.Threading.Tasks.Task.Run(() => ParsePacksParallel(packsToParse));
+        meshLoad.Start(() =>
+        {
+            var prims = new List<GltfPrimitive>();
+            foreach (var (name, model) in ParsePacksParallel(packsToParse))
+            {
+                prims.AddRange(model.Primitives);
+                Console.WriteLine($"[VulkanSponza] {name} pack: {model.Primitives.Length} primitives.");
+            }
+            return prims;
+        });
 
         UpdateCamera();
     }
@@ -909,52 +869,34 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         return parsed.Where(r => r.HasValue).Select(r => r!.Value).ToList();
     }
 
-    // Main thread (from OnUpdate): drain the background-parsed packs into GPU
-    // resources WITHOUT freezing. The bulk of the cost is per-material texture
-    // read+upload (~7s if done at once), so we time-slice it: enqueue every
-    // primitive once parsing finishes, then stage only a few-ms budget of them
-    // per frame. The window renders its loading clear (responsive) between
-    // chunks; once the queue drains we consolidate the shared buffers and flip
-    // sceneLoaded. (Backgrounding the texture reads or placeholder-streaming
-    // would make the scene *appear* sooner — see the PR notes — but this fully
-    // removes the freeze with no extra plumbing.)
+    // Main thread (from OnUpdate): drain the background-parsed primitives into
+    // GPU resources WITHOUT freezing. The bulk of the cost is per-material
+    // texture read+upload (~7s if done at once), so the AsyncLoadQueue time-slices
+    // it: it stages only a few-ms budget of primitives per frame. The window
+    // renders its loading clear (responsive) between chunks; once the queue drains
+    // we consolidate the shared buffers and flip sceneLoaded. (Backgrounding the
+    // texture reads or placeholder-streaming would make the scene *appear* sooner
+    // — see the PR notes — but this fully removes the freeze with no extra
+    // plumbing.)
     private const double LoadBudgetMs = 8.0;
-    private readonly Queue<GltfPrimitive> buildQueue = new();
-    private bool buildStarted;
 
     private void TryFinishLoad()
     {
-        if (sceneLoaded || packParseTask is not { IsCompleted: true }) return;
-        if (packParseTask.IsFaulted)
+        if (sceneLoaded) return;
+        if (meshLoad.IsFaulted)
         {
-            Console.WriteLine($"[VulkanSponza] load failed: {packParseTask.Exception?.GetBaseException().Message}");
+            Console.WriteLine($"[VulkanSponza] load failed: {meshLoad.Fault?.Message}");
             sceneLoaded = true; // give up → render the empty clear
             return;
         }
 
-        if (!buildStarted)
-        {
-            foreach (var (name, model) in packParseTask.Result)
-            {
-                foreach (var prim in model.Primitives) buildQueue.Enqueue(prim);
-                Console.WriteLine($"[VulkanSponza] {name} pack: {model.Primitives.Length} primitives.");
-            }
-            buildStarted = true;
-        }
-
-        // Stage prims until the per-frame budget is spent (a new material's
-        // texture read+upload is ~tens of ms, so a few per frame).
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        while (buildQueue.Count > 0 && sw.Elapsed.TotalMilliseconds < LoadBudgetMs)
-        {
-            StageDrawable(buildQueue.Dequeue());
-        }
-        if (buildQueue.Count > 0) return; // more next frame
+        // Stage primitives within the per-frame budget; false while still parsing
+        // off-thread or with more to stage. True once every primitive is staged.
+        if (!meshLoad.Drain(LoadBudgetMs, StageDrawable)) return;
 
         // Everything staged → build the shared buffers + finish.
         ConsolidateBuffers();
         RegisterSelectables();
-        Console.WriteLine($"[VulkanSponza] textures cached: {albedoCache.Count} albedo, {normalCache.Count} normal, {mrCache.Count} MR, {aoCache.Count} AO, {emissiveCache.Count} emissive.");
         Console.WriteLine($"[VulkanSponza] total draws: {opaqueDrawables.Count} opaque/mask, {blendDrawables.Count} blend.");
         LogPrimitiveSizeHistogram();
         UpdateCamera();
@@ -1085,75 +1027,46 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         }
     }
 
-    // Stage 0: concatenate every staged primitive into one shared vertex buffer
-    // + one shared index buffer per width (u16/u32), and turn each staging into
-    // a Drawable that draws a sub-range (BaseVertex + per-LOD firstIndex). Index
-    // values stay primitive-local; vkCmdDrawIndexed's vertexOffset (= BaseVertex)
-    // rebases them into the shared VB, so u16 indices keep working even though
-    // the shared VB spans millions of vertices. Opaque first, then blend, so the
-    // two draw buckets stay contiguous.
+    // Bundle every staged primitive into the shared buffers, then compose the
+    // draw lists/groups over the result. The engine's MeshBundler does the
+    // geometry packing (one shared VB + per-width u16/u32 IBs, each primitive a
+    // BaseVertex + per-LOD firstIndex sub-range — indices stay primitive-local,
+    // vkCmdDrawIndexed's vertexOffset rebases them); the game keeps the
+    // material/pipeline binding, the opaque/blend split, and the draw groups.
+    // Inputs are pre-sorted by (pipeline, material, index-width) and opaque-then-
+    // blend, so each (pipeline, material, width) run is contiguous — one indirect
+    // call per group, the two buckets contiguous.
     private void ConsolidateBuffers()
     {
         if (staging.Count == 0) return;
 
-        long vertexByteTotal = 0; var u16Total = 0; var u32Total = 0;
-        foreach (var s in staging)
-        {
-            vertexByteTotal += s.VertexBytes.Length;
-            var isU32 = s.Lods[0].Indices32 is not null;
-            foreach (var lod in s.Lods)
-                if (isU32) u32Total += lod.Indices32!.Length; else u16Total += lod.Indices16!.Length;
-        }
-
-        var vbytes = new byte[vertexByteTotal];
-        var u16 = new ushort[u16Total];
-        var u32 = new uint[u32Total];
-        var vByteCursor = 0; var vCursor = 0; var i16 = 0; var i32c = 0;
-
-        void Emit(DrawableStaging s, List<Drawable> dest)
-        {
-            var baseVertex = vCursor;
-            Buffer.BlockCopy(s.VertexBytes, 0, vbytes, vByteCursor, s.VertexBytes.Length);
-            vByteCursor += s.VertexBytes.Length;
-            vCursor += s.VertexCount;
-
-            var isU32 = s.Lods[0].Indices32 is not null;
-            var firstIndex = new int[s.Lods.Count];
-            var counts = new int[s.Lods.Count];
-            var errors = new float[s.Lods.Count];
-            for (var l = 0; l < s.Lods.Count; l++)
-            {
-                var lod = s.Lods[l];
-                errors[l] = lod.Error;
-                if (isU32)
-                {
-                    firstIndex[l] = i32c;
-                    lod.Indices32!.CopyTo(u32, i32c);
-                    i32c += lod.Indices32.Length;
-                    counts[l] = lod.Indices32.Length;
-                }
-                else
-                {
-                    firstIndex[l] = i16;
-                    lod.Indices16!.CopyTo(u16, i16);
-                    i16 += lod.Indices16.Length;
-                    counts[l] = lod.Indices16.Length;
-                }
-            }
-            dest.Add(new Drawable(
-                isU32, baseVertex, firstIndex, counts, errors,
-                s.Material, s.Pipeline, s.Bounds, s.Albedo, s.AlphaCutoff, s.BaseColorAlpha,
-                s.ShadowAlbedoBinding, s.Name));
-        }
-
-        // Both buckets emitted grouped by (pipeline, material, index-width) → each
-        // group is a contiguous run, drawable by one indirect call. OrderBy is
-        // stable, so prims keep their relative order within a group.
         static bool StagingIsU32(DrawableStaging s) => s.Lods[0].Indices32 is not null;
         static IEnumerable<DrawableStaging> Grouped(IEnumerable<DrawableStaging> src) => src
             .OrderBy(s => s.Pipeline.Id).ThenBy(s => s.Material.Id).ThenBy(s => StagingIsU32(s) ? 1 : 0);
-        foreach (var s in Grouped(staging.Where(s => !s.IsBlend))) Emit(s, opaqueDrawables);
-        foreach (var s in Grouped(staging.Where(s => s.IsBlend))) Emit(s, blendDrawables);
+        // OrderBy is stable, so prims keep their relative order within a group.
+        var ordered = Grouped(staging.Where(s => !s.IsBlend))
+            .Concat(Grouped(staging.Where(s => s.IsBlend)))
+            .ToList();
+
+        var bundle = Blix.Render.MeshBundler.Bundle(
+            ordered.Select(s => new Blix.Render.MeshGeometryInput(
+                s.VertexBytes, s.VertexCount, s.Lods, s.Bounds)).ToList(),
+            sharedLayout, vk, "sponza.shared");
+        sharedVb = bundle.Vertices;
+        sharedIbU16 = bundle.Indices16;
+        sharedIbU32 = bundle.Indices32;
+
+        // Attach material/pipeline/etc. to each bundled geometry sub-range; split
+        // back into the opaque + blend buckets (bundle order == ordered order).
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            var s = ordered[i];
+            var bm = bundle.Meshes[i];
+            (s.IsBlend ? blendDrawables : opaqueDrawables).Add(new Drawable(
+                bm.IndicesAreU32, bm.BaseVertex, bm.LodFirstIndex, bm.LodIndexCounts, bm.LodErrors,
+                s.Material, s.Pipeline, bm.Bounds, s.Albedo, s.AlphaCutoff, s.BaseColorAlpha,
+                s.ShadowAlbedoBinding, s.Name));
+        }
 
         // Contiguous (pipeline, material, width) groups over the sorted lists. A
         // material is uniformly mask-or-not, so the group is too (lets the depth
@@ -1176,11 +1089,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         BuildGroups(opaqueDrawables, opaqueGroups);
         BuildGroups(blendDrawables, blendGroups);
 
-        sharedVb = vk.CreateVertexBuffer(new VertexBufferData(
-            new VertexBufferDescription(sharedLayout, vCursor, GraphicsBufferUsage.Static), vbytes),
-            "sponza.shared.vb");
-        if (u16Total > 0) sharedIbU16 = vk.CreateIndexBuffer(u16, name: "sponza.shared.ib16");
-        if (u32Total > 0) sharedIbU32 = vk.CreateIndexBuffer(u32, name: "sponza.shared.ib32");
         // One indirect command per drawable, refilled each frame (camera opaque +
         // one per shadow cascade + blend). indirectScratch is sized for the
         // largest list (opaque) and reused for the smaller fills.
@@ -1191,7 +1099,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             blendIndirect = vk.CreateIndirectBuffer(blendDrawables.Count, "sponza.blend.indirect");
         indirectScratch = new byte[Math.Max(opaqueDrawables.Count, blendDrawables.Count) * VulkanGraphicsDevice.IndirectCommandStride];
         staging.Clear();
-        Console.WriteLine($"[VulkanSponza] consolidated geometry: 1 VB ({vertexByteTotal / 1024.0 / 1024.0:0.0} MB, {vCursor} verts) + {(u16Total > 0 ? 1 : 0)} u16 IB ({u16Total} idx) + {(u32Total > 0 ? 1 : 0)} u32 IB ({u32Total} idx); {opaqueGroups.Count} opaque indirect groups over {opaqueDrawables.Count} draws.");
+        Console.WriteLine($"[VulkanSponza] bundled geometry: 1 VB ({bundle.VertexCount} verts); {opaqueDrawables.Count} opaque + {blendDrawables.Count} blend draws; {opaqueGroups.Count} opaque indirect groups.");
     }
 
     // Index buffer a drawable's LOD indices live in (chosen at consolidation).
@@ -1269,11 +1177,11 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private MaterialHandle BuildMaterial(
         GltfMaterial? gm, out TextureHandle albedo, out float alphaCutoff, out float baseColorAlpha)
     {
-        albedo = GetOrUploadAlbedo(gm);
-        var normal = GetOrUploadNormal(gm);
-        var emissive = GetOrUploadEmissive(gm);
-        var mr = GetOrUploadMr(gm);
-        var ao = GetOrUploadAo(gm);
+        // Engine resolves the five channel textures (read/decode/upload/dedup/
+        // stream + glTF-default fallbacks + per-slot sRGB policy); the game keeps
+        // the material UBO write + descriptor binding below.
+        var tex = textureLoader.Load(gm);
+        albedo = tex.Albedo;
 
         var baseColorFactor = gm?.BaseColorFactor ?? Vector4.One;
         var emissiveFactor = gm is null ? Vector3.Zero : gm.EmissiveFactor;
@@ -1300,11 +1208,11 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 new Vector4(alphaCutoff, normalScale, roughness, metallic))
             .SetUniform(binding: 0, "uMaterialParams2",
                 new Vector4(transmission, 0f, 0f, 0f))
-            .SetTexture(binding: 1, albedo)
-            .SetTexture(binding: 2, normal)
-            .SetTexture(binding: 3, emissive)
-            .SetTexture(binding: 4, mr)
-            .SetTexture(binding: 5, ao)
+            .SetTexture(binding: 1, tex.Albedo)
+            .SetTexture(binding: 2, tex.Normal)
+            .SetTexture(binding: 3, tex.Emissive)
+            .SetTexture(binding: 4, tex.MetallicRoughness)
+            .SetTexture(binding: 5, tex.Occlusion)
             .Handle;
     }
 
@@ -1317,105 +1225,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             _                            => opaqueSolidPipeline,
         };
 
-    // Upload or look up the GPU handle for a glTF material's BaseColorTexture.
-    // glTF BaseColor is sRGB-encoded per spec, so we use Rgba8Srgb so the
-    // sampler hardware decodes to linear at fetch time. LinearRepeat sampler
-    // matches the authored intent of tiled stone/brick textures.
-    private TextureHandle GetOrUploadAlbedo(GltfMaterial? material) =>
-        UploadOrFallback(material?.BaseColorTexture, albedoCache, fallbackAlbedo,
-            TextureFormat.Rgba8Srgb, "albedo");
-
-    private TextureHandle GetOrUploadNormal(GltfMaterial? material) =>
-        // Normal maps are LINEAR data (encoded direction vectors), NOT sRGB.
-        // Upload as Rgba8 so the sampler hardware doesn't run gamma decode
-        // on the (x, y, z) components.
-        UploadOrFallback(material?.NormalTexture, normalCache, flatNormal,
-            TextureFormat.Rgba8, "normal");
-
-    private TextureHandle GetOrUploadEmissive(GltfMaterial? material) =>
-        // Emissive textures are sRGB-encoded per glTF spec.
-        UploadOrFallback(material?.EmissiveTexture, emissiveCache, blackEmissive,
-            TextureFormat.Rgba8Srgb, "emissive");
-
-    private TextureHandle GetOrUploadMr(GltfMaterial? material) =>
-        // Metallic-roughness — LINEAR encoded. G = roughness, B = metallic.
-        // R may carry AO when the asset packs ORM into one texture; in
-        // Sponza Modern's case R is empty (zero) and AO ships separately
-        // via material.OcclusionTexture. The shader reads ao from the AO
-        // sampler (binding 5), not from MR.R, so this empty R is harmless.
-        UploadOrFallback(material?.MetallicRoughnessTexture, mrCache, defaultMr,
-            TextureFormat.Rgba8, "mr");
-
-    private TextureHandle GetOrUploadAo(GltfMaterial? material) =>
-        // glTF OcclusionTexture: R channel = ambient occlusion (linear).
-        // Default-1.0 texture means missing-AO materials get no extra
-        // attenuation.
-        UploadOrFallback(material?.OcclusionTexture, aoCache, defaultAo,
-            TextureFormat.Rgba8, "ao");
-
-    private TextureHandle UploadOrFallback(
-        GltfTexture? tex,
-        Dictionary<GltfTexture, TextureHandle> cache,
-        TextureHandle fallback,
-        TextureFormat uploadFormat,
-        string channelTag)
-    {
-        if (tex is null) return fallback;
-        if (cache.TryGetValue(tex, out var cached)) return cached;
-
-        var label = $"sponza.{channelTag}.{tex.Name}";
-        TextureHandle handle;
-        if (tex.LazyHandle is { } lazy)
-        {
-            // Cooked .blixtex: pre-baked BC (or Rgba8) mip chain on disk. Pull
-            // each mip and upload as a mipped texture. tex.Format already
-            // encodes the sRGB choice (BC7Srgb albedo vs BC7Unorm MR, BC5
-            // normal), so use it directly rather than the source uploadFormat.
-            // Streamed: allocate the mip chain now (so materials bind a real,
-            // stable handle immediately) and queue the per-mip uploads to run
-            // budgeted over the next frames. The geometry renders flat until
-            // every texture finishes (the chain is undefined until uploaded), so
-            // these handles aren't sampled by the lit pass before they're ready.
-            handle = vk.AllocateTexture2DMips(
-                new TextureDescription(tex.Width, tex.Height, tex.Format, SamplerDescription.LinearRepeat),
-                tex.MipCount, label);
-            // One file open per texture (not per mip) — critical when the
-            // pack set lives on an external SSD, where per-open latency would
-            // otherwise dominate the streamed load. See CreateBufferedMipReader.
-            textureUploader.EnqueueInto(
-                handle, tex.Format, tex.Width, tex.Height, tex.MipCount,
-                BlixTexReader.CreateBufferedMipReader(lazy));
-        }
-        else if (tex.MipBytes is { Count: > 0 } mips)
-        {
-            // Eager path: source-PNG decode (single Rgba8 mip — CreateTexture2D
-            // blit-generates the chain) or an eager .blixtex read.
-            handle = tex.MipCount > 1
-                ? vk.CreateTexture2DMipped(
-                    new TextureDescription(tex.Width, tex.Height, tex.Format, SamplerDescription.LinearRepeat), mips, label)
-                : vk.CreateTexture2D(
-                    new TextureDescription(tex.Width, tex.Height, uploadFormat, SamplerDescription.LinearRepeat), mips[0], label);
-        }
-        else
-        {
-            cache[tex] = fallback;
-            return fallback;
-        }
-        cache[tex] = handle;
-        return handle;
-    }
-
-    private static TextureHandle CreateFallbackAlbedoTexture(VulkanGraphicsDevice vk)
-    {
-        // 1×1 white. Untextured materials (glass / light_bulb / lamp_glass_01
-        // in Sponza, ~76 primitives) carry their colour in BaseColorFactor;
-        // the shader multiplies sampled albedo × baseColorFactor, so white
-        // here means the factor is the colour.
-        return vk.CreateTexture2D(
-            new TextureDescription(1, 1, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
-            new byte[] { 255, 255, 255, 255 }, "sponza.default.albedo");
-    }
-
     public void OnUpdate(Time time)
     {
         // Promote the background-parsed packs to GPU resources on the main thread
@@ -1426,8 +1235,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // lit+shadow loop takes over (fullyLoaded).
         if (sceneLoaded && !fullyLoaded)
         {
-            textureUploader.Drain(budgetMillis: 6.0);
-            if (textureUploader.PendingCount == 0) fullyLoaded = true;
+            textureLoader.Drain(budgetMillis: 6.0);
+            if (textureLoader.PendingCount == 0) fullyLoaded = true;
         }
 
         var dt = (float)time.Delta;
