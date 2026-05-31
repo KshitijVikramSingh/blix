@@ -1,7 +1,10 @@
 using System.Numerics;
+using Blix.Assets;
 using Blix.Diagnostics;
+using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
+using Blix.Render;
 // Silk.NET.Vulkan types are used by Section N (BarrierOp value equality).
 // Aliased rather than globally imported to avoid ambiguity with
 // Blix.Graphics.Vulkan.PushConstantRange and Blix.Graphics.PrimitiveTopology.
@@ -1404,6 +1407,56 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectClose("S.4 default B reads index 1", mode?.Value ?? -1, 1f);
     if (mode is not null) mode.Value = 2f;
     t.ExpectTrue("S.4 enum set wrote C", fixture.Mode == TuneFixtureMode.C);
+}
+
+// ============================================================================
+// Section T — MeshBundler.Pack (Blix.Render): geometry bundling.
+// ============================================================================
+//
+// Packs N primitives into one shared vertex buffer + per-width index buffers,
+// order-preserving, indices kept primitive-local. The CPU surface is pure
+// (no device), so we assert the byte/offset math directly.
+{
+    // A: 2 verts, u16 [0,1,2]. B: 3 verts, two LODs (u16). C: 4 verts, u32.
+    var a = new MeshGeometryInput(new byte[8], 2,
+        new[] { new MeshLod(new ushort[] { 0, 1, 2 }, null) }, default);
+    var b = new MeshGeometryInput(new byte[12], 3,
+        new[]
+        {
+            new MeshLod(new ushort[] { 0, 1, 2, 1, 2, 0 }, null),
+            new MeshLod(new ushort[] { 0, 1, 2 }, null, 0.5f),
+        }, default);
+    var c = new MeshGeometryInput(new byte[16], 4,
+        new[] { new MeshLod(null, new uint[] { 0, 1, 2, 3 }) }, default);
+    var packed = MeshBundler.Pack(new[] { a, b, c });
+
+    // T.0 — buffers concatenated; widths split.
+    t.ExpectClose("T.0 vertex bytes concatenated (8+12+16)", packed.VertexBytes.Length, 36);
+    t.ExpectClose("T.0 vertex count summed (2+3+4)", packed.VertexCount, 9);
+    t.ExpectClose("T.0 u16 indices (3+6+3)", packed.Indices16.Length, 12);
+    t.ExpectClose("T.0 u32 indices (4)", packed.Indices32.Length, 4);
+    t.ExpectClose("T.0 three bundled meshes", packed.Meshes.Count, 3);
+
+    // T.1 — BaseVertex accumulates in input order.
+    t.ExpectClose("T.1 A BaseVertex 0", packed.Meshes[0].BaseVertex, 0);
+    t.ExpectClose("T.1 B BaseVertex 2", packed.Meshes[1].BaseVertex, 2);
+    t.ExpectClose("T.1 C BaseVertex 5", packed.Meshes[2].BaseVertex, 5);
+
+    // T.2 — per-LOD firstIndex/counts into the width buffer; B's two LODs.
+    t.ExpectClose("T.2 A LOD0 firstIndex 0", packed.Meshes[0].LodFirstIndex[0], 0);
+    t.ExpectClose("T.2 B LOD0 firstIndex 3", packed.Meshes[1].LodFirstIndex[0], 3);
+    t.ExpectClose("T.2 B LOD0 count 6", packed.Meshes[1].LodIndexCounts[0], 6);
+    t.ExpectClose("T.2 B LOD1 firstIndex 9", packed.Meshes[1].LodFirstIndex[1], 9);
+    t.ExpectClose("T.2 B LOD1 error 0.5", packed.Meshes[1].LodErrors[1], 0.5f);
+
+    // T.3 — u16/u32 split: C indexes the u32 buffer (firstIndex 0 there).
+    t.ExpectTrue("T.3 A is u16", !packed.Meshes[0].IndicesAreU32);
+    t.ExpectTrue("T.3 C is u32", packed.Meshes[2].IndicesAreU32);
+    t.ExpectClose("T.3 C LOD0 firstIndex 0 (u32 buffer)", packed.Meshes[2].LodFirstIndex[0], 0);
+
+    // T.4 — indices stay primitive-local (NOT rebased by BaseVertex): B's LOD0
+    // at u16[3] is still 0, not 2.
+    t.ExpectClose("T.4 B's first index stays local (0)", packed.Indices16[3], 0);
 }
 
 t.PrintSummary();
