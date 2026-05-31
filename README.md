@@ -66,10 +66,10 @@ Setup (one-time): `brew install molten-vk vulkan-loader vulkan-headers vulkan-to
 tools/run-pong.sh
 ```
 
-The engine's gameplay demo and the `SpriteBatch` + `Font` proving ground: two-player Pong with 1/120s fixed-step paddle physics, five-zone quantised deflection, ball speed ramp, squash/stretch, hitstop, screen-shake, a fading ball trail, first-to-11 scoring, and a win flash. Renders entirely through the 2D path — solid rects and bitmap text drawn to the swapchain via `SpriteBatch` (one alpha-blended pipeline, texture at set 0, view-projection via push constant) and `DrawText` over a baked `Font` atlas.
+The engine's gameplay demo and the `SpriteBatch` + `Font` proving ground: two-player Pong with 1/120s fixed-step paddle physics, five-zone quantised deflection, ball speed ramp, squash/stretch, hitstop, screen-shake, a fading ball trail, first-to-11 scoring, and a win flash. Solid rects and bitmap text are drawn via `SpriteBatch` (one alpha-blended pipeline, texture at set 0, view-projection via push constant) and `DrawText` over a baked `Font` atlas into a 2×-supersampled offscreen (a `RenderGraph` pass), then a fullscreen CRT post-FX present grades it onto the swapchain — bezel vignette, luminance-gated chromatic aberration, dual-radius bloom, scanlines, and a win-flash tint. Square-wave SFX play through the OpenAL device the Silk runtime now provides.
 
 - `W` / `S` — left paddle. `↑` / `↓` — right paddle. `Space` — serve / new match. `R` — reset. `Esc` — quit.
-- Audio is silent for now (the Silk runtime isn't an `IAudioHost` yet); the GL build's CRT post-FX present (offscreen supersample + chromatic aberration + bloom + scanlines) is a deferred follow-up.
+- macOS audio needs OpenAL Soft (`brew install openal-soft`); without it the beeps no-op but the game runs.
 
 ## Cooked asset pipeline
 
