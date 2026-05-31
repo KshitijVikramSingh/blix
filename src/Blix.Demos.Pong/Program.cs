@@ -131,6 +131,7 @@ internal sealed class PongGame : Game, IInputHandler
             new FixedGraphSize(OffscreenWidth, OffscreenHeight));
         spritePass = graph.GraphicsPass("pong.sprites")
             .Target(sceneColor, LoadOp.Clear, StoreOp.Store)
+            .Shader(SpriteBatch.Interface)
             .Handle;
         graph.Compile();
 

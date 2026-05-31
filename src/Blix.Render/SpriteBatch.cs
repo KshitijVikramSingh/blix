@@ -23,6 +23,18 @@ public sealed class SpriteBatch : IDisposable
     private const int MaxVertexCount = MaxSprites * 4;
     private const int MaxIndexCount = MaxSprites * 6;
 
+    // The shader interface SpriteBatch's pipeline uses: one combined image
+    // sampler at set 0 / binding 0 + a 64-byte vertex push constant (the
+    // view-projection). Exposed so a RenderGraph GraphicsPass that SpriteBatch
+    // draws into can declare it via .Shader(SpriteBatch.Interface) — the graph
+    // validator requires every graphics pass to declare its shader interfaces.
+    public static ShaderInterface Interface { get; } = new(
+        Slots: new[]
+        {
+            new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+        },
+        PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+
     private readonly VulkanGraphicsDevice device;
     private readonly VertexBufferHandle vertexBuffer;
     private readonly IndexBufferHandle indexBuffer;
@@ -70,13 +82,7 @@ public sealed class SpriteBatch : IDisposable
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         var vertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "sprite.vert.spv"));
         var fragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "sprite.frag.spv"));
-        var spriteInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
-        shader = device.CreateShaderProgramFromSpv(vertSpv, fragSpv, spriteInterface, "sprite");
+        shader = device.CreateShaderProgramFromSpv(vertSpv, fragSpv, Interface, "sprite");
 
         pipeline = device.CreatePipeline(
             new PipelineDescription(
