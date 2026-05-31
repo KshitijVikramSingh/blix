@@ -1,3 +1,4 @@
+using Blix.Graphics;
 using Blix.Render;
 
 namespace Blix;
@@ -12,7 +13,7 @@ public sealed class PhysicsGameObject : GameObject, IFixedUpdateable
 {
     public PhysicsHost3D Physics { get; }
 
-    public PhysicsGameObject(string name, Mesh mesh, Material material, Transform3D? transform = null)
+    public PhysicsGameObject(string name, Mesh mesh, MaterialHandle material, Transform3D? transform = null)
         : base(name, mesh, material, transform)
     {
         Physics = new PhysicsHost3D { Target = Transform };

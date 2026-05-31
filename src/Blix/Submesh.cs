@@ -1,3 +1,4 @@
+using Blix.Graphics;
 using Blix.Render;
 
 namespace Blix;
@@ -10,4 +11,6 @@ namespace Blix;
 // shape. SkinnedGameObject grows a Submeshes[] for the multi-primitive case (one
 // character split into body/hair/eyes/clothing primitives, each with its own
 // material).
-public readonly record struct Submesh(Mesh Mesh, Material Material);
+//
+// Material is a backend-resolved MaterialHandle, not a name-keyed material bag.
+public readonly record struct Submesh(Mesh Mesh, MaterialHandle Material);

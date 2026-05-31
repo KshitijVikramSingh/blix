@@ -1,3 +1,4 @@
+using Blix.Graphics;
 using Blix.Render;
 
 namespace Blix;
@@ -13,7 +14,7 @@ public sealed class AnimatedGameObject : GameObject, IUpdateable, IAnimated
 {
     private readonly AnimationHost host = new();
 
-    public AnimatedGameObject(string name, Mesh mesh, Material material, Transform3D? transform = null)
+    public AnimatedGameObject(string name, Mesh mesh, MaterialHandle material, Transform3D? transform = null)
         : base(name, mesh, material, transform)
     {
     }
