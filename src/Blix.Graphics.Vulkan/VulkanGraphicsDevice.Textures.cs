@@ -649,6 +649,23 @@ public sealed partial class VulkanGraphicsDevice
 
     internal VkTextureEntry GetTexture(TextureHandle h) => textureTable[h.Id];
 
+    // Pixel dimensions of a registered texture. Used by SpriteBatch to map a
+    // pixel-space source rect to UVs without the full SnapshotResources walk
+    // (which doesn't surface texture entries yet). Returns false for unknown
+    // or destroyed handles.
+    public bool TryGetTextureSize(TextureHandle handle, out int width, out int height)
+    {
+        if (textureTable.TryGetValue(handle.Id, out var entry))
+        {
+            width = entry.Width;
+            height = entry.Height;
+            return true;
+        }
+        width = 0;
+        height = 0;
+        return false;
+    }
+
     // Register an externally-owned VkImage as a sampleable entry. Caller
     // retains image/memory/view lifetime — DestroyTexture only removes the
     // entry from the table, it does NOT destroy the underlying objects.

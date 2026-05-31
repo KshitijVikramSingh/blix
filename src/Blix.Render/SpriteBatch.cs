@@ -310,10 +310,11 @@ public sealed class SpriteBatch : IDisposable
             return cached;
         }
 
-        var snapshot = device.SnapshotResources();
-        var entry = snapshot.FindTexture(handle)
-            ?? throw new InvalidOperationException($"Texture handle {handle.Id} is not registered in the resource registry.");
-        var dims = (entry.Width, entry.Height);
+        if (!device.TryGetTextureSize(handle, out var w, out var h))
+        {
+            throw new InvalidOperationException($"Texture handle {handle.Id} is not registered with the graphics device.");
+        }
+        var dims = (w, h);
         textureDimensionsCache[handle.Id] = dims;
         return dims;
     }
