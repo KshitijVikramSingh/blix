@@ -74,29 +74,49 @@
                     "offset" : 320
                 },
                 {
-                    "name" : "uShadowParams",
+                    "name" : "uCascadeBias",
                     "type" : "vec4",
                     "offset" : 336
                 },
                 {
-                    "name" : "uCascadeBias",
+                    "name" : "uFog",
                     "type" : "vec4",
                     "offset" : 352
                 },
                 {
-                    "name" : "uShaderParams",
-                    "type" : "vec4",
+                    "name" : "uMetallicThreshold",
+                    "type" : "float",
                     "offset" : 368
                 },
                 {
-                    "name" : "uFog",
-                    "type" : "vec4",
+                    "name" : "uNormalStrength",
+                    "type" : "float",
+                    "offset" : 372
+                },
+                {
+                    "name" : "uSlopeScale",
+                    "type" : "float",
+                    "offset" : 376
+                },
+                {
+                    "name" : "uGlassMinOpacity",
+                    "type" : "float",
+                    "offset" : 380
+                },
+                {
+                    "name" : "uIndirectShadowBase",
+                    "type" : "float",
                     "offset" : 384
                 },
                 {
-                    "name" : "uIblParams",
-                    "type" : "vec4",
-                    "offset" : 400
+                    "name" : "uIndirectShadowRange",
+                    "type" : "float",
+                    "offset" : 388
+                },
+                {
+                    "name" : "uVisualizeCascades",
+                    "type" : "float",
+                    "offset" : 392
                 }
             ]
         },
@@ -232,7 +252,7 @@
         {
             "type" : "_291",
             "name" : "Frame",
-            "block_size" : 416,
+            "block_size" : 396,
             "set" : 0,
             "binding" : 0
         },

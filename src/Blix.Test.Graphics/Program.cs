@@ -1,4 +1,5 @@
 using System.Numerics;
+using Blix.Diagnostics;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 // Silk.NET.Vulkan types are used by Section N (BarrierOp value equality).
@@ -1203,9 +1204,11 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("P.0 Frame UBO merged to both stages",
         frame is { } fr && fr.Stages.HasFlag(ShaderStages.Vertex) && fr.Stages.HasFlag(ShaderStages.Fragment));
 
-    // P.1 — Frame UBO std140 offsets match VulkanSponza's hand-authored table.
+    // P.1 — Frame UBO std140 offsets reflect correctly. lit.frag's tunables are
+    // named float members (no packed uShaderParams/uShadowParams/uIblParams
+    // vec4s), so the block is 396 and the grab-bags are gone — see P.6.
     var fb = frame?.BlockLayout;
-    t.ExpectClose("P.1 Frame TotalSize 416 (fuller block won the merge)", fb?.TotalSize ?? -1, 416);
+    t.ExpectClose("P.1 Frame TotalSize 396", fb?.TotalSize ?? -1, 396);
     t.ExpectClose("P.1 uViewProjection @0", Member(fb, "uViewProjection")?.Offset ?? -1, 0);
     t.ExpectClose("P.1 uViewProjection size 64", Member(fb, "uViewProjection")?.Size ?? -1, 64);
     t.ExpectClose("P.1 uSunDirection @64", Member(fb, "uSunDirection")?.Offset ?? -1, 64);
@@ -1213,7 +1216,7 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectClose("P.1 uCascadeViewProj @128", Member(fb, "uCascadeViewProj")?.Offset ?? -1, 128);
     t.ExpectClose("P.1 uCascadeViewProj size 192 (mat4[3])", Member(fb, "uCascadeViewProj")?.Size ?? -1, 192);
     t.ExpectClose("P.1 uCascadeViewProj ElementStride 64", Member(fb, "uCascadeViewProj")?.ElementStride ?? -1, 64);
-    t.ExpectClose("P.1 uIblParams @400 (engine extension)", Member(fb, "uIblParams")?.Offset ?? -1, 400);
+    t.ExpectTrue("P.1 packed uShaderParams gone (un-packed to named members)", Member(fb, "uShaderParams") is null);
 
     // P.2 — Material UBO (set 2, binding 0): four vec4s, 64 bytes.
     var matSlot = Slot(2, 0);
@@ -1245,6 +1248,162 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectClose("P.5 push range Size 144 (matches payload, not 288)", pc?.Size ?? -1, 144);
     t.ExpectTrue("P.5 push range spans Vertex+Fragment",
         pc is { } r && r.Stages.HasFlag(ShaderStages.Vertex) && r.Stages.HasFlag(ShaderStages.Fragment));
+
+    // P.6 — the former vec4 grab-bags are now named float members the tune
+    // scanner + overlay can bind individually.
+    t.ExpectTrue("P.6 uMetallicThreshold is a named member", Member(fb, "uMetallicThreshold") is not null);
+    t.ExpectTrue("P.6 uIndirectShadowBase is a named member", Member(fb, "uIndirectShadowBase") is not null);
+    t.ExpectClose("P.6 uVisualizeCascades size 4 (float)", Member(fb, "uVisualizeCascades")?.Size ?? -1, 4);
+}
+
+// ============================================================================
+// Section Q — `//@tune` shader-tunable decorator scan (Blix.Graphics).
+// ============================================================================
+//
+// The scanner reads GLSL source for the opt-in tuning decorator the diagnostics
+// overlay auto-binds. Asserts: only tagged members surface, range/default and
+// enum payloads parse, group = enclosing block name, label inferred from name.
+{
+    const string glsl = """
+        layout(set = 0, binding = 0) uniform Tune {
+            //@tune 0..16 = 9.42
+            float uSunIntensity;
+            //@tune 0..1 = 0.5
+            float uMetallicThreshold;
+            // engine-driven, no tag → must be ignored
+            float uEngineThing;
+            //@tune enum{ PBR, Albedo, Normal, Roughness, Cascade }
+            int   uDebugView;
+        } tune;
+
+        // A bare uniform outside any block, still tunable.
+        //@tune 0..4 = 2
+        uniform int uLodBias;
+        """;
+
+    var tunables = ShaderTunables.Scan(glsl);
+    ShaderTunable? Find(string n)
+    {
+        foreach (var x in tunables) if (x.Name == n) return x;
+        return null;
+    }
+
+    // Q.0 — only the four tagged decls surface; uEngineThing is dropped.
+    t.ExpectClose("Q.0 four tunables found (untagged ignored)", tunables.Count, 4);
+    t.ExpectTrue("Q.0 untagged uEngineThing excluded", Find("uEngineThing") is null);
+
+    // Q.1 — float range + default + inferred group/label.
+    var sun = Find("uSunIntensity");
+    t.ExpectTrue("Q.1 uSunIntensity is Float", sun is { Kind: TunableKind.Float });
+    t.ExpectClose("Q.1 min 0", sun?.Min ?? -1, 0);
+    t.ExpectClose("Q.1 max 16", sun?.Max ?? -1, 16);
+    t.ExpectClose("Q.1 default 9.42", sun?.Default ?? -1, 9.42f);
+    t.ExpectTrue("Q.1 group = block name 'Tune'", sun?.Block == "Tune");
+    t.ExpectTrue("Q.1 label inferred 'Sun intensity'", sun?.Label == "Sun intensity");
+
+    var metal = Find("uMetallicThreshold");
+    t.ExpectClose("Q.1 metallic default 0.5", metal?.Default ?? -1, 0.5f);
+    t.ExpectTrue("Q.1 metallic label 'Metallic threshold'", metal?.Label == "Metallic threshold");
+
+    // Q.2 — int enum: kind, options, range.
+    var dv = Find("uDebugView");
+    t.ExpectTrue("Q.2 uDebugView is Enum", dv is { Kind: TunableKind.Enum });
+    t.ExpectClose("Q.2 enum has 5 options", dv?.EnumNames?.Count ?? -1, 5);
+    t.ExpectTrue("Q.2 first option 'PBR'", dv?.EnumNames is { Count: > 0 } e && e[0] == "PBR");
+    t.ExpectTrue("Q.2 last option 'Cascade'", dv?.EnumNames is { Count: 5 } e2 && e2[4] == "Cascade");
+    t.ExpectClose("Q.2 enum max = count-1", dv?.Max ?? -1, 4);
+
+    // Q.3 — bare uniform outside a block: Int kind, empty group.
+    var lod = Find("uLodBias");
+    t.ExpectTrue("Q.3 uLodBias is Int", lod is { Kind: TunableKind.Int });
+    t.ExpectClose("Q.3 uLodBias default 2", lod?.Default ?? -1, 2);
+    t.ExpectTrue("Q.3 uLodBias has no block group", lod?.Block == "");
+}
+
+// ============================================================================
+// Section R — ShaderTunablePanel (Blix.Diagnostics): seeding + uniform emit.
+// ============================================================================
+//
+// The panel auto-binds //@tune decorators to overlay dials and feeds live
+// values back as named uniforms. UI binding (BuildControls) needs a live
+// DebugContext and is exercised in the demo; here we lock the value contract:
+// defaults seed from the tags, and AppendUniforms emits one named float each.
+{
+    var panelTunables = ShaderTunables.Scan("""
+        layout(set = 0, binding = 0) uniform Tune {
+            //@tune 0..16 = 9.42
+            float uSunIntensity;
+            //@tune 0..1 = 0.5
+            float uMetallicThreshold;
+        } tune;
+        """);
+    var panel = new ShaderTunablePanel(panelTunables);
+
+    // R.1 — values seed from the tag defaults; unknown name → 0.
+    t.ExpectClose("R.1 uSunIntensity seeded to 9.42", panel.Value("uSunIntensity"), 9.42f);
+    t.ExpectClose("R.1 uMetallicThreshold seeded to 0.5", panel.Value("uMetallicThreshold"), 0.5f);
+    t.ExpectClose("R.1 unknown name → 0", panel.Value("uNope"), 0f);
+
+    // R.2 — AppendUniforms emits one named float uniform per tunable.
+    var uniforms = new List<ShaderUniform>();
+    panel.AppendUniforms(uniforms);
+    t.ExpectClose("R.2 two uniforms appended", uniforms.Count, 2);
+    var sunU = uniforms.FirstOrDefault(u => u.Name == "uSunIntensity");
+    t.ExpectTrue("R.2 uSunIntensity present as FloatUniform", sunU?.Value is FloatUniform);
+    t.ExpectClose("R.2 uSunIntensity value 9.42", (sunU?.Value as FloatUniform)?.Value ?? -1, 9.42f);
+}
+
+// ============================================================================
+// Section S — [Tune] attribute reflection (Blix.Diagnostics): CPU tunables.
+// ============================================================================
+//
+// The CPU twin of shader //@tune: an attribute on a field/property that the
+// overlay reflects into a live dial. Locks: tagged-only surfacing, range +
+// label inference, and that editing Value writes back through the member
+// (with int rounding).
+{
+    var fixture = new TuneFixture();
+    var fields = TuneReflection.Reflect(fixture);
+    TunableField? FindF(string n)
+    {
+        foreach (var f in fields) if (f.Name == n) return f;
+        return null;
+    }
+
+    // S.0 — only [Tune] members surface (NotTunable excluded).
+    t.ExpectClose("S.0 five tunables found", fields.Count, 5);
+    t.ExpectTrue("S.0 untagged field excluded", FindF("NotTunable") is null);
+
+    // S.1 — range + inferred labels (PascalCase + camelCase).
+    var density = FindF("Density");
+    t.ExpectClose("S.1 Density min 0", density?.Min ?? -1, 0);
+    t.ExpectClose("S.1 Density max 0.5", density?.Max ?? -1, 0.5f);
+    t.ExpectTrue("S.1 label 'Density'", density?.Label == "Density");
+    t.ExpectTrue("S.1 camelCase label 'Fly speed'", FindF("flySpeed")?.Label == "Fly speed");
+    t.ExpectClose("S.1 get reads the live field", density?.Value ?? -1, 0.1f);
+
+    // S.2 — set writes back through the member; ints round.
+    if (density is not null) density.Value = 0.3f;
+    t.ExpectClose("S.2 float set wrote the field", fixture.Density, 0.3f);
+    var steps = FindF("Steps");
+    t.ExpectTrue("S.2 int member is Int kind", steps is { Kind: TuneKind.Int });
+    if (steps is not null) steps.Value = 2.6f;
+    t.ExpectClose("S.2 int set rounds to 3", fixture.Steps, 3);
+
+    // S.3 — bool member → toggle (0/1), set writes back.
+    var wire = FindF("Wireframe");
+    t.ExpectTrue("S.3 bool member is Bool kind", wire is { Kind: TuneKind.Bool });
+    t.ExpectClose("S.3 bool false reads 0", wire?.Value ?? -1, 0f);
+    if (wire is not null) wire.Value = 1f;
+    t.ExpectTrue("S.3 bool set wrote true", fixture.Wireframe);
+
+    // S.4 — enum member → dropdown (option index), set writes the enum value.
+    var mode = FindF("Mode");
+    t.ExpectTrue("S.4 enum member is Enum kind", mode is { Kind: TuneKind.Enum });
+    t.ExpectClose("S.4 three enum options", mode?.EnumNames?.Count ?? -1, 3);
+    t.ExpectClose("S.4 default B reads index 1", mode?.Value ?? -1, 1f);
+    if (mode is not null) mode.Value = 2f;
+    t.ExpectTrue("S.4 enum set wrote C", fixture.Mode == TuneFixtureMode.C);
 }
 
 t.PrintSummary();
@@ -1333,4 +1492,16 @@ sealed class TestRunner
         Console.WriteLine();
         Console.WriteLine($"{passed}/{passed + failed} passed, {failed} failed");
     }
+}
+
+// Fixture for Section S: a [Tune]-tagged object the reflector should surface.
+enum TuneFixtureMode { A, B, C }
+sealed class TuneFixture
+{
+    [Tune(0, 0.5)] public float Density = 0.1f;
+    [Tune(0, 5)]   public int Steps = 1;
+    [Tune(0, 60)]  public float flySpeed = 4.5f;
+    [Tune]         public bool Wireframe = false;
+    [Tune]         public TuneFixtureMode Mode = TuneFixtureMode.B;
+    public float NotTunable = 9f;   // no attribute → must be ignored
 }

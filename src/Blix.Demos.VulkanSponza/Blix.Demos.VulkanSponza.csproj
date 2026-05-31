@@ -65,6 +65,14 @@
     <SpirvCross Condition="'$(SpirvCross)' == ''">spirv-cross</SpirvCross>
   </PropertyGroup>
 
+  <!-- Ship the GLSL source next to the compiled .spv. The diagnostics overlay
+       scans it at load for //@tune decorators (live-tunable shader vars) — the
+       intent that the compiled SPIR-V doesn't carry. See ShaderTunables. -->
+  <ItemGroup>
+    <None Include="Shaders\**\*.vert;Shaders\**\*.frag;Shaders\**\*.comp"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <GlslShader Include="Shaders\lit.vert" />
     <GlslShader Include="Shaders\lit.frag" />

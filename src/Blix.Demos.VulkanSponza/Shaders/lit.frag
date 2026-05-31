@@ -24,8 +24,10 @@
 layout(set = 0, binding = 0) uniform Frame {
     mat4  uViewProjection;
     vec3  uSunDirection;
+    //@tune 0..16 = 9.42
     float uSunIntensity;
     vec3  uAmbientColor;   // unused; kept for layout compat
+    //@tune 0..4 = 1.6
     float uIblIntensity;
     vec3  uCameraPos;
     float uEnvMipCount;
@@ -33,11 +35,26 @@ layout(set = 0, binding = 0) uniform Frame {
     float uShadowStrength;         // 0 = sun shadows off, 1 = on
     mat4  uCascadeViewProj[3];     // light view-proj per cascade
     vec4  uCascadeSplits;          // .xyz = far view-depth bound of cascades 0,1,2
-    vec4  uShadowParams;           // .x = visualizeCascades (0/1)
     vec4  uCascadeBias;            // .xyz = per-cascade base depth bias (NDC units)
-    vec4  uShaderParams;           // x=metallicThreshold, y=normalStrength, z=biasSlopeScale
     vec4  uFog;                    // x=screenW, y=screenH, z=fogFar, w=enabled(0/1)
-    vec4  uIblParams;              // x=indirectShadowBase, y=indirectShadowRange
+    // Live-tunable shader params. Un-packed from the former uShaderParams /
+    // uShadowParams / uIblParams vec4s into named members so each carries its
+    // own //@tune range+default and the diagnostics overlay can auto-bind and
+    // label it (see docs/renderer.md "SPIR-V reflection" + the tune scanner).
+    //@tune 0..1 = 0.5
+    float uMetallicThreshold;
+    //@tune 0..2 = 1.0
+    float uNormalStrength;
+    //@tune 0..12 = 3.0
+    float uSlopeScale;
+    //@tune 0..0.6 = 0.12
+    float uGlassMinOpacity;
+    //@tune 0..1 = 0.6
+    float uIndirectShadowBase;
+    //@tune 0..1 = 0.4
+    float uIndirectShadowRange;
+    //@tune 0..1 = 0
+    float uVisualizeCascades;
 } frame;
 
 layout(set = 1, binding = 0) uniform samplerCube uIrradiance;
@@ -193,7 +210,7 @@ float sunShadowFactor(float NdotL, out int cascadeOut) {
     // shadow texel spans more depth across the surface → more self-shadow
     // acne). Capped so steep grazing surfaces don't peter-pan.
     float slope = clamp(1.0 - NdotL, 0.0, 1.0);
-    float bias = frame.uCascadeBias[idx] * (1.0 + slope * frame.uShaderParams.z);
+    float bias = frame.uCascadeBias[idx] * (1.0 + slope * frame.uSlopeScale);
     return samplePickedCascade(idx, uv, current, bias);
 }
 
@@ -240,7 +257,7 @@ void main() {
     // dropped), so the sampled .z is meaningless — derive it from the
     // unit-length constraint. This is also correct for RGBA8 normal maps
     // (their stored Z ≈ sqrt(1 - x² - y²)), so it works for both paths.
-    float normalScale = mat.uMaterialParams.y * frame.uShaderParams.y;
+    float normalScale = mat.uMaterialParams.y * frame.uNormalStrength;
     vec2 nxy = (texture(uNormalMap, uv).xy * 2.0 - 1.0) * normalScale;
     float nz = sqrt(max(0.0, 1.0 - dot(nxy, nxy)));
     // Default normal map is flat (0,0,1), so untextured materials keep N.
@@ -257,13 +274,13 @@ void main() {
     // Sponza Modern leaves a stray ~0.35 metalness on dielectric stone/brick
     // (its metallic channel doubled as a specular-intensity dial under the
     // authoring pipeline); read as real glTF metalness it mixes albedo into F0
-    // and dulls the diffuse. The gate treats metalness below uShaderParams.x
+    // and dulls the diffuse. The gate treats metalness below uMetallicThreshold
     // as noise -> 0, but passes values at/above through UNCHANGED — unlike the
     // old binary step() it no longer slams genuine partial metals to fully
     // metal. Threshold 0 trusts the glTF verbatim (the standard); the default
     // (0.5) keeps Sponza's stone clean. Live-tunable: Material -> Metallic
     // threshold.
-    metallic = metallic >= frame.uShaderParams.x ? metallic : 0.0;
+    metallic = metallic >= frame.uMetallicThreshold ? metallic : 0.0;
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
     vec3 V = normalize(frame.uCameraPos - vWorldPos);
@@ -286,10 +303,10 @@ void main() {
         float fresnel = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
         float glassAlpha = mix(albedo4.a, fresnel, transmission);
         // Physically clean glass is ~96% transparent head-on, which reads as
-        // "no glass at all". Lift it by a tunable floor (uShaderParams.w) so
+        // "no glass at all". Lift it by a tunable floor (uGlassMinOpacity) so
         // the panes keep a faint reflective sheen straight-on. Grazing angles
         // already saturate to opaque, so this only affects the head-on view.
-        glassAlpha = max(glassAlpha, frame.uShaderParams.w);
+        glassAlpha = max(glassAlpha, frame.uGlassMinOpacity);
         outColor = vec4(envRefl, glassAlpha);
         return;
     }
@@ -340,8 +357,8 @@ void main() {
     // shadow also dims indirect light — fragments the sun can't see receive
     // less bounce too — mirroring the GL demo's 0.60 + 0.40*shadow so
     // shadowed areas don't read flat from full-strength ambient. Base/range
-    // are live-tunable (overlay Sun scope) via uIblParams.
-    float indirectShadow = frame.uIblParams.x + frame.uIblParams.y * sunShadow;
+    // are live-tunable via uIndirectShadowBase / uIndirectShadowRange.
+    float indirectShadow = frame.uIndirectShadowBase + frame.uIndirectShadowRange * sunShadow;
     vec3 ambient = (kD * diffuseIBL + specularIBL) * frame.uIblIntensity * ao * indirectShadow;
 
     // --- Emissive ------------------------------------------------------
@@ -351,7 +368,7 @@ void main() {
 
     // Debug: tint by which cascade shadowed this fragment (red/green/blue,
     // near→far). Helps confirm split placement + texel-snap stability.
-    if (frame.uShadowParams.x > 0.5 && shadowCascade >= 0) {
+    if (frame.uVisualizeCascades > 0.5 && shadowCascade >= 0) {
         color = mix(color, kCascadeTint[shadowCascade] * (0.5 + 0.5 * NdotL * sunShadow), 0.4);
     }
 

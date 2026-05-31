@@ -116,14 +116,13 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private PipelineHandle froxelPipeline;
     private TextureHandle froxelGridTexture;
     private PassHandle froxelPassHandle;
-    private bool fogEnabled = false;    // demo toggle (compute cost); off by default
+    // Volumetric-fog tunables — [Tune]-tagged, auto-bound to the overlay "Fog"
+    // group via ObjectTunables (see FogSettings); replaces six hand-wired dials.
+    private readonly FogSettings fog = new();
+    private readonly ShadowsSettings shadows = new();
+    private readonly RenderSettings render = new();
     private bool fogStress;             // --fog-stress: auto-toggle fog to exercise the on/off barrier transitions under validation
     private int fogStressFrame;
-    private float fogDensity = 0.018f;  // extinction scale — subtle haze, not a wash
-    private float fogScatter = 0.6f;    // scattering albedo
-    private float fogPhaseG = 0.6f;     // Henyey-Greenstein anisotropy (forward)
-    private float fogAmbient = 0.005f;  // ambient in-scatter floor
-    private float fogFar = 60f;         // grid far distance (metres)
 
     // --- Cascaded sun shadow maps -----------------------------------------
     // Three depth-only cascades fitted to camera-frustum slices, snapped to
@@ -142,15 +141,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // How far behind the scene slab the light "eye" sits, in world units.
     // Larger keeps the whole atrium height inside each cascade's near/far.
     // Live-tunable from the overlay (Shadows scope).
-    private float shadowSunDistance = 40f;
     // View-space depth boundaries: cascade i covers (Splits[i], Splits[i+1]).
     // [1..3] (the cascade far distances) are live-tunable from the overlay.
     private readonly float[] cascadeSplits = { 0.1f, 6f, 22f, 60f };
     // Per-cascade frustum culling of shadow casters (overlay toggle + margin).
     private bool cullEnabled = true;
     private float cullMargin = 0.5f;
-    // Shadow depth-bias slope term: bias *= (1 + (1-NdotL) * slopeScale).
-    private float slopeScale = 3f;
     private readonly GraphResourceHandle[] cascadeHandles = new GraphResourceHandle[CascadeCount];
     private readonly PassHandle[] cascadePassHandles = new PassHandle[CascadeCount];
     private readonly Matrix4x4[] cascadeViewProj = new Matrix4x4[CascadeCount];
@@ -170,7 +166,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // grazing-angle slope term on top.
     private readonly float[] cascadeDepthBias = new float[CascadeCount];
     // Shadow depth bias in shadow-texels (live-tunable from the overlay).
-    private float biasTexels = 1.5f;
     // Per-cascade shadow-caster survivor counts after frustum culling,
     // surfaced live in the diagnostics overlay (see Debug()).
     private readonly int[] cascadeDrawCounts = new int[CascadeCount];
@@ -181,8 +176,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private PipelineHandle shadowOpaquePipeline;
     private ShaderProgramHandle shadowMaskProgram;
     private PipelineHandle shadowMaskPipeline;
-    private bool shadowsEnabled = true;
-    private bool visualizeCascades;
     // Diagnostics overlay visibility, toggled with Cmd+C. Applied to
     // DebugState.Enabled each frame in Debug() (which runs unconditionally).
     private bool overlayEnabled = true;
@@ -264,7 +257,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         float BaseColorAlpha,
         // Pre-built once at load so the per-frame mask shadow draws don't
         // allocate a binding array each (×3 cascades × every frame).
-        ShaderTextureBinding[] ShadowAlbedoBinding)
+        ShaderTextureBinding[] ShadowAlbedoBinding,
+        // Source primitive name — selection/inspection identity (debug only).
+        string Name)
     {
         // Screen-space-error LOD: pick the COARSEST level whose stored world
         // error projects to ≤ errorPixels at the nearest point of the bounds.
@@ -306,7 +301,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         float AlphaCutoff,
         float BaseColorAlpha,
         ShaderTextureBinding[] ShadowAlbedoBinding,
-        bool IsBlend);
+        bool IsBlend,
+        string Name);
 
     // Stage 0 shared geometry buffers (one VB + one IB per index width), built
     // by ConsolidateBuffers from the staging lists. The eventual indirect path
@@ -370,7 +366,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private float aspect = 16f / 9f;
     private float fovYRadians = MathF.PI / 3f;
     private float renderHeightPx = 810f; // updated on resize; drives screen-space-error LOD
-    private float moveSpeed = 4.5f;
     // Screen-space-error LOD threshold: a level is used when its baked geometric
     // error projects to ≤ this many pixels at the viewing distance. ~1px is the
     // "imperceptible" target; raise to trim more aggressively, 0 forces full
@@ -379,18 +374,28 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // a small far prop drops early). NOTE: a single huge primitive still gets one
     // level (its near edge pins it), which is why cook-time spatial split (B) is
     // the next step — this metric just makes selection principled.
-    private float lodErrorPixels = 1.0f;
     // pixels-per-world at unit distance = viewportH / (2·tan(fovY/2)); PickLod
     // divides by the view distance. Recomputed lazily from the fields above.
     private float LodErrorScale => renderHeightPx * 0.5f / MathF.Tan(fovYRadians * 0.5f);
     private bool mouseLook;
+    private float lastMouseX, lastMouseY;   // latest cursor pos (for click-to-pick)
+    // Diagnostics selection: a contributor registered after consolidation so a
+    // left-click ray-picks a primitive and the Selection panel can inspect it.
+    private Blix.Diagnostics.DebugSystem? debugSystem;
+    private readonly SceneSelection sceneSelection = new();
+    // Live multi-selection (ephemeral): set of picked entity paths + the primary
+    // (last-picked, gets the framework highlight + inspector). Cmd-click adds.
+    private readonly HashSet<string> selection = new();
+    private string? primarySelection;
+    // Per-drawable LOD error-margin multipliers (×global px budget), keyed by
+    // drawable index — parallel to opaque/blend drawables, default 1.0. Live,
+    // ephemeral; edited via the Selection panel, consumed by PickLod.
+    private float[] opaqueLodMargins = System.Array.Empty<float>();
+    private float[] blendLodMargins = System.Array.Empty<float>();
+    private static readonly GraphicsColor MultiSelectColor = new(0.95f, 0.75f, 0.2f, 1f);
     private readonly HashSet<Key> heldKeys = new();
     private Matrix4x4 viewProj;
 
-    // Sun + IBL strength (hardcoded; cascade shadows land in a follow-up).
-    // SunIntensity scales the Lambert N·L term; IblIntensity scales the
-    // combined diffuse + specular IBL contribution. Tuned so the atrium
-    // floor reads in mid-tone without crushing the sunlit areas.
     // Sun travel direction, recomputed from sunYaw/sunPitch (overlay Sun
     // scope). Initialised in OnLoad from the default direction below. Note the
     // IBL cubes are baked once with SkyBakeSunDirection, so live sun changes
@@ -398,38 +403,17 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private Vector3 sunDirection = Vector3.Normalize(new Vector3(0.35f, -0.85f, 0.25f));
     private float sunYaw;
     private float sunPitch;
-    // Sun + IBL strength (live-tunable from the diagnostics overlay).
-    // lit.frag now divides the direct diffuse by PI (energy-conserving
-    // Cook-Torrance), so this is pre-scaled by PI vs the old Lambert-only
-    // term (3.0 → 3.0π ≈ 9.42) to keep the diffuse brightness constant while
-    // the newly-added analytic specular highlight is the additive gain.
-    private float sunIntensity = 9.42f;
     private readonly Vector3 ambientColor = new(0.42f, 0.50f, 0.62f);  // unused; kept for layout compat
-    private float ambientIntensity = 1.6f;
-    // Indirect (IBL/ambient) dimming under the sun's cascaded shadow. The lit
-    // shader scales ambient by (base + range * sunShadow): fragments the sun
-    // can't see receive less bounce too, so shadowed areas don't read flat
-    // from full-strength ambient. Defaults mirror the GL SponzaModern demo.
-    // base + range > 1 is allowed (lit areas can over-brighten); both clamp
-    // in the shader via the AO/IBL terms. Live-tunable: overlay Sun scope.
-    private float indirectShadowBase = 0.60f;
-    private float indirectShadowRange = 0.40f;
 
-    // Shader-debug knobs surfaced as uShaderParams (overlay Material scope):
-    //   metallicThreshold — metalness noise-gate cutoff: below it -> 0, at/above
-    //                       passes through unchanged. Cleans Sponza's stray
-    //                       ~0.35 stone metalness; 0 = trust the glTF verbatim.
-    //   normalStrength    — global multiplier on tangent-space normal x/y.
-    private float metallicThreshold = 0.5f;
-    private float normalStrength = 1.0f;
-
-    private float exposure = 0.5f;
-    // Present tonemap operator (overlay Render → Tonemap); index into present.frag's branch.
-    private static readonly string[] TonemapNames = { "Reinhard", "ACES", "AgX", "Hejl" };
-    private int tonemapMode = 2; // AgX
-    // Head-on opacity floor for Fresnel glass (overlay Material → Glass opacity).
-    // Clean glass is ~96% transparent straight-on; this keeps it readable.
-    private float glassMinOpacity = 0.12f;
+    // Shader-uniform tunables (sun/ambient intensity, metallic/normal/shadow
+    // thresholds, cascade-viz) are declared with //@tune in lit.frag and
+    // auto-bound to the overlay by this panel — no per-variable field + dial +
+    // UBO pack here. The panel owns the live values (seeded from the shader's
+    // tag defaults) and feeds them into the per-frame write by name; CPU-side
+    // readers (e.g. the froxel sun term) pull via tunePanel.Value(...).
+    private ShaderTunablePanel tunePanel = null!;
+    // [Tune]-tagged CPU settings objects (Fog, …) auto-paneled in the overlay.
+    private ObjectTunables tuneObjects = null!;
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
@@ -442,11 +426,11 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // Volumetric fog is off by default (it adds a per-frame compute pass);
         // launch with --fog to start with it on, or toggle it in the overlay.
         var cmdArgs = Environment.GetCommandLineArgs();
-        if (cmdArgs.Contains("--fog")) fogEnabled = true;
+        if (cmdArgs.Contains("--fog")) fog.Enabled = true;
         // --fog-stress flips fog on/off every ~90 frames so a validation run
         // exercises the compute storage-image layout transitions across the
         // disabled↔enabled boundary (the highest-risk sync path).
-        if (cmdArgs.Contains("--fog-stress")) { fogStress = true; fogEnabled = true; }
+        if (cmdArgs.Contains("--fog-stress")) { fogStress = true; fog.Enabled = true; }
 
         // Seed sun yaw/pitch from the default direction so the Sun controls
         // start matching the baked look.
@@ -456,12 +440,15 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // Diagnostics overlay: GPU info + this loop's shadow/camera controls,
         // live values, and cascade gizmos (see Debug()). Replaces the old
         // Console-log + hardcoded-key debugging.
-        if (host is IDebugHost debugHost && debugHost.System is { } debugSystem)
+        if (host is IDebugHost debugHost && debugHost.System is { } dbg)
         {
             // Only register the GPU contributor. The runtime already runs this
             // loop's Debug() via Run(debuggable) since it implements IDebuggable
             // — also registering it would run (and render its controls) twice.
-            graphicsDevice.RegisterDebug(debugSystem);
+            graphicsDevice.RegisterDebug(dbg);
+            // Kept so click-to-pick can CollectSelectables()/Select(); the
+            // SceneSelection contributor is registered after consolidation.
+            debugSystem = dbg;
         }
 
         // --- Locate Sponza glTF -----------------------------------------
@@ -588,21 +575,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 new FixedGraphSize(ShadowMapSizes[c], ShadowMapSizes[c]));
         }
 
-        // Per-frame UBO carries view-projection + sun + IBL strength + camera
-        // position (the latter for Fresnel + reflection vector computation
-        // in the lit shader). std140-padded:
-        //   [0..63]   mat4 viewProjection
-        //   [64..79]  vec3 sunDirection + float sunIntensity
-        //   [80..95]  vec3 ambientColor (unused now)  + float iblIntensity
-        //   [96..111] vec3 cameraPos + float envMipCount
-        //   [112..123] vec3 cameraForward + [124] float shadowStrength
-        //   [128..319] mat4 cascadeViewProj[3]   (std140 mat4 array, stride 64)
-        //   [320..335] vec4 cascadeSplits        (.xyz = far depth of cascade 0/1/2)
-        //   [336..351] vec4 shadowParams         (.x = visualizeCascades)
-        //   [352..367] vec4 cascadeBias          (.xyz = per-cascade base depth bias)
-        //   [368..383] vec4 shaderParams         (x=metallicThreshold, y=normalStrength, z=slopeScale)
-        //   [384..399] vec4 fog                  (x=screenW, y=screenH, z=fogFar, w=enabled)
-        //   [400..415] vec4 iblParams            (x=indirectShadowBase, y=indirectShadowRange)
+        // The per-frame Frame UBO (view-proj, sun, camera, cascades, fog) and
+        // its //@tune-decorated shader tunables are declared in lit.frag; their
+        // std140 offsets are reflected, not documented here (they used to be a
+        // hand-counted table in this comment — see lit.frag for the live layout).
         // Shader binding interfaces — descriptor sets, std140 UBO layouts, and
         // push-constant ranges — are reflected from the compiled SPIR-V at
         // build time (spirv-cross sidecars next to each .spv), not hand-
@@ -622,6 +598,14 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         var presentInterface = Reflect("present.vert", "present.frag");
         var shadowOpaqueInterface = Reflect("shadow.vert", "shadow.frag");
         var shadowMaskInterface = Reflect("shadow_mask.vert", "shadow_mask.frag");
+
+        // Scan lit.frag's //@tune decorators (shipped alongside the .spv) and
+        // build the overlay's shader-variable panel. The panel owns the live
+        // values + the dials; the per-frame write and the froxel sun term pull
+        // from it by name. Replaces the hand-wired field/dial/pack per uniform.
+        tunePanel = new ShaderTunablePanel(ShaderTunables.Scan(
+            File.ReadAllText(Path.Combine(shaderDir, "lit.frag"))));
+        tuneObjects = new ObjectTunables(fog, shadows, render);
 
         // One graphics pass per cascade, each writing its own depth target.
         // Both shadow programs are render-pass-compatible with these passes.
@@ -973,11 +957,57 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
         // Everything staged → build the shared buffers + finish.
         ConsolidateBuffers();
+        RegisterSelectables();
         Console.WriteLine($"[VulkanSponza] textures cached: {albedoCache.Count} albedo, {normalCache.Count} normal, {mrCache.Count} MR, {aoCache.Count} AO, {emissiveCache.Count} emissive.");
         Console.WriteLine($"[VulkanSponza] total draws: {opaqueDrawables.Count} opaque/mask, {blendDrawables.Count} blend.");
         LogPrimitiveSizeHistogram();
         UpdateCamera();
         sceneLoaded = true;
+    }
+
+    // Build the pickable-primitive set (one entry per drawable, opaque + blend)
+    // and register it with the debug system, so click-to-pick + the Selection
+    // panel work. Paths are session-stable (bucket + index); nothing persists.
+    private void RegisterSelectables()
+    {
+        var items = new List<(string Path, string Name, Bounds3 Bounds, int LodLevels, float MaxError)>(
+            opaqueDrawables.Count + blendDrawables.Count);
+        void Add(string bucket, List<Drawable> list)
+        {
+            for (var i = 0; i < list.Count; i++)
+            {
+                var d = list[i];
+                var maxErr = d.LodErrors.Length > 0 ? d.LodErrors[^1] : 0f;
+                items.Add(($"scene/{bucket}/{i}", d.Name, d.Bounds, d.LodIndexCounts.Length, maxErr));
+            }
+        }
+        Add("opaque", opaqueDrawables);
+        Add("blend", blendDrawables);
+        sceneSelection.Rebuild(items);
+        debugSystem?.Register(sceneSelection);
+
+        // Per-drawable LOD margins, default 1.0 (= use the global budget as-is).
+        opaqueLodMargins = new float[opaqueDrawables.Count];
+        blendLodMargins = new float[blendDrawables.Count];
+        System.Array.Fill(opaqueLodMargins, 1f);
+        System.Array.Fill(blendLodMargins, 1f);
+    }
+
+    // Resolve a selectable path ("scene/<bucket>/<i>") to its LOD-margin array
+    // slot. Returns false for unknown buckets / out-of-range indices.
+    private bool TryResolveMargin(string path, out float[] arr, out int index)
+    {
+        arr = System.Array.Empty<float>();
+        index = -1;
+        var parts = path.Split('/');
+        if (parts.Length != 3 || !int.TryParse(parts[2], out index)) return false;
+        arr = parts[1] switch
+        {
+            "opaque" => opaqueLodMargins,
+            "blend" => blendLodMargins,
+            _ => System.Array.Empty<float>(),
+        };
+        return index >= 0 && index < arr.Length;
     }
 
     // Per-primitive LOD0 triangle-size distribution across all opaque drawables.
@@ -1054,7 +1084,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             staging.Add(new DrawableStaging(
                 mesh.VertexBytes, mesh.VertexCount, lods, material, pipeline, mesh.Bounds,
                 albedo, alphaCutoff, baseColorAlpha,
-                new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) }, isBlend));
+                new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) }, isBlend,
+                string.IsNullOrEmpty(mesh.Name) ? "primitive" : mesh.Name));
         }
     }
 
@@ -1116,7 +1147,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             dest.Add(new Drawable(
                 isU32, baseVertex, firstIndex, counts, errors,
                 s.Material, s.Pipeline, s.Bounds, s.Albedo, s.AlphaCutoff, s.BaseColorAlpha,
-                s.ShadowAlbedoBinding));
+                s.ShadowAlbedoBinding, s.Name));
         }
 
         // Both buckets emitted grouped by (pipeline, material, index-width) → each
@@ -1175,7 +1206,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // frustum is given, culled objects get instanceCount 0 (drawn as a GPU no-op
     // — no compaction needed, so group offsets stay fixed). Written to the
     // current frame slot. Returns the visible count (for the diagnostic).
-    private int FillIndirect(List<Drawable> drawables, IndirectBufferHandle buffer, Frustum? cull, float margin)
+    private int FillIndirect(List<Drawable> drawables, float[] lodMargins, IndirectBufferHandle buffer, Frustum? cull, float margin)
     {
         var cmds = MemoryMarshal.Cast<byte, uint>(indirectScratch.AsSpan());
         var visible = 0;
@@ -1183,7 +1214,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         {
             var d = drawables[i];
             var vis = cull is not { } f || f.Intersects(d.Bounds, margin);
-            var lod = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
+            // Per-primitive LOD margin (live-tunable) scales the global px budget.
+            var lod = d.PickLod(cameraPosition, LodErrorScale, render.LodErrorPixels * lodMargins[i]);
             var o = i * 5;
             cmds[o + 0] = (uint)d.LodIndexCounts[lod]; // indexCount
             cmds[o + 1] = vis ? 1u : 0u;               // instanceCount (0 = culled)
@@ -1415,7 +1447,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         if (heldKeys.Contains(Key.Space)) move += Vector3.UnitY;
         if (heldKeys.Contains(Key.LeftControl)) move -= Vector3.UnitY;
         var sprint = heldKeys.Contains(Key.LeftSuper) || heldKeys.Contains(Key.RightSuper);
-        var speed = sprint ? moveSpeed * 3f : moveSpeed;
+        var speed = sprint ? render.MoveSpeed * 3f : render.MoveSpeed;
         if (move != Vector3.Zero)
         {
             cameraPosition += Vector3.Normalize(move) * speed * dt;
@@ -1508,7 +1540,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
             // Texel-snap the sphere centre in light space so the ortho footprint
             // lands on a stable grid (kills the shimmer under camera motion).
-            var eye = center - L * (shadowSunDistance + radius);
+            var eye = center - L * (shadows.SunDistance + radius);
             var lightView = Matrix4x4.CreateLookAt(eye, center, sunUp);
             var texelSize = (2f * radius) / ShadowMapSizes[c];
             var centreLight = Vector3.Transform(center, lightView);
@@ -1517,9 +1549,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             Matrix4x4.Invert(lightView, out var invLightView);
             var snapped = Vector3.Transform(centreLight, invLightView);
 
-            var eye2 = snapped - L * (shadowSunDistance + radius);
+            var eye2 = snapped - L * (shadows.SunDistance + radius);
             var lightView2 = Matrix4x4.CreateLookAt(eye2, snapped, sunUp);
-            var farPlane = 2f * (shadowSunDistance + radius);
+            var farPlane = 2f * (shadows.SunDistance + radius);
             var ortho = CreateOrthoVulkan(2f * radius, 2f * radius, 0.1f, farPlane);
             cascadeViewProj[c] = lightView2 * ortho;
 
@@ -1527,7 +1559,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             // converted to this cascade's NDC depth units (ortho z is linear,
             // so world→NDC depth scale is 1/farPlane). Keeps the bias visually
             // constant across cascades despite their very different extents.
-            cascadeDepthBias[c] = (biasTexels * texelSize) / farPlane;
+            cascadeDepthBias[c] = (shadows.BiasTexels * texelSize) / farPlane;
         }
     }
 
@@ -1568,34 +1600,31 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
         // Stress hook: flip fog every 90 frames to exercise the on/off barrier
         // transitions under validation (no effect without --fog-stress).
-        if (fogStress && (++fogStressFrame % 90 == 0)) fogEnabled = !fogEnabled;
+        if (fogStress && (++fogStressFrame % 90 == 0)) fog.Enabled = !fog.Enabled;
 
-        var perFrame = new ShaderUniform[]
+        var perFrameList = new List<ShaderUniform>
         {
             new("uViewProjection",   new Matrix4x4Uniform(viewProj)),
             new("uSunDirection",     new Vector3Uniform(sunDirection)),
-            new("uSunIntensity",     new FloatUniform(sunIntensity)),
             new("uAmbientColor",     new Vector3Uniform(ambientColor)),
-            new("uIblIntensity",     new FloatUniform(ambientIntensity)),
             new("uCameraPos",        new Vector3Uniform(cameraPosition)),
             new("uEnvMipCount",      new FloatUniform(iblPrefilterMips)),
             new("uCameraForward",    new Vector3Uniform(cameraForward)),
-            new("uShadowStrength",   new FloatUniform(shadowsEnabled ? 1f : 0f)),
+            new("uShadowStrength",   new FloatUniform(shadows.Enabled ? 1f : 0f)),
             new("uCascadeViewProj",  new Matrix4x4ArrayUniform(cascadeViewProj)),
             // .xyz = far view-depth bound of cascade 0,1,2 (Splits[1..3]).
             new("uCascadeSplits",    new Vector4Uniform(
                 new Vector4(cascadeSplits[1], cascadeSplits[2], cascadeSplits[3], 0f))),
-            new("uShadowParams",     new Vector4Uniform(
-                new Vector4(visualizeCascades ? 1f : 0f, 0f, 0f, 0f))),
             new("uCascadeBias",      new Vector4Uniform(
                 new Vector4(cascadeDepthBias[0], cascadeDepthBias[1], cascadeDepthBias[2], 0f))),
-            new("uShaderParams",     new Vector4Uniform(
-                new Vector4(metallicThreshold, normalStrength, slopeScale, glassMinOpacity))),
             new("uFog",              new Vector4Uniform(
-                new Vector4(frame.Width, frame.Height, fogFar, fogEnabled ? 1f : 0f))),
-            new("uIblParams",        new Vector4Uniform(
-                new Vector4(indirectShadowBase, indirectShadowRange, 0f, 0f))),
+                new Vector4(frame.Width, frame.Height, fog.Far, fog.Enabled ? 1f : 0f))),
         };
+        // The //@tune shader uniforms (uSunIntensity, uIblIntensity, the un-packed
+        // material/shadow scalars, uVisualizeCascades) are appended by name from
+        // the overlay panel — reflection lands each at its offset.
+        tunePanel.AppendUniforms(perFrameList);
+        var perFrame = perFrameList.ToArray();
 
         // Per-pass set-1 bindings (passBindings) and the identity model push
         // are built once at load (constant handles / identity transform) and
@@ -1610,7 +1639,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // discard against the not-yet-uploaded albedo).
         if (!fullyLoaded)
         {
-            FillIndirect(opaqueDrawables, opaqueIndirect, cull: null, margin: 0f);
+            FillIndirect(opaqueDrawables, opaqueLodMargins, opaqueIndirect, cull: null, margin: 0f);
             graph.Pass(depthPrepassHandle, scope =>
             {
                 foreach (var g in opaqueGroups)
@@ -1653,7 +1682,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             var ci = c;
             // Shadows off: skip the pass (the lit shader early-outs without
             // sampling) and invalidate the cache so re-enabling forces a redraw.
-            if (!shadowsEnabled)
+            if (!shadows.Enabled)
             {
                 cachedCascadeViewProj[ci] = default;
                 cascadeRendered[ci] = false;
@@ -1679,7 +1708,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             // Fill this cascade's indirect buffer (per-cascade frustum cull → 0
             // instanceCount; same SSE LOD as the lit/pre-pass so shadow depth
             // matches the shaded silhouette). Then one indirect draw per group.
-            cascadeDrawCounts[ci] = FillIndirect(opaqueDrawables, cascadeIndirect[ci], cull ? cascadeFrustum : null, margin);
+            cascadeDrawCounts[ci] = FillIndirect(opaqueDrawables, opaqueLodMargins, cascadeIndirect[ci], cull ? cascadeFrustum : null, margin);
             // Opaque casters all push the same bytes (identity model + this
             // cascade's VP); mask casters push per-material alpha params, so one
             // mask push per group (constant within a material).
@@ -1721,17 +1750,17 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // samples the grid.) Skipped when fog is off — and the lit shader gates
         // on uFog.w, so when disabled the grid is never sampled (its contents
         // are undefined/stale; "disabled" must mean "never sample").
-        if (fogEnabled)
+        if (fog.Enabled)
         {
             Matrix4x4.Invert(viewProj, out var invViewProj);
             var froxelUniforms = new ShaderUniform[]
             {
                 new("uInvViewProj",   new Matrix4x4Uniform(invViewProj)),
-                new("uCamPos",        new Vector4Uniform(new Vector4(cameraPosition, fogFar))),
-                new("uCamForward",    new Vector4Uniform(new Vector4(cameraForward, fogDensity))),
-                new("uSunDir",        new Vector4Uniform(new Vector4(sunDirection, sunIntensity))),
-                new("uSunColor",      new Vector4Uniform(new Vector4(1f, 1f, 1f, fogScatter))),
-                new("uFogParams",     new Vector4Uniform(new Vector4(fogPhaseG, fogAmbient, 0f, 0f))),
+                new("uCamPos",        new Vector4Uniform(new Vector4(cameraPosition, fog.Far))),
+                new("uCamForward",    new Vector4Uniform(new Vector4(cameraForward, fog.Density))),
+                new("uSunDir",        new Vector4Uniform(new Vector4(sunDirection, tunePanel.Value("uSunIntensity")))),
+                new("uSunColor",      new Vector4Uniform(new Vector4(1f, 1f, 1f, fog.Scatter))),
+                new("uFogParams",     new Vector4Uniform(new Vector4(fog.PhaseG, fog.Ambient, 0f, 0f))),
                 new("uCascadeVP",     new Matrix4x4ArrayUniform(cascadeViewProj)),
                 new("uCascadeSplits", new Vector4Uniform(
                     new Vector4(cascadeSplits[1], cascadeSplits[2], cascadeSplits[3], 0f))),
@@ -1745,8 +1774,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // Fill the camera opaque indirect commands once per frame (LOD by SSE, no
         // cull); both the depth pre-pass and the lit pass consume this buffer —
         // they draw the identical opaque set at identical LODs.
-        FillIndirect(opaqueDrawables, opaqueIndirect, cull: null, margin: 0f);
-        if (blendDrawables.Count > 0) FillIndirect(blendDrawables, blendIndirect, cull: null, margin: 0f);
+        FillIndirect(opaqueDrawables, opaqueLodMargins, opaqueIndirect, cull: null, margin: 0f);
+        if (blendDrawables.Count > 0) FillIndirect(blendDrawables, blendLodMargins, blendIndirect, cull: null, margin: 0f);
 
         // Depth pre-pass: same non-blend set as the lit pass (no cull, so the
         // depth the lit pass loads covers exactly what it shades), depth only.
@@ -1847,20 +1876,41 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             sunYaw   = debug.Controls.Float("Yaw (deg)", sunYaw * deg, -180f, 180f) / deg;
             sunPitch = debug.Controls.Float("Pitch (deg)", sunPitch * deg, -89f, -1f) / deg;
             UpdateSunDirection();
-            sunIntensity     = debug.Controls.Float("Sun intensity", sunIntensity, 0f, 16f);
-            ambientIntensity = debug.Controls.Float("Ambient (IBL)", ambientIntensity, 0f, 4f);
-            // Indirect dimming under sun shadow: ambient *= base + range*shadow.
-            indirectShadowBase  = debug.Controls.Float("Indirect shadow base", indirectShadowBase, 0f, 1f);
-            indirectShadowRange = debug.Controls.Float("Indirect shadow range", indirectShadowRange, 0f, 1f);
         }
-        using (debug.Scope("Shadows"))
+        // Shadows + Render scopes are now [Tune]-tagged settings objects
+        // (ShadowsSettings / RenderSettings), auto-paneled by tuneObjects below.
+        // Shader-uniform tunables (//@tune in lit.frag): sun/ambient intensity,
+        // metallic/normal/slope/glass thresholds, indirect-shadow base/range,
+        // cascade-viz. Auto-built + read back here — grouped by their UBO block.
+        tunePanel.BuildControls(debug);
+        tuneObjects.BuildControls(debug);   // [Tune]-tagged CPU settings (Fog, …)
+
+        // --- Live selection (ephemeral) -------------------------------------
+        // Left-click picks a primitive; Cmd-click adds. Drag LOD margin to
+        // coarsen/sharpen the whole selection at once (set-all); nothing is
+        // saved. The framework highlights the primary; tint the rest here.
+        if (selection.Count > 0)
         {
-            shadowsEnabled    = debug.Controls.Toggle("Sun shadows", shadowsEnabled);
-            visualizeCascades = debug.Controls.Toggle("Visualize cascades", visualizeCascades);
-            biasTexels        = debug.Controls.Float("Bias (texels)", biasTexels, 0f, 6f);
-            slopeScale        = debug.Controls.Float("Bias slope scale", slopeScale, 0f, 12f);
-            shadowSunDistance = debug.Controls.Float("Sun distance", shadowSunDistance, 10f, 120f);
+            using (debug.Scope("Selection"))
+            {
+                debug.Values.Value("count", selection.Count);
+                var repPath = primarySelection ?? selection.First();
+                var cur = TryResolveMargin(repPath, out var rArr, out var rIdx) ? rArr[rIdx] : 1f;
+                var next = debug.Controls.Float("LOD margin (×px)", cur, 0f, 8f);
+                if (next != cur)
+                {
+                    foreach (var p in selection)
+                        if (TryResolveMargin(p, out var a, out var ix)) a[ix] = next;
+                }
+            }
+            foreach (var p in selection)
+            {
+                if (p == primarySelection) continue;
+                if (sceneSelection.TryGetBounds(p, out var b))
+                    debug.Draw.Aabb($"sel/{p}", b.Min, b.Max, MultiSelectColor);
+            }
         }
+
         using (debug.Scope("Cascades"))
         {
             cullEnabled   = debug.Controls.Toggle("Frustum cull", cullEnabled);
@@ -1871,32 +1921,12 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             cascadeSplits[2] = debug.Controls.Float("Far: cascade 1", cascadeSplits[2], cascadeSplits[1], 50f);
             cascadeSplits[3] = debug.Controls.Float("Far: cascade 2", cascadeSplits[3], cascadeSplits[2], 150f);
         }
-        using (debug.Scope("Fog"))
-        {
-            fogEnabled = debug.Controls.Toggle("Volumetric fog", fogEnabled);
-            fogDensity = debug.Controls.Float("Density", fogDensity, 0f, 0.5f);
-            fogScatter = debug.Controls.Float("Scatter albedo", fogScatter, 0f, 1f);
-            fogPhaseG  = debug.Controls.Float("Phase g", fogPhaseG, -0.9f, 0.9f);
-            fogAmbient = debug.Controls.Float("Ambient scatter", fogAmbient, 0f, 0.2f);
-            fogFar     = debug.Controls.Float("Far distance", fogFar, 10f, 150f);
-        }
-        using (debug.Scope("Material"))
-        {
-            metallicThreshold = debug.Controls.Float("Metallic threshold", metallicThreshold, 0f, 1f);
-            normalStrength    = debug.Controls.Float("Normal-map strength", normalStrength, 0f, 2f);
-            glassMinOpacity   = debug.Controls.Float("Glass opacity", glassMinOpacity, 0f, 0.6f);
-        }
+        // Exposure / tonemap / fly-speed / LOD-error budget are [Tune] on
+        // RenderSettings (auto-paneled above). Vsync stays manual — it's a
+        // device property, not a field: FIFO (capped, no tearing) vs Mailbox
+        // (uncapped; tears on MoltenVK). Toggling recreates the swapchain.
         using (debug.Scope("Render"))
         {
-            exposure   = debug.Controls.Float("Exposure", exposure, 0.05f, 16f);
-            tonemapMode = debug.Controls.Enum("Tonemap", tonemapMode, TonemapNames);
-            moveSpeed  = debug.Controls.Float("Fly speed", moveSpeed, 0.3f, 60f);
-            // Screen-space-error budget in pixels; 0 forces full detail. Raise it
-            // to trim more aggressively and watch the triangle count fall.
-            lodErrorPixels = debug.Controls.Float("LOD error (px)", lodErrorPixels, 0f, 8f);
-            // Vsync on → FIFO (no tearing, capped at refresh). Off → Mailbox
-            // (uncapped; cpu-wait then reads as true GPU frame cost, but tears on
-            // MoltenVK). Toggling recreates the swapchain next frame.
             vk.VsyncEnabled = debug.Controls.Toggle("Vsync", vk.VsyncEnabled);
         }
 
@@ -1913,14 +1943,15 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // across opaque drawables at the current camera + pixel-error budget.
         var maxLevels = 0;
         var hist = new int[8];
-        foreach (var d in opaqueDrawables)
+        for (var i = 0; i < opaqueDrawables.Count; i++)
         {
+            var d = opaqueDrawables[i];
             maxLevels = Math.Max(maxLevels, d.LodIndexCounts.Length);
-            var lv = d.PickLod(cameraPosition, LodErrorScale, lodErrorPixels);
+            var lv = d.PickLod(cameraPosition, LodErrorScale, render.LodErrorPixels * opaqueLodMargins[i]);
             if (lv < hist.Length) hist[lv]++;
         }
         debug.Values.Value("lod-maxlevels", maxLevels);
-        debug.Values.Value("lod-hist", $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]} (err={lodErrorPixels:0.0}px)");
+        debug.Values.Value("lod-hist", $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]} (err={render.LodErrorPixels:0.0}px)");
 
         // --- Perf instrumentation: weigh where the frame actually goes -------
         // CPU-phase split of the bundled `execute` timer. encode is the only
@@ -1958,8 +1989,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     {
         var hdrTex = graph.GetColorTexture(hdrHandle);
         var push = new byte[8];
+        var exposure = render.Exposure;   // local: MemoryMarshal.Write needs an `in` ref
         MemoryMarshal.Write(push.AsSpan(0, 4), in exposure);
-        var tonemap = (uint)tonemapMode;
+        var tonemap = (uint)render.Tonemap;
         MemoryMarshal.Write(push.AsSpan(4, 4), in tonemap);
         commandList.Pass(
             "present",
@@ -2042,6 +2074,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
     public void OnMouseMove(float x, float y, float deltaX, float deltaY)
     {
+        lastMouseX = x;
+        lastMouseY = y;
         if (!mouseLook) return;
         const float sensitivity = 0.0035f;
         camYaw += deltaX * sensitivity;
@@ -2058,6 +2092,72 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             mouseLook = true;
             host.SetCursorCaptured(true);
         }
+        else if (button == MouseButton.Left && !mouseLook)
+        {
+            PickAt(lastMouseX, lastMouseY);
+        }
+    }
+
+    // Click-to-pick: build a geometric pick ray (backend-agnostic — no Vulkan-NDC
+    // unproject needed), ray-test every registered selectable's AABB, and select
+    // the smallest-volume hit ("the most specific thing under the cursor", as the
+    // GL demo does). Misses clear the selection.
+    private void PickAt(float mx, float my)
+    {
+        if (debugSystem is null) return;
+        var w = host.LogicalSize.Width;
+        var h = host.LogicalSize.Height;
+        if (w <= 0 || h <= 0) return;
+
+        var nx = 2f * mx / w - 1f;
+        var ny = 1f - 2f * my / h;
+        var right = Vector3.Normalize(Vector3.Cross(cameraForward, Vector3.UnitY));
+        var up = Vector3.Cross(right, cameraForward);
+        var tanV = MathF.Tan(fovYRadians * 0.5f);
+        var dir = Vector3.Normalize(cameraForward + right * (nx * tanV * aspect) + up * (ny * tanV));
+        var ray = new Blix.Geometry.Ray(cameraPosition, dir);
+
+        var selectables = debugSystem.CollectSelectables();
+        DebugSelectable? best = null;
+        var bestVolume = float.PositiveInfinity;
+        for (var i = 0; i < selectables.Count; i++)
+        {
+            var s = selectables[i];
+            if (Blix.Geometry.Intersection.Raycast(ray, s.Bounds) is null) continue;
+            var ext = s.Bounds.Max - s.Bounds.Min;
+            var vol = ext.X * ext.Y * ext.Z;
+            if (vol < bestVolume) { bestVolume = vol; best = s; }
+        }
+
+        // Cmd-click adds/toggles; plain click replaces. The framework tracks one
+        // SelectedPath (the primary, last-picked) for its highlight + inspector;
+        // the full multi-select set lives here and is drawn/edited in Debug().
+        var add = heldKeys.Contains(Key.LeftSuper) || heldKeys.Contains(Key.RightSuper);
+        if (best is { } pick)
+        {
+            if (add)
+            {
+                if (!selection.Remove(pick.EntityPath)) selection.Add(pick.EntityPath);
+                primarySelection = selection.Contains(pick.EntityPath) ? pick.EntityPath
+                    : (selection.Count > 0 ? selection.First() : null);
+            }
+            else
+            {
+                selection.Clear();
+                selection.Add(pick.EntityPath);
+                primarySelection = pick.EntityPath;
+            }
+        }
+        else if (!add)
+        {
+            selection.Clear();
+            primarySelection = null;
+        }
+
+        if (primarySelection is { } pp && sceneSelection.TryGetBounds(pp, out var pb))
+            debugSystem.Select(pp, pb);
+        else
+            debugSystem.ClearSelection();
     }
 
     public void OnMouseUp(MouseButton button)
@@ -2071,7 +2171,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
     public void OnMouseWheel(float offsetX, float offsetY)
     {
-        moveSpeed = Math.Clamp(moveSpeed * (offsetY > 0 ? 1.25f : 0.8f), 0.3f, 60f);
+        render.MoveSpeed = Math.Clamp(render.MoveSpeed * (offsetY > 0 ? 1.25f : 0.8f), 0.3f, 60f);
     }
 
     public void Dispose() { }
@@ -2286,5 +2386,87 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         var k = (roughness * roughness) / 2f;
         float GeomG(float c) => c / (c * (1f - k) + k);
         return GeomG(NdotV) * GeomG(NdotL);
+    }
+}
+
+// Volumetric-fog tunables, auto-exposed via [Tune] (overlay "Fog" group —
+// FogSettings → "Fog"). The fields are the source of truth; the render loop
+// reads fog.Density etc. directly, the overlay reflects + edits them.
+internal sealed class FogSettings
+{
+    [Tune] public bool Enabled;                       // compute cost; off by default
+    [Tune(0f, 0.5f)]    public float Density = 0.018f; // extinction scale
+    [Tune(0f, 1f)]      public float Scatter = 0.6f;   // scattering albedo
+    [Tune(-0.9f, 0.9f)] public float PhaseG = 0.6f;    // Henyey-Greenstein anisotropy
+    [Tune(0f, 0.2f)]    public float Ambient = 0.005f; // ambient in-scatter floor
+    [Tune(10f, 150f)]   public float Far = 60f;        // grid far distance (metres)
+}
+
+// Tonemap operators (overlay Render → Tonemap); the enum's int value indexes
+// present.frag's branch, so declaration order must match the shader.
+internal enum TonemapMode { Reinhard, ACES, AgX, Hejl }
+
+// Sun-shadow tunables (overlay "Shadows" group). Read live by UpdateCascades
+// (bias + ortho-fit distance) and the per-frame uShadowStrength write.
+internal sealed class ShadowsSettings
+{
+    [Tune]            public bool Enabled = true;
+    [Tune(0f, 6f)]    public float BiasTexels = 1.5f;
+    [Tune(10f, 120f)] public float SunDistance = 40f;
+}
+
+// Misc render tunables (overlay "Render" group). Vsync stays a manual toggle —
+// it's a device property, not a field.
+internal sealed class RenderSettings
+{
+    [Tune(0.05f, 16f)] public float Exposure = 0.5f;
+    [Tune]             public TonemapMode Tonemap = TonemapMode.AgX;
+    [Tune(0.3f, 60f)]  public float MoveSpeed = 4.5f;
+    [Tune(0f, 8f)]     public float LodErrorPixels = 1.0f;
+}
+
+// Pickable scene primitives for the diagnostics overlay. Built after geometry
+// consolidation: one DebugSelectable per drawable, keyed by a session-stable
+// path. Implements the engine's selection + inspection hooks so a click
+// ray-picks a primitive and the Selection panel shows its identity + LOD info.
+// Selection is live debug state only — nothing persists.
+internal sealed class SceneSelection : IDebugSelectable, IDebugInspectable
+{
+    public string DebugName => "scene";
+
+    private readonly List<DebugSelectable> selectables = new();
+    private readonly Dictionary<string, Entry> byPath = new();
+    private readonly record struct Entry(string Name, Bounds3 Bounds, int LodLevels, float MaxError);
+
+    public void Rebuild(
+        IReadOnlyList<(string Path, string Name, Bounds3 Bounds, int LodLevels, float MaxError)> items)
+    {
+        selectables.Clear();
+        byPath.Clear();
+        foreach (var it in items)
+        {
+            selectables.Add(new DebugSelectable(it.Path, it.Bounds));
+            byPath[it.Path] = new Entry(it.Name, it.Bounds, it.LodLevels, it.MaxError);
+        }
+    }
+
+    public void CollectSelectables(List<DebugSelectable> destination) => destination.AddRange(selectables);
+
+    // Bounds for a path (for the demo to draw multi-select highlights).
+    public bool TryGetBounds(string entityPath, out Bounds3 bounds)
+    {
+        if (byPath.TryGetValue(entityPath, out var e)) { bounds = e.Bounds; return true; }
+        bounds = default;
+        return false;
+    }
+
+    public void Inspect(string entityPath, DebugContext debug)
+    {
+        if (!byPath.TryGetValue(entityPath, out var e)) return;
+        debug.Values.Value("name", e.Name);
+        debug.Values.Value("bounds-min", e.Bounds.Min);
+        debug.Values.Value("bounds-max", e.Bounds.Max);
+        debug.Values.Value("lod-levels", e.LodLevels);
+        debug.Values.Value("lod-max-error", e.MaxError);
     }
 }
