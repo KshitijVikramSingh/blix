@@ -25,6 +25,16 @@ layout(push_constant) uniform Push {
 layout(location = 0) in vec2 vScreenUV;
 layout(location = 0) out vec4 fragColor;
 
+// The swapchain is B8G8R8A8_SRGB and hardware-encodes linear->sRGB on write.
+// This grade runs in display space (ported from the GL build, which presented
+// without a second encode), so convert back to linear before output — the
+// swapchain's encode then reproduces the authored values instead of
+// double-brightening them (which blew out the bright text + paddles).
+vec3 srgbToLinear(vec3 c)
+{
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
+
 vec3 sampleGlow(vec2 uv, float radius)
 {
     vec2 d = pc.uTexel * radius;
@@ -108,5 +118,5 @@ void main()
     float grain = fract(sin(dot(uv.xy + pc.uTime, vec2(12.9898, 78.233))) * 43758.5453);
     col += (grain - 0.5) * 0.025;
 
-    fragColor = vec4(col, 1.0);
+    fragColor = vec4(srgbToLinear(clamp(col, 0.0, 1.0)), 1.0);
 }
