@@ -1,23 +1,51 @@
 # Blix
 
-Blix is a small, code-first native game engine kit for C# / .NET. It provides explicit building blocks for rendering, audio, assets, animation, collision, diagnostics, and game loops — without forcing an ECS, editor-first workflow, or monolithic scene model.
+**Blix is a code-first native engine kit for C# / .NET — for games that want to own their engine stack.**
 
-Every type has named fields and a deliberate-limits list. Concrete `Camera3D` / `DirectionalLight` / `GameObject` instead of entity-component soup. A typed graphics-command layer (`Blix.Graphics`) over a Vulkan backend (`Blix.Graphics.Vulkan`), driven through a Silk.NET host adapter (`Blix.Runtime.Silk`). PBR-grade rendering underneath — HDR + IBL, cascade and cube shadow maps, froxel volumetric fog, bloom, ACES/AgX tonemapping, GPU-driven indirect draw with screen-space-error LOD — kinematic physics + collision, glTF skeletal animation, OpenAL positional audio, sprite/text UI (`SpriteBatch` + `Font`).
+An in-development engine workbench: rendering, assets, streaming, audio, physics, UI, animation, runtime hosting, and diagnostics, all exposed as explicit pieces game code wires together directly. Blix doesn't try to make the engine disappear — it makes the important machinery visible.
 
-No editor, no scripting, no plugin system, no asset cache, no hot reload. No shipped games yet. Built to be read.
+The split is deliberate. The engine owns the reusable hard parts — cooked asset formats, background loading, progressive texture upload, mesh bundling, the typed graphics-command layer, shader interfaces, render graphs, Vulkan execution, and diagnostics. The game owns how those become a frame — which passes run, how draw groups are built, what gets culled, how LOD is chosen, how the world is represented. No single scene renderer or fixed world model is imposed on top, and there's no ECS, editor, scripting, or hot reload.
+
+The stack is Vulkan-first: `Blix.Graphics` is the typed command layer, `Blix.Graphics.Vulkan` the backend, and `Blix.Runtime.Silk` hosts the window, input, Vulkan surface, audio device, and diagnostics. Visibility is part of that surface — systems contribute debug values, controls, timers, events, overlays, stats, selections, inspectors, and live-tunable parameters, so the engine can answer practical questions while it runs: what was loaded, streamed, bundled, submitted, culled, and drawn, and where the frame time went.
+
+Today that spans cooked binary asset formats (`.blixtex`, `.blixprobe`, `.blixmesh`), progressive texture streaming, mesh bundling, screen-space-error LOD, GPU-driven indirect drawing, PBR + HDR/IBL, cascaded and cubemap shadows, volumetric fog, bloom, tonemapping, glTF skinning, OpenAL positional audio, kinematic collision, and a Vulkan `SpriteBatch`/font path (the Pong demo).
+
+Blix is still early — APIs are changing, the demos do real engine work, and some systems are exposed before they're polished. The goal is a readable native engine kit: serious enough to push multi-GB scenes through a modern Vulkan frame, small enough to understand, change, and own.
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — orientation: project graph, host contracts, conventions, where to find things.
-- [`docs/renderer.md`](docs/renderer.md) — **historical**: the sunset OpenGL renderer, retained for its rendering-technique writeups (PBR, shadows, HDR + IBL, tonemap). For the current Vulkan backend see [`docs/vulkan-friction.md`](docs/vulkan-friction.md) and [`docs/architecture.md`](docs/architecture.md).
+- [`docs/architecture.md`](docs/architecture.md) — orientation: project graph, host contracts, the Vulkan binding model, conventions, where to find things.
+- [`docs/renderer.md`](docs/renderer.md) — the Vulkan renderer: render graph, recording draws, pipelines, shaders, and the rendering techniques (PBR, IBL, shadows, bloom, fog).
 - [`docs/blix.md`](docs/blix.md) — the layer game code targets: loop, scene primitives, cameras, lights, animation, skeletal, physics, geometry, audio, picking.
-- [`docs/walkthrough.md`](docs/walkthrough.md) — **historical**: the retired GL Walkthrough demo's architecture, retained for reference. For current scene-grade demos see VulkanSponza / VulkanLit below.
 
 ## Demos
 
-Five demos ship in `src/`, all on the Vulkan backend. Each is a standalone entry point. They exercise the shader-interface binding model, declarative render graph, and per-draw transient descriptor pool ([`docs/vulkan-friction.md`](docs/vulkan-friction.md) tracks the reshape). The OpenGL backend and its four heavy demos were sunset; Pong was ported to the Vulkan `SpriteBatch` and kept as the gameplay demo.
+Five demos ship in `src/`, all on the Vulkan backend, each a standalone entry point. Two anchor the set: **Vulkan Sponza** is the capabilities demo — the forward edge of what the engine can pull off — and **Pong** is the complete game, the one end-to-end playable title. The other three (Vulkan Lit, Vulkan Graph, Vulkan Hello) are focused references for the renderer, the render graph, and the Vulkan bring-up path. (The OpenGL backend and its four heavy demos were sunset; Pong was rebuilt on the Vulkan `SpriteBatch`.)
 
-### Vulkan Lit (active development, headline demo)
+### Vulkan Sponza — capabilities demo
+
+![Intel Sponza rendered in Blix: PBR stone and draped cloth, cascaded sun shadows, alpha-cutout foliage, and image-based lighting — all from cooked, streamed, screen-space-error-LOD'd assets.](docs/sponza.jpg)
+
+```sh
+tools/run-vulkan-sponza.sh
+```
+
+The forward edge of the engine, and the demo where the whole pipeline has to come together to keep a multi-GB scene playable: the Khronos Intel Sponza scene (main + curtains + ivy + trees packs). It loads cooked siblings only (`.blixtex` BC7/BC5 textures, `.blixprobe` IBL, `.blixmesh` geometry with LOD): 3-cascade directional shadows with per-cascade resolution + rotated-Vogel PCF, depth pre-pass, R11G11B10F HDR scene target at 4× MSAA, GGX/IBL + Fresnel glass, ACES/AgX tonemap, and an optional froxel volumetric-fog compute pass (`--fog`). Geometry uses screen-space-error LOD over cook-time meshopt chains + spatial split, all bundled into one shared vertex/index buffer by the engine's `MeshBundler` (draws are sub-ranges), with cutout foliage rendered as depth-writing MASK + alpha-to-coverage to avoid overdraw. The Vulkan binding model (descriptor sets + std140 UBO layouts + push ranges) is reflected from the compiled SPIR-V at build time; cooked textures stream in through the engine's `GltfTextureLoader` + `AsyncLoadQueue`; and shader/scene tunables are live-editable in the overlay via `//@tune` / `[Tune]` decorators. The diagnostics overlay surfaces per-pass draw/triangle counts, the LOD histogram, and a CPU-phase frame breakdown (`cpu-wait` / `cpu-encode` / `cpu-submit`) for separating GPU-bound from draw-encode-bound frames — the levers you actually pull to make the scene fast.
+
+Assets are multi-GB and not committed — run `tools/setup-sponza-modern.sh` once to populate + cook from a local Khronos download.
+
+### Pong — complete game
+
+```sh
+tools/run-pong.sh
+```
+
+The one end-to-end playable game, and the `SpriteBatch` + `Font` proving ground: two-player Pong with 1/120s fixed-step paddle physics, five-zone quantised deflection, ball speed ramp, squash/stretch, hitstop, screen-shake, a fading ball trail, first-to-11 scoring, and a win flash. Solid rects and bitmap text are drawn via `SpriteBatch` (one alpha-blended pipeline, texture at set 0, view-projection via push constant) and `DrawText` over a baked `Font` atlas into a 2×-supersampled offscreen (a `RenderGraph` pass), then a fullscreen CRT post-FX present grades it onto the swapchain — bezel vignette, luminance-gated chromatic aberration, dual-radius bloom, scanlines, and a win-flash tint. Square-wave SFX play through the OpenAL device the Silk runtime provides.
+
+- `W` / `S` — left paddle. `↑` / `↓` — right paddle. `Space` — serve / new match. `R` — reset. `Esc` — quit.
+- macOS audio needs OpenAL Soft (`brew install openal-soft`); without it the beeps no-op but the game runs.
+
+### Vulkan Lit — PBR renderer reference
 
 ```sh
 # Run via the launcher (sets DYLD_FALLBACK_LIBRARY_PATH for MoltenVK on macOS).
@@ -28,21 +56,11 @@ prefix=$(brew --prefix) && \
   dotnet run --project src/Blix.Demos.VulkanLit/Blix.Demos.VulkanLit.csproj
 ```
 
-PBR scene end-to-end on the Vulkan backend: cube + skinned glTF + a PBR sphere rig + ground plane, lit by directional sun + two spot lights + one point light, each with PCF-filtered shadow maps. Procedural-sky IBL (env cube + diffuse irradiance + split-sum BRDF LUT), separable-Gaussian bloom chain, ACES tonemap. Free-fly camera, ImGui-driven debug surface (sun yaw/pitch, exposure, per-light toggles, per-pixel shader-channel inspection).
+The full lit/shadow/PBR/IBL/bloom path in isolation: cube + skinned glTF + a PBR sphere rig + ground plane, lit by directional sun + two spot lights + one point light, each with PCF-filtered shadow maps. Procedural-sky IBL (env cube + diffuse irradiance + split-sum BRDF LUT), separable-Gaussian bloom chain, ACES tonemap. Free-fly camera, ImGui-driven debug surface (sun yaw/pitch, exposure, per-light toggles, per-pixel shader-channel inspection).
 
 Render graph: `sun-shadow → spot0-shadow → spot1-shadow → 6× point-cube-faces → lit-scene → bloom-bright → bloom-blurH → bloom-blurV → present`. Skinning rides a per-frame bone-palette SSBO via `MaterialBindings(framesInFlight = MaxFramesInFlight)`.
 
-### Vulkan Sponza (perf target)
-
-```sh
-tools/run-vulkan-sponza.sh
-```
-
-The Khronos Intel Sponza scene (main + curtains + ivy + trees packs) on the Vulkan backend — the renderer's performance and asset-pipeline proving ground. Loads cooked siblings only (`.blixtex` BC7/BC5 textures, `.blixprobe` IBL, `.blixmesh` geometry with LOD): 3-cascade directional shadows with per-cascade resolution + rotated-Vogel PCF, depth pre-pass, R11G11B10F HDR scene target at 4× MSAA, GGX/IBL + Fresnel glass, ACES/AgX tonemap, and an optional froxel volumetric-fog compute pass (`--fog`). Geometry uses screen-space-error LOD over cook-time meshopt chains + spatial split, all bundled into one shared vertex/index buffer by the engine's `MeshBundler` (draws are sub-ranges), with cutout foliage rendered as depth-writing MASK + alpha-to-coverage to avoid overdraw. The Vulkan binding model (descriptor sets + std140 UBO layouts + push ranges) is reflected from the compiled SPIR-V at build time; cooked textures stream in through the engine's `GltfTextureLoader` + `AsyncLoadQueue`; and shader/scene tunables are live-editable in the overlay via `//@tune` / `[Tune]` decorators. The diagnostics overlay also surfaces per-pass draw/triangle counts, the LOD histogram, and a CPU-phase frame breakdown (`cpu-wait` / `cpu-encode` / `cpu-submit`) for separating GPU-bound from draw-encode-bound frames.
-
-Assets are multi-GB and not committed — run `tools/setup-sponza-modern.sh` once to populate + cook from a local Khronos download.
-
-### Vulkan Graph
+### Vulkan Graph — render-graph reference
 
 ```sh
 dotnet run --project src/Blix.Demos.VulkanGraph/Blix.Demos.VulkanGraph.csproj
@@ -50,23 +68,15 @@ dotnet run --project src/Blix.Demos.VulkanGraph/Blix.Demos.VulkanGraph.csproj
 
 Smaller demo of the render-graph topology: `cube-offscreen → invert → present`. Validates resource handles, Read edges, `MatchSwapchainGraphSize` resizing, and the graph→imperative-command-list bridge.
 
-### Vulkan Hello
+### Vulkan Hello — bring-up reference
 
 ```sh
 tools/run-vulkan-hello.sh
 ```
 
-Original Vulkan validation demo. Spinning depth-tested cube via MoltenVK, swapchain + per-frame sync + VkQueryPool timing infrastructure, debug-line overlay. The narrowest known-good Vulkan call site — useful as the simplest reference when something else breaks.
+The narrowest known-good Vulkan call site: a spinning depth-tested cube via MoltenVK, swapchain + per-frame sync + VkQueryPool timing infrastructure, debug-line overlay. The simplest reference when something further up the stack breaks.
 
 Setup (one-time): `brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc`. `BLIX_VK_VALIDATE=1` enables Khronos validation layers. `BLIX_DIAG_INTERVAL=<frames>` controls the periodic console digest cadence (default 60; `BLIX_DIAG=off` disables).
-
-### Pong (gameplay demo)
-
-```sh
-tools/run-pong.sh
-```
-
-The engine's gameplay demo and the `SpriteBatch` + `Font` proving ground: two-player Pong with 1/120s fixed-step paddle physics, five-zone quantised deflection, ball speed ramp, squash/stretch, hitstop, screen-shake, a fading ball trail, first-to-11 scoring, and a win flash. Solid rects and bitmap text are drawn via `SpriteBatch` (one alpha-blended pipeline, texture at set 0, view-projection via push constant) and `DrawText` over a baked `Font` atlas into a 2×-supersampled offscreen (a `RenderGraph` pass), then a fullscreen CRT post-FX present grades it onto the swapchain — bezel vignette, luminance-gated chromatic aberration, dual-radius bloom, scanlines, and a win-flash tint. Square-wave SFX play through the OpenAL device the Silk runtime now provides.
 
 - `W` / `S` — left paddle. `↑` / `↓` — right paddle. `Space` — serve / new match. `R` — reset. `Esc` — quit.
 - macOS audio needs OpenAL Soft (`brew install openal-soft`); without it the beeps no-op but the game runs.
@@ -85,7 +95,7 @@ Three sibling binary formats let the runtime skip the slow paths (PNG decode, eq
 
 When a `.blixmesh` sibling exists, the importer also switches `ModelRoot.Load` to a lite path (`ReadContext.Create` + `ValidationMode.Skip` + an empty buffer reader) — the JSON still parses for material descriptors, but the multi-megabyte `.bin` validation is skipped entirely. Textures upload progressively through `ResourceUploader`, smallest mip first, so materials bind a usable-if-blurry texture within a frame and sharpen over the next few.
 
-`.blixmesh` also carries geometry LOD: `blix-cook mesh` bakes a meshoptimizer-decimated chain per primitive (each level tagged with its world-space geometric error) and, with `--split N`, recursively splits oversized primitives into spatial chunks so a huge floor/wall/ivy mesh can coarsen its far half independently of its near half. The runtime picks a level by screen-space error. See [`docs/renderer.md` → Geometry LOD](docs/renderer.md#geometry-lod).
+`.blixmesh` also carries geometry LOD: `blix-cook mesh` bakes a meshoptimizer-decimated chain per primitive (each level tagged with its world-space geometric error) and, with `--split N`, recursively splits oversized primitives into spatial chunks so a huge floor/wall/ivy mesh can coarsen its far half independently of its near half. The runtime picks a level by screen-space error; `src/Blix.Demos.VulkanSponza/` is the working reference.
 
 ## Build
 

@@ -2,14 +2,11 @@
 
 The engine is organised so that game code lives in `Blix` (the root namespace, the layer game code targets), the renderer spine lives below it (`Blix.Graphics` → `Blix.Graphics.Vulkan`), and platform contracts (windowing, input, audio host, diagnostics) live below everything in `Blix.Core`.
 
-One backend + runtime ship today: the Vulkan + Silk.NET pair. The original OpenGL backend (`Blix.Graphics.OpenGL`) and its OpenTK runtime (`Blix.Runtime.OpenTK`) were sunset, along with the GL-only `Blix.Render` engine-facing API (name-keyed `Material`/`MaterialResolver`/`PostProcessStack`/`PbrSceneRenderer`) and the four heavy GL demos. Five Vulkan demos ship: `Blix.Demos.VulkanHello`, `Blix.Demos.VulkanGraph`, `Blix.Demos.VulkanLit`, and `Blix.Demos.VulkanSponza` cover validation, render-graph topology, the full lit/shadow/PBR/IBL/bloom scene, and the GPU-driven Intel Sponza performance + asset-pipeline target; `Blix.Demos.Pong` is the gameplay demo, ported onto the rebuilt Vulkan `SpriteBatch`. The engine was progressively reshaped around the Vulkan target; see [`vulkan-friction.md`](vulkan-friction.md) for the friction notes that drove the reshape.
+One backend + runtime ship today: the Vulkan + Silk.NET pair. The original OpenGL backend (`Blix.Graphics.OpenGL`) and its OpenTK runtime (`Blix.Runtime.OpenTK`) were sunset, along with the GL-only `Blix.Render` engine-facing API (name-keyed `Material`/`MaterialResolver`/`PostProcessStack`/`PbrSceneRenderer`) and the four heavy GL demos. Five Vulkan demos ship: `Blix.Demos.VulkanHello`, `Blix.Demos.VulkanGraph`, `Blix.Demos.VulkanLit`, and `Blix.Demos.VulkanSponza` cover validation, render-graph topology, the full lit/shadow/PBR/IBL/bloom scene, and the GPU-driven Intel Sponza performance + asset-pipeline target; `Blix.Demos.Pong` is the gameplay demo, ported onto the rebuilt Vulkan `SpriteBatch`. The engine was progressively reshaped around the Vulkan target — name-keyed materials gave way to SPIR-V-reflected binding (see [the Vulkan binding model](#the-vulkan-binding-model) below).
 
 **Library, not framework.** The engine is a set of composable primitives game code calls — not a control-inverting framework. The split: the **engine owns asset loading, reading, and bundling** (decode/upload/dedup/stream textures, pack geometry into shared buffers, run an off-thread load queue); the **game owns synthesis and composition** (which passes run, how draws are recorded, material/pipeline choice, render-graph topology). There is no `SceneRenderer` that owns read→cull→draw: `VulkanSponza` composes the engine primitives (`MeshBundler`, `AsyncLoadQueue`, `GltfTextureLoader`, the `RenderGraph`) itself and keeps its own draw groups + LOD/cull policy. New rendering capability lands as a primitive the game calls, not a stage the engine runs for you.
 
-This doc orients you. For detail:
-- Renderer techniques (historical GL reference): [`renderer.md`](renderer.md)
-- Game-engine layer reference: [`blix.md`](blix.md)
-- Vulkan-backend reshape notes: [`vulkan-friction.md`](vulkan-friction.md)
+This doc orients you. For the game-engine layer game code targets, see [`blix.md`](blix.md). For the renderer — render graph, recording draws, shaders, and rendering techniques — see [`renderer.md`](renderer.md); `src/Blix.Demos.VulkanLit/` and `src/Blix.Demos.VulkanSponza/` are the working references it points at.
 
 ## Project graph
 
@@ -67,9 +64,13 @@ Blix.Audio.OpenAL              ← OpenAL Soft backend
 
 Every cross-project dependency in the source tree fits one of the arrows above. Nothing above `Blix.Core` depends on a windowing/audio backend directly — `Blix.Runtime.Silk` is the only project that wires `IRenderHost`/`IAudioHost`/`IDebugHost` to concrete implementations.
 
-The Vulkan path is now the sole renderer, and in `VulkanSponza` it has moved well past the old GL feature set: a SPIR-V-reflected binding model (descriptor sets + std140 UBO layouts + push ranges derived from the compiled `.spv`, not hand-authored), per-material descriptor sets, push constants, per-draw transient descriptor pools, a declarative render graph (`Blix.Graphics.Vulkan/RenderGraph.cs`), glTF + skinning (via the existing `Blix.Assets` importers), PBR + IBL (procedural-sky or cooked-probe environment + irradiance cube + split-sum BRDF LUT), HDR + ACES/AgX tonemap, and a separable-Gaussian bloom chain. `VulkanSponza` adds cascaded directional shadows (texel-snapped + cached), a depth pre-pass, froxel volumetric fog, GPU-driven indirect rendering, screen-space-error LOD over meshopt chains, and the cooked-asset pipeline (`.blixmesh`/`.blixtex`/`.blixprobe`) streamed through the engine's `GltfTextureLoader` + `AsyncLoadQueue` + `MeshBundler`. The 2D path (`SpriteBatch` + `Font`, used by `Pong`) was rebuilt on the Vulkan binding model. SSR and the dual-filter bloom were GL-only techniques and did not survive the sunset; froxel fog now lives on Vulkan in VulkanSponza.
+## The Vulkan binding model
 
-`Blix.Shaders` isn't a code project — it's a folder of `.glsl` files copied into each demo's output via `<None Include="..\Blix.Shaders\**\*.glsl" Link="Shaders\lib\...">` in the demo csproj. Demo shaders write `#include "lib/tonemap.glsl"` and the include preprocessor resolves it at load time. See [renderer.md → Shader library](renderer.md#shader-library).
+The renderer's defining choice is that the binding model is *derived*, not declared by hand. At build time the compiled SPIR-V is reflected (via spirv-cross sidecars) into a `ShaderInterface`: descriptor sets + std140 UBO layouts + push-constant ranges, keyed by the set/binding/member names in the shader. `CreateMaterial(program, setIndex, …)` then allocates a `MaterialBindings` against one reflected set — `SetUniform("uTint", …)` / `SetTexture(binding, …)` write into it by name, and `.Handle` is the backend-neutral `MaterialHandle` a `GameObject` stores. Sets are organised by lifetime (frame-global, per-material, per-draw), and per-draw data rides push constants or a transient descriptor pool refilled each frame. There is no parallel hand-maintained binding table to drift out of sync with the shader source.
+
+The Vulkan path is now the sole renderer, and in `VulkanSponza` it has moved well past the old GL feature set: that SPIR-V-reflected binding model, per-material descriptor sets, push constants, per-draw transient descriptor pools, a declarative render graph (`Blix.Graphics.Vulkan/RenderGraph.cs`), glTF + skinning (via the existing `Blix.Assets` importers), PBR + IBL (procedural-sky or cooked-probe environment + irradiance cube + split-sum BRDF LUT), HDR + ACES/AgX tonemap, and a separable-Gaussian bloom chain. `VulkanSponza` adds cascaded directional shadows (texel-snapped + cached), a depth pre-pass, froxel volumetric fog, GPU-driven indirect rendering, screen-space-error LOD over meshopt chains, and the cooked-asset pipeline (`.blixmesh`/`.blixtex`/`.blixprobe`) streamed through the engine's `GltfTextureLoader` + `AsyncLoadQueue` + `MeshBundler`. The 2D path (`SpriteBatch` + `Font`, used by `Pong`) was rebuilt on the Vulkan binding model. SSR and the dual-filter bloom were GL-only techniques and did not survive the sunset; froxel fog now lives on Vulkan in VulkanSponza.
+
+`Blix.Shaders` isn't a code project — it's a folder of `.glsl` files copied into each demo's output via `<None Include="..\Blix.Shaders\**\*.glsl" Link="Shaders\lib\...">` in the demo csproj. Demo shaders write `#include "lib/tonemap.glsl"` and the include preprocessor resolves it at load time (see **Shader library** under Conventions below).
 
 ## Host contracts
 
@@ -101,7 +102,7 @@ The game implements `IGameLoop` (in `Blix`) and optionally `IInputHandler` and `
 
 `Blix.Graphics.ShaderLoader.LoadVertexFragment(vertPath, fragPath, includeDirs?, defines?)` bundles read + preprocess + naming + source-map plumbing. The optional `defines` dictionary injects `#define KEY VALUE` lines right after `#version` so the same library function can serve multiple variants.
 
-**Shader library.** Engine-shared GLSL lives at `src/Blix.Shaders/*.glsl` with a `blix_` prefix on every symbol. Demo shaders consume them with `#include "lib/<file>.glsl"`. New library files start with `#pragma once`. See [renderer.md → Shader library](renderer.md#shader-library).
+**Shader library.** Engine-shared GLSL lives at `src/Blix.Shaders/*.glsl` with a `blix_` prefix on every symbol. Demo shaders consume them with `#include "lib/<file>.glsl"`. New library files start with `#pragma once`.
 
 **GLSL ASCII only.** Shaders are compiled offline to SPIR-V with `glslc` (Khronos); the old Apple GL 4.1 compiler quirks no longer apply at runtime. Pure ASCII remains the `glslc`-portability convention for the shader library — keep shader files pure ASCII.
 
@@ -109,14 +110,14 @@ The game implements `IGameLoop` (in `Blix`) and optionally `IInputHandler` and `
 
 | If you want... | Look at... |
 | --- | --- |
-| Render a frame, write a shader, set up a pipeline | [`renderer.md`](renderer.md) |
+| Render a frame, write a shader, set up a pipeline | [`renderer.md`](renderer.md); `src/Blix.Demos.VulkanGraph/` (smallest graph) and `src/Blix.Demos.VulkanLit/` (full pipeline) |
 | See HDR + IBL + shadows + bloom wired together on Vulkan | `src/Blix.Demos.VulkanLit/` and `src/Blix.Demos.VulkanSponza/` |
 | Make a `Game` subclass, place an object, animate it, query collisions | [`blix.md`](blix.md) |
 | Add a host facet (audio, gamepads, networking) | `src/Blix.Core/` for the contract, then implement in `src/Blix.Runtime.Silk/` |
 | Add a new asset type | `src/Blix.Assets/` (importer + intermediate data type) |
-| Bundle meshes into shared buffers / stream glTF textures | `Blix.Render.MeshBundler`, `Blix.Render.AsyncLoadQueue<T>`, `GltfTextureLoader` — see "Asset pipeline" in [`renderer.md`](renderer.md) |
-| Add a new debug control / stat / timer / event | `IDebuggable.Debug(DebugContext)` — see "Diagnostics" in [`renderer.md`](renderer.md) |
-| Expose a value for live tuning in the overlay | `//@tune lo..hi = default` in a GLSL uniform, or `[Tune(min,max)]` on a C# field — see "Live tuning" in [`renderer.md`](renderer.md) |
+| Bundle meshes into shared buffers / stream glTF textures | `Blix.Render.MeshBundler`, `Blix.Render.AsyncLoadQueue<T>`, `GltfTextureLoader` — `src/Blix.Demos.VulkanSponza/` composes them |
+| Add a new debug control / stat / timer / event | `IDebuggable.Debug(DebugContext)` — `Blix.Diagnostics` |
+| Expose a value for live tuning in the overlay | `//@tune lo..hi = default` in a GLSL uniform, or `[Tune(min,max)]` on a C# field |
 | Register a debug producer (subsystem, asset, scene instance) | `debugSystem.Register(contributor)` from `OnLoad` — implement `IDebuggable` / `IDebugGeometrySource` / `IDebugSelectable` / `IDebugInspectable` / `IDebugUi` independently |
 | Save a frame snapshot to disk | Press `F12` (runtime-owned) — writes `dumps/frame-NNNNNN.json` via `JsonDumpSink` |
 | Toggle the diagnostics overlay | Press `` ` `` (backtick) |

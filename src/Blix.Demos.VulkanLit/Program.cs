@@ -767,10 +767,8 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         // a fixed convention that assumes Y-up face rendering; the screen
         // perspective's Y-flip (M22 < 0) vertically mirrors each stored face,
         // so a direction samples a mirrored texel and reads the wrong
-        // occluder distance (a mirrored false shadow). Undo the flip while
-        // keeping Vulkan's [0,1] depth range (can't use the GL-style
-        // CreatePerspective — its z ∈ [-1,1] would clip near geometry in
-        // Vulkan). See ShaderLab's point-shadow faces (GL CreatePerspective).
+        // occluder distance (a mirrored false shadow). Undo the flip (below)
+        // while keeping Vulkan's [0,1] depth range.
         var pointProj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 2f, 1.0f, 0.1f, PointFar);
         pointProj.M22 = -pointProj.M22;
         var faceDirs = new[]
@@ -1272,8 +1270,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     public void Debug(DebugContext debug)
     {
         // Light up the on-screen diagnostics overlay (toggle visibility with
-        // the ` key). The Vulkan backend now renders the same ImGui panels the
-        // GL demos have.
+        // the ` key).
         debug.State.Enabled = true;
         debug.Values.Value("frame", frameCount);
 

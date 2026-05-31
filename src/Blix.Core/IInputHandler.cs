@@ -1,7 +1,7 @@
 namespace Blix.Core;
 
 // Edge-triggered input events from the host. Separated from the game loop so consumers
-// can opt in without taking on update/render obligations. Blix.Runtime.OpenTK checks
+// can opt in without taking on update/render obligations. Blix.Runtime.Silk checks
 // for this interface on the loop instance and forwards events when present.
 public interface IInputHandler
 {

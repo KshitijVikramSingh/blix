@@ -22,20 +22,20 @@ public sealed class Camera3D
         GraphicsMatrices.CreateView(Transform.Position, Transform.Rotation);
 
     public Matrix4x4 GetProjection(float aspectRatio) =>
-        GraphicsMatrices.CreatePerspective(VerticalFieldOfView, aspectRatio, NearPlane, FarPlane);
+        GraphicsMatrices.CreatePerspectiveVulkan(VerticalFieldOfView, aspectRatio, NearPlane, FarPlane);
 
     public Matrix4x4 GetViewProjection(float aspectRatio) => GetView() * GetProjection(aspectRatio);
 
     // Build a world-space Ray from a screen-pixel position. Screen coordinates use
-    // top-left origin (screen Y grows downward, the OpenTK / window-system convention);
-    // the unprojection flips that into NDC's bottom-left origin internally. The
-    // returned ray's origin sits on the near plane and the direction points away
-    // from the camera through the screen pixel toward the far plane.
+    // top-left origin (screen Y grows downward, the window-system convention),
+    // which matches Vulkan's Y-down NDC, so the screen→NDC map needs no Y flip.
+    // The returned ray's origin sits on the near plane and the direction points
+    // away from the camera through the screen pixel toward the far plane.
     //
     // The view-projection is computed from the camera's current Transform + the
-    // viewport's aspect ratio, then inverted. The two NDC z values (-1 = near,
-    // +1 = far) get unprojected through the inverse, homogeneous-divided, and
-    // subtracted to form the ray direction.
+    // viewport's aspect ratio, then inverted. The two Vulkan NDC z values
+    // (0 = near, 1 = far) get unprojected through the inverse, homogeneous-
+    // divided, and subtracted to form the ray direction.
     public Ray ScreenPointToRay(float screenX, float screenY, float viewportWidth, float viewportHeight)
     {
         if (viewportWidth <= 0.0f)
@@ -47,9 +47,9 @@ public sealed class Camera3D
             throw new ArgumentOutOfRangeException(nameof(viewportHeight), "Viewport height must be positive.");
         }
 
-        // Screen -> NDC. NDC y is up; screen y is down — flip.
+        // Screen -> Vulkan NDC. NDC y points down, same as screen y — no flip.
         var ndcX = 2.0f * screenX / viewportWidth - 1.0f;
-        var ndcY = 1.0f - 2.0f * screenY / viewportHeight;
+        var ndcY = 2.0f * screenY / viewportHeight - 1.0f;
 
         var viewProjection = GetViewProjection(viewportWidth / viewportHeight);
         if (!Matrix4x4.Invert(viewProjection, out var inv))
@@ -59,10 +59,11 @@ public sealed class Camera3D
             return new Ray(Transform.Position, Transform.Forward);
         }
 
-        // F-016: engine row-vector form. Vector4.Transform applies v_row * M
-        // which is exactly what we need for unprojecting NDC through inv(viewProj).
-        var nearH = Vector4.Transform(new Vector4(ndcX, ndcY, -1.0f, 1.0f), inv);
-        var farH  = Vector4.Transform(new Vector4(ndcX, ndcY,  1.0f, 1.0f), inv);
+        // Engine row-vector form: Vector4.Transform applies v_row * M, which is
+        // exactly what we need for unprojecting NDC through inv(viewProj).
+        // Vulkan clip depth is [0, 1]: near = 0, far = 1.
+        var nearH = Vector4.Transform(new Vector4(ndcX, ndcY, 0.0f, 1.0f), inv);
+        var farH  = Vector4.Transform(new Vector4(ndcX, ndcY, 1.0f, 1.0f), inv);
 
         var near = new Vector3(nearH.X / nearH.W, nearH.Y / nearH.W, nearH.Z / nearH.W);
         var far  = new Vector3(farH.X  / farH.W,  farH.Y  / farH.W,  farH.Z  / farH.W);

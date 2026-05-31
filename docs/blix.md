@@ -2,7 +2,7 @@
 
 The layer game code targets. Owns the loop contract, scene composition, per-object pose, cameras + lights, animation + skeletal animation, physics, geometry + collision, audio, and the glTF importer. Everything below it (`Blix.Core`, `Blix.Graphics`, `Blix.Graphics.Vulkan`, `Blix.Graphics.Images`, `Blix.Render`, `Blix.Assets`, `Blix.Diagnostics`, `Blix.Geometry`) is platform/renderer plumbing.
 
-This doc is the reference for the `Blix` namespace. For the layers below, see [`renderer.md`](renderer.md) and [`architecture.md`](architecture.md).
+This doc is the reference for the `Blix` namespace. For the layers below, see [`architecture.md`](architecture.md) (project graph, host contracts, the Vulkan binding model) and [`renderer.md`](renderer.md) (render graph, shaders, rendering techniques).
 
 ## Overview
 
@@ -16,6 +16,7 @@ Anything richer (a scene graph, parenting, render queues, animation graphs, mult
 using Blix;
 using Blix.Core;
 using Blix.Diagnostics;
+using Blix.Graphics.Vulkan;
 using Blix.Runtime.Silk;
 
 using var window = new Window(new MyGame());
@@ -31,7 +32,16 @@ internal sealed class MyGame : Game, IInputHandler, IDebuggable
         Host.SetTitle("My Game");
 
         var mesh = GraphicsDevice.CreateMesh(/* ... */);
-        MaterialHandle material = GraphicsDevice.CreateMaterial(litShaderProgram, name: "hero.material");
+
+        // A GameObject just stores a backend-neutral MaterialHandle. Creating one
+        // is a renderer concern: on the Vulkan device, CreateMaterial allocates a
+        // MaterialBindings against a SPIR-V-reflected descriptor set; you write it
+        // by name and take .Handle. (Full render setup lives in the demos.)
+        var vk = (VulkanGraphicsDevice)GraphicsDevice;
+        MaterialHandle material = vk.CreateMaterial(litShaderProgram, name: "hero.material")
+            .SetUniform(binding: 0, "uTint", Vector4.One)
+            .SetTexture(binding: 1, albedoTexture)
+            .Handle;
         objects.Add(new GameObject("hero", mesh, material,
             new Transform3D { Position = new Vector3(0, 0, -2) }));
 
@@ -1062,7 +1072,7 @@ State-based push, once per frame. Game code calls `audioListener.Sync(device)` a
 
 ## Cross-references
 
-- **Mesh / materials / shaders / render passes** — game code reads `obj.Mesh` and `obj.Material` (a `MaterialHandle`) and records them into the Vulkan `RenderGraph`. See `src/Blix.Demos.VulkanLit/` and `src/Blix.Demos.VulkanSponza/` for the render setup, and [`vulkan-friction.md`](vulkan-friction.md) for the backend's binding model. ([`renderer.md`](renderer.md) covers the sunset GL renderer — historical reference only.)
+- **Mesh / materials / shaders / render passes** — game code reads `obj.Mesh` and `obj.Material` (a `MaterialHandle`) and records them into the Vulkan `RenderGraph`. See `src/Blix.Demos.VulkanLit/` and `src/Blix.Demos.VulkanSponza/` for the render setup, and [`architecture.md`](architecture.md#the-vulkan-binding-model) for the backend's binding model.
 - **`IDebuggable` / `DebugContext` / debug draw** — game code implements `IDebuggable` to contribute UI/values/draw commands; the diagnostics system lives in `Blix.Diagnostics`.
 - **2D physics test harness** — `Blix.Test.Physics2D` is a 43-case CLI test runner exercising every `Intersection2D` overload. Pressure-tests the 2D primitives without a visual demo.
 

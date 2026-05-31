@@ -13,10 +13,9 @@ namespace Blix.Demos.VulkanHello;
 // backend, exercising depth attachment + descriptor sets + per-frame UBO
 // + name-keyed ShaderUniform writes routed through a UniformBlockLayout.
 //
-// Validation lens (see docs/vulkan-friction.md): keep the existing
-// ShaderUniform("uModel", ...) API at the call site even though the
-// backend has to do extra work to translate it. The point is to land
-// observations about which abstractions creak before redesigning them.
+// The narrowest known-good Vulkan call site: it keeps the name-keyed
+// ShaderUniform("uModel", ...) API at the call site, so it doubles as the
+// simplest reference when something further up the stack breaks.
 public static class Program
 {
     public static void Main()

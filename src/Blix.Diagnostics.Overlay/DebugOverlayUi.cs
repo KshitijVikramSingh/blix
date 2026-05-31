@@ -11,8 +11,8 @@ namespace Blix.Diagnostics.Overlay;
 // runtime backend sets up ImGui IO + a render context, calls ImGui.NewFrame(),
 // invokes Layout(), then ImGui.Render() and submits the draw data its own way.
 //
-// Extracted from the original OpenTK-only renderer so both the GL and Vulkan
-// backends share one source of truth for the panel layout.
+// Holds the single source of truth for the panel layout, independent of the
+// runtime that submits the ImGui draw data.
 public sealed class DebugOverlayUi
 {
     // Per-row sparkline opt-in. UI state, not diagnostics-system state —

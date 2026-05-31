@@ -141,7 +141,6 @@ public sealed class RenderPassBuilder
     }
 
     // Draw with a MaterialBindings handle bound at its declared set index.
-    // Vulkan-only — GL backend rejects non-null Material on execute.
     public void DrawIndexed(
         VertexBufferHandle vertexBuffer,
         IndexBufferHandle indexBuffer,
@@ -157,8 +156,7 @@ public sealed class RenderPassBuilder
         recorder?.OnDraw(in command);
     }
 
-    // Draw with material + per-draw push-constant payload. Vulkan-only —
-    // GL backend rejects non-null PushConstants on execute.
+    // Draw with material + per-draw push-constant payload.
     public void DrawIndexed(
         VertexBufferHandle vertexBuffer,
         IndexBufferHandle indexBuffer,
@@ -184,7 +182,6 @@ public sealed class RenderPassBuilder
 
     // Draw with push-constant payload but NO material (set 2 unused).
     // Shadow / depth-only passes that only need set 0 + push constants.
-    // Vulkan-only — GL backend rejects non-null PushConstants on execute.
     public void DrawIndexed(
         VertexBufferHandle vertexBuffer,
         IndexBufferHandle indexBuffer,
