@@ -117,7 +117,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private TextureHandle froxelGridTexture;
     private PassHandle froxelPassHandle;
     // Volumetric-fog tunables — [Tune]-tagged, auto-bound to the overlay "Fog"
-    // group via ObjectTunables (see FogSettings); replaces six hand-wired dials.
+    // group via ObjectTunables (see FogSettings).
     private readonly FogSettings fog = new();
     private readonly ShadowsSettings shadows = new();
     private readonly RenderSettings render = new();
@@ -138,9 +138,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // lit/froxel PCF reads textureSize() so it adapts to each map automatically;
     // only texel-snapping + bias need the per-cascade size (see UpdateCascades).
     private static readonly int[] ShadowMapSizes = { 2048, 2048, 1024 };
-    // How far behind the scene slab the light "eye" sits, in world units.
-    // Larger keeps the whole atrium height inside each cascade's near/far.
-    // Live-tunable from the overlay (Shadows scope).
     // View-space depth boundaries: cascade i covers (Splits[i], Splits[i+1]).
     // [1..3] (the cascade far distances) are live-tunable from the overlay.
     private readonly float[] cascadeSplits = { 0.1f, 6f, 22f, 60f };
@@ -165,7 +162,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // shadow texels of slope-independent offset). The fragment shader adds a
     // grazing-angle slope term on top.
     private readonly float[] cascadeDepthBias = new float[CascadeCount];
-    // Shadow depth bias in shadow-texels (live-tunable from the overlay).
     // Per-cascade shadow-caster survivor counts after frustum culling,
     // surfaced live in the diagnostics overlay (see Debug()).
     private readonly int[] cascadeDrawCounts = new int[CascadeCount];
@@ -181,8 +177,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private bool overlayEnabled = true;
 
 
-    // IBL textures (procedural sky bake, CPU-side, generated once at load).
-    //   envCube           prefiltered specular stand-in (mip chain at increasing roughness)
+    // IBL textures: a cooked .blixprobe (real GGX prefilter) when present, else
+    // the procedural sky bake (see OnLoad). Generated/uploaded once at load.
+    //   envCube           prefiltered specular (mip chain at increasing roughness)
     //   irradianceCube    cosine-weighted hemisphere convolution of the sky
     //   brdfLut           split-sum BRDF integration (R = F0 scale, G = F0 bias)
     // Bound at set 1 (per-pass), so every draw in the lit pass samples them.
@@ -203,10 +200,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // Per-primitive draw payload. PipelineHandle is picked once at load
     // time from the material's AlphaMode + DoubleSided combination.
     private sealed record Drawable(
-        // GPU-driven-rendering Stage 0: all primitives' vertices live in one
-        // shared VB and their LOD indices in one shared IB (u16 or u32 per
-        // drawable). A draw is now a sub-range: vertexOffset = BaseVertex,
-        // indexOffset = LodFirstIndex[lod]. No per-prim buffers.
+        // All primitives' vertices live in one shared VB and their LOD indices
+        // in one shared IB (u16 or u32 per drawable). A draw is a sub-range:
+        // vertexOffset = BaseVertex, indexOffset = LodFirstIndex[lod].
         bool IndicesAreU32,
         int BaseVertex,
         // Per-LOD firstIndex into the shared IB (LodFirstIndex[0] = full detail).
@@ -276,20 +272,19 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         bool IsBlend,
         string Name);
 
-    // Stage 0 shared geometry buffers (one VB + one IB per index width), built
-    // by ConsolidateBuffers from the staging lists. The eventual indirect path
-    // draws ranges out of these; today the per-drawable loops do.
+    // Shared geometry buffers (one VB + one IB per index width), built from the
+    // staging list by ConsolidateBuffers (via MeshBundler). Every draw is a
+    // sub-range; the per-group indirect draws in OnRender index into these.
     private readonly List<DrawableStaging> staging = new();
     private VertexBufferHandle sharedVb;
     private IndexBufferHandle sharedIbU16;
     private IndexBufferHandle sharedIbU32;
     private VertexLayout sharedLayout = VertexPosition3NormalTangentTexture.Layout;
 
-    // GPU-driven Stage 1: opaque drawables are emitted grouped by
-    // (pipeline, material, index-width) so each group is a contiguous run in the
-    // shared buffers + the indirect buffer. Each frame we fill one
-    // VkDrawIndexedIndirectCommand per opaque drawable (LOD picked by SSE), then
-    // issue ONE vkCmdDrawIndexedIndirect per group instead of a draw per object.
+    // Opaque drawables are grouped by (pipeline, material, index-width) so each
+    // group is a contiguous run in the shared buffers + the indirect buffer.
+    // Each frame fills one VkDrawIndexedIndirectCommand per drawable (LOD by
+    // SSE), then issues ONE vkCmdDrawIndexedIndirect per group.
     private readonly record struct OpaqueGroup(
         PipelineHandle Pipeline, MaterialHandle Material, bool IsU32, bool IsMask, int Start, int Count);
     private readonly List<OpaqueGroup> opaqueGroups = new();
@@ -388,6 +383,19 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     // [Tune]-tagged CPU settings objects (Fog, …) auto-paneled in the overlay.
     private ObjectTunables tuneObjects = null!;
 
+    // Build a graphics pipeline for a render-graph pass surface. Every scene
+    // pipeline shares Triangles topology + a pass-surface target; only the
+    // program/layout/depth/raster/blend (+ AlphaToCoverage) vary, so this trims
+    // the ten near-identical PipelineDescription literals to one line each.
+    private PipelineHandle Pipeline(
+        ShaderProgramHandle program, VertexLayout layout, DepthState depth,
+        RasterizerState raster, BlendState[] blend, PassHandle target, string name,
+        bool alphaToCoverage = false) =>
+        vk.CreatePipeline(new PipelineDescription(
+            program, layout, PrimitiveTopology.Triangles, depth, raster, blend,
+            RenderTarget: graph.GetPassSurface(target),
+            AlphaToCoverage: alphaToCoverage), name);
+
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         this.host = host;
@@ -411,8 +419,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         sunYaw = MathF.Atan2(sunDirection.X, -sunDirection.Z);
 
         // Diagnostics overlay: GPU info + this loop's shadow/camera controls,
-        // live values, and cascade gizmos (see Debug()). Replaces the old
-        // Console-log + hardcoded-key debugging.
+        // live values, and cascade gizmos (see Debug()).
         if (host is IDebugHost debugHost && debugHost.System is { } dbg)
         {
             // Only register the GPU contributor. The runtime already runs this
@@ -424,82 +431,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             debugSystem = dbg;
         }
 
-        // --- Locate Sponza glTF -----------------------------------------
-        // The setup-sponza-modern.sh script populates this path; when it
-        // hasn't been run, exit cleanly so CI on a vanilla checkout doesn't
-        // fail. The glTF filename varies across Khronos pack revisions, so
-        // we glob for the first .gltf under main_sponza/.
-        //
-        // BLIX_SPONZA_ASSETS lets the (~19GB) pack set live on an external
-        // SSD shared across machines: when set, the runtime reads straight
-        // from it and the csproj skips copying anything into bin/. Falls
-        // back to the bin-local Assets/ copy when the var is unset.
-        var assetsRoot = Environment.GetEnvironmentVariable("BLIX_SPONZA_ASSETS") is { Length: > 0 } envAssetsRoot
-            ? envAssetsRoot
-            : Path.Combine(AppContext.BaseDirectory, "Assets");
-        var mainPackDir = Path.Combine(assetsRoot, "main_sponza");
-        if (!Directory.Exists(mainPackDir))
-        {
-            Console.WriteLine($"[VulkanSponza] Main Sponza assets not found at {mainPackDir}.");
-            Console.WriteLine("[VulkanSponza] Run tools/setup-sponza-modern.sh once to populate from your local Khronos packs,");
-            Console.WriteLine("[VulkanSponza] or set BLIX_SPONZA_ASSETS to an existing pack dir (e.g. on an external SSD).");
-            host.RequestClose();
-            return;
-        }
-        var gltfPath = Directory.EnumerateFiles(mainPackDir, "*.gltf", SearchOption.TopDirectoryOnly).FirstOrDefault();
-        if (gltfPath is null)
-        {
-            Console.WriteLine($"[VulkanSponza] No .gltf file in {mainPackDir}. Re-run tools/setup-sponza-modern.sh.");
-            host.RequestClose();
-            return;
-        }
-
-        // --- IBL: cooked .blixprobe (real GGX prefilter) or procedural ------
-        // Prefer a cooked probe baked from the HDR sky (real GGX importance-
-        // sampled specular + cosine irradiance + split-sum BRDF LUT, RGBA16F).
-        // Falls back to the procedural analytic-sky bake when no probe is
-        // present (vanilla checkout that hasn't run the cook step).
-        // Probe preference: autumn_field (has a sun → high light/dark contrast
-        // for punchy shadows; we align our directional sun to its detected sun)
-        // → rogland overcast (sunless ambient, our own sun) → old sky → procedural.
-        // The sun-alignment is automatic: HdrSunFinder returns null for skies
-        // with no clear sun, so we only align when the probe actually has one.
-        string[] probeCandidates = { "autumn_field_4k.blixprobe", "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe" };
-        var probePath = probeCandidates
-            .Select(p => Path.Combine(assetsRoot, "textures", p))
-            .FirstOrDefault(File.Exists);
-        if (probePath is not null)
-        {
-            try
-            {
-                var baked = EnvironmentBaker.UploadCookedProbe(vk, BlixProbeReader.Read(probePath), "sponza.ibl");
-                envCubeTexture = baked.Probe.PrefilteredSpecular;
-                irradianceCubeTexture = baked.Probe.DiffuseIrradiance;
-                brdfLutTexture = baked.BrdfLut;
-                iblPrefilterMips = baked.Probe.PrefilteredSpecularMipCount;
-                Console.WriteLine($"[VulkanSponza] IBL: cooked probe {Path.GetFileName(probePath)} ({iblPrefilterMips} GGX prefilter mips).");
-                // Align the directional sun (key light + shadow caster) to the
-                // probe's detected sun so cast shadows match the visible sky sun.
-                // FROM-sun-into-scene convention, matching sunDirection.
-                if (baked.Probe.SunDirectionFromEquirect is { } hdrSun)
-                {
-                    sunDirection = Vector3.Normalize(hdrSun);
-                    sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1f, 1f));
-                    sunYaw = MathF.Atan2(sunDirection.X, -sunDirection.Z);
-                    Console.WriteLine($"[VulkanSponza]   sun aligned to probe: {sunDirection}");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[VulkanSponza] probe load failed ({ex.Message}); using procedural IBL.");
-                BakeProceduralIbl();
-            }
-        }
-        else
-        {
-            Console.WriteLine("[VulkanSponza] IBL: no cooked probe (run tools/setup-sponza-modern.sh / blix-cook probe); using procedural sky.");
-            BakeProceduralIbl();
-        }
+        if (!TryLocateSponza(out var assetsRoot, out var gltfPath)) return;
+        LoadIbl(assetsRoot);
 
         // --- Render graph ------------------------------------------------
         graph = new RenderGraph(vk);
@@ -524,8 +457,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
 
         // The per-frame Frame UBO (view-proj, sun, camera, cascades, fog) and
         // its //@tune-decorated shader tunables are declared in lit.frag; their
-        // std140 offsets are reflected, not documented here (they used to be a
-        // hand-counted table in this comment — see lit.frag for the live layout).
+        // std140 offsets are reflected from the SPIR-V, not hand-authored here.
         // Shader binding interfaces — descriptor sets, std140 UBO layouts, and
         // push-constant ranges — are reflected from the compiled SPIR-V at
         // build time (spirv-cross sidecars next to each .spv), not hand-
@@ -549,7 +481,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // Scan lit.frag's //@tune decorators (shipped alongside the .spv) and
         // build the overlay's shader-variable panel. The panel owns the live
         // values + the dials; the per-frame write and the froxel sun term pull
-        // from it by name. Replaces the hand-wired field/dial/pack per uniform.
+        // from it by name.
         tunePanel = new ShaderTunablePanel(ShaderTunables.Scan(
             File.ReadAllText(Path.Combine(shaderDir, "lit.frag"))));
         tuneObjects = new ObjectTunables(fog, shadows, render);
@@ -615,45 +547,23 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // AlphaToCoverage on the opaque/mask pipelines: cutout foliage (the
         // reclassified blend) outputs a sharpened coverage alpha → antialiased
         // leaf edges under MSAA; solid opaque outputs coverage 1.0 → no effect.
-        opaqueSolidPipeline = vk.CreatePipeline(new PipelineDescription(
-            litProgram,
-            VertexPosition3NormalTangentTexture.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.LessEqualNoWrite,
-            RasterizerState.BackFaceCulling,
-            new[] { BlendState.Disabled },
-            RenderTarget: graph.GetPassSurface(litPassHandle),
-            AlphaToCoverage: true), "lit.opaque");
-        opaqueDoubleSidedPipeline = vk.CreatePipeline(new PipelineDescription(
-            litProgram,
-            VertexPosition3NormalTangentTexture.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.LessEqualNoWrite,
-            RasterizerState.NoCulling,
-            new[] { BlendState.Disabled },
-            RenderTarget: graph.GetPassSurface(litPassHandle),
-            AlphaToCoverage: true), "lit.opaque.doubleSided");
+        opaqueSolidPipeline = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.BackFaceCulling,
+            new[] { BlendState.Disabled }, litPassHandle, "lit.opaque", alphaToCoverage: true);
+        opaqueDoubleSidedPipeline = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled }, litPassHandle, "lit.opaque.doubleSided", alphaToCoverage: true);
 
         // Blend: depth-test (so windows don't draw behind walls) but no
         // depth-write (so successive translucent fragments don't z-fight),
         // src-alpha blend. Back-to-front sort within the blend bucket is a
         // deferred polish.
-        blendSolidPipeline = vk.CreatePipeline(new PipelineDescription(
-            litProgram,
-            VertexPosition3NormalTangentTexture.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.LessEqualNoWrite,
-            RasterizerState.BackFaceCulling,
-            new[] { BlendState.AlphaBlend },
-            RenderTarget: graph.GetPassSurface(litPassHandle)), "lit.blend");
-        blendDoubleSidedPipeline = vk.CreatePipeline(new PipelineDescription(
-            litProgram,
-            VertexPosition3NormalTangentTexture.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.LessEqualNoWrite,
-            RasterizerState.NoCulling,
-            new[] { BlendState.AlphaBlend },
-            RenderTarget: graph.GetPassSurface(litPassHandle)), "lit.blend.doubleSided");
+        blendSolidPipeline = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.BackFaceCulling,
+            new[] { BlendState.AlphaBlend }, litPassHandle, "lit.blend");
+        blendDoubleSidedPipeline = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
+            new[] { BlendState.AlphaBlend }, litPassHandle, "lit.blend.doubleSided");
 
         // Sky pipeline. Depth-test LessEqual with NO write, so the sky only
         // draws where the depth buffer still holds the clear value (1.0)
@@ -663,14 +573,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         var skyVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "skybox.vert.spv"));
         var skyFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "skybox.frag.spv"));
         skyProgram = vk.CreateShaderProgramFromSpv(skyVertSpv, skyFragSpv, skyInterface, "skybox");
-        skyPipeline = vk.CreatePipeline(new PipelineDescription(
-            skyProgram,
+        skyPipeline = Pipeline(skyProgram,
             VertexPosition3NormalTexture.Layout, // ignored — sky vert synthesises positions
-            PrimitiveTopology.Triangles,
-            DepthState.LessEqualNoWrite,
-            RasterizerState.NoCulling,
-            new[] { BlendState.Disabled },
-            RenderTarget: graph.GetPassSurface(litPassHandle)), "skybox");
+            DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled }, litPassHandle, "skybox");
 
         // Shadow caster pipelines. NoCulling so Sponza's double-sided foliage
         // and thin geometry still write depth from both faces; depth-write
@@ -680,26 +586,16 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         var shadowVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow.vert.spv"));
         var shadowFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow.frag.spv"));
         shadowOpaqueProgram = vk.CreateShaderProgramFromSpv(shadowVertSpv, shadowFragSpv, shadowOpaqueInterface, "shadow.opaque");
-        shadowOpaquePipeline = vk.CreatePipeline(new PipelineDescription(
-            shadowOpaqueProgram,
-            VertexPosition3NormalTangentTexture.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.LessEqualWrite,
-            RasterizerState.NoCulling,
-            Array.Empty<BlendState>(),
-            RenderTarget: graph.GetPassSurface(cascadePassHandles[0])), "shadow.opaque");
+        shadowOpaquePipeline = Pipeline(shadowOpaqueProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualWrite, RasterizerState.NoCulling,
+            Array.Empty<BlendState>(), cascadePassHandles[0], "shadow.opaque");
 
         var shadowMaskVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow_mask.vert.spv"));
         var shadowMaskFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow_mask.frag.spv"));
         shadowMaskProgram = vk.CreateShaderProgramFromSpv(shadowMaskVertSpv, shadowMaskFragSpv, shadowMaskInterface, "shadow.mask");
-        shadowMaskPipeline = vk.CreatePipeline(new PipelineDescription(
-            shadowMaskProgram,
-            VertexPosition3NormalTangentTexture.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.LessEqualWrite,
-            RasterizerState.NoCulling,
-            Array.Empty<BlendState>(),
-            RenderTarget: graph.GetPassSurface(cascadePassHandles[0])), "shadow.mask");
+        shadowMaskPipeline = Pipeline(shadowMaskProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualWrite, RasterizerState.NoCulling,
+            Array.Empty<BlendState>(), cascadePassHandles[0], "shadow.mask");
 
         // Depth pre-pass pipelines — lit.vert (shared → invariant depth) + a
         // trivial fragment, depth-only into the 4× MSAA pre-pass surface. No
@@ -713,36 +609,21 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // with the trivial pre-pass program).
         var flatFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "flat.frag.spv"));
         flatProgram = vk.CreateShaderProgramFromSpv(litVertSpv, flatFragSpv, litInterface, "flat");
-        flatPipeline = vk.CreatePipeline(new PipelineDescription(
-            flatProgram,
-            VertexPosition3NormalTangentTexture.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.LessEqualNoWrite,
-            RasterizerState.NoCulling,
-            new[] { BlendState.Disabled },
-            RenderTarget: graph.GetPassSurface(litPassHandle)), "flat");
+        flatPipeline = Pipeline(flatProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled }, litPassHandle, "flat");
 
         var prepassOpaqueFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "depth_prepass.frag.spv"));
         prepassOpaqueProgram = vk.CreateShaderProgramFromSpv(litVertSpv, prepassOpaqueFragSpv, litInterface, "depth_prepass");
-        prepassOpaquePipeline = vk.CreatePipeline(new PipelineDescription(
-            prepassOpaqueProgram,
-            VertexPosition3NormalTangentTexture.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.LessEqualWrite,
-            RasterizerState.NoCulling,
-            Array.Empty<BlendState>(),
-            RenderTarget: graph.GetPassSurface(depthPrepassHandle)), "depth_prepass");
+        prepassOpaquePipeline = Pipeline(prepassOpaqueProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualWrite, RasterizerState.NoCulling,
+            Array.Empty<BlendState>(), depthPrepassHandle, "depth_prepass");
 
         var prepassMaskFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "depth_prepass_mask.frag.spv"));
         prepassMaskProgram = vk.CreateShaderProgramFromSpv(litVertSpv, prepassMaskFragSpv, litInterface, "depth_prepass_mask");
-        prepassMaskPipeline = vk.CreatePipeline(new PipelineDescription(
-            prepassMaskProgram,
-            VertexPosition3NormalTangentTexture.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.LessEqualWrite,
-            RasterizerState.NoCulling,
-            Array.Empty<BlendState>(),
-            RenderTarget: graph.GetPassSurface(depthPrepassHandle)), "depth_prepass_mask");
+        prepassMaskPipeline = Pipeline(prepassMaskProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualWrite, RasterizerState.NoCulling,
+            Array.Empty<BlendState>(), depthPrepassHandle, "depth_prepass_mask");
 
         var presentVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv"));
         var presentFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv"));
@@ -802,18 +683,13 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         };
 
         // --- Load Sponza geometry ---------------------------------------
-        // Static-mesh importer: Sponza has no skinning. Each glTF primitive
-        // becomes one engine-side mesh with a baked-in node transform; its glTF
-        // material (BaseColor/normal/MR/AO/emissive + alpha mode) is resolved
-        // and cached by GetMaterial.
-        // Parse every pack's geometry/materials on a background thread, in
-        // parallel — the ~7s .blixmesh parse + UV-sanitize was the bulk of an
-        // ~8s synchronous load that froze the window. Parsing is pure CPU (no
-        // GPU), so it's safe off-thread; the GPU work (BuildDrawables +
-        // ConsolidateBuffers) stays on the main thread, run by TryFinishLoad
-        // from OnUpdate once parsing completes. Until then sceneLoaded stays
-        // false and OnRender shows a responsive clear (loading screen).
-        // Candles intentionally excluded (no light source in this renderer).
+        // Static-mesh importer (Sponza has no skinning): each glTF primitive
+        // becomes one mesh with a baked-in node transform; its material is
+        // resolved + cached by GetMaterial. Parsing is pure CPU (~7s — the bulk
+        // of the load), so the AsyncLoadQueue runs it off-thread; the GPU work
+        // (StageDrawable + ConsolidateBuffers) drains on the main thread via
+        // TryFinishLoad. Until then sceneLoaded is false and OnRender shows a
+        // responsive clear (loading screen). Candles excluded (no light source).
         var packsToParse = new List<(string Name, string Path, string AssetId)>
         {
             ("main", gltfPath, "models/sponza_main"),
@@ -833,6 +709,83 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         });
 
         UpdateCamera();
+    }
+
+    // Resolve the Sponza glTF: BLIX_SPONZA_ASSETS (the ~19GB pack set on an
+    // external SSD shared across machines) when set, else the bin-local Assets/
+    // copy. Closes the window cleanly when the packs aren't present (a vanilla
+    // checkout that hasn't run setup-sponza-modern.sh) and returns false so
+    // OnLoad bails. The glTF filename varies across Khronos revisions, so glob.
+    private bool TryLocateSponza(out string assetsRoot, out string gltfPath)
+    {
+        gltfPath = "";
+        assetsRoot = Environment.GetEnvironmentVariable("BLIX_SPONZA_ASSETS") is { Length: > 0 } env
+            ? env
+            : Path.Combine(AppContext.BaseDirectory, "Assets");
+        var mainPackDir = Path.Combine(assetsRoot, "main_sponza");
+        if (!Directory.Exists(mainPackDir))
+        {
+            Console.WriteLine($"[VulkanSponza] Main Sponza assets not found at {mainPackDir}.");
+            Console.WriteLine("[VulkanSponza] Run tools/setup-sponza-modern.sh once to populate from your local Khronos packs,");
+            Console.WriteLine("[VulkanSponza] or set BLIX_SPONZA_ASSETS to an existing pack dir (e.g. on an external SSD).");
+            host.RequestClose();
+            return false;
+        }
+        var found = Directory.EnumerateFiles(mainPackDir, "*.gltf", SearchOption.TopDirectoryOnly).FirstOrDefault();
+        if (found is null)
+        {
+            Console.WriteLine($"[VulkanSponza] No .gltf file in {mainPackDir}. Re-run tools/setup-sponza-modern.sh.");
+            host.RequestClose();
+            return false;
+        }
+        gltfPath = found;
+        return true;
+    }
+
+    // IBL: prefer a cooked .blixprobe baked from an HDR sky (real GGX importance-
+    // sampled specular + cosine irradiance + split-sum BRDF LUT, RGBA16F), else
+    // the procedural analytic-sky bake (vanilla checkout that hasn't cooked one).
+    // Preference: autumn_field (has a sun → high light/dark contrast for punchy
+    // shadows; we align our directional sun to its detected sun) → rogland
+    // overcast (sunless ambient, our own sun) → old sky → procedural. Sun
+    // alignment is automatic: HdrSunFinder returns null for skies with no clear
+    // sun, so we only align when the probe actually has one.
+    private void LoadIbl(string assetsRoot)
+    {
+        string[] probeCandidates = { "autumn_field_4k.blixprobe", "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe" };
+        var probePath = probeCandidates
+            .Select(p => Path.Combine(assetsRoot, "textures", p))
+            .FirstOrDefault(File.Exists);
+        if (probePath is null)
+        {
+            Console.WriteLine("[VulkanSponza] IBL: no cooked probe (run tools/setup-sponza-modern.sh / blix-cook probe); using procedural sky.");
+            BakeProceduralIbl();
+            return;
+        }
+        try
+        {
+            var baked = EnvironmentBaker.UploadCookedProbe(vk, BlixProbeReader.Read(probePath), "sponza.ibl");
+            envCubeTexture = baked.Probe.PrefilteredSpecular;
+            irradianceCubeTexture = baked.Probe.DiffuseIrradiance;
+            brdfLutTexture = baked.BrdfLut;
+            iblPrefilterMips = baked.Probe.PrefilteredSpecularMipCount;
+            Console.WriteLine($"[VulkanSponza] IBL: cooked probe {Path.GetFileName(probePath)} ({iblPrefilterMips} GGX prefilter mips).");
+            // Align the directional sun (key light + shadow caster) to the probe's
+            // detected sun so cast shadows match the visible sky sun. FROM-sun-
+            // into-scene convention, matching sunDirection.
+            if (baked.Probe.SunDirectionFromEquirect is { } hdrSun)
+            {
+                sunDirection = Vector3.Normalize(hdrSun);
+                sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1f, 1f));
+                sunYaw = MathF.Atan2(sunDirection.X, -sunDirection.Z);
+                Console.WriteLine($"[VulkanSponza]   sun aligned to probe: {sunDirection}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[VulkanSponza] probe load failed ({ex.Message}); using procedural IBL.");
+            BakeProceduralIbl();
+        }
     }
 
     private static void AddOptionalPackPath(
@@ -1610,11 +1563,10 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             // then Blend (depth-test only), so translucent surfaces composite
             // over the resolved opaque depth without writing into it.
             //
-            // GPU-driven Stage 1: one indirect draw per (pipeline, material)
-            // group over the buffer filled above — ~800 per-object draws collapse
-            // to ~one per material. All draws in a group share set0 + set2
-            // (material) + identity push (the static importer bakes transforms),
-            // exactly the indirect-multidraw constraint.
+            // One indirect draw per (pipeline, material) group over the buffer
+            // filled above — ~800 per-object draws collapse to ~one per material.
+            // All draws in a group share set0 + set2 (material) + identity push
+            // (the static importer bakes transforms), the multidraw constraint.
             foreach (var g in opaqueGroups)
             {
                 scope.DrawIndexedIndirect(
@@ -1662,7 +1614,6 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     }
 
     // --- IDebuggable ------------------------------------------------------
-    // Replaces the old Console cull-count log + hardcoded C/L key toggles.
     // Controls are read-back: the returned value feeds this frame's render.
     public void Debug(DebugContext debug)
     {
