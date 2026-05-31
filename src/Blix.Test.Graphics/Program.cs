@@ -1173,6 +1173,80 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("O.4 GetColorTexture before Compile throws", threw);
 }
 
+// ============================================================================
+// Section P — SPIR-V reflection (build-time .refl.json → binding records).
+// ============================================================================
+//
+// Golden gate before VulkanSponza's hand-authored UniformBlockLayout /
+// ShaderInterface are deleted: ShaderReflection must reproduce those tables
+// exactly from the spirv-cross --reflect sidecars. Fixtures are checked into
+// fixtures/ (see csproj). The known-good values below are copied from
+// VulkanSponza/Program.cs's hand-authored Frame/Material layouts.
+{
+    var fxDir = Path.Combine(AppContext.BaseDirectory, "fixtures");
+    var vert = ShaderReflection.Load(Path.Combine(fxDir, "lit.vert.refl.json"));
+    var frag = ShaderReflection.Load(Path.Combine(fxDir, "lit.frag.refl.json"));
+    var iface = ShaderReflection.MergeStages(vert, frag);
+
+    DescriptorSetSlot? Slot(int set, int binding) =>
+        iface.Slots.FirstOrDefault(s => s.Set == set && s.Binding == binding);
+    UniformBlockMember? Member(UniformBlockLayout? b, string name) =>
+        b?.Members.FirstOrDefault(m => m.Name == name);
+
+    // P.0 — merged interface passes the same structural validation as the
+    // hand-authored ones, and the vert↔frag Frame block merged to the FULLER
+    // layout (frag's 416, not vert's 96 prefix).
+    t.ExpectTrue("P.0 reflected lit interface validates", TryValidate(iface) is null);
+
+    var frame = Slot(0, 0);
+    t.ExpectTrue("P.0 Frame UBO at (0,0) is a UniformBuffer", frame is { Type: ShaderResourceType.UniformBuffer });
+    t.ExpectTrue("P.0 Frame UBO merged to both stages",
+        frame is { } fr && fr.Stages.HasFlag(ShaderStages.Vertex) && fr.Stages.HasFlag(ShaderStages.Fragment));
+
+    // P.1 — Frame UBO std140 offsets match VulkanSponza's hand-authored table.
+    var fb = frame?.BlockLayout;
+    t.ExpectClose("P.1 Frame TotalSize 416 (fuller block won the merge)", fb?.TotalSize ?? -1, 416);
+    t.ExpectClose("P.1 uViewProjection @0", Member(fb, "uViewProjection")?.Offset ?? -1, 0);
+    t.ExpectClose("P.1 uViewProjection size 64", Member(fb, "uViewProjection")?.Size ?? -1, 64);
+    t.ExpectClose("P.1 uSunDirection @64", Member(fb, "uSunDirection")?.Offset ?? -1, 64);
+    t.ExpectClose("P.1 uSunIntensity @76", Member(fb, "uSunIntensity")?.Offset ?? -1, 76);
+    t.ExpectClose("P.1 uCascadeViewProj @128", Member(fb, "uCascadeViewProj")?.Offset ?? -1, 128);
+    t.ExpectClose("P.1 uCascadeViewProj size 192 (mat4[3])", Member(fb, "uCascadeViewProj")?.Size ?? -1, 192);
+    t.ExpectClose("P.1 uCascadeViewProj ElementStride 64", Member(fb, "uCascadeViewProj")?.ElementStride ?? -1, 64);
+    t.ExpectClose("P.1 uIblParams @400 (engine extension)", Member(fb, "uIblParams")?.Offset ?? -1, 400);
+
+    // P.2 — Material UBO (set 2, binding 0): four vec4s, 64 bytes.
+    var matSlot = Slot(2, 0);
+    t.ExpectClose("P.2 Material UBO TotalSize 64", matSlot?.BlockLayout?.TotalSize ?? -1, 64);
+    t.ExpectClose("P.2 uMaterialParams @32", Member(matSlot?.BlockLayout, "uMaterialParams")?.Offset ?? -1, 32);
+
+    // P.3 — set 1 IBL samplers + cascade-array Count.
+    t.ExpectTrue("P.3 uIrradiance at (1,0)", Slot(1, 0) is { Type: ShaderResourceType.SampledImage });
+    t.ExpectTrue("P.3 uPrefilteredEnv at (1,1)", Slot(1, 1) is { Type: ShaderResourceType.SampledImage });
+    t.ExpectTrue("P.3 uBrdfLut at (1,2)", Slot(1, 2) is { Type: ShaderResourceType.SampledImage });
+    t.ExpectClose("P.3 uCascadeShadowMaps at (1,3) Count==3", Slot(1, 3)?.Count ?? -1, 3);
+    t.ExpectTrue("P.3 uFroxelGrid at (1,4)", Slot(1, 4) is { Type: ShaderResourceType.SampledImage });
+
+    // P.4 — per-material textures on set 2.
+    t.ExpectTrue("P.4 uAlbedo at (2,1) Count 1", Slot(2, 1) is { Type: ShaderResourceType.SampledImage, Count: 1 });
+    t.ExpectTrue("P.4 uOcclusion at (2,5)", Slot(2, 5) is { Type: ShaderResourceType.SampledImage });
+
+    // P.5 — push-constant coalescing (regression). shadow_mask declares one
+    // [0,144) push block referenced by BOTH stages, so each stage reflects the
+    // full block; MergeStages must coalesce them into ONE range with OR'd
+    // stages — not two ranges that the emit path's sum-of-sizes would total to
+    // 288 and reject against the 144B payload.
+    var shadowMask = ShaderReflection.MergeStages(
+        ShaderReflection.Load(Path.Combine(fxDir, "shadow_mask.vert.refl.json")),
+        ShaderReflection.Load(Path.Combine(fxDir, "shadow_mask.frag.refl.json")));
+    t.ExpectClose("P.5 shadow_mask has exactly ONE push range", shadowMask.PushConstants.Count, 1);
+    var pc = shadowMask.PushConstants.Count > 0 ? shadowMask.PushConstants[0] : null;
+    t.ExpectClose("P.5 push range Offset 0", pc?.Offset ?? -1, 0);
+    t.ExpectClose("P.5 push range Size 144 (matches payload, not 288)", pc?.Size ?? -1, 144);
+    t.ExpectTrue("P.5 push range spans Vertex+Fragment",
+        pc is { } r && r.Stages.HasFlag(ShaderStages.Vertex) && r.Stages.HasFlag(ShaderStages.Fragment));
+}
+
 t.PrintSummary();
 return t.FailedCount;
 

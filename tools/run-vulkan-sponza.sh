@@ -74,6 +74,9 @@ SHADER_BUILD_DIR="$REPO_ROOT/src/Blix.Demos.VulkanSponza/bin/Debug/net8.0/$RID/S
 if [ -d "$SHADER_BUILD_DIR" ]; then
     mkdir -p "$PUBLISH_DIR/Shaders"
     cp -p "$SHADER_BUILD_DIR"/*.spv "$PUBLISH_DIR/Shaders/" 2>/dev/null || true
+    # The .spv.refl.json reflection sidecars are loaded at program creation
+    # (ShaderReflection); mirror them next to the .spv for the same reason.
+    cp -p "$SHADER_BUILD_DIR"/*.spv.refl.json "$PUBLISH_DIR/Shaders/" 2>/dev/null || true
 fi
 
 export DYLD_FALLBACK_LIBRARY_PATH="$prefix/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"

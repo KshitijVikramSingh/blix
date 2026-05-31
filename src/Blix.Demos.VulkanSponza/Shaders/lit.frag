@@ -37,6 +37,7 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  uCascadeBias;            // .xyz = per-cascade base depth bias (NDC units)
     vec4  uShaderParams;           // x=metallicThreshold, y=normalStrength, z=biasSlopeScale
     vec4  uFog;                    // x=screenW, y=screenH, z=fogFar, w=enabled(0/1)
+    vec4  uIblParams;              // x=indirectShadowBase, y=indirectShadowRange
 } frame;
 
 layout(set = 1, binding = 0) uniform samplerCube uIrradiance;
@@ -80,11 +81,43 @@ layout(location = 4) in float vTangentSign;   // glTF TANGENT.w handedness
 
 layout(location = 0) out vec4 outColor;
 
+#define PI 3.14159265359
+
 // Roughness-aware Fresnel-Schlick that softens edges as surfaces roughen
 // (otherwise rough metals over-glow at grazing angles where the split-sum
-// approximation breaks down).
+// approximation breaks down). Used for the wide IBL reflection cone.
 vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
     return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// --- Cook-Torrance terms for direct (analytic) sun specular --------------
+// Inlined rather than #included from Blix.Shaders/pbr.glsl because this
+// project's glslc invocation passes no -I library path (the shaders stay
+// self-contained); the math is the same as blix_* there.
+
+// Trowbridge-Reitz GGX microfacet distribution. roughness is perceptual;
+// a = r*r remaps to the GGX alpha the literature uses.
+float distributionGGX(float NdotH, float roughness) {
+    float a  = roughness * roughness;
+    float a2 = a * a;
+    float d  = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+// Smith geometry with the direct-lighting k = (r+1)^2 / 8 remap (IBL uses a/2).
+float geometrySchlickGGX(float NdotX, float k) {
+    return NdotX / (NdotX * (1.0 - k) + k);
+}
+float geometrySmith(float NdotV, float NdotL, float roughness) {
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+    return geometrySchlickGGX(NdotV, k) * geometrySchlickGGX(NdotL, k);
+}
+
+// Standard Schlick Fresnel for the sharp analytic highlight (the roughness-
+// aware variant above is for the wide IBL cone, not a punctual light).
+vec3 fresnelSchlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
 // --- Cascaded sun shadows -----------------------------------------------
@@ -261,12 +294,30 @@ void main() {
         return;
     }
 
-    // --- Direct sun (Lambert) + cascaded shadow -------------------------
+    // --- Direct sun: Cook-Torrance (diffuse + analytic specular) --------
     vec3 L = -normalize(frame.uSunDirection);
+    vec3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
+    float NdotH = max(dot(N, H), 0.0);
+    float VdotH = max(dot(V, H), 0.0);
     int shadowCascade;
     float sunShadow = sunShadowFactor(NdotL, shadowCascade);
-    vec3 direct = albedo * NdotL * frame.uSunIntensity * sunShadow;
+
+    // GGX microfacet highlight from the sun. Without this the sun produces
+    // no glint on metal/polished stone, and metals read flat and chalky.
+    float Dsun = distributionGGX(NdotH, roughness);
+    float Gsun = geometrySmith(NdotV, NdotL, roughness);
+    vec3  Fsun = fresnelSchlick(VdotH, F0);
+    vec3 sunSpecular = (Dsun * Gsun * Fsun) / max(4.0 * NdotV * NdotL, 1e-3);
+
+    // Energy split: diffuse keeps only the non-reflected fraction (1 - F)
+    // and vanishes on metals (1 - metallic); /PI normalizes the Lambert lobe.
+    // uSunIntensity is pre-scaled by PI on the CPU so the diffuse magnitude
+    // matches the old `albedo * NdotL * uSunIntensity` look — the specular
+    // is the additive gain.
+    vec3 kDsun = (vec3(1.0) - Fsun) * (1.0 - metallic);
+    vec3 direct = (kDsun * albedo / PI + sunSpecular)
+                  * NdotL * frame.uSunIntensity * sunShadow;
 
     // --- IBL: split-sum diffuse + specular ------------------------------
     // Diffuse: irradiance cube × albedo, modulated by (1 - F) and (1 - metallic)
@@ -285,8 +336,13 @@ void main() {
     vec2 envBrdf = texture(uBrdfLut, vec2(NdotV, roughness)).rg;
     vec3 specularIBL = prefiltered * (F * envBrdf.x + envBrdf.y);
 
-    // AO attenuates the indirect contribution only (per glTF spec).
-    vec3 ambient = (kD * diffuseIBL + specularIBL) * frame.uIblIntensity * ao;
+    // AO attenuates the indirect contribution only (per glTF spec). The sun
+    // shadow also dims indirect light — fragments the sun can't see receive
+    // less bounce too — mirroring the GL demo's 0.60 + 0.40*shadow so
+    // shadowed areas don't read flat from full-strength ambient. Base/range
+    // are live-tunable (overlay Sun scope) via uIblParams.
+    float indirectShadow = frame.uIblParams.x + frame.uIblParams.y * sunShadow;
+    vec3 ambient = (kD * diffuseIBL + specularIBL) * frame.uIblIntensity * ao * indirectShadow;
 
     // --- Emissive ------------------------------------------------------
     vec3 emissive = texture(uEmissive, uv).rgb * mat.uEmissiveFactor.rgb * mat.uEmissiveFactor.a;

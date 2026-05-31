@@ -399,9 +399,21 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
     private float sunYaw;
     private float sunPitch;
     // Sun + IBL strength (live-tunable from the diagnostics overlay).
-    private float sunIntensity = 3.0f;
+    // lit.frag now divides the direct diffuse by PI (energy-conserving
+    // Cook-Torrance), so this is pre-scaled by PI vs the old Lambert-only
+    // term (3.0 → 3.0π ≈ 9.42) to keep the diffuse brightness constant while
+    // the newly-added analytic specular highlight is the additive gain.
+    private float sunIntensity = 9.42f;
     private readonly Vector3 ambientColor = new(0.42f, 0.50f, 0.62f);  // unused; kept for layout compat
     private float ambientIntensity = 1.6f;
+    // Indirect (IBL/ambient) dimming under the sun's cascaded shadow. The lit
+    // shader scales ambient by (base + range * sunShadow): fragments the sun
+    // can't see receive less bounce too, so shadowed areas don't read flat
+    // from full-strength ambient. Defaults mirror the GL SponzaModern demo.
+    // base + range > 1 is allowed (lit areas can over-brighten); both clamp
+    // in the shader via the AO/IBL terms. Live-tunable: overlay Sun scope.
+    private float indirectShadowBase = 0.60f;
+    private float indirectShadowRange = 0.40f;
 
     // Shader-debug knobs surfaced as uShaderParams (overlay Material scope):
     //   metallicThreshold — metalness noise-gate cutoff: below it -> 0, at/above
@@ -590,106 +602,26 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         //   [352..367] vec4 cascadeBias          (.xyz = per-cascade base depth bias)
         //   [368..383] vec4 shaderParams         (x=metallicThreshold, y=normalStrength, z=slopeScale)
         //   [384..399] vec4 fog                  (x=screenW, y=screenH, z=fogFar, w=enabled)
-        var frameUbo = new UniformBlockLayout(
-            TotalSize: 400,
-            Members: new[]
-            {
-                new UniformBlockMember("uViewProjection",   0,   64),
-                new UniformBlockMember("uSunDirection",     64,  12),
-                new UniformBlockMember("uSunIntensity",     76,  4),
-                new UniformBlockMember("uAmbientColor",     80,  12),
-                new UniformBlockMember("uIblIntensity",     92,  4),
-                new UniformBlockMember("uCameraPos",        96,  12),
-                new UniformBlockMember("uEnvMipCount",      108, 4),
-                new UniformBlockMember("uCameraForward",    112, 12),
-                new UniformBlockMember("uShadowStrength",   124, 4),
-                new UniformBlockMember("uCascadeViewProj",  128, 192),
-                new UniformBlockMember("uCascadeSplits",    320, 16),
-                new UniformBlockMember("uShadowParams",     336, 16),
-                new UniformBlockMember("uCascadeBias",      352, 16),
-                new UniformBlockMember("uShaderParams",     368, 16),
-                new UniformBlockMember("uFog",              384, 16),
-            });
+        //   [400..415] vec4 iblParams            (x=indirectShadowBase, y=indirectShadowRange)
+        // Shader binding interfaces — descriptor sets, std140 UBO layouts, and
+        // push-constant ranges — are reflected from the compiled SPIR-V at
+        // build time (spirv-cross sidecars next to each .spv), not hand-
+        // authored. See docs/renderer.md "SPIR-V reflection". Each program
+        // reflects exactly what its stages declare; per-draw descriptor binding
+        // skips any per-pass texture a program doesn't sample, so the skybox
+        // no longer has to restate the lit pass's set-1 bindings for "layout
+        // compatibility" — there is no shared bound set to be compatible with.
+        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        ShaderInterface Reflect(params string[] stages) =>
+            ShaderReflection.MergeStages(
+                stages.Select(s => ShaderReflection.Load(
+                    Path.Combine(shaderDir, s + ".spv.refl.json"))).ToArray());
 
-        // Per-material UBO: BaseColorFactor (rgba), EmissiveFactor (rgb +
-        // strength packed into .a), MaterialParams (alphaCutoff, normalScale,
-        // roughness, metallic), MaterialParams2 (x = transmission). std140
-        // packs four vec4s = 64 bytes.
-        var materialUbo = new UniformBlockLayout(
-            TotalSize: 64,
-            Members: new[]
-            {
-                new UniformBlockMember("uBaseColorFactor", 0,  16),
-                new UniformBlockMember("uEmissiveFactor",  16, 16),
-                new UniformBlockMember("uMaterialParams",  32, 16),
-                new UniformBlockMember("uMaterialParams2", 48, 16),
-            });
-
-        // The skybox shares the per-frame UBO and the per-pass IBL bindings
-        // exactly so both interfaces can coexist in the same lit-scene pass
-        // without RenderGraph set-1 compatibility complaints. Sky doesn't
-        // need any set-2 material slots, so its interface stops at set 1.
-        var skyInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer,
-                    ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: frameUbo),
-                new DescriptorSetSlot(1, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(1, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                // Declared for set-1 layout compatibility with the lit pipeline
-                // sharing this pass; the sky shader never samples these.
-                new DescriptorSetSlot(1, 3, ShaderResourceType.SampledImage, ShaderStages.Fragment, Count: CascadeCount),
-                new DescriptorSetSlot(1, 4, ShaderResourceType.SampledImage, ShaderStages.Fragment), // uFroxelGrid (3D)
-            },
-            PushConstants: Array.Empty<PushConstantRange>());
-
-        var litInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer,
-                    ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: frameUbo),
-                // Set 1 — per-pass IBL textures. Lifetime: bound by every
-                // lit draw, identical references across all primitives in
-                // the lit pass.
-                new DescriptorSetSlot(1, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment), // uIrradiance (cube)
-                new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment), // uPrefilteredEnv (cube)
-                new DescriptorSetSlot(1, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment), // uBrdfLut (2D)
-                new DescriptorSetSlot(1, 3, ShaderResourceType.SampledImage, ShaderStages.Fragment, Count: CascadeCount), // uCascadeShadowMaps[3]
-                new DescriptorSetSlot(1, 4, ShaderResourceType.SampledImage, ShaderStages.Fragment), // uFroxelGrid (3D fog grid)
-                // Set 2 — per-material.
-                new DescriptorSetSlot(2, 0, ShaderResourceType.UniformBuffer,
-                    ShaderStages.Fragment, BlockLayout: materialUbo),
-                new DescriptorSetSlot(2, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment), // albedo
-                new DescriptorSetSlot(2, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment), // normal
-                new DescriptorSetSlot(2, 3, ShaderResourceType.SampledImage, ShaderStages.Fragment), // emissive
-                new DescriptorSetSlot(2, 4, ShaderResourceType.SampledImage, ShaderStages.Fragment), // mr (roughness + metallic packed)
-                new DescriptorSetSlot(2, 5, ShaderResourceType.SampledImage, ShaderStages.Fragment), // ao (R channel)
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
-
-        var presentInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 8) });
-
-        // Opaque shadow interface: push-only (model + cascadeViewProj = 128B),
-        // no descriptor sets — opaque casters allocate zero transient sets.
-        var shadowOpaqueInterface = new ShaderInterface(
-            Slots: Array.Empty<DescriptorSetSlot>(),
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 128) });
-
-        // Mask shadow interface: albedo sampler (set 0) for alpha cutout + a
-        // 144-byte push spanning both stages ([model | cascadeViewProj] vertex,
-        // [alphaParams] fragment). Only MASK foliage draws use this.
-        var shadowMaskInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 144) });
+        var litInterface = Reflect("lit.vert", "lit.frag");
+        var skyInterface = Reflect("skybox.vert", "skybox.frag");
+        var presentInterface = Reflect("present.vert", "present.frag");
+        var shadowOpaqueInterface = Reflect("shadow.vert", "shadow.frag");
+        var shadowMaskInterface = Reflect("shadow_mask.vert", "shadow_mask.frag");
 
         // One graphics pass per cascade, each writing its own depth target.
         // Both shadow programs are render-pass-compatible with these passes.
@@ -704,29 +636,9 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         // Froxel fog compute pass — fills the 3D scattering grid. Declared
         // between the cascade passes and the lit pass so it runs after the
         // shadow maps are rendered (it samples them) and before the lit pass
-        // composites its result. Set 0: UBO (binding 0), the storage grid
-        // (binding 1), the cascade shadow maps (binding 2, Count=3).
-        var froxelUbo = new UniformBlockLayout(
-            TotalSize: 352,
-            Members: new[]
-            {
-                new UniformBlockMember("uInvViewProj",   0,   64),
-                new UniformBlockMember("uCamPos",        64,  16), // xyz pos, w = fogFar
-                new UniformBlockMember("uCamForward",    80,  16), // xyz fwd, w = density
-                new UniformBlockMember("uSunDir",        96,  16), // xyz into-scene, w = intensity
-                new UniformBlockMember("uSunColor",      112, 16), // rgb, w = scatter
-                new UniformBlockMember("uFogParams",     128, 16), // x=phaseG, y=ambient
-                new UniformBlockMember("uCascadeVP",     144, 192),
-                new UniformBlockMember("uCascadeSplits", 336, 16),
-            });
-        var froxelInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer, ShaderStages.Compute, BlockLayout: froxelUbo),
-                new DescriptorSetSlot(0, 1, ShaderResourceType.StorageImage, ShaderStages.Compute),
-                new DescriptorSetSlot(0, 2, ShaderResourceType.SampledImage, ShaderStages.Compute, Count: CascadeCount),
-            },
-            PushConstants: Array.Empty<PushConstantRange>());
+        // composites its result. Reflected interface: UBO (set 0 binding 0),
+        // the storage grid (binding 1), the cascade shadow maps (binding 2).
+        var froxelInterface = Reflect("froxel.comp");
         var froxelPass = graph.ComputePass("froxel-fog").Shader(froxelInterface);
         for (var c = 0; c < CascadeCount; c++)
         {
@@ -760,7 +672,7 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
         graph.Compile();
 
         // --- Shader programs + pipelines --------------------------------
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        // shaderDir was resolved above (reflection sidecars live alongside the .spv).
         var litVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "lit.vert.spv"));
         var litFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "lit.frag.spv"));
         litProgram = vk.CreateShaderProgramFromSpv(litVertSpv, litFragSpv, litInterface, "lit");
@@ -1681,6 +1593,8 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
                 new Vector4(metallicThreshold, normalStrength, slopeScale, glassMinOpacity))),
             new("uFog",              new Vector4Uniform(
                 new Vector4(frame.Width, frame.Height, fogFar, fogEnabled ? 1f : 0f))),
+            new("uIblParams",        new Vector4Uniform(
+                new Vector4(indirectShadowBase, indirectShadowRange, 0f, 0f))),
         };
 
         // Per-pass set-1 bindings (passBindings) and the identity model push
@@ -1933,8 +1847,11 @@ internal sealed class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDispo
             sunYaw   = debug.Controls.Float("Yaw (deg)", sunYaw * deg, -180f, 180f) / deg;
             sunPitch = debug.Controls.Float("Pitch (deg)", sunPitch * deg, -89f, -1f) / deg;
             UpdateSunDirection();
-            sunIntensity     = debug.Controls.Float("Sun intensity", sunIntensity, 0f, 8f);
+            sunIntensity     = debug.Controls.Float("Sun intensity", sunIntensity, 0f, 16f);
             ambientIntensity = debug.Controls.Float("Ambient (IBL)", ambientIntensity, 0f, 4f);
+            // Indirect dimming under sun shadow: ambient *= base + range*shadow.
+            indirectShadowBase  = debug.Controls.Float("Indirect shadow base", indirectShadowBase, 0f, 1f);
+            indirectShadowRange = debug.Controls.Float("Indirect shadow range", indirectShadowRange, 0f, 1f);
         }
         using (debug.Scope("Shadows"))
         {

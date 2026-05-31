@@ -56,6 +56,13 @@
     <Glslc Condition="'$(Glslc)' == '' AND Exists('/opt/homebrew/bin/glslc')">/opt/homebrew/bin/glslc</Glslc>
     <Glslc Condition="'$(Glslc)' == '' AND Exists('/usr/local/bin/glslc')">/usr/local/bin/glslc</Glslc>
     <Glslc Condition="'$(Glslc)' == ''">glslc</Glslc>
+    <!-- spirv-cross is located the same way as glslc (both ship in the Vulkan
+         SDK / Homebrew). It emits a per-shader reflection sidecar the runtime
+         loads instead of hand-authored binding tables; see docs/renderer.md
+         "SPIR-V reflection". Install with: brew install spirv-cross. -->
+    <SpirvCross Condition="'$(SpirvCross)' == '' AND Exists('/opt/homebrew/bin/spirv-cross')">/opt/homebrew/bin/spirv-cross</SpirvCross>
+    <SpirvCross Condition="'$(SpirvCross)' == '' AND Exists('/usr/local/bin/spirv-cross')">/usr/local/bin/spirv-cross</SpirvCross>
+    <SpirvCross Condition="'$(SpirvCross)' == ''">spirv-cross</SpirvCross>
   </PropertyGroup>
 
   <ItemGroup>
@@ -78,10 +85,13 @@
   <Target Name="CompileSpirV"
           AfterTargets="CopyFilesToOutputDirectory"
           Inputs="@(GlslShader)"
-          Outputs="@(GlslShader -> '$(OutDir)Shaders\%(Filename)%(Extension).spv')">
+          Outputs="@(GlslShader -> '$(OutDir)Shaders\%(Filename)%(Extension).spv');@(GlslShader -> '$(OutDir)Shaders\%(Filename)%(Extension).spv.refl.json')">
     <MakeDir Directories="$(OutDir)Shaders" />
     <Message Text="Compiling SPIR-V: %(GlslShader.Identity)" Importance="high" />
     <Exec Command="&quot;$(Glslc)&quot; -o &quot;$(OutDir)Shaders\%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; &quot;%(GlslShader.Identity)&quot;" />
+    <!-- Reflect each module into a sidecar (binding model: descriptor sets +
+         std140 UBO offsets). ShaderReflection loads these at program creation. -->
+    <Exec Command="&quot;$(SpirvCross)&quot; &quot;$(OutDir)Shaders\%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; --reflect --output &quot;$(OutDir)Shaders\%(GlslShader.Filename)%(GlslShader.Extension).spv.refl.json&quot;" />
   </Target>
 
 </Project>

@@ -1,0 +1,247 @@
+{
+    "entryPoints" : [
+        {
+            "name" : "main",
+            "mode" : "frag"
+        }
+    ],
+    "types" : {
+        "_291" : {
+            "name" : "Frame",
+            "members" : [
+                {
+                    "name" : "uViewProjection",
+                    "type" : "mat4",
+                    "offset" : 0,
+                    "matrix_stride" : 16
+                },
+                {
+                    "name" : "uSunDirection",
+                    "type" : "vec3",
+                    "offset" : 64
+                },
+                {
+                    "name" : "uSunIntensity",
+                    "type" : "float",
+                    "offset" : 76
+                },
+                {
+                    "name" : "uAmbientColor",
+                    "type" : "vec3",
+                    "offset" : 80
+                },
+                {
+                    "name" : "uIblIntensity",
+                    "type" : "float",
+                    "offset" : 92
+                },
+                {
+                    "name" : "uCameraPos",
+                    "type" : "vec3",
+                    "offset" : 96
+                },
+                {
+                    "name" : "uEnvMipCount",
+                    "type" : "float",
+                    "offset" : 108
+                },
+                {
+                    "name" : "uCameraForward",
+                    "type" : "vec3",
+                    "offset" : 112
+                },
+                {
+                    "name" : "uShadowStrength",
+                    "type" : "float",
+                    "offset" : 124
+                },
+                {
+                    "name" : "uCascadeViewProj",
+                    "type" : "mat4",
+                    "array" : [
+                        3
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 128,
+                    "array_stride" : 64,
+                    "matrix_stride" : 16
+                },
+                {
+                    "name" : "uCascadeSplits",
+                    "type" : "vec4",
+                    "offset" : 320
+                },
+                {
+                    "name" : "uShadowParams",
+                    "type" : "vec4",
+                    "offset" : 336
+                },
+                {
+                    "name" : "uCascadeBias",
+                    "type" : "vec4",
+                    "offset" : 352
+                },
+                {
+                    "name" : "uShaderParams",
+                    "type" : "vec4",
+                    "offset" : 368
+                },
+                {
+                    "name" : "uFog",
+                    "type" : "vec4",
+                    "offset" : 384
+                },
+                {
+                    "name" : "uIblParams",
+                    "type" : "vec4",
+                    "offset" : 400
+                }
+            ]
+        },
+        "_444" : {
+            "name" : "Material",
+            "members" : [
+                {
+                    "name" : "uBaseColorFactor",
+                    "type" : "vec4",
+                    "offset" : 0
+                },
+                {
+                    "name" : "uEmissiveFactor",
+                    "type" : "vec4",
+                    "offset" : 16
+                },
+                {
+                    "name" : "uMaterialParams",
+                    "type" : "vec4",
+                    "offset" : 32
+                },
+                {
+                    "name" : "uMaterialParams2",
+                    "type" : "vec4",
+                    "offset" : 48
+                }
+            ]
+        }
+    },
+    "inputs" : [
+        {
+            "type" : "vec3",
+            "name" : "vWorldPos",
+            "location" : 2
+        },
+        {
+            "type" : "vec2",
+            "name" : "vUv",
+            "location" : 1
+        },
+        {
+            "type" : "vec3",
+            "name" : "vNormalWorld",
+            "location" : 0
+        },
+        {
+            "type" : "vec3",
+            "name" : "vTangentWorld",
+            "location" : 3
+        },
+        {
+            "type" : "float",
+            "name" : "vTangentSign",
+            "location" : 4
+        }
+    ],
+    "outputs" : [
+        {
+            "type" : "vec4",
+            "name" : "outColor",
+            "location" : 0
+        }
+    ],
+    "textures" : [
+        {
+            "type" : "sampler2D",
+            "name" : "uCascadeShadowMaps",
+            "array" : [
+                3
+            ],
+            "array_size_is_literal" : [
+                true
+            ],
+            "set" : 1,
+            "binding" : 3
+        },
+        {
+            "type" : "sampler2D",
+            "name" : "uAlbedo",
+            "set" : 2,
+            "binding" : 1
+        },
+        {
+            "type" : "sampler2D",
+            "name" : "uNormalMap",
+            "set" : 2,
+            "binding" : 2
+        },
+        {
+            "type" : "sampler2D",
+            "name" : "uMetallicRoughness",
+            "set" : 2,
+            "binding" : 4
+        },
+        {
+            "type" : "sampler2D",
+            "name" : "uOcclusion",
+            "set" : 2,
+            "binding" : 5
+        },
+        {
+            "type" : "samplerCube",
+            "name" : "uPrefilteredEnv",
+            "set" : 1,
+            "binding" : 1
+        },
+        {
+            "type" : "samplerCube",
+            "name" : "uIrradiance",
+            "set" : 1,
+            "binding" : 0
+        },
+        {
+            "type" : "sampler2D",
+            "name" : "uBrdfLut",
+            "set" : 1,
+            "binding" : 2
+        },
+        {
+            "type" : "sampler2D",
+            "name" : "uEmissive",
+            "set" : 2,
+            "binding" : 3
+        },
+        {
+            "type" : "sampler3D",
+            "name" : "uFroxelGrid",
+            "set" : 1,
+            "binding" : 4
+        }
+    ],
+    "ubos" : [
+        {
+            "type" : "_291",
+            "name" : "Frame",
+            "block_size" : 416,
+            "set" : 0,
+            "binding" : 0
+        },
+        {
+            "type" : "_444",
+            "name" : "Material",
+            "block_size" : 64,
+            "set" : 2,
+            "binding" : 0
+        }
+    ]
+}

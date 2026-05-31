@@ -253,6 +253,32 @@ Demo consumption examples:
 - `volume.frag` / `flame.frag` — `#include "lib/noise.glsl"`; call `blix_vnoise3`, `blix_fbm3`, etc.
 - `ssr.frag` — `#include "lib/noise.glsl"`; calls `blix_screenHash` for per-pixel jitter.
 
+### SPIR-V reflection (Vulkan binding model)
+
+The OpenGL backend learns a shader's binding layout for free: `GetUniformLocation(name)` asks the driver, which reflected the program at link. Vulkan has no such step — `vkCreateShaderModule` treats the `.spv` as opaque bytes — so the binding metadata (descriptor sets + std140 UBO offsets) has to come from somewhere. The engine **reflects it from the compiled SPIR-V at build time** rather than hand-authoring it.
+
+`spirv-cross <spv> --reflect` runs alongside `glslc` in the demo csproj and emits a `<shader>.spv.refl.json` sidecar per stage. `ShaderReflection` (`src/Blix.Graphics.Vulkan/ShaderReflection.cs`) parses that JSON into the engine's existing binding records — it adds no new vocabulary, it just *populates* `ShaderInterface` / `DescriptorSetSlot` / `UniformBlockLayout` / `PushConstantRange` so everything downstream of `CreateShaderProgramFromSpv` is unchanged.
+
+The consumed subset of the sidecar maps as:
+
+| Sidecar field | Managed | Notes |
+| --- | --- | --- |
+| `entryPoints[0].mode` | `ShaderStages` | `vert→Vertex`, `frag→Fragment`, `comp→Compute` |
+| `ubos[]` / `ssbos[]` | `DescriptorSetSlot{ Type=Uniform/StorageBuffer, BlockLayout }` | `BlockLayout.TotalSize = block_size` |
+| `textures[]` / `separate_images[]` | `DescriptorSetSlot{ Type=SampledImage }` | combined image+sampler |
+| `separate_samplers[]` / `images[]` | `Type=Sampler` / `Type=StorageImage` | `images` = compute storage |
+| `array: [n]` | `DescriptorSetSlot.Count` | product of dims (1 if absent) |
+| `types[ref].members[]` | `UniformBlockMember{ Name, Offset, Size, ElementStride }` | offsets straight from `OpMemberDecorate` |
+| `push_constants[]` → its type | `PushConstantRange` | one range spanning the block |
+
+Member `Size`/`ElementStride` derive from the member `type` + decorations: arrays → `array_stride × ∏dims` (stride = `array_stride`); matrices → `matrix_stride × columns`; scalars/vectors → `float`=4, `vec2`=8, `vec3`=12, `vec4`=16. Unhandled types (nested structs) throw with the member name — a clear failure beats a silent wrong offset. `Size` is the write-guard span `MaterialBindings.WriteUniformBytes` checks, not the std140-aligned stride.
+
+A program merges its stages via `ShaderReflection.MergeStages(...)`:
+- Slots group by `(Set, Binding)`; differing `Type`/`Count` at the same slot **throws** (a real cross-stage bug, silent in the old hand-tables).
+- Otherwise the **fuller `BlockLayout`** wins (larger `TotalSize`) and stage flags are OR'd. A stage only reflects the UBO members it references, so the same block comes back smaller from one stage than another (a lit shader's vertex stage sees a short prefix of the `Frame` block the fragment stage fully reads); std140 offsets are positional, so the fuller block is the authoritative layout for by-name writes.
+
+The reflector is golden-tested against checked-in fixtures in `Blix.Test.Graphics` (Section P): reflected offsets/slots must equal VulkanSponza's known-good tables exactly. That gate is what lets the hand-authored `UniformBlockLayout`/`ShaderInterface` be deleted from the demos.
+
 ## Render surfaces + attachments
 
 Render passes target either `RenderSurfaceHandle.Default` (the window framebuffer) or an offscreen `RenderSurface` created by `IGraphicsDevice.CreateRenderSurface`. Surfaces declare one or more color attachments and an optional depth attachment.
