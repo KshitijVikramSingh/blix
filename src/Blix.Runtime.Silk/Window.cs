@@ -1,3 +1,5 @@
+using Blix.Audio;
+using Blix.Audio.OpenAL;
 using Blix.Core;
 using Blix.Diagnostics;
 using Blix;
@@ -26,7 +28,7 @@ namespace Blix.Runtime.Silk;
 // FrameDebugPacket metadata only and the window has no pixels to
 // present yet. The whole point of this turn is proving the shape
 // of the surface lines up; visible rendering comes after.
-public sealed class Window : IRenderHost, IDebugHost, IDisposable
+public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 {
     private readonly IWindow window;
     private readonly IGameLoop gameLoop;
@@ -36,6 +38,7 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
     private readonly DiagnosticsFrameRecorder? frameRecorder;
     private readonly JsonDumpSink? jsonDumpSink;
     private VulkanGraphicsDevice? graphicsDevice;
+    private OpenALAudioDevice? audioDevice;
     private IInputContext? input;
     private VkLineDrawer? lineDrawer;
     private VkImGuiRenderer? imguiRenderer;
@@ -140,6 +143,20 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
             input.Mice[i].MouseUp += OnMouseUp;
             input.Mice[i].MouseMove += OnMouseMove;
             input.Mice[i].Scroll += OnMouseScroll;
+        }
+
+        // Audio device construction can fail on machines without an OpenAL
+        // backend installed. Catch + warn rather than aborting startup —
+        // Game.AudioDevice stays null and audio-aware game code skips its
+        // audio path via null-check.
+        try
+        {
+            audioDevice = new OpenALAudioDevice();
+            Console.WriteLine($"Audio: {audioDevice.Vendor} | {audioDevice.Renderer} | {audioDevice.Version}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Audio device unavailable: {ex.Message}");
         }
 
         ApplyDefaultSurfaceSize();
@@ -343,6 +360,12 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
 
     public void SetVSync(bool enabled) => window.VSync = enabled;
 
+    // IAudioHost facet. Returns the live OpenAL device. Throws if accessed
+    // before OnLoad runs or when no audio backend is available (Game captures
+    // it through `host as IAudioHost`, so a missing device surfaces there).
+    public IAudioDevice AudioDevice =>
+        audioDevice ?? throw new InvalidOperationException("Audio device is not initialised. OnLoad has not run yet, or no audio backend is available.");
+
     // IDebugHost
     public DebugContext? CurrentDebug => debugSystem?.Current;
     public DebugSystem? System => debugSystem;
@@ -351,6 +374,7 @@ public sealed class Window : IRenderHost, IDebugHost, IDisposable
     {
         imguiRenderer?.Dispose();
         lineDrawer?.Dispose();
+        audioDevice?.Dispose();
         input?.Dispose();
         graphicsDevice?.Dispose();
         window.Dispose();
