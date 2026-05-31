@@ -1,6 +1,0 @@
-{
-  "assets": [
-    { "id": "models/sponza", "importer": "static-mesh.gltf", "source": "models/Sponza.gltf" },
-    { "id": "fonts/bowlby",  "importer": "font.json",       "source": "fonts/BowlbyOne-Regular.font.json" }
-  ]
-}
