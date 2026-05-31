@@ -8,6 +8,8 @@
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
     <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
+    <ProjectReference Include="..\Blix.Audio\Blix.Audio.csproj" />
+    <ProjectReference Include="..\Blix.Audio.OpenAL\Blix.Audio.OpenAL.csproj" />
   </ItemGroup>
 
   <ItemGroup>

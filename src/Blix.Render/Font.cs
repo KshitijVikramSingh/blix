@@ -37,7 +37,13 @@ public sealed class Font
                 size.AtlasHeight,
                 TextureFormat.Rgba8,
                 SamplerDescription.LinearClamp);
-            var atlas = device.CreateTexture2D(description, rgba, name: $"{data.Name}.{size.PixelSize}px");
+            // Single mip on purpose: CreateTexture2D auto-generates a full mip
+            // chain for blittable color formats (right for repeating world
+            // textures to kill moire, wrong for a glyph atlas — trilinear mip
+            // sampling muddies downscaled text). One level via the mipped path
+            // keeps glyphs crisp; the baker already provides several PixelSizes
+            // for size selection, so per-texture mips add nothing here.
+            var atlas = device.CreateTexture2DMipped(description, new[] { rgba }, name: $"{data.Name}.{size.PixelSize}px");
             uploaded.Add(new FontSize(size, atlas));
         }
 

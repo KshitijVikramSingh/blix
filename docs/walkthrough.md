@@ -1,5 +1,7 @@
 # Sponza Walkthrough
 
+> **HISTORICAL — the Walkthrough demo was retired in the OpenGL sunset.** `Blix.Demos.Walkthrough` and the GL renderer it drove have been removed from the codebase. This document is retained for reference. For the current scene-grade demos see VulkanSponza (`src/Blix.Demos.VulkanSponza/`, the Sponza performance target with 3-cascade shadows, depth pre-pass, indirect draws, and optional froxel volumetric fog) and VulkanLit (`src/Blix.Demos.VulkanLit/`, the PBR + IBL + shadows + skinning + bloom headline), plus [`architecture.md`](architecture.md) and [`vulkan-friction.md`](vulkan-friction.md).
+
 `Blix.Demos.Walkthrough` is the engine's flagship demo and the place to see how the renderer's pieces fit together at the level of a real scene. It loads the standard Sponza atrium, paints four hanging braziers with volumetric fire, lights it with one directional sun + four point lights, casts cascade shadows for the sun and cube shadows for each brazier, applies the full Karis split-sum IBL from an HDR sky probe, runs SSR off the marble floor, layers volumetric fog with sun god-rays and point-light scatter, blooms, and tonemaps through one of ACES / AgX / Reinhard / Neutral.
 
 Every dial is exposed in the ImGui debug overlay. The demo is one C# file (`src/Blix.Demos.Walkthrough/Program.cs`) plus a `Shaders/` directory plus the engine shader library at `src/Blix.Shaders/`.

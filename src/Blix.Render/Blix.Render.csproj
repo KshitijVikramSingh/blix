@@ -5,6 +5,10 @@
     <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
     <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
+    <!-- Vulkan is the sole backend post-GL-sunset. SpriteBatch owns its shader
+         + pipeline (SPIR-V, ShaderInterface, set-0 binding), so Blix.Render
+         depends on the Vulkan backend directly. -->
+    <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -12,5 +16,36 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+
+  <!-- Pre-compile the SpriteBatch shaders to SPIR-V at build time and ship them
+       as content next to the assembly; consumers (demo executables) pick them up
+       via CopyToOutputDirectory propagation. Mirrors Blix.Runtime.Silk's imgui
+       shader shipping. -->
+  <PropertyGroup>
+    <Glslc Condition="'$(Glslc)' == '' AND Exists('/opt/homebrew/bin/glslc')">/opt/homebrew/bin/glslc</Glslc>
+    <Glslc Condition="'$(Glslc)' == '' AND Exists('/usr/local/bin/glslc')">/usr/local/bin/glslc</Glslc>
+    <Glslc Condition="'$(Glslc)' == ''">glslc</Glslc>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <GlslShader Include="Shaders\sprite.vert" />
+    <GlslShader Include="Shaders\sprite.frag" />
+  </ItemGroup>
+
+  <Target Name="CompileSpirV"
+          BeforeTargets="AssignTargetPaths"
+          Inputs="@(GlslShader)"
+          Outputs="@(GlslShader -> '$(MSBuildThisFileDirectory)Shaders\%(Filename)%(Extension).spv')">
+    <Message Text="Compiling SPIR-V (lib): %(GlslShader.Identity)" Importance="high" />
+    <Exec Command="&quot;$(Glslc)&quot; -o &quot;$(MSBuildThisFileDirectory)Shaders\%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; &quot;$(MSBuildThisFileDirectory)%(GlslShader.Identity)&quot;" />
+  </Target>
+
+  <ItemGroup>
+    <None Include="Shaders\*.spv">
+      <Pack>false</Pack>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Shaders\%(Filename)%(Extension)</Link>
+    </None>
+  </ItemGroup>
 
 </Project>

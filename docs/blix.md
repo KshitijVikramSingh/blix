@@ -1,6 +1,6 @@
 # Blix
 
-The layer game code targets. Owns the loop contract, scene composition, per-object pose, cameras + lights, animation + skeletal animation, physics, geometry + collision, audio, and the glTF importer. Everything below it (`Blix.Core`, `Blix.Graphics`, `Blix.Graphics.OpenGL`, `Blix.Graphics.Images`, `Blix.Render`, `Blix.Assets`, `Blix.Diagnostics`, `Blix.Geometry`) is platform/renderer plumbing.
+The layer game code targets. Owns the loop contract, scene composition, per-object pose, cameras + lights, animation + skeletal animation, physics, geometry + collision, audio, and the glTF importer. Everything below it (`Blix.Core`, `Blix.Graphics`, `Blix.Graphics.Vulkan`, `Blix.Graphics.Images`, `Blix.Render`, `Blix.Assets`, `Blix.Diagnostics`, `Blix.Geometry`) is platform/renderer plumbing.
 
 This doc is the reference for the `Blix` namespace. For the layers below, see [`renderer.md`](renderer.md) and [`architecture.md`](architecture.md).
 
@@ -16,7 +16,7 @@ Anything richer (a scene graph, parenting, render queues, animation graphs, mult
 using Blix;
 using Blix.Core;
 using Blix.Diagnostics;
-using Blix.Runtime.OpenTK;
+using Blix.Runtime.Silk;
 
 using var window = new Window(new MyGame());
 window.Run();
@@ -31,7 +31,7 @@ internal sealed class MyGame : Game, IInputHandler, IDebuggable
         Host.SetTitle("My Game");
 
         var mesh = GraphicsDevice.CreateMesh(/* ... */);
-        var material = new Material("lit", litPipeline);
+        MaterialHandle material = GraphicsDevice.CreateMaterial(litShaderProgram, name: "hero.material");
         objects.Add(new GameObject("hero", mesh, material,
             new Transform3D { Position = new Vector3(0, 0, -2) }));
 
@@ -54,20 +54,16 @@ internal sealed class MyGame : Game, IInputHandler, IDebuggable
     {
         var view = camera.GetView();
         var projection = camera.GetProjection(frame.Width / (float)frame.Height);
-        commandList.Pass("scene",
-            new RenderPassDescription(RenderSurfaceHandle.Default, [bgColor], ClearDepth: true),
-            pass =>
-            {
-                foreach (var obj in objects)
-                {
-                    pass.DrawMesh(obj.Mesh, obj.Material, perDrawUniforms:
-                    [
-                        new ShaderUniform("uModel",      new Matrix4x4Uniform(obj.Transform.ToMatrix())),
-                        new ShaderUniform("uView",       new Matrix4x4Uniform(view)),
-                        new ShaderUniform("uProjection", new Matrix4x4Uniform(projection)),
-                    ]);
-                }
-            });
+
+        // The Vulkan backend drives a declarative RenderGraph: passes declare their
+        // targets + Read edges, materials bind through MaterialBindings, and per-draw
+        // data rides push constants / transient descriptor sets. See the demo programs
+        // (src/Blix.Demos.VulkanLit, src/Blix.Demos.VulkanSponza) for the full render
+        // setup; this doc focuses on the game-layer types above the renderer.
+        foreach (var obj in objects)
+        {
+            // record obj.Mesh + obj.Material (a MaterialHandle) into the frame's graph
+        }
     }
 
     public string DebugName => "MyGame";
@@ -77,7 +73,7 @@ internal sealed class MyGame : Game, IInputHandler, IDebuggable
 }
 ```
 
-See `Blix.Demos.ShaderLab/Program.cs` for a full game-layer reference — it exercises every subsystem (multi-light PCSS, glass, fur, hologram, skinned glTF, picking, audio). For the higher-end rendering path (HDR + IBL, cascade shadows, SSR, volumetric fire/fog, dual-filter bloom, tonemap pickers), see `Blix.Demos.Walkthrough/Program.cs` and [`walkthrough.md`](walkthrough.md).
+See `Blix.Demos.VulkanLit/Program.cs` for a full game-layer reference — it exercises the lit/skinned/PBR path (directional + spot + point shadows, IBL, bloom, skinned glTF). For the higher-end scene path (3-cascade shadows, depth pre-pass, IBL, geometry LOD, optional froxel volumetric fog, ACES/AgX tonemap), see `Blix.Demos.VulkanSponza/Program.cs`.
 
 ## Project dependencies
 
@@ -85,12 +81,12 @@ See `Blix.Demos.ShaderLab/Program.cs` for a full game-layer reference — it exe
 - `Blix.Core` — `IRenderHost`, `IAudioHost`, `IInputHandler`, `Key`, `MouseButton`, `RenderFrameContext`, `IRuntimeDiagnosticsSink`
 - `Blix.Geometry` — `Bounds3`/`Bounds2`, `BoundingSphere`, `Ray`, `Plane`, `Triangle`, `Capsule`, `OrientedBounds3`, `TriangleMesh3D`, `Circle`, `Capsule2D`, `OrientedBounds2`, `LineMesh2D`, `Segment2D`, `Intersection`/`Intersection2D`, `CollisionHit`, `CollisionResponse`
 - `Blix.Graphics` — `IGraphicsDevice`, `RenderCommandList`, matrix helpers
-- `Blix.Render` — `Mesh`, `Material` (composed into `GameObject` / `Submesh`)
+- `Blix.Render` — `Mesh` (composed into `GameObject` / `Submesh`; the material slot is a backend-neutral `MaterialHandle` from `Blix.Graphics`)
 - `Blix.Assets` — `IAssetImporter<T>`, `AssetImportContext`, `MeshData` (for the glTF importer)
 
 Plus one NuGet dependency: **SharpGLTF.Toolkit**, used only by `GltfImporter` for parsing `.glb` / `.gltf` files. The glTF types are translated into engine types (`MeshData`, `Skeleton`, `AnimationClip`) at the format boundary so a future FBX or proprietary importer hits the same surface.
 
-Nothing references `Blix` from below. No transitive dependency on `Blix.Runtime.OpenTK` or `Blix.Diagnostics` — the layer is platform-free.
+Nothing references `Blix` from below. No transitive dependency on `Blix.Runtime.Silk` or `Blix.Diagnostics` — the layer is platform-free.
 
 ## Public API index
 
@@ -118,7 +114,7 @@ Every public type in `Blix`, one-line each.
 
 ### IGameLoop
 
-The contract a game implements. The runtime (`Blix.Runtime.OpenTK.Window`) drives it.
+The contract a game implements. The runtime (`Blix.Runtime.Silk.Window`) drives it.
 
 ```csharp
 public interface IGameLoop
@@ -257,7 +253,7 @@ The 2D sibling. Same shape; scalar `Rotation` around Z; 2D `Position` and `Scale
 
 ### GameObject
 
-A plain container — `string Name`, `Mesh Mesh`, `Material Material`, `Transform3D Transform`. No tags, no visibility flag, no component list, no render-queue field.
+A plain container — `string Name`, `Mesh Mesh`, `MaterialHandle Material`, `Transform3D Transform`. No tags, no visibility flag, no component list, no render-queue field. The `Material` slot is the backend-neutral `MaterialHandle` (from `Blix.Graphics`), not a name-keyed uniform/texture bag.
 
 ```csharp
 var heroCube = new GameObject("hero_cube", cubeMesh, heroCubeMaterial,
@@ -282,7 +278,7 @@ The demo splits by render pass: opaque list feeds shadow + scene passes; glass l
 ### Submesh
 
 ```csharp
-public readonly record struct Submesh(Mesh Mesh, Material Material);
+public readonly record struct Submesh(Mesh Mesh, MaterialHandle Material);
 ```
 
 The atomic draw unit for multi-part meshes (typically glTF characters split into body / hair / clothing). `SkinnedGameObject` carries a `Submesh[]`; the base `GameObject.Mesh` / `Material` reflect `Submeshes[0]` for compatibility with code that reads them generically.
@@ -324,7 +320,7 @@ Every type with a pose composes a `Transform`. Camera3D, GameObject, PointLight,
 
 - No `ICamera` interface. Each camera class stays concrete until a real consumer needs the polymorphism.
 - `Camera3D` and `Camera2D` stay separate. A unified `Camera { Mode: 2D/3D, ... }` was considered and rejected — the API split (FoV vs Zoom, perspective vs ortho) is cleaner than the mode branch every consumer would need.
-- `Camera2D` is platform-ready but unused by the current demo — the SpriteBatch HUD passes a hand-built orthographic matrix. The 2D layer exists in full ready for the first 2D game.
+- `Camera2D` is platform-ready but unused by the current demos. The 2D layer (Transform2D, Camera2D, the 2D geometry/collision primitives) exists in full ready for the first 2D game.
 
 ## Lights
 
@@ -437,7 +433,7 @@ new LoopCurve<float>(inner, period: 2.0);
 new FloatAnimation
 {
     Curve = new LinearCurve { From = 0, To = 1, Duration = 0.5 },
-    Setter = v => material.SetUniform("uIntensity", new FloatUniform(v)),
+    Setter = v => mainLight.Intensity = v,
     StartTime = time.Total,
 };
 
@@ -457,7 +453,7 @@ new CallbackAnimation(time => { /* mutate state */; return continueRunning; });
 
 Typed animations are the goal — concrete classes with named fields, refactorable, IDE-navigable. `CallbackAnimation` is the bridge while a one-off lives in just one place. If the same callback shape appears twice, promote to a typed class.
 
-Demo-specific animations stay in the demo. The ShaderLab demo defines its own `EulerRotationAnimation` (closed-form, takes a `Vector3 RadiansPerSecond` and sets `Target.Rotation` from `Time.Total × per-axis rate`) — it's a demo-shaped pattern, not engine-shaped, so it doesn't get promoted until a second consumer needs it.
+Demo-specific animations stay in the demo. A spin animation like `EulerRotationAnimation` (closed-form, takes a `Vector3 RadiansPerSecond` and sets `Target.Rotation` from `Time.Total × per-axis rate`) is a demo-shaped pattern, not engine-shaped, so it doesn't get promoted until a second consumer needs it.
 
 ### AnimationHost + AnimatedGameObject
 
@@ -482,7 +478,7 @@ The structural commit: **animations attach to the thing being animated, not to a
 
 Animations reference their targets via **typed fields**, not property paths or reflection. `Transform3DAnimation.Target` is a `Transform3D` — assigned at construction, the animation mutates it directly. Refactoring, jump-to-definition, and type-checking all work.
 
-`FloatAnimation` uses a `Setter` closure because float-valued state lives in too many different places (`Material.SetUniform(name, ...)`, `Camera3D.VerticalFieldOfView`, `DirectionalLight.Intensity`) to make each one grow an "animatable" abstraction. The closure captures whatever needs to be written.
+`FloatAnimation` uses a `Setter` closure because float-valued state lives in too many different places (`Camera3D.VerticalFieldOfView`, `DirectionalLight.Intensity`, a material parameter, a shader push-constant field) to make each one grow an "animatable" abstraction. The closure captures whatever needs to be written.
 
 ### Deliberate limits
 
@@ -992,7 +988,7 @@ public Ray Camera3D.ScreenPointToRay(
     float viewportWidth, float viewportHeight);
 ```
 
-Takes a cursor position in **screen pixels** (top-left origin, Y growing downward — the OpenTK / window-system convention) and a viewport size in the **same coordinate system**, returns a world-space `Ray` whose origin sits on the near plane and whose direction points away from the camera through that screen pixel.
+Takes a cursor position in **screen pixels** (top-left origin, Y growing downward — the window-system convention) and a viewport size in the **same coordinate system**, returns a world-space `Ray` whose origin sits on the near plane and whose direction points away from the camera through that screen pixel.
 
 ### Coordinate-system gotcha — HDPI / Retina
 
@@ -1066,8 +1062,8 @@ State-based push, once per frame. Game code calls `audioListener.Sync(device)` a
 
 ## Cross-references
 
-- **Material / Mesh / DrawMesh / shaders / render passes** — see [`renderer.md`](renderer.md). Game code reads `obj.Mesh` and `obj.Material`, calls `pass.DrawMesh(...)`; the renderer doc explains everything underneath.
-- **`IDebuggable` / `DebugContext` / debug draw** — see "Diagnostics" in [`renderer.md`](renderer.md). Game code implements `IDebuggable` to contribute UI/values/draw commands.
+- **Mesh / materials / shaders / render passes** — game code reads `obj.Mesh` and `obj.Material` (a `MaterialHandle`) and records them into the Vulkan `RenderGraph`. See `src/Blix.Demos.VulkanLit/` and `src/Blix.Demos.VulkanSponza/` for the render setup, and [`vulkan-friction.md`](vulkan-friction.md) for the backend's binding model. ([`renderer.md`](renderer.md) covers the sunset GL renderer — historical reference only.)
+- **`IDebuggable` / `DebugContext` / debug draw** — game code implements `IDebuggable` to contribute UI/values/draw commands; the diagnostics system lives in `Blix.Diagnostics`.
 - **2D physics test harness** — `Blix.Test.Physics2D` is a 43-case CLI test runner exercising every `Intersection2D` overload. Pressure-tests the 2D primitives without a visual demo.
 
 ## Roadmap
@@ -1084,5 +1080,5 @@ In approximate priority order. Each item is a feature direction, not a structura
 - **Forces / impulses / mass + multi-body solver.** Real physics-gameplay. Kinematic depenetration covers the demo; full N-body iterative resolution is a multi-week commitment that isn't justified by current content.
 - **Pathfinding.** Graph / navmesh / grid representations. No autonomous-AI content motivates it.
 - **Convex hull collider.** No specific content needs it; OBB covers the tilted-prop case.
-- **Hot-reload / cooked binary assets / asset cache.** All asset loads re-import every time; texture caching lives at `MaterialResolver`. Each becomes a follow-up when iteration speed becomes a bottleneck.
-- **Particle system.** Generic GPU/CPU emitter with sorted billboards + soft-particle depth fade. Planned next; the Walkthrough's fire is currently hand-rolled per use site, and a real particle system would replace it (plus enable sparks, embers, dust motes, debris).
+- **Hot-reload / asset cache.** The cooked-asset pipeline (`.blixtex` / `.blixprobe` / `.blixmesh`) skips the slow import paths for VulkanSponza, but there's no in-memory asset cache or hot-reload; uncooked loads re-import every time. Each becomes a follow-up when iteration speed becomes a bottleneck.
+- **Particle system.** Generic GPU/CPU emitter with sorted billboards + soft-particle depth fade. Planned next; a real particle system would enable sparks, embers, dust motes, debris.

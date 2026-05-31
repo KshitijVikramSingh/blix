@@ -1,13 +1,13 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Blix;
 using Blix.Assets;
 using Blix.Audio;
 using Blix.Core;
-using Blix.Geometry;
 using Blix.Graphics;
-using Blix.Graphics.Primitives;
+using Blix.Graphics.Vulkan;
 using Blix.Render;
-using Blix.Runtime.OpenTK;
+using Blix.Runtime.Silk;
 
 using var window = new Window(
     new PongGame(),
@@ -16,23 +16,25 @@ window.Run();
 
 internal sealed class PongGame : Game, IInputHandler
 {
-    // Clean 16:9 chain end-to-end. Virtual playfield is the coordinate space
-    // gameplay logic uses; offscreen is the actual pixel buffer the scene
-    // renders into (2x virtual for free AA); the on-screen window matches the
-    // virtual aspect so the play rect doesn't letterbox.
-    // Window is 1152x576 (2:1). Virtual and offscreen match that aspect so the
-    // play rect doesn't stretch; offscreen is the exact 2x of virtual.
+    // Virtual playfield is the coordinate space gameplay logic uses; sprites
+    // render straight to the swapchain through a Vulkan-NDC ortho that maps the
+    // playfield over the whole window. Window is 1152x576 (2:1) and the playfield
+    // is 960x480 (2:1), so the play rect fills the window without letterboxing.
     private const float PlayfieldWidth = 960.0f;
     private const float PlayfieldHeight = 480.0f;
+    // Offscreen render target: 2x the playfield for free AA, then the CRT
+    // post-FX downsamples it to the swapchain. Fixed so uTexel is constant.
     private const int OffscreenWidth = 1920;
     private const int OffscreenHeight = 960;
-
-    // Tight bezel — play rect fills 95% of the window each axis (~970 x 547
-    // visible on a 1024x576 client). The remaining strip frames the screen.
-    private const float PlayRectLeft   = 0.025f;
-    private const float PlayRectRight  = 0.975f;
-    private const float PlayRectBottom = 0.025f;
-    private const float PlayRectTop    = 0.975f;
+    // Play rect fills the whole frame (no bezel border). In screen UVs
+    // (left, bottom, right, top). Set to a sub-rect (e.g. 0.025..0.975) to
+    // reintroduce the framed-bezel look.
+    private const float PlayRectLeft = 0.0f;
+    private const float PlayRectRight = 1.0f;
+    private const float PlayRectBottom = 0.0f;
+    private const float PlayRectTop = 1.0f;
+    // Font crispness knob (DrawText picks a baked size near pixelSize*dpiScale).
+    private const float FontDpiScale = OffscreenHeight / PlayfieldHeight;
 
     private const float PaddleWidth = 12.0f;
     private const float PaddleHeight = 88.0f;
@@ -53,12 +55,10 @@ internal sealed class PongGame : Game, IInputHandler
     private const float HitstopGoal = 0.10f;
 
     // Trail samples. One per fixed step → 1/120s spacing. 20 samples = ~166ms
-    // of history; ramps below keep dots thin + low-alpha so bloom doesn't catch.
+    // of history; ramps below keep dots thin + low-alpha.
     private const int TrailLength = 20;
 
-    // First-to-N. 11 is the long-running Pong/ping-pong convention; short enough
-    // that a single match wraps in a few minutes, long enough to reward sustained
-    // performance over a single lucky hit.
+    // First-to-N. 11 is the long-running Pong/ping-pong convention.
     private const int WinScore = 11;
     private const float WinFlashDuration = 0.9f;
 
@@ -83,8 +83,6 @@ internal sealed class PongGame : Game, IInputHandler
     private double totalTime;
 
     // 0 = match in progress, -1 = left player won, +1 = right player won.
-    // While non-zero: paddles still move (visual only), ball stays centered,
-    // the win overlay replaces the serve prompt. Space/R clears it for a new match.
     private int winner;
     private float winFlashTimer;
 
@@ -103,9 +101,16 @@ internal sealed class PongGame : Game, IInputHandler
     private TextureHandle whitePixel;
     private Font? hudFont;
 
-    private RenderSurface offscreenSurface = null!;
-    private Mesh fullscreenMesh = null!;
-    private Material postfxMaterial = null!;
+    // Render graph: sprites -> offscreen (graph pass), then a CRT post-FX
+    // present (imperative) samples that offscreen into the swapchain.
+    private RenderGraph graph = null!;
+    private GraphResourceHandle sceneColor;
+    private PassHandle spritePass;
+    private ShaderProgramHandle postfxShader;
+    private PipelineHandle postfxPipeline;
+    private VertexBufferHandle fullscreenVB;
+    private IndexBufferHandle fullscreenIB;
+    private readonly byte[] postfxPush = new byte[64];
 
     private AudioClipHandle paddleClip = AudioClipHandle.Invalid;
     private AudioClipHandle wallClip = AudioClipHandle.Invalid;
@@ -118,44 +123,60 @@ internal sealed class PongGame : Game, IInputHandler
     {
         Host.SetTitle("Blix · Pong");
 
-        spriteBatch = new SpriteBatch(GraphicsDevice);
+        var vk = (VulkanGraphicsDevice)GraphicsDevice;
+
+        // Graph: one offscreen color target + a sprite pass that draws into it.
+        // The post-FX present (imperative, below) samples it into the swapchain.
+        graph = new RenderGraph(vk);
+        sceneColor = graph.ColorTarget("pong.scene", TextureFormat.Rgba8,
+            new FixedGraphSize(OffscreenWidth, OffscreenHeight));
+        spritePass = graph.GraphicsPass("pong.sprites")
+            .Target(sceneColor, LoadOp.Clear, StoreOp.Store)
+            .Shader(SpriteBatch.Interface)
+            .Handle;
+        graph.Compile();
+
+        // SpriteBatch's pipeline bakes against the sprite pass's offscreen
+        // surface (Rgba8) for render-pass compatibility.
+        spriteBatch = new SpriteBatch(vk, renderTarget: graph.GetPassSurface(spritePass));
         whitePixel = GraphicsDevice.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.PixelatedRepeat),
             new byte[] { 255, 255, 255, 255 },
             name: "pong.white");
 
-        offscreenSurface = GraphicsDevice.CreateRenderSurface(new RenderSurfaceDescription(
-            Name: "pong.offscreen",
-            Size: new FixedRenderSurfaceSize(OffscreenWidth, OffscreenHeight),
-            ColorAttachments:
-            [
-                new ColorAttachmentDescription(TextureFormat.Rgba8, SamplerDescription.LinearClamp)
-            ],
-            Depth: null));
+        // CRT post-FX present pipeline: fullscreen triangle (gl_VertexIndex),
+        // offscreen sampled at set 0 / slot 0, params via a fragment push
+        // constant. Targets the swapchain (RenderTarget: null).
+        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var postfxInterface = new ShaderInterface(
+            Slots: new[]
+            {
+                new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+            },
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 64) });
+        postfxShader = vk.CreateShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "postfx.vert.spv")),
+            File.ReadAllBytes(Path.Combine(shaderDir, "postfx.frag.spv")),
+            postfxInterface, "pong.postfx");
+        postfxPipeline = vk.CreatePipeline(new PipelineDescription(
+            postfxShader,
+            VertexPosition3Texture.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.Disabled,
+            RasterizerState.NoCulling,
+            BlendState.Disabled), "pong.postfx");
 
-        var fsVerts = GraphicsDevice.CreateVertexBuffer(
-            VertexPositionTexture.CreateBufferData(FullscreenQuad.Vertices),
-            name: "pong.fs.vertices");
-        var fsIndices = GraphicsDevice.CreateIndexBuffer(
-            FullscreenQuad.Indices, name: "pong.fs.indices");
-        fullscreenMesh = new Mesh("pong.fs", fsVerts, fsIndices,
-            FullscreenQuad.Indices.Length, Bounds3.Empty);
-
-        var postfxShader = GraphicsDevice.CreateShaderProgram(new ShaderSources(
-            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Shaders", "postfx.vert")),
-            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Shaders", "postfx.frag")),
-            VertexName: "pong.postfx.vert",
-            FragmentName: "pong.postfx.frag"));
-        var postfxPipeline = GraphicsDevice.CreatePipeline(
-            new PipelineDescription(
-                postfxShader,
-                VertexPositionTexture.Layout,
-                PrimitiveTopology.Triangles,
-                DepthState.Disabled,
-                RasterizerState.NoCulling,
-                BlendState.Disabled),
-            name: "pong.postfx");
-        postfxMaterial = new Material("pong.postfx", postfxPipeline);
+        // Dummy 3-vertex buffers — the fullscreen-triangle vertex shader
+        // generates positions from gl_VertexIndex and ignores these.
+        var dummyVerts = new VertexPosition3Texture[]
+        {
+            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
+            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
+            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
+        };
+        fullscreenVB = vk.CreateVertexBuffer(
+            VertexPosition3Texture.CreateBufferData(dummyVerts), "pong.fs.vb");
+        fullscreenIB = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "pong.fs.ib");
 
         try
         {
@@ -170,6 +191,8 @@ internal sealed class PongGame : Game, IInputHandler
             Console.WriteLine($"Font unavailable, score will not render: {ex.Message}");
         }
 
+        // AudioDevice is null on the Silk runtime (not an IAudioHost yet), so the
+        // beeps are silent for now — the calls below no-op gracefully.
         if (AudioDevice is { } audio)
         {
             paddleClip = audio.CreateClip(SynthBeep(660.0f, 0.06f, 0.6f), name: "pong.paddle");
@@ -185,6 +208,8 @@ internal sealed class PongGame : Game, IInputHandler
 
     public override void OnUnload()
     {
+        spriteBatch?.Dispose();
+        graph?.Dispose();
         if (AudioDevice is { } audio)
         {
             paddleSource?.Dispose(audio);
@@ -322,22 +347,17 @@ internal sealed class PongGame : Game, IInputHandler
             : paddleCenterX - pHalfW - bHalf;
 
         ballVelocity.X = -ballVelocity.X;
-        // Five-zone quantised paddle: the smooth gradient read as random; zones
-        // make it a skill — players can aim for {-1, -0.5, 0, +0.5, +1}.
-        // Center zone is widest (40% of paddle face) so a deliberate centre
-        // return is achievable instead of a coin-flip between ±0.5.
+        // Five-zone quantised paddle: zones make the deflection a skill —
+        // players can aim for {-1, -0.5, 0, +0.5, +1}. Center zone widest.
         var dyN = Math.Clamp(dy / pHalfH, -1.0f, 1.0f);
         var zone = Math.Clamp((int)MathF.Floor((dyN + 1.0f) * 2.5f), 0, 4);
         var offsetT = (zone - 2) * 0.5f;
         var speed = ballVelocity.Length();
-        // Stronger Y-kick so an edge hit produces a visibly sharper angle —
-        // reads as "bouncy" without losing centre-hit control.
         ballVelocity.Y += offsetT * speed * 1.0f;
         var newSpeed = Math.Min(speed + BallSpeedupPerHit, BallSpeedMax);
         ballVelocity = Vector2.Normalize(ballVelocity) * newSpeed;
 
-        // Feel triggers. All proportional to current ball speed so weak rallies
-        // shake less than fast ones.
+        // Feel triggers, all proportional to current ball speed.
         var speedT = newSpeed / BallSpeedMax;
         hitstopTimer = HitstopPaddle;
         squashTimer = HitstopPaddle * 1.2f;
@@ -366,9 +386,6 @@ internal sealed class PongGame : Game, IInputHandler
         shakeAmp = MathF.Max(shakeAmp, 0.022f);
         PlaySfx(scoreSource, pitch: 1.0f);
 
-        // Match-point check. The flash + extended hitstop sell the final blow;
-        // the actual ball reset still happens via ResetBall in OnFixedUpdate
-        // (winner != 0 just gates input + render below).
         if (leftScore >= WinScore) winner = -1;
         else if (rightScore >= WinScore) winner = +1;
         if (winner != 0)
@@ -403,11 +420,7 @@ internal sealed class PongGame : Game, IInputHandler
         var dirX = nextServeDir == 0
             ? (rng.NextDouble() < 0.5 ? -1.0f : 1.0f)
             : (float)nextServeDir;
-        // Always angled — magnitude in [15°, 38°] off horizontal, never a flat
-        // boring serve. Y-sign random so a serve can break either up or down.
-        // Capped at 38° so the ball stays X-dominant; 55° earlier read as too
-        // vertical, the rally became "guess which paddle catches it" instead
-        // of "react to a cross-court fizz."
+        // Always angled — magnitude in [15°, ~38°] off horizontal, Y-sign random.
         var minAngle = (float)(Math.PI / 12.0);    // 15°
         var maxAngle = (float)(Math.PI / 4.74);    // ~38°
         var angleMag = minAngle + (float)rng.NextDouble() * (maxAngle - minAngle);
@@ -422,61 +435,68 @@ internal sealed class PongGame : Game, IInputHandler
     {
         if (frame.Width <= 0 || frame.Height <= 0) return;
 
-        var gameOrtho = GraphicsMatrices.CreateOrthographicOffCenter(
+        // Vulkan-NDC screen ortho: maps the virtual playfield over the offscreen
+        // target, top-left origin, Y down.
+        var gameOrtho = GraphicsMatrices.CreateOrthographicOffCenterVulkan(
             left: 0.0f, right: PlayfieldWidth,
             bottom: PlayfieldHeight, top: 0.0f,
             nearPlane: -1.0f, farPlane: 1.0f);
 
-        commandList.Pass(
-            "pong.game",
-            new RenderPassDescription(
-                offscreenSurface.Handle,
-                ClearColors: new GraphicsColor?[] { new(0.03f, 0.02f, 0.06f, 1.0f) },
-                ClearDepth: false),
-            pass =>
-            {
-                spriteBatch.Begin(gameOrtho);
-                DrawScores();
-                DrawCentreNet();
-                DrawPaddle(PaddleInset, leftPaddleY, leftPaddleRecoil);
-                DrawPaddle(PlayfieldWidth - PaddleInset - PaddleWidth, rightPaddleY, rightPaddleRecoil);
-                DrawTrail();
-                DrawBall();
-                DrawHud();
-                spriteBatch.End(pass);
-            });
+        // Sprites -> offscreen (graph pass). The graph leaves the stored color
+        // target sampleable for the post-FX present below.
+        graph.Pass(spritePass, scope =>
+        {
+            spriteBatch.Begin(gameOrtho);
+            DrawScores();
+            DrawCentreNet();
+            DrawPaddle(PaddleInset, leftPaddleY, leftPaddleRecoil);
+            DrawPaddle(PlayfieldWidth - PaddleInset - PaddleWidth, rightPaddleY, rightPaddleRecoil);
+            DrawTrail();
+            DrawBall();
+            DrawHud();
+            spriteBatch.End(scope);
+        }, clearColor: new GraphicsColor(0.03f, 0.02f, 0.06f, 1.0f));
 
-        var sceneTex = offscreenSurface.ColorAttachments[0];
-        // Win flash: intensity in alpha channel decays linearly; RGB stays at
-        // the winner's side colour so the play rect briefly washes cyan or magenta.
+        graph.Execute(commandList);
+
+        // CRT post-FX present (imperative): sample the offscreen into the
+        // swapchain. Params go in a fragment push constant (see postfx.frag's
+        // Push block layout: uPlayRect@0, uTexel@16, uShake@24, uWinFlash@32,
+        // uTime@48).
+        var sceneTex = graph.GetColorTexture(sceneColor);
         var flashT = winFlashTimer / WinFlashDuration;
+        // Win flash: rgb = winner's side colour (cyan for P1, magenta for P2).
         var flashRgb = winner < 0
-            ? new Vector3(0.30f, 0.85f, 1.0f)     // left = cyan
-            : new Vector3(1.0f, 0.45f, 0.85f);    // right = magenta
-        var uniforms = new ShaderUniform[]
-        {
-            new("uPlayRect", new Vector4Uniform(new Vector4(
-                PlayRectLeft, PlayRectBottom, PlayRectRight, PlayRectTop))),
-            new("uTime",  new FloatUniform((float)totalTime)),
-            new("uTexel", new Vector2Uniform(new Vector2(
-                1.0f / OffscreenWidth, 1.0f / OffscreenHeight))),
-            new("uShake", new Vector2Uniform(shakeOffset)),
-            new("uWinFlash", new Vector4Uniform(new Vector4(
-                flashRgb.X, flashRgb.Y, flashRgb.Z, flashT)))
-        };
-        var textures = new ShaderTextureBinding[]
-        {
-            new("uScene", sceneTex, Slot: 0)
-        };
+            ? new Vector3(0.30f, 0.85f, 1.0f)
+            : new Vector3(1.0f, 0.45f, 0.85f);
+        var playRect = new Vector4(PlayRectLeft, PlayRectBottom, PlayRectRight, PlayRectTop);
+        var texel = new Vector2(1.0f / OffscreenWidth, 1.0f / OffscreenHeight);
+        var winFlash = new Vector4(flashRgb.X, flashRgb.Y, flashRgb.Z, flashT);
+        var elapsed = (float)totalTime;
+        var push = postfxPush.AsSpan();
+        MemoryMarshal.Write(push.Slice(0, 16), in playRect);
+        MemoryMarshal.Write(push.Slice(16, 8), in texel);
+        MemoryMarshal.Write(push.Slice(24, 8), in shakeOffset);
+        MemoryMarshal.Write(push.Slice(32, 16), in winFlash);
+        MemoryMarshal.Write(push.Slice(48, 4), in elapsed);
 
         commandList.Pass(
             "pong.postfx",
             new RenderPassDescription(
                 RenderSurfaceHandle.Default,
-                ClearColors: Array.Empty<GraphicsColor?>(),
-                ClearDepth: false),
-            pass => pass.DrawMesh(fullscreenMesh, postfxMaterial,
-                perDrawUniforms: uniforms, perDrawTextures: textures));
+                ClearColors: new GraphicsColor?[] { new(0, 0, 0, 1) },
+                ClearDepth: true),
+            pass =>
+            {
+                pass.DrawIndexed(
+                    fullscreenVB,
+                    fullscreenIB,
+                    postfxPipeline,
+                    indexCount: 3,
+                    Array.Empty<ShaderUniform>(),
+                    new ShaderTextureBinding[] { new("uScene", sceneTex, Slot: 0) },
+                    postfxPush);
+            });
     }
 
     private void DrawCentreNet()
@@ -501,10 +521,8 @@ internal sealed class PongGame : Game, IInputHandler
             new GraphicsColor(0.85f, 0.98f, 1.0f, 1.0f));
     }
 
-    // Speed → temperature gradient. Cool cyan-blue when the ball just launched,
-    // shifting through white at mid-speed, into hot magenta/red at the cap. The
-    // bloom in the post-FX picks up the warm pixels harder, so a heating ball
-    // visually intensifies on its own as the rally escalates.
+    // Speed → temperature gradient: cool cyan-blue at launch, white at mid-speed,
+    // hot magenta/red at the cap.
     private GraphicsColor BallColor(float alpha = 1.0f)
     {
         var speed = ballVelocity.Length();
@@ -532,17 +550,13 @@ internal sealed class PongGame : Game, IInputHandler
     private void DrawTrail()
     {
         if (trailCount == 0 || waitingForServe) return;
-        // Walk oldest → newest. Linear ramp on alpha + size so the head of the
-        // trail visually melts into the ball.
+        // Walk oldest → newest. Linear ramp on alpha + size so the head melts
+        // into the ball.
         for (var i = 0; i < trailCount; i++)
         {
-            // (trailHead - trailCount + i) modulo TrailLength gives the i-th
-            // oldest sample. Add TrailLength before mod to avoid negative %.
             var idx = ((trailHead - trailCount + i) % TrailLength + TrailLength) % TrailLength;
             var p = trail[idx];
             var t = (i + 1) / (float)trailCount;
-            // Thin head growing toward the live ball; low alpha across the run
-            // so the post-FX bloom doesn't catch the trail and smear it.
             var size = BallSize * (0.08f + 0.32f * t);
             var alpha = 0.02f + 0.12f * t;
             var h = size * 0.5f;
@@ -565,11 +579,7 @@ internal sealed class PongGame : Game, IInputHandler
             return;
         }
 
-        // Squash/stretch. Two stacked effects:
-        //   (1) Velocity stretch: stretch the ball along the dominant velocity
-        //       axis, compress the perpendicular. Reads as "fast."
-        //   (2) Impact squash: while squashTimer is active, override with a hard
-        //       compress on the impact axis. Decays linearly over its duration.
+        // Squash/stretch: velocity-axis stretch + impact-axis compress.
         var speed = ballVelocity.Length();
         var speedT = MathF.Min(speed / BallSpeedMax, 1.0f);
         float scaleX = 1.0f, scaleY = 1.0f;
@@ -616,69 +626,64 @@ internal sealed class PongGame : Game, IInputHandler
     private void DrawScores()
     {
         if (hudFont is null) return;
-        const float dpiScale = OffscreenHeight / PlayfieldHeight;
         const float scoreSize = 200.0f;
         var color = new GraphicsColor(0.55f, 0.70f, 0.95f, 0.28f);
 
-        DrawScoreCentered(leftScore.ToString("00"), PlayfieldWidth * 0.25f, scoreSize, dpiScale, color);
-        DrawScoreCentered(rightScore.ToString("00"), PlayfieldWidth * 0.75f, scoreSize, dpiScale, color);
+        DrawScoreCentered(leftScore.ToString("00"), PlayfieldWidth * 0.25f, scoreSize, color);
+        DrawScoreCentered(rightScore.ToString("00"), PlayfieldWidth * 0.75f, scoreSize, color);
     }
 
-    private void DrawScoreCentered(string text, float centerX, float pixelSize, float dpiScale, GraphicsColor color)
+    private void DrawScoreCentered(string text, float centerX, float pixelSize, GraphicsColor color)
     {
-        var measured = SpriteBatchUiExtensions.MeasureText(hudFont!, pixelSize, text, dpiScale);
+        var measured = SpriteBatchUiExtensions.MeasureText(hudFont!, pixelSize, text, FontDpiScale);
         var pos = new Vector2(centerX - measured.X * 0.5f, PlayfieldHeight * 0.5f - measured.Y * 0.5f);
-        spriteBatch.DrawText(hudFont!, pixelSize, text, pos, color, dpiScale: dpiScale);
+        spriteBatch.DrawText(hudFont!, pixelSize, text, pos, color, dpiScale: FontDpiScale);
     }
 
     private void DrawHud()
     {
         if (hudFont is null) return;
-        const float dpiScale = OffscreenHeight / PlayfieldHeight;
 
         if (winner != 0)
         {
-            // Side-coloured huge win banner. The post-FX win flash tints the
-            // whole play rect to match; the text gets the same colour so it
-            // reads as the source of the tint rather than competing with it.
             var label = winner < 0 ? "P1 WINS" : "P2 WINS";
             var winColor = winner < 0
                 ? new GraphicsColor(0.55f, 0.95f, 1.00f, 0.95f)
                 : new GraphicsColor(1.00f, 0.65f, 0.92f, 0.95f);
             const float winSize = 96.0f;
-            var winMeasured = SpriteBatchUiExtensions.MeasureText(hudFont, winSize, label, dpiScale);
+            var winMeasured = SpriteBatchUiExtensions.MeasureText(hudFont, winSize, label, FontDpiScale);
             spriteBatch.DrawText(hudFont, winSize, label,
                 new Vector2(PlayfieldWidth * 0.5f - winMeasured.X * 0.5f,
                             PlayfieldHeight * 0.5f - winMeasured.Y * 0.5f),
-                winColor, dpiScale: dpiScale);
+                winColor, dpiScale: FontDpiScale);
 
             const string sub = "PRESS SPACE";
             const float subSize = 26.0f;
-            var subMeasured = SpriteBatchUiExtensions.MeasureText(hudFont, subSize, sub, dpiScale);
+            var subMeasured = SpriteBatchUiExtensions.MeasureText(hudFont, subSize, sub, FontDpiScale);
             spriteBatch.DrawText(hudFont, subSize, sub,
                 new Vector2(PlayfieldWidth * 0.5f - subMeasured.X * 0.5f,
                             PlayfieldHeight * 0.5f + winMeasured.Y * 0.5f + 16.0f),
                 new GraphicsColor(0.95f, 0.55f, 0.85f, 0.85f),
-                dpiScale: dpiScale);
+                dpiScale: FontDpiScale);
         }
         else if (waitingForServe)
         {
             const string prompt = "PRESS SPACE";
             const float promptSize = 38.0f;
-            var measured = SpriteBatchUiExtensions.MeasureText(hudFont, promptSize, prompt, dpiScale);
+            var measured = SpriteBatchUiExtensions.MeasureText(hudFont, promptSize, prompt, FontDpiScale);
             spriteBatch.DrawText(hudFont, promptSize, prompt,
                 new Vector2(PlayfieldWidth * 0.5f - measured.X * 0.5f, PlayfieldHeight - 100.0f),
                 new GraphicsColor(0.95f, 0.55f, 0.85f, 0.95f),
-                dpiScale: dpiScale);
+                dpiScale: FontDpiScale);
         }
 
-        const string controls = "W / S      ↑ / ↓      R      ESC";
+        const string controls = "W / S      UP / DN      R      ESC";
         const float controlsSize = 18.0f;
-        var cMeasured = SpriteBatchUiExtensions.MeasureText(hudFont, controlsSize, controls, dpiScale);
+        var cMeasured = SpriteBatchUiExtensions.MeasureText(hudFont, controlsSize, controls, FontDpiScale);
         spriteBatch.DrawText(hudFont, controlsSize, controls,
             new Vector2(PlayfieldWidth * 0.5f - cMeasured.X * 0.5f, PlayfieldHeight - 36.0f),
             new GraphicsColor(0.55f, 0.55f, 0.78f, 0.75f),
-            dpiScale: dpiScale);
+            dpiScale: FontDpiScale);
     }
 
     private void PlaySfx(AudioSource? source, float pitch)
