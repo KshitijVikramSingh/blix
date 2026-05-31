@@ -81,6 +81,30 @@ public static class TextureFormatExtensions
             "Depth formats don't have a fixed mip byte count.", nameof(format)),
         _ => throw new ArgumentOutOfRangeException(nameof(format), format, null),
     };
+
+    // Total bytes for a full mip chain of `mipCount` levels starting at
+    // width×height, each level halving (floored, min 1) in both dimensions —
+    // the standard pyramid the upload path allocates. Single-layer (2D); cube
+    // and 3D callers scale by face count / depth. Used by the diagnostics
+    // snapshot to report per-texture footprint.
+    public static long TextureByteCount(this TextureFormat format, int width, int height, int mipCount)
+    {
+        if (mipCount < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(mipCount), "Mip count must be at least 1.");
+        }
+
+        long total = 0;
+        var w = width;
+        var h = height;
+        for (var level = 0; level < mipCount; level++)
+        {
+            total += format.MipByteCount(w, h);
+            w = Math.Max(1, w / 2);
+            h = Math.Max(1, h / 2);
+        }
+        return total;
+    }
 }
 
 public sealed record SamplerDescription(

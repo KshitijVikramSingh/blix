@@ -82,6 +82,14 @@ public sealed class DebugSystem
 
     public void SetFramePacket(FrameDebugPacket packet) => LatestFramePacket = packet;
 
+    // Most recent resource inventory (textures, buffers, pipelines, shader
+    // programs, render surfaces). Set by the runtime each frame; read by the
+    // overlay's Resources tab. Like the packet, a point-in-time copy safe to
+    // read off the live tables.
+    public ResourceRegistrySnapshot? LatestResourceSnapshot { get; private set; }
+
+    public void SetResourceSnapshot(ResourceRegistrySnapshot snapshot) => LatestResourceSnapshot = snapshot;
+
     // When non-null, sinks should render this frame read-only instead of
     // Current. Held independently of the ring so it survives overwrite.
     public DebugFrame? FrozenFrame { get; private set; }
