@@ -222,9 +222,17 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             }
         }
 
-        if (diagnostics is { } sink)
+        // Resource inventory: snapshot once and share with the overlay's
+        // Resources tab and the runtime diagnostics sink. SnapshotResources
+        // walks every table + allocates, so only do it when something will
+        // read it — the overlay is visible, or a sink is attached. (The
+        // overlay reads it via DebugSystem.LatestResourceSnapshot.)
+        var overlayWantsResources = debugSystem?.State.ShowOverlay == true;
+        if (overlayWantsResources || diagnostics is not null)
         {
-            sink.OnFrameDebug(packet, graphicsDevice.SnapshotResources());
+            var resources = graphicsDevice.SnapshotResources();
+            if (overlayWantsResources) debugSystem!.SetResourceSnapshot(resources);
+            diagnostics?.OnFrameDebug(packet, resources);
         }
 
         // Present + buffer-swap lands here once swapchain integration is in

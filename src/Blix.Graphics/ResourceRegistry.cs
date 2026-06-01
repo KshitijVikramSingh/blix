@@ -7,24 +7,42 @@ public enum TextureKind
     RenderSurfaceDepth
 }
 
+// Streaming state of a texture's mip chain. Non-streamed textures (uploaded
+// in full, or written by render/compute) are always Resident. The streamed
+// path (AllocateTexture2DMips + per-mip UploadTextureMip) starts Pending, is
+// Streaming while finer mips trickle in, and becomes Resident once the full
+// chain has landed.
+public enum TextureResidency
+{
+    Resident = 0,
+    Streaming,
+    Pending
+}
+
+// Snapshot record fields mirror exactly what the backend tracks for each live
+// resource — no fabricated metadata. Buffers expose their GPU byte size (the
+// backend stores bytes, not vertex/index counts); pipelines expose the bind
+// point they were built for (the backend keeps IsCompute, not topology).
 public sealed record VertexBufferEntry(
     VertexBufferHandle Handle,
     string Name,
-    int VertexCount,
-    int Stride);
+    long ByteSize);
 
 public sealed record IndexBufferEntry(
     IndexBufferHandle Handle,
     string Name,
-    int IndexCount);
+    long ByteSize);
 
 public sealed record TextureEntry(
     TextureHandle Handle,
     string Name,
     int Width,
     int Height,
+    int MipCount,
     TextureFormat Format,
-    TextureKind Kind);
+    TextureKind Kind,
+    long ByteSize,
+    TextureResidency Residency);
 
 public sealed record ShaderProgramEntry(
     ShaderProgramHandle Handle,
@@ -34,7 +52,7 @@ public sealed record PipelineEntry(
     PipelineHandle Handle,
     string Name,
     ShaderProgramHandle ShaderProgram,
-    PrimitiveTopology Topology);
+    bool IsCompute);
 
 public sealed record RenderSurfaceEntry(
     RenderSurfaceHandle Handle,

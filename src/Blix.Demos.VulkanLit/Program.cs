@@ -751,7 +751,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         // past its edge sampleShadow returns "lit", a hard seam across the far
         // floor when you look down. 11 covers the diagonal + actor height; the
         // longer far plane keeps the full depth range in view.
-        var sunOrtho = CreateOrthoVulkan(width: 11f, height: 11f, near: 0.1f, far: 22f);
+        var sunOrtho = GraphicsMatrices.CreateOrthographicVulkan(width: 11f, height: 11f, nearPlane: 0.1f, farPlane: 22f);
         sunShadowVP = sunView * sunOrtho;
 
         // Spot shadow VP — perspective from the spot, FOV covering the outer
@@ -1359,16 +1359,6 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         var fov = 2f * outerDeg * (MathF.PI / 180f) * 1.1f;
         var proj = GraphicsMatrices.CreatePerspectiveVulkan(fov, 1.0f, 0.2f, range + 4f);
         return view * proj;
-    }
-
-    private static Matrix4x4 CreateOrthoVulkan(float width, float height, float near, float far)
-    {
-        var fn = far - near;
-        return new Matrix4x4(
-            2f / width, 0f,           0f,          0f,
-            0f,        -2f / height,  0f,          0f,
-            0f,         0f,          -1f / fn,     0f,
-            0f,         0f,          -near / fn,   1f);
     }
 
     // Direct row-major write — GLSL std430 reads column-major so the

@@ -34,9 +34,8 @@ public enum TextureFormat
     Rgba8Srgb,
     // BC7 (BPTC) compressed RGBA, sRGB-encoded. The workhorse compressed colour
     // format -- 8 bits per pixel (4x compression vs Rgba8), high quality.
-    // Pixel data is uploaded via glCompressedTexImage2D as 16-byte blocks per
-    // 4x4 texel region. Width + height should be multiples of 4; smaller
-    // edge-mips pad up to 4.
+    // Pixel data is stored as 16-byte blocks per 4x4 texel region. Width +
+    // height should be multiples of 4; smaller edge-mips pad up to 4.
     Bc7Srgb,
     // BC7 (BPTC) compressed RGBA, linear-space. For non-colour data like
     // metallic-roughness, occlusion, or roughness-only packed channels.
@@ -81,6 +80,30 @@ public static class TextureFormatExtensions
             "Depth formats don't have a fixed mip byte count.", nameof(format)),
         _ => throw new ArgumentOutOfRangeException(nameof(format), format, null),
     };
+
+    // Total bytes for a full mip chain of `mipCount` levels starting at
+    // width×height, each level halving (floored, min 1) in both dimensions —
+    // the standard pyramid the upload path allocates. Single-layer (2D); cube
+    // and 3D callers scale by face count / depth. Used by the diagnostics
+    // snapshot to report per-texture footprint.
+    public static long TextureByteCount(this TextureFormat format, int width, int height, int mipCount)
+    {
+        if (mipCount < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(mipCount), "Mip count must be at least 1.");
+        }
+
+        long total = 0;
+        var w = width;
+        var h = height;
+        for (var level = 0; level < mipCount; level++)
+        {
+            total += format.MipByteCount(w, h);
+            w = Math.Max(1, w / 2);
+            h = Math.Max(1, h / 2);
+        }
+        return total;
+    }
 }
 
 public sealed record SamplerDescription(
@@ -89,10 +112,10 @@ public sealed record SamplerDescription(
     TextureWrap WrapU,
     TextureWrap WrapV,
     bool GenerateMipmaps,
-    // Compare flips the texture into depth-comparison mode (GL_COMPARE_REF_TO_TEXTURE
-    // with GL_LEQUAL). Required for sampler2DShadow lookups — the GPU then performs a
-    // free 2x2 bilinear PCF compare on each texture() call. Only meaningful on depth
-    // textures; ignored for color textures.
+    // Compare puts the sampler in depth-comparison mode (Vulkan compareEnable with
+    // compareOp = LessOrEqual). Required for sampler2DShadow lookups — the GPU then
+    // performs a free 2x2 bilinear PCF compare on each texture() call. Only meaningful
+    // on depth textures; ignored for color textures.
     bool Compare = false,
     // Wrap mode for the third (W) axis. Only consumed by 3D textures via
     // CreateTexture3D; ignored by 2D/Cube paths. Defaults to ClampToEdge so

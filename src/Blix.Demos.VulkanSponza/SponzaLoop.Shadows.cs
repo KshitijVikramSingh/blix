@@ -75,7 +75,7 @@ internal sealed partial class SponzaLoop
             var eye2 = snapped - L * (shadows.SunDistance + radius);
             var lightView2 = Matrix4x4.CreateLookAt(eye2, snapped, sunUp);
             var farPlane = 2f * (shadows.SunDistance + radius);
-            var ortho = CreateOrthoVulkan(2f * radius, 2f * radius, 0.1f, farPlane);
+            var ortho = GraphicsMatrices.CreateOrthographicVulkan(2f * radius, 2f * radius, 0.1f, farPlane);
             cascadeViewProj[c] = lightView2 * ortho;
 
             // Base depth bias = BiasTexels shadow-texels of world offset,
@@ -84,17 +84,5 @@ internal sealed partial class SponzaLoop
             // constant across cascades despite their very different extents.
             cascadeDepthBias[c] = (shadows.BiasTexels * texelSize) / farPlane;
         }
-    }
-
-    // Symmetric orthographic projection for Vulkan clip space: x/y in [-1,1],
-    // z in [0,1], Y flipped (matches VulkanLit's shadow ortho + CreatePerspectiveVulkan).
-    private static Matrix4x4 CreateOrthoVulkan(float width, float height, float near, float far)
-    {
-        var fn = far - near;
-        return new Matrix4x4(
-            2f / width, 0f,          0f,         0f,
-            0f,        -2f / height, 0f,         0f,
-            0f,         0f,         -1f / fn,    0f,
-            0f,         0f,         -near / fn,  1f);
     }
 }
