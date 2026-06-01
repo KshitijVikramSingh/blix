@@ -75,10 +75,13 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
         foreach (var (id, e) in textureTable)
         {
             var kind = surfaceColorIds.Contains(id) ? TextureKind.RenderSurfaceColor : TextureKind.UserUploaded;
+            // Resident only when every distinct level has landed — a bitmask, so
+            // repeated uploads of one level can't fake a full chain.
+            var allMips = e.MipCount >= 64 ? ulong.MaxValue : (1UL << e.MipCount) - 1UL;
             var residency = !e.Streamable ? TextureResidency.Resident
-                : e.MipsUploaded == 0 ? TextureResidency.Pending
-                : e.MipsUploaded < e.MipCount ? TextureResidency.Streaming
-                : TextureResidency.Resident;
+                : e.UploadedMips == 0 ? TextureResidency.Pending
+                : (e.UploadedMips & allMips) == allMips ? TextureResidency.Resident
+                : TextureResidency.Streaming;
             textures.Add(new TextureEntry(
                 new TextureHandle(id), e.Name, e.Width, e.Height, e.MipCount, e.EngineFormat, kind, e.ByteSize, residency));
         }

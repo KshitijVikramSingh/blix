@@ -34,9 +34,11 @@ public sealed partial class VulkanGraphicsDevice
         // Streaming bookkeeping for the diagnostics snapshot. Streamable is set
         // only by AllocateTexture2DMips (the storage-then-stream path); every
         // other create path uploads in full, so the default (false) reads as
-        // Resident. MipsUploaded counts levels landed via UploadTextureMip.
+        // Resident. UploadedMips is a bitmask of which levels have landed (one
+        // bit per level) — a set, not a count, so a level uploaded twice can't
+        // falsely advance residency to Resident.
         public bool Streamable;
-        public int MipsUploaded;
+        public ulong UploadedMips;
         public string Name = string.Empty;
     }
 
@@ -286,21 +288,20 @@ public sealed partial class VulkanGraphicsDevice
         return new TextureHandle(id);
     }
 
-    // Upload one mip level of a texture created by AllocateTexture2DMips. Flips
-    // the whole image to TransferDst, copies this level, flips back to
-    // ShaderReadOnly. Safe to do per-mip because the texture isn't sampled until
-    // its chain is complete (the upload runs on a single-time command that the
-    // device waits on, so it never overlaps a sampling frame on this image).
+    // Upload one mip level into a texture from AllocateTexture2DMips: flip the
+    // whole image to TransferDst, copy this level, flip back to ShaderReadOnly.
+    // The copy runs on a single-time command the device waits on, so it never
+    // races a sampling frame on this image. Levels arrive smallest-first and the
+    // handle is bindable from the moment the smallest one lands; callers gate
+    // sampling per their own streaming policy (the streamed-asset path binds the
+    // stable handle early and treats finer levels as progressive refinement). A
+    // level's contents are undefined until that level has been uploaded.
     public unsafe void UploadTextureMip(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes)
     {
         if (mipLevel < 0) throw new ArgumentOutOfRangeException(nameof(mipLevel));
         var e = textureTable[handle.Id];
         if (mipLevel >= e.MipCount)
             throw new ArgumentOutOfRangeException(nameof(mipLevel), $"texture '{e.Name}' has {e.MipCount} mips.");
-
-        // Residency bookkeeping: each level lands once, smallest-first. Clamp so
-        // a defensive re-upload of a level can't push past the chain length.
-        e.MipsUploaded = Math.Min(e.MipsUploaded + 1, e.MipCount);
 
         var staging = CreateHostVisibleBuffer(bytes, BufferUsageFlags.TransferSrcBit, $"{e.Name}.mip{mipLevel}.staging");
         var cmd = BeginSingleTimeCommands();
@@ -323,6 +324,12 @@ public sealed partial class VulkanGraphicsDevice
         TransitionImageLayout(cmd, e.Image, e.MipCount, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal);
         EndSingleTimeCommands(cmd);
         DestroyVkBufferEntry(staging);
+
+        // Mark this level resident only now that the copy has actually completed
+        // — a failure before here leaves residency unchanged. OR is idempotent,
+        // so re-uploading a level doesn't double-count. (mipLevel < MipCount, and
+        // a full chain is well under 64 levels, so the shift never overflows.)
+        e.UploadedMips |= 1UL << mipLevel;
     }
 
     // Uploads a sampleable cubemap (6 faces, optional mip chain) from CPU
@@ -335,11 +342,11 @@ public sealed partial class VulkanGraphicsDevice
     {
         var vkFormat = MapTextureFormat(format);
 
-        // Validate total size = Σ over 6 faces of Σ over mips of mipByteCount.
-        long expected = 0;
-        for (var f = 0; f < 6; f++)
-            for (var m = 0; m < mipCount; m++)
-                expected += format.MipByteCount(faceSize >> m, faceSize >> m);
+        // Validate total size = 6 faces × the mip-chain footprint. Use the shared
+        // TextureByteCount (it clamps each level's dimensions to ≥1) so this agrees
+        // with the ByteSize recorded on the entry; a manual faceSize>>m sum would
+        // diverge once a level hits zero dimensions on an over-long mipCount.
+        var expected = format.TextureByteCount(faceSize, faceSize, mipCount) * 6;
         if (data.Length != expected)
         {
             throw new ArgumentException(

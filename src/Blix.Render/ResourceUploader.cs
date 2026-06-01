@@ -5,13 +5,11 @@ using Blix.Graphics;
 namespace Blix.Render;
 
 // Spreads GPU-side texture uploads over multiple frames so the main thread
-// doesn't stall on a synchronous wall of per-mip upload calls (GL
-// glTexImage2D / glCompressedTexImage2D + glGenerateMipmap, or the Vulkan
-// staged copies) during scene load. Backend-agnostic — it drives an
-// IGraphicsDevice — and is the pump underneath the Vulkan GltfTextureLoader as
-// well as the GL scene loaders. Callers enqueue an upload + a callback; each
-// frame the runtime calls Drain(budgetMs), which processes pending work items
-// until the budget runs out.
+// doesn't stall on a synchronous wall of per-mip staged copies during scene
+// load. Backend-agnostic — it drives an IGraphicsDevice — and is the pump
+// underneath the Vulkan GltfTextureLoader. Callers enqueue an upload + a
+// callback; each frame the runtime calls Drain(budgetMs), which processes
+// pending work items until the budget runs out.
 //
 // Per-mip granularity is the key trick. Each Enqueue splits into N work
 // items (one per mip level), so Drain's "do at least one item" guarantee
@@ -24,10 +22,9 @@ namespace Blix.Render;
 // Drain" path produced.
 //
 // Smallest-mip-first ordering: the texture handle is created when the
-// smallest mip's work item runs. Sampling at any LOD picks the smallest
-// mip via GL_TEXTURE_BASE_LEVEL; as finer mips upload, BASE_LEVEL
-// decreases. The lit shader sees a usable (if blurry) texture from the
-// moment OnFirstMipReady fires, and the texture sharpens over time.
+// smallest mip's work item runs, so a material can bind the stable handle
+// immediately and render usable-if-blurry. Finer mips stream in over later
+// frames and sharpen the result; the handle never changes across the stream.
 //
 // Deliberate non-goals:
 // - Not a streaming system. Every enqueue is unconditional.
@@ -127,12 +124,10 @@ public sealed class ResourceUploader : IDebuggable
         // Per-mip granularity, smallest-first. The first ProcessOne call
         // (level = mipCount-1, the smallest mip) allocates storage via
         // AllocateTexture2DMips and uploads that mip; subsequent calls
-        // upload progressively finer levels, walking GL_TEXTURE_BASE_LEVEL
-        // down so the sampler always reads the highest-quality mip
-        // available. The texture becomes bindable as soon as the smallest
-        // mip lands (callback fires from inside ProcessOne) -- materials
-        // see a usable, if blurry, texture immediately, sharpening over
-        // the next ~N frames.
+        // upload progressively finer levels into the same image. The texture
+        // becomes bindable as soon as the smallest mip lands (callback fires
+        // from inside ProcessOne) -- materials see a usable, if blurry,
+        // texture immediately, sharpening over the next ~N frames.
         var ctx = new TextureUploadContext(format, width, height, sampler, name, mipCount, mipReader, onUploaded);
         for (var level = mipCount - 1; level >= 0; level--)
         {
@@ -191,11 +186,10 @@ public sealed class ResourceUploader : IDebuggable
         var bytes = ctx.MipReader(level);
         if (ctx.Handle is null)
         {
-            // First (smallest) mip: allocate storage for the full chain.
-            // AllocateTexture2DMips sets BASE_LEVEL = MAX_LEVEL = mipCount-1
-            // and applies the sampler params (no glGenerateMipmap, since
-            // we'll fill levels manually). UploadTextureMip then writes
-            // the smallest mip's bytes into level mipCount-1.
+            // First (smallest) mip: allocate storage for the full chain (no
+            // auto mip generation — we fill every level manually).
+            // UploadTextureMip then writes the smallest mip's bytes into
+            // level mipCount-1.
             var handle = device.AllocateTexture2DMips(
                 new TextureDescription(ctx.Width, ctx.Height, ctx.Format, ctx.Sampler),
                 ctx.MipCount,
@@ -206,9 +200,8 @@ public sealed class ResourceUploader : IDebuggable
         }
         else
         {
-            // Finer mip: UploadTextureMip walks GL_TEXTURE_BASE_LEVEL down
-            // to `level` so the sampler picks up the new highest-quality
-            // mip on the next draw.
+            // Finer mip: UploadTextureMip fills in `level`, so the sampler
+            // picks up the new highest-quality mip on the next draw.
             device.UploadTextureMip(ctx.Handle.Value, level, bytes);
         }
         uploadedCount++;

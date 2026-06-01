@@ -53,37 +53,32 @@ public interface IGraphicsDevice : IDisposable
 
     // Multi-mip texture upload. Each entry of `mipBytes` is one mip level's
     // packed pixel/block data; mip 0 (full size) first, then half, quarter,
-    // etc. Required for compressed formats (BC7/BC5/BC6h) since GL can't
-    // glGenerateMipmap on a compressed texture -- mips must be pre-baked
-    // at cook time. Uncompressed formats accept this path too if the caller
-    // wants pre-baked mips instead of GL-side generation.
+    // etc. Required for compressed formats (BC7/BC5/BC6h) since their mips
+    // can't be generated on the GPU -- they must be pre-baked at cook time.
+    // Uncompressed formats accept this path too if the caller wants pre-baked
+    // mips instead of runtime generation.
     //
     // When mipBytes.Count == 1, this collapses to the single-mip case --
     // identical to CreateTexture2D for uncompressed; for compressed it
-    // uploads just mip 0 and the GL sampler's MAX_LEVEL gets clamped to 0.
+    // uploads just mip 0.
     TextureHandle CreateTexture2DMipped(
         TextureDescription description,
         IReadOnlyList<byte[]> mipBytes,
         string? name = null);
 
     // Uploads bytes to a specific mip level of an existing texture. Pairs
-    // with CreateTexture2DMipped used in "create with smallest mip, then
-    // stream the larger mips in over multiple frames" flows. The texture
-    // must already exist; mipLevel must be < the level count derivable
-    // from the texture's recorded width/height (mip0 = full size).
-    //
-    // Also widens the GL sampler's MIN_FILTER to a mipmap mode once 2+
-    // levels have been uploaded so trilinear sampling actually picks up
-    // the new finer mip. BASE_LEVEL is adjusted so sampling sees the
-    // highest-quality mip available so far.
+    // with AllocateTexture2DMips in "allocate the chain, then stream the
+    // levels in over multiple frames" flows. The texture must already exist;
+    // mipLevel must be < the level count derivable from the texture's
+    // recorded width/height (mip0 = full size). A level's contents are
+    // undefined until it has been uploaded.
     void UploadTextureMip(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes);
 
-    // Allocates a multi-mip texture with all storage reserved but no real
-    // pixel data uploaded. The smallest mip is set as BASE_LEVEL = MAX_LEVEL
-    // initially so samplers return from it (returns garbage until something
-    // is uploaded to that level via UploadTextureMip). Used by the streamed-
-    // upload path -- ResourceUploader allocates upfront, then drips real
-    // mip data in over multiple frames.
+    // Allocates a multi-mip texture with all storage reserved but no pixel
+    // data uploaded -- every level's contents are undefined until filled via
+    // UploadTextureMip. Used by the streamed-upload path: ResourceUploader
+    // allocates upfront, then drips real mip data in over multiple frames,
+    // smallest level first.
     TextureHandle AllocateTexture2DMips(
         TextureDescription description,
         int mipCount,
