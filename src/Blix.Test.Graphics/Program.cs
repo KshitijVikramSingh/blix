@@ -1665,6 +1665,58 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("AB mipCount 0 rejected", threw);
 }
 
+// ============================================================================
+// Section AC — Instanced draw + InstanceBuffer (instancing foundation).
+// ============================================================================
+//
+// The GPU draw (vkCmdDrawIndexed instanceCount=N reading the per-instance SSBO)
+// needs a live device — proven by the VulkanInstanced demo under validation.
+// Surface-level tests lock the command-record contract, the InstanceData byte
+// layout, and InstanceBuffer.Slot's set-3 SSBO declaration.
+
+{
+    // AC.1 — InstanceCount defaults to 1 (preserves every existing caller).
+    var baseCmd = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(2), new PipelineHandle(3),
+        36, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>());
+    t.ExpectClose("AC.1 default DrawIndexedCommand.InstanceCount is 1", baseCmd.InstanceCount, 1);
+
+    // AC.2 — with-update carries the instance count through.
+    var instanced = baseCmd with { InstanceCount = 5000 };
+    t.ExpectClose("AC.2 with-update sets InstanceCount", instanced.InstanceCount, 5000);
+    t.ExpectClose("AC.2 with-update leaves IndexCount intact", instanced.IndexCount, 36);
+}
+
+{
+    // AC.3 — InstanceData is 80 bytes: mat4 model @0, vec4 tint @64.
+    var size = System.Runtime.InteropServices.Marshal.SizeOf<Blix.Render.InstanceData>();
+    t.ExpectClose("AC.3 sizeof(InstanceData) == 80", size, 80);
+    var modelOff = (int)System.Runtime.InteropServices.Marshal.OffsetOf<Blix.Render.InstanceData>(nameof(Blix.Render.InstanceData.Model));
+    var tintOff = (int)System.Runtime.InteropServices.Marshal.OffsetOf<Blix.Render.InstanceData>(nameof(Blix.Render.InstanceData.Tint));
+    t.ExpectClose("AC.3 InstanceData.Model offset == 0", modelOff, 0);
+    t.ExpectClose("AC.3 InstanceData.Tint offset == 64", tintOff, 64);
+}
+
+{
+    // AC.4 — InstanceBuffer.Slot is the set-3 per-instance SSBO contract (the data
+    // layer). Shaders compose it; the engine ships no default shader/material.
+    var slot = Blix.Render.InstanceBuffer.Slot;
+    t.ExpectClose("AC.4 InstanceBuffer.Slot is set 3", slot.Set, 3);
+    t.ExpectClose("AC.4 InstanceBuffer.Slot is binding 0", slot.Binding, 0);
+    t.ExpectTrue("AC.4 slot is a StorageBuffer", slot.Type == ShaderResourceType.StorageBuffer);
+    t.ExpectTrue("AC.4 slot is Vertex-stage", slot.Stages == ShaderStages.Vertex);
+    t.ExpectTrue("AC.4 slot carries a BlockLayout", slot.BlockLayout is not null);
+    t.ExpectClose("AC.4 SSBO TotalSize == MaxInstances * Stride",
+        slot.BlockLayout!.TotalSize, Blix.Render.InstanceBuffer.MaxInstances * Blix.Render.InstanceBuffer.Stride);
+    t.ExpectClose("AC.4 InstanceBuffer.Stride == 80", Blix.Render.InstanceBuffer.Stride, 80);
+
+    // A shader composing the slot + a push range must still validate.
+    var composed = new ShaderInterface(
+        new[] { slot },
+        new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+    t.ExpectTrue("AC.4 composed interface validates", TryValidate(composed) is null);
+}
+
 t.PrintSummary();
 return t.FailedCount;
 

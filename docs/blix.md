@@ -83,7 +83,7 @@ internal sealed class MyGame : Game, IInputHandler, IDebuggable
 }
 ```
 
-See `Blix.Demos.VulkanLit/Program.cs` for a full game-layer reference — it exercises the lit/skinned/PBR path (directional + spot + point shadows, IBL, bloom, skinned glTF). For the higher-end scene path (3-cascade shadows, depth pre-pass, IBL, geometry LOD, optional froxel volumetric fog, ACES/AgX tonemap), see `Blix.Demos.VulkanSponza/Program.cs`.
+See `Blix.Demos.VulkanLit/Program.cs` for a full game-layer reference — it exercises the lit/skinned/PBR path (directional + spot + point shadows, IBL, bloom, skinned glTF). For the higher-end scene path (3-cascade shadows, depth pre-pass, IBL, geometry LOD, optional froxel volumetric fog, ACES/AgX tonemap), see `Blix.Demos.VulkanSponza/Program.cs`. For the game layer driving an actual playable title — the fixed-step-ish update loop, `Transform3D`, `PhysicsHost3D` (gravity/jump), `CollisionWorld3D.Overlap`, skeletal animation (`SkinnedGameObject` path via clip → `Pose` → `BonePalette`), `AudioSource`, and `IDebuggable` diagnostics, all wired together — see `Blix.Demos.Runner/Program.cs` (a 3D endless runner).
 
 ## Project dependencies
 

@@ -1,0 +1,6 @@
+Rogue.glb — "KayKit Character Pack : Adventurers" by Kay Lousberg (kaylousberg.com)
+barrel.glb, coin.glb — "KayKit Dungeon Remastered" by Kay Lousberg (kaylousberg.com)
+License: CC0 1.0 (public domain, no attribution required)
+Sources:
+  https://github.com/KayKit-Game-Assets/KayKit-Character-Pack-Adventures-1.0
+  https://github.com/KayKit-Game-Assets/KayKit-Dungeon-Remastered-1.0

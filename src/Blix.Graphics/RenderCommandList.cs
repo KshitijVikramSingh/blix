@@ -224,6 +224,31 @@ public sealed class RenderPassBuilder
         recorder?.OnDraw(in command);
     }
 
+    // Instanced draw: one index range drawn instanceCount times. Per-instance
+    // data (transform + tint) rides perDrawMaterial — a storage-buffer
+    // MaterialBindings at its declared set index (set 3), indexed in the vertex
+    // shader by gl_InstanceIndex. uViewProjection is the typical push constant.
+    // An optional set-2 material carries shared textures. Vulkan-only.
+    public void DrawIndexedInstanced(
+        VertexBufferHandle vertexBuffer,
+        IndexBufferHandle indexBuffer,
+        PipelineHandle pipeline,
+        int indexCount,
+        int instanceCount,
+        IReadOnlyList<ShaderUniform> uniforms,
+        IReadOnlyList<ShaderTextureBinding> textures,
+        MaterialHandle perDrawMaterial,
+        byte[] pushConstants,
+        MaterialHandle? material = null)
+    {
+        var command = new DrawIndexedCommand(
+            vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures,
+            IndexOffset: 0, Material: material, PushConstants: pushConstants,
+            PerDrawMaterial: perDrawMaterial, InstanceCount: instanceCount);
+        commands.Add(command);
+        recorder?.OnDraw(in command);
+    }
+
     // ImGui overlay draw: one shared (vertex, index) buffer pair holding every
     // cmd-list concatenated, indexed per draw via indexOffset + vertexOffset, a
     // per-cmd clip scissor, and scale/translate push constants. Set 0 binds the
