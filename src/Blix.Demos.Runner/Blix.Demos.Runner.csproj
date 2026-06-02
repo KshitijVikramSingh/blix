@@ -28,6 +28,8 @@
   <ItemGroup>
     <GlslShader Include="Shaders\sky.vert" />
     <GlslShader Include="Shaders\sky.frag" />
+    <GlslShader Include="Shaders\world.vert" />
+    <GlslShader Include="Shaders\world.frag" />
   </ItemGroup>
 
   <Target Name="CompileSpirV"

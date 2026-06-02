@@ -1,9 +1,14 @@
 #version 450
 
-// Instanced mesh vertex stage. One mesh (position + normal) drawn N times; each
-// instance pulls its world transform + tint from a per-instance storage buffer
-// indexed by gl_InstanceIndex (the Vulkan-GLSL built-in). The view-projection
-// rides a push constant shared by the whole batch.
+// Default instanced mesh vertex stage. One mesh (position + normal) drawn N
+// times; each instance pulls its world transform + tint from a per-instance
+// storage buffer indexed by gl_InstanceIndex (the Vulkan-GLSL built-in). The
+// view-projection rides a push constant shared by the whole batch.
+//
+// This is InstancedBatch's turnkey shader. Callers that need a richer material
+// (lighting, fog, shadows, texturing) supply their own shader to InstancedBatch
+// instead — the per-instance SSBO contract (set 3, binding 0, the Instance
+// struct below) is all that's fixed.
 //
 // Matrices arrive as raw System.Numerics.Matrix4x4 bytes (row-major). GLSL reads
 // a mat4 column-major, so each lands as its transpose — which makes

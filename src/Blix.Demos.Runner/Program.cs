@@ -62,10 +62,19 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     // on the horizon ahead (-Z) so it sits in the camera's downward-looking frame.
     private static readonly Vector3 SunToward = Vector3.Normalize(new Vector3(0.12f, 0.16f, -1.0f));
 
+    // Distance fog (a runner/material concern — lives in the runner's own world
+    // shader, not in the engine's InstancedBatch): near play-area clear, far track
+    // fades into the sky-horizon colour.
+    private static readonly Vector4 FogColor = new(0.66f, 0.77f, 0.88f, 1f);
+    private const float FogDensity = 0.045f;
+    private const float FogStart = 35f;
+
     private readonly int exitAfterFrames;
     private VulkanGraphicsDevice vk = null!;
     private IRenderHost host = null!;
     private InstancedBatch world = null!;
+    private ShaderProgramHandle worldShader;
+    private readonly byte[] worldPush = new byte[112];  // viewProj + camPos + fogColor + fogParams
 
     // Fullscreen procedural sky (drawn behind the world each frame).
     private VertexBufferHandle skyVb;
@@ -121,7 +130,20 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         var ib = vk.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
         var cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
             new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)));
-        world = new InstancedBatch(vk, cube);
+
+        // The runner supplies its own lit+fog instanced shader (world.vert/frag).
+        // It declares InstancedBatch.InstanceSlot at set 3 (the per-instance SSBO
+        // contract) plus a 112-byte push the runner packs each frame. Fog lives
+        // here, in the runner's material — not in the generic InstancedBatch.
+        var worldInterface = new ShaderInterface(
+            Slots: new[] { InstancedBatch.InstanceSlot },
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 112) });
+        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        worldShader = vk.CreateShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "world.vert.spv")),
+            File.ReadAllBytes(Path.Combine(shaderDir, "world.frag.spv")),
+            worldInterface, "runner.world");
+        world = new InstancedBatch(vk, cube, worldShader, pushConstantBytes: 112);
 
         physics = new PhysicsHost3D { Target = player, Gravity = new Vector3(0f, -55f, 0f), GravityScale = 1f };
         player.Position = new Vector3(LaneX[laneIndex], 0f, 0f);
@@ -257,7 +279,15 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         frameCount++;
         var t = (float)time.Total;
 
-        world.Begin(viewProj);
+        // Pack the world shader's push: viewProj (vertex) + camera + fog (fragment).
+        MemoryMarshal.Write(worldPush.AsSpan(0, 64), in viewProj);
+        var worldCam = new Vector4(cameraEye, 1f);
+        var fogParams = new Vector4(FogDensity, FogStart, 0f, 0f);
+        MemoryMarshal.Write(worldPush.AsSpan(64, 16), in worldCam);
+        MemoryMarshal.Write(worldPush.AsSpan(80, 16), in FogColor);
+        MemoryMarshal.Write(worldPush.AsSpan(96, 16), in fogParams);
+
+        world.Begin(worldPush);
         EmitTiles(scrollDistance);
         EmitSpawns(t);
         EmitPlayer();

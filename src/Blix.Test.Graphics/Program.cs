@@ -1552,7 +1552,7 @@ static ShaderInterface MinimalShader() => new(new[]
         ssbo.BlockLayout!.TotalSize, Blix.Render.InstancedBatch.MaxInstances * 80);
 
     t.ExpectClose("V.4 one push-constant range", iface.PushConstants.Count, 1);
-    t.ExpectClose("V.4 push range is 64 bytes", iface.PushConstants[0].Size, 64);
+    t.ExpectClose("V.4 default push range is 64 bytes (mat4 viewProj)", iface.PushConstants[0].Size, 64);
     t.ExpectTrue("V.4 push range is Vertex-stage", iface.PushConstants[0].Stages == ShaderStages.Vertex);
 }
 

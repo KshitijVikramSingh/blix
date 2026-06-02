@@ -1,10 +1,8 @@
 #version 450
 
-// Minimal shaded output for instanced meshes: per-instance tint modulated by a
-// fixed-direction hemispheric/Lambert term so instanced geometry reads as 3D
-// (flat tint looks like a sticker). Lighting is intentionally hardcoded — the
-// foundation's job is to prove the per-instance data path, not to be a full
-// material. A richer lit-instanced pipeline can come later.
+// Default instanced fragment shader: per-instance tint with a fixed-direction
+// Lambert/ambient term so instanced geometry reads as 3D. Intentionally minimal —
+// callers wanting fog/shadows/texturing provide their own shader to InstancedBatch.
 
 layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec4 vTint;
