@@ -36,7 +36,6 @@ public sealed class SpriteBatch : IDisposable
         PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
 
     private readonly VulkanGraphicsDevice device;
-    private readonly VertexBufferHandle vertexBuffer;
     private readonly IndexBufferHandle indexBuffer;
     private readonly ShaderProgramHandle shader;
     private readonly PipelineHandle pipeline;
@@ -59,12 +58,10 @@ public sealed class SpriteBatch : IDisposable
         ArgumentNullException.ThrowIfNull(device);
         this.device = device;
 
-        var emptyVertices = new VertexPosition3TextureColor[MaxVertexCount];
-        var initialData = new VertexBufferData(
-            new VertexBufferDescription(VertexPosition3TextureColor.Layout, MaxVertexCount, GraphicsBufferUsage.Dynamic),
-            VertexPosition3TextureColor.Pack(emptyVertices));
-        vertexBuffer = device.CreateVertexBuffer(initialData, name: "sprite.vertices");
-
+        // Per-frame vertices ride the device's transient arena (see FlushEntries),
+        // not an owned Dynamic buffer — the old single-buffer-re-mapped-every-frame
+        // pattern raced the GPU across frames-in-flight. The index buffer stays
+        // static (base-0 quad indices, addressed via the arena slice's bind offset).
         var quadIndices = new ushort[MaxIndexCount];
         for (var sprite = 0; sprite < MaxSprites; sprite++)
         {
@@ -216,8 +213,13 @@ public sealed class SpriteBatch : IDisposable
         }
         partitions.Add((partitionStart, entries.Count - partitionStart, currentTexture));
 
-        var byteCount = entries.Count * 4 * VertexPosition3TextureColor.Layout.Stride;
-        device.UpdateVertexBuffer(vertexBuffer, uploadBuffer.AsSpan(0, byteCount));
+        // ONE transient-arena sub-allocation for the whole batch (all partitions
+        // share the slice base; the static index buffer's base-0 quad indices plus
+        // each partition's indexOffset select its quads). Race-free by construction:
+        // the arena hands out a fresh region per frame from its ring.
+        var stride = VertexPosition3TextureColor.Layout.Stride;
+        var byteCount = entries.Count * 4 * stride;
+        var slice = device.AllocVertices(uploadBuffer.AsSpan(0, byteCount), stride, "sprite.vertices");
 
         // View-projection rides a vertex-stage push constant. The whole batch
         // shares one matrix, so a single shared byte[] is safe across the
@@ -232,7 +234,7 @@ public sealed class SpriteBatch : IDisposable
             // Pre-baked index buffer maps sprite i -> indices [6i, 6i+6), so
             // partition `start..start+count` lives at index range [start*6, ...).
             pass.DrawIndexed(
-                vertexBuffer,
+                slice.Buffer,
                 indexBuffer,
                 pipeline,
                 indexCount: count * 6,
@@ -242,7 +244,8 @@ public sealed class SpriteBatch : IDisposable
                     new ShaderTextureBinding("uTexture", texture, Slot: 0)
                 },
                 pushConstants,
-                indexOffset: start * 6);
+                indexOffset: start * 6,
+                vertexBufferByteOffset: slice.ByteOffset);
         }
     }
 
@@ -332,7 +335,8 @@ public sealed class SpriteBatch : IDisposable
         device.DestroyPipeline(pipeline);
         device.DestroyShaderProgram(shader);
         device.DestroyIndexBuffer(indexBuffer);
-        device.DestroyVertexBuffer(vertexBuffer);
+        // No vertex buffer to destroy — vertices come from the device-owned
+        // transient arena, freed at device teardown.
     }
 
     private readonly struct SpriteEntry
