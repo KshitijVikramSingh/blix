@@ -93,4 +93,11 @@ public sealed record DrawIndexedCommand(
     int VertexOffset = 0,
     // Per-draw scissor clip (framebuffer pixels). null = pass-wide scissor.
     // See ScissorRect. Honored by Vulkan, ignored by GL.
-    ScissorRect? Scissor = null) : RenderCommand;
+    ScissorRect? Scissor = null,
+    // Vulkan: vkCmdDrawIndexed instanceCount. 1 (the default) preserves the
+    // historical single-instance behavior for every caller. >1 issues one
+    // instanced draw of the same index range; the vertex shader reads
+    // gl_InstanceIndex (the Vulkan-GLSL built-in) to index a per-instance
+    // storage buffer — bound via PerDrawMaterial — for its transform/tint.
+    // The GL backend rejects InstanceCount != 1 (no instanced path).
+    int InstanceCount = 1) : RenderCommand;

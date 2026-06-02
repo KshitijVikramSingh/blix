@@ -982,8 +982,10 @@ public sealed partial class VulkanGraphicsDevice
         Vk.CmdBindVertexBuffers(cmd, 0, 1, &buffer, &offset);
         Vk.CmdBindIndexBuffer(cmd, ib.Buffer, 0, ib.IndexType);
         // vertexOffset (5th arg) lets concatenated ImGui cmd-lists index
-        // per-list off one shared vertex buffer.
-        Vk.CmdDrawIndexed(cmd, (uint)d.IndexCount, 1, (uint)d.IndexOffset, d.VertexOffset, 0);
+        // per-list off one shared vertex buffer. instanceCount (3rd arg) is 1
+        // for ordinary draws; >1 issues an instanced draw whose vertex shader
+        // reads gl_InstanceIndex into a per-instance storage buffer.
+        Vk.CmdDrawIndexed(cmd, (uint)d.IndexCount, (uint)d.InstanceCount, (uint)d.IndexOffset, d.VertexOffset, 0);
     }
 
     // Per-material indirect multi-draw. Identical bind sequence to

@@ -1501,6 +1501,61 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("U.2 faulted Drain processes nothing / not done", !q2.Drain(1000.0, _ => { }));
 }
 
+// ============================================================================
+// Section V — Instanced draw + InstancedBatch interface (instancing foundation).
+// ============================================================================
+//
+// The GPU draw (vkCmdDrawIndexed instanceCount=N reading the per-instance SSBO)
+// needs a live device — proven by the VulkanInstanced demo under validation.
+// Surface-level tests lock the command-record contract, the InstanceData byte
+// layout (must stay identical to the `Instance` struct in instanced.vert), and
+// InstancedBatch.Interface's set-3 SSBO declaration.
+
+{
+    // V.1 — InstanceCount defaults to 1 (preserves every existing caller).
+    var baseCmd = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(2), new PipelineHandle(3),
+        36, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>());
+    t.ExpectClose("V.1 default DrawIndexedCommand.InstanceCount is 1", baseCmd.InstanceCount, 1);
+
+    // V.2 — with-update carries the instance count through.
+    var instanced = baseCmd with { InstanceCount = 5000 };
+    t.ExpectClose("V.2 with-update sets InstanceCount", instanced.InstanceCount, 5000);
+    t.ExpectClose("V.2 with-update leaves IndexCount intact", instanced.IndexCount, 36);
+}
+
+{
+    // V.3 — InstanceData is 80 bytes: mat4 model @0, vec4 tint @64.
+    var size = System.Runtime.InteropServices.Marshal.SizeOf<Blix.Render.InstanceData>();
+    t.ExpectClose("V.3 sizeof(InstanceData) == 80", size, 80);
+    var modelOff = (int)System.Runtime.InteropServices.Marshal.OffsetOf<Blix.Render.InstanceData>(nameof(Blix.Render.InstanceData.Model));
+    var tintOff = (int)System.Runtime.InteropServices.Marshal.OffsetOf<Blix.Render.InstanceData>(nameof(Blix.Render.InstanceData.Tint));
+    t.ExpectClose("V.3 InstanceData.Model offset == 0", modelOff, 0);
+    t.ExpectClose("V.3 InstanceData.Tint offset == 64", tintOff, 64);
+}
+
+{
+    // V.4 — InstancedBatch.Interface declares a valid set-3 SSBO + 64B vertex push.
+    var iface = Blix.Render.InstancedBatch.Interface;
+    t.ExpectTrue("V.4 InstancedBatch.Interface validates", TryValidate(iface) is null);
+
+    DescriptorSetSlot? ssbo = null;
+    foreach (var s in iface.Slots)
+    {
+        if (s.Set == 3 && s.Binding == 0) { ssbo = s; break; }
+    }
+    t.ExpectTrue("V.4 has slot at set 3 / binding 0", ssbo is not null);
+    t.ExpectTrue("V.4 set-3 slot is a StorageBuffer", ssbo!.Type == ShaderResourceType.StorageBuffer);
+    t.ExpectTrue("V.4 set-3 slot is Vertex-stage", ssbo.Stages == ShaderStages.Vertex);
+    t.ExpectTrue("V.4 set-3 slot carries a BlockLayout", ssbo.BlockLayout is not null);
+    t.ExpectClose("V.4 SSBO TotalSize == MaxInstances * 80",
+        ssbo.BlockLayout!.TotalSize, Blix.Render.InstancedBatch.MaxInstances * 80);
+
+    t.ExpectClose("V.4 one push-constant range", iface.PushConstants.Count, 1);
+    t.ExpectClose("V.4 push range is 64 bytes", iface.PushConstants[0].Size, 64);
+    t.ExpectTrue("V.4 push range is Vertex-stage", iface.PushConstants[0].Stages == ShaderStages.Vertex);
+}
+
 t.PrintSummary();
 return t.FailedCount;
 

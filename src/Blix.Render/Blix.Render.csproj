@@ -30,6 +30,8 @@
   <ItemGroup>
     <GlslShader Include="Shaders\sprite.vert" />
     <GlslShader Include="Shaders\sprite.frag" />
+    <GlslShader Include="Shaders\instanced.vert" />
+    <GlslShader Include="Shaders\instanced.frag" />
   </ItemGroup>
 
   <Target Name="CompileSpirV"
