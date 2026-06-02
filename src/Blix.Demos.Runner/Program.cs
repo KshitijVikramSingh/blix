@@ -4,6 +4,7 @@ using Blix;
 using Blix.Assets;
 using Blix.Audio;
 using Blix.Core;
+using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Primitives;
@@ -35,7 +36,7 @@ public static class Program
     }
 }
 
-internal sealed class RunnerLoop : IGameLoop, IInputHandler
+internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
 {
     // --- Track geometry -----------------------------------------------------
     private static readonly float[] LaneX = { -2.2f, 0f, 2.2f };
@@ -71,10 +72,18 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     private const float FogDensity = 0.045f;
     private const float FogStart = 35f;
 
+    // Per-mesh instanced batches (all share the world shader/pipeline + worldPush):
+    // ground tiles (cube), obstacles (barrel), coins (coin disc). One InstanceBuffer
+    // each so their per-frame writes don't collide.
+    private const float ObstacleScale = 0.7f;   // barrel native 2.0 tall -> ~1.4
+    private const float CoinScale = 2.0f;        // coin native 0.36 -> ~0.72 across
+
     private readonly int exitAfterFrames;
     private VulkanGraphicsDevice vk = null!;
     private IRenderHost host = null!;
-    private InstancedBatch world = null!;
+    private InstancedBatch tileBatch = null!;
+    private InstancedBatch obstacleBatch = null!;
+    private InstancedBatch coinBatch = null!;
     private ShaderProgramHandle worldShader;
     private readonly byte[] worldPush = new byte[112];  // viewProj + camPos + fogColor + fogParams
 
@@ -190,8 +199,13 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
             new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
                 DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled }),
             "runner.world");
-        var instances = new InstanceBuffer(vk, worldShader, "runner.instances");
-        world = new InstancedBatch(cube, worldPipeline, instances);
+        // Three batches sharing the one world pipeline; tiles stay cubes, obstacles
+        // and coins use CC0 KayKit prop meshes (flat-tinted through the same shader).
+        var barrel = LoadStaticMesh("barrel.glb") ?? cube;
+        var coin = LoadStaticMesh("coin.glb") ?? cube;
+        tileBatch = new InstancedBatch(cube, worldPipeline, new InstanceBuffer(vk, worldShader, "tiles"));
+        obstacleBatch = new InstancedBatch(barrel, worldPipeline, new InstanceBuffer(vk, worldShader, "obstacles"));
+        coinBatch = new InstancedBatch(coin, worldPipeline, new InstanceBuffer(vk, worldShader, "coins"));
 
         physics = new PhysicsHost3D { Target = player, Gravity = new Vector3(0f, -55f, 0f), GravityScale = 1f };
         player.Position = new Vector3(LaneX[laneIndex], 0f, 0f);
@@ -333,6 +347,32 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     {
         foreach (var c in model.Animations) if (c.Name == name) return c;
         return null;
+    }
+
+    // Load a static CC0 prop glb (single-material → one primitive) as a Mesh in the
+    // stride-32 VertexPosition3NormalTexture layout the world pipeline expects.
+    // Returns null on any failure so the caller can fall back to the cube.
+    private Mesh? LoadStaticMesh(string fileName)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Assets", "models", fileName);
+        try
+        {
+            var model = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse($"models/{fileName}"), path));
+            if (model.Primitives.Length == 0) return null;
+            var m = model.Primitives[0].Mesh;
+            var vb = vk.CreateVertexBuffer(
+                new VertexBufferData(new VertexBufferDescription(m.Layout, m.VertexCount, GraphicsBufferUsage.Static), m.VertexBytes),
+                $"{fileName}.vb");
+            var ib = m.Indices32 is { } u32
+                ? vk.CreateIndexBuffer(u32, name: $"{fileName}.ib")
+                : vk.CreateIndexBuffer(m.Indices, name: $"{fileName}.ib");
+            return new Mesh(fileName, vb, ib, m.IndexCount, m.Bounds);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Prop '{fileName}' unavailable, using cube: {ex.Message}");
+            return null;
+        }
     }
 
     private TextureHandle UploadAlbedo(GltfTexture? tex)
@@ -497,7 +537,9 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         MemoryMarshal.Write(worldPush.AsSpan(80, 16), in FogColor);
         MemoryMarshal.Write(worldPush.AsSpan(96, 16), in fogParams);
 
-        world.Begin(worldPush);
+        tileBatch.Begin(worldPush);
+        obstacleBatch.Begin(worldPush);
+        coinBatch.Begin(worldPush);
         EmitTiles(scrollDistance);
         EmitSpawns(t);
         if (!charLoaded) EmitPlayer();   // box fallback when the character didn't load
@@ -524,7 +566,9 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
                 // then the HUD on top (SpriteBatch is depth-disabled + alpha-blended).
                 pass.DrawIndexed(skyVb, skyIb, skyPipeline, 3,
                     Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), skyPush);
-                world.End(pass);
+                tileBatch.End(pass);
+                obstacleBatch.End(pass);
+                coinBatch.End(pass);
                 if (charLoaded)
                 {
                     // Skinned character: each primitive shares the set-3 bone palette
@@ -612,7 +656,7 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
             var model =
                 Matrix4x4.CreateScale(TrackWidth, 0.5f, TileLength) *
                 Matrix4x4.CreateTranslation(0f, -0.25f, z);
-            world.Add(model, (i & 1) == 0 ? TileA : TileB);
+            tileBatch.Add(model, (i & 1) == 0 ? TileA : TileB);
         }
     }
 
@@ -623,43 +667,68 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     {
         obstacles.Clear();
         coinSpawns.Clear();
+
+        // Obstacles first, so coins (whose runs span Z into adjacent segments) can
+        // be tested against ALL of them and skip any that would sit inside a barrel.
+        for (var seg = 0; seg < SegmentCount; seg++)
+        {
+            var h = Hash((uint)seg);
+            obstacles.Add(new Vector3(LaneX[(int)(h % 3)], 0.65f, WrapZ(seg * SegmentSpacing + scroll)));
+        }
+
         for (var seg = 0; seg < SegmentCount; seg++)
         {
             var h = Hash((uint)seg);
             var segZ = seg * SegmentSpacing;
-
             var obstacleLane = (int)(h % 3);
-            obstacles.Add(new Vector3(LaneX[obstacleLane], 0.65f, WrapZ(segZ + scroll)));
-
             var coinLane = (obstacleLane + 1 + (int)((h >> 3) & 1)) % 3;
+            var laneX = LaneX[coinLane];
             for (var c = 0; c < CoinsPerRun; c++)
             {
                 var raw = segZ + scroll - c * 1.4f - 2f;
                 var lap = (int)MathF.Floor((raw - RecycleZ) / TrackLength);
                 var key = ((long)(lap + 1024)) * 1_000_000 + seg * 100 + c;
                 if (collectedKeys.Contains(key)) continue;
-                coinSpawns.Add((new Vector3(LaneX[coinLane], 1.0f, WrapZ(raw)), key));
+                var z = WrapZ(raw);
+                if (CoinHitsObstacle(laneX, z)) continue;   // never spawn a coin inside a barrel
+                coinSpawns.Add((new Vector3(laneX, 1.0f, z), key));
             }
         }
+    }
+
+    // True if a coin at (laneX, z) would sit inside any barrel: same lane (lanes are
+    // ~2.2 apart, so an exact X match is enough) and within a Z clearance covering
+    // both the barrel and coin footprints.
+    private bool CoinHitsObstacle(float laneX, float z)
+    {
+        const float clearance = 1.8f;
+        foreach (var o in obstacles)
+            if (MathF.Abs(o.X - laneX) < 0.1f && MathF.Abs(o.Z - z) < clearance)
+                return true;
+        return false;
     }
 
     // Render obstacles + coins from the spawn lists. Coins spin via their
     // per-instance transform (a live read of the per-instance SSBO).
     private void EmitSpawns(float t)
     {
+        // Barrel sits on the ground (its origin is at the base); the collision
+        // sphere stays where BuildSpawns put it.
         foreach (var o in obstacles)
-            world.Add(Matrix4x4.CreateScale(1.3f) * Matrix4x4.CreateTranslation(o), ObstacleTint);
+            obstacleBatch.Add(Matrix4x4.CreateScale(ObstacleScale) * Matrix4x4.CreateTranslation(o.X, 0f, o.Z), ObstacleTint);
+        // Coin disc stood upright (rotate 90° about X) then spun about Y.
         foreach (var (pos, _) in coinSpawns)
-            world.Add(
-                Matrix4x4.CreateScale(0.35f) * Matrix4x4.CreateRotationY(t * 3f) * Matrix4x4.CreateTranslation(pos),
+            coinBatch.Add(
+                Matrix4x4.CreateScale(CoinScale) * Matrix4x4.CreateRotationX(MathF.PI * 0.5f) *
+                Matrix4x4.CreateRotationY(t * 3f) * Matrix4x4.CreateTranslation(pos),
                 CoinTint);
     }
 
-    // Player box (placeholder until the animated glTF character lands in M5).
-    // Drawn through the same instanced batch as the world — one draw for everything.
+    // Placeholder player box — only used as a fallback when the animated character
+    // fails to load. Drawn through the tile (cube) batch.
     private void EmitPlayer()
     {
-        world.Add(
+        tileBatch.Add(
             Matrix4x4.CreateScale(0.8f, PlayerHalfHeight * 2f, 0.8f) *
             Matrix4x4.CreateTranslation(player.Position.X, player.Position.Y + PlayerHalfHeight, 0f),
             gameOver ? PlayerDeadTint : PlayerTint);
@@ -704,6 +773,38 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
             case Key.Up or Key.W or Key.Space:
                 if (grounded) { physics.Velocity = new Vector3(0f, JumpSpeed, 0f); grounded = false; PlaySfx(jumpSfx, 1f); }
                 break;
+        }
+    }
+
+    // Diagnostics: toggle the overlay with the ` (grave) key. Draws the exact
+    // collision spheres ResolveCollisions tests, so coin↔obstacle overlap is
+    // visible (a coin run from one segment can reach an adjacent segment's lane).
+    public string DebugName => "runner";
+
+    public void Debug(DebugContext debug)
+    {
+        debug.Draw.ViewProjection = viewProj;
+
+        var red = new GraphicsColor(0.95f, 0.30f, 0.25f, 0.9f);
+        var gold = new GraphicsColor(0.95f, 0.80f, 0.25f, 0.9f);
+        var cyan = new GraphicsColor(0.30f, 0.90f, 0.95f, 0.9f);
+        for (var i = 0; i < obstacles.Count; i++)
+            debug.Draw.Sphere($"obstacle/{i}", obstacles[i], 0.9f, red);
+        for (var i = 0; i < coinSpawns.Count; i++)
+            debug.Draw.Sphere($"coin/{i}", coinSpawns[i].Pos, 0.45f, gold);
+        debug.Draw.Sphere("player", new Vector3(currentX, player.Position.Y + PlayerHalfHeight, 0f), 0.6f, cyan);
+
+        using (debug.Scope("game"))
+        {
+            debug.Values.Value("coins", coins);
+            debug.Values.Value("distance-m", (int)scrollDistance);
+            debug.Values.Value("speed", currentSpeed);
+            debug.Values.Value("lane", laneIndex);
+            debug.Values.Value("grounded", grounded);
+            debug.Values.Value("gameOver", gameOver);
+            debug.Values.Value("character", charLoaded);
+            debug.Values.Value("obstacles", obstacles.Count);
+            debug.Values.Value("coins-onscreen", coinSpawns.Count);
         }
     }
 }

@@ -372,6 +372,11 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     public void Dispose()
     {
+        // Wait for in-flight frames to finish before tearing down the debug
+        // renderers — they own pipelines/buffers the last frame may still reference,
+        // and destroying those in-use trips validation. (graphicsDevice.Dispose
+        // waits idle too, but only after these are already gone.)
+        graphicsDevice?.WaitIdle();
         imguiRenderer?.Dispose();
         lineDrawer?.Dispose();
         audioDevice?.Dispose();

@@ -219,6 +219,15 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
     // vsync wait that dominates `execute` when the renderer is GPU-bound.
     public VkCpuFrameTiming LastCpuFrameTiming => lastCpuFrameTiming;
 
+    // Block until the GPU has finished all submitted work. Callers that destroy
+    // resources outside the device's own teardown (e.g. the runtime disposing its
+    // debug line-drawer / imgui renderer) must wait idle first, or validation flags
+    // the still-in-flight resources as destroyed-in-use.
+    public void WaitIdle()
+    {
+        if (!disposed && Vk is not null && Device.Handle != 0) Vk.DeviceWaitIdle(Device);
+    }
+
     public void Dispose()
     {
         if (disposed) return;
