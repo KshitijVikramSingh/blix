@@ -1,6 +1,8 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix;
+using Blix.Assets;
+using Blix.Audio;
 using Blix.Core;
 using Blix.Geometry;
 using Blix.Graphics;
@@ -83,6 +85,16 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     private PipelineHandle skyPipeline;
     private readonly byte[] skyPush = new byte[96];  // mat4 invVP + vec4 camPos + vec4 sunDir
 
+    // HUD (SpriteBatch + Font) drawn over the world.
+    private SpriteBatch hud = null!;
+    private Font? hudFont;
+
+    // Audio (null if no backend). One-shot SFX synthesized at load — no assets.
+    private IAudioDevice? audio;
+    private AudioSource? jumpSfx;
+    private AudioSource? coinSfx;
+    private AudioSource? crashSfx;
+
     private Matrix4x4 viewProj;
     private Vector3 cameraEye;
     private float aspect = 16f / 9f;
@@ -164,9 +176,42 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         currentX = LaneX[laneIndex];
 
         CreateSky();
+        CreateHud(shaderDir);
+        CreateAudio();
+        host.SetTitle("Blix — Endless Runner");
 
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         UpdateCamera();
+    }
+
+    // HUD: a SpriteBatch baked against the swapchain + the Bowlby font. Font load
+    // is best-effort — a missing font just means no on-screen text, not a crash.
+    private void CreateHud(string shaderDir)
+    {
+        hud = new SpriteBatch(vk); // null render target = swapchain
+        try
+        {
+            var assets = new AssetDatabase()
+                .RegisterImporter(new FontImporter())
+                .LoadManifest(Path.Combine(AppContext.BaseDirectory, "Assets", "manifest.json"));
+            hudFont = Font.Upload(vk, assets.Load<FontData>(AssetId.Parse("fonts/bowlby")));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Font unavailable, HUD text will not render: {ex.Message}");
+        }
+    }
+
+    // One-shot SFX, synthesized at load (no assets). Audio is optional — the
+    // device throws if no backend, so capture it defensively.
+    private void CreateAudio()
+    {
+        try { audio = (host as IAudioHost)?.AudioDevice; }
+        catch { audio = null; }
+        if (audio is not { } a) return;
+        jumpSfx = AudioSource.Create(a, a.CreateClip(SynthBlip(520f, 0.10f, 0.5f, rising: true), "runner.jump"), "runner.jump");
+        coinSfx = AudioSource.Create(a, a.CreateClip(SynthBlip(900f, 0.08f, 0.45f, rising: true), "runner.coin"), "runner.coin");
+        crashSfx = AudioSource.Create(a, a.CreateClip(SynthBlip(150f, 0.35f, 0.7f, rising: false), "runner.crash"), "runner.crash");
     }
 
     // Fullscreen-triangle sky: 3 vertices at NDC corners (far plane), a push-only
@@ -227,7 +272,6 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         BuildSpawns(scrollDistance);
         if (!gameOver) ResolveCollisions();
         UpdateCamera();
-        UpdateTitle();
     }
 
     // Player sphere vs every obstacle/coin via CollisionWorld3D.Overlap. Obstacle
@@ -248,15 +292,16 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
             if (hit.Owner.Obstacle)
             {
                 gameOver = true;
+                PlaySfx(crashSfx, 1f);
                 return;
             }
-            if (collectedKeys.Add(hit.Owner.CoinKey)) coins++;
+            if (collectedKeys.Add(hit.Owner.CoinKey))
+            {
+                coins++;
+                PlaySfx(coinSfx, 1f + (coins % 6) * 0.04f); // slight rising pitch per coin
+            }
         }
     }
-
-    private void UpdateTitle() => host.SetTitle(gameOver
-        ? $"Blix Runner — {coins} coins — {(int)scrollDistance} m — GAME OVER (Enter to restart)"
-        : $"Blix Runner — {coins} coins — {(int)scrollDistance} m");
 
     private void Restart()
     {
@@ -322,13 +367,76 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
                 ClearDepth: true),
             pass =>
             {
-                // Sky first (depth-disabled background), then the world over it.
+                // Sky first (depth-disabled background), then the world over it,
+                // then the HUD on top (SpriteBatch is depth-disabled + alpha-blended).
                 pass.DrawIndexed(skyVb, skyIb, skyPipeline, 3,
                     Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), skyPush);
                 world.End(pass);
+                DrawHud(pass, frame.Width, frame.Height);
             });
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames) host.RequestClose();
+    }
+
+    // Score / distance top-left; a centred game-over overlay. Screen-space ortho in
+    // framebuffer pixels (so pixelSize is in physical px, dpiScale = 1).
+    private void DrawHud(RenderPassBuilder pass, int width, int height)
+    {
+        if (hudFont is null) return;
+        var ortho = GraphicsMatrices.CreateOrthographicOffCenterVulkan(0f, width, height, 0f, -1f, 1f);
+        hud.Begin(ortho);
+
+        var pad = height * 0.03f;
+        var size = height * 0.045f;
+        hud.DrawText(hudFont, size, $"COINS {coins}", new Vector2(pad, pad), new GraphicsColor(0.96f, 0.82f, 0.30f, 1f));
+        hud.DrawText(hudFont, size, $"{(int)scrollDistance} M", new Vector2(pad, pad + size * 1.25f), new GraphicsColor(0.85f, 0.92f, 1.0f, 1f));
+
+        if (gameOver)
+        {
+            var big = height * 0.11f;
+            var sub = height * 0.045f;
+            const string over = "GAME OVER";
+            var overSize = SpriteBatchUiExtensions.MeasureText(hudFont, big, over);
+            hud.DrawText(hudFont, big, over, new Vector2((width - overSize.X) * 0.5f, height * 0.34f), new GraphicsColor(0.96f, 0.36f, 0.30f, 1f));
+            const string prompt = "ENTER TO RESTART";
+            var promptSize = SpriteBatchUiExtensions.MeasureText(hudFont, sub, prompt);
+            hud.DrawText(hudFont, sub, prompt, new Vector2((width - promptSize.X) * 0.5f, height * 0.34f + big), new GraphicsColor(0.90f, 0.92f, 0.96f, 1f));
+        }
+
+        hud.End(pass);
+    }
+
+    private void PlaySfx(AudioSource? source, float pitch)
+    {
+        if (source is null || audio is not { } a) return;
+        source.Pitch = pitch;
+        source.Gain = 0.6f;
+        source.Sync(a);
+        source.Stop(a);  // rewind so rapid re-triggers restart cleanly
+        source.Play(a);
+    }
+
+    // Square-wave blip with a decay envelope and a pitch sweep (rising = up,
+    // falling = down). 16-bit mono PCM — synthesized, no asset.
+    private static AudioClipData SynthBlip(float baseFreq, float seconds, float amplitude, bool rising)
+    {
+        const int rate = 44100;
+        var n = (int)(rate * seconds);
+        var pcm = new byte[n * 2];
+        var phase = 0f;
+        for (var i = 0; i < n; i++)
+        {
+            var u = (float)i / n;
+            var env = 1f - u;
+            var freq = rising ? baseFreq * (1f + 0.8f * u) : baseFreq * (1f - 0.5f * u);
+            phase += freq / rate;
+            if (phase >= 1f) phase -= 1f;
+            var square = phase < 0.5f ? 1f : -1f;
+            var s = (short)(square * env * amplitude * short.MaxValue);
+            pcm[i * 2 + 0] = (byte)(s & 0xFF);
+            pcm[i * 2 + 1] = (byte)((s >> 8) & 0xFF);
+        }
+        return new AudioClipData(SampleRate: rate, Channels: 1, BitsPerSample: 16, PcmData: pcm);
     }
 
     // Contiguous scrolling ground: one wide, thin tile per track segment.
@@ -430,7 +538,7 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
                 laneIndex = Math.Min(LaneX.Length - 1, laneIndex + 1);
                 break;
             case Key.Up or Key.W or Key.Space:
-                if (grounded) { physics.Velocity = new Vector3(0f, JumpSpeed, 0f); grounded = false; }
+                if (grounded) { physics.Velocity = new Vector3(0f, JumpSpeed, 0f); grounded = false; PlaySfx(jumpSfx, 1f); }
                 break;
         }
     }
