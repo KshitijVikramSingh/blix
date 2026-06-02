@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Blix;
 using Blix.Core;
 using Blix.Geometry;
@@ -57,12 +58,24 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     private static readonly Vector4 ObstacleTint = new(0.85f, 0.25f, 0.22f, 1f);
     private static readonly Vector4 CoinTint = new(0.95f, 0.78f, 0.20f, 1f);
 
+    // Direction toward the sun (used by the sky glow + later lighting). Kept low
+    // on the horizon ahead (-Z) so it sits in the camera's downward-looking frame.
+    private static readonly Vector3 SunToward = Vector3.Normalize(new Vector3(0.12f, 0.16f, -1.0f));
+
     private readonly int exitAfterFrames;
     private VulkanGraphicsDevice vk = null!;
     private IRenderHost host = null!;
     private InstancedBatch world = null!;
 
+    // Fullscreen procedural sky (drawn behind the world each frame).
+    private VertexBufferHandle skyVb;
+    private IndexBufferHandle skyIb;
+    private ShaderProgramHandle skyProgram;
+    private PipelineHandle skyPipeline;
+    private readonly byte[] skyPush = new byte[96];  // mat4 invVP + vec4 camPos + vec4 sunDir
+
     private Matrix4x4 viewProj;
+    private Vector3 cameraEye;
     private float aspect = 16f / 9f;
     private int frameCount;
 
@@ -114,8 +127,39 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         player.Position = new Vector3(LaneX[laneIndex], 0f, 0f);
         currentX = LaneX[laneIndex];
 
+        CreateSky();
+
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         UpdateCamera();
+    }
+
+    // Fullscreen-triangle sky: 3 vertices at NDC corners (far plane), a push-only
+    // shader interface, depth-disabled so it fills the background before the world.
+    private void CreateSky()
+    {
+        var fsLayout = new VertexLayout(
+            Stride: 3 * sizeof(float),
+            Attributes: new[] { new VertexAttribute(0, VertexAttributeFormat.Float3, 0) });
+        var corners = new float[] { -1f, -1f, 1f,   3f, -1f, 1f,   -1f, 3f, 1f };
+        var bytes = new byte[corners.Length * sizeof(float)];
+        System.Buffer.BlockCopy(corners, 0, bytes, 0, bytes.Length);
+        skyVb = vk.CreateVertexBuffer(new VertexBufferData(new VertexBufferDescription(fsLayout, 3, GraphicsBufferUsage.Static), bytes), "sky.vb");
+        skyIb = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "sky.ib");
+
+        var skyInterface = new ShaderInterface(
+            Slots: Array.Empty<DescriptorSetSlot>(),
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 96) });
+
+        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var vert = File.ReadAllBytes(Path.Combine(shaderDir, "sky.vert.spv"));
+        var frag = File.ReadAllBytes(Path.Combine(shaderDir, "sky.frag.spv"));
+        skyProgram = vk.CreateShaderProgramFromSpv(vert, frag, skyInterface, "sky");
+
+        skyPipeline = vk.CreatePipeline(
+            new PipelineDescription(
+                skyProgram, fsLayout, PrimitiveTopology.Triangles,
+                DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled }),
+            name: "sky");
     }
 
     public void OnUpdate(Time time)
@@ -202,8 +246,8 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     {
         // Behind + above the player, panning partway with its lane so switches
         // read clearly without locking the camera rigidly to the player's X.
-        var eye = new Vector3(currentX * 0.5f, 6.5f, 11f);
-        var view = Matrix4x4.CreateLookAt(eye, new Vector3(currentX, 1.0f, -10f), Vector3.UnitY);
+        cameraEye = new Vector3(currentX * 0.5f, 6.5f, 11f);
+        var view = Matrix4x4.CreateLookAt(cameraEye, new Vector3(currentX, 1.0f, -10f), Vector3.UnitY);
         var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, aspect, 0.1f, 400f);
         viewProj = view * proj;
     }
@@ -218,13 +262,27 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         EmitSpawns(t);
         EmitPlayer();
 
+        // Sky push: inverse view-projection (for the per-pixel ray) + camera + sun.
+        Matrix4x4.Invert(viewProj, out var invViewProj);
+        MemoryMarshal.Write(skyPush.AsSpan(0, 64), in invViewProj);
+        var camPos = new Vector4(cameraEye, 1f);
+        var sunDir = new Vector4(SunToward, 0f);
+        MemoryMarshal.Write(skyPush.AsSpan(64, 16), in camPos);
+        MemoryMarshal.Write(skyPush.AsSpan(80, 16), in sunDir);
+
         commandList.Pass(
             "runner-world",
             new RenderPassDescription(
                 Target: RenderSurfaceHandle.Default,
                 ClearColors: new GraphicsColor?[] { new GraphicsColor(0.07f, 0.09f, 0.13f, 1f) },
                 ClearDepth: true),
-            pass => world.End(pass));
+            pass =>
+            {
+                // Sky first (depth-disabled background), then the world over it.
+                pass.DrawIndexed(skyVb, skyIb, skyPipeline, 3,
+                    Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), skyPush);
+                world.End(pass);
+            });
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames) host.RequestClose();
     }
