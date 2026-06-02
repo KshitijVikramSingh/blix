@@ -95,6 +95,28 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     private AudioSource? coinSfx;
     private AudioSource? crashSfx;
 
+    // --- Animated character (KayKit Rogue, skinned glTF) ----------------------
+    private const float CharScale = 0.9f;
+    private const float CharFacing = MathF.PI;     // face -Z (into the screen); flip if backwards
+    private ShaderProgramHandle skinnedShader;
+    private PipelineHandle skinnedPipeline;
+    private VertexBufferHandle[] charVBs = Array.Empty<VertexBufferHandle>();
+    private IndexBufferHandle[] charIBs = Array.Empty<IndexBufferHandle>();
+    private int[] charIndexCounts = Array.Empty<int>();
+    private MaterialHandle charSkinMaterial;       // set 2: albedo (shared, 1 material)
+    private MaterialBindings charBones = null!;    // set 3: bone palette, framesInFlight
+    private Skeleton charSkeleton = null!;
+    private Pose charRestPose = null!;
+    private Pose charPose = null!;
+    private BonePalette charPalette = null!;
+    private byte[] charPalettePayload = Array.Empty<byte>();
+    private Matrix4x4 charMeshNodeTransform = Matrix4x4.Identity;
+    private AnimationClip charRun = null!;
+    private AnimationClip charJump = null!;
+    private double charAnimTime;
+    private readonly byte[] skinnedPush = new byte[128];  // uModel + uViewProjection
+    private bool charLoaded;
+
     private Matrix4x4 viewProj;
     private Vector3 cameraEye;
     private float aspect = 16f / 9f;
@@ -178,6 +200,7 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         CreateSky();
         CreateHud(shaderDir);
         CreateAudio();
+        CreateCharacter(shaderDir);
         host.SetTitle("Blix — Endless Runner");
 
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
@@ -212,6 +235,134 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         jumpSfx = AudioSource.Create(a, a.CreateClip(SynthBlip(520f, 0.10f, 0.5f, rising: true), "runner.jump"), "runner.jump");
         coinSfx = AudioSource.Create(a, a.CreateClip(SynthBlip(900f, 0.08f, 0.45f, rising: true), "runner.coin"), "runner.coin");
         crashSfx = AudioSource.Create(a, a.CreateClip(SynthBlip(150f, 0.35f, 0.7f, rising: false), "runner.crash"), "runner.crash");
+    }
+
+    // Animated character (KayKit Rogue): skinned glTF rendered as its own pass via
+    // a bone-palette SSBO (set 3) + albedo (set 2). Best-effort — any failure
+    // leaves charLoaded false and the player falls back to the placeholder box.
+    private void CreateCharacter(string shaderDir)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Assets", "models", "Rogue.glb");
+        GltfModel model;
+        try
+        {
+            model = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("models/rogue"), path));
+            if (model.Animations.Length == 0) throw new InvalidOperationException("no animations");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Character unavailable, using placeholder box: {ex.Message}");
+            return;
+        }
+
+        charSkeleton = model.Skeleton;
+        charRestPose = charSkeleton.CreateRestPose();
+        charPose = charSkeleton.CreateRestPose();
+        charPalette = new BonePalette(charSkeleton.BoneCount);
+        charPalettePayload = new byte[charSkeleton.BoneCount * 64];
+        charMeshNodeTransform = model.MeshNodeTransform;
+        charRun = FindClip(model, "Running_A") ?? model.Animations[0];
+        charJump = FindClip(model, "Jump_Idle") ?? FindClip(model, "Jump_Full_Short") ?? charRun;
+
+        var boneLayout = new UniformBlockLayout(
+            TotalSize: charSkeleton.BoneCount * 64,
+            Members: new[] { new UniformBlockMember("bones", 0, charSkeleton.BoneCount * 64, ElementStride: 64) });
+        var iface = new ShaderInterface(
+            Slots: new[]
+            {
+                new DescriptorSetSlot(2, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                new DescriptorSetSlot(3, 0, ShaderResourceType.StorageBuffer, ShaderStages.Vertex, BlockLayout: boneLayout),
+            },
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 128) });
+        skinnedShader = vk.CreateShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "skinned.vert.spv")),
+            File.ReadAllBytes(Path.Combine(shaderDir, "skinned.frag.spv")), iface, "runner.skinned");
+        skinnedPipeline = vk.CreatePipeline(
+            new PipelineDescription(skinnedShader, VertexPosition3NormalTextureSkin4Tangent.Layout,
+                PrimitiveTopology.Triangles, DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled }),
+            "runner.skinned");
+
+        // One VB/IB per primitive; all 12 share one skin material + one bone palette.
+        var n = model.Primitives.Length;
+        charVBs = new VertexBufferHandle[n];
+        charIBs = new IndexBufferHandle[n];
+        charIndexCounts = new int[n];
+        GltfTexture? albedo = null;
+        for (var i = 0; i < n; i++)
+        {
+            var mesh = model.Primitives[i].Mesh;
+            charVBs[i] = vk.CreateVertexBuffer(
+                new VertexBufferData(new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static), mesh.VertexBytes),
+                $"rogue.vb{i}");
+            charIBs[i] = mesh.Indices32 is { } u32
+                ? vk.CreateIndexBuffer(u32, name: $"rogue.ib{i}")
+                : vk.CreateIndexBuffer(mesh.Indices, name: $"rogue.ib{i}");
+            charIndexCounts[i] = mesh.IndexCount;
+            albedo ??= model.Primitives[i].Material?.BaseColorTexture;
+        }
+
+        charSkinMaterial = vk.CreateMaterial(skinnedShader, name: "rogue.skin").SetTexture(0, UploadAlbedo(albedo)).Handle;
+        charBones = vk.CreateMaterial(skinnedShader, setIndex: 3, framesInFlight: vk.MaxFramesInFlightCount, name: "rogue.bones");
+        charLoaded = true;
+    }
+
+    // Advance the character's animation, upload its bone palette for this frame,
+    // and pack the skinned push (model + view-projection). Run cadence scales with
+    // run speed; airborne switches to the jump clip; game-over freezes the pose.
+    private void UpdateCharacter(Time time)
+    {
+        var clip = grounded ? charRun : charJump;
+        var rate = gameOver ? 0f : (grounded ? currentSpeed / BaseSpeed : 1f);
+        charAnimTime += time.Delta * rate;
+        var dur = clip.Duration > 0 ? clip.Duration : 1.0;
+        charPose.CopyFrom(charRestPose);
+        clip.Sample(charAnimTime % dur, charPose);
+        charSkeleton.ComputeBonePalette(charPose, charPalette);
+        PackPalette(charPalette, charPalettePayload);
+        charBones.WriteBuffer(vk.CurrentFrameSlot, 0, charPalettePayload);
+
+        var user = Matrix4x4.CreateScale(CharScale)
+                 * Matrix4x4.CreateRotationY(CharFacing)
+                 * Matrix4x4.CreateTranslation(player.Position.X, player.Position.Y, 0f);
+        var model = charMeshNodeTransform * user;
+        MemoryMarshal.Write(skinnedPush.AsSpan(0, 64), in model);
+        MemoryMarshal.Write(skinnedPush.AsSpan(64, 64), in viewProj);
+    }
+
+    private static AnimationClip? FindClip(GltfModel model, string name)
+    {
+        foreach (var c in model.Animations) if (c.Name == name) return c;
+        return null;
+    }
+
+    private TextureHandle UploadAlbedo(GltfTexture? tex)
+    {
+        if (tex?.MipBytes is { Count: > 0 } mips)
+        {
+            return vk.CreateTexture2D(
+                new TextureDescription(tex.Width, tex.Height, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
+                mips[0], "rogue.albedo");
+        }
+        var px = new byte[4 * 4 * 4];
+        for (var i = 0; i < px.Length; i += 4) { px[i] = 210; px[i + 1] = 180; px[i + 2] = 140; px[i + 3] = 255; }
+        return vk.CreateTexture2D(
+            new TextureDescription(4, 4, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat), px, "rogue.albedo.fallback");
+    }
+
+    // Pack the bone palette into std430 bytes (row-major; read column-major in GLSL
+    // = transpose, which matches the engine's row-vector matrices). Mirrors VulkanLit.
+    private static void PackPalette(BonePalette palette, byte[] dst)
+    {
+        var f = MemoryMarshal.Cast<byte, float>(dst.AsSpan());
+        for (var i = 0; i < palette.BoneCount; i++)
+        {
+            var m = palette.Matrices[i];
+            var o = i * 16;
+            f[o + 0] = m.M11; f[o + 1] = m.M12; f[o + 2] = m.M13; f[o + 3] = m.M14;
+            f[o + 4] = m.M21; f[o + 5] = m.M22; f[o + 6] = m.M23; f[o + 7] = m.M24;
+            f[o + 8] = m.M31; f[o + 9] = m.M32; f[o + 10] = m.M33; f[o + 11] = m.M34;
+            f[o + 12] = m.M41; f[o + 13] = m.M42; f[o + 14] = m.M43; f[o + 15] = m.M44;
+        }
     }
 
     // Fullscreen-triangle sky: 3 vertices at NDC corners (far plane), a push-only
@@ -349,7 +500,9 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         world.Begin(worldPush);
         EmitTiles(scrollDistance);
         EmitSpawns(t);
-        EmitPlayer();
+        if (!charLoaded) EmitPlayer();   // box fallback when the character didn't load
+
+        if (charLoaded) UpdateCharacter(time);
 
         // Sky push: inverse view-projection (for the per-pixel ray) + camera + sun.
         Matrix4x4.Invert(viewProj, out var invViewProj);
@@ -372,6 +525,17 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
                 pass.DrawIndexed(skyVb, skyIb, skyPipeline, 3,
                     Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), skyPush);
                 world.End(pass);
+                if (charLoaded)
+                {
+                    // Skinned character: each primitive shares the set-3 bone palette
+                    // and the set-2 albedo; depth-tested into the same buffer as the world.
+                    for (var i = 0; i < charVBs.Length; i++)
+                    {
+                        pass.DrawIndexed(charVBs[i], charIBs[i], skinnedPipeline, charIndexCounts[i],
+                            Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(),
+                            charSkinMaterial, charBones.Handle, skinnedPush);
+                    }
+                }
                 DrawHud(pass, frame.Width, frame.Height);
             });
 
