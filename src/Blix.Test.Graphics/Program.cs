@@ -1,4 +1,5 @@
 using System.Numerics;
+using Blix;
 using Blix.Assets;
 using Blix.Diagnostics;
 using Blix.Geometry;
@@ -22,8 +23,8 @@ using VkAccessFlags = Silk.NET.Vulkan.AccessFlags;
 //   - GLSL std140 column-major reading reinterprets row-major bytes as
 //     column-major reads = transpose = column-vector form, which is what
 //     GLSL's `M * v_col` expects.
-//   - CreatePerspective rewritten to row-vector form (M34=-1, M43=z-translation
-//     instead of M43=-1, M34=z-translation as today's column-vector form).
+//   - CreatePerspectiveVulkan in row-vector form (M34=-1, M43=z-translation),
+//     Vulkan Y-down (M22=-focalLength) and [0,1] depth.
 //   - CreateNormalMatrix returns just Invert(model) — no Transpose, because
 //     row-vector M's inverse already corresponds to column-vector M^-T after
 //     the natural memory-layout transpose on upload.
@@ -71,19 +72,7 @@ var t = new TestRunner();
 // ============================================================================
 
 {
-    // CreatePerspective should be in row-vector form: M34 = -1 (perspective
-    // divide flag in last column of last row), M43 = z-translation.
-    // (Pre-migration: M43 = -1 and M34 = z-translation — column-vector form.)
-    var proj = GraphicsMatrices.CreatePerspective(MathF.PI / 3f, 16f / 9f, 0.1f, 100f);
-    t.ExpectClose("CreatePerspective M34 == -1 (row-vector perspective-divide flag)", proj.M34, -1f);
-    t.ExpectClose("CreatePerspective M43 != -1 (z-translation lives here in row-vector form)",
-        proj.M43, (2f * 100f * 0.1f) / (0.1f - 100f));
-    t.ExpectClose("CreatePerspective M22 = +focalLength (GL Y up)",
-        proj.M22, 1f / MathF.Tan((MathF.PI / 3f) * 0.5f));
-}
-
-{
-    // CreatePerspectiveVulkan stays as Vector D shipped — already row-vector form.
+    // CreatePerspectiveVulkan: row-vector form, Vulkan Y-down + [0,1] depth.
     var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, 16f / 9f, 0.1f, 100f);
     t.ExpectClose("CreatePerspectiveVulkan M34 == -1 (row-vector form)", proj.M34, -1f);
     t.ExpectClose("CreatePerspectiveVulkan M22 = -focalLength (Vulkan Y down)",
@@ -197,41 +186,6 @@ var t = new TestRunner();
 }
 
 // ============================================================================
-// Section D — GL transpose-flag semantics (regression for the transpose:true
-//             vs transpose:false confusion that broke GL demos after F-016).
-// ============================================================================
-//
-// The byte-level tests above don't exercise the GL.UniformMatrix4 transpose
-// flag — they only check what GLSL sees AFTER GL's internal reinterpretation.
-// The actual flag value matters: for .NET row-major bytes to land as
-// column-vector form in GLSL, GL must read them as column-major
-// (transpose: false). The opposite (transpose: true) leaves the matrix as
-// row-vector form in GLSL, which silently breaks every M*v multiplication.
-
-{
-    var m = Matrix4x4.CreateTranslation(new Vector3(10, 20, 30));
-
-    var bytes = new float[16];
-    var span = System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref m, 1);
-    var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<Matrix4x4, float>(span);
-    floats.CopyTo(bytes);
-
-    // Simulate GL.UniformMatrix4(transpose: false): input treated as column-major.
-    // GLSL math(r, c) = bytes[4*c + r].
-    var origin = new Vector4(0, 0, 0, 1);
-    var glslTransposeFalse = GlslMulColumnMajor(bytes, origin);
-    t.ExpectClose("GL transpose:false + row-major .NET bytes ⇒ GLSL translates correctly",
-        glslTransposeFalse, new Vector4(10, 20, 30, 1));
-
-    // Simulate GL.UniformMatrix4(transpose: true): input treated as row-major.
-    // GLSL math(r, c) = bytes[4*r + c]. For .NET row-vector matrix this leaves
-    // translation in row 3 — column-vector M*v_col then produces NO translation.
-    var glslTransposeTrue = GlslMulRowMajor(bytes, origin);
-    t.ExpectClose("GL transpose:true + row-major .NET bytes ⇒ GLSL DOES NOT translate (regression marker)",
-        glslTransposeTrue, new Vector4(0, 0, 0, 1));
-}
-
-// ============================================================================
 // Section E — ShaderInterface structural validation (Vector A 2a).
 // ============================================================================
 //
@@ -266,9 +220,9 @@ static UniformBlockLayout Mat4Block() => new(
 }
 
 // E.2 — Lit-shader-shape fixture: per-frame UBO + per-pass UBO + sampler array
-// + per-material UBO + per-material samplers + push constants. Mirrors
-// docs/vulkan-reshape-shaderlab-target.md Section 1. Proves the type composes
-// for the real downstream use case.
+// + per-material UBO + per-material samplers + push constants. Exercises the
+// set-by-lifetime layout (docs/architecture.md → the Vulkan binding model) and
+// proves the type composes for the real downstream use case.
 {
     var lit = new ShaderInterface(
         Slots: new[]
@@ -1502,56 +1456,265 @@ static ShaderInterface MinimalShader() => new(new[]
 }
 
 // ============================================================================
-// Section V — Instanced draw + InstancedBatch interface (instancing foundation).
+// Section V — Frustum near-plane against Vulkan [0,1] clip.
+// ============================================================================
+//
+// Regression for the near-plane derivation: the projection produces [0,1]
+// depth, so the near plane is row3 (clip.z >= 0), NOT GL's row4 + row3. A box
+// in front of the near plane must survive culling; a box between the camera
+// and the near plane (closer than near) must be rejected by the near plane.
+{
+    // Camera at origin looking down -Z; near = 1, far = 100.
+    var view = GraphicsMatrices.CreateView(Vector3.Zero, Quaternion.Identity);
+    var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 2f, 1.0f, 1.0f, 100f);
+    var vp = view * proj;
+    // FromViewProjection wants the planes as rows → transpose the row-vector VP.
+    var frustum = Frustum.FromViewProjection(Matrix4x4.Transpose(vp));
+
+    Bounds3 Box(Vector3 c, float r) => new(c - new Vector3(r), c + new Vector3(r));
+
+    t.ExpectTrue("Frustum: box well inside the view volume intersects",
+        frustum.Intersects(Box(new Vector3(0, 0, -10f), 1f)));
+    t.ExpectTrue("Frustum: box behind the camera is culled",
+        !frustum.Intersects(Box(new Vector3(0, 0, 10f), 1f)));
+    // The near-plane fix: a box at view-z ∈ [-0.8,-0.6] is in front of the camera
+    // but nearer than near=1, so it must be culled. This band is exactly where the
+    // correct [0,1] near plane (row3) and the buggy GL one (row4 + row3, which
+    // puts the plane at view-z ≈ -0.5) disagree — the GL form wrongly keeps it.
+    t.ExpectTrue("Frustum: box nearer than the near plane is culled (row3, [0,1] clip)",
+        !frustum.Intersects(Box(new Vector3(0, 0, -0.7f), 0.1f)));
+    t.ExpectTrue("Frustum: box just past the near plane survives",
+        frustum.Intersects(Box(new Vector3(0, 0, -2f), 0.4f)));
+}
+
+// ============================================================================
+// Section W — Frustum: the other five planes (complements V's near plane).
+// ============================================================================
+//
+// V locked the near plane against the [0,1]-clip regression. W exercises the
+// remaining five so the whole Gribb-Hartmann extraction is pinned: left/right/
+// top/bottom from the symmetric fov (at view depth d the half-extent is d since
+// tan(45°)=1), and far from the [0,1] far plane (row4 - row3). Each plane gets a
+// box just outside it (must cull); the inside cases keep the extraction honest.
+{
+    var view = GraphicsMatrices.CreateView(Vector3.Zero, Quaternion.Identity);
+    var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 2f, 1.0f, 1.0f, 100f);
+    var frustum = Frustum.FromViewProjection(Matrix4x4.Transpose(view * proj));
+
+    Bounds3 Box(Vector3 c, float r) => new(c - new Vector3(r), c + new Vector3(r));
+
+    // 90° vertical fov, aspect 1 → at view depth 10 the frustum spans x,y ∈ [-10, 10].
+    t.ExpectTrue("Frustum: centred box at depth 10 is inside all planes",
+        frustum.Intersects(Box(new Vector3(0, 0, -10f), 1f)));
+
+    t.ExpectTrue("Frustum: box past the right plane is culled",
+        !frustum.Intersects(Box(new Vector3(12f, 0, -10f), 0.5f)));
+    t.ExpectTrue("Frustum: box just inside the right plane survives",
+        frustum.Intersects(Box(new Vector3(9f, 0, -10f), 0.5f)));
+    t.ExpectTrue("Frustum: box past the left plane is culled",
+        !frustum.Intersects(Box(new Vector3(-12f, 0, -10f), 0.5f)));
+    t.ExpectTrue("Frustum: box past the top plane is culled",
+        !frustum.Intersects(Box(new Vector3(0, 12f, -10f), 0.5f)));
+    t.ExpectTrue("Frustum: box past the bottom plane is culled",
+        !frustum.Intersects(Box(new Vector3(0, -12f, -10f), 0.5f)));
+
+    // Far plane = row4 - row3 for [0,1] clip: beyond far=100 (view-z < -100) culls.
+    t.ExpectTrue("Frustum: box beyond the far plane is culled",
+        !frustum.Intersects(Box(new Vector3(0, 0, -101f), 0.4f)));
+    t.ExpectTrue("Frustum: box just inside the far plane survives",
+        frustum.Intersects(Box(new Vector3(0, 0, -99f), 0.4f)));
+}
+
+// ============================================================================
+// Section X — Camera projection ↔ unprojection round-trip (ScreenPointToRay).
+// ============================================================================
+//
+// ScreenPointToRay had zero coverage and is exactly what the GL sunset touched.
+// Project a known world point through the camera's viewProj, perspective-divide
+// to NDC, map NDC → screen pixel, then unproject that pixel back to a ray: the
+// ray must aim from the camera straight through the original point. Also pins
+// the [0,1] depth endpoints — near plane → NDC z 0, far plane → NDC z 1 (GL's
+// [-1,1] would put near at -1).
+{
+    var camera = new Camera3D();           // origin, identity pose, fov π/3, near 0.1, far 100
+    const float W = 1600f, H = 900f;
+    var vp = camera.GetViewProjection(W / H);
+
+    Vector3 ProjectToNdc(Vector3 world)
+    {
+        var clip = Vector4.Transform(new Vector4(world, 1f), vp);
+        return new Vector3(clip.X / clip.W, clip.Y / clip.W, clip.Z / clip.W);
+    }
+
+    var p = new Vector3(2f, 1f, -10f);     // off-axis, in front of the camera
+    var ndc = ProjectToNdc(p);
+    t.ExpectTrue("X round-trip: projected NDC depth within [0,1]", ndc.Z >= 0f && ndc.Z <= 1f);
+
+    var screenX = (ndc.X + 1f) * 0.5f * W;
+    var screenY = (ndc.Y + 1f) * 0.5f * H;
+    var ray = camera.ScreenPointToRay(screenX, screenY, W, H);
+
+    t.ExpectClose("X round-trip: ray direction points back at the world point",
+        new Vector4(ray.Direction, 0f), new Vector4(Vector3.Normalize(p), 0f));
+    t.ExpectTrue("X round-trip: ray origin sits on the near plane, ahead of the camera",
+        ray.Origin.Z < 0f);
+
+    var nearNdc = ProjectToNdc(new Vector3(0f, 0f, -camera.NearPlane));
+    var farNdc = ProjectToNdc(new Vector3(0f, 0f, -camera.FarPlane));
+    t.ExpectClose("X depth: near plane → NDC z 0 (Vulkan [0,1], not GL -1)", nearNdc.Z, 0f);
+    t.ExpectClose("X depth: far plane → NDC z 1", farNdc.Z, 1f);
+}
+
+// ============================================================================
+// Section Y — Screen ↔ NDC ↔ world axis mapping (Y-down, no flip).
+// ============================================================================
+//
+// The exact axis the GL sunset broke: screen uses a top-left origin (Y grows
+// down), which matches Vulkan's Y-down NDC, so the screen→NDC map applies NO Y
+// flip — and the projection's own Y-flip then sends screen-top to world-up.
+// Asserted through ScreenPointToRay direction signs so the whole chain is pinned.
+{
+    var camera = new Camera3D();
+    const float W = 1600f, H = 900f;
+
+    var centre = camera.ScreenPointToRay(W / 2f, H / 2f, W, H);
+    t.ExpectClose("Y centre pixel → ray straight down -Z",
+        new Vector4(centre.Direction, 0f), new Vector4(0f, 0f, -1f, 0f));
+
+    var top = camera.ScreenPointToRay(W / 2f, 0f, W, H);
+    t.ExpectTrue("Y screen top → ray points up (+Y) and forward (-Z)",
+        top.Direction.Y > 0f && top.Direction.Z < 0f);
+    var bottom = camera.ScreenPointToRay(W / 2f, H, W, H);
+    t.ExpectTrue("Y screen bottom → ray points down (-Y)", bottom.Direction.Y < 0f);
+
+    var left = camera.ScreenPointToRay(0f, H / 2f, W, H);
+    t.ExpectTrue("Y screen left → ray points left (-X)", left.Direction.X < 0f);
+    var rightRay = camera.ScreenPointToRay(W, H / 2f, W, H);
+    t.ExpectTrue("Y screen right → ray points right (+X)", rightRay.Direction.X > 0f);
+}
+
+// ============================================================================
+// Section Z — SpriteBatch ortho: screen-corner → NDC-corner mapping.
+// ============================================================================
+//
+// CreateOrthographicOffCenterVulkan(0, w, h, 0, ...) is what SpriteBatch feeds
+// as its view-projection: it must reproduce the ImGui (x*2/w-1, y*2/h-1) screen
+// map — top-left (0,0) → NDC (-1,-1), bottom-right (w,h) → (1,1), centre → (0,0)
+// — with depth in [0,1]. Row-vector: apply via Vector4.Transform.
+{
+    const float w = 800f, h = 600f;
+    var ortho = GraphicsMatrices.CreateOrthographicOffCenterVulkan(0f, w, h, 0f, 0f, 1f);
+    Vector4 Map(float x, float y, float z) => Vector4.Transform(new Vector4(x, y, z, 1f), ortho);
+
+    t.ExpectClose("Z top-left (0,0) → NDC (-1,-1)", Map(0f, 0f, 0f), new Vector4(-1f, -1f, 0f, 1f));
+    t.ExpectClose("Z bottom-right (w,h) → NDC (1,1)", Map(w, h, 0f), new Vector4(1f, 1f, 0f, 1f));
+    t.ExpectClose("Z top-right (w,0) → NDC (1,-1)", Map(w, 0f, 0f), new Vector4(1f, -1f, 0f, 1f));
+    t.ExpectClose("Z centre (w/2,h/2) → NDC origin", Map(w / 2f, h / 2f, 0f), new Vector4(0f, 0f, 0f, 1f));
+    t.ExpectClose("Z far depth (z=1) → NDC z 1 ([0,1] clip)", Map(0f, 0f, 1f).Z, 1f);
+}
+
+// ============================================================================
+// Section AA — CreateOrthographicVulkan (shadow-cascade / spot-light proj).
+// ============================================================================
+//
+// The symmetric Vulkan ortho was duplicated verbatim in two demos (VulkanLit +
+// VulkanSponza cascades) with no test; now promoted to GraphicsMatrices. Pin its
+// invariants: x/y map [-w/2,w/2] → [-1,1] with +Y DOWN (top of slab → -1), depth
+// maps near → 0 / far → 1 ([0,1] clip), and w stays 1 (no perspective divide).
+{
+    var ortho = GraphicsMatrices.CreateOrthographicVulkan(10f, 10f, 0f, 10f);
+    Vector4 Map(float x, float y, float z) => Vector4.Transform(new Vector4(x, y, z, 1f), ortho);
+
+    t.ExpectClose("AA right edge (+x) → NDC +1", Map(5f, 0f, 0f).X, 1f);
+    t.ExpectClose("AA left edge (-x) → NDC -1", Map(-5f, 0f, 0f).X, -1f);
+    t.ExpectClose("AA top (+Y world) → NDC -1 (Y-down flip)", Map(0f, 5f, 0f).Y, -1f);
+    t.ExpectClose("AA bottom (-Y world) → NDC +1", Map(0f, -5f, 0f).Y, 1f);
+    t.ExpectClose("AA near plane (view-z 0) → NDC z 0", Map(0f, 0f, 0f).Z, 0f);
+    t.ExpectClose("AA far plane (view-z -10) → NDC z 1", Map(0f, 0f, -10f).Z, 1f);
+    t.ExpectClose("AA orthographic keeps w = 1 (no perspective divide)", Map(3f, -4f, -5f).W, 1f);
+
+    // Rejects degenerate extents (matches the sibling projection builders).
+    var threwW = false;
+    try { GraphicsMatrices.CreateOrthographicVulkan(0f, 10f, 0f, 10f); }
+    catch (ArgumentOutOfRangeException) { threwW = true; }
+    t.ExpectTrue("AA zero width rejected", threwW);
+    var threwDepth = false;
+    try { GraphicsMatrices.CreateOrthographicVulkan(10f, 10f, 5f, 5f); }
+    catch (ArgumentOutOfRangeException) { threwDepth = true; }
+    t.ExpectTrue("AA far <= near rejected", threwDepth);
+}
+
+// ============================================================================
+// Section AB — TextureFormat.TextureByteCount (diagnostics footprint math).
+// ============================================================================
+//
+// SnapshotResources reports each texture's GPU footprint via this mip-chain
+// sum. Pin the math: the chain halves dims (floored, min 1) per level, BCn
+// rounds each level up to a 4×4 block, and a single mip equals MipByteCount.
+{
+    // Rgba8 4×4: 64 + 16 + 4 = 84 over 3 mips; 64 for one.
+    t.ExpectClose("AB Rgba8 4×4 single mip == 64", TextureFormat.Rgba8.TextureByteCount(4, 4, 1), 64);
+    t.ExpectClose("AB Rgba8 4×4 three mips == 64+16+4", TextureFormat.Rgba8.TextureByteCount(4, 4, 3), 84);
+    t.ExpectClose("AB R8 256×256 single mip == 65536", TextureFormat.R8.TextureByteCount(256, 256, 1), 256 * 256);
+    // Bc7 4×4: every level pads up to one 16-byte block → 16 × 3 = 48.
+    t.ExpectClose("AB Bc7Srgb 4×4 three mips (each pads to a block)",
+        TextureFormat.Bc7Srgb.TextureByteCount(4, 4, 3), 48);
+
+    var threw = false;
+    try { TextureFormat.Rgba8.TextureByteCount(4, 4, 0); } catch (ArgumentOutOfRangeException) { threw = true; }
+    t.ExpectTrue("AB mipCount 0 rejected", threw);
+}
+
+// ============================================================================
+// Section AC — Instanced draw + InstanceBuffer (instancing foundation).
 // ============================================================================
 //
 // The GPU draw (vkCmdDrawIndexed instanceCount=N reading the per-instance SSBO)
 // needs a live device — proven by the VulkanInstanced demo under validation.
 // Surface-level tests lock the command-record contract, the InstanceData byte
-// layout (must stay identical to the `Instance` struct in instanced.vert), and
-// InstancedBatch.Interface's set-3 SSBO declaration.
+// layout, and InstanceBuffer.Slot's set-3 SSBO declaration.
 
 {
-    // V.1 — InstanceCount defaults to 1 (preserves every existing caller).
+    // AC.1 — InstanceCount defaults to 1 (preserves every existing caller).
     var baseCmd = new DrawIndexedCommand(
         new VertexBufferHandle(1), new IndexBufferHandle(2), new PipelineHandle(3),
         36, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>());
-    t.ExpectClose("V.1 default DrawIndexedCommand.InstanceCount is 1", baseCmd.InstanceCount, 1);
+    t.ExpectClose("AC.1 default DrawIndexedCommand.InstanceCount is 1", baseCmd.InstanceCount, 1);
 
-    // V.2 — with-update carries the instance count through.
+    // AC.2 — with-update carries the instance count through.
     var instanced = baseCmd with { InstanceCount = 5000 };
-    t.ExpectClose("V.2 with-update sets InstanceCount", instanced.InstanceCount, 5000);
-    t.ExpectClose("V.2 with-update leaves IndexCount intact", instanced.IndexCount, 36);
+    t.ExpectClose("AC.2 with-update sets InstanceCount", instanced.InstanceCount, 5000);
+    t.ExpectClose("AC.2 with-update leaves IndexCount intact", instanced.IndexCount, 36);
 }
 
 {
-    // V.3 — InstanceData is 80 bytes: mat4 model @0, vec4 tint @64.
+    // AC.3 — InstanceData is 80 bytes: mat4 model @0, vec4 tint @64.
     var size = System.Runtime.InteropServices.Marshal.SizeOf<Blix.Render.InstanceData>();
-    t.ExpectClose("V.3 sizeof(InstanceData) == 80", size, 80);
+    t.ExpectClose("AC.3 sizeof(InstanceData) == 80", size, 80);
     var modelOff = (int)System.Runtime.InteropServices.Marshal.OffsetOf<Blix.Render.InstanceData>(nameof(Blix.Render.InstanceData.Model));
     var tintOff = (int)System.Runtime.InteropServices.Marshal.OffsetOf<Blix.Render.InstanceData>(nameof(Blix.Render.InstanceData.Tint));
-    t.ExpectClose("V.3 InstanceData.Model offset == 0", modelOff, 0);
-    t.ExpectClose("V.3 InstanceData.Tint offset == 64", tintOff, 64);
+    t.ExpectClose("AC.3 InstanceData.Model offset == 0", modelOff, 0);
+    t.ExpectClose("AC.3 InstanceData.Tint offset == 64", tintOff, 64);
 }
 
 {
-    // V.4 — InstanceBuffer.Slot is the set-3 per-instance SSBO contract (the data
+    // AC.4 — InstanceBuffer.Slot is the set-3 per-instance SSBO contract (the data
     // layer). Shaders compose it; the engine ships no default shader/material.
     var slot = Blix.Render.InstanceBuffer.Slot;
-    t.ExpectClose("V.4 InstanceBuffer.Slot is set 3", slot.Set, 3);
-    t.ExpectClose("V.4 InstanceBuffer.Slot is binding 0", slot.Binding, 0);
-    t.ExpectTrue("V.4 slot is a StorageBuffer", slot.Type == ShaderResourceType.StorageBuffer);
-    t.ExpectTrue("V.4 slot is Vertex-stage", slot.Stages == ShaderStages.Vertex);
-    t.ExpectTrue("V.4 slot carries a BlockLayout", slot.BlockLayout is not null);
-    t.ExpectClose("V.4 SSBO TotalSize == MaxInstances * Stride",
+    t.ExpectClose("AC.4 InstanceBuffer.Slot is set 3", slot.Set, 3);
+    t.ExpectClose("AC.4 InstanceBuffer.Slot is binding 0", slot.Binding, 0);
+    t.ExpectTrue("AC.4 slot is a StorageBuffer", slot.Type == ShaderResourceType.StorageBuffer);
+    t.ExpectTrue("AC.4 slot is Vertex-stage", slot.Stages == ShaderStages.Vertex);
+    t.ExpectTrue("AC.4 slot carries a BlockLayout", slot.BlockLayout is not null);
+    t.ExpectClose("AC.4 SSBO TotalSize == MaxInstances * Stride",
         slot.BlockLayout!.TotalSize, Blix.Render.InstanceBuffer.MaxInstances * Blix.Render.InstanceBuffer.Stride);
-    t.ExpectClose("V.4 InstanceBuffer.Stride == 80", Blix.Render.InstanceBuffer.Stride, 80);
+    t.ExpectClose("AC.4 InstanceBuffer.Stride == 80", Blix.Render.InstanceBuffer.Stride, 80);
 
     // A shader composing the slot + a push range must still validate.
     var composed = new ShaderInterface(
         new[] { slot },
         new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
-    t.ExpectTrue("V.4 composed interface validates", TryValidate(composed) is null);
+    t.ExpectTrue("AC.4 composed interface validates", TryValidate(composed) is null);
 }
 
 t.PrintSummary();
@@ -1564,28 +1727,6 @@ static InvalidOperationException? TryValidate(ShaderInterface iface)
 {
     try { iface.Validate(); return null; }
     catch (InvalidOperationException e) { return e; }
-}
-
-// GLSL M*v_col interpretation when GL stored the bytes as column-major
-// (transpose:false in UniformMatrix4). math(r, c) = bytes[4*c + r].
-static Vector4 GlslMulColumnMajor(float[] bytes, Vector4 v)
-{
-    var rx = bytes[0]  * v.X + bytes[4]  * v.Y + bytes[8]   * v.Z + bytes[12] * v.W;
-    var ry = bytes[1]  * v.X + bytes[5]  * v.Y + bytes[9]   * v.Z + bytes[13] * v.W;
-    var rz = bytes[2]  * v.X + bytes[6]  * v.Y + bytes[10]  * v.Z + bytes[14] * v.W;
-    var rw = bytes[3]  * v.X + bytes[7]  * v.Y + bytes[11]  * v.Z + bytes[15] * v.W;
-    return new Vector4(rx, ry, rz, rw);
-}
-
-// GLSL M*v_col when GL was told transpose:true (input was row-major).
-// math(r, c) = bytes[4*r + c]. result[r] = sum_c M[r,c] * v[c] = sum_c bytes[4*r+c] * v[c].
-static Vector4 GlslMulRowMajor(float[] bytes, Vector4 v)
-{
-    var rx = bytes[0]  * v.X + bytes[1]  * v.Y + bytes[2]   * v.Z + bytes[3]  * v.W;
-    var ry = bytes[4]  * v.X + bytes[5]  * v.Y + bytes[6]   * v.Z + bytes[7]  * v.W;
-    var rz = bytes[8]  * v.X + bytes[9]  * v.Y + bytes[10]  * v.Z + bytes[11] * v.W;
-    var rw = bytes[12] * v.X + bytes[13] * v.Y + bytes[14]  * v.Z + bytes[15] * v.W;
-    return new Vector4(rx, ry, rz, rw);
 }
 
 // Simulate GLSL's `M * v_col` with M read column-major from a flat float buffer.

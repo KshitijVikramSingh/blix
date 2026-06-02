@@ -11,8 +11,8 @@ namespace Blix.Diagnostics.Overlay;
 // runtime backend sets up ImGui IO + a render context, calls ImGui.NewFrame(),
 // invokes Layout(), then ImGui.Render() and submits the draw data its own way.
 //
-// Extracted from the original OpenTK-only renderer so both the GL and Vulkan
-// backends share one source of truth for the panel layout.
+// Holds the single source of truth for the panel layout, independent of the
+// runtime that submits the ImGui draw data.
 public sealed class DebugOverlayUi
 {
     // Per-row sparkline opt-in. UI state, not diagnostics-system state —
@@ -108,6 +108,12 @@ public sealed class DebugOverlayUi
             if (ImGui.BeginTabItem("Pipeline"))
             {
                 DrawPipelineTab(debugSystem);
+                ImGui.EndTabItem();
+            }
+
+            if (debugSystem.LatestResourceSnapshot is { } resources && ImGui.BeginTabItem("Resources"))
+            {
+                DrawResources(resources);
                 ImGui.EndTabItem();
             }
 
@@ -287,6 +293,221 @@ public sealed class DebugOverlayUi
     // True if any registered contributor wants a custom panel. Cheap
     // walk; used only to gate showing the "Custom" tab so demos without
     // any IDebugUi producers don't see an empty tab.
+    // Resources tab — the live GPU resource inventory from DebugSystem
+    // .LatestResourceSnapshot (fed by the runtime each frame). Read-only:
+    // textures (with streaming residency + footprint), buffers, pipelines,
+    // shader programs, render surfaces.
+    private static void DrawResources(ResourceRegistrySnapshot r)
+    {
+        long textureBytes = 0;
+        var pending = 0;
+        var streaming = 0;
+        for (var i = 0; i < r.Textures.Count; i++)
+        {
+            textureBytes += r.Textures[i].ByteSize;
+            switch (r.Textures[i].Residency)
+            {
+                case TextureResidency.Pending: pending++; break;
+                case TextureResidency.Streaming: streaming++; break;
+            }
+        }
+        long bufferBytes = 0;
+        for (var i = 0; i < r.VertexBuffers.Count; i++) bufferBytes += r.VertexBuffers[i].ByteSize;
+        for (var i = 0; i < r.IndexBuffers.Count; i++) bufferBytes += r.IndexBuffers[i].ByteSize;
+
+        ImGui.TextUnformatted(
+            $"{r.Textures.Count} textures ({FormatBytes(textureBytes)})  ·  " +
+            $"{r.VertexBuffers.Count + r.IndexBuffers.Count} buffers ({FormatBytes(bufferBytes)})  ·  " +
+            $"{r.Pipelines.Count} pipelines  ·  {r.ShaderPrograms.Count} shaders  ·  {r.RenderSurfaces.Count} surfaces");
+
+        // Streaming progress (B4): how much of the texture set is still filling
+        // in, derived from per-texture residency. Live upload queue depth +
+        // drain-ms surface separately as gauges in the Stats tab.
+        if (pending > 0 || streaming > 0)
+        {
+            ImGui.TextColored(new Vector4(1f, 0.8f, 0.2f, 1f),
+                $"streaming: {pending} pending, {streaming} in flight, {r.Textures.Count - pending - streaming} resident");
+        }
+        else
+        {
+            ImGui.TextDisabled("streaming: all textures resident");
+        }
+        ImGui.Separator();
+
+        DrawResourceTextures(r.Textures);
+        DrawResourceBuffers(r.VertexBuffers, r.IndexBuffers);
+        DrawResourcePipelines(r.Pipelines, r.ShaderPrograms);
+        DrawResourceSurfaces(r.RenderSurfaces);
+    }
+
+    private static void DrawResourceTextures(IReadOnlyList<TextureEntry> textures)
+    {
+        if (!ImGui.CollapsingHeader($"Textures ({textures.Count})", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            return;
+        }
+        if (textures.Count == 0)
+        {
+            ImGui.TextDisabled("none");
+            return;
+        }
+        if (!ImGui.BeginTable("res-textures", 6,
+            ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.ScrollY,
+            new Vector2(0f, 220f)))
+        {
+            return;
+        }
+        ImGui.TableSetupColumn("Name");
+        ImGui.TableSetupColumn("Size");
+        ImGui.TableSetupColumn("Mips");
+        ImGui.TableSetupColumn("Format");
+        ImGui.TableSetupColumn("Kind");
+        ImGui.TableSetupColumn("Footprint");
+        ImGui.TableSetupScrollFreeze(0, 1);
+        ImGui.TableHeadersRow();
+        foreach (var t in textures)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0); DrawResidencyName(t);
+            ImGui.TableSetColumnIndex(1); ImGui.TextUnformatted($"{t.Width}×{t.Height}");
+            ImGui.TableSetColumnIndex(2); ImGui.TextUnformatted(t.MipCount.ToString());
+            ImGui.TableSetColumnIndex(3); ImGui.TextUnformatted(t.Format.ToString());
+            ImGui.TableSetColumnIndex(4); ImGui.TextUnformatted(KindLabel(t.Kind));
+            ImGui.TableSetColumnIndex(5); ImGui.TextUnformatted(t.ByteSize > 0 ? FormatBytes(t.ByteSize) : "—");
+        }
+        ImGui.EndTable();
+    }
+
+    // Texture name coloured + tagged by streaming residency: red = Pending (no
+    // mips yet), amber = Streaming (finer mips still landing), default = Resident.
+    private static void DrawResidencyName(TextureEntry t)
+    {
+        switch (t.Residency)
+        {
+            case TextureResidency.Pending:
+                ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), $"{t.Name}  (pending)");
+                break;
+            case TextureResidency.Streaming:
+                ImGui.TextColored(new Vector4(1f, 0.8f, 0.2f, 1f), $"{t.Name}  (streaming)");
+                break;
+            default:
+                ImGui.TextUnformatted(t.Name);
+                break;
+        }
+    }
+
+    private static string KindLabel(TextureKind kind) => kind switch
+    {
+        TextureKind.RenderSurfaceColor => "rt-color",
+        TextureKind.RenderSurfaceDepth => "rt-depth",
+        _ => "user",
+    };
+
+    private static void DrawResourceBuffers(IReadOnlyList<VertexBufferEntry> vbs, IReadOnlyList<IndexBufferEntry> ibs)
+    {
+        var total = vbs.Count + ibs.Count;
+        if (!ImGui.CollapsingHeader($"Buffers ({total})"))
+        {
+            return;
+        }
+        if (total == 0)
+        {
+            ImGui.TextDisabled("none");
+            return;
+        }
+        if (!ImGui.BeginTable("res-buffers", 3,
+            ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
+        {
+            return;
+        }
+        ImGui.TableSetupColumn("Name");
+        ImGui.TableSetupColumn("Type");
+        ImGui.TableSetupColumn("Size");
+        ImGui.TableHeadersRow();
+        foreach (var b in vbs)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(b.Name);
+            ImGui.TableSetColumnIndex(1); ImGui.TextUnformatted("vertex");
+            ImGui.TableSetColumnIndex(2); ImGui.TextUnformatted(FormatBytes(b.ByteSize));
+        }
+        foreach (var b in ibs)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(b.Name);
+            ImGui.TableSetColumnIndex(1); ImGui.TextUnformatted("index");
+            ImGui.TableSetColumnIndex(2); ImGui.TextUnformatted(FormatBytes(b.ByteSize));
+        }
+        ImGui.EndTable();
+    }
+
+    private static void DrawResourcePipelines(IReadOnlyList<PipelineEntry> pipelines, IReadOnlyList<ShaderProgramEntry> shaders)
+    {
+        if (!ImGui.CollapsingHeader($"Pipelines ({pipelines.Count})  ·  Shaders ({shaders.Count})"))
+        {
+            return;
+        }
+        if (pipelines.Count > 0 && ImGui.BeginTable("res-pipelines", 3,
+            ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
+        {
+            ImGui.TableSetupColumn("Name");
+            ImGui.TableSetupColumn("Shader");
+            ImGui.TableSetupColumn("Stage");
+            ImGui.TableHeadersRow();
+            foreach (var p in pipelines)
+            {
+                ImGui.TableNextRow();
+                ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(p.Name);
+                ImGui.TableSetColumnIndex(1); ImGui.TextUnformatted($"#{p.ShaderProgram.Id}");
+                ImGui.TableSetColumnIndex(2); ImGui.TextUnformatted(p.IsCompute ? "compute" : "graphics");
+            }
+            ImGui.EndTable();
+        }
+        foreach (var s in shaders)
+        {
+            ImGui.BulletText(s.Name);
+        }
+    }
+
+    private static void DrawResourceSurfaces(IReadOnlyList<RenderSurfaceEntry> surfaces)
+    {
+        if (surfaces.Count == 0)
+        {
+            return;
+        }
+        if (!ImGui.CollapsingHeader($"Render surfaces ({surfaces.Count})"))
+        {
+            return;
+        }
+        if (!ImGui.BeginTable("res-surfaces", 4,
+            ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
+        {
+            return;
+        }
+        ImGui.TableSetupColumn("Name");
+        ImGui.TableSetupColumn("Size");
+        ImGui.TableSetupColumn("Color");
+        ImGui.TableSetupColumn("Depth");
+        ImGui.TableHeadersRow();
+        foreach (var s in surfaces)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(s.Name);
+            ImGui.TableSetColumnIndex(1); ImGui.TextUnformatted($"{s.Width}×{s.Height}");
+            ImGui.TableSetColumnIndex(2); ImGui.TextUnformatted(s.ColorAttachments.Count.ToString());
+            ImGui.TableSetColumnIndex(3); ImGui.TextUnformatted(s.DepthTexture is not null ? "yes" : "—");
+        }
+        ImGui.EndTable();
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes <= 0) return "0 B";
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.0} KB";
+        return $"{bytes / (1024.0 * 1024.0):0.0} MB";
+    }
+
     private static bool HasCustomUi(DebugSystem debugSystem)
     {
         var contributors = debugSystem.Contributors;

@@ -2,11 +2,10 @@ using Silk.NET.Core.Contexts;
 
 namespace Blix.Graphics.Vulkan;
 
-// Vulkan backend, sibling to Blix.Graphics.OpenGL.OpenGLGraphicsDevice. On
-// macOS this runs through MoltenVK (Vulkan-to-Metal translation); on Linux
-// and Windows it talks to a native Vulkan driver. The IGraphicsDevice
-// surface is intentionally the same as the GL backend — game code shouldn't
-// care which one is under it.
+// The graphics backend — the sole IGraphicsDevice implementation. On macOS
+// this runs through MoltenVK (Vulkan-to-Metal translation); on Linux and
+// Windows it talks to a native Vulkan driver. The IGraphicsDevice surface is
+// kept backend-neutral so game code doesn't depend on Vulkan specifics.
 //
 // Implementation lives across partial classes:
 // - VulkanGraphicsDevice.cs (this file) — public lifecycle (ctor / Dispose),
@@ -53,23 +52,82 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
         MarkSwapchainOutOfDate();
     }
 
+    // Project the backend's live resource tables into a backend-neutral
+    // snapshot for the diagnostics overlay. A point-in-time copy — safe for the
+    // debug surface to read without touching Vulkan handles. Allocates, so it's
+    // a diagnostics call, not a per-frame path (hot lookups use TryGetTextureSize
+    // and the internal Get* accessors).
     public ResourceRegistrySnapshot SnapshotResources()
     {
-        // Empty registry until resource creation paths are filled in.
+        // Render-surface colour attachments live in textureTable too (so present
+        // passes can sample them); classify by membership so the snapshot
+        // distinguishes user uploads from render targets.
+        var surfaceColorIds = new HashSet<int>();
+        foreach (var surf in renderSurfaceTable.Values)
+        {
+            foreach (var c in surf.ColorAttachments)
+            {
+                surfaceColorIds.Add(c.Id);
+            }
+        }
+
+        var textures = new List<TextureEntry>(textureTable.Count);
+        foreach (var (id, e) in textureTable)
+        {
+            var kind = surfaceColorIds.Contains(id) ? TextureKind.RenderSurfaceColor : TextureKind.UserUploaded;
+            // Resident only when every distinct level has landed — a bitmask, so
+            // repeated uploads of one level can't fake a full chain.
+            var allMips = e.MipCount >= 64 ? ulong.MaxValue : (1UL << e.MipCount) - 1UL;
+            var residency = !e.Streamable ? TextureResidency.Resident
+                : e.UploadedMips == 0 ? TextureResidency.Pending
+                : (e.UploadedMips & allMips) == allMips ? TextureResidency.Resident
+                : TextureResidency.Streaming;
+            textures.Add(new TextureEntry(
+                new TextureHandle(id), e.Name, e.Width, e.Height, e.MipCount, e.EngineFormat, kind, e.ByteSize, residency));
+        }
+
+        var vertexBuffers = new List<VertexBufferEntry>(vertexBufferTable.Count);
+        foreach (var (id, e) in vertexBufferTable)
+        {
+            vertexBuffers.Add(new VertexBufferEntry(new VertexBufferHandle(id), e.Name, (long)e.Size));
+        }
+
+        var indexBuffers = new List<IndexBufferEntry>(indexBufferTable.Count);
+        foreach (var (id, e) in indexBufferTable)
+        {
+            indexBuffers.Add(new IndexBufferEntry(new IndexBufferHandle(id), e.Name, (long)e.Size));
+        }
+
+        var shaderPrograms = new List<ShaderProgramEntry>(shaderProgramTable.Count);
+        foreach (var (id, e) in shaderProgramTable)
+        {
+            shaderPrograms.Add(new ShaderProgramEntry(new ShaderProgramHandle(id), e.Name));
+        }
+
+        var pipelines = new List<PipelineEntry>(pipelineTable.Count);
+        foreach (var (id, e) in pipelineTable)
+        {
+            pipelines.Add(new PipelineEntry(new PipelineHandle(id), e.Name, e.ShaderProgram, e.IsCompute));
+        }
+
+        var renderSurfaces = new List<RenderSurfaceEntry>(renderSurfaceTable.Count);
+        foreach (var (id, e) in renderSurfaceTable)
+        {
+            // Render-surface depth is a renderbuffer (not sampleable, not in
+            // textureTable), so DepthTexture stays null until a sampleable
+            // depth path exists.
+            renderSurfaces.Add(new RenderSurfaceEntry(
+                new RenderSurfaceHandle(id), e.Name, (int)e.Width, (int)e.Height, e.ColorAttachments, DepthTexture: null));
+        }
+
         return new ResourceRegistrySnapshot(
-            vertexBufferEntries: Array.Empty<VertexBufferEntry>(),
-            indexBufferEntries: Array.Empty<IndexBufferEntry>(),
-            textureEntries: Array.Empty<TextureEntry>(),
-            shaderProgramEntries: Array.Empty<ShaderProgramEntry>(),
-            pipelineEntries: Array.Empty<PipelineEntry>(),
-            renderSurfaceEntries: Array.Empty<RenderSurfaceEntry>());
+            vertexBuffers, indexBuffers, textures, shaderPrograms, pipelines, renderSurfaces);
     }
 
-    // Execute the per-frame command list. Symmetric with
-    // OpenGLGraphicsDevice.Execute: walks each pass, builds a FrameDebugPacket
-    // for the runtime's diagnostics adapter, and (eventually) records +
-    // submits Vk command buffers. Until the swapchain integration lands the
-    // body is metadata-only — it produces a valid FrameDebugPacket so the
+    // Execute the per-frame command list: walks each pass, builds a
+    // FrameDebugPacket for the runtime's diagnostics adapter, and (eventually)
+    // records + submits Vk command buffers. Until the swapchain integration
+    // lands the body is metadata-only — it produces a valid FrameDebugPacket so the
     // diagnostic surface stays observable, but no GPU work is issued.
     public FrameDebugPacket Execute(RenderCommandList commandList)
     {
@@ -200,8 +258,7 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
         $"{m.M41:0.##} {m.M42:0.##} {m.M43:0.##} {m.M44:0.##}";
 
     // Drains GPU timings that the device has finished resolving since the
-    // last call. Symmetric with OpenGLGraphicsDevice.ConsumeAvailableGpuTimings.
-    // Empty until VkQueryPool wiring lands.
+    // last call. Empty until VkQueryPool wiring lands.
     public IReadOnlyList<VkGpuPassTiming> ConsumeAvailableGpuTimings()
     {
         if (pendingGpuTimings.Count == 0)

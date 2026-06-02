@@ -13,8 +13,7 @@ public sealed record FrameDebugPass(
     bool ClearedColor,
     bool ClearedDepth,
     IReadOnlyList<FrameDebugDraw> Draws,
-    // Human-readable name of the render target (e.g. "swapchain"). Optional so
-    // the GL backend, which doesn't populate it, keeps compiling.
+    // Human-readable name of the render target (e.g. "swapchain"). Optional.
     string TargetName = "");
 
 public sealed record FrameDebugDraw(

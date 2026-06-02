@@ -7,9 +7,9 @@ namespace Blix.Graphics;
 // `cross(N, T.xyz) * T.w`. A tangent of (0, 0, 0, 0) signals "no tangent available";
 // shaders fall back to dFdx/dFdy synthesis (or just zero, depending on caller).
 //
-// Stride grows from 16 floats (Skin4 baseline) to 20 floats. Backwards-compatible
-// at the OpenGL level: shaders that don't declare an `aTangent` attribute simply
-// ignore it; the per-attribute strides come from the layout, not the vertex shader.
+// Stride grows from 16 floats (Skin4 baseline) to 20 floats. Backwards-compatible:
+// shaders that don't declare an `aTangent` attribute simply ignore it; the
+// per-attribute strides come from the layout, not the vertex shader.
 public readonly record struct VertexPosition3NormalTextureSkin4Tangent(
     GraphicsVector3 Position,
     GraphicsVector3 Normal,

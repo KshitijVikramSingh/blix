@@ -5,9 +5,8 @@ namespace Blix.Diagnostics.Overlay;
 // Producer-side hook for custom ImGui panels. Lives in Blix.Diagnostics.Overlay
 // (not the UI-agnostic Blix.Diagnostics core) because opting in to a custom
 // panel means taking a hard reference to ImGuiNET, which this project carries.
-// Both runtime backends (OpenGL + Vulkan) render these panels through the
-// shared DebugOverlayUi, so a producer writes OnImGui once and it shows on
-// either backend.
+// The runtime renders these panels through the shared DebugOverlayUi, so a
+// producer writes OnImGui once and the overlay draws it.
 //
 // Discovery is via the contributor registry: anything registered on
 // DebugSystem that also implements IDebugUi gets OnImGui invoked once per

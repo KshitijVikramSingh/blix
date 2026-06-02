@@ -187,25 +187,24 @@ public static class GraphicsMatrices
             0.0f,         0.0f,          -(farPlane + nearPlane) / depth, 1.0f);
     }
 
-    public static Matrix4x4 CreatePerspective(
-        float verticalFieldOfView,
-        float aspectRatio,
-        float nearPlane,
-        float farPlane)
+    // Symmetric Vulkan-NDC orthographic centred on the origin: x/y map
+    // [-width/2, width/2] × [-height/2, height/2] onto [-1, 1] with +Y DOWN
+    // (top of the world slab → NDC -1, matching CreatePerspectiveVulkan's
+    // Y-flip), and view-space depth maps to [0, 1] (near → 0, far → 1) rather
+    // than GL's [-1, 1]. This is the shadow-cascade / spot-light projection:
+    // pair it with CreateLookAt to build a light's view-projection. Row-vector
+    // form (z-translation in M43); written raw to a UBO and read column-major
+    // by GLSL so `mat * v_col` == `v_row * mat`.
+    public static Matrix4x4 CreateOrthographicVulkan(float width, float height, float nearPlane, float farPlane)
     {
-        if (verticalFieldOfView <= 0.0f || verticalFieldOfView >= MathF.PI)
+        if (width <= 0.0f)
         {
-            throw new ArgumentOutOfRangeException(nameof(verticalFieldOfView), "Field of view must be between 0 and PI radians.");
+            throw new ArgumentOutOfRangeException(nameof(width), "Orthographic width must be greater than zero.");
         }
 
-        if (aspectRatio <= 0.0f)
+        if (height <= 0.0f)
         {
-            throw new ArgumentOutOfRangeException(nameof(aspectRatio), "Aspect ratio must be greater than zero.");
-        }
-
-        if (nearPlane <= 0.0f)
-        {
-            throw new ArgumentOutOfRangeException(nameof(nearPlane), "Near plane must be greater than zero.");
+            throw new ArgumentOutOfRangeException(nameof(height), "Orthographic height must be greater than zero.");
         }
 
         if (farPlane <= nearPlane)
@@ -213,27 +212,21 @@ public static class GraphicsMatrices
             throw new ArgumentOutOfRangeException(nameof(farPlane), "Far plane must be greater than the near plane.");
         }
 
-        var focalLength = 1.0f / MathF.Tan(verticalFieldOfView * 0.5f);
-        var depth = nearPlane - farPlane;
+        var fn = farPlane - nearPlane;
 
-        // Row-vector layout (F-016): perspective-divide flag (-1) lives at M34
-        // and the z-translation lives at M43. Opposite of the column-vector
-        // form this helper produced before the migration.
         return new Matrix4x4(
-            focalLength / aspectRatio, 0.0f,         0.0f,                              0.0f,
-            0.0f,                      focalLength,  0.0f,                              0.0f,
-            0.0f,                      0.0f,         (farPlane + nearPlane) / depth,    -1.0f,
-            0.0f,                      0.0f,         (2.0f * farPlane * nearPlane) / depth, 0.0f);
+            2.0f / width, 0.0f,           0.0f,                0.0f,
+            0.0f,        -2.0f / height,  0.0f,                0.0f,
+            0.0f,         0.0f,          -1.0f / fn,           0.0f,
+            0.0f,         0.0f,          -nearPlane / fn,      1.0f);
     }
 
     // Vulkan-NDC perspective: +Y points DOWN in clip space (the projection
     // flips Y so screen Y matches framebuffer Y-down convention) and depth
-    // maps to [0, 1] instead of OpenGL's [-1, 1]. Built directly in the
-    // form the Vulkan backend's UBO-write path expects — System.Numerics
-    // row-major bytes, no transpose at upload time. Math (row, col) lives
-    // at M[col+1, row+1] in .NET field naming, which is the inverse of
-    // CreatePerspective above (column-vector form, transposed by the GL
-    // backend on upload). See vulkan-friction.md F-008.
+    // maps to [0, 1] (the Vulkan/D3D convention, not OpenGL's [-1, 1]). Built
+    // directly in the form the Vulkan backend's UBO-write path expects —
+    // System.Numerics row-major bytes, no transpose at upload time. Math
+    // (row, col) lives at M[col+1, row+1] in .NET field naming.
     //
     // Returns the camera's view-space → Vulkan-clip transform applied as
     // `clip_row = view_row * proj` in .NET (row-vector convention).

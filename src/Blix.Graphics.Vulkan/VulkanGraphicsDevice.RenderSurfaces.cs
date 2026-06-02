@@ -89,6 +89,8 @@ public sealed partial class VulkanGraphicsDevice
                 Height = (int)height,
                 MipCount = 1,
                 Format = format,
+                EngineFormat = attachment.Format,
+                ByteSize = attachment.Format.TextureByteCount((int)width, (int)height, 1),
                 Name = $"{description.Name}.color[{i}].tex",
             };
             var id = nextResourceId++;

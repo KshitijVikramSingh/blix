@@ -18,9 +18,8 @@ using SilkMouseButton = Silk.NET.Input.MouseButton;
 
 namespace Blix.Runtime.Silk;
 
-// Sibling to Blix.Runtime.OpenTK.Window. Owns a Silk.NET window in
-// "Vulkan API" mode, pumps the IGameLoop, and wires the diagnostics
-// surface so it stays identical across backends.
+// The Vulkan window/runtime adapter. Owns a Silk.NET window in
+// "Vulkan API" mode, pumps the IGameLoop, and wires the diagnostics surface.
 //
 // Scope today: window opens, loop ticks, IDebuggable producers run,
 // console + JSON dump sinks fire. Vulkan instance/surface/swapchain
@@ -126,8 +125,8 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             // line-pipeline draw on the OverlayRenderPass. Only allocate when
             // diagnostics are live (no IDebuggable game loop → no overlay).
             lineDrawer = new VkLineDrawer(graphicsDevice);
-            // VkImGuiRenderer draws the on-screen diagnostics panels (same
-            // DebugOverlayUi the GL backend uses). Toggle with the ` key.
+            // VkImGuiRenderer draws the on-screen diagnostics panels (the
+            // shared DebugOverlayUi). Toggle with the ` key.
             imguiRenderer = new VkImGuiRenderer(graphicsDevice);
         }
 
@@ -223,9 +222,17 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             }
         }
 
-        if (diagnostics is { } sink)
+        // Resource inventory: snapshot once and share with the overlay's
+        // Resources tab and the runtime diagnostics sink. SnapshotResources
+        // walks every table + allocates, so only do it when something will
+        // read it — the overlay is visible, or a sink is attached. (The
+        // overlay reads it via DebugSystem.LatestResourceSnapshot.)
+        var overlayWantsResources = debugSystem?.State.ShowOverlay == true;
+        if (overlayWantsResources || diagnostics is not null)
         {
-            sink.OnFrameDebug(packet, graphicsDevice.SnapshotResources());
+            var resources = graphicsDevice.SnapshotResources();
+            if (overlayWantsResources) debugSystem!.SetResourceSnapshot(resources);
+            diagnostics?.OnFrameDebug(packet, resources);
         }
 
         // Present + buffer-swap lands here once swapchain integration is in

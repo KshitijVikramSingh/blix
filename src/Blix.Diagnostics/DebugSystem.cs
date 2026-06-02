@@ -82,6 +82,14 @@ public sealed class DebugSystem
 
     public void SetFramePacket(FrameDebugPacket packet) => LatestFramePacket = packet;
 
+    // Most recent resource inventory (textures, buffers, pipelines, shader
+    // programs, render surfaces). Set by the runtime each frame; read by the
+    // overlay's Resources tab. Like the packet, a point-in-time copy safe to
+    // read off the live tables.
+    public ResourceRegistrySnapshot? LatestResourceSnapshot { get; private set; }
+
+    public void SetResourceSnapshot(ResourceRegistrySnapshot snapshot) => LatestResourceSnapshot = snapshot;
+
     // When non-null, sinks should render this frame read-only instead of
     // Current. Held independently of the ring so it survives overwrite.
     public DebugFrame? FrozenFrame { get; private set; }
@@ -113,8 +121,8 @@ public sealed class DebugSystem
     // Register a contributor for the life of the system. Each frame:
     //   - if it implements IDebuggable, Run() calls Debug() inside an
     //     auto-scope of its DebugName;
-    //   - if it implements a UI-layer interface (IDebugUi in the OpenTK
-    //     runtime), the runtime discovers it via Contributors.
+    //   - if it implements a UI-layer interface (IDebugUi in the overlay
+    //     layer), the runtime discovers it via Contributors.
     //
     // Re-registering the same instance is a no-op rather than a duplicate;
     // we'd otherwise produce duplicate scopes on the same frame.

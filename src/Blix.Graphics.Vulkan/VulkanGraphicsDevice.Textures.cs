@@ -26,8 +26,41 @@ public sealed partial class VulkanGraphicsDevice
         public int Height;
         public int MipCount;
         public Format Format;
+        // Engine-side format + total GPU footprint, carried for the diagnostics
+        // snapshot (SnapshotResources). ByteSize is the full mip chain × layers
+        // (cube = ×6, 3D = ×depth); 0 for externally-owned images we don't size.
+        public TextureFormat EngineFormat;
+        public long ByteSize;
+        // Streaming bookkeeping for the diagnostics snapshot. Streamable is set
+        // only by AllocateTexture2DMips (the storage-then-stream path); every
+        // other create path uploads in full, so the default (false) reads as
+        // Resident. UploadedMips is a bitmask of which levels have landed (one
+        // bit per level) — a set, not a count, so a level uploaded twice can't
+        // falsely advance residency to Resident.
+        public bool Streamable;
+        public ulong UploadedMips;
         public string Name = string.Empty;
     }
+
+    // Inverse of MapTextureFormat. Render-graph attachments register through
+    // RegisterExternalTexture with only a raw Vulkan Format; this recovers the
+    // engine format for the diagnostics snapshot. Depth + anything unrecognised
+    // is labelled conservatively — this output only feeds the diagnostic view.
+    internal static TextureFormat MapVkFormatToEngine(Format f) => f switch
+    {
+        Format.R8G8B8A8Unorm => TextureFormat.Rgba8,
+        Format.R8G8B8A8Srgb => TextureFormat.Rgba8Srgb,
+        Format.R8Unorm => TextureFormat.R8,
+        Format.R16G16B16A16Sfloat => TextureFormat.Rgba16F,
+        Format.B10G11R11UfloatPack32 => TextureFormat.R11G11B10F,
+        Format.BC7SrgbBlock => TextureFormat.Bc7Srgb,
+        Format.BC7UnormBlock => TextureFormat.Bc7Unorm,
+        Format.BC5UnormBlock => TextureFormat.Bc5Unorm,
+        Format.BC6HUfloatBlock => TextureFormat.Bc6hUf16,
+        Format.D32Sfloat or Format.D24UnormS8Uint or Format.D16Unorm
+            or Format.X8D24UnormPack32 or Format.D32SfloatS8Uint => TextureFormat.Depth24,
+        _ => TextureFormat.Rgba8,
+    };
 
     // --- Public API --------------------------------------------------------
 
@@ -165,6 +198,8 @@ public sealed partial class VulkanGraphicsDevice
             Height = description.Height,
             MipCount = mipCount,
             Format = vkFormat,
+            EngineFormat = description.Format,
+            ByteSize = description.Format.TextureByteCount(description.Width, description.Height, mipCount),
             Name = label,
         };
         var id = nextResourceId++;
@@ -243,18 +278,24 @@ public sealed partial class VulkanGraphicsDevice
             Height = description.Height,
             MipCount = mipCount,
             Format = vkFormat,
+            EngineFormat = description.Format,
+            ByteSize = description.Format.TextureByteCount(description.Width, description.Height, mipCount),
             Name = label,
         };
+        entry.Streamable = true; // starts Pending; UploadTextureMip fills the chain over frames
         var id = nextResourceId++;
         textureTable[id] = entry;
         return new TextureHandle(id);
     }
 
-    // Upload one mip level of a texture created by AllocateTexture2DMips. Flips
-    // the whole image to TransferDst, copies this level, flips back to
-    // ShaderReadOnly. Safe to do per-mip because the texture isn't sampled until
-    // its chain is complete (the upload runs on a single-time command that the
-    // device waits on, so it never overlaps a sampling frame on this image).
+    // Upload one mip level into a texture from AllocateTexture2DMips: flip the
+    // whole image to TransferDst, copy this level, flip back to ShaderReadOnly.
+    // The copy runs on a single-time command the device waits on, so it never
+    // races a sampling frame on this image. Levels arrive smallest-first and the
+    // handle is bindable from the moment the smallest one lands; callers gate
+    // sampling per their own streaming policy (the streamed-asset path binds the
+    // stable handle early and treats finer levels as progressive refinement). A
+    // level's contents are undefined until that level has been uploaded.
     public unsafe void UploadTextureMip(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes)
     {
         if (mipLevel < 0) throw new ArgumentOutOfRangeException(nameof(mipLevel));
@@ -283,6 +324,12 @@ public sealed partial class VulkanGraphicsDevice
         TransitionImageLayout(cmd, e.Image, e.MipCount, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal);
         EndSingleTimeCommands(cmd);
         DestroyVkBufferEntry(staging);
+
+        // Mark this level resident only now that the copy has actually completed
+        // — a failure before here leaves residency unchanged. OR is idempotent,
+        // so re-uploading a level doesn't double-count. (mipLevel < MipCount, and
+        // a full chain is well under 64 levels, so the shift never overflows.)
+        e.UploadedMips |= 1UL << mipLevel;
     }
 
     // Uploads a sampleable cubemap (6 faces, optional mip chain) from CPU
@@ -295,11 +342,11 @@ public sealed partial class VulkanGraphicsDevice
     {
         var vkFormat = MapTextureFormat(format);
 
-        // Validate total size = Σ over 6 faces of Σ over mips of mipByteCount.
-        long expected = 0;
-        for (var f = 0; f < 6; f++)
-            for (var m = 0; m < mipCount; m++)
-                expected += format.MipByteCount(faceSize >> m, faceSize >> m);
+        // Validate total size = 6 faces × the mip-chain footprint. Use the shared
+        // TextureByteCount (it clamps each level's dimensions to ≥1) so this agrees
+        // with the ByteSize recorded on the entry; a manual faceSize>>m sum would
+        // diverge once a level hits zero dimensions on an over-long mipCount.
+        var expected = format.TextureByteCount(faceSize, faceSize, mipCount) * 6;
         if (data.Length != expected)
         {
             throw new ArgumentException(
@@ -404,6 +451,8 @@ public sealed partial class VulkanGraphicsDevice
             Height = faceSize,
             MipCount = mipCount,
             Format = vkFormat,
+            EngineFormat = format,
+            ByteSize = format.TextureByteCount(faceSize, faceSize, mipCount) * 6,
             Name = name,
         };
         var cid = nextResourceId++;
@@ -508,6 +557,8 @@ public sealed partial class VulkanGraphicsDevice
             Height = height,
             MipCount = 1,
             Format = vkFormat,
+            EngineFormat = format,
+            ByteSize = format.TextureByteCount(width, height, 1),
             Name = name ?? "storage2d",
         };
         var id = nextResourceId++;
@@ -634,6 +685,8 @@ public sealed partial class VulkanGraphicsDevice
             Height = height,
             MipCount = 1,
             Format = vkFormat,
+            EngineFormat = format,
+            ByteSize = format.TextureByteCount(width, height, 1) * depth,
             Name = name,
         };
         var id = nextResourceId++;
@@ -649,10 +702,11 @@ public sealed partial class VulkanGraphicsDevice
 
     internal VkTextureEntry GetTexture(TextureHandle h) => textureTable[h.Id];
 
-    // Pixel dimensions of a registered texture. Used by SpriteBatch to map a
-    // pixel-space source rect to UVs without the full SnapshotResources walk
-    // (which doesn't surface texture entries yet). Returns false for unknown
-    // or destroyed handles.
+    // Pixel dimensions of a registered texture. The cheap hot-path lookup
+    // SpriteBatch uses to map a pixel-space source rect to UVs per draw —
+    // a direct table hit, versus allocating a full SnapshotResources walk
+    // (which now surfaces texture entries, but is for diagnostics, not the
+    // per-frame path). Returns false for unknown or destroyed handles.
     public bool TryGetTextureSize(TextureHandle handle, out int width, out int height)
     {
         if (textureTable.TryGetValue(handle.Id, out var entry))
@@ -689,6 +743,8 @@ public sealed partial class VulkanGraphicsDevice
             Height = height,
             MipCount = mipCount,
             Format = format,
+            EngineFormat = MapVkFormatToEngine(format),
+            ByteSize = 0, // externally-owned image; footprint accounted by the owner
             Name = name,
         };
         // Note: the destroy path in DestroyVkTextureEntry frees Image/Memory/View
@@ -845,6 +901,8 @@ public sealed partial class VulkanGraphicsDevice
             Height = height,
             MipCount = mipCount,
             Format = vkFormat,
+            EngineFormat = format,
+            ByteSize = format.TextureByteCount(width, height, mipCount),
             Name = name,
         };
     }
