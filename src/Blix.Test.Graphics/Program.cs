@@ -1535,25 +1535,23 @@ static ShaderInterface MinimalShader() => new(new[]
 }
 
 {
-    // V.4 — InstancedBatch.Interface declares a valid set-3 SSBO + 64B vertex push.
-    var iface = Blix.Render.InstancedBatch.Interface;
-    t.ExpectTrue("V.4 InstancedBatch.Interface validates", TryValidate(iface) is null);
+    // V.4 — InstanceBuffer.Slot is the set-3 per-instance SSBO contract (the data
+    // layer). Shaders compose it; the engine ships no default shader/material.
+    var slot = Blix.Render.InstanceBuffer.Slot;
+    t.ExpectClose("V.4 InstanceBuffer.Slot is set 3", slot.Set, 3);
+    t.ExpectClose("V.4 InstanceBuffer.Slot is binding 0", slot.Binding, 0);
+    t.ExpectTrue("V.4 slot is a StorageBuffer", slot.Type == ShaderResourceType.StorageBuffer);
+    t.ExpectTrue("V.4 slot is Vertex-stage", slot.Stages == ShaderStages.Vertex);
+    t.ExpectTrue("V.4 slot carries a BlockLayout", slot.BlockLayout is not null);
+    t.ExpectClose("V.4 SSBO TotalSize == MaxInstances * Stride",
+        slot.BlockLayout!.TotalSize, Blix.Render.InstanceBuffer.MaxInstances * Blix.Render.InstanceBuffer.Stride);
+    t.ExpectClose("V.4 InstanceBuffer.Stride == 80", Blix.Render.InstanceBuffer.Stride, 80);
 
-    DescriptorSetSlot? ssbo = null;
-    foreach (var s in iface.Slots)
-    {
-        if (s.Set == 3 && s.Binding == 0) { ssbo = s; break; }
-    }
-    t.ExpectTrue("V.4 has slot at set 3 / binding 0", ssbo is not null);
-    t.ExpectTrue("V.4 set-3 slot is a StorageBuffer", ssbo!.Type == ShaderResourceType.StorageBuffer);
-    t.ExpectTrue("V.4 set-3 slot is Vertex-stage", ssbo.Stages == ShaderStages.Vertex);
-    t.ExpectTrue("V.4 set-3 slot carries a BlockLayout", ssbo.BlockLayout is not null);
-    t.ExpectClose("V.4 SSBO TotalSize == MaxInstances * 80",
-        ssbo.BlockLayout!.TotalSize, Blix.Render.InstancedBatch.MaxInstances * 80);
-
-    t.ExpectClose("V.4 one push-constant range", iface.PushConstants.Count, 1);
-    t.ExpectClose("V.4 default push range is 64 bytes (mat4 viewProj)", iface.PushConstants[0].Size, 64);
-    t.ExpectTrue("V.4 push range is Vertex-stage", iface.PushConstants[0].Stages == ShaderStages.Vertex);
+    // A shader composing the slot + a push range must still validate.
+    var composed = new ShaderInterface(
+        new[] { slot },
+        new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+    t.ExpectTrue("V.4 composed interface validates", TryValidate(composed) is null);
 }
 
 t.PrintSummary();

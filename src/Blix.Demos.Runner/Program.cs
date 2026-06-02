@@ -131,19 +131,33 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         var cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
             new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)));
 
-        // The runner supplies its own lit+fog instanced shader (world.vert/frag).
-        // It declares InstancedBatch.InstanceSlot at set 3 (the per-instance SSBO
-        // contract) plus a 112-byte push the runner packs each frame. Fog lives
-        // here, in the runner's material — not in the generic InstancedBatch.
+        // The runner supplies its own lit+fog instanced shader (world.vert/frag) +
+        // pipeline; the engine's instancing layers only provide the per-instance
+        // SSBO (InstanceBuffer) and the staging/draw (InstancedBatch). Fog lives
+        // here, in the runner's material. The shader declares InstanceBuffer.Slot at
+        // set 3 plus a 112-byte push the runner packs each frame.
         var worldInterface = new ShaderInterface(
-            Slots: new[] { InstancedBatch.InstanceSlot },
+            Slots: new[] { InstanceBuffer.Slot },
             PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 112) });
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         worldShader = vk.CreateShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "world.vert.spv")),
             File.ReadAllBytes(Path.Combine(shaderDir, "world.frag.spv")),
             worldInterface, "runner.world");
-        world = new InstancedBatch(vk, cube, worldShader, pushConstantBytes: 112);
+        // Pipeline consumes position + normal (stride matched to the cube vertex).
+        var meshLayout = new VertexLayout(
+            Stride: VertexPosition3NormalTexture.Layout.Stride,
+            Attributes: new[]
+            {
+                new VertexAttribute(0, VertexAttributeFormat.Float3, 0),
+                new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
+            });
+        var worldPipeline = vk.CreatePipeline(
+            new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
+                DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled }),
+            "runner.world");
+        var instances = new InstanceBuffer(vk, worldShader, "runner.instances");
+        world = new InstancedBatch(cube, worldPipeline, instances);
 
         physics = new PhysicsHost3D { Target = player, Gravity = new Vector3(0f, -55f, 0f), GravityScale = 1f };
         player.Position = new Vector3(LaneX[laneIndex], 0f, 0f);

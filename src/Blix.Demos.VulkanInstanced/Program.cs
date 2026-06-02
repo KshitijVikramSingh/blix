@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Blix;
 using Blix.Core;
 using Blix.Geometry;
@@ -47,7 +48,9 @@ internal sealed class InstancedLoop : IGameLoop, IInputHandler
     private readonly int exitAfterFrames; // 0 = stay open until Esc/close
     private VulkanGraphicsDevice vk = null!;
     private IRenderHost host = null!;
+    private InstanceBuffer instanceBuffer = null!;
     private InstancedBatch batch = null!;
+    private readonly byte[] pushBytes = new byte[64];   // mat4 view-projection
     private readonly InstanceData[] instances = new InstanceData[InstanceCount];
 
     private Matrix4x4 viewProj;
@@ -65,7 +68,31 @@ internal sealed class InstancedLoop : IGameLoop, IInputHandler
         var ib = vk.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
         var cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
             new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)));
-        batch = new InstancedBatch(vk, cube);
+
+        // Pipeline consumes only position + normal (stride matched to the cube's
+        // VertexPosition3NormalTexture so it reads correctly without an
+        // unconsumed-uv validation warning).
+        var meshLayout = new VertexLayout(
+            Stride: VertexPosition3NormalTexture.Layout.Stride,
+            Attributes: new[]
+            {
+                new VertexAttribute(0, VertexAttributeFormat.Float3, 0),
+                new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
+            });
+        var iface = new ShaderInterface(
+            Slots: new[] { InstanceBuffer.Slot },
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shader = vk.CreateShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv")),
+            File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv")),
+            iface, "cube");
+        var pipeline = vk.CreatePipeline(
+            new PipelineDescription(shader, meshLayout, PrimitiveTopology.Triangles,
+                DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled }),
+            "cube");
+        instanceBuffer = new InstanceBuffer(vk, shader, "cubes");
+        batch = new InstancedBatch(cube, pipeline, instanceBuffer);
 
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         BuildFrame(0f); // seed so frame 0 is valid even if OnUpdate hasn't run
@@ -116,7 +143,8 @@ internal sealed class InstancedLoop : IGameLoop, IInputHandler
     {
         frameCount++;
 
-        batch.Begin(viewProj);
+        MemoryMarshal.Write(pushBytes.AsSpan(0, 64), in viewProj);
+        batch.Begin(pushBytes);
         batch.SetInstances(instances);
         commandList.Pass(
             "instanced-cubes",
