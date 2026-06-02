@@ -47,7 +47,9 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     // Recycle window: objects flow toward +Z and wrap once they pass behind the
     // camera. zMax sits just behind the camera; zMin is one track-length ahead.
     private const float RecycleZ = 14.0f;
-    private const float Speed = 16.0f;                      // world units / second
+    private const float BaseSpeed = 14.0f;                  // world units / second
+    private const float MaxSpeed = 34.0f;
+    private const float SpeedRampPerMetre = 0.02f;
 
     // Tints
     private static readonly Vector4 TileA = new(0.28f, 0.30f, 0.36f, 1f);
@@ -73,6 +75,27 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     private const float JumpSpeed = 17f;
     private const float PlayerHalfHeight = 0.8f;
     private static readonly Vector4 PlayerTint = new(0.30f, 0.85f, 0.95f, 1f);
+    private static readonly Vector4 PlayerDeadTint = new(0.45f, 0.45f, 0.50f, 1f);
+
+    // --- Game state -----------------------------------------------------------
+    private float scrollDistance;     // stateful so it freezes on game-over
+    private float currentSpeed = BaseSpeed;
+    private int coins;
+    private bool gameOver;
+
+    // Coins are procedural (recomputed each frame from scrollDistance); collected
+    // ones are remembered by a lap-stable key so they stay gone for that lap but
+    // return fresh on the next lap. Obstacles need no identity (hitting one ends
+    // the run).
+    private readonly HashSet<long> collectedKeys = new();
+    private readonly record struct Collider(bool Obstacle, long CoinKey);
+    private readonly CollisionWorld3D<Collider> collision = new();
+    private readonly List<CollisionContact3D<Collider>> hits = new();
+
+    // Spawn lists rebuilt each frame and shared by render + collision so the two
+    // can never disagree about where an obstacle/coin is.
+    private readonly List<Vector3> obstacles = new();
+    private readonly List<(Vector3 Pos, long Key)> coinSpawns = new();
 
     public RunnerLoop(int exitAfterFrames) => this.exitAfterFrames = exitAfterFrames;
 
@@ -99,23 +122,74 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     {
         var dt = (float)time.Delta;
 
-        // Vertical: gravity + jump impulse integrated by PhysicsHost3D, clamped to
-        // the ground plane (y = 0). Velocity.X/Z stay 0 so only Y is physics-driven.
-        physics.FixedUpdate(time);
-        var y = player.Position.Y;
-        if (y <= 0f)
+        if (!gameOver)
         {
-            y = 0f;
-            physics.Velocity = Vector3.Zero;
-            grounded = true;
+            // Forward motion + difficulty ramp (frozen once the run ends).
+            currentSpeed = MathF.Min(MaxSpeed, BaseSpeed + scrollDistance * SpeedRampPerMetre);
+            scrollDistance += currentSpeed * dt;
+
+            // Vertical: gravity + jump impulse via PhysicsHost3D, clamped to the
+            // ground plane (y = 0). Velocity.X/Z stay 0 so only Y is physics-driven.
+            physics.FixedUpdate(time);
+            var y = player.Position.Y;
+            if (y <= 0f)
+            {
+                y = 0f;
+                physics.Velocity = Vector3.Zero;
+                grounded = true;
+            }
+
+            // Lateral: frame-rate-independent lerp toward the active lane.
+            currentX += (LaneX[laneIndex] - currentX) * (1f - MathF.Exp(-12f * dt));
+            player.Position = new Vector3(currentX, y, 0f);
         }
 
-        // Lateral: frame-rate-independent lerp toward the active lane.
-        var targetX = LaneX[laneIndex];
-        currentX += (targetX - currentX) * (1f - MathF.Exp(-12f * dt));
-
-        player.Position = new Vector3(currentX, y, 0f);
+        BuildSpawns(scrollDistance);
+        if (!gameOver) ResolveCollisions();
         UpdateCamera();
+        UpdateTitle();
+    }
+
+    // Player sphere vs every obstacle/coin via CollisionWorld3D.Overlap. Obstacle
+    // contact ends the run; coin contact scores once (the lap-stable key dedupes
+    // repeat hits while the coin sits in the overlap zone across frames).
+    private void ResolveCollisions()
+    {
+        collision.Clear();
+        foreach (var o in obstacles) collision.Add(new Collider(true, 0), new BoundingSphere(o, 0.9f));
+        foreach (var (pos, key) in coinSpawns) collision.Add(new Collider(false, key), new BoundingSphere(pos, 0.45f));
+
+        var playerSphere = new BoundingSphere(new Vector3(currentX, player.Position.Y + PlayerHalfHeight, 0f), 0.6f);
+        hits.Clear();
+        collision.Overlap(playerSphere, hits);
+
+        foreach (var hit in hits)
+        {
+            if (hit.Owner.Obstacle)
+            {
+                gameOver = true;
+                return;
+            }
+            if (collectedKeys.Add(hit.Owner.CoinKey)) coins++;
+        }
+    }
+
+    private void UpdateTitle() => host.SetTitle(gameOver
+        ? $"Blix Runner — {coins} coins — {(int)scrollDistance} m — GAME OVER (Enter to restart)"
+        : $"Blix Runner — {coins} coins — {(int)scrollDistance} m");
+
+    private void Restart()
+    {
+        scrollDistance = 0f;
+        currentSpeed = BaseSpeed;
+        coins = 0;
+        gameOver = false;
+        laneIndex = 1;
+        currentX = LaneX[laneIndex];
+        grounded = true;
+        physics.Velocity = Vector3.Zero;
+        player.Position = new Vector3(currentX, 0f, 0f);
+        collectedKeys.Clear();
     }
 
     public void OnResize(int width, int height)
@@ -138,11 +212,10 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     {
         frameCount++;
         var t = (float)time.Total;
-        var scroll = t * Speed;
 
         world.Begin(viewProj);
-        EmitTiles(scroll);
-        EmitObstaclesAndCoins(scroll, t);
+        EmitTiles(scrollDistance);
+        EmitSpawns(t);
         EmitPlayer();
 
         commandList.Pass(
@@ -170,34 +243,42 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     }
 
     // Deterministic obstacle + coin layout per segment (no RNG so the field is
-    // stable frame-to-frame as it scrolls). Coins spin via per-instance rotation.
-    private void EmitObstaclesAndCoins(float scroll, float t)
+    // stable as it scrolls). Fills the shared spawn lists used by both render and
+    // collision. Collected coins (lap-stable key) are skipped so they vanish.
+    private void BuildSpawns(float scroll)
     {
+        obstacles.Clear();
+        coinSpawns.Clear();
         for (var seg = 0; seg < SegmentCount; seg++)
         {
             var h = Hash((uint)seg);
             var segZ = seg * SegmentSpacing;
 
-            // One obstacle in a hashed lane.
             var obstacleLane = (int)(h % 3);
-            var oz = WrapZ(segZ + scroll);
-            world.Add(
-                Matrix4x4.CreateScale(1.3f, 1.3f, 1.3f) *
-                Matrix4x4.CreateTranslation(LaneX[obstacleLane], 0.65f, oz),
-                ObstacleTint);
+            obstacles.Add(new Vector3(LaneX[obstacleLane], 0.65f, WrapZ(segZ + scroll)));
 
-            // A run of coins in a different lane, spaced along the segment.
             var coinLane = (obstacleLane + 1 + (int)((h >> 3) & 1)) % 3;
             for (var c = 0; c < CoinsPerRun; c++)
             {
-                var cz = WrapZ(segZ + scroll - c * 1.4f - 2f);
-                var model =
-                    Matrix4x4.CreateScale(0.35f) *
-                    Matrix4x4.CreateRotationY(t * 3f + c) *
-                    Matrix4x4.CreateTranslation(LaneX[coinLane], 1.0f, cz);
-                world.Add(model, CoinTint);
+                var raw = segZ + scroll - c * 1.4f - 2f;
+                var lap = (int)MathF.Floor((raw - RecycleZ) / TrackLength);
+                var key = ((long)(lap + 1024)) * 1_000_000 + seg * 100 + c;
+                if (collectedKeys.Contains(key)) continue;
+                coinSpawns.Add((new Vector3(LaneX[coinLane], 1.0f, WrapZ(raw)), key));
             }
         }
+    }
+
+    // Render obstacles + coins from the spawn lists. Coins spin via their
+    // per-instance transform (a live read of the per-instance SSBO).
+    private void EmitSpawns(float t)
+    {
+        foreach (var o in obstacles)
+            world.Add(Matrix4x4.CreateScale(1.3f) * Matrix4x4.CreateTranslation(o), ObstacleTint);
+        foreach (var (pos, _) in coinSpawns)
+            world.Add(
+                Matrix4x4.CreateScale(0.35f) * Matrix4x4.CreateRotationY(t * 3f) * Matrix4x4.CreateTranslation(pos),
+                CoinTint);
     }
 
     // Player box (placeholder until the animated glTF character lands in M5).
@@ -207,7 +288,7 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         world.Add(
             Matrix4x4.CreateScale(0.8f, PlayerHalfHeight * 2f, 0.8f) *
             Matrix4x4.CreateTranslation(player.Position.X, player.Position.Y + PlayerHalfHeight, 0f),
-            PlayerTint);
+            gameOver ? PlayerDeadTint : PlayerTint);
     }
 
     // Map a raw advancing z into the recycle window [RecycleZ - TrackLength, RecycleZ).
@@ -230,6 +311,14 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
 
     public void OnKeyDown(Key key)
     {
+        if (key == Key.Escape) { host.RequestClose(); return; }
+
+        if (gameOver)
+        {
+            if (key is Key.Enter or Key.R) Restart();
+            return;
+        }
+
         switch (key)
         {
             case Key.Left or Key.A:
@@ -240,9 +329,6 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
                 break;
             case Key.Up or Key.W or Key.Space:
                 if (grounded) { physics.Velocity = new Vector3(0f, JumpSpeed, 0f); grounded = false; }
-                break;
-            case Key.Escape:
-                host.RequestClose();
                 break;
         }
     }
