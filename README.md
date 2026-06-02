@@ -8,7 +8,7 @@ The split is deliberate. The engine owns the reusable hard parts — cooked asse
 
 The stack is Vulkan-first: `Blix.Graphics` is the typed command layer, `Blix.Graphics.Vulkan` the backend, and `Blix.Runtime.Silk` hosts the window, input, Vulkan surface, audio device, and diagnostics. Visibility is part of that surface — systems contribute debug values, controls, timers, events, overlays, stats, selections, inspectors, and live-tunable parameters, so the engine can answer practical questions while it runs: what was loaded, streamed, bundled, submitted, culled, and drawn, and where the frame time went.
 
-Today that spans cooked binary asset formats (`.blixtex`, `.blixprobe`, `.blixmesh`), progressive texture streaming, mesh bundling, screen-space-error LOD, GPU-driven indirect drawing, PBR + HDR/IBL, cascaded and cubemap shadows, volumetric fog, bloom, tonemapping, glTF skinning, OpenAL positional audio, kinematic collision, and a Vulkan `SpriteBatch`/font path (the Pong demo).
+Today that spans cooked binary asset formats (`.blixtex`, `.blixprobe`, `.blixmesh`), progressive texture streaming, mesh bundling, screen-space-error LOD, GPU-driven indirect drawing, per-instance instanced rendering, PBR + HDR/IBL, cascaded and cubemap shadows, volumetric fog, bloom, tonemapping, glTF skinning, OpenAL positional audio, kinematic collision, and a Vulkan `SpriteBatch`/font path — driving two complete games (2D Pong and a 3D endless runner) alongside the Sponza capabilities scene.
 
 Blix is still early — APIs are changing, the demos do real engine work, and some systems are exposed before they're polished. The goal is a readable native engine kit: serious enough to push multi-GB scenes through a modern Vulkan frame, small enough to understand, change, and own.
 
@@ -20,7 +20,7 @@ Blix is still early — APIs are changing, the demos do real engine work, and so
 
 ## Demos
 
-Five demos ship in `src/`, all on the Vulkan backend, each a standalone entry point. Two anchor the set: **Vulkan Sponza** is the capabilities demo — the forward edge of what the engine can pull off — and **Pong** is the complete game, the one end-to-end playable title. The other three (Vulkan Lit, Vulkan Graph, Vulkan Hello) are focused references for the renderer, the render graph, and the Vulkan bring-up path. (The OpenGL backend and its four heavy demos were sunset; Pong was rebuilt on the Vulkan `SpriteBatch`.)
+Seven demos ship in `src/`, all on the Vulkan backend, each a standalone entry point. **Vulkan Sponza** is the capabilities demo — the forward edge of what the engine can pull off. Two are complete, end-to-end playable games: **Pong** (2D, the `SpriteBatch`/font path) and the **Runner** (a 3D endless runner — an instanced world, a skinned animated character, kinematic physics, procedural sky + fog, HUD, and audio). The other four are focused references: **Vulkan Instanced** (the per-instance instancing foundation the Runner builds on), **Vulkan Lit** (the lit/shadow/PBR/IBL/bloom path), **Vulkan Graph** (render-graph topology), and **Vulkan Hello** (the Vulkan bring-up path). (The OpenGL backend and its four heavy demos were sunset; Pong was rebuilt on the Vulkan `SpriteBatch`.)
 
 ### Vulkan Sponza — capabilities demo
 
@@ -44,6 +44,25 @@ The one end-to-end playable game, and the `SpriteBatch` + `Font` proving ground:
 
 - `W` / `S` — left paddle. `↑` / `↓` — right paddle. `Space` — serve / new match. `R` — reset. `Esc` — quit.
 - macOS audio needs OpenAL Soft (`brew install openal-soft`); without it the beeps no-op but the game runs.
+
+### Runner — 3D game (instancing + skeletal animation)
+
+```sh
+tools/run-runner.sh
+```
+
+The second complete game, and the engine's instancing + skeletal-animation showcase: a 3D endless runner. The whole scrolling world — recycling ground tiles plus barrel obstacles and spinning coins — is drawn through per-mesh instanced batches: `InstanceBuffer` (a frames-in-flight-replicated set-3 storage buffer of per-instance transform + tint) and `InstancedBatch` (the staging/draw ergonomics), each mesh issued as one `vkCmdDrawIndexed(instanceCount=N)` reading `gl_InstanceIndex`. The player is a skinned, animated glTF character (the CC0 KayKit Rogue) drawn through the engine's bone-palette skinning path — a `Running_A` clip whose cadence scales with the run speed, switching to a jump clip mid-air. Three lanes with frame-rate-independent lane-lerp, a `PhysicsHost3D` gravity jump, `CollisionWorld3D.Overlap` for coin pickups and obstacle hits, distance + coin scoring with a speed ramp and game-over/restart. A fullscreen analytic sky + exponential distance fog set the scene; a `SpriteBatch` + `Font` HUD shows the score; synthesized SFX play through the OpenAL device. Implements `IDebuggable`, so the diagnostics overlay draws the live collision-sphere gizmos.
+
+- `←` / `A`, `→` / `D` — switch lanes. `Space` / `W` / `↑` — jump. `Enter` / `R` — restart after game-over. `Esc` — quit. `` ` `` — toggle the diagnostics overlay.
+- Character + props are CC0 KayKit assets (Kay Lousberg, kaylousberg.com); see `src/Blix.Demos.Runner/Assets/models/CREDITS.txt`.
+
+### Vulkan Instanced — instancing foundation
+
+```sh
+tools/run-instanced.sh           # interactive; --frames N auto-exits for a headless validation run
+```
+
+The proof gate for per-instance instanced rendering: 5,000 cubes drawn in a single `vkCmdDrawIndexed(instanceCount=5000)`, each pulling its own transform + tint from a set-3 storage buffer indexed by `gl_InstanceIndex`. Isolates the two engine layers the Runner builds its world on — `InstanceBuffer` (the replicated SSBO data layer) and `InstancedBatch` (the staging + draw ergonomics) — with no built-in shader, so the demo supplies its own. The headless `--frames N` mode is the validation harness (run under `BLIX_VK_VALIDATE=1`).
 
 ### Vulkan Lit — PBR renderer reference
 
@@ -78,9 +97,6 @@ The narrowest known-good Vulkan call site: a spinning depth-tested cube via Molt
 
 Setup (one-time): `brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc`. `BLIX_VK_VALIDATE=1` enables Khronos validation layers. `BLIX_DIAG_INTERVAL=<frames>` controls the periodic console digest cadence (default 60; `BLIX_DIAG=off` disables).
 
-- `W` / `S` — left paddle. `↑` / `↓` — right paddle. `Space` — serve / new match. `R` — reset. `Esc` — quit.
-- macOS audio needs OpenAL Soft (`brew install openal-soft`); without it the beeps no-op but the game runs.
-
 ## Cooked asset pipeline
 
 VulkanSponza runs entirely off cooked siblings; `tools/setup-sponza-modern.sh` populates the sources from a local Khronos download and produces the cooked split, and the cook scripts re-cook on demand. Source assets are multi-GB and not committed. Source: <https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/IntelSponza>.
@@ -108,7 +124,7 @@ Target framework: net8.0. The 2D physics CLI test harness lives at `src/Blix.Tes
 ## Roadmap
 
 - **Particles** — generic GPU/CPU emitter with sorted billboards, soft-particle depth, HDR + bloom integration. First consumer of the new shader library.
-- **More demos** — beyond the current Vulkan set. Likely a focused VFX scene to validate the particle system, then something with gameplay.
+- **More demos** — beyond the current Vulkan set. With Pong (2D) and the Runner (3D) covering gameplay, the next likely target is a focused VFX scene to validate the particle system.
 
 The shader library at `src/Blix.Shaders/` (tonemap, noise, PBR primitives) is the substrate both new features build on; the include preprocessor + `ShaderLoader` make new shaders cheap to author.
 

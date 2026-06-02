@@ -72,6 +72,8 @@ builder.DrawIndexed(vb, ib, pipeline, indexCount, uniforms, textures, material,
 
 For GPU-driven rendering, `DrawIndexedIndirect` issues one `vkCmdDrawIndexedIndirect` over a buffer of draw structs — group objects by `(pipeline, material)` and emit one per group. `VulkanSponza` fills the indirect buffer per cascade after frustum culling.
 
+For drawing one mesh many times, `DrawIndexedInstanced` issues a single `vkCmdDrawIndexed(instanceCount=N)`; the vertex shader reads `gl_InstanceIndex` into a per-instance storage buffer for its transform/tint. Two `Blix.Render` layers wrap this, kept deliberately separate: **`InstanceBuffer`** is the data layer — a frames-in-flight-replicated set-3 SSBO of `InstanceData {mat4 model; vec4 tint}`, exposing `Write(span)`, its `Material` handle, and the static `Slot` contract a shader composes into its interface. **`InstancedBatch`** is the ergonomics layer — constructed with an already-built `(mesh, pipeline, InstanceBuffer)`, it stages instances via `Begin(push)/Add/End` and records the one draw. It owns no GPU resources and no shader: the caller brings the pipeline (and thus the material — lighting, fog, whatever), so the engine ships no built-in instanced shader. `Blix.Demos.VulkanInstanced` is the 5000-cube proof gate; `Blix.Demos.Runner` draws its whole world (tiles, obstacles, coins) through per-mesh `InstancedBatch`es.
+
 **The binding model.** Materials bind by *reflected slot*, not by name-keyed bags. `CreateMaterial(program, setIndex, framesInFlight)` allocates a `MaterialBindings` against one SPIR-V-reflected descriptor set; `SetUniform(binding, "uName", value)` / `SetTexture(binding, handle)` write it by name, and `.Handle` is the `MaterialHandle` a draw (or `GameObject`) carries. Sets are organised by lifetime — set 0 per-frame, set 1 per-pass, set 2 per-material, set 3 per-draw — and per-draw data rides push constants (≤256 B) or a transient descriptor pool refilled each frame. Full detail: [`architecture.md` → The Vulkan binding model](architecture.md#the-vulkan-binding-model).
 
 ## Meshes, pipelines, vertex types
@@ -121,6 +123,8 @@ All techniques run on Vulkan; the shader files below are the source of truth.
 | Depth pre-pass | `depth_prepass.frag` / `depth_prepass_mask.frag` (VulkanSponza) |
 | Glass / transmissive | Fresnel + alpha-blend pipeline in `lit.frag` (no refraction) |
 | GPU-driven indirect draw | `DrawIndexedIndirect`, per-material multi-draw (VulkanSponza) |
+| Per-instance instancing | `DrawIndexedInstanced` + `InstanceBuffer` (set-3 SSBO) / `InstancedBatch` (VulkanInstanced, Runner) |
+| Skeletal animation (GPU skinning) | bone-palette set-3 SSBO; `skinned_lit.vert` (VulkanLit), `skinned.vert` (Runner) |
 | Screen-space-error LOD | `.blixmesh` per-level geometric error; runtime selects by SSE (VulkanSponza) |
 | Geometry bundling | `MeshBundler` packs primitives into one shared `(VB, IB)`; draws are sub-ranges |
 

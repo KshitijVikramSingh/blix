@@ -2,7 +2,7 @@
 
 The engine is organised so that game code lives in `Blix` (the root namespace, the layer game code targets), the renderer spine lives below it (`Blix.Graphics` → `Blix.Graphics.Vulkan`), and platform contracts (windowing, input, audio host, diagnostics) live below everything in `Blix.Core`.
 
-One backend + runtime ship today: the Vulkan + Silk.NET pair. The original OpenGL backend (`Blix.Graphics.OpenGL`) and its OpenTK runtime (`Blix.Runtime.OpenTK`) were sunset, along with the GL-only `Blix.Render` engine-facing API (name-keyed `Material`/`MaterialResolver`/`PostProcessStack`/`PbrSceneRenderer`) and the four heavy GL demos. Five Vulkan demos ship: `Blix.Demos.VulkanHello`, `Blix.Demos.VulkanGraph`, `Blix.Demos.VulkanLit`, and `Blix.Demos.VulkanSponza` cover validation, render-graph topology, the full lit/shadow/PBR/IBL/bloom scene, and the GPU-driven Intel Sponza performance + asset-pipeline target; `Blix.Demos.Pong` is the gameplay demo, ported onto the rebuilt Vulkan `SpriteBatch`. The engine was progressively reshaped around the Vulkan target — name-keyed materials gave way to SPIR-V-reflected binding (see [the Vulkan binding model](#the-vulkan-binding-model) below).
+One backend + runtime ship today: the Vulkan + Silk.NET pair. The original OpenGL backend (`Blix.Graphics.OpenGL`) and its OpenTK runtime (`Blix.Runtime.OpenTK`) were sunset, along with the GL-only `Blix.Render` engine-facing API (name-keyed `Material`/`MaterialResolver`/`PostProcessStack`/`PbrSceneRenderer`) and the four heavy GL demos. Seven Vulkan demos ship: `Blix.Demos.VulkanHello`, `Blix.Demos.VulkanGraph`, `Blix.Demos.VulkanLit`, `Blix.Demos.VulkanInstanced`, and `Blix.Demos.VulkanSponza` cover validation, render-graph topology, the full lit/shadow/PBR/IBL/bloom scene, the per-instance instancing foundation (5000-cube gate), and the GPU-driven Intel Sponza performance + asset-pipeline target; two are complete games — `Blix.Demos.Pong` (2D, on the rebuilt Vulkan `SpriteBatch`) and `Blix.Demos.Runner` (a 3D endless runner exercising instancing + skeletal animation + kinematic physics). The engine was progressively reshaped around the Vulkan target — name-keyed materials gave way to SPIR-V-reflected binding (see [the Vulkan binding model](#the-vulkan-binding-model) below).
 
 **Library, not framework.** The engine is a set of composable primitives game code calls — not a control-inverting framework. The split: the **engine owns asset loading, reading, and bundling** (decode/upload/dedup/stream textures, pack geometry into shared buffers, run an off-thread load queue); the **game owns synthesis and composition** (which passes run, how draws are recorded, material/pipeline choice, render-graph topology). There is no `SceneRenderer` that owns read→cull→draw: `VulkanSponza` composes the engine primitives (`MeshBundler`, `AsyncLoadQueue`, `GltfTextureLoader`, the `RenderGraph`) itself and keeps its own draw groups + LOD/cull policy. New rendering capability lands as a primitive the game calls, not a stage the engine runs for you.
 
@@ -14,9 +14,12 @@ This doc orients you. For the game-engine layer game code targets, see [`blix.md
 Blix.Demos.VulkanHello         ← Vulkan validation demo (cube + debug overlay)
 Blix.Demos.VulkanGraph         ← Vulkan render-graph topology demo (3-pass invert)
 Blix.Demos.VulkanLit           ← Vulkan PBR + IBL + shadows + skinning + bloom
+Blix.Demos.VulkanInstanced     ← per-instance instancing foundation (5000-cube gate)
 Blix.Demos.VulkanSponza        ← Khronos Intel Sponza on Vulkan (GPU-driven indirect,
                                   SSE LOD, cascaded shadows, froxel fog, streamed cooked assets)
-Blix.Demos.Pong                ← gameplay demo (2D SpriteBatch + Font, CRT post-FX)
+Blix.Demos.Pong                ← 2D game (SpriteBatch + Font, CRT post-FX)
+Blix.Demos.Runner              ← 3D game: endless runner (instanced world + props,
+                                  skinned animated character, kinematic physics, sky/fog/HUD/audio)
         ↑
 Blix.Runtime.Silk              ← Vulkan window/runtime adapter
                                   (Silk.NET window + IVkSurface + MoltenVK bootstrap,

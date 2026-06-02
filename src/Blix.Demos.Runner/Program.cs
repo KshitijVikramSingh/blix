@@ -14,12 +14,23 @@ using Blix.Runtime.Silk;
 
 namespace Blix.Demos.Runner;
 
-// Blix 3D endless runner. Milestone 2: the treadmill world — a scrolling,
-// recycling track of ground tiles, obstacles, and coins, all drawn through a
-// single instanced draw (InstancedBatch over one shared cube mesh). The world
-// flows toward the camera (+Z) and wraps procedurally; coins spin via their
-// per-instance transform. Player controller, collision, and presentation come
-// in later milestones.
+// Blix 3D endless runner — the engine's instancing + skeletal-animation showcase.
+//
+// The scrolling world flows toward the camera (+Z) and wraps procedurally: ground
+// tiles, barrel obstacles, and spinning coins (CC0 KayKit meshes) are each drawn
+// through a per-mesh InstancedBatch (one vkCmdDrawIndexed(instanceCount=N) reading
+// a per-instance transform/tint from a set-3 SSBO). The player is a skinned,
+// animated glTF character (CC0 KayKit Rogue) on the engine's bone-palette path —
+// a run clip whose cadence tracks the speed, switching to a jump clip mid-air.
+// Three lanes (frame-rate-independent lerp) + PhysicsHost3D gravity jump;
+// CollisionWorld3D.Overlap drives coin pickups + obstacle hits; distance/coin
+// scoring with a speed ramp and game-over/restart. A fullscreen procedural sky +
+// exponential distance fog set the scene, a SpriteBatch/Font HUD shows the score,
+// synthesized SFX play through OpenAL, and IDebuggable surfaces collision gizmos.
+//
+// One file by design (a demo reads top-to-bottom): load/setup, OnUpdate (player +
+// world + collision), the per-mesh emit helpers, OnRender (sky → world → character
+// → HUD), input, and the IDebuggable Debug() pass.
 public static class Program
 {
     public static void Main(string[] args)
