@@ -64,6 +64,16 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
     private float aspect = 16f / 9f;
     private int frameCount;
 
+    // --- Player (kinematic): lane-lerp on X, PhysicsHost3D gravity on Y --------
+    private readonly Transform3D player = new();
+    private PhysicsHost3D physics = null!;
+    private int laneIndex = 1;        // start centre lane
+    private float currentX;
+    private bool grounded = true;
+    private const float JumpSpeed = 17f;
+    private const float PlayerHalfHeight = 0.8f;
+    private static readonly Vector4 PlayerTint = new(0.30f, 0.85f, 0.95f, 1f);
+
     public RunnerLoop(int exitAfterFrames) => this.exitAfterFrames = exitAfterFrames;
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
@@ -77,7 +87,34 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
             new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)));
         world = new InstancedBatch(vk, cube);
 
+        physics = new PhysicsHost3D { Target = player, Gravity = new Vector3(0f, -55f, 0f), GravityScale = 1f };
+        player.Position = new Vector3(LaneX[laneIndex], 0f, 0f);
+        currentX = LaneX[laneIndex];
+
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
+        UpdateCamera();
+    }
+
+    public void OnUpdate(Time time)
+    {
+        var dt = (float)time.Delta;
+
+        // Vertical: gravity + jump impulse integrated by PhysicsHost3D, clamped to
+        // the ground plane (y = 0). Velocity.X/Z stay 0 so only Y is physics-driven.
+        physics.FixedUpdate(time);
+        var y = player.Position.Y;
+        if (y <= 0f)
+        {
+            y = 0f;
+            physics.Velocity = Vector3.Zero;
+            grounded = true;
+        }
+
+        // Lateral: frame-rate-independent lerp toward the active lane.
+        var targetX = LaneX[laneIndex];
+        currentX += (targetX - currentX) * (1f - MathF.Exp(-12f * dt));
+
+        player.Position = new Vector3(currentX, y, 0f);
         UpdateCamera();
     }
 
@@ -89,9 +126,10 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
 
     private void UpdateCamera()
     {
-        // Behind + above the origin, looking down the track into -Z.
-        var eye = new Vector3(0f, 6.5f, 11f);
-        var view = Matrix4x4.CreateLookAt(eye, new Vector3(0f, 1.0f, -10f), Vector3.UnitY);
+        // Behind + above the player, panning partway with its lane so switches
+        // read clearly without locking the camera rigidly to the player's X.
+        var eye = new Vector3(currentX * 0.5f, 6.5f, 11f);
+        var view = Matrix4x4.CreateLookAt(eye, new Vector3(currentX, 1.0f, -10f), Vector3.UnitY);
         var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, aspect, 0.1f, 400f);
         viewProj = view * proj;
     }
@@ -105,6 +143,7 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         world.Begin(viewProj);
         EmitTiles(scroll);
         EmitObstaclesAndCoins(scroll, t);
+        EmitPlayer();
 
         commandList.Pass(
             "runner-world",
@@ -161,6 +200,16 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
         }
     }
 
+    // Player box (placeholder until the animated glTF character lands in M5).
+    // Drawn through the same instanced batch as the world — one draw for everything.
+    private void EmitPlayer()
+    {
+        world.Add(
+            Matrix4x4.CreateScale(0.8f, PlayerHalfHeight * 2f, 0.8f) *
+            Matrix4x4.CreateTranslation(player.Position.X, player.Position.Y + PlayerHalfHeight, 0f),
+            PlayerTint);
+    }
+
     // Map a raw advancing z into the recycle window [RecycleZ - TrackLength, RecycleZ).
     private static float WrapZ(float z)
     {
@@ -181,6 +230,20 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler
 
     public void OnKeyDown(Key key)
     {
-        if (key == Key.Escape) host.RequestClose();
+        switch (key)
+        {
+            case Key.Left or Key.A:
+                laneIndex = Math.Max(0, laneIndex - 1);
+                break;
+            case Key.Right or Key.D:
+                laneIndex = Math.Min(LaneX.Length - 1, laneIndex + 1);
+                break;
+            case Key.Up or Key.W or Key.Space:
+                if (grounded) { physics.Velocity = new Vector3(0f, JumpSpeed, 0f); grounded = false; }
+                break;
+            case Key.Escape:
+                host.RequestClose();
+                break;
+        }
     }
 }
