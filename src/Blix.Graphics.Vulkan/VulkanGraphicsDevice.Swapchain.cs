@@ -112,6 +112,7 @@ public sealed partial class VulkanGraphicsDevice
         CreateFrameResources();
         CreateGpuTimingPool();
         CreateTransientDescriptorPools();
+        CreateTransientArena();
     }
 
     private unsafe void CreateDepthBuffer()
@@ -764,6 +765,10 @@ public sealed partial class VulkanGraphicsDevice
         // not the early-out recreate path above) so the next frame's fill lands
         // on a slot no in-flight frame is reading.
         AdvanceIndirectSlot();
+        // Advance the transient vertex arena's ring in lockstep and rewind the
+        // newly-current slot (GPU-complete) so next frame's AllocVertices starts
+        // clean. Same race-free reasoning as the indirect ring.
+        AdvanceArenaSlot();
         return defaultPasses > 0;
     }
 
@@ -977,7 +982,10 @@ public sealed partial class VulkanGraphicsDevice
             Vk.CmdSetScissor(cmd, 0, 1, in rect);
         }
 
-        ulong offset = 0;
+        // Bind offset shifts the buffer's origin to a transient-arena slice
+        // (base-0 indices then address the slice); 0 for ordinary whole-buffer
+        // draws. Distinct from VertexOffset (index bias) on CmdDrawIndexed below.
+        ulong offset = d.VertexBufferByteOffset;
         var buffer = vb.Buffer;
         Vk.CmdBindVertexBuffers(cmd, 0, 1, &buffer, &offset);
         Vk.CmdBindIndexBuffer(cmd, ib.Buffer, 0, ib.IndexType);

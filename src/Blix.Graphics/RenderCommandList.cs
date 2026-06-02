@@ -79,9 +79,14 @@ public sealed class RenderPassBuilder
         PipelineHandle pipeline,
         int indexCount,
         IReadOnlyList<ShaderUniform> uniforms,
-        IReadOnlyList<ShaderTextureBinding> textures)
+        IReadOnlyList<ShaderTextureBinding> textures,
+        // Bind the vertex buffer at this byte offset (transient-arena slice origin).
+        // 0 = whole buffer. See DrawIndexedCommand.VertexBufferByteOffset.
+        ulong vertexBufferByteOffset = 0)
     {
-        var command = new DrawIndexedCommand(vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures);
+        var command = new DrawIndexedCommand(
+            vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures,
+            VertexBufferByteOffset: vertexBufferByteOffset);
         commands.Add(command);
         recorder?.OnDraw(in command);
     }
@@ -192,12 +197,15 @@ public sealed class RenderPassBuilder
         byte[] pushConstants,
         // Shared-buffer sub-range (see the material overload above).
         int indexOffset = 0,
-        int vertexOffset = 0)
+        int vertexOffset = 0,
+        // Bind the vertex buffer at this byte offset (transient-arena slice origin).
+        // 0 = whole buffer. See DrawIndexedCommand.VertexBufferByteOffset.
+        ulong vertexBufferByteOffset = 0)
     {
         var command = new DrawIndexedCommand(
             vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures,
             IndexOffset: indexOffset, Material: null, PushConstants: pushConstants,
-            VertexOffset: vertexOffset);
+            VertexOffset: vertexOffset, VertexBufferByteOffset: vertexBufferByteOffset);
         commands.Add(command);
         recorder?.OnDraw(in command);
     }

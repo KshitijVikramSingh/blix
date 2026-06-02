@@ -39,8 +39,19 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
 
     public GraphicsDeviceInfo Info { get; private set; }
 
-    public GraphicsDeviceDiagnostics DiagnosticsSnapshot { get; private set; } =
-        new GraphicsDeviceDiagnostics(FrameErrorCount: 0, LastErrorContext: string.Empty, LastErrorMessage: string.Empty);
+    // Computed each read so the transient-arena gauges reflect the live ring
+    // state. The error fields stay zero/empty here — Vulkan surfaces validation
+    // failures through the [vk-ERR] log path, not this snapshot.
+    public GraphicsDeviceDiagnostics DiagnosticsSnapshot
+    {
+        get
+        {
+            var (used, high, cap) = TransientArenaStats();
+            return new GraphicsDeviceDiagnostics(
+                FrameErrorCount: 0, LastErrorContext: string.Empty, LastErrorMessage: string.Empty,
+                TransientArenaBytesUsed: used, TransientArenaHighWaterBytes: high, TransientArenaCapacityBytes: cap);
+        }
+    }
 
     public void SetDefaultRenderSurfaceSize(int width, int height)
     {
