@@ -55,6 +55,7 @@ public sealed class ParticleBatch : IDisposable
     private readonly Particle[] particles;
     private readonly float[] scratch;                 // CPU vertex staging
     private readonly int[] order;                     // indices for optional depth sort
+    private readonly float[] depthKey;                // sort keys, parallel to order
     private readonly byte[] pushConstants = new byte[64]; // view-projection
     private int count;
     private bool disposed;
@@ -68,6 +69,7 @@ public sealed class ParticleBatch : IDisposable
         particles = new Particle[maxParticles];
         scratch = new float[maxParticles * VertsPerParticle * FloatsPerVertex];
         order = new int[maxParticles];
+        depthKey = new float[maxParticles];
 
         // Static quad index buffer: particle i -> indices [6i, 6i+6) over verts
         // [4i, 4i+4). Base-0, addressed via the arena slice's bind offset, exactly
@@ -152,11 +154,15 @@ public sealed class ParticleBatch : IDisposable
         for (var i = 0; i < count; i++) order[i] = i;
         if (sortByDepth)
         {
-            // Back-to-front: farthest first so alpha blending composites correctly.
-            var cam = camPos;
-            Array.Sort(order, 0, count, Comparer<int>.Create((a, b) =>
-                Vector3.DistanceSquared(particles[b].Position, cam)
-                    .CompareTo(Vector3.DistanceSquared(particles[a].Position, cam))));
+            // Back-to-front so alpha blending composites correctly. Sort the index
+            // array against a parallel key of NEGATED squared distance — ascending
+            // sort then puts the farthest particle first, with no per-frame
+            // comparer/closure allocation.
+            for (var i = 0; i < count; i++)
+            {
+                depthKey[i] = -Vector3.DistanceSquared(particles[i].Position, camPos);
+            }
+            Array.Sort(depthKey, order, 0, count);
         }
 
         // Quad corners in billboard space + their UVs (UV drives the soft radial
