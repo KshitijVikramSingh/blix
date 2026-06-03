@@ -16,15 +16,17 @@ namespace Blix.Demos.TankArena;
 // Tank Arena — a survival shooter built on Transform3D parenting. Each tank is a
 // hull -> turret -> barrel hierarchy (see Tank): driving the hull carries the
 // turret + barrel, while the turret yaws to aim independently. The player drives
-// and aims; enemy tanks roll in from the arena edges, track the player with their
-// turrets, and fire. Shells are spawned as a child of the firing barrel and then
-// SetParent(null, keepWorldPose) detaches them into a PhysicsHost3D arc — the
-// parenting model's detach op. Stylized primitives only; everything draws as cube
-// instances through one InstancedBatch.
+// and aims; enemy tanks roll in from the arena edges, steer around cover toward the
+// player, track them with their turrets, and fire. Shells spawn as a child of the
+// firing barrel and then SetParent(null, keepWorldPose) detaches them into a
+// PhysicsHost3D arc — the parenting model's detach op.
 //
-// This is the "is it a game" test for the engine; the juicy bits (recoil, death
-// FX, smoothed tracking) land in a follow-up pass that pressures the animation
-// surface. M1 here is the playable loop: combat, health, waves, game-over.
+// Rendering: tanks are the articulated Quaternius glTF model (per-part meshes on the
+// rig, see LoadTankParts); barrels/crates are static props tinted by their material
+// colours and act as cover; the ground, walls, shells and explosion sparks draw as
+// cube instances. Everything goes through InstancedBatch into a RenderGraph sun-shadow
+// + HDR pipeline. Enemy navigation is obstacle-avoidance steering (AvoidObstacles) —
+// the first consumer pressuring a navigation primitive.
 public static class Program
 {
     public static void Main(string[] args)
@@ -775,27 +777,79 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         var toPlayer = player.Position - e.Position;
         toPlayer.Y = 0f;
         var dist = toPlayer.Length();
-        var dir = dist > 0.0001f ? toPlayer / dist : -Vector3.UnitZ;
+        var seek = dist > 0.0001f ? toPlayer / dist : -Vector3.UnitZ;
 
-        e.HullYaw = MathF.Atan2(-dir.X, -dir.Z);
-        // Turret tracks the player in world space; convert to a local yaw under the
-        // hull. (M2 will smooth this rather than snap — a likely rotate-toward helper.)
+        // Steer the HULL around cover (drive direction); the TURRET keeps aiming
+        // straight at the player regardless of how the hull is weaving.
+        var drive = AvoidObstacles(e.Position, seek);
+        e.HullYaw = MathF.Atan2(-drive.X, -drive.Z);
         var worldAim = MathF.Atan2(-toPlayer.X, -toPlayer.Z);
         e.TurretYaw = worldAim - e.HullYaw;
         SeatRig(e);
         e.Apply();
 
-        // Drive toward the player until standoff range; gravity + walls via Resolve.
-        SetHorizontalVelocity(e, dist > EnemyStandoff ? dir * feel.EnemySpeed : Vector3.Zero);
+        // Drive along the steered heading until standoff range; gravity + walls via Resolve.
+        SetHorizontalVelocity(e, dist > EnemyStandoff ? drive * feel.EnemySpeed : Vector3.Zero);
         e.Physics.Gravity = new Vector3(0f, feel.TankGravity, 0f);
         e.Physics.FixedUpdate(new Time(time.Total, dt));
         ResolveTank(e);
 
         e.FireTimer -= dt;
-        if (feel.EnemiesFire && dist < EnemyFireRange && e.FireTimer <= 0f)
+        // Don't fire when a prop sits between us and the player (we'd just hit cover).
+        if (feel.EnemiesFire && dist < EnemyFireRange && e.FireTimer <= 0f && !PropBlocksShot(e.Position, toPlayer, dist))
         {
             Fire(e, fromPlayer: false);
         }
+    }
+
+    // Obstacle-avoidance steering: if a cover prop sits ahead within a lookahead and
+    // close to the seek path, bend the heading perpendicular — around the side the
+    // obstacle isn't on. Steers around convex cover without true path planning (good
+    // enough for a sparse arena; a concave trap could still stall). The first real
+    // consumer of a navigation angle — a `SteeringBehaviors`/nav primitive could
+    // graduate out of this once a second consumer wants it.
+    private Vector3 AvoidObstacles(Vector3 from, Vector3 seek)
+    {
+        const float lookahead = 9f;
+        const float margin = 2.4f;       // tank half-width + clearance around the prop
+        const float strength = 1.7f;
+
+        Prop? threat = null;
+        var nearest = float.MaxValue;
+        foreach (var p in props)
+        {
+            if (!p.Alive) continue;
+            var off = Flatten(p.Position - from);
+            var ahead = Vector3.Dot(off, seek);                 // distance along the heading
+            if (ahead <= 0.01f || ahead > lookahead) continue;  // behind us or beyond lookahead
+            var lateral = (off - seek * ahead).Length();        // perpendicular distance to the path
+            if (lateral < p.Type.Radius + margin && ahead < nearest) { nearest = ahead; threat = p; }
+        }
+        if (threat is null) return seek;
+
+        var toObs = Flatten(threat.Position - from);
+        var left = new Vector3(-seek.Z, 0f, seek.X);            // +90° from seek (left)
+        var side = Vector3.Dot(toObs, left) > 0f ? -1f : 1f;    // obstacle on the left -> steer right
+        var urgency = 1f - nearest / lookahead;                 // stronger the closer it is
+        var steered = seek + left * (side * strength * urgency);
+        return Vector3.Normalize(steered);
+    }
+
+    // True if an alive prop sits on the segment from `from` toward the player (within
+    // its cover radius), so an enemy shouldn't waste a shot into it.
+    private bool PropBlocksShot(Vector3 from, Vector3 toPlayer, float dist)
+    {
+        var dir = dist > 1e-3f ? toPlayer / dist : Vector3.Zero;
+        foreach (var p in props)
+        {
+            if (!p.Alive) continue;
+            var off = Flatten(p.Position - from);
+            var along = Vector3.Dot(off, dir);
+            if (along <= 0.5f || along >= dist) continue;       // behind the shooter or past the target
+            var lateral = (off - dir * along).Length();
+            if (lateral < p.Type.Radius + 0.6f) return true;
+        }
+        return false;
     }
 
     private void Fire(Tank tank, bool fromPlayer)
