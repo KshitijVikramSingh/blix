@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Launcher for Blix.Demos.VehicleParenting on macOS (the Transform-parenting
-# vehicle/turret demo). Same exec-the-apphost rationale as run-particles.sh:
-# dyld snapshots DYLD_* at exec, so going through the dotnet muxer can drop the
-# Vulkan loader path. Pass --frames N for a headless validation run (run under
-# BLIX_VK_VALIDATE=1 and grep stderr for [vk-ERR]/[vk-WARN]).
+# Launcher for Blix.Demos.TankArena on macOS (the tank-arena game — Transform
+# parenting + a survival combat loop). Same exec-the-apphost rationale as
+# run-particles.sh: dyld snapshots DYLD_* at exec, so going through the dotnet
+# muxer can drop the Vulkan loader path. Pass --frames N for a headless validation
+# run (run under BLIX_VK_VALIDATE=1 and grep stderr for [vk-ERR]/[vk-WARN]).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROJECT="$REPO_ROOT/src/Blix.Demos.VehicleParenting/Blix.Demos.VehicleParenting.csproj"
-PUBLISH_DIR="$REPO_ROOT/src/Blix.Demos.VehicleParenting/bin/Publish"
+PROJECT="$REPO_ROOT/src/Blix.Demos.TankArena/Blix.Demos.TankArena.csproj"
+PUBLISH_DIR="$REPO_ROOT/src/Blix.Demos.TankArena/bin/Publish"
 RID="osx-arm64"
 
 prefix=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")
@@ -32,8 +32,8 @@ fi
 echo "Publishing self-contained ($RID) ..."
 dotnet publish "$PROJECT" -c Debug -r "$RID" --self-contained true -o "$PUBLISH_DIR" --nologo -v:q
 
-BUILD_SHADERS="$REPO_ROOT/src/Blix.Demos.VehicleParenting/bin/Debug/net8.0/$RID/Shaders"
-[ -d "$BUILD_SHADERS" ] || BUILD_SHADERS="$REPO_ROOT/src/Blix.Demos.VehicleParenting/bin/Debug/net8.0/Shaders"
+BUILD_SHADERS="$REPO_ROOT/src/Blix.Demos.TankArena/bin/Debug/net8.0/$RID/Shaders"
+[ -d "$BUILD_SHADERS" ] || BUILD_SHADERS="$REPO_ROOT/src/Blix.Demos.TankArena/bin/Debug/net8.0/Shaders"
 if [ -d "$BUILD_SHADERS" ]; then
     mkdir -p "$PUBLISH_DIR/Shaders"
     cp -p "$BUILD_SHADERS"/*.spv "$PUBLISH_DIR/Shaders/" 2>/dev/null || true
@@ -43,4 +43,4 @@ export DYLD_FALLBACK_LIBRARY_PATH="$prefix/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
 export VK_ICD_FILENAMES="$prefix/etc/vulkan/icd.d/MoltenVK_icd.json"
 export VK_LAYER_PATH="$prefix/share/vulkan/explicit_layer.d"
 
-exec "$PUBLISH_DIR/Blix.Demos.VehicleParenting" "$@"
+exec "$PUBLISH_DIR/Blix.Demos.TankArena" "$@"

@@ -15,7 +15,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <RootNamespace>Blix.Demos.VehicleParenting</RootNamespace>
+    <RootNamespace>Blix.Demos.TankArena</RootNamespace>
   </PropertyGroup>
 
   <PropertyGroup>

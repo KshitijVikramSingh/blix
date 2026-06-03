@@ -20,7 +20,7 @@ Blix is still early — APIs are changing, the demos do real engine work, and so
 
 ## Demos
 
-Nine demos ship in `src/`, all on the Vulkan backend, each a standalone entry point. **Vulkan Sponza** is the capabilities demo — the forward edge of what the engine can pull off. Two are complete, end-to-end playable games: **Pong** (2D, the `SpriteBatch`/font path) and the **Runner** (a 3D endless runner — an instanced world, a skinned animated character, kinematic physics, procedural sky + fog, HUD, and audio). **Vulkan Particles** is the VFX showcase — the CPU-simulated particle system over the engine's fullscreen/post-process primitives. The other five are focused references: **Vulkan Instanced** (the per-instance instancing foundation the Runner builds on), **Vehicle Parenting** (the `Transform3D` hierarchy: a drivable hull → turret → barrel), **Vulkan Lit** (the lit/shadow/PBR/IBL/bloom path), **Vulkan Graph** (render-graph topology), and **Vulkan Hello** (the Vulkan bring-up path). (The OpenGL backend and its four heavy demos were sunset; Pong was rebuilt on the Vulkan `SpriteBatch`.)
+Nine demos ship in `src/`, all on the Vulkan backend, each a standalone entry point. **Vulkan Sponza** is the capabilities demo — the forward edge of what the engine can pull off. Three are complete, end-to-end playable games: **Pong** (2D, the `SpriteBatch`/font path), the **Runner** (a 3D endless runner — an instanced world, a skinned animated character, kinematic physics, procedural sky + fog, HUD, and audio), and **Tank Arena** (a survival shooter on the `Transform3D` parenting rig — drive a tank, aim an independently-yawing turret, and fend off waves of tracking enemies). **Vulkan Particles** is the VFX showcase — the CPU-simulated particle system over the engine's fullscreen/post-process primitives. The other four are focused references: **Vulkan Instanced** (the per-instance instancing foundation the Runner builds on), **Vulkan Lit** (the lit/shadow/PBR/IBL/bloom path), **Vulkan Graph** (render-graph topology), and **Vulkan Hello** (the Vulkan bring-up path). (The OpenGL backend and its four heavy demos were sunset; Pong was rebuilt on the Vulkan `SpriteBatch`.)
 
 ### Vulkan Sponza — capabilities demo
 
@@ -74,13 +74,13 @@ tools/run-instanced.sh           # interactive; --frames N auto-exits for a head
 
 The proof gate for per-instance instanced rendering: 5,000 cubes drawn in a single `vkCmdDrawIndexed(instanceCount=5000)`, each pulling its own transform + tint from a set-3 storage buffer indexed by `gl_InstanceIndex`. Isolates the two engine layers the Runner builds its world on — `InstanceBuffer` (the replicated SSBO data layer) and `InstancedBatch` (the staging + draw ergonomics) — with no built-in shader, so the demo supplies its own. The headless `--frames N` mode is the validation harness (run under `BLIX_VK_VALIDATE=1`).
 
-### Vehicle Parenting — Transform hierarchy reference
+### Tank Arena — game (Transform parenting)
 
 ```sh
-tools/run-vehicle.sh             # interactive; --frames N auto-exits for a headless validation run
+tools/run-tank.sh                # interactive; --frames N auto-exits for a headless validation run
 ```
 
-The `Transform3D` parenting reference: a drivable tank whose **hull → turret → barrel** form a transform hierarchy. The hull is the root (driven by input); the turret is its child (yaws independently); the barrel is the turret's child (pitches). Each part's `WorldMatrix` composes the chain, so turning the hull carries the turret + barrel while they keep their own local aim. Firing is the centrepiece of the parenting model: a shell is spawned **as a child of the barrel** at the muzzle, then `SetParent(null, keepWorldPose: true)` detaches it into world space with its world pose preserved — so it leaves the muzzle exactly where the moving, aimed barrel points and flies a free gravity arc (`PhysicsHost3D`). Everything draws through one `InstancedBatch` (each part/target/shell is a unit cube whose model is `scale(visual) * WorldMatrix`). Drive `W`/`S`/`A`/`D`, aim with the arrow keys, `Space` to fire.
+A survival shooter built on `Transform3D` parenting. Each tank is a **hull → turret → barrel** hierarchy: the hull drives, the turret is its child (yaws to aim independently), the barrel the turret's child — each part's `WorldMatrix` composes the chain, so driving carries the turret along while it tracks its own target. Enemy tanks roll in from the arena edges, aim their turrets at the player, and fire; you drive, aim, and shoot back across waves with a health pool and game-over/restart. Firing is the parenting model's centrepiece: a shell is spawned **as a child of the barrel** at the muzzle, then `SetParent(null, keepWorldPose: true)` detaches it into world space with its world pose preserved — leaving exactly where the moving, aimed barrel points and flying a `PhysicsHost3D` gravity arc. Stylized primitives only; everything draws through one `InstancedBatch` (each part/shell a unit cube, `model = scale(visual) * WorldMatrix`). Drive `W`/`S`/`A`/`D`, aim with `←`/`→`, `Space` to fire, `Enter` to restart.
 
 ### Vulkan Lit — PBR renderer reference
 

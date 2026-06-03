@@ -256,7 +256,7 @@ var barrel = new Transform3D { Position = new Vector3(0, 0, -1.4f), Parent = tur
 var worldMuzzle = barrel.WorldPosition;   // composed down hull -> turret -> barrel
 ```
 
-`SetParent(newParent, keepWorldPose)` re-parents; with `keepWorldPose: true` the local TRS is recomputed so the **world** pose is unchanged across the switch — e.g. `shell.SetParent(null, keepWorldPose: true)` detaches a shell from a moving barrel at its current muzzle pose so it flies straight instead of snapping to the barrel's local frame. `WorldMatrix` is a `System.Numerics` model matrix (translation in the last row), fed straight to a `model * v` shader / `InstanceData.Model` with no transpose. `Blix.Demos.VehicleParenting` is the working reference; the composition + render convention are pinned by `Blix.Test.Graphics` Section AH.
+`SetParent(newParent, keepWorldPose)` re-parents; with `keepWorldPose: true` the local TRS is recomputed so the **world** pose is unchanged across the switch — e.g. `shell.SetParent(null, keepWorldPose: true)` detaches a shell from a moving barrel at its current muzzle pose so it flies straight instead of snapping to the barrel's local frame. `WorldMatrix` is a `System.Numerics` model matrix (translation in the last row), fed straight to a `model * v` shader / `InstanceData.Model` with no transpose. `Blix.Demos.TankArena` is the working reference (its hull → turret → barrel tanks are parenting hierarchies); the composition + render convention are pinned by `Blix.Test.Graphics` Section AH.
 
 #### Deliberate limits
 
