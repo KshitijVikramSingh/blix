@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix;
 using Blix.Core;
+using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Primitives;
@@ -32,11 +33,34 @@ public static class Program
         {
             if (args[i] == "--frames" && int.TryParse(args[i + 1], out var n)) exitAfterFrames = n;
         }
+        var debugOverlay = args.Contains("--debug");   // live tuning + diagnostics overlay (` to show)
 
-        var loop = new TankArenaLoop(exitAfterFrames);
+        var loop = new TankArenaLoop(exitAfterFrames, debugOverlay);
         using var window = new Window(loop, new WindowOptions("Blix — Tank Arena", 1280, 720));
         window.Run();
     }
+}
+
+// Live-tunable feel knobs — reflected into the --debug overlay via [Tune] and read
+// each frame, so movement / camera / turning / ballistics can be dialled in while
+// playing. Defaults are the current tuned values.
+internal sealed class TankFeel
+{
+    [Tune(3f, 18f)]    public float DriveSpeed = 8f;
+    [Tune(2f, 10f)]    public float ReverseSpeed = 4.5f;
+    [Tune(5f, 60f)]    public float DriveAccel = 22f;
+    [Tune(5f, 90f)]    public float DriveDecel = 36f;
+    [Tune(0.3f, 2.5f)] public float TurnSpeed = 0.85f;
+    [Tune(0.5f, 4f)]   public float TurretSpeed = 1.5f;
+    [Tune(0.3f, 2.5f)] public float PitchSpeed = 0.85f;
+    [Tune(0.3f, 1.4f)] public float MaxPitch = 0.8f;
+    [Tune(15f, 70f)]   public float MuzzleSpeed = 32f;
+    [Tune(-40f, -4f)]  public float ShellGravity = -16f;
+    [Tune(-60f, -8f)]  public float TankGravity = -32f;
+    [Tune(0.2f, 2.5f)] public float Reload = 0.95f;
+    [Tune(6f, 30f)]    public float CamDistance = 16f;
+    [Tune(3f, 22f)]    public float CamHeight = 10f;
+    [Tune(1f, 14f)]    public float CamSmooth = 5f;
 }
 
 // One tank: the hull -> turret -> barrel transform hierarchy plus its combat state.
@@ -89,25 +113,10 @@ internal sealed class Tank
     public Vector3 BarrelForward => Vector3.Transform(-Vector3.UnitZ, Barrel.WorldRotation);
 }
 
-internal sealed class TankArenaLoop : IGameLoop, IInputHandler
+internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
 {
     private const float ArenaHalf = 42f;
-    // Deliberate, tactical pace — positioning + ballistic aim, not twitch.
-    private const float DriveSpeed = 8f;
-    private const float ReverseSpeed = 4.5f;
-    private const float DriveAccel = 22f;       // ramp up
-    private const float DriveDecel = 36f;       // ramp down (crisper stop, less glide)
-    private const float TurnSpeed = 0.85f;      // max yaw rate (rad/s)
     private const float PivotFactor = 0f;       // no in-place spin — must be moving to turn
-    private const float TurretSpeed = 1.5f;     // turret yaw aim speed
-    private const float PitchSpeed = 0.85f;     // barrel elevation speed
-    private const float MaxPitch = 0.8f;        // ~46deg up; flat (0) is min
-    private const float ShellGravity = -16f;    // proper arc — pitch sets the range
-    private const float CamDistance = 16f;      // pulled back for a tactical view
-    private const float CamHeight = 10f;
-    private const float CamSmooth = 5f;          // camera-yaw follow rate
-    private const float MuzzleSpeed = 32f;      // tuned with ShellGravity so pitch spans the arena
-    private const float PlayerFireCooldown = 0.95f;   // slower reload — make each shot count
     private const float EnemyFireCooldown = 2.8f;
     private const float ShellLife = 6f;
     private const float HitRadius = 2.0f;       // a touch forgiving for lobbed arcs
@@ -116,8 +125,13 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
     private const float EnemyFireRange = 28f;
     private const float PlayerMaxHealth = 100f;
     private const float EnemyShellDamage = 18f;
-    private const int MaxEnemies = 12;
     private static readonly Vector3 GroundScale = new(2f * ArenaHalf, 0.2f, 2f * ArenaHalf);
+
+    // Live-tunable feel knobs (movement / camera / turning / ballistics), exposed in
+    // the --debug overlay. Read each frame so dragging a slider updates the game live.
+    private readonly TankFeel feel = new();
+    private ObjectTunables tunables = null!;
+    private readonly bool debugOverlay;
 
     private readonly int exitAfterFrames;
     private VulkanGraphicsDevice vk = null!;
@@ -160,7 +174,11 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
     private int frameCount;
     private readonly Random rng = new(1234);
 
-    public TankArenaLoop(int exitAfterFrames) => this.exitAfterFrames = exitAfterFrames;
+    public TankArenaLoop(int exitAfterFrames, bool debugOverlay)
+    {
+        this.exitAfterFrames = exitAfterFrames;
+        this.debugOverlay = debugOverlay;
+    }
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
@@ -193,6 +211,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
             "cube");
         instanceBuffer = new InstanceBuffer(vk, shader, "tanks");
         batch = new InstancedBatch(cube, pipeline, instanceBuffer);
+        tunables = new ObjectTunables(feel);
 
         BuildWorld();
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
@@ -277,28 +296,29 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
     {
         // Ramp forward speed toward the throttle target (W forward / S reverse) so the
         // hull has weight instead of snapping to full speed.
-        var targetSpeed = (held.Contains(Key.W) ? DriveSpeed : 0f) - (held.Contains(Key.S) ? ReverseSpeed : 0f);
-        var rate = MathF.Abs(targetSpeed) > MathF.Abs(playerSpeed) ? DriveAccel : DriveDecel;
+        var targetSpeed = (held.Contains(Key.W) ? feel.DriveSpeed : 0f) - (held.Contains(Key.S) ? feel.ReverseSpeed : 0f);
+        var rate = MathF.Abs(targetSpeed) > MathF.Abs(playerSpeed) ? feel.DriveAccel : feel.DriveDecel;
         playerSpeed = MoveToward(playerSpeed, targetSpeed, rate * dt);
 
         // Steering is coupled to motion: full turn rate while driving, only a slow
         // pivot when parked — so the tank carves a turn radius rather than spinning
         // on a dime. (speedFrac scales the available yaw rate with current speed.)
         var steer = (held.Contains(Key.A) ? 1f : 0f) - (held.Contains(Key.D) ? 1f : 0f);
-        var speedFrac = MathF.Min(1f, MathF.Abs(playerSpeed) / DriveSpeed);
-        player.HullYaw += steer * TurnSpeed * (PivotFactor + (1f - PivotFactor) * speedFrac) * dt;
+        var speedFrac = MathF.Min(1f, MathF.Abs(playerSpeed) / feel.DriveSpeed);
+        player.HullYaw += steer * feel.TurnSpeed * (PivotFactor + (1f - PivotFactor) * speedFrac) * dt;
 
-        if (held.Contains(Key.Left)) player.TurretYaw += TurretSpeed * dt;
-        if (held.Contains(Key.Right)) player.TurretYaw -= TurretSpeed * dt;
+        if (held.Contains(Key.Left)) player.TurretYaw += feel.TurretSpeed * dt;
+        if (held.Contains(Key.Right)) player.TurretYaw -= feel.TurretSpeed * dt;
         // Up/Down elevate the gun — higher pitch lobs the shell further (range control).
-        if (held.Contains(Key.Up)) player.BarrelPitch += PitchSpeed * dt;
-        if (held.Contains(Key.Down)) player.BarrelPitch -= PitchSpeed * dt;
-        player.BarrelPitch = Math.Clamp(player.BarrelPitch, 0f, MaxPitch);
+        if (held.Contains(Key.Up)) player.BarrelPitch += feel.PitchSpeed * dt;
+        if (held.Contains(Key.Down)) player.BarrelPitch -= feel.PitchSpeed * dt;
+        player.BarrelPitch = Math.Clamp(player.BarrelPitch, 0f, feel.MaxPitch);
         player.Apply();
 
         // Drive sets horizontal velocity along the hull facing; gravity owns vertical.
         var forward = Vector3.Transform(-Vector3.UnitZ, player.Hull.Rotation);
         SetHorizontalVelocity(player, forward * playerSpeed);
+        player.Physics.Gravity = new Vector3(0f, feel.TankGravity, 0f);   // live-tunable
         player.Physics.FixedUpdate(new Time(time.Total, dt));
         ResolveTank(player);
 
@@ -355,6 +375,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
 
         // Drive toward the player until standoff range; gravity + walls via Resolve.
         SetHorizontalVelocity(e, dist > EnemyStandoff ? dir * EnemySpeed : Vector3.Zero);
+        e.Physics.Gravity = new Vector3(0f, feel.TankGravity, 0f);
         e.Physics.FixedUpdate(new Time(time.Total, dt));
         ResolveTank(e);
 
@@ -367,12 +388,12 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
 
     private void Fire(Tank tank, bool fromPlayer)
     {
-        tank.FireTimer = fromPlayer ? PlayerFireCooldown : EnemyFireCooldown;
+        tank.FireTimer = fromPlayer ? feel.Reload : EnemyFireCooldown;
         // Spawn the shell as a child of the barrel at the muzzle, then detach it into
         // world space keeping that pose — it leaves exactly where the barrel points.
         var shell = new Transform3D { Position = new Vector3(0f, 0f, -Tank.BarrelScale.Z), Parent = tank.Barrel };
         shell.SetParent(null, keepWorldPose: true);
-        var physics = new PhysicsHost3D { Target = shell, Velocity = tank.BarrelForward * MuzzleSpeed, GravityScale = 1f, Gravity = new Vector3(0f, ShellGravity, 0f) };
+        var physics = new PhysicsHost3D { Target = shell, Velocity = tank.BarrelForward * feel.MuzzleSpeed, GravityScale = 1f, Gravity = new Vector3(0f, feel.ShellGravity, 0f) };
         shells.Add(new Shell { Transform = shell, Physics = physics, FromPlayer = fromPlayer });
     }
 
@@ -425,10 +446,10 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
         // smoothed — the camera looks where the gun points, so aiming the turret
         // scans the arena and you can see what you're shooting at.
         var aimYaw = player.HullYaw + player.TurretYaw;
-        camYaw += (aimYaw - camYaw) * MathF.Min(1f, CamSmooth * (float)time.Delta);
+        camYaw += (aimYaw - camYaw) * MathF.Min(1f, feel.CamSmooth * (float)time.Delta);
         var camForward = Vector3.Transform(-Vector3.UnitZ, Quaternion.CreateFromAxisAngle(Vector3.UnitY, camYaw));
         var p = player.Position;
-        var eye = p - camForward * CamDistance + Vector3.UnitY * CamHeight;
+        var eye = p - camForward * feel.CamDistance + Vector3.UnitY * feel.CamHeight;
         var view = Matrix4x4.CreateLookAt(eye, p + Vector3.UnitY * 1.2f, Vector3.UnitY);
         var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, aspect, 0.3f, 400f);
         viewProj = view * proj;
@@ -480,6 +501,29 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
         batch.Add(
             Matrix4x4.CreateScale(Tank.BarrelScale) * Matrix4x4.CreateTranslation(0f, 0f, -Tank.BarrelScale.Z * 0.5f) * t.Barrel.WorldMatrix,
             new Vector4(0.18f, 0.2f, 0.22f, 1f));
+    }
+
+    public string DebugName => "tank-arena";
+
+    public void Debug(DebugContext debug)
+    {
+        // The overlay renders only when Enabled (--debug); the backtick key toggles
+        // ShowOverlay. When off, emit nothing.
+        debug.State.Enabled = debugOverlay;
+        if (!debugOverlay) return;
+
+        tunables.BuildControls(debug);   // live [Tune] sliders for the feel knobs
+
+        using (debug.Scope("arena"))
+        {
+            debug.Values.Value("hp", health);
+            debug.Values.Value("score", score);
+            debug.Values.Value("wave", wave);
+            debug.Values.Value("enemies", enemies.Count);
+            debug.Values.Value("shells", shells.Count);
+            debug.Values.Value("speed", playerSpeed);
+            debug.Values.Value("pitch", player.BarrelPitch);
+        }
     }
 
     public void OnKeyDown(Key key)
