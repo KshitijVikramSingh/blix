@@ -2074,6 +2074,73 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectClose("AJ.5 composed yaw (90+90=180): -Z → +Z", composedFwd.Z, 1f);
 }
 
+// ============================================================================
+// Section AK — Camera3D ground-plane picking (Bulwark Gate A invariant).
+// ============================================================================
+//
+// Tower-defense placement casts the cursor ray onto the ground plane and maps the
+// hit to a grid cell. Section X already pins ScreenPointToRay's unprojection; this
+// pins the GAME invariant on top of it: the same camera that renders also picks, so
+// the screen centre must hit the camera's look target on the ground, cursor motion
+// must move the hit the right way, and it must hold as the RTS camera orbits. A
+// regression here silently places towers a cell off without failing anything else.
+{
+    const float vpW = 1280f, vpH = 720f;
+    var ground = Blix.Geometry.Plane.FromPointNormal(Vector3.Zero, Vector3.UnitY);
+
+    // Angled top-down RTS pose looking at the origin (mirrors BulwarkLoop defaults:
+    // pitch ~0.95 rad, distance 36, yaw 0 → eye above and toward +Z).
+    Camera3D PoseAt(float yaw)
+    {
+        var cam = new Camera3D { NearPlane = 0.5f, FarPlane = 400f };
+        var cp = MathF.Cos(0.95f);
+        var dir = new Vector3(cp * MathF.Sin(yaw), MathF.Sin(0.95f), cp * MathF.Cos(yaw));
+        cam.Transform.Position = dir * 36f;
+        cam.Transform.LookAt(Vector3.Zero, Vector3.UnitY);
+        return cam;
+    }
+
+    Vector3 PickGround(Camera3D cam, float sx, float sy)
+    {
+        var ray = cam.ScreenPointToRay(sx, sy, vpW, vpH);
+        var hit = Intersection.Raycast(ray, ground);
+        return hit!.Value.Point;
+    }
+
+    var camera = PoseAt(0f);
+
+    // AK.1 — the screen centre picks the look target on the ground (origin).
+    var center = PickGround(camera, vpW / 2f, vpH / 2f);
+    t.ExpectClose("AK.1 screen-centre ray hits the look target (X≈0)", center.X, 0f, 0.05f);
+    t.ExpectClose("AK.1 screen-centre ray hits the look target (Z≈0)", center.Z, 0f, 0.05f);
+    t.ExpectClose("AK.1 hit lies on the ground plane (Y≈0)", center.Y, 0f, 1e-3f);
+
+    // AK.2 — horizontal cursor motion moves the hit in world X (yaw 0: screen +X →
+    // world +X), and left/right are mirror-symmetric about the centre.
+    var right = PickGround(camera, vpW / 2f + 200f, vpH / 2f);
+    var left  = PickGround(camera, vpW / 2f - 200f, vpH / 2f);
+    t.ExpectTrue("AK.2 cursor right → greater world X", right.X > 0.1f);
+    t.ExpectTrue("AK.2 cursor left → lesser world X", left.X < -0.1f);
+    t.ExpectClose("AK.2 left/right symmetric about centre", right.X + left.X, 0f, 0.05f);
+
+    // AK.3 — the top of the screen picks farther ground than the bottom (a camera
+    // angled down sees distant ground up top). Compare distance from the eye.
+    var top = PickGround(camera, vpW / 2f, vpH / 2f - 200f);
+    var bottom = PickGround(camera, vpW / 2f, vpH / 2f + 200f);
+    var eye = camera.Transform.Position;
+    t.ExpectTrue("AK.3 top-of-screen ground is farther from the camera than bottom",
+        Vector3.Distance(top, eye) > Vector3.Distance(bottom, eye));
+
+    // AK.4 — the gate's load-bearing invariant: centre always picks the target no
+    // matter how the camera orbits, because picking and rendering share the camera.
+    foreach (var yaw in new[] { MathF.PI / 2f, MathF.PI, 2.5f })
+    {
+        var c = PickGround(PoseAt(yaw), vpW / 2f, vpH / 2f);
+        t.ExpectClose($"AK.4 centre picks target at yaw {yaw:0.0} (X≈0)", c.X, 0f, 0.05f);
+        t.ExpectClose($"AK.4 centre picks target at yaw {yaw:0.0} (Z≈0)", c.Z, 0f, 0.05f);
+    }
+}
+
 t.PrintSummary();
 return t.FailedCount;
 
