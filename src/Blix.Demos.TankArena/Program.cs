@@ -204,13 +204,33 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         public required float Scale;          // model units -> game
         public required float Radius;         // game-space horizontal half-extent (cover footprint)
         public required float Height;         // game-space height (shells lob over the top)
+        public required bool Explosive;       // detonates on hit: AoE damage + chain
         public required IReadOnlyList<PropPrim> Prims;
     }
-    private readonly record struct PropInstance(PropType Type, Vector3 Position, float Yaw);
+    // A placed prop. Destructible (Alive) so an exploding barrel can be removed from
+    // render + collision when it detonates; OwnerId is its collision-world handle.
+    private sealed class Prop
+    {
+        public required PropType Type;
+        public required Vector3 Position;
+        public required float Yaw;
+        public required Bounds3 Bounds;
+        public required int OwnerId;
+        public bool Alive = true;
+    }
 
     private readonly List<PropType> propTypes = new();
-    private readonly List<PropInstance> props = new();
-    private readonly List<Bounds3> propBounds = new();   // shell-vs-prop test (flat shots stop, lobs clear)
+    private readonly List<Prop> props = new();
+
+    // Explosion debris — short-lived bright cubes drawn through the world cube batch
+    // (no separate pipeline). Pure VFX: no collision, no damage of their own.
+    private sealed class Spark { public Vector3 Pos; public Vector3 Vel; public float Age; }
+    private readonly List<Spark> sparks = new();
+
+    private const float ExplosionRadius = 6.5f;       // AoE kill/damage radius
+    private const float ExplosionChainRadius = 5.5f;  // detonates nearby explosive barrels
+    private const float ExplosionDamage = 38f;        // to the player at the epicentre (linear falloff)
+    private const float ExplosionKnockback = 10f;     // blast shove on the player
 
     private readonly int exitAfterFrames;
     private VulkanGraphicsDevice vk = null!;
@@ -356,15 +376,13 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         fullscreen = new FullscreenPass(vk, "fullscreen");
 
         LoadTankParts(worldShader, casterShader);
-        propTypes.Add(LoadProp("barrel.glb", targetHeight: 1.4f, worldShader, casterShader));
-        propTypes.Add(LoadProp("crate.glb", targetHeight: 1.5f, worldShader, casterShader));
-        propTypes.Add(LoadProp("barrel_explosive.glb", targetHeight: 1.4f, worldShader, casterShader));
+        propTypes.Add(LoadProp("barrel.glb", targetHeight: 1.4f, explosive: false, worldShader, casterShader));
+        propTypes.Add(LoadProp("crate.glb", targetHeight: 1.5f, explosive: false, worldShader, casterShader));
+        propTypes.Add(LoadProp("barrel_explosive.glb", targetHeight: 1.4f, explosive: true, worldShader, casterShader));
 
         tunables = new ObjectTunables(feel, fit);   // grouped by type: feel + model-fit
-        BuildWorld();
-        PlaceProps();
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
-        Reset();
+        Reset();   // builds the collision world + places props (so a restart restores them)
     }
 
     // Load the articulated tank model and split it into the four drawable parts
@@ -489,7 +507,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     // uniformly scaled so the model is `targetHeight` game units tall. Each primitive
     // becomes an instanced batch tinted by its material's base colour. Returns the
     // shared PropType; PlaceProps scatters instances.
-    private PropType LoadProp(string file, float targetHeight, ShaderProgramHandle worldShader, ShaderProgramHandle casterShader)
+    private PropType LoadProp(string file, float targetHeight, bool explosive, ShaderProgramHandle worldShader, ShaderProgramHandle casterShader)
     {
         var path = Path.Combine(AppContext.BaseDirectory, "Assets", "models", file);
         var model = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse(file), path));
@@ -521,7 +539,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
                 Caster = new InstancedBatch(mesh, casterPipeline, cInst),
             });
         }
-        return new PropType { Name = file, Scale = scale, Radius = radius, Height = targetHeight, Prims = prims };
+        return new PropType { Name = file, Scale = scale, Radius = radius, Height = targetHeight, Explosive = explosive, Prims = prims };
     }
 
     // Scatter cover props in a mid-arena ring (deterministic), keeping clear of the
@@ -546,13 +564,13 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             if (placed.Any(q => Vector3.Distance(q, pos) < type.Radius + 2.5f)) continue;
 
             var yaw = (float)(prng.NextDouble() * Math.Tau);
-            props.Add(new PropInstance(type, pos, yaw));
             placed.Add(pos);
 
             var r = type.Radius;
             var box = new Bounds3(pos + new Vector3(-r, 0f, -r), pos + new Vector3(r, type.Height, r));
-            propBounds.Add(box);
-            world.Add(100 + props.Count, box);   // tanks resolve against it (cover blocks driving)
+            var ownerId = 100 + props.Count;
+            props.Add(new Prop { Type = type, Position = pos, Yaw = yaw, Bounds = box, OwnerId = ownerId });
+            world.Add(ownerId, box);   // tanks resolve against it (cover blocks driving)
         }
     }
 
@@ -623,6 +641,14 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
 
     private void Reset()
     {
+        // Rebuild the static world so a restart restores any detonated barrels
+        // (PlaceProps is deterministic, so the layout is identical each game).
+        world.Clear();
+        BuildWorld();
+        props.Clear();
+        PlaceProps();
+        sparks.Clear();
+
         player = new Tank();
         player.Position = new Vector3(0f, 4f, 0f);   // drop in under gravity
         playerSpeed = 0f;
@@ -659,6 +685,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         UpdateSpawning(dt);
         for (var i = enemies.Count - 1; i >= 0; i--) UpdateEnemy(enemies[i], time, dt);
         UpdateShells(time, dt);
+        UpdateSparks(dt);
 
         // Headless gate: a deterministic player shot so the run exercises the
         // fire/detach/collision path within the short --frames window.
@@ -803,7 +830,15 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             s.Physics.FixedUpdate(new Time(time.Total, dt));
             s.Age += dt;
             var pos = s.Transform.WorldPosition;
-            if (s.Age > ShellLife || pos.Y < -1f || OutOfArena(pos) || HitsProp(pos)) { shells.RemoveAt(i); continue; }
+            if (s.Age > ShellLife || pos.Y < -1f || OutOfArena(pos)) { shells.RemoveAt(i); continue; }
+
+            // Cover: a flat shot stops at a prop (lobs clear it). Explosive barrels detonate.
+            if (HitProp(pos) is { } prop)
+            {
+                shells.RemoveAt(i);
+                if (prop.Type.Explosive) Explode(prop);
+                continue;
+            }
 
             if (s.FromPlayer)
             {
@@ -832,21 +867,98 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     private static bool OutOfArena(Vector3 p) =>
         MathF.Abs(p.X) > ArenaHalf + 4f || MathF.Abs(p.Z) > ArenaHalf + 4f;
 
-    // A shell hits a prop when its point is inside the prop's cover box. Boxes are
-    // only as tall as the prop, so a high lob clears the cover — flat shots don't.
-    private bool HitsProp(Vector3 p)
+    // The alive prop a shell point is inside (its cover box), or null. Boxes are only
+    // as tall as the prop, so a high lob clears the cover — flat shots don't.
+    private Prop? HitProp(Vector3 p)
     {
-        foreach (var b in propBounds)
+        foreach (var prop in props)
         {
+            if (!prop.Alive) continue;
+            var b = prop.Bounds;
             if (p.X >= b.Min.X && p.X <= b.Max.X &&
                 p.Y >= b.Min.Y && p.Y <= b.Max.Y &&
                 p.Z >= b.Min.Z && p.Z <= b.Max.Z)
             {
-                return true;
+                return prop;
             }
         }
-        return false;
+        return null;
     }
+
+    // Detonate an explosive barrel: clear it from render + collision, throw a spark
+    // burst, kill enemies and damage/shove the player within the blast (linear
+    // falloff), then chain-detonate nearby explosive barrels. Recursive — each barrel
+    // marks itself dead before chaining, so a cluster goes up once with no re-entry.
+    private void Explode(Prop barrel)
+    {
+        if (!barrel.Alive) return;
+        barrel.Alive = false;
+        world.Remove(barrel.OwnerId);
+
+        var center = Flatten(barrel.Position);
+        SpawnSparks(barrel.Position + new Vector3(0f, barrel.Type.Height * 0.5f, 0f), 24);
+
+        for (var ei = enemies.Count - 1; ei >= 0; ei--)
+        {
+            if (Flatten(enemies[ei].Position - center).Length() < ExplosionRadius)
+            {
+                enemies.RemoveAt(ei);
+                score++;
+            }
+        }
+
+        if (!gameOver)
+        {
+            var toPlayer = Flatten(player.Position - center);
+            var pd = toPlayer.Length();
+            if (pd < ExplosionRadius)
+            {
+                var falloff = 1f - pd / ExplosionRadius;
+                health -= ExplosionDamage * falloff;
+                if (pd > 1e-3f) recoilVel += toPlayer / pd * (ExplosionKnockback * falloff);
+                if (health <= 0f) { health = 0f; gameOver = true; }
+            }
+        }
+        UpdateTitle();
+
+        // Chain: nearby explosive barrels go up too.
+        foreach (var p in props)
+        {
+            if (p.Alive && p.Type.Explosive && Flatten(p.Position - center).Length() < ExplosionChainRadius)
+            {
+                Explode(p);
+            }
+        }
+    }
+
+    private static Vector3 Flatten(Vector3 v) => new(v.X, 0f, v.Z);
+
+    private void SpawnSparks(Vector3 center, int count)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            var a = (float)(rng.NextDouble() * Math.Tau);
+            var up = 0.4f + (float)rng.NextDouble() * 1.0f;
+            var speed = 7f + (float)rng.NextDouble() * 11f;
+            var dir = Vector3.Normalize(new Vector3(MathF.Sin(a), up, MathF.Cos(a)));
+            sparks.Add(new Spark { Pos = center, Vel = dir * speed, Age = 0f });
+        }
+    }
+
+    private void UpdateSparks(float dt)
+    {
+        for (var i = sparks.Count - 1; i >= 0; i--)
+        {
+            var s = sparks[i];
+            s.Vel.Y += SparkGravity * dt;
+            s.Pos += s.Vel * dt;
+            s.Age += dt;
+            if (s.Age > SparkLife || s.Pos.Y < 0f) sparks.RemoveAt(i);
+        }
+    }
+
+    private const float SparkLife = 0.7f;
+    private const float SparkGravity = -26f;
 
     private void UpdateTitle() => host.SetTitle(gameOver
         ? $"Blix — Tank Arena | GAME OVER — score {score}, wave {wave} — Enter to restart"
@@ -895,6 +1007,9 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             var tint = s.FromPlayer ? new Vector4(0.80f, 0.92f, 1f, 1f) : new Vector4(1f, 0.62f, 0.25f, 1f);
             batch.Add(Matrix4x4.CreateScale(0.28f) * s.Transform.WorldMatrix, tint);
         }
+        var sparkTint = new Vector4(1f, 0.55f, 0.12f, 1f);   // explosion debris
+        foreach (var s in sparks)
+            batch.Add(Matrix4x4.CreateScale(0.2f) * Matrix4x4.CreateTranslation(s.Pos), sparkTint);
 
         // Tank model parts (world + shadow caster), team-tinted hull/turret.
         foreach (var part in tankParts) { part.World.Begin(worldPush); part.Caster.Begin(shadowPush); }
@@ -906,6 +1021,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             foreach (var pp in pt.Prims) { pp.World.Begin(worldPush); pp.Caster.Begin(shadowPush); }
         foreach (var inst in props)
         {
+            if (!inst.Alive) continue;   // detonated barrels are gone
             var m = Matrix4x4.CreateScale(inst.Type.Scale)
                 * Matrix4x4.CreateRotationY(inst.Yaw)
                 * Matrix4x4.CreateTranslation(inst.Position);
