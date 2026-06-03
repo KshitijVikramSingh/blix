@@ -1975,6 +1975,47 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectClose("AH.7 WorldMatrix upload maps origin to world X (11)", originWorld.X, 11f);
 }
 
+// ============================================================================
+// Section AI — GltfStaticImporter.ImportNodes (articulated hierarchy import).
+// ============================================================================
+//
+// ImportNodes preserves the node hierarchy (name + parent + LOCAL transform) with
+// each mesh in local space — unlike Import, which world-bakes everything into one
+// flat blob. That's what lets an articulated model (hull -> turret -> barrel) map
+// onto a Transform3D rig. Build a tiny 2-node glTF (turret a child of hull, lifted
+// +1 Y) and assert the round-trip keeps the names, parent link, local-space mesh,
+// and unbaked local transform.
+{
+    var tri = new SharpGLTF.Geometry.MeshBuilder<SharpGLTF.Geometry.VertexTypes.VertexPositionNormal>("tri");
+    var prim = tri.UsePrimitive(SharpGLTF.Materials.MaterialBuilder.CreateDefault());
+    prim.AddTriangle(
+        new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 0, 0, 1, 0),
+        new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(1, 0, 0, 0, 1, 0),
+        new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 1, 0, 1, 0));
+
+    var hull = new SharpGLTF.Scenes.NodeBuilder("hull");
+    var turret = hull.CreateNode("turret");
+    turret.LocalMatrix = Matrix4x4.CreateTranslation(0f, 1f, 0f);
+
+    var sceneBuilder = new SharpGLTF.Scenes.SceneBuilder();
+    sceneBuilder.AddRigidMesh(tri, hull);
+    sceneBuilder.AddRigidMesh(tri, turret);
+
+    var tmp = Path.Combine(Path.GetTempPath(), "blix_importnodes_test.glb");
+    sceneBuilder.ToGltf2().SaveGLB(tmp);
+
+    var nm = new GltfStaticImporter().ImportNodes(new AssetImportContext(AssetId.Parse("tmp/test"), tmp));
+    var hullNode = nm.Find("hull");
+    var turretNode = nm.Find("turret");
+    t.ExpectTrue("AI.1 hull node imported", hullNode is not null);
+    t.ExpectTrue("AI.1 turret node imported", turretNode is not null);
+    t.ExpectClose("AI.2 node carries its local-space mesh (3 verts)", hullNode!.Primitives[0].Mesh.VertexCount, 3);
+    t.ExpectTrue("AI.3 turret's parent is hull",
+        turretNode!.ParentIndex >= 0 && nm.Nodes[turretNode.ParentIndex].Name == "hull");
+    t.ExpectClose("AI.4 turret local transform kept (+1 Y, not world-baked)", turretNode.LocalTransform.M42, 1f);
+    File.Delete(tmp);
+}
+
 t.PrintSummary();
 return t.FailedCount;
 
