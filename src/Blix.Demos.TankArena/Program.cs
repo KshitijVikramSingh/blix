@@ -50,6 +50,9 @@ internal sealed class Tank
     public readonly Transform3D Hull = new();
     public readonly Transform3D Turret = new();
     public readonly Transform3D Barrel = new();
+    // Gravity body driving the hull — tanks fall and rest on the ground via world
+    // collision, same as shells (just with the drive setting horizontal velocity).
+    public readonly PhysicsHost3D Physics;
     public float HullYaw;
     public float TurretYaw;     // LOCAL turret yaw, relative to the hull
     public float Health;
@@ -57,6 +60,7 @@ internal sealed class Tank
 
     public Tank()
     {
+        Physics = new PhysicsHost3D { Target = Hull, GravityScale = 1f };
         Hull.Position = new Vector3(0f, HullScale.Y * 0.5f, 0f);
         Turret.Position = new Vector3(0f, HullScale.Y * 0.5f + TurretScale.Y * 0.5f, 0f);
         Turret.Parent = Hull;
@@ -121,6 +125,12 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
     private readonly List<Shell> shells = new();
     private readonly HashSet<Key> held = new();
 
+    // Static world: ground slab + four arena walls, as Bounds3 colliders. Tanks
+    // resolve their AABB against it each step (gravity rests them on the ground;
+    // walls keep them in the arena).
+    private readonly CollisionWorld3D<int> world = new();
+    private readonly List<CollisionContact3D<int>> contacts = new();
+
     private float health;
     private int score;
     private int wave = 1;
@@ -168,13 +178,43 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
         instanceBuffer = new InstanceBuffer(vk, shader, "tanks");
         batch = new InstancedBatch(cube, pipeline, instanceBuffer);
 
+        BuildWorld();
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         Reset();
+    }
+
+    // Ground slab (solid below y=0) + four wall slabs just outside the arena. All
+    // Bounds3 so tank-AABB resolution is plain box-vs-box.
+    private void BuildWorld()
+    {
+        const float e = ArenaHalf;
+        world.Add(0, new Bounds3(new Vector3(-e - 10f, -20f, -e - 10f), new Vector3(e + 10f, 0f, e + 10f)));     // ground
+        world.Add(1, new Bounds3(new Vector3(-e - 2f, -1f, -e - 2f), new Vector3(-e, 10f, e + 2f)));             // -X wall
+        world.Add(2, new Bounds3(new Vector3(e, -1f, -e - 2f), new Vector3(e + 2f, 10f, e + 2f)));               // +X wall
+        world.Add(3, new Bounds3(new Vector3(-e - 2f, -1f, -e - 2f), new Vector3(e + 2f, 10f, -e)));             // -Z wall
+        world.Add(4, new Bounds3(new Vector3(-e - 2f, -1f, e), new Vector3(e + 2f, 10f, e + 2f)));               // +Z wall
+    }
+
+    // Resolve a tank's world AABB against the static world: depenetrate out of every
+    // contact and remove the into-surface velocity (so it rests on the ground and
+    // slides along walls). Single pass — fine for a flat arena.
+    private void ResolveTank(Tank tank)
+    {
+        var half = Tank.HullScale * 0.5f;
+        var c = tank.Hull.Position;
+        contacts.Clear();
+        world.Overlap(new Bounds3(c - half, c + half), contacts);
+        foreach (var contact in contacts)
+        {
+            tank.Hull.Position += contact.Hit.Normal * contact.Hit.Depth;
+            tank.Physics.Velocity = CollisionResponse.RemoveNormalComponent(tank.Physics.Velocity, contact.Hit.Normal);
+        }
     }
 
     private void Reset()
     {
         player = new Tank();
+        player.Position = new Vector3(0f, 4f, 0f);   // drop in under gravity
         enemies.Clear();
         shells.Clear();
         health = PlayerMaxHealth;
@@ -201,9 +241,9 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
             return;
         }
 
-        UpdatePlayer(dt);
+        UpdatePlayer(time, dt);
         UpdateSpawning(dt);
-        for (var i = enemies.Count - 1; i >= 0; i--) UpdateEnemy(enemies[i], dt);
+        for (var i = enemies.Count - 1; i >= 0; i--) UpdateEnemy(enemies[i], time, dt);
         UpdateShells(time, dt);
 
         // Headless gate: a deterministic player shot so the run exercises the
@@ -215,35 +255,42 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
         }
     }
 
-    private void UpdatePlayer(float dt)
+    private void UpdatePlayer(Time time, float dt)
     {
-        var forward = Vector3.Transform(-Vector3.UnitZ, player.Hull.Rotation);
-        if (held.Contains(Key.W)) player.Position += forward * DriveSpeed * dt;
-        if (held.Contains(Key.S)) player.Position -= forward * DriveSpeed * dt;
         if (held.Contains(Key.A)) player.HullYaw += TurnSpeed * dt;
         if (held.Contains(Key.D)) player.HullYaw -= TurnSpeed * dt;
         if (held.Contains(Key.Left)) player.TurretYaw += TurretSpeed * dt;
         if (held.Contains(Key.Right)) player.TurretYaw -= TurretSpeed * dt;
-        player.Position = ClampToArena(player.Position);
         player.Apply();
+
+        // Drive sets horizontal velocity; gravity (in Physics) owns the vertical.
+        var forward = Vector3.Transform(-Vector3.UnitZ, player.Hull.Rotation);
+        var drive = Vector3.Zero;
+        if (held.Contains(Key.W)) drive += forward * DriveSpeed;
+        if (held.Contains(Key.S)) drive -= forward * DriveSpeed;
+        SetHorizontalVelocity(player, drive);
+        player.Physics.FixedUpdate(new Time(time.Total, dt));
+        ResolveTank(player);
 
         player.FireTimer -= dt;
         if (held.Contains(Key.Space) && player.FireTimer <= 0f) Fire(player, fromPlayer: true);
     }
+
+    private static void SetHorizontalVelocity(Tank tank, Vector3 horizontal) =>
+        tank.Physics.Velocity = new Vector3(horizontal.X, tank.Physics.Velocity.Y, horizontal.Z);
 
     private void UpdateSpawning(float dt)
     {
         waveTimer += dt;
         if (waveTimer > 18f) { waveTimer = 0f; wave++; UpdateTitle(); }
 
-        var target = Math.Min(2 + wave, MaxEnemies);
+        // One enemy at a time for now — respawns shortly after the current one dies.
+        const int target = 1;
         spawnTimer -= dt;
-        // Keep the arena populated; spawn one immediately when it's empty so the
-        // game (and the headless gate) always has an enemy to render + run AI on.
         if (enemies.Count < target && (spawnTimer <= 0f || enemies.Count == 0))
         {
             SpawnEnemy();
-            spawnTimer = 1.1f;
+            spawnTimer = 1.5f;
         }
     }
 
@@ -252,29 +299,28 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
         var angle = (float)(rng.NextDouble() * Math.Tau);
         var e = new Tank { Health = 1f, FireTimer = EnemyFireCooldown * (0.4f + (float)rng.NextDouble()) };
         e.Position = new Vector3(
-            MathF.Sin(angle) * (ArenaHalf - 2f), Tank.HullScale.Y * 0.5f, MathF.Cos(angle) * (ArenaHalf - 2f));
+            MathF.Sin(angle) * (ArenaHalf - 4f), 4f, MathF.Cos(angle) * (ArenaHalf - 4f));   // drop in
         enemies.Add(e);
     }
 
-    private void UpdateEnemy(Tank e, float dt)
+    private void UpdateEnemy(Tank e, Time time, float dt)
     {
         var toPlayer = player.Position - e.Position;
         toPlayer.Y = 0f;
         var dist = toPlayer.Length();
         var dir = dist > 0.0001f ? toPlayer / dist : -Vector3.UnitZ;
 
-        // Drive the hull toward the player until standoff range; face travel direction.
-        if (dist > EnemyStandoff)
-        {
-            e.Position = ClampToArena(e.Position + dir * EnemySpeed * dt);
-        }
         e.HullYaw = MathF.Atan2(-dir.X, -dir.Z);
-
         // Turret tracks the player in world space; convert to a local yaw under the
         // hull. (M2 will smooth this rather than snap — a likely rotate-toward helper.)
         var worldAim = MathF.Atan2(-toPlayer.X, -toPlayer.Z);
         e.TurretYaw = worldAim - e.HullYaw;
         e.Apply();
+
+        // Drive toward the player until standoff range; gravity + walls via Resolve.
+        SetHorizontalVelocity(e, dist > EnemyStandoff ? dir * EnemySpeed : Vector3.Zero);
+        e.Physics.FixedUpdate(new Time(time.Total, dt));
+        ResolveTank(e);
 
         e.FireTimer -= dt;
         if (dist < EnemyFireRange && e.FireTimer <= 0f)
@@ -331,9 +377,6 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
     private static bool OutOfArena(Vector3 p) =>
         MathF.Abs(p.X) > ArenaHalf + 4f || MathF.Abs(p.Z) > ArenaHalf + 4f;
 
-    private static Vector3 ClampToArena(Vector3 p) => new(
-        Math.Clamp(p.X, -ArenaHalf, ArenaHalf), p.Y, Math.Clamp(p.Z, -ArenaHalf, ArenaHalf));
-
     private void UpdateTitle() => host.SetTitle(gameOver
         ? $"Blix — Tank Arena | GAME OVER — score {score}, wave {wave} — Enter to restart"
         : $"Blix — Tank Arena | HP {health:0} | score {score} | wave {wave}");
@@ -342,11 +385,11 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
     {
         frameCount++;
 
-        // Fixed-orientation chase: follows the player's position from a high angle so
-        // the arena stays readable and independent turret aim is visible.
+        // Fixed-orientation chase, pulled in close behind + above the player so the
+        // tank reads big and turret aim is legible.
         var p = player.Position;
-        var eye = p + new Vector3(0f, 20f, 16f);
-        var view = Matrix4x4.CreateLookAt(eye, p + Vector3.UnitY * 0.5f, Vector3.UnitY);
+        var eye = p + new Vector3(0f, 7f, 9.5f);
+        var view = Matrix4x4.CreateLookAt(eye, p + Vector3.UnitY * 1f, Vector3.UnitY);
         var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, aspect, 0.3f, 400f);
         viewProj = view * proj;
 
