@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Blix\Blix.csproj" />
     <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
+    <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
     <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
@@ -26,11 +27,24 @@
   <ItemGroup>
     <GlslShader Include="Shaders\particle.vert" />
     <GlslShader Include="Shaders\particle.frag" />
+    <GlslShader Include="Shaders\particle_soft.vert" />
+    <GlslShader Include="Shaders\particle_soft.frag" />
+    <GlslShader Include="Shaders\opaque.vert" />
+    <GlslShader Include="Shaders\opaque.frag" />
+    <GlslShader Include="Shaders\depth_only.vert" />
+    <GlslShader Include="Shaders\depth_only.frag" />
+    <GlslShader Include="Shaders\present.vert" />
+    <GlslShader Include="Shaders\present.frag" />
+    <GlslShader Include="Shaders\bloom_bright.frag" />
+    <GlslShader Include="Shaders\bloom_blur.frag" />
+    <!-- #include'd by present.frag; listed so edits retrigger the cook (glslc
+         resolves the include relative to the file, so no -I is needed). -->
+    <GlslInclude Include="Shaders\tonemap.glsl" />
   </ItemGroup>
 
   <Target Name="CompileSpirV"
           AfterTargets="CopyFilesToOutputDirectory"
-          Inputs="@(GlslShader)"
+          Inputs="@(GlslShader);@(GlslInclude)"
           Outputs="@(GlslShader -> '$(OutDir)Shaders\%(Filename)%(Extension).spv')">
     <MakeDir Directories="$(OutDir)Shaders" />
     <Message Text="Compiling SPIR-V: %(GlslShader.Identity)" Importance="high" />

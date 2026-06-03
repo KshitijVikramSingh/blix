@@ -82,6 +82,8 @@ For drawing one mesh many times, `DrawIndexedInstanced` issues a single `vkCmdDr
 
 - **Per-frame SSBO/UBO that needs a descriptor → `MaterialBindings`.** Per-instance transforms (`InstanceBuffer`, a set-3 SSBO) and skinned bone palettes are frames-in-flight-replicated *and carry their own descriptor set*. These stay in `MaterialBindings` — it already owns the buffer **and** the descriptor write correctly. They do **not** belong in the transient arena: pushing a descriptor-backed buffer through the arena would mean rebuilding the per-frame descriptor machinery `MaterialBindings` already provides, for no gain. The rule: *arena = descriptor-less vertex/index data bound by offset; `MaterialBindings` = descriptor-backed per-frame storage.*
 
+  *Soft particles show why the batch stays out of it.* `ParticleBatch` owns geometry only — billboard expansion + arena upload + depth sort — and forwards the *caller's* pipeline, push constants, and texture bindings to the draw. So "soft particles" is a property of the **caller's pipeline**, not the batch: `VulkanParticles` hands it a soft shader whose push carries a fade and whose textures include one **read-only** scene-depth sampler, letting the fragment shader dissolve a billboard into geometry instead of clipping through it. That depth sampler is a render-pass *read edge*, not `MaterialBindings`-owned storage (nothing per-frame to replicate), and the vertex stream still rides the arena. The boundary holds, and the primitive stays generic — the same way `InstancedBatch` leaves the shader to its caller. `VulkanParticles` wires the rest through a `RenderGraph` (depth pre-pass → scene → bloom → tonemap present) since a colour target is single-writer and a pass can't sample its own depth attachment.
+
 ## Meshes, pipelines, vertex types
 
 `Mesh` (`Blix.Render`) bundles a vertex buffer + index buffer + count + mesh-local AABB under a name; build one from a `MeshData` via `IGraphicsDevice.CreateMesh(...)`, or bundle many primitives into one shared `(VB, IB)` with `MeshBundler.Bundle(...)` (draws become sub-ranges via `indexOffset`/`vertexOffset`).
@@ -130,7 +132,7 @@ All techniques run on Vulkan; the shader files below are the source of truth.
 | Glass / transmissive | Fresnel + alpha-blend pipeline in `lit.frag` (no refraction) |
 | GPU-driven indirect draw | `DrawIndexedIndirect`, per-material multi-draw (VulkanSponza) |
 | Per-frame transient vertices | `AllocVertices` → `TransientVertexSlice`, ring of host-visible buffers bound by offset (SpriteBatch, VkLineDrawer, ParticleBatch) |
-| Billboard particles | `ParticleBatch` (CPU sim, colour/size-over-life) → arena slice; VulkanParticles (fountain · explosion · vortex) |
+| Billboard particles | `ParticleBatch` (CPU sim, colour/size-over-life, optional soft-depth fade) → arena slice; VulkanParticles (fountain · explosion · vortex) over an HDR bloom pipeline with soft particles |
 | Per-instance instancing | `DrawIndexedInstanced` + `InstanceBuffer` (set-3 SSBO) / `InstancedBatch` (VulkanInstanced, Runner) |
 | Skeletal animation (GPU skinning) | bone-palette set-3 SSBO; `skinned_lit.vert` (VulkanLit), `skinned.vert` (Runner) |
 | Screen-space-error LOD | `.blixmesh` per-level geometric error; runtime selects by SSE (VulkanSponza) |
