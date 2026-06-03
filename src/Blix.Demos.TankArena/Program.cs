@@ -46,21 +46,25 @@ public static class Program
 // playing. Defaults are the current tuned values.
 internal sealed class TankFeel
 {
-    [Tune(3f, 18f)]    public float DriveSpeed = 8f;
-    [Tune(2f, 10f)]    public float ReverseSpeed = 4.5f;
-    [Tune(5f, 60f)]    public float DriveAccel = 22f;
-    [Tune(5f, 90f)]    public float DriveDecel = 36f;
-    [Tune(0.3f, 2.5f)] public float TurnSpeed = 0.85f;
-    [Tune(0.5f, 4f)]   public float TurretSpeed = 1.5f;
-    [Tune(0.3f, 2.5f)] public float PitchSpeed = 0.85f;
-    [Tune(0.3f, 1.4f)] public float MaxPitch = 0.8f;
-    [Tune(15f, 70f)]   public float MuzzleSpeed = 32f;
-    [Tune(-40f, -4f)]  public float ShellGravity = -16f;
-    [Tune(-60f, -8f)]  public float TankGravity = -32f;
-    [Tune(0.2f, 2.5f)] public float Reload = 0.95f;
-    [Tune(6f, 30f)]    public float CamDistance = 16f;
-    [Tune(3f, 22f)]    public float CamHeight = 10f;
-    [Tune(1f, 14f)]    public float CamSmooth = 5f;
+    // Movement / camera / turning default to slider-min (slow, deliberate baseline);
+    // ballistics (shell speed, gravity, pitch, reload) keep their tuned values.
+    [Tune(3f, 18f)]    public float DriveSpeed = 3f;
+    [Tune(2f, 10f)]    public float ReverseSpeed = 2f;
+    [Tune(5f, 60f)]    public float DriveAccel = 5f;
+    [Tune(5f, 90f)]    public float DriveDecel = 5f;
+    [Tune(0.3f, 2.5f)] public float TurnSpeed = 0.3f;
+    [Tune(0.5f, 4f)]   public float TurretSpeed = 0.5f;
+    [Tune(0.3f, 2.5f)] public float PitchSpeed = 0.3f;
+    [Tune(0.3f, 1.4f)] public float MaxPitch = 0.8f;          // kept — ballistic range
+    [Tune(0.4f, 3.14f)] public float TurretLimit = 1.7f;      // clamp turret to a front arc (no 360 spin)
+    [Tune(15f, 70f)]   public float MuzzleSpeed = 32f;        // kept
+    [Tune(-40f, -4f)]  public float ShellGravity = -16f;      // kept
+    [Tune(-60f, -8f)]  public float TankGravity = -32f;       // kept
+    [Tune(0.2f, 2.5f)] public float Reload = 0.95f;           // kept
+    [Tune(0f, 12f)]    public float Knockback = 3f;           // recoil shove on firing
+    [Tune(6f, 30f)]    public float CamDistance = 6f;
+    [Tune(3f, 22f)]    public float CamHeight = 3f;
+    [Tune(1f, 14f)]    public float CamSmooth = 1f;
 
     // Enemy knobs — turn them down/off to tune in peace.
     [Tune(0f, 8f)]     public float EnemyMax = 1f;       // 0 clears the arena
@@ -172,7 +176,9 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
     private bool seededShot;
 
     private float playerSpeed;   // current forward speed (ramped toward target)
-    private float camYaw;        // smoothed camera yaw, trails the hull facing
+    private Vector3 recoilVel;   // decaying recoil shove from firing (added to drive)
+    private float camYaw;        // smoothed camera yaw, trails the turret facing
+    private const float RecoilDamp = 4f;
     private Matrix4x4 viewProj;
     private float aspect = 16f / 9f;
     private int frameCount;
@@ -255,6 +261,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
         player = new Tank();
         player.Position = new Vector3(0f, 4f, 0f);   // drop in under gravity
         playerSpeed = 0f;
+        recoilVel = Vector3.Zero;
         camYaw = 0f;
         enemies.Clear();
         shells.Clear();
@@ -313,6 +320,9 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
 
         if (held.Contains(Key.Left)) player.TurretYaw += feel.TurretSpeed * dt;
         if (held.Contains(Key.Right)) player.TurretYaw -= feel.TurretSpeed * dt;
+        // Clamp the turret to a forward arc (no 360 spin) so the gun — and the
+        // turret-follow camera — stay anchored to where the hull faces.
+        player.TurretYaw = Math.Clamp(player.TurretYaw, -feel.TurretLimit, feel.TurretLimit);
         // Up/Down elevate the gun — higher pitch lobs the shell further (range control).
         if (held.Contains(Key.Up)) player.BarrelPitch += feel.PitchSpeed * dt;
         if (held.Contains(Key.Down)) player.BarrelPitch -= feel.PitchSpeed * dt;
@@ -321,7 +331,8 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
 
         // Drive sets horizontal velocity along the hull facing; gravity owns vertical.
         var forward = Vector3.Transform(-Vector3.UnitZ, player.Hull.Rotation);
-        SetHorizontalVelocity(player, forward * playerSpeed);
+        recoilVel *= MathF.Max(0f, 1f - RecoilDamp * dt);   // recoil shove fades out
+        SetHorizontalVelocity(player, forward * playerSpeed + recoilVel);
         player.Physics.Gravity = new Vector3(0f, feel.TankGravity, 0f);   // live-tunable
         player.Physics.FixedUpdate(new Time(time.Total, dt));
         ResolveTank(player);
@@ -401,6 +412,16 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
         shell.SetParent(null, keepWorldPose: true);
         var physics = new PhysicsHost3D { Target = shell, Velocity = tank.BarrelForward * feel.MuzzleSpeed, GravityScale = 1f, Gravity = new Vector3(0f, feel.ShellGravity, 0f) };
         shells.Add(new Shell { Transform = shell, Physics = physics, FromPlayer = fromPlayer });
+
+        // Knockback: shove the firing tank back along the gun's horizontal facing,
+        // so shooting nudges the player (and can be used to reposition). Player only
+        // — rides recoilVel, which the drive blends in + decays.
+        if (fromPlayer)
+        {
+            var back = tank.BarrelForward;
+            back.Y = 0f;
+            if (back.LengthSquared() > 1e-4f) recoilVel -= Vector3.Normalize(back) * feel.Knockback;
+        }
     }
 
     private void UpdateShells(Time time, float dt)
