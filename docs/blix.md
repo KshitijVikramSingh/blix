@@ -258,12 +258,22 @@ var worldMuzzle = barrel.WorldPosition;   // composed down hull -> turret -> bar
 
 `SetParent(newParent, keepWorldPose)` re-parents; with `keepWorldPose: true` the local TRS is recomputed so the **world** pose is unchanged across the switch — e.g. `shell.SetParent(null, keepWorldPose: true)` detaches a shell from a moving barrel at its current muzzle pose so it flies straight instead of snapping to the barrel's local frame. `WorldMatrix` is a `System.Numerics` model matrix (translation in the last row), fed straight to a `model * v` shader / `InstanceData.Model` with no transpose. `Blix.Demos.TankArena` is the working reference (its hull → turret → barrel tanks are parenting hierarchies); the composition + render convention are pinned by `Blix.Test.Graphics` Section AH.
 
+#### Fitting an articulated model onto a rig
+
+Mapping a rigged glTF (a tank with a separate turret/gun, a mech, a crane) onto a `Transform3D` rig works without screenshots if you **measure the asset instead of guessing pivots**:
+
+1. **Inspect it** — `dotnet run --project src/Blix.Tools.Cook -- inspect <model.glb>` prints the node hierarchy and, for each mesh-bearing node, its composed-world `scale` / `translation` and assembled `bounds`. A rigged part's **node translation is its rotation pivot** (authors place the node origin at the hinge); the bounds give the model's size and forward axis.
+2. **Import nodes, not a fused blob** — `GltfStaticImporter.ImportNodes` keeps every node in its own local space (vs `Import`, which bakes world transforms into one static mesh). Compose each node's world transform by walking parents (`world = local * parentWorld`).
+3. **Bake each part to its pivot** — transform a part's primitives by `nodeWorld * Translate(-pivot)` so its pivot sits at the mesh origin, upload as a `Mesh`, and give each part its own `InstancedBatch` (reusing one world/caster pipeline — same vertex layout).
+4. **Drive from the rig** — the per-frame instance matrix is `Scale(s) * RotateY(yawFix) * rigPart.WorldMatrix * Translate(0, lift, 0)`, and the rig's child positions (turret-on-hull, gun-on-turret) are the **measured** node offsets mapped through the same `RotateY(yawFix) * s` — so the meshes and the gameplay rig (aim, muzzle, recoil) stay locked and a single scale/yaw knob can't desync them.
+5. **Expose only the residuals** as live `[Tune]` knobs — global scale, a forward-axis `yawFix` (model `-X` → engine `-Z` is `-90°`), and a vertical `lift`. Because the pivots came from measurement, sensible defaults land the fit with no dialing. `Blix.Demos.TankArena.LoadTankParts` / `SeatRig` / `PartModel` are the worked reference.
+
 #### Deliberate limits
 
 - Class, not struct. Game code regularly hands the same transform to multiple consumers; reference semantics are the right default.
 - No parent/child container on `GameObject` — parenting is pose-level on `Transform3D`. Game code wires `Transform.Parent` and keeps its own object lists; there's no automatic scene-graph that owns children, draw order, or lifetimes.
 - No dirty-flag caching for `ToMatrix()` / `WorldMatrix`. Matrix composition is a few small multiplies and hierarchies here are shallow; `WorldMatrix` re-walks the parent chain on each access (add caching when a deep rig needs it). Cycle-checking happens once, on `Parent` assignment.
-- Non-uniform parent scale combined with a child rotation can shear the child (the standard TRS-hierarchy limitation; content keeps non-uniform scale off shared parents, mirroring the rigid-bone skinning assumption — the vehicle demo scales each part's box at draw time, not in the pose hierarchy).
+- Non-uniform parent scale combined with a child rotation can shear the child (the standard TRS-hierarchy limitation; content keeps non-uniform scale off shared parents, mirroring the rigid-bone skinning assumption — `TankArena` applies a single **uniform** model scale in the per-part instance matrix, not in the pose hierarchy).
 - No `Origin` / `Pivot`. Mesh-side authored offsets are normalised at import time (`ObjImporter.RecenterToOrigin`, default true); game code uses plain `Transform.Position`.
 
 ### Transform2D
