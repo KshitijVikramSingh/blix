@@ -29,15 +29,24 @@ namespace Blix.Demos.Bulwark;
 // LOCAL: the extraction call (a shared NavGrid + A*?) waits until the duplication is
 // real and visible, per docs/conventions.md §4.
 //
-// Everything goes through one InstancedBatch (tiles + towers + ghost + enemies),
-// lifted from VulkanInstanced. The sun-shadow + HDR graph from TankArena lands at M3.
+// M1 — Playable core: towers target the nearest enemy in range and fire homing
+// shots; enemies have HP; a kill pays scrap, a leak costs a life; scrap builds more
+// towers. Each tower aims with a Transform3D turret→barrel rig — the SAME pattern as
+// TankArena's tank turret (LookAt to yaw, a parented barrel whose WorldPosition is
+// the muzzle), now its SECOND consumer. Also kept local; the TurretRig extraction
+// call waits, like nav.
 //
-// ── Executable spec for (engine primitives this gate proves) ──
+// Everything goes through one InstancedBatch (tiles + towers + enemies + shots +
+// ghost), lifted from VulkanInstanced. The sun-shadow + HDR graph from TankArena
+// lands at M3.
+//
+// ── Executable spec for (engine primitives this demo proves) ──
 //   • Picking: Camera3D.ScreenPointToRay → Intersection.Raycast(ray, ground) → cell
 //   • A* grid pathfinding: dynamic re-path + wall-off rejection (nav's 2nd consumer)
-//   • Orbit/zoom RTS camera; build UI (hover ghost, place/remove)
+//   • Transform3D turret→barrel aim rig: LookAt + parented-barrel muzzle (rig's 2nd consumer)
+//   • Orbit/zoom RTS camera; build UI (hover ghost, place/remove, scrap economy)
 // ── Intentionally owns (stays local — NOT extracted) ──
-//   • the grid model, A* + path-following, placement rules, camera feel
+//   • the grid model, A* + path-following, turret aim, economy, wave spawn, camera feel
 public static class Program
 {
     public static void Main(string[] args)
@@ -57,7 +66,7 @@ public static class Program
         }
 
         var loop = new BulwarkLoop(exitAfterFrames);
-        using var window = new Window(loop, new WindowOptions("Blix — Bulwark (Gate B: Path & March)", 1280, 720));
+        using var window = new Window(loop, new WindowOptions("Blix — Bulwark (M1: Playable Core)", 1280, 720));
         window.Run();
     }
 }
@@ -97,18 +106,40 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     private readonly bool[] occupied = new bool[GridW * GridH];
     private int placedCount;
 
-    // Gate B — navigation (kept local; see header). Enemies march a shortest path
-    // spawn→core; A* runs on placement (not per frame), towers are impassable, and a
-    // build that would wall the route is rejected. Spawn + core sit on opposite edges.
+    // Navigation (kept local; see header). Enemies march a shortest path spawn→core;
+    // A* runs on placement (not per frame), towers are impassable, and a build that
+    // would wall the route is rejected. Spawn + core sit on opposite edges.
     private const int SpawnCx = 0;
     private const int SpawnCz = GridH / 2;
     private const int CoreCx = GridW - 1;
     private const int CoreCz = GridH / 2;
-    private const int EnemyCount = 6;
-    private const float EnemySpeed = 4.5f;
+    private const float EnemySpeed = 3.2f;
     private List<(int cx, int cz)> path = new();
     private readonly HashSet<int> pathCells = new();
-    private readonly Vector3[] enemyPos = new Vector3[EnemyCount];
+
+    // M1 — combat loop. Towers (a Transform3D turret→barrel aim rig lifted from
+    // TankArena, kept local) target the nearest enemy in range and fire homing shots;
+    // enemies have HP; a kill pays scrap, a leak costs a life; scrap builds towers.
+    private const int TowerCost = 50;
+    private const int KillReward = 12;
+    private const int StartScrap = 150;
+    private const int StartLives = 20;
+    private const float TowerRange = 7f;
+    private const float FireInterval = 0.55f;
+    private const float ShotDamage = 12f;
+    private const float EnemyMaxHp = 32f;
+    private const float SpawnInterval = 1.3f;
+    private const int MaxAlive = 14;
+    private const float ProjSpeed = 22f;
+
+    private readonly List<Enemy> enemies = new();
+    private readonly Dictionary<int, Tower> towers = new();
+    private readonly List<Projectile> shots = new();
+    private float spawnTimer;
+    private float statusTimer;
+    private int lives = StartLives;
+    private int scrap = StartScrap;
+    private bool gameOver;
 
     // Held-key orbit state (OnKeyDown/Up is edge-triggered; apply in OnUpdate).
     private bool orbitLeft, orbitRight, orbitUp, orbitDown;
@@ -155,13 +186,13 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
 
         UpdateCamera();
         UpdatePick();
+        SeedStarterTowers();
         Recompute();
-        InitEnemies();
 
-        Console.WriteLine("Bulwark Gate B — Path & March");
-        Console.WriteLine("  move mouse: hover   left-click: place   right-click: remove");
-        Console.WriteLine("  arrows: orbit   wheel: zoom   Esc: quit");
-        Console.WriteLine("  enemies march spawn→core; a build that walls the path is rejected");
+        Console.WriteLine("Bulwark M1 — Playable Core");
+        Console.WriteLine("  left-click: build tower (50 scrap)   right-click: sell   arrows: orbit   wheel: zoom");
+        Console.WriteLine($"  towers shoot marching enemies; kills pay scrap, leaks cost lives");
+        Console.WriteLine($"  start: {StartLives} lives, {StartScrap} scrap   Esc: quit");
     }
 
     public void OnResize(int width, int height)
@@ -183,7 +214,15 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
 
         UpdateCamera();
         UpdatePick();
-        MoveEnemies(dt);
+
+        if (!gameOver)
+        {
+            Spawn(dt);
+            UpdateEnemies(dt);
+            UpdateTowers(dt);
+            UpdateShots(dt);
+            PrintStatus(dt);
+        }
     }
 
     // Rebuild the Camera3D pose from the orbit params. eye = target + dir*distance,
@@ -272,13 +311,6 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
                 if (hoverValid && cx == hoverCx && cz == hoverCz)
                     tint = new Vector4(tint.X + 0.12f, tint.Y + 0.14f, tint.Z + 0.12f, 1f);
                 instances.Add(new InstanceData(tile, tint));
-
-                if (occupied[idx])
-                {
-                    var tower = Matrix4x4.CreateScale(Cell * 0.55f, 1.6f, Cell * 0.55f) *
-                                Matrix4x4.CreateTranslation(center.X, 0.8f, center.Z);
-                    instances.Add(new InstanceData(tower, new Vector4(0.35f, 0.55f, 0.85f, 1f)));
-                }
             }
         }
 
@@ -289,12 +321,34 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             Matrix4x4.CreateTranslation(core.X, 1.2f, core.Z),
             new Vector4(0.30f, 0.85f, 1.0f, 1f)));
 
-        // Enemies marching the current path.
-        foreach (var p in enemyPos)
+        // Towers: a fixed pedestal + the aiming turret (oriented by its Transform3D,
+        // so the elongated box visibly points its -Z barrel at the current target).
+        foreach (var t in towers.Values)
         {
             instances.Add(new InstanceData(
-                Matrix4x4.CreateScale(0.8f) * Matrix4x4.CreateTranslation(p.X, 0.4f, p.Z),
-                new Vector4(0.95f, 0.45f, 0.20f, 1f)));
+                Matrix4x4.CreateScale(Cell * 0.5f, 1.0f, Cell * 0.5f) *
+                Matrix4x4.CreateTranslation(t.Pos.X, 0.5f, t.Pos.Z),
+                new Vector4(0.30f, 0.34f, 0.42f, 1f)));
+            instances.Add(new InstanceData(t.Turret.ToMatrix(), new Vector4(0.45f, 0.60f, 0.90f, 1f)));
+        }
+
+        // Enemies, tinted green (full HP) → red (dying).
+        var green = new Vector4(0.30f, 0.90f, 0.35f, 1f);
+        var red = new Vector4(0.95f, 0.22f, 0.16f, 1f);
+        foreach (var e in enemies)
+        {
+            var hp = Math.Clamp(e.Health / EnemyMaxHp, 0f, 1f);
+            var tint = Vector4.Lerp(red, green, hp);
+            instances.Add(new InstanceData(
+                Matrix4x4.CreateScale(0.85f) * Matrix4x4.CreateTranslation(e.Pos.X, 0.45f, e.Pos.Z), tint));
+        }
+
+        // In-flight homing shots.
+        foreach (var s in shots)
+        {
+            instances.Add(new InstanceData(
+                Matrix4x4.CreateScale(0.28f) * Matrix4x4.CreateTranslation(s.Pos.X, s.Pos.Y, s.Pos.Z),
+                new Vector4(1.0f, 0.95f, 0.40f, 1f)));
         }
 
         if (hoverValid)
@@ -377,55 +431,141 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         return result;
     }
 
-    // Stagger the enemies evenly along the current path so they read as a column.
-    private void InitEnemies()
-    {
-        for (var i = 0; i < EnemyCount; i++)
-            enemyPos[i] = PathPointAtFraction((float)i / EnemyCount);
-    }
+    // ── Combat (M1) — all local to this demo ──
 
-    // Sample the polyline through the current path's cell centres at fraction f∈[0,1].
-    private Vector3 PathPointAtFraction(float f)
+    // Trickle a wave from the spawn cell up to the alive cap.
+    private void Spawn(float dt)
     {
-        if (path.Count == 0) return CellCenter(SpawnCx, SpawnCz);
-        if (path.Count == 1) return Center(path[0]);
-        var total = 0f;
-        for (var i = 1; i < path.Count; i++) total += Vector3.Distance(Center(path[i - 1]), Center(path[i]));
-        var target = f * total;
-        var acc = 0f;
-        for (var i = 1; i < path.Count; i++)
+        spawnTimer -= dt;
+        if (spawnTimer <= 0f && enemies.Count < MaxAlive)
         {
-            var a = Center(path[i - 1]);
-            var b = Center(path[i]);
-            var seg = Vector3.Distance(a, b);
-            if (acc + seg >= target) return Vector3.Lerp(a, b, seg > 1e-4f ? (target - acc) / seg : 0f);
-            acc += seg;
+            spawnTimer = SpawnInterval;
+            enemies.Add(new Enemy { Pos = Center((SpawnCx, SpawnCz)), Health = EnemyMaxHp });
         }
-        return Center(path[^1]);
     }
 
-    // Steer each enemy toward the path node just ahead of it (found by nearest node),
-    // so a dynamic re-path reroutes the marchers with no per-enemy path state. Reaching
-    // the core loops the enemy back to the spawn (Gate B has no HP/economy yet — M1).
-    private void MoveEnemies(float dt)
+    // March enemies along the current path (nearest-node lookahead, same as Gate B),
+    // and resolve deaths (→ scrap) and leaks (→ a life). Backwards iteration so
+    // removal during the loop is safe.
+    private void UpdateEnemies(float dt)
     {
         if (path.Count < 2) return;
-        var coreCenter = Center(path[^1]);
-        for (var i = 0; i < EnemyCount; i++)
+        var core = Center(path[^1]);
+        for (var i = enemies.Count - 1; i >= 0; i--)
         {
+            var e = enemies[i];
+            if (e.Health <= 0f)
+            {
+                enemies.RemoveAt(i);
+                scrap += KillReward;
+                continue;
+            }
+
             var nearest = 0;
             var best = float.MaxValue;
             for (var k = 0; k < path.Count; k++)
             {
-                var d = Vector3.DistanceSquared(enemyPos[i], Center(path[k]));
+                var d = Vector3.DistanceSquared(e.Pos, Center(path[k]));
                 if (d < best) { best = d; nearest = k; }
             }
             var target = Center(path[Math.Min(nearest + 1, path.Count - 1)]);
-            var to = target - enemyPos[i];
+            var to = target - e.Pos;
             var dist = to.Length();
-            if (dist > 1e-4f) enemyPos[i] += to / dist * Math.Min(EnemySpeed * dt, dist);
-            if (Vector3.Distance(enemyPos[i], coreCenter) < 0.4f) enemyPos[i] = Center(path[0]);
+            if (dist > 1e-4f) e.Pos += to / dist * Math.Min(EnemySpeed * dt, dist);
+
+            if (Vector3.Distance(e.Pos, core) < 0.5f)
+            {
+                enemies.RemoveAt(i);
+                lives--;
+                Console.WriteLine($"  LEAK — lives {lives}");
+                if (lives <= 0) { gameOver = true; Console.WriteLine("  *** GAME OVER ***"); }
+            }
         }
+    }
+
+    // Each tower aims its Transform3D turret (yaw-only LookAt) at the nearest enemy in
+    // range and fires a homing shot from the barrel's muzzle when its cooldown is up.
+    private void UpdateTowers(float dt)
+    {
+        foreach (var t in towers.Values)
+        {
+            t.Cooldown -= dt;
+            var target = NearestEnemyInRange(t.Pos, TowerRange);
+            if (target is null) continue;
+
+            // Aim flat at the target (yaw only — barrel stays level).
+            t.Turret.LookAt(new Vector3(target.Pos.X, t.Turret.Position.Y, target.Pos.Z), Vector3.UnitY);
+            if (t.Cooldown <= 0f)
+            {
+                t.Cooldown = FireInterval;
+                shots.Add(new Projectile { Pos = t.Barrel.WorldPosition, Target = target, Damage = ShotDamage });
+            }
+        }
+    }
+
+    // Homing shots: chase the assigned target, apply damage on contact, fizzle if the
+    // target died mid-flight.
+    private void UpdateShots(float dt)
+    {
+        for (var i = shots.Count - 1; i >= 0; i--)
+        {
+            var s = shots[i];
+            if (s.Target is null || s.Target.Health <= 0f) { shots.RemoveAt(i); continue; }
+            var to = s.Target.Pos - s.Pos;
+            var dist = to.Length();
+            if (dist < 0.5f) { s.Target.Health -= s.Damage; shots.RemoveAt(i); continue; }
+            s.Pos += to / dist * Math.Min(ProjSpeed * dt, dist);
+        }
+    }
+
+    private Enemy? NearestEnemyInRange(Vector3 from, float range)
+    {
+        Enemy? best = null;
+        var bestD = range * range;
+        foreach (var e in enemies)
+        {
+            if (e.Health <= 0f) continue;
+            var d = Vector3.DistanceSquared(from, e.Pos);
+            if (d <= bestD) { bestD = d; best = e; }
+        }
+        return best;
+    }
+
+    // A tower's aim rig: a turret Transform3D (root, at the tower top) that LookAts the
+    // target, and a barrel parented to it whose WorldPosition is the muzzle. This is
+    // TankArena's turret pattern, kept local — see header (TurretRig extraction TBD).
+    private Tower MakeTower(int cx, int cz)
+    {
+        var c = CellCenter(cx, cz);
+        var turret = new Transform3D
+        {
+            Position = new Vector3(c.X, 1.4f, c.Z),
+            Scale = new Vector3(0.7f, 0.5f, 1.1f),
+        };
+        var barrel = new Transform3D { Position = new Vector3(0f, 0f, -0.9f), Parent = turret };
+        return new Tower { Cx = cx, Cz = cz, Pos = c, Turret = turret, Barrel = barrel };
+    }
+
+    // A few free starter towers flanking the lane, so the field is defended from
+    // frame 0 (and the headless --frames smoke exercises aim + fire under validation).
+    // All sit off the spawn→core row, so the straight path is unaffected.
+    private void SeedStarterTowers()
+    {
+        foreach (var (cx, cz) in new[] { (4, 7), (8, 9), (11, 7) })
+        {
+            var idx = Idx(cx, cz);
+            occupied[idx] = true;
+            towers[idx] = MakeTower(cx, cz);
+            placedCount++;
+        }
+    }
+
+    private void PrintStatus(float dt)
+    {
+        statusTimer -= dt;
+        if (statusTimer > 0f) return;
+        statusTimer = 2f;
+        Console.WriteLine($"  [lives {lives} | scrap {scrap} | enemies {enemies.Count} | towers {towers.Count}]");
     }
 
     // Deterministic proof of the Gate B nav invariants — no window, no device. Run
@@ -479,7 +619,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
 
     public void OnMouseDown(MouseButton button)
     {
-        if (!hoverValid) return;
+        if (gameOver || !hoverValid) return;
         var idx = hoverCz * GridW + hoverCx;
         // The spawn and the core are never buildable.
         if ((hoverCx == SpawnCx && hoverCz == SpawnCz) || (hoverCx == CoreCx && hoverCz == CoreCz))
@@ -489,6 +629,11 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         }
         if (button == MouseButton.Left && !occupied[idx])
         {
+            if (scrap < TowerCost)
+            {
+                Console.WriteLine($"  need {TowerCost} scrap (have {scrap})");
+                return;
+            }
             occupied[idx] = true;
             // Reject a placement that would fully wall the route: tentatively occupy,
             // re-run A*, and revert if no path survives.
@@ -498,16 +643,20 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
                 Console.WriteLine($"  blocked: a tower at ({hoverCx}, {hoverCz}) would wall off the path");
                 return;
             }
+            scrap -= TowerCost;
             placedCount++;
+            towers[idx] = MakeTower(hoverCx, hoverCz);
             Recompute();
-            Console.WriteLine($"  placed tower at ({hoverCx}, {hoverCz}) — {placedCount} total, path {path.Count} cells");
+            Console.WriteLine($"  built tower ({hoverCx}, {hoverCz}) — scrap {scrap}, {placedCount} towers, path {path.Count}");
         }
         else if (button == MouseButton.Right && occupied[idx])
         {
             occupied[idx] = false;
+            towers.Remove(idx);
             placedCount--;
+            scrap += TowerCost / 2;   // partial refund on sell
             Recompute();
-            Console.WriteLine($"  removed tower at ({hoverCx}, {hoverCz}) — {placedCount} total, path {path.Count} cells");
+            Console.WriteLine($"  sold tower ({hoverCx}, {hoverCz}) — scrap {scrap}, {placedCount} towers, path {path.Count}");
         }
     }
 
@@ -538,4 +687,29 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             case Key.Down: orbitDown = false; break;
         }
     }
+}
+
+// ── Combat actors (M1) — plain mutable data, local to the demo ──
+
+internal sealed class Enemy
+{
+    public Vector3 Pos;
+    public float Health;
+}
+
+internal sealed class Tower
+{
+    public int Cx;
+    public int Cz;
+    public Vector3 Pos;                  // pedestal world position (cell centre)
+    public Transform3D Turret = null!;   // root aim transform; LookAts the target
+    public Transform3D Barrel = null!;   // child of Turret; WorldPosition is the muzzle
+    public float Cooldown;
+}
+
+internal sealed class Projectile
+{
+    public Vector3 Pos;
+    public Enemy? Target;
+    public float Damage;
 }

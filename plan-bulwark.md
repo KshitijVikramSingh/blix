@@ -49,9 +49,11 @@ RTS camera (orbit / zoom / pan) · wave director + economy.
   **reject a placement that fully walls the path**; instanced markers march the path;
   re-path on every build. Nav kept **local** (not extracted). Proven by the demo's
   `--selftest` (A* + wall-off + dynamic re-path) + `--frames` smoke.
-- **M1 · Playable core**: real tower (turret-aim rig lifted from Tank Arena)
-  targets + fires; enemies have HP; reach-core = lose a life; kill = scrap; scrap =
-  place tower. One hand-placed wave.
+- **M1 · Playable core** *(done)*: towers aim a Transform3D turret→barrel rig
+  (LookAt + parented-barrel muzzle, lifted from TankArena, kept local) at the nearest
+  enemy in range and fire homing shots; enemies have HP; a leak costs a life; a kill
+  pays scrap; scrap builds towers (with cost + wall-off gating). Continuous spawn +
+  3 free starter towers. Verified clean under validation; combat exercised headless.
 - **M2 · The game**: wave director, tower upgrades, win/lose, juice (impact
   particles, SFX, HUD readouts).
 - **M3 · Polish**: 2–3 tower + enemy types, CC0 art pass (KayKit Tower Defense pack
