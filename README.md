@@ -123,8 +123,10 @@ Target framework: net8.0. The 2D physics CLI test harness lives at `src/Blix.Tes
 
 ## Roadmap
 
-- **Particles** — generic GPU/CPU emitter with sorted billboards, soft-particle depth, HDR + bloom integration. First consumer of the new shader library.
-- **More demos** — beyond the current Vulkan set. With Pong (2D) and the Runner (3D) covering gameplay, the next likely target is a focused VFX scene to validate the particle system.
+- **Particles (v1 shipped)** — `ParticleBatch` (`Blix.Render`) is a CPU-simulated billboard system riding the per-frame transient vertex arena; `Blix.Demos.VulkanParticles` is the fountain showcase (additive sparks + alpha smoke, two blend-variant pipelines over one shader). Next: soft-particle depth, HDR + bloom integration, optional GPU simulation.
+- **More demos** — beyond the current Vulkan set; Pong (2D), the Runner (3D), and now the particle fountain (VFX) each stress a different slice of the engine.
+
+The per-frame **transient vertex arena** (`IGraphicsDevice.AllocVertices` → a ring of host-visible buffers bound by offset) is the substrate dynamic-vertex helpers share — `SpriteBatch`, `VkLineDrawer`, and `ParticleBatch` all ride it, so no helper hand-rolls its own per-frame upload (or its frames-in-flight hazard). Descriptor-backed per-frame data (per-instance SSBO, bone palettes) stays in `MaterialBindings`. Pipelines dedupe via `GetOrCreatePipeline`, and shader `#define` variants expand at cook time (csproj `Variant`/`Defines` → `ShaderVariantPath`).
 
 The shader library at `src/Blix.Shaders/` (tonemap, noise, PBR primitives) is the substrate both new features build on; the include preprocessor + `ShaderLoader` make new shaders cheap to author.
 
