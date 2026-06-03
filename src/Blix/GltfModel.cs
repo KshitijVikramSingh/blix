@@ -12,7 +12,7 @@ public sealed record GltfModel(
     GltfPrimitive[] Primitives,
     Skeleton Skeleton,
     AnimationClip[] Animations,
-    // Column-vector matrix produced by walking the skin node's ancestor chain in
+    // Row-vector model matrix (F-016) produced by walking the skin node's ancestor chain in
     // the source glTF. Most authored characters apply their axis-orientation
     // correction (Z-up → Y-up, etc.) at a parent node rather than per-vertex;
     // composing this matrix into uModel (`uModel = userTransform * MeshNodeTransform`)

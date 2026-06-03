@@ -20,7 +20,7 @@ Blix is still early — APIs are changing, the demos do real engine work, and so
 
 ## Demos
 
-Eight demos ship in `src/`, all on the Vulkan backend, each a standalone entry point. **Vulkan Sponza** is the capabilities demo — the forward edge of what the engine can pull off. Two are complete, end-to-end playable games: **Pong** (2D, the `SpriteBatch`/font path) and the **Runner** (a 3D endless runner — an instanced world, a skinned animated character, kinematic physics, procedural sky + fog, HUD, and audio). **Vulkan Particles** is the VFX showcase — the CPU-simulated particle system over the engine's fullscreen/post-process primitives. The other four are focused references: **Vulkan Instanced** (the per-instance instancing foundation the Runner builds on), **Vulkan Lit** (the lit/shadow/PBR/IBL/bloom path), **Vulkan Graph** (render-graph topology), and **Vulkan Hello** (the Vulkan bring-up path). (The OpenGL backend and its four heavy demos were sunset; Pong was rebuilt on the Vulkan `SpriteBatch`.)
+Nine demos ship in `src/`, all on the Vulkan backend, each a standalone entry point. **Vulkan Sponza** is the capabilities demo — the forward edge of what the engine can pull off. Three are complete, end-to-end playable games: **Pong** (2D, the `SpriteBatch`/font path), the **Runner** (a 3D endless runner — an instanced world, a skinned animated character, kinematic physics, procedural sky + fog, HUD, and audio), and **Tank Arena** (a survival shooter on the `Transform3D` parenting rig — an articulated glTF tank, destructible cover, enemies that steer around it, and combat juice, over a sun-shadow + HDR graph). **Vulkan Particles** is the VFX showcase — the CPU-simulated particle system over the engine's fullscreen/post-process primitives. The other four are focused references: **Vulkan Instanced** (the per-instance instancing foundation the Runner builds on), **Vulkan Lit** (the lit/shadow/PBR/IBL/bloom path), **Vulkan Graph** (render-graph topology), and **Vulkan Hello** (the Vulkan bring-up path). (The OpenGL backend and its four heavy demos were sunset; Pong was rebuilt on the Vulkan `SpriteBatch`.)
 
 ### Vulkan Sponza — capabilities demo
 
@@ -73,6 +73,16 @@ tools/run-instanced.sh           # interactive; --frames N auto-exits for a head
 ```
 
 The proof gate for per-instance instanced rendering: 5,000 cubes drawn in a single `vkCmdDrawIndexed(instanceCount=5000)`, each pulling its own transform + tint from a set-3 storage buffer indexed by `gl_InstanceIndex`. Isolates the two engine layers the Runner builds its world on — `InstanceBuffer` (the replicated SSBO data layer) and `InstancedBatch` (the staging + draw ergonomics) — with no built-in shader, so the demo supplies its own. The headless `--frames N` mode is the validation harness (run under `BLIX_VK_VALIDATE=1`).
+
+### Tank Arena — game (Transform parenting)
+
+```sh
+tools/run-tank.sh                # interactive; --frames N auto-exits for a headless validation run
+```
+
+A survival shooter built on `Transform3D` parenting, and the engine's broadest game-layer + asset workout. Each tank is a **hull → turret → barrel** hierarchy: the hull drives, the turret is its child (yaws to aim independently), the barrel the turret's child — each part's `WorldMatrix` composes the chain, so driving carries the turret along while it tracks its own target. Firing is the parenting model's centrepiece: a shell spawns **as a child of the barrel** at the muzzle, then `SetParent(null, keepWorldPose: true)` detaches it into world space with its pose preserved — leaving exactly where the moving, aimed barrel points and flying a `PhysicsHost3D` gravity arc.
+
+The tank is a real articulated glTF model (Quaternius, CC0) mapped onto the rig per-part via `GltfStaticImporter.ImportNodes` and the measured-pivot fit (see *Fitting an articulated model onto a rig* in `docs/blix.md`); barrels and crates are static props (material-coloured, instanced) that act as **cover** — they block driving and flat shots in the collision world, but a high lob clears them, and **exploding barrels** detonate with AoE damage + chain reactions. Enemies steer around cover toward the player (obstacle-avoidance) while their turrets stay locked on, hold fire through cover, and spawn at a fair distance band. The whole scene renders through a `RenderGraph` sun-shadow + HDR pipeline, with combat *juice* — screen shake, muzzle flash, gun recoil, and impact/death/blast debris bursts. Drive `W`/`S`/`A`/`D`, aim the turret with `←`/`→`, elevate the gun with `↑`/`↓` (pitch sets the range), `Space` to fire, `Enter` to restart. Run with `--debug` then press `` ` `` for live `[Tune]` overlays grouped into feel (drive/turn/aim/camera/ballistics/enemies), model-fit, and juice.
 
 ### Vulkan Lit — PBR renderer reference
 

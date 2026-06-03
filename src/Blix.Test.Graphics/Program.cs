@@ -1900,6 +1900,122 @@ static ShaderInterface MinimalShader() => new(new[]
         layout.Attributes[2].Format == VertexAttributeFormat.Float2 && layout.Attributes[2].Offset == 7 * sizeof(float));
 }
 
+// ============================================================================
+// Section AH — Transform3D parenting (hierarchy compose + reparent).
+// ============================================================================
+//
+// Parenting composes local TRS up the chain into WorldMatrix. The composition
+// order is the row/column-vector minefield this codebase warns about, so lock it
+// against known world points (it mirrors Skeleton's working hierarchy walk:
+// world = local * parentWorld). Also pins SetParent(keepWorldPose) — the
+// detach-and-keep-flying op — and the cycle guard. The live multi-level
+// hierarchy is proven by VehicleParenting under validation.
+{
+    // Root: WorldPosition == local Position (no parent).
+    var root = new Blix.Transform3D { Position = new Vector3(3f, 4f, 5f) };
+    t.ExpectClose("AH.1 root world X == local", root.WorldPosition.X, 3f);
+    t.ExpectClose("AH.1 root world Z == local", root.WorldPosition.Z, 5f);
+
+    // Translate compose: parent (10,0,0) + child local (1,0,0) → world (11,0,0).
+    var parent = new Blix.Transform3D { Position = new Vector3(10f, 0f, 0f) };
+    var child = new Blix.Transform3D { Position = new Vector3(1f, 0f, 0f), Parent = parent };
+    t.ExpectClose("AH.2 child world X (parent+local = 11)", child.WorldPosition.X, 11f);
+    t.ExpectClose("AH.2 child world Y", child.WorldPosition.Y, 0f);
+    t.ExpectClose("AH.2 child world Z", child.WorldPosition.Z, 0f);
+
+    // Rotated parent: a child's local offset orbits with the parent's rotation.
+    // World pos must equal parentPos + rotate(localOffset, parentRot) for a
+    // no-scale chain — the same result Vector3.Transform gives independently.
+    var rot = new Blix.Transform3D
+    {
+        Rotation = Quaternion.CreateFromAxisAngle(Vector3.UnitY, MathF.PI / 2f),
+    };
+    var orbiter = new Blix.Transform3D { Position = new Vector3(1f, 0f, 0f), Parent = rot };
+    var expected = rot.Position + Vector3.Transform(new Vector3(1f, 0f, 0f), rot.Rotation);
+    t.ExpectClose("AH.3 orbiter world X == rotate(local)", orbiter.WorldPosition.X, expected.X);
+    t.ExpectClose("AH.3 orbiter world Z == rotate(local)", orbiter.WorldPosition.Z, expected.Z);
+
+    // Multi-level chain: gp(100) -> p(10) -> c(1) -> world X 111.
+    var gp = new Blix.Transform3D { Position = new Vector3(100f, 0f, 0f) };
+    var p2 = new Blix.Transform3D { Position = new Vector3(10f, 0f, 0f), Parent = gp };
+    var c2 = new Blix.Transform3D { Position = new Vector3(1f, 0f, 0f), Parent = p2 };
+    t.ExpectClose("AH.4 three-level chain world X (111)", c2.WorldPosition.X, 111f);
+
+    // SetParent(keepWorldPose): detaching preserves the world pose; the local
+    // position becomes the old world position (the fire-and-detach op).
+    var hull = new Blix.Transform3D { Position = new Vector3(10f, 0f, 0f) };
+    var mounted = new Blix.Transform3D { Position = new Vector3(2f, 0f, 0f), Parent = hull };
+    var worldBefore = mounted.WorldPosition;   // (12, 0, 0)
+    mounted.SetParent(null, keepWorldPose: true);
+    t.ExpectTrue("AH.5 detached parent is null", mounted.Parent is null);
+    t.ExpectClose("AH.5 detach preserves world X", mounted.WorldPosition.X, worldBefore.X);
+    t.ExpectClose("AH.5 detached local X == old world X", mounted.Position.X, 12f);
+
+    // Cycle guard: a->b then b->a throws on assignment.
+    var ca = new Blix.Transform3D();
+    var cb = new Blix.Transform3D { Parent = ca };
+    var threwCycle = false;
+    try { ca.Parent = cb; } catch (InvalidOperationException) { threwCycle = true; }
+    t.ExpectTrue("AH.6 cycle rejected", threwCycle);
+
+    // Render path: WorldMatrix feeds an InstancedBatch/`model * v` shader (cube.vert)
+    // exactly like a VulkanInstanced InstanceData.model. CreateModel builds standard
+    // System.Numerics matrices (translation in the last row), uploaded raw and read
+    // column-major by GLSL — so M*v lands the translation correctly, no transpose.
+    // Simulate the exact GLSL M*v with GlslMul: the part's local origin (0,0,0,1)
+    // must map to its WorldPosition (parent 10 + local 1 = 11).
+    var uploadBytes = new[]
+    {
+        child.WorldMatrix.M11, child.WorldMatrix.M12, child.WorldMatrix.M13, child.WorldMatrix.M14,
+        child.WorldMatrix.M21, child.WorldMatrix.M22, child.WorldMatrix.M23, child.WorldMatrix.M24,
+        child.WorldMatrix.M31, child.WorldMatrix.M32, child.WorldMatrix.M33, child.WorldMatrix.M34,
+        child.WorldMatrix.M41, child.WorldMatrix.M42, child.WorldMatrix.M43, child.WorldMatrix.M44,
+    };
+    var originWorld = GlslMul(uploadBytes, new Vector4(0f, 0f, 0f, 1f));
+    t.ExpectClose("AH.7 WorldMatrix upload maps origin to world X (11)", originWorld.X, 11f);
+}
+
+// ============================================================================
+// Section AI — GltfStaticImporter.ImportNodes (articulated hierarchy import).
+// ============================================================================
+//
+// ImportNodes preserves the node hierarchy (name + parent + LOCAL transform) with
+// each mesh in local space — unlike Import, which world-bakes everything into one
+// flat blob. That's what lets an articulated model (hull -> turret -> barrel) map
+// onto a Transform3D rig. Build a tiny 2-node glTF (turret a child of hull, lifted
+// +1 Y) and assert the round-trip keeps the names, parent link, local-space mesh,
+// and unbaked local transform.
+{
+    var tri = new SharpGLTF.Geometry.MeshBuilder<SharpGLTF.Geometry.VertexTypes.VertexPositionNormal>("tri");
+    var prim = tri.UsePrimitive(SharpGLTF.Materials.MaterialBuilder.CreateDefault());
+    prim.AddTriangle(
+        new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 0, 0, 1, 0),
+        new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(1, 0, 0, 0, 1, 0),
+        new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 1, 0, 1, 0));
+
+    var hull = new SharpGLTF.Scenes.NodeBuilder("hull");
+    var turret = hull.CreateNode("turret");
+    turret.LocalMatrix = Matrix4x4.CreateTranslation(0f, 1f, 0f);
+
+    var sceneBuilder = new SharpGLTF.Scenes.SceneBuilder();
+    sceneBuilder.AddRigidMesh(tri, hull);
+    sceneBuilder.AddRigidMesh(tri, turret);
+
+    var tmp = Path.Combine(Path.GetTempPath(), "blix_importnodes_test.glb");
+    sceneBuilder.ToGltf2().SaveGLB(tmp);
+
+    var nm = new GltfStaticImporter().ImportNodes(new AssetImportContext(AssetId.Parse("tmp/test"), tmp));
+    var hullNode = nm.Find("hull");
+    var turretNode = nm.Find("turret");
+    t.ExpectTrue("AI.1 hull node imported", hullNode is not null);
+    t.ExpectTrue("AI.1 turret node imported", turretNode is not null);
+    t.ExpectClose("AI.2 node carries its local-space mesh (3 verts)", hullNode!.Primitives[0].Mesh.VertexCount, 3);
+    t.ExpectTrue("AI.3 turret's parent is hull",
+        turretNode!.ParentIndex >= 0 && nm.Nodes[turretNode.ParentIndex].Name == "hull");
+    t.ExpectClose("AI.4 turret local transform kept (+1 Y, not world-baked)", turretNode.LocalTransform.M42, 1f);
+    File.Delete(tmp);
+}
+
 t.PrintSummary();
 return t.FailedCount;
 

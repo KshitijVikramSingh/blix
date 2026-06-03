@@ -161,6 +161,56 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             Matrix4x4.Identity);
     }
 
+    // Node-hierarchy-preserving import (see GltfNodeModel). Unlike Import, this does
+    // NOT bake world transforms: each node's mesh comes back in its own LOCAL space,
+    // alongside the node's name, local transform, and parent index — so a consumer
+    // can map named nodes onto its own articulated rig (hull/turret/barrel) and drive
+    // them. Loads the whole buffer (no cooked-mesh fast path — articulated props are
+    // small) so accessor reads succeed.
+    public GltfNodeModel ImportNodes(AssetImportContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (!File.Exists(context.SourcePath))
+        {
+            throw new FileNotFoundException($"glTF file not found: {context.SourcePath}", context.SourcePath);
+        }
+
+        var model = ModelRoot.Load(context.SourcePath);
+        var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
+        var textureCache = new Dictionary<int, GltfTexture>();
+        var materialCache = new Dictionary<int, GltfMaterial>();
+        PreDecodeImages(model, textureCache, gltfDir);
+
+        var glNodes = model.LogicalNodes.ToList();
+        var indexOf = new Dictionary<Node, int>(glNodes.Count);
+        for (var i = 0; i < glNodes.Count; i++) indexOf[glNodes[i]] = i;
+
+        var nodes = new GltfNode[glNodes.Count];
+        for (var i = 0; i < glNodes.Count; i++)
+        {
+            var node = glNodes[i];
+            var parent = node.VisualParent is { } vp && indexOf.TryGetValue(vp, out var pi) ? pi : -1;
+
+            var prims = Array.Empty<GltfPrimitive>();
+            if (node.Mesh is { } mesh)
+            {
+                prims = new GltfPrimitive[mesh.Primitives.Count];
+                for (var j = 0; j < mesh.Primitives.Count; j++)
+                {
+                    var prim = mesh.Primitives[j];
+                    var name = $"{node.Name ?? mesh.Name ?? "node"}.{j}";
+                    // Identity world + normal matrix → vertices stay in node-local space.
+                    var meshData = BuildStaticMeshData(name, prim, Matrix4x4.Identity, Matrix4x4.Identity, context.FlipTextureV, context.IncludeTangents);
+                    prims[j] = new GltfPrimitive(meshData, ExtractMaterial(prim.Material, materialCache, textureCache));
+                }
+            }
+
+            nodes[i] = new GltfNode(node.Name ?? $"node{i}", parent, node.LocalMatrix, prims);
+        }
+
+        return new GltfNodeModel(nodes);
+    }
+
     // Cook a .gltf/.glb to its .blixmesh sibling. CPU-only -- no GraphicsDevice
     // required; safe to invoke from the offline cook tool. Walks the same
     // node/primitive structure the runtime importer does, packs vertices via

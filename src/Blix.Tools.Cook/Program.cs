@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Numerics;
 using BCnEncoder.Encoder;
 using BCnEncoder.Shared;
 using Blix.Graphics;
@@ -28,6 +29,7 @@ return args[0] switch
     "textures" => CookTextures(args),
     "probe" => CookProbe(args),
     "mesh" => CookMesh(args),
+    "inspect" => InspectGltf(args),
     "meshopt-selftest" => MeshoptSelfTest(),
     "help" or "-h" or "--help" => Help(),
     _ => UnknownVerb(args[0]),
@@ -87,6 +89,10 @@ static void PrintUsage()
     Console.WriteLine("    .gltf -- only the per-primitive vertex/index data is cooked.");
     Console.WriteLine("    --flip-v canonicalises bottom-up (OpenGL) UVs to a top-down");
     Console.WriteLine("    origin, baked into the cooked vertices.");
+    Console.WriteLine("  blix-cook inspect <gltf-or-glb>");
+    Console.WriteLine("    Print the node hierarchy + each mesh node's composed-world");
+    Console.WriteLine("    scale/translation (= rig pivot) and assembled bounds, for");
+    Console.WriteLine("    fitting an articulated model onto a Transform3D rig.");
     Console.WriteLine();
     Console.WriteLine("  --out <dir>  (textures/probe/mesh) write cooked output into a separate");
     Console.WriteLine("    tree, mirroring each source's path relative to the input root, instead");
@@ -195,6 +201,98 @@ static int CookMesh(string[] args)
             ? $", split@{splitBudget / 1000}k → biggest chunk {biggest.Lods[0].IndexCount / 3} tris"
             : "";
         Console.WriteLine($"  cooked {Path.GetFileName(src)} -> {Path.GetFileName(outPath)} ({count} prims, {size / 1024.0 / 1024.0:0.00} MB, {tangents}-tan) in {sw.ElapsedMilliseconds} ms; LOD tris (biggest prim): {lodCounts}{splitNote}");
+    }
+    return 0;
+}
+
+// Inspect a rigged/articulated glTF for fitting it onto a Transform3D rig
+// (hull/turret/barrel, etc.). Prints the node hierarchy and, for every
+// mesh-bearing node, its composed-world transform — the SCALE and TRANSLATION
+// are the numbers the fit recipe needs: a rigged part's node translation is its
+// rotation PIVOT (authors place the node origin there), and the assembled bounds
+// give the model's size + forward axis. Read the values off this, hard-code the
+// pivots, and the model drops onto the rig with no blind dialing (see how
+// Blix.Demos.TankArena consumes the Quaternius tank).
+static int InspectGltf(string[] args)
+{
+    if (args.Length < 2)
+    {
+        Console.Error.WriteLine("Usage: blix-cook inspect <gltf-or-glb>");
+        return 1;
+    }
+    var path = args[1];
+    if (!File.Exists(path))
+    {
+        Console.Error.WriteLine($"File not found: {path}");
+        return 1;
+    }
+
+    var model = new Blix.GltfStaticImporter().ImportNodes(
+        new Blix.Assets.AssetImportContext(Blix.Assets.AssetId.Parse("inspect"), path));
+    var nodes = model.Nodes;
+
+    // Compose a node's world transform by walking up its parent chain (row-vector:
+    // child = local * parent). ImportNodes keeps every node in LOCAL space, so this
+    // is where the assembled placement comes from.
+    Matrix4x4 World(int i)
+    {
+        var m = nodes[i].LocalTransform;
+        for (var p = nodes[i].ParentIndex; p >= 0; p = nodes[p].ParentIndex) m *= nodes[p].LocalTransform;
+        return m;
+    }
+
+    var meshNodes = 0;
+    foreach (var n in nodes) if (n.Primitives.Length > 0) meshNodes++;
+    Console.WriteLine($"{Path.GetFileName(path)}: {nodes.Length} nodes, {meshNodes} mesh-bearing");
+    Console.WriteLine("  (mesh nodes show composed-world scale/translation [= rig PIVOT] + assembled bounds)");
+
+    // Hierarchy depth for indentation.
+    int Depth(int i)
+    {
+        var d = 0;
+        for (var p = nodes[i].ParentIndex; p >= 0; p = nodes[p].ParentIndex) d++;
+        return d;
+    }
+
+    for (var i = 0; i < nodes.Length; i++)
+    {
+        var n = nodes[i];
+        var indent = new string(' ', 2 + Depth(i) * 2);
+        if (n.Primitives.Length == 0)
+        {
+            // Transform-only node — list it (it may be an armature pivot) but keep it terse.
+            Console.WriteLine($"{indent}[{i,3}] {n.Name}  (no mesh, parent={n.ParentIndex})");
+            continue;
+        }
+
+        var w = World(i);
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+        var verts = 0;
+        foreach (var prim in n.Primitives)
+        {
+            var md = prim.Mesh;
+            verts += md.VertexCount;
+            var stride = md.Layout.Stride;
+            for (var v = 0; v < md.VertexCount; v++)
+            {
+                var o = v * stride;
+                var lp = new Vector3(
+                    BitConverter.ToSingle(md.VertexBytes, o),
+                    BitConverter.ToSingle(md.VertexBytes, o + 4),
+                    BitConverter.ToSingle(md.VertexBytes, o + 8));
+                var wp = Vector3.Transform(lp, w);
+                min = Vector3.Min(min, wp); max = Vector3.Max(max, wp);
+            }
+        }
+        Matrix4x4.Decompose(w, out var scale, out _, out var trans);
+        Console.WriteLine(
+            $"{indent}[{i,3}] {n.Name}  parent={n.ParentIndex} prims={n.Primitives.Length} verts={verts}");
+        Console.WriteLine(
+            $"{indent}      pivot/trans=({trans.X:0.###}, {trans.Y:0.###}, {trans.Z:0.###})  " +
+            $"scale=({scale.X:0.###}, {scale.Y:0.###}, {scale.Z:0.###})");
+        Console.WriteLine(
+            $"{indent}      bounds X[{min.X:0.##}, {max.X:0.##}]  Y[{min.Y:0.##}, {max.Y:0.##}]  Z[{min.Z:0.##}, {max.Z:0.##}]");
     }
     return 0;
 }

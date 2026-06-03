@@ -243,11 +243,37 @@ t.LookAt(new Vector3(0, 0, 0), Vector3.UnitY);
 
 `Forward` is the rotation applied to `-Z`. Identity rotation looks down `-Z`, matching the default camera convention. `LookAt(target, up)` solves the rotation that aligns local `-Z` with the target direction.
 
+#### Parenting
+
+`Position` / `Rotation` / `Scale` are **local**; an optional `Parent` composes them up a hierarchy. `WorldMatrix` is the local matrix composed with the parent chain (`world = local * parentWorld`, matching `Skeleton`'s hierarchy walk), and `WorldPosition` / `WorldRotation` read the world pose for consumers outside the hierarchy (a chase camera, a muzzle spawn point). Assigning a `Parent` that would form a cycle throws.
+
+```csharp
+var hull = new Transform3D { Position = new Vector3(0, 0.5f, 0) };
+var turret = new Transform3D { Parent = hull };                  // rides the hull, yaws on its own
+var barrel = new Transform3D { Position = new Vector3(0, 0, -1.4f), Parent = turret };
+// driving the hull carries turret + barrel; turret.Rotation aims independently.
+
+var worldMuzzle = barrel.WorldPosition;   // composed down hull -> turret -> barrel
+```
+
+`SetParent(newParent, keepWorldPose)` re-parents; with `keepWorldPose: true` the local TRS is recomputed so the **world** pose is unchanged across the switch — e.g. `shell.SetParent(null, keepWorldPose: true)` detaches a shell from a moving barrel at its current muzzle pose so it flies straight instead of snapping to the barrel's local frame. `WorldMatrix` is a `System.Numerics` model matrix (translation in the last row), fed straight to a `model * v` shader / `InstanceData.Model` with no transpose. `Blix.Demos.TankArena` is the working reference (its hull → turret → barrel tanks are parenting hierarchies); the composition + render convention are pinned by `Blix.Test.Graphics` Section AH.
+
+#### Fitting an articulated model onto a rig
+
+Mapping a rigged glTF (a tank with a separate turret/gun, a mech, a crane) onto a `Transform3D` rig works without screenshots if you **measure the asset instead of guessing pivots**:
+
+1. **Inspect it** — `dotnet run --project src/Blix.Tools.Cook -- inspect <model.glb>` prints the node hierarchy and, for each mesh-bearing node, its composed-world `scale` / `translation` and assembled `bounds`. A rigged part's **node translation is its rotation pivot** (authors place the node origin at the hinge); the bounds give the model's size and forward axis.
+2. **Import nodes, not a fused blob** — `GltfStaticImporter.ImportNodes` keeps every node in its own local space (vs `Import`, which bakes world transforms into one static mesh). Compose each node's world transform by walking parents (`world = local * parentWorld`).
+3. **Bake each part to its pivot** — transform a part's primitives by `nodeWorld * Translate(-pivot)` so its pivot sits at the mesh origin, upload as a `Mesh`, and give each part its own `InstancedBatch` (reusing one world/caster pipeline — same vertex layout).
+4. **Drive from the rig** — the per-frame instance matrix is `Scale(s) * RotateY(yawFix) * rigPart.WorldMatrix * Translate(0, lift, 0)`, and the rig's child positions (turret-on-hull, gun-on-turret) are the **measured** node offsets mapped through the same `RotateY(yawFix) * s` — so the meshes and the gameplay rig (aim, muzzle, recoil) stay locked and a single scale/yaw knob can't desync them.
+5. **Expose only the residuals** as live `[Tune]` knobs — global scale, a forward-axis `yawFix` (model `-X` → engine `-Z` is `-90°`), and a vertical `lift`. Because the pivots came from measurement, sensible defaults land the fit with no dialing. `Blix.Demos.TankArena.LoadTankParts` / `SeatRig` / `PartModel` are the worked reference.
+
 #### Deliberate limits
 
 - Class, not struct. Game code regularly hands the same transform to multiple consumers; reference semantics are the right default.
-- No parent/child. Worlds with hierarchical poses (rig bones, mounted props) need a `Transform3D.Parent` and a `WorldMatrix` accessor; they'll come when something needs them.
-- No dirty-flag caching for `ToMatrix()`. Matrix composition is four small multiplies.
+- No parent/child container on `GameObject` — parenting is pose-level on `Transform3D`. Game code wires `Transform.Parent` and keeps its own object lists; there's no automatic scene-graph that owns children, draw order, or lifetimes.
+- No dirty-flag caching for `ToMatrix()` / `WorldMatrix`. Matrix composition is a few small multiplies and hierarchies here are shallow; `WorldMatrix` re-walks the parent chain on each access (add caching when a deep rig needs it). Cycle-checking happens once, on `Parent` assignment.
+- Non-uniform parent scale combined with a child rotation can shear the child (the standard TRS-hierarchy limitation; content keeps non-uniform scale off shared parents, mirroring the rigid-bone skinning assumption — `TankArena` applies a single **uniform** model scale in the per-part instance matrix, not in the pose hierarchy).
 - No `Origin` / `Pivot`. Mesh-side authored offsets are normalised at import time (`ObjImporter.RecenterToOrigin`, default true); game code uses plain `Transform.Position`.
 
 ### Transform2D
@@ -545,13 +571,11 @@ public sealed class BonePalette
 
 `BonePalette` is a typed wrapper around `Matrix4x4[]` — the GPU-ready output. Bind via `new ShaderUniform("uBones", new Matrix4x4ArrayUniform(palette.Matrices))`.
 
-### Column-vector convention gotcha
+### Matrix convention (F-016)
 
-The engine uses **column-vector** matrices (translation in `M14/M24/M34`, the `T * R * S` form `GraphicsMatrices.CreateModel` produces). `System.Numerics.Matrix4x4.CreateTranslation` produces **row-vector** matrices (translation in `M41/M42/M43`); `Matrix4x4.Decompose` reads from row-vector positions.
+Skeletal math uses the same convention as the rest of the engine: **`System.Numerics` row-vector form** — translation in `M41/M42/M43`, a vertex flows left-to-right (`v_row * M`, and `M = A * B` applies `A` first). `GraphicsMatrices.CreateModel` (and therefore `BoneTransform.ToMatrix`) is `Scale * Rotation * Translation` in that form. There are **no transposes** in the skeletal path: `Matrix4x4.Decompose` reads `System.Numerics` matrices directly, so `BoneTransform.FromMatrix` decomposes the matrix as-is, and `Skeleton.ComputeBonePalette` composes `child = local * parentWorld` straight (the same walk `Transform3D.WorldMatrix` uses). See [`architecture.md` → Matrices](architecture.md#conventions) for the full convention and the upload→GLSL story; `Blix.Test.Graphics` Section AH pins it.
 
-Anything that builds an inverse-bind matrix manually must use the column-vector form (`GraphicsMatrices.CreateModel(bindPos, bindRot, bindScale)` then invert). `GltfImporter` handles this once at the format boundary — every IBM is transposed on import so all downstream skeleton math lives in column-vector land.
-
-`BoneTransform.FromMatrix` transposes before decomposing so it reads column-vector matrices correctly. Callers don't see this; it's an internal adaptation to `Matrix4x4.Decompose`'s row-vector assumption.
+A manually built inverse-bind matrix is just `GraphicsMatrices.CreateModel(bindPos, bindRot, bindScale)` inverted — no transpose. `GltfImporter` doesn't transpose either: SharpGLTF already hands back IBMs in this row-vector form.
 
 ### Clips
 
@@ -716,7 +740,7 @@ Per-file invariants the importer enforces or normalises:
 
 - **First skinned mesh wins as the primary skin.** Multi-mesh characters (body + hair + clothing) sharing one skin are all collected and concatenated into `Primitives[]` provided they share the primary node's `WorldMatrix`.
 - **Joints topo-sorted.** glTF's `Skin.Joints` is an ordered list of nodes, but the order isn't required to be hierarchy-ordered. The importer computes parent indices by walking each joint's `VisualParent` chain up to the next ancestor that's also a joint, then DFS-orders the joints so parents come first.
-- **Inverse-bind matrices transposed to column-vector form** at the boundary (see "Column-vector convention gotcha" above).
+- **Inverse-bind matrices kept in the engine's row-vector form** at the boundary — SharpGLTF already returns them that way, so no transpose is applied (see "Matrix convention (F-016)" above).
 - **`LINEAR` interpolation only.** glTF also defines `STEP` and `CUBICSPLINE`; the importer throws `NotSupportedException` on either.
 - **Channel filtering by skin.** Animations that don't touch the skin's joints produce empty `AnimationClip`s and are dropped.
 - **Morph-target weight channels skipped.** Lands alongside their first real use.
