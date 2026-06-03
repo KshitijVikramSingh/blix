@@ -140,7 +140,11 @@ internal sealed class VehicleLoop : IGameLoop, IInputHandler
         turret.Position = new Vector3(0f, HullScale.Y * 0.5f + TurretScale.Y * 0.5f, 0f);
         turret.Parent = hull;
 
-        barrel.Position = new Vector3(0f, TurretScale.Y * 0.15f, -(TurretScale.Z * 0.5f + BarrelScale.Z * 0.5f));
+        // Barrel pivot sits at the BREACH (the turret's front face), not the barrel's
+        // midpoint — so pitching elevates the gun from where it mounts instead of
+        // see-sawing about its centre. The visual box is pushed forward from this
+        // origin at draw time (see OnRender), and the muzzle is one full length ahead.
+        barrel.Position = new Vector3(0f, TurretScale.Y * 0.15f, -TurretScale.Z * 0.5f);
         barrel.Parent = turret;
 
         // A ring of targets to shoot.
@@ -216,7 +220,7 @@ internal sealed class VehicleLoop : IGameLoop, IInputHandler
     private void Fire()
     {
         fireTimer = FireCooldown;
-        var shell = new Transform3D { Position = new Vector3(0f, 0f, -(BarrelScale.Z * 0.5f)), Parent = barrel };
+        var shell = new Transform3D { Position = new Vector3(0f, 0f, -BarrelScale.Z), Parent = barrel };
         shell.SetParent(null, keepWorldPose: true);
         var worldForward = Vector3.Transform(-Vector3.UnitZ, barrel.WorldRotation);
         var physics = new PhysicsHost3D { Target = shell, Velocity = worldForward * MuzzleSpeed, GravityScale = 1f };
@@ -245,7 +249,10 @@ internal sealed class VehicleLoop : IGameLoop, IInputHandler
         // The vehicle: each part's box = scale(visual) * its WorldMatrix.
         batch.Add(Matrix4x4.CreateScale(HullScale) * hull.WorldMatrix, new Vector4(0.30f, 0.45f, 0.30f, 1f));
         batch.Add(Matrix4x4.CreateScale(TurretScale) * turret.WorldMatrix, new Vector4(0.38f, 0.52f, 0.36f, 1f));
-        batch.Add(Matrix4x4.CreateScale(BarrelScale) * barrel.WorldMatrix, new Vector4(0.22f, 0.24f, 0.22f, 1f));
+        // Barrel box pushed forward by half its length so it extends from the breach
+        // (barrel origin) to the muzzle — the pivot stays at the breach.
+        batch.Add(Matrix4x4.CreateScale(BarrelScale) * Matrix4x4.CreateTranslation(0f, 0f, -BarrelScale.Z * 0.5f) * barrel.WorldMatrix,
+            new Vector4(0.22f, 0.24f, 0.22f, 1f));
 
         // Targets (dimmed once hit) + shells.
         for (var i = 0; i < targets.Count; i++)
