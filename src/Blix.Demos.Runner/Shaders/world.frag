@@ -26,9 +26,15 @@ void main() {
     float diffuse = max(dot(n, kSunDir), 0.0);
     vec3 color = vTint.rgb * (kAmbient + (1.0 - kAmbient) * diffuse);
 
+#ifdef ENABLE_FOG
+    // Compiled in only for the FOG variant (glslc -DENABLE_FOG); the base variant
+    // skips the distance haze. The push-constant block is declared unconditionally
+    // above, so both variants share ONE interface — only the fragment math differs,
+    // which is exactly what the variant system is for.
     float dist = length(vWorldPos - uCamPos.xyz);
     float fog = 1.0 - exp(-max(dist - uFogParams.y, 0.0) * uFogParams.x);
     color = mix(color, uFogColor.rgb, clamp(fog, 0.0, 1.0));
+#endif
 
     outColor = vec4(color, vTint.a);
 }

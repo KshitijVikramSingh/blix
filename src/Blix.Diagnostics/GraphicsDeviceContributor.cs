@@ -48,6 +48,13 @@ public sealed class GraphicsDeviceContributor : IDebuggable
             debug.Stats.Gauge("arena-peak-kib", diag.TransientArenaHighWaterBytes / 1024);
         }
 
+        // Pipeline cache effectiveness: distinct cached pipelines + cumulative hits.
+        if (diag.PipelineCacheCount > 0 || diag.PipelineCacheHits > 0)
+        {
+            debug.Stats.Gauge("pipelines-cached", diag.PipelineCacheCount);
+            debug.Stats.Gauge("pipeline-cache-hits", diag.PipelineCacheHits);
+        }
+
         // De-dup repeated error messages: the device snapshot holds the
         // most recent error so it'd otherwise re-emit every frame until
         // something else replaces it. Echo it once per distinct message.

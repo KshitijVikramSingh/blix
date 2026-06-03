@@ -49,7 +49,9 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
             var (used, high, cap) = TransientArenaStats();
             return new GraphicsDeviceDiagnostics(
                 FrameErrorCount: 0, LastErrorContext: string.Empty, LastErrorMessage: string.Empty,
-                TransientArenaBytesUsed: used, TransientArenaHighWaterBytes: high, TransientArenaCapacityBytes: cap);
+                TransientArenaBytesUsed: used, TransientArenaHighWaterBytes: high, TransientArenaCapacityBytes: cap,
+                PipelineCacheCount: pipelineCache.Count,
+                PipelineCacheHits: pipelineCacheHits, PipelineCacheMisses: pipelineCacheMisses);
         }
     }
 

@@ -194,9 +194,14 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
             Slots: new[] { InstanceBuffer.Slot },
             PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 112) });
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        // The world fragment shader is cooked in two #define variants (see csproj):
+        // base (no fog) and FOG. The runner wants the haze, so it selects the FOG
+        // variant by convention via ShaderVariantPath — proving the cook + select
+        // + load path end to end. The base variant ships alongside, unused here.
+        var fog = new ShaderVariantKey("FOG");
         worldShader = vk.CreateShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "world.vert.spv")),
-            File.ReadAllBytes(Path.Combine(shaderDir, "world.frag.spv")),
+            File.ReadAllBytes(ShaderVariantPath.Spv(shaderDir, "world", ".vert", ShaderVariantKey.Base)),
+            File.ReadAllBytes(ShaderVariantPath.Spv(shaderDir, "world", ".frag", fog)),
             worldInterface, "runner.world");
         // Pipeline consumes position + normal (stride matched to the cube vertex).
         var meshLayout = new VertexLayout(
@@ -206,10 +211,21 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
                 new VertexAttribute(0, VertexAttributeFormat.Float3, 0),
                 new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
             });
-        var worldPipeline = vk.CreatePipeline(
-            new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
-                DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled }),
-            "runner.world");
+        var worldDesc = new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled });
+        var worldPipeline = vk.GetOrCreatePipeline(worldDesc, "runner.world");
+        // Cache self-check: a second GetOrCreatePipeline with a structurally-equal
+        // description (note the SEPARATELY-allocated blend array — record equality
+        // would miss it; PipelineKey compares blends by value) must return the SAME
+        // handle, not rebuild. Proves the cache + key on a live device.
+        var worldDescDup = new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled });
+        var worldPipelineDup = vk.GetOrCreatePipeline(worldDescDup, "runner.world");
+        if (worldPipelineDup.Id != worldPipeline.Id)
+        {
+            throw new InvalidOperationException(
+                $"PipelineCache identity failed: equal descriptions gave handles {worldPipeline.Id} vs {worldPipelineDup.Id}.");
+        }
         // Three batches sharing the one world pipeline; tiles stay cubes, obstacles
         // and coins use CC0 KayKit prop meshes (flat-tinted through the same shader).
         var barrel = LoadStaticMesh("barrel.glb") ?? cube;

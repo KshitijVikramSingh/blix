@@ -41,6 +41,13 @@ public sealed partial class VulkanGraphicsDevice
         // declared ones carry an empty-layout placeholder so pSetLayouts
         // stays contiguous (Vulkan rejects gaps).
         public VkShaderSetResources?[] Sets = Array.Empty<VkShaderSetResources?>();
+        // Lazily-built VkPipelineLayout, shared by every pipeline derived from
+        // this program (the layout depends only on the interface, not on
+        // depth/blend/raster/target). Built once via GetOrBuildLayout; owned by
+        // the program and destroyed at program teardown — a pipeline can't
+        // outlive its program, so this lifetime is strictly ⊇ every pipeline's.
+        // Handle==0 means "not built yet".
+        public PipelineLayout CachedLayout;
     }
 
     internal sealed class VkShaderSetResources
@@ -404,6 +411,8 @@ public sealed partial class VulkanGraphicsDevice
         if (e.Vertex.Handle != 0) Vk.DestroyShaderModule(Device, e.Vertex, null);
         if (e.Fragment.Handle != 0) Vk.DestroyShaderModule(Device, e.Fragment, null);
         if (e.Compute.Handle != 0) Vk.DestroyShaderModule(Device, e.Compute, null);
+        // Pipeline layout cached on the program (shared by all its pipelines).
+        if (e.CachedLayout.Handle != 0) Vk.DestroyPipelineLayout(Device, e.CachedLayout, null);
     }
 
     // --- Pipelines ---------------------------------------------------------
@@ -445,6 +454,18 @@ public sealed partial class VulkanGraphicsDevice
         return layout;
     }
 
+    // Layout is a pure function of the program's interface, yet CreatePipeline ran
+    // it per call. Build once, cache on the program, reuse for every pipeline
+    // (graphics or compute) derived from it. The program owns the lifetime.
+    private PipelineLayout GetOrBuildLayout(VkShaderProgramEntry prog)
+    {
+        if (prog.CachedLayout.Handle == 0)
+        {
+            prog.CachedLayout = BuildPipelineLayout(prog);
+        }
+        return prog.CachedLayout;
+    }
+
     // Compute pipeline from a compute shader program (entry point "main").
     public unsafe PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null)
     {
@@ -457,7 +478,7 @@ public sealed partial class VulkanGraphicsDevice
             throw new InvalidOperationException($"Shader program '{prog.Name}' is not a compute program.");
         }
 
-        var layout = BuildPipelineLayout(prog);
+        var layout = GetOrBuildLayout(prog);
         using var entryName = new Utf8Pin("main");
         var stage = new PipelineShaderStageCreateInfo
         {
@@ -490,6 +511,86 @@ public sealed partial class VulkanGraphicsDevice
         return new PipelineHandle(id);
     }
 
+    // Value-equatable cache key for a graphics PipelineDescription. PipelineDescription
+    // is a record, but its ColorBlends is an IReadOnlyList → record equality compares
+    // it by REFERENCE, so two structurally-identical descriptions built with separate
+    // blend arrays would miss the cache. This struct flattens the value-relevant fields
+    // and compares the blend list element-by-element.
+    private readonly struct PipelineKey : IEquatable<PipelineKey>
+    {
+        private readonly int shaderProgramId;
+        private readonly VertexLayout vertexLayout;
+        private readonly PrimitiveTopology topology;
+        private readonly DepthState depth;
+        private readonly RasterizerState rasterizer;
+        private readonly int renderTargetId;   // -1 == swapchain (null target)
+        private readonly bool alphaToCoverage;
+        private readonly BlendState[] blends;
+
+        public PipelineKey(PipelineDescription d)
+        {
+            shaderProgramId = d.ShaderProgram.Id;
+            vertexLayout = d.VertexLayout;
+            topology = d.Topology;
+            depth = d.Depth;
+            rasterizer = d.Rasterizer;
+            renderTargetId = d.RenderTarget?.Id ?? -1;
+            alphaToCoverage = d.AlphaToCoverage;
+            blends = d.ColorBlends.ToArray();
+        }
+
+        public bool Equals(PipelineKey other)
+            => shaderProgramId == other.shaderProgramId
+            && vertexLayout == other.vertexLayout
+            && topology == other.topology
+            && depth == other.depth
+            && rasterizer == other.rasterizer
+            && renderTargetId == other.renderTargetId
+            && alphaToCoverage == other.alphaToCoverage
+            && blends.AsSpan().SequenceEqual(other.blends);
+
+        public override bool Equals(object? obj) => obj is PipelineKey k && Equals(k);
+
+        public override int GetHashCode()
+        {
+            var h = new HashCode();
+            h.Add(shaderProgramId);
+            h.Add(vertexLayout);
+            h.Add(topology);
+            h.Add(depth);
+            h.Add(rasterizer);
+            h.Add(renderTargetId);
+            h.Add(alphaToCoverage);
+            foreach (var b in blends) h.Add(b);
+            return h.ToHashCode();
+        }
+    }
+
+    private readonly Dictionary<PipelineKey, PipelineHandle> pipelineCache = new();
+    private int pipelineCacheHits;
+    private int pipelineCacheMisses;
+
+    // Opt-in cached pipeline creation: returns the SAME handle for a structurally
+    // equal description, creating one only on a miss. Unlike CreatePipeline (which
+    // always creates a fresh pipeline the caller owns + destroys), cached pipelines
+    // are owned by the device and live until teardown — so callers using this MUST
+    // NOT DestroyPipeline the result while another caller may still hold it.
+    // Compute pipelines have no PipelineDescription and stay on CreateComputePipeline.
+    public PipelineHandle GetOrCreatePipeline(PipelineDescription description, string? name = null)
+    {
+        ArgumentNullException.ThrowIfNull(description);
+        var key = new PipelineKey(description);
+        if (pipelineCache.TryGetValue(key, out var existing))
+        {
+            pipelineCacheHits++;
+            return existing;
+        }
+        pipelineCacheMisses++;
+        var handle = CreatePipeline(description, name);
+        pipelineCache[key] = handle;
+        return handle;
+    }
+
     public unsafe PipelineHandle CreatePipeline(PipelineDescription description, string? name = null)
     {
         if (!shaderProgramTable.TryGetValue(description.ShaderProgram.Id, out var prog))
@@ -497,7 +598,7 @@ public sealed partial class VulkanGraphicsDevice
             throw new InvalidOperationException($"Unknown shader program handle {description.ShaderProgram.Id}.");
         }
 
-        var layout = BuildPipelineLayout(prog);
+        var layout = GetOrBuildLayout(prog);
 
         using var entryName = new Utf8Pin("main");
         var vertStage = new PipelineShaderStageCreateInfo
@@ -688,13 +789,24 @@ public sealed partial class VulkanGraphicsDevice
     public void DestroyPipeline(PipelineHandle handle)
     {
         if (!pipelineTable.Remove(handle.Id, out var e)) return;
+        // Evict any cache entry pointing at this handle so a later GetOrCreatePipeline
+        // never serves a destroyed pipeline. The cache is tiny (one entry per distinct
+        // description), so the reverse scan is cheap.
+        if (pipelineCache.Count > 0)
+        {
+            foreach (var kv in pipelineCache)
+            {
+                if (kv.Value.Id == handle.Id) { pipelineCache.Remove(kv.Key); break; }
+            }
+        }
         DestroyVkPipelineEntry(e);
     }
 
     private unsafe void DestroyVkPipelineEntry(VkPipelineEntry e)
     {
         if (e.Pipeline.Handle != 0) Vk.DestroyPipeline(Device, e.Pipeline, null);
-        if (e.Layout.Handle != 0) Vk.DestroyPipelineLayout(Device, e.Layout, null);
+        // The layout is owned by the shader program (CachedLayout), shared across
+        // pipelines, and freed in DestroyVkShaderProgramEntry — not here.
     }
 
     // --- Lookup helpers (used by command translation) ----------------------

@@ -32,22 +32,40 @@
     <Glslc Condition="'$(Glslc)' == ''">glslc</Glslc>
   </PropertyGroup>
 
+  <!--
+    Shader cook list. Optional per-item metadata declares a #define variant:
+      Variant - filename infix (world.frag -> world.FOG.frag.spv); empty = base.
+      Defines - the glslc -D macro for that variant.
+    A base entry (no Variant) plus one entry per variant cooks every permutation.
+    Variants MUST expand here: the Vulkan backend consumes precompiled SPIR-V only
+    (no runtime glslc). Runtime selects a variant by ShaderVariantPath.
+  -->
   <ItemGroup>
     <GlslShader Include="Shaders\sky.vert" />
     <GlslShader Include="Shaders\sky.frag" />
     <GlslShader Include="Shaders\world.vert" />
     <GlslShader Include="Shaders\world.frag" />
+    <GlslShader Include="Shaders\world.frag" Variant="FOG" Defines="ENABLE_FOG" />
     <GlslShader Include="Shaders\skinned.vert" />
     <GlslShader Include="Shaders\skinned.frag" />
   </ItemGroup>
 
-  <Target Name="CompileSpirV"
-          AfterTargets="CopyFilesToOutputDirectory"
-          Inputs="@(GlslShader)"
-          Outputs="@(GlslShader -> '$(OutDir)Shaders\%(Filename)%(Extension).spv')">
+  <Target Name="CompileSpirV" AfterTargets="CopyFilesToOutputDirectory">
+    <!-- Derive each item's output stem + -D flags from its optional metadata. -->
+    <ItemGroup>
+      <GlslShader Condition="'%(GlslShader.Variant)' == ''">
+        <VariantStem>%(GlslShader.Filename)</VariantStem>
+      </GlslShader>
+      <GlslShader Condition="'%(GlslShader.Variant)' != ''">
+        <VariantStem>%(GlslShader.Filename).%(GlslShader.Variant)</VariantStem>
+      </GlslShader>
+      <GlslShader Condition="'%(GlslShader.Defines)' != ''">
+        <DefineFlags>-D%(GlslShader.Defines)</DefineFlags>
+      </GlslShader>
+    </ItemGroup>
     <MakeDir Directories="$(OutDir)Shaders" />
-    <Message Text="Compiling SPIR-V: %(GlslShader.Identity)" Importance="high" />
-    <Exec Command="&quot;$(Glslc)&quot; -o &quot;$(OutDir)Shaders\%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; &quot;%(GlslShader.Identity)&quot;" />
+    <Message Text="Compiling SPIR-V: %(GlslShader.Identity) [%(GlslShader.VariantStem)]" Importance="high" />
+    <Exec Command="&quot;$(Glslc)&quot; %(GlslShader.DefineFlags) -o &quot;$(OutDir)Shaders\%(GlslShader.VariantStem)%(GlslShader.Extension).spv&quot; &quot;%(GlslShader.Identity)&quot;" />
   </Target>
 
 </Project>

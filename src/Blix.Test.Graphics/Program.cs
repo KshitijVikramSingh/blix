@@ -1815,6 +1815,39 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectClose("AD.5 slice byte length", slice.ByteLength, 40);
 }
 
+// ============================================================================
+// Section AE — Shader variant path resolution (pipeline cache + variants).
+// ============================================================================
+//
+// Variants are cooked to distinct .spv files (glslc -DTAG) and selected at runtime
+// by a filename-suffix convention. ShaderVariantPath is the pure resolver; the
+// PipelineKey value-equality (the ColorBlends reference-equality hazard) is private
+// to the backend and proven on a live device by the runner's cache self-check.
+
+{
+    // AE.1 — Base variant has no suffix; tagged variant infixes ".TAG".
+    t.ExpectTrue("AE.1 Base suffix is empty", ShaderVariantKey.Base.Suffix.Length == 0);
+    t.ExpectTrue("AE.1 FOG suffix is .FOG", new ShaderVariantKey("FOG").Suffix == ".FOG");
+    t.ExpectTrue("AE.1 empty tag treated as base", new ShaderVariantKey("").Suffix.Length == 0);
+
+    // AE.2 — Spv path: base vs tagged, correct stage extension placement.
+    var baseFrag = ShaderVariantPath.Spv("Shaders", "world", ".frag", ShaderVariantKey.Base);
+    var fogFrag = ShaderVariantPath.Spv("Shaders", "world", ".frag", new ShaderVariantKey("FOG"));
+    t.ExpectTrue("AE.2 base -> world.frag.spv", baseFrag.EndsWith("world.frag.spv"));
+    t.ExpectTrue("AE.2 FOG -> world.FOG.frag.spv", fogFrag.EndsWith("world.FOG.frag.spv"));
+    t.ExpectTrue("AE.2 base vert -> world.vert.spv",
+        ShaderVariantPath.Spv("Shaders", "world", ".vert", ShaderVariantKey.Base).EndsWith("world.vert.spv"));
+
+    // AE.3 — Refl sidecar is the .spv path + .refl.json.
+    t.ExpectTrue("AE.3 FOG refl -> world.FOG.frag.spv.refl.json",
+        ShaderVariantPath.Refl("Shaders", "world", ".frag", new ShaderVariantKey("FOG"))
+            .EndsWith("world.FOG.frag.spv.refl.json"));
+
+    // AE.4 — ShaderVariantKey is a value type: equal tags compare equal.
+    t.ExpectTrue("AE.4 equal tags equal", new ShaderVariantKey("FOG") == new ShaderVariantKey("FOG"));
+    t.ExpectTrue("AE.4 different tags differ", new ShaderVariantKey("FOG") != new ShaderVariantKey("SKINNED"));
+}
+
 t.PrintSummary();
 return t.FailedCount;
 
