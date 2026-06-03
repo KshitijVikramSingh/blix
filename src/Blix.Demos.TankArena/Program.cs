@@ -27,6 +27,16 @@ namespace Blix.Demos.TankArena;
 // cube instances. Everything goes through InstancedBatch into a RenderGraph sun-shadow
 // + HDR pipeline. Enemy navigation is obstacle-avoidance steering (AvoidObstacles) —
 // the first consumer pressuring a navigation primitive.
+//
+// ── Executable spec for (engine primitives this demo proves) ──
+//   • Transform3D parenting: hull → turret → barrel compose + WorldPosition muzzle
+//   • SetParent(null, keepWorldPose) — the shell detach-and-fly op
+//   • glTF ImportNodes → measured-pivot rig fit (blix-cook inspect workflow)
+//   • RenderGraph sun-shadow + HDR, per-part InstancedBatch on one shared pipeline
+// ── Intentionally owns (stays local; don't extract until a 2nd consumer needs it) ──
+//   • enemy AI, obstacle-avoidance steering, turret tracking, combat-feel tuning
+//   • arena rules, spawn waves, shell lifetime, props-as-cover
+//   • AvoidObstacles is the FIRST pressure on a nav primitive — not yet a primitive
 public static class Program
 {
     public static void Main(string[] args)

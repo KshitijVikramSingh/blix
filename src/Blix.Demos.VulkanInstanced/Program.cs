@@ -18,6 +18,13 @@ namespace Blix.Demos.VulkanInstanced;
 // written and bound at least once — that's what would surface an in-flight
 // hazard. Correctness is asserted by running under BLIX_VK_VALIDATE=1 and
 // grepping for [vk-ERR]/[vk-WARN] (screenshots don't work on this setup).
+//
+// ── Executable spec for (engine primitives this demo proves) ──
+//   • The instancing foundation: one vkCmdDrawIndexed(instanceCount=N) reading a
+//     per-instance transform/tint from a set-3 SSBO via gl_InstanceIndex
+//   • In-flight SSBO replication correctness (both slots written + bound) — the gate
+// ── Intentionally owns (stays local) ──
+//   • the 5000-cube grid scene + the --frames auto-exit validation harness
 public static class Program
 {
     public static void Main(string[] args)

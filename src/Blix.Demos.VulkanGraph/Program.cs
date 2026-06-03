@@ -28,6 +28,13 @@ namespace Blix.Demos.VulkanGraph;
 // Visual proof of correctness: cube renders with checkerboard texture +
 // per-face lighting + dark blue corner markers (red INVERTED → cyan;
 // green INVERTED → magenta).
+//
+// ── Executable spec for (engine primitives this demo proves) ──
+//   • RenderGraph topology + Read-edge correctness (graph-owned offscreen passes,
+//     auto layout transitions between producer and consumer)
+//   • The imperative-bridge seam: graph offscreen passes → swapchain present
+// ── Intentionally owns (stays local) ──
+//   • the 3-pass invert scene as a visual correctness check
 public static class Program
 {
     public static void Main()

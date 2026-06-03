@@ -22,6 +22,14 @@ namespace Blix.Demos.VulkanLit;
 // Skinning rides the per-frame bone-palette SSBO path: a MaterialBindings
 // at set 3 with framesInFlight = MaxFramesInFlight, written into
 // CurrentFrameSlot every frame.
+//
+// ── Executable spec for (engine primitives this demo proves) ──
+//   • Full PBR + procedural-sky IBL + PCF shadows (sun + 2 spot + point-cube)
+//   • Skeletal skinning on the per-frame bone-palette SSBO path
+//   • HDR bloom (bright/blurH/blurV) + ACES tonemap through the RenderGraph
+//   • SPIR-V-reflected binding model end-to-end (set-by-lifetime, push constants)
+// ── Intentionally owns (stays local; don't extract until a 2nd consumer needs it) ──
+//   • the specific test scene: PBR sphere rig, light placement, camera
 public static class Program
 {
     public static void Main()

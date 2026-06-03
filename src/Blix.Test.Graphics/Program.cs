@@ -2016,6 +2016,64 @@ static ShaderInterface MinimalShader() => new(new[]
     File.Delete(tmp);
 }
 
+// ============================================================================
+// Section AJ — Transform3D pose basis + LookAt + WorldRotation.
+// ============================================================================
+//
+// AH pins the parenting *compose* (positions through WorldMatrix). This pins the
+// orientation half the convention depends on: the local-(-Z)-forward basis, the
+// LookAt solve, and WorldRotation decompose. These are convention-critical — a
+// flipped axis here silently aims turrets and cameras the wrong way without ever
+// failing a position assert. Rotations are compared by their action on a probe
+// vector (q and -q are the same rotation; component compares would false-fail).
+{
+    // AJ.1 — identity rotation basis matches the default-camera convention:
+    // forward is -Z, right is +X, up is +Y.
+    var id = new Blix.Transform3D();
+    t.ExpectClose("AJ.1 identity Forward == -Z", id.Forward.Z, -1f);
+    t.ExpectClose("AJ.1 identity Forward X/Y == 0", id.Forward.X + id.Forward.Y, 0f);
+    t.ExpectClose("AJ.1 identity Right == +X", id.Right.X, 1f);
+    t.ExpectClose("AJ.1 identity Up == +Y", id.Up.Y, 1f);
+
+    // AJ.2 — yaw +90 about +Y swings Forward from -Z to -X (right-handed).
+    var yaw = new Blix.Transform3D
+    {
+        Rotation = Quaternion.CreateFromAxisAngle(Vector3.UnitY, MathF.PI / 2f),
+    };
+    t.ExpectClose("AJ.2 yaw+90 Forward X == -1", yaw.Forward.X, -1f);
+    t.ExpectClose("AJ.2 yaw+90 Forward Z == 0", yaw.Forward.Z, 0f);
+
+    // AJ.3 — LookAt solves the rotation aligning local -Z with (target - position).
+    var look = new Blix.Transform3D { Position = new Vector3(0f, 0f, 5f) };
+    look.LookAt(Vector3.Zero, Vector3.UnitY);
+    t.ExpectClose("AJ.3 LookAt origin from +Z → Forward == -Z", look.Forward.Z, -1f);
+
+    var lookRight = new Blix.Transform3D { Position = Vector3.Zero };
+    lookRight.LookAt(new Vector3(5f, 0f, 0f), Vector3.UnitY);
+    t.ExpectClose("AJ.3 LookAt +X target → Forward == +X", lookRight.Forward.X, 1f);
+
+    // AJ.4 — a child with identity local rotation inherits the parent's world
+    // rotation: WorldRotation acting on -Z matches the parent acting on -Z.
+    var rotParent = new Blix.Transform3D
+    {
+        Rotation = Quaternion.CreateFromAxisAngle(Vector3.UnitY, MathF.PI / 2f),
+    };
+    var inherit = new Blix.Transform3D { Parent = rotParent };
+    var inheritFwd = Vector3.Transform(-Vector3.UnitZ, inherit.WorldRotation);
+    t.ExpectClose("AJ.4 child inherits parent world rotation (Forward X == -1)", inheritFwd.X, -1f);
+    t.ExpectClose("AJ.4 child inherits parent world rotation (Forward Z == 0)", inheritFwd.Z, 0f);
+
+    // AJ.5 — rotations compose down the chain: child yaw+90 under parent yaw+90
+    // is a 180 world yaw, so -Z maps to +Z.
+    var childYaw = new Blix.Transform3D
+    {
+        Rotation = Quaternion.CreateFromAxisAngle(Vector3.UnitY, MathF.PI / 2f),
+        Parent = rotParent,
+    };
+    var composedFwd = Vector3.Transform(-Vector3.UnitZ, childYaw.WorldRotation);
+    t.ExpectClose("AJ.5 composed yaw (90+90=180): -Z → +Z", composedFwd.Z, 1f);
+}
+
 t.PrintSummary();
 return t.FailedCount;
 
