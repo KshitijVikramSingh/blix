@@ -7,7 +7,13 @@ namespace Blix.Graphics;
 public readonly record struct GraphicsDeviceDiagnostics(
     int FrameErrorCount,
     string LastErrorContext,
-    string LastErrorMessage);
+    string LastErrorMessage,
+    // Per-frame transient vertex arena gauges (bytes). Used = current ring slot's
+    // bump usage this frame; HighWater = all-time per-slot peak; Capacity = per-slot
+    // size. Surfaced in the debug overlay so per-frame upload traffic is visible.
+    int TransientArenaBytesUsed = 0,
+    int TransientArenaHighWaterBytes = 0,
+    int TransientArenaCapacityBytes = 0);
 
 public interface IGraphicsDevice : IDisposable
 {
@@ -22,6 +28,15 @@ public interface IGraphicsDevice : IDisposable
     void UpdateVertexBuffer(VertexBufferHandle handle, ReadOnlySpan<byte> bytes, int byteOffset = 0);
 
     void DestroyVertexBuffer(VertexBufferHandle handle);
+
+    // Sub-allocate a per-frame transient vertex slice and copy `data` into it. The
+    // slice is valid only for the current frame (its backing ring slot is recycled
+    // a few frames later). Bind the returned slice's buffer at its ByteOffset and
+    // draw the matching index buffer with base-0 indices — the offset is aligned to
+    // vertexStride so firstVertex = 0 addresses the slice. This is the race-free
+    // replacement for "create one Dynamic vertex buffer and UpdateVertexBuffer it
+    // every frame", which collided with in-flight GPU reads.
+    TransientVertexSlice AllocVertices(ReadOnlySpan<byte> data, int vertexStride, string? name = null);
 
     IndexBufferHandle CreateIndexBuffer(
         IReadOnlyList<ushort> indices,

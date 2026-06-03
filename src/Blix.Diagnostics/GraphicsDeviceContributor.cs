@@ -39,6 +39,15 @@ public sealed class GraphicsDeviceContributor : IDebuggable
         // across calls inside the same frame.
         debug.Stats.Gauge("frame-errors", diag.FrameErrorCount);
 
+        // Transient vertex arena traffic — KiB used this frame in the current ring
+        // slot, plus the all-time per-slot high-water mark. Makes "how much
+        // per-frame vertex data am I uploading?" one glance away.
+        if (diag.TransientArenaCapacityBytes > 0)
+        {
+            debug.Stats.Gauge("arena-kib", diag.TransientArenaBytesUsed / 1024);
+            debug.Stats.Gauge("arena-peak-kib", diag.TransientArenaHighWaterBytes / 1024);
+        }
+
         // De-dup repeated error messages: the device snapshot holds the
         // most recent error so it'd otherwise re-emit every frame until
         // something else replaces it. Echo it once per distinct message.

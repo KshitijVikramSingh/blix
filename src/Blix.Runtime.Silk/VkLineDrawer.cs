@@ -23,7 +23,6 @@ public sealed class VkLineDrawer : IDisposable
     private const int StrideBytes = 28; // matches VertexPosition3Color.Layout.Stride (3 floats pos + 4 floats color)
 
     private readonly VulkanGraphicsDevice device;
-    private readonly VertexBufferHandle vertexBuffer;
     private readonly IndexBufferHandle indexBuffer;
     private readonly ShaderProgramHandle shader;
     private readonly PipelineHandle pipeline;
@@ -36,14 +35,10 @@ public sealed class VkLineDrawer : IDisposable
         ArgumentNullException.ThrowIfNull(device);
         this.device = device;
 
-        // Pre-allocate the dynamic vertex buffer at the max size we expect.
-        // Vulkan-backend's UpdateVertexBuffer memcpys into the host-visible
-        // buffer per frame; cheap as long as MaxVertexCount stays modest.
-        var emptyVertices = new VertexPosition3Color[MaxVertexCount];
-        var initialData = new VertexBufferData(
-            new VertexBufferDescription(VertexPosition3Color.Layout, MaxVertexCount, GraphicsBufferUsage.Dynamic),
-            VertexPosition3Color.Pack(emptyVertices));
-        vertexBuffer = device.CreateVertexBuffer(initialData, name: "debugline.vb");
+        // Per-frame line vertices ride the device's transient arena (see Submit),
+        // not an owned Dynamic buffer — the old re-mapped-every-frame buffer raced
+        // the GPU across frames-in-flight. Line() already caps before accumulating,
+        // so the slice alloc never overflows.
 
         // Pre-baked sequential index buffer — every two consecutive vertices
         // form one line segment. No reuse, but simpler than tracking pairs.
@@ -167,14 +162,17 @@ public sealed class VkLineDrawer : IDisposable
     {
         if (vertexCount == 0) return;
         var byteCount = vertexCount * StrideBytes;
-        device.UpdateVertexBuffer(vertexBuffer, uploadBuffer.AsSpan(0, byteCount));
+        // Race-free per-frame vertices from the transient arena; bind at the slice
+        // offset so the static base-0 index buffer addresses this frame's lines.
+        var slice = device.AllocVertices(uploadBuffer.AsSpan(0, byteCount), StrideBytes, "debugline.vb");
         pass.DrawIndexed(
-            vertexBuffer: vertexBuffer,
+            vertexBuffer: slice.Buffer,
             indexBuffer: indexBuffer,
             pipeline: pipeline,
             indexCount: vertexCount,
             uniforms: new[] { new ShaderUniform("uViewProjection", new Matrix4x4Uniform(viewProjection)) },
-            textures: Array.Empty<ShaderTextureBinding>());
+            textures: Array.Empty<ShaderTextureBinding>(),
+            vertexBufferByteOffset: slice.ByteOffset);
         vertexCount = 0;
     }
 
@@ -196,7 +194,8 @@ public sealed class VkLineDrawer : IDisposable
         disposed = true;
         device.DestroyPipeline(pipeline);
         device.DestroyShaderProgram(shader);
-        device.DestroyVertexBuffer(vertexBuffer);
         device.DestroyIndexBuffer(indexBuffer);
+        // No vertex buffer to destroy — vertices come from the device-owned
+        // transient arena, freed at device teardown.
     }
 }

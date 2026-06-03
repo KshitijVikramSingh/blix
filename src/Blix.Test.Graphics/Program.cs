@@ -1717,6 +1717,104 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("AC.4 composed interface validates", TryValidate(composed) is null);
 }
 
+// ============================================================================
+// Section AD — Transient vertex arena math (FrameTransientArena substrate).
+// ============================================================================
+//
+// The arena's correctness rests on three pure invariants, all testable without a
+// device: (1) sub-slice offsets are stride-aligned so base-0 index fetch is valid;
+// (2) the bump allocator packs and rewinds without overrunning capacity; (3) the
+// ring depth makes consecutive frames land in different slots — THE hazard fix, the
+// reason SpriteBatch/VkLineDrawer no longer race the GPU on a single shared buffer.
+// The live GPU draw (bind at slice offset) is proven by run-runner/run-pong under
+// validation.
+
+{
+    // AD.1 — AlignUp: exact multiples pass through; non-multiples round up; stride 1
+    // is identity; bad input throws.
+    t.ExpectClose("AD.1 AlignUp(0,36) == 0", TransientArenaMath.AlignUp(0, 36), 0);
+    t.ExpectClose("AD.1 AlignUp(36,36) == 36 (already aligned)", TransientArenaMath.AlignUp(36, 36), 36);
+    t.ExpectClose("AD.1 AlignUp(1,36) == 36 (rounds up)", TransientArenaMath.AlignUp(1, 36), 36);
+    t.ExpectClose("AD.1 AlignUp(37,36) == 72", TransientArenaMath.AlignUp(37, 36), 72);
+    t.ExpectClose("AD.1 AlignUp(100,1) == 100 (stride 1 identity)", TransientArenaMath.AlignUp(100, 1), 100);
+    var aThrew = false;
+    try { TransientArenaMath.AlignUp(0, 0); } catch (ArgumentOutOfRangeException) { aThrew = true; }
+    t.ExpectTrue("AD.1 AlignUp rejects stride 0", aThrew);
+}
+
+{
+    // AD.2 — BumpSlot packs sequential allocations at increasing aligned offsets and
+    // tracks Used; Reset rewinds for slot reuse.
+    var slot = new BumpSlot(256);
+    var ok0 = slot.TryAlloc(40, 36, out var off0);   // 0..40
+    var ok1 = slot.TryAlloc(40, 36, out var off1);   // aligned 40->72, 72..112
+    t.ExpectTrue("AD.2 first alloc succeeds", ok0);
+    t.ExpectClose("AD.2 first offset == 0", off0, 0);
+    t.ExpectTrue("AD.2 second alloc succeeds", ok1);
+    t.ExpectClose("AD.2 second offset aligned to stride (72)", off1, 72);
+    t.ExpectClose("AD.2 Used advanced to 112", slot.Used, 112);
+    slot.Reset();
+    t.ExpectClose("AD.2 Reset rewinds Used to 0", slot.Used, 0);
+    var okR = slot.TryAlloc(40, 36, out var offR);
+    t.ExpectTrue("AD.2 alloc after reset succeeds", okR);
+    t.ExpectClose("AD.2 offset after reset == 0", offR, 0);
+}
+
+{
+    // AD.3 — Overflow fails WITHOUT mutating Used, so the device can throw cleanly
+    // and the slot stays consistent.
+    var slot = new BumpSlot(64);
+    slot.TryAlloc(40, 4, out _);                     // Used = 40
+    var before = slot.Used;
+    var ok = slot.TryAlloc(40, 4, out var off);      // 40 + 40 = 80 > 64 -> fail
+    t.ExpectTrue("AD.3 over-capacity alloc fails", !ok);
+    t.ExpectClose("AD.3 failed alloc returns offset 0", off, 0);
+    t.ExpectClose("AD.3 failed alloc does not advance Used", slot.Used, before);
+    // A fit-exactly allocation at the boundary still succeeds.
+    var okFit = slot.TryAlloc(24, 4, out var offFit); // 40 + 24 = 64 == capacity
+    t.ExpectTrue("AD.3 boundary-exact alloc succeeds", okFit);
+    t.ExpectClose("AD.3 boundary alloc offset == 40", offFit, 40);
+}
+
+{
+    // AD.4 — Ring slots: THE hazard fix. With slots >= 2, consecutive frames map to
+    // DIFFERENT physical slots, so frame N never overwrites frame N-1's in-flight
+    // vertices. With slots = MaxFramesInFlight+1 (3), a slot is reused only every 3
+    // frames — guaranteed GPU-complete.
+    const int slots = 3;   // MaxFramesInFlight (2) + 1
+    var distinctAcrossPairs = true;
+    for (long f = 0; f < 50; f++)
+    {
+        if (TransientArenaMath.RingSlot(f, slots) == TransientArenaMath.RingSlot(f + 1, slots))
+        {
+            distinctAcrossPairs = false;
+            break;
+        }
+    }
+    t.ExpectTrue("AD.4 consecutive frames map to different ring slots (hazard fix)", distinctAcrossPairs);
+    t.ExpectClose("AD.4 slot cycles with period = slots", TransientArenaMath.RingSlot(0, slots), TransientArenaMath.RingSlot(slots, slots));
+    t.ExpectTrue("AD.4 a slot is not reused within MaxFramesInFlight (2) frames",
+        TransientArenaMath.RingSlot(0, slots) != TransientArenaMath.RingSlot(1, slots) &&
+        TransientArenaMath.RingSlot(0, slots) != TransientArenaMath.RingSlot(2, slots));
+}
+
+{
+    // AD.5 — Command + slice contracts. VertexBufferByteOffset defaults to 0
+    // (preserves every existing caller) and carries through a with-update; the
+    // slice handle holds (buffer, offset, length).
+    var baseCmd = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(2), new PipelineHandle(3),
+        6, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>());
+    t.ExpectClose("AD.5 default VertexBufferByteOffset is 0", (long)baseCmd.VertexBufferByteOffset, 0);
+    var shifted = baseCmd with { VertexBufferByteOffset = 4096 };
+    t.ExpectClose("AD.5 with-update sets VertexBufferByteOffset", (long)shifted.VertexBufferByteOffset, 4096);
+    t.ExpectClose("AD.5 with-update leaves IndexCount intact", shifted.IndexCount, 6);
+    var slice = new TransientVertexSlice(new VertexBufferHandle(7), 72, 40);
+    t.ExpectClose("AD.5 slice buffer id", slice.Buffer.Id, 7);
+    t.ExpectClose("AD.5 slice byte offset", (long)slice.ByteOffset, 72);
+    t.ExpectClose("AD.5 slice byte length", slice.ByteLength, 40);
+}
+
 t.PrintSummary();
 return t.FailedCount;
 

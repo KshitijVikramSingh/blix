@@ -91,4 +91,12 @@ public sealed record DrawIndexedCommand(
     // instanced draw of the same index range; the vertex shader reads
     // gl_InstanceIndex (the Vulkan-GLSL built-in) to index a per-instance
     // storage buffer — bound via PerDrawMaterial — for its transform/tint.
-    int InstanceCount = 1) : RenderCommand;
+    int InstanceCount = 1,
+    // Vulkan: byte offset at which the vertex buffer is BOUND (the pOffsets
+    // argument to vkCmdBindVertexBuffers) — distinct from VertexOffset, which is
+    // an index bias added at fetch. Lets a sub-slice of a shared/transient vertex
+    // buffer be drawn with base-0 indices: the bind shifts the buffer's origin to
+    // the slice, so index 0 reads the slice's first vertex. The transient arena
+    // (IGraphicsDevice.AllocVertices) returns a stride-aligned offset for exactly
+    // this. 0 preserves historical whole-buffer behavior for every caller.
+    ulong VertexBufferByteOffset = 0) : RenderCommand;
