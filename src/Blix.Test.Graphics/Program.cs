@@ -1848,6 +1848,36 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("AE.4 different tags differ", new ShaderVariantKey("FOG") != new ShaderVariantKey("SKINNED"));
 }
 
+// ============================================================================
+// Section AF — Arena/MaterialBindings boundary guardrail.
+// ============================================================================
+//
+// Locked design decision: the transient arena holds ONLY descriptor-less
+// vertex/index data bound by offset; descriptor-backed per-frame storage
+// (per-instance SSBO, bone palettes) stays in MaterialBindings. These asserts
+// trip if a future refactor erodes that split — e.g. turns InstanceBuffer's SSBO
+// into something the arena would have to carry, or adds a descriptor concept to
+// the slice handle.
+
+{
+    // AF.1 — InstanceBuffer is descriptor-backed (a set-3 StorageBuffer), which is
+    // exactly why it belongs in MaterialBindings, NOT the arena.
+    var slot = Blix.Render.InstanceBuffer.Slot;
+    t.ExpectTrue("AF.1 InstanceBuffer.Slot is a StorageBuffer (descriptor-backed → MaterialBindings, not arena)",
+        slot.Type == ShaderResourceType.StorageBuffer);
+    t.ExpectTrue("AF.1 InstanceBuffer.Slot binds a descriptor set (set 3)", slot.Set == 3);
+    t.ExpectTrue("AF.1 InstanceBuffer.Slot carries a BlockLayout (SSBO storage)", slot.BlockLayout is not null);
+
+    // AF.2 — A TransientVertexSlice is purely (buffer, offset, length): no set, no
+    // binding, no descriptor. The arena is descriptor-less by construction.
+    var sliceFields = typeof(TransientVertexSlice).GetProperties().Select(p => p.Name).ToArray();
+    t.ExpectTrue("AF.2 slice exposes Buffer", sliceFields.Contains(nameof(TransientVertexSlice.Buffer)));
+    t.ExpectTrue("AF.2 slice exposes ByteOffset", sliceFields.Contains(nameof(TransientVertexSlice.ByteOffset)));
+    t.ExpectTrue("AF.2 slice exposes ByteLength", sliceFields.Contains(nameof(TransientVertexSlice.ByteLength)));
+    t.ExpectTrue("AF.2 slice has no descriptor/set concept",
+        !sliceFields.Any(n => n.Contains("Set") || n.Contains("Binding") || n.Contains("Descriptor")));
+}
+
 t.PrintSummary();
 return t.FailedCount;
 
