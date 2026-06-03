@@ -91,6 +91,26 @@ internal sealed class TankModelFit
     [Tune(-3f, 3f)]       public float ModelLift = -0.15f;  // vertical seat onto the ground
 }
 
+// Live-tunable combat-feel "juice" — screen shake (trauma model), gun recoil kick,
+// and burst sizes. Read each frame so the punch can be dialled while playing.
+internal sealed class TankJuice
+{
+    // Screen shake: events add trauma [0,1]; the offset is trauma² so it eases out.
+    [Tune(0f, 1.5f)] public float ShakeFire = 0.16f;       // firing your own gun
+    [Tune(0f, 1.5f)] public float ShakeHit = 0.55f;        // taking a shell
+    [Tune(0f, 1.5f)] public float ShakeExplosion = 0.8f;   // barrel blast (scaled by proximity)
+    [Tune(0f, 3f)]   public float ShakeAmount = 0.9f;      // world-units of camera offset at full trauma
+    [Tune(1f, 8f)]   public float TraumaDecay = 2.6f;      // trauma units shed per second
+
+    // Gun recoil: the barrel slides back into the turret on firing, then recovers.
+    [Tune(0f, 1f)]   public float Recoil = 0.5f;           // slide-back distance (game units)
+    [Tune(4f, 30f)]  public float RecoilRecover = 9f;      // exponential recover rate
+
+    // Particle burst sizes (debris counts).
+    [Tune(8f, 60f)]  public float ExplosionDebris = 30f;
+    [Tune(6f, 40f)]  public float DeathDebris = 18f;
+}
+
 // One tank: the hull -> turret -> barrel transform hierarchy plus its combat state.
 // Local yaws drive the parts; WorldMatrix composes the chain for rendering + aim.
 internal sealed class Tank
@@ -112,6 +132,7 @@ internal sealed class Tank
     public float BarrelPitch;   // gun elevation — sets the ballistic arc / range
     public float Health;
     public float FireTimer;
+    public float GunRecoil;     // 0..1 visual recoil, kicked to 1 on firing, decays
 
     public Tank()
     {
@@ -155,8 +176,10 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     // the --debug overlay. Read each frame so dragging a slider updates the game live.
     private readonly TankFeel feel = new();
     private readonly TankModelFit fit = new();
+    private readonly TankJuice juice = new();
     private ObjectTunables tunables = null!;
     private readonly bool debugOverlay;
+    private float trauma;   // screen-shake accumulator [0,1], decays each frame
 
     // Model-space pivots measured from tank.glb's node transforms (model-world units;
     // the asset's ×100 node scale is baked into the part meshes at load). The rig's
@@ -225,9 +248,10 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     private readonly List<PropType> propTypes = new();
     private readonly List<Prop> props = new();
 
-    // Explosion debris — short-lived bright cubes drawn through the world cube batch
-    // (no separate pipeline). Pure VFX: no collision, no damage of their own.
-    private sealed class Spark { public Vector3 Pos; public Vector3 Vel; public float Age; }
+    // VFX debris — short-lived cubes drawn through the world cube batch (no separate
+    // pipeline). Pure visuals: no collision, no damage. Used for muzzle flash, impact
+    // dust, enemy death and barrel explosions; each carries its own colour/size/life.
+    private sealed class Spark { public Vector3 Pos; public Vector3 Vel; public float Age; public float Life; public Vector4 Tint; public float Size; }
     private readonly List<Spark> sparks = new();
 
     private const float ExplosionRadius = 6.5f;       // AoE kill/damage radius
@@ -383,7 +407,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         propTypes.Add(LoadProp("crate.glb", targetHeight: 1.5f, explosive: false, worldShader, casterShader));
         propTypes.Add(LoadProp("barrel_explosive.glb", targetHeight: 1.4f, explosive: true, worldShader, casterShader));
 
-        tunables = new ObjectTunables(feel, fit);   // grouped by type: feel + model-fit
+        tunables = new ObjectTunables(feel, fit, juice);   // grouped by type: feel + fit + juice
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         Reset();   // builds the collision world + places props (so a restart restores them)
     }
@@ -593,13 +617,17 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     private Matrix4x4 PartModel(Tank t, Attach attach)
     {
         var bind = Matrix4x4.CreateScale(fit.GlobalScale) * Matrix4x4.CreateRotationY(fit.YawFix);
-        var rig = attach switch
+        var lift = Matrix4x4.CreateTranslation(0f, fit.ModelLift, 0f);
+        switch (attach)
         {
-            Attach.Hull => t.Hull.WorldMatrix,
-            Attach.Turret => t.Turret.WorldMatrix,
-            _ => t.Barrel.WorldMatrix,
-        };
-        return bind * rig * Matrix4x4.CreateTranslation(0f, fit.ModelLift, 0f);
+            case Attach.Hull: return bind * t.Hull.WorldMatrix * lift;
+            case Attach.Turret: return bind * t.Turret.WorldMatrix * lift;
+            default:
+                // Gun: slide the barrel back along its axis (+Z is rearward in the
+                // post-bind barrel frame) by the recoil kick, between bind and the rig.
+                var recoil = Matrix4x4.CreateTranslation(0f, 0f, t.GunRecoil * juice.Recoil);
+                return bind * recoil * t.Barrel.WorldMatrix * lift;
+        }
     }
 
     // Sun shadow view-projection: light eye up the sun direction, looking at the
@@ -678,6 +706,8 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     public void OnUpdate(Time time)
     {
         var dt = (float)time.Delta;
+        trauma = MathF.Max(0f, trauma - juice.TraumaDecay * dt);   // screen shake settles
+        UpdateSparks(dt);                                          // VFX live on through game-over
         if (gameOver)
         {
             if (held.Contains(Key.Enter) || held.Contains(Key.R)) Reset();
@@ -688,7 +718,6 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         UpdateSpawning(dt);
         for (var i = enemies.Count - 1; i >= 0; i--) UpdateEnemy(enemies[i], time, dt);
         UpdateShells(time, dt);
-        UpdateSparks(dt);
 
         // Headless gate: a deterministic player shot so the run exercises the
         // fire/detach/collision path within the short --frames window.
@@ -729,6 +758,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         // Drive sets horizontal velocity along the hull facing; gravity owns vertical.
         var forward = Vector3.Transform(-Vector3.UnitZ, player.Hull.Rotation);
         recoilVel *= MathF.Max(0f, 1f - RecoilDamp * dt);   // recoil shove fades out
+        player.GunRecoil *= MathF.Max(0f, 1f - juice.RecoilRecover * dt);   // barrel kick recovers
         SetHorizontalVelocity(player, forward * playerSpeed + recoilVel);
         player.Physics.Gravity = new Vector3(0f, feel.TankGravity, 0f);   // live-tunable
         player.Physics.FixedUpdate(new Time(time.Total, dt));
@@ -829,6 +859,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         // curves smoothly with the turn instead of sliding sideways.
         var forward = Vector3.Transform(-Vector3.UnitZ, Quaternion.CreateFromAxisAngle(Vector3.UnitY, e.HullYaw));
         SetHorizontalVelocity(e, dist > EnemyStandoff ? forward * feel.EnemySpeed : Vector3.Zero);
+        e.GunRecoil *= MathF.Max(0f, 1f - juice.RecoilRecover * dt);   // barrel kick recovers
         e.Physics.Gravity = new Vector3(0f, feel.TankGravity, 0f);
         e.Physics.FixedUpdate(new Time(time.Total, dt));
         ResolveTank(e);
@@ -904,6 +935,12 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         var physics = new PhysicsHost3D { Target = shell, Velocity = tank.BarrelForward * feel.MuzzleSpeed, GravityScale = 1f, Gravity = new Vector3(0f, feel.ShellGravity, 0f) };
         shells.Add(new Shell { Transform = shell, Physics = physics, FromPlayer = fromPlayer });
 
+        // Punch: muzzle flash at the gun tip, a visual recoil kick on the barrel, and
+        // (for the player) a touch of screen shake.
+        SpawnMuzzleFlash(shell.WorldPosition, tank.BarrelForward);
+        tank.GunRecoil = 1f;
+        if (fromPlayer) AddTrauma(juice.ShakeFire);
+
         // Knockback: shove the firing tank back along the gun's horizontal facing,
         // so shooting nudges the player (and can be used to reposition). Player only
         // — rides recoilVel, which the drive blends in + decays.
@@ -923,13 +960,21 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             s.Physics.FixedUpdate(new Time(time.Total, dt));
             s.Age += dt;
             var pos = s.Transform.WorldPosition;
-            if (s.Age > ShellLife || pos.Y < -1f || OutOfArena(pos)) { shells.RemoveAt(i); continue; }
+            if (s.Age > ShellLife || OutOfArena(pos)) { shells.RemoveAt(i); continue; }
+            // Ground impact: a dirt kick-up where the arc lands.
+            if (pos.Y <= 0f)
+            {
+                SpawnBurst(new Vector3(pos.X, 0.05f, pos.Z), 10, new Vector4(0.42f, 0.34f, 0.24f, 1f), speed: 5f, upBias: 0.7f, life: 0.4f, size: 0.22f);
+                shells.RemoveAt(i);
+                continue;
+            }
 
             // Cover: a flat shot stops at a prop (lobs clear it). Explosive barrels detonate.
             if (HitProp(pos) is { } prop)
             {
                 shells.RemoveAt(i);
                 if (prop.Type.Explosive) Explode(prop);
+                else SpawnBurst(pos, 8, new Vector4(0.55f, 0.5f, 0.42f, 1f), speed: 4f, upBias: 0.4f, life: 0.3f, size: 0.18f);   // dust puff
                 continue;
             }
 
@@ -939,10 +984,8 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
                 {
                     if (Vector3.Distance(pos, enemies[ei].Position) < HitRadius)
                     {
-                        enemies.RemoveAt(ei);
+                        KillEnemy(ei);
                         shells.RemoveAt(i);
-                        score++;
-                        UpdateTitle();
                         break;
                     }
                 }
@@ -951,10 +994,24 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             {
                 shells.RemoveAt(i);
                 health -= feel.EnemyDamage;
+                AddTrauma(juice.ShakeHit);
+                SpawnBurst(pos, 12, new Vector4(1f, 0.5f, 0.3f, 1f), speed: 7f, upBias: 0.5f, life: 0.35f, size: 0.24f);
                 if (health <= 0f) { health = 0f; gameOver = true; }
                 UpdateTitle();
             }
         }
+    }
+
+    // Remove an enemy with a debris burst + a little shake. Shared by direct shell
+    // hits and explosion AoE so kills always read with the same punch.
+    private void KillEnemy(int index)
+    {
+        var at = enemies[index].Position + new Vector3(0f, 1.2f, 0f);
+        enemies.RemoveAt(index);
+        score++;
+        SpawnBurst(at, (int)juice.DeathDebris, EnemyTeam, speed: 9f, upBias: 0.5f, life: 0.6f, size: 0.3f);
+        AddTrauma(juice.ShakeFire * 0.7f);
+        UpdateTitle();
     }
 
     private static bool OutOfArena(Vector3 p) =>
@@ -989,15 +1046,13 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         world.Remove(barrel.OwnerId);
 
         var center = Flatten(barrel.Position);
-        SpawnSparks(barrel.Position + new Vector3(0f, barrel.Type.Height * 0.5f, 0f), 24);
+        var burstAt = barrel.Position + new Vector3(0f, barrel.Type.Height * 0.5f, 0f);
+        SpawnBurst(burstAt, (int)juice.ExplosionDebris, new Vector4(1f, 0.5f, 0.12f, 1f), speed: 13f, upBias: 0.5f, life: 0.65f, size: 0.3f);
+        SpawnBurst(burstAt, 6, new Vector4(1f, 0.95f, 0.7f, 1f), speed: 6f, upBias: 0.8f, life: 0.18f, size: 0.6f);   // bright flash core
 
         for (var ei = enemies.Count - 1; ei >= 0; ei--)
         {
-            if (Flatten(enemies[ei].Position - center).Length() < ExplosionRadius)
-            {
-                enemies.RemoveAt(ei);
-                score++;
-            }
+            if (Flatten(enemies[ei].Position - center).Length() < ExplosionRadius) KillEnemy(ei);
         }
 
         if (!gameOver)
@@ -1011,6 +1066,8 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
                 if (pd > 1e-3f) recoilVel += toPlayer / pd * (ExplosionKnockback * falloff);
                 if (health <= 0f) { health = 0f; gameOver = true; }
             }
+            // Shake scales with proximity, out to roughly twice the kill radius.
+            AddTrauma(juice.ShakeExplosion * MathF.Max(0f, 1f - pd / (ExplosionRadius * 2f)));
         }
         UpdateTitle();
 
@@ -1026,15 +1083,35 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
 
     private static Vector3 Flatten(Vector3 v) => new(v.X, 0f, v.Z);
 
-    private void SpawnSparks(Vector3 center, int count)
+    private float Rand11() => (float)(rng.NextDouble() * 2.0 - 1.0);
+
+    // Add screen-shake trauma (clamped). Shake offset is trauma², so small hits barely
+    // register and big ones kick hard, both easing out as trauma decays.
+    private void AddTrauma(float amount) => trauma = MathF.Min(1f, trauma + amount);
+
+    // A radial debris burst at `center`, biased upward. Used for explosions, deaths,
+    // and impact dust — colour/spread/life/size per call.
+    private void SpawnBurst(Vector3 center, int count, Vector4 tint, float speed, float upBias, float life, float size)
     {
         for (var i = 0; i < count; i++)
         {
             var a = (float)(rng.NextDouble() * Math.Tau);
-            var up = 0.4f + (float)rng.NextDouble() * 1.0f;
-            var speed = 7f + (float)rng.NextDouble() * 11f;
+            var up = upBias + (float)rng.NextDouble() * 0.9f;
+            var sp = speed * (0.5f + (float)rng.NextDouble());
             var dir = Vector3.Normalize(new Vector3(MathF.Sin(a), up, MathF.Cos(a)));
-            sparks.Add(new Spark { Pos = center, Vel = dir * speed, Age = 0f });
+            sparks.Add(new Spark { Pos = center, Vel = dir * sp, Age = 0f, Life = life, Tint = tint, Size = size });
+        }
+    }
+
+    // A tight cone of bright sparks along `dir` — the muzzle flash on firing.
+    private void SpawnMuzzleFlash(Vector3 center, Vector3 dir)
+    {
+        var flash = new Vector4(1f, 0.86f, 0.42f, 1f);
+        for (var i = 0; i < 8; i++)
+        {
+            var jitter = new Vector3(Rand11(), Rand11(), Rand11()) * 0.5f;
+            var vel = dir * (10f + (float)rng.NextDouble() * 8f) + jitter * 6f;
+            sparks.Add(new Spark { Pos = center, Vel = vel, Age = 0f, Life = 0.16f, Tint = flash, Size = 0.34f });
         }
     }
 
@@ -1046,11 +1123,10 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             s.Vel.Y += SparkGravity * dt;
             s.Pos += s.Vel * dt;
             s.Age += dt;
-            if (s.Age > SparkLife || s.Pos.Y < 0f) sparks.RemoveAt(i);
+            if (s.Age > s.Life || s.Pos.Y < 0f) sparks.RemoveAt(i);
         }
     }
 
-    private const float SparkLife = 0.7f;
     private const float SparkGravity = -26f;
 
     private void UpdateTitle() => host.SetTitle(gameOver
@@ -1069,7 +1145,17 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         var camForward = Vector3.Transform(-Vector3.UnitZ, Quaternion.CreateFromAxisAngle(Vector3.UnitY, camYaw));
         var p = player.Position;
         var eye = p - camForward * feel.CamDistance + Vector3.UnitY * feel.CamHeight;
-        var view = Matrix4x4.CreateLookAt(eye, p + Vector3.UnitY * 1.2f, Vector3.UnitY);
+        var target = p + Vector3.UnitY * 1.2f;
+        // Screen shake: offset both eye and look-at by trauma² so the whole view kicks
+        // (random direction each frame) and eases out as trauma decays.
+        if (trauma > 0f)
+        {
+            var kick = trauma * trauma * juice.ShakeAmount;
+            var jolt = new Vector3(Rand11(), Rand11() * 0.6f, Rand11()) * kick;
+            eye += jolt;
+            target += jolt * 0.5f;
+        }
+        var view = Matrix4x4.CreateLookAt(eye, target, Vector3.UnitY);
         var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, aspect, 0.3f, 400f);
         viewProj = view * proj;
 
