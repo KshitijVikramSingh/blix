@@ -386,6 +386,12 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         graphicsDevice?.WaitIdle();
         imguiRenderer?.Dispose();
         lineDrawer?.Dispose();
+        // The game loop may own GPU resources outside the device's auto-freed
+        // tables (e.g. a RenderGraph's render passes + offscreen images). Dispose
+        // it here — after WaitIdle so the GPU is done with them, before the device
+        // is torn down so the frees still have a live device. Closing/OnUnload is
+        // too early: it can fire mid-frame before the final submit.
+        (gameLoop as IDisposable)?.Dispose();
         audioDevice?.Dispose();
         input?.Dispose();
         graphicsDevice?.Dispose();

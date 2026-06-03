@@ -9,17 +9,18 @@ namespace Blix.Render;
 // per-frame transient vertex arena. Each frame it integrates particles on the CPU,
 // expands every live one into a camera-facing quad, and uploads the lot as ONE
 // transient-arena vertex slice (no owned/persistent vertex buffer — that's the
-// arena's whole point). It records a single DrawIndexed against a caller-supplied
-// pipeline, mirroring InstancedBatch's layering: the batch owns simulation +
-// geometry expansion, the caller brings the shader/pipeline (and thus the blend
-// mode — additive sparks vs alpha smoke are just two pipelines over one shader).
+// arena's whole point), then records a single DrawIndexed.
 //
-// Descriptor-less by design: vertices carry their own colour, the only binding is a
-// view-projection push constant. That's why particles belong in the arena, not in
-// MaterialBindings (see docs/renderer.md → "two substrates, one boundary").
+// The batch owns ONLY geometry: simulation, billboard expansion, optional depth sort,
+// arena upload. The CALLER brings the pipeline, the push constants, and any texture
+// bindings — mirroring InstancedBatch's layering. So the look is the caller's: blend
+// mode (additive sparks vs alpha smoke), a plain viewProj push, or a soft-particle
+// shader that samples scene depth and reads a fade push — none of that lives here. The
+// batch stays a descriptor-less arena consumer; whatever bindings the caller hands it
+// just ride through to the draw (see docs/renderer.md → "two substrates, one boundary").
 public sealed class ParticleBatch : IDisposable
 {
-    // pos(3) + color(4) + uv(2) = 9 floats. The demo builds a matching pipeline
+    // pos(3) + color(4) + uv(2) = 9 floats. The caller builds a matching pipeline
     // against this layout; exposed so callers stay in lockstep with the packing.
     public static VertexLayout VertexLayoutDescription { get; } = new(
         Stride: 9 * sizeof(float),
@@ -56,7 +57,6 @@ public sealed class ParticleBatch : IDisposable
     private readonly float[] scratch;                 // CPU vertex staging
     private readonly int[] order;                     // indices for optional depth sort
     private readonly float[] depthKey;                // sort keys, parallel to order
-    private readonly byte[] pushConstants = new byte[64]; // view-projection
     private int count;
     private bool disposed;
 
@@ -135,22 +135,44 @@ public sealed class ParticleBatch : IDisposable
         }
     }
 
-    // Expand live particles into camera-facing billboards, upload as one transient
-    // arena slice, and record one DrawIndexed against `pipeline` (whose blend state
-    // chooses additive vs alpha). camRight/camUp orient the quads; when sortByDepth
-    // is set (alpha blending), particles are drawn back-to-front from camPos.
+    // Expand the live set into camera-facing billboards (optionally depth-sorted
+    // back-to-front for alpha blending), upload them as one transient-arena slice, and
+    // record one DrawIndexed against the caller's `pipeline` with the caller's
+    // `pushConstants` and `textures`. camRight/camUp orient the quads. What the draw
+    // *means* is entirely the caller's: a plain viewProj push with no textures, or a
+    // soft-particle pipeline whose push carries a fade and whose textures include the
+    // scene depth — the batch is agnostic and just forwards them.
     public void Draw(
         RenderPassBuilder pass,
         PipelineHandle pipeline,
-        Matrix4x4 viewProjection,
         Vector3 camRight,
         Vector3 camUp,
         Vector3 camPos,
-        bool sortByDepth)
+        bool sortByDepth,
+        byte[] pushConstants,
+        IReadOnlyList<ShaderTextureBinding> textures)
     {
         ArgumentNullException.ThrowIfNull(pass);
         if (count == 0) return;
 
+        var slice = ExpandBillboards(camRight, camUp, camPos, sortByDepth);
+        pass.DrawIndexed(
+            slice.Buffer,
+            indexBuffer,
+            pipeline,
+            indexCount: count * IndicesPerParticle,
+            Array.Empty<ShaderUniform>(),
+            textures,
+            pushConstants,
+            indexOffset: 0,
+            vertexOffset: 0,
+            vertexBufferByteOffset: slice.ByteOffset);
+    }
+
+    // Sort (optional, back-to-front) + expand the live set into camera-facing quads and
+    // upload them as one transient-arena slice.
+    private TransientVertexSlice ExpandBillboards(Vector3 camRight, Vector3 camUp, Vector3 camPos, bool sortByDepth)
+    {
         for (var i = 0; i < count; i++) order[i] = i;
         if (sortByDepth)
         {
@@ -196,20 +218,7 @@ public sealed class ParticleBatch : IDisposable
         }
 
         var bytes = MemoryMarshal.AsBytes(scratch.AsSpan(0, count * VertsPerParticle * FloatsPerVertex));
-        var slice = device.AllocVertices(bytes, VertexLayoutDescription.Stride, "particles.vertices");
-
-        MemoryMarshal.Write(pushConstants.AsSpan(0, 64), in viewProjection);
-        pass.DrawIndexed(
-            slice.Buffer,
-            indexBuffer,
-            pipeline,
-            indexCount: count * IndicesPerParticle,
-            Array.Empty<ShaderUniform>(),
-            Array.Empty<ShaderTextureBinding>(),
-            pushConstants,
-            indexOffset: 0,
-            vertexOffset: 0,
-            vertexBufferByteOffset: slice.ByteOffset);
+        return device.AllocVertices(bytes, VertexLayoutDescription.Stride, "particles.vertices");
     }
 
     public void Dispose()

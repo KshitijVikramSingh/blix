@@ -88,8 +88,9 @@ public enum FrontFace
 
 public enum BlendMode
 {
-    Alpha = 0,    // SrcAlpha, OneMinusSrcAlpha -- standard transparency
-    Additive,     // One, One -- emissive layering, bloom accumulation
+    Alpha = 0,           // SrcAlpha, OneMinusSrcAlpha -- standard straight-alpha transparency
+    Additive,            // One, One -- emissive layering, bloom accumulation
+    PremultipliedAlpha,  // One, OneMinusSrcAlpha -- source already carries colour*alpha
 }
 
 public sealed record BlendState(bool Enabled, BlendMode Mode = BlendMode.Alpha)
@@ -97,4 +98,7 @@ public sealed record BlendState(bool Enabled, BlendMode Mode = BlendMode.Alpha)
     public static BlendState Disabled { get; } = new(Enabled: false);
     public static BlendState AlphaBlend { get; } = new(Enabled: true, BlendMode.Alpha);
     public static BlendState Additive { get; } = new(Enabled: true, BlendMode.Additive);
+    // For shaders that output premultiplied colour (rgb already × alpha) — e.g. the
+    // soft-particle shader, so ONE shader serves both additive and alpha layers.
+    public static BlendState PremultipliedAlpha { get; } = new(Enabled: true, BlendMode.PremultipliedAlpha);
 }
