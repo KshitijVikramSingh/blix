@@ -124,17 +124,8 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private PipelineHandle pointSkinnedShadowPipeline;
     private readonly Matrix4x4[] pointFaceVP = new Matrix4x4[6];
 
-    // Bloom: bright extract → separable Gaussian (H+V) at quarter res.
-    private GraphResourceHandle bloomBrightHandle;
-    private GraphResourceHandle bloomBlurHHandle;
-    private GraphResourceHandle bloomBlurVHandle;
-    private PassHandle bloomBrightPassHandle;
-    private PassHandle bloomBlurHPassHandle;
-    private PassHandle bloomBlurVPassHandle;
-    private ShaderProgramHandle bloomBrightProgram;
-    private PipelineHandle bloomBrightPipeline;
-    private ShaderProgramHandle bloomBlurProgram;
-    private PipelineHandle bloomBlurPipeline;
+    // Bloom: bright extract → separable Gaussian (H+V) at quarter res, as a PostChain.
+    private PostChain bloom = null!;
     private bool bloomEnabled = true;
     private const float BloomScale = 0.25f; // const — sizes graph render targets
     internal float BloomIntensity { get; set; } = 0.7f;
@@ -365,12 +356,6 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
         sceneDepthHandle = graph.DepthTarget("scene-depth", fullSize);
 
-        // Bloom targets at quarter res (bright extract + ping-pong blur).
-        var bloomSize = new MatchSwapchainGraphSize(BloomScale);
-        bloomBrightHandle = graph.ColorTarget("bloom-bright", TextureFormat.Rgba16F, bloomSize);
-        bloomBlurHHandle = graph.ColorTarget("bloom-blurH", TextureFormat.Rgba16F, bloomSize);
-        bloomBlurVHandle = graph.ColorTarget("bloom-blurV", TextureFormat.Rgba16F, bloomSize);
-
         // --- Shader interfaces ------------------------------------------
         // Per-frame UBO grows with each light. vec4-packed light blocks
         // dodge the std140 vec3+float padding fragility. See lit.vert.
@@ -538,22 +523,17 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             .Read(pointShadowCube)
             .Shader(litInterface, skinnedLitInterface)
             .Handle;
-        // Bloom chain: bright(hdr) → blurH → blurV. Each reads the previous.
-        bloomBrightPassHandle = graph.GraphicsPass("bloom-bright")
-            .Target(bloomBrightHandle, LoadOp.Clear, StoreOp.Store)
-            .Read(hdrHandle)
-            .Shader(bloomBrightInterface)
-            .Handle;
-        bloomBlurHPassHandle = graph.GraphicsPass("bloom-blurH")
-            .Target(bloomBlurHHandle, LoadOp.Clear, StoreOp.Store)
-            .Read(bloomBrightHandle)
-            .Shader(bloomBlurInterface)
-            .Handle;
-        bloomBlurVPassHandle = graph.GraphicsPass("bloom-blurV")
-            .Target(bloomBlurVHandle, LoadOp.Clear, StoreOp.Store)
-            .Read(bloomBlurHHandle)
-            .Shader(bloomBlurInterface)
-            .Handle;
+        // Bloom: bright(hdr) → blurH → blurV at quarter res, as a PostChain. It
+        // declares its own targets + passes after the lit scene pass (so it runs
+        // after the scene writes hdr) and stops at a blurred-bright texture; the
+        // present pass below composites bloom.Output back over hdr.
+        var bloomSize = new MatchSwapchainGraphSize(BloomScale);
+        bloom = new PostChain(vk, graph, hdrHandle, new[]
+        {
+            new PostStage("bloom-bright", TextureFormat.Rgba16F, bloomSize, bloomBrightInterface, "uHdr"),
+            new PostStage("bloom-blurH", TextureFormat.Rgba16F, bloomSize, bloomBlurInterface, "uSrc"),
+            new PostStage("bloom-blurV", TextureFormat.Rgba16F, bloomSize, bloomBlurInterface, "uSrc"),
+        }, "bloom");
         graph.Compile();
 
         // --- Pipelines --------------------------------------------------
@@ -654,31 +634,24 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             RasterizerState.NoCulling,
             BlendState.Disabled), "present_depth");
 
-        // Bloom pipelines (fullscreen, target the bloom pass surfaces).
-        var bloomBrightFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "bloom_bright.frag.spv"));
-        bloomBrightProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, bloomBrightFragSpv, bloomBrightInterface, "bloom_bright");
-        bloomBrightPipeline = vk.CreatePipeline(new PipelineDescription(
-            bloomBrightProgram,
-            VertexPosition3NormalTexture.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.Disabled,
-            RasterizerState.NoCulling,
-            new[] { BlendState.Disabled },
-            RenderTarget: graph.GetPassSurface(bloomBrightPassHandle)), "bloom_bright");
-
-        var bloomBlurFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "bloom_blur.frag.spv"));
-        // One program shared by both blurH and blurV. The transient
-        // descriptor pool gives each draw its own set, so the two blur
-        // draws no longer clobber each other's uSrc binding.
-        bloomBlurProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, bloomBlurFragSpv, bloomBlurInterface, "bloom_blur");
-        bloomBlurPipeline = vk.CreatePipeline(new PipelineDescription(
-            bloomBlurProgram,
-            VertexPosition3NormalTexture.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.Disabled,
-            RasterizerState.NoCulling,
-            new[] { BlendState.Disabled },
-            RenderTarget: graph.GetPassSurface(bloomBlurHPassHandle)), "bloom_blur");
+        // Bloom pipelines (fullscreen): the caller brings each stage's pipeline,
+        // built against that stage's surface. Bright + blur share present.vert; the
+        // blur program is reused for blurH and blurV (the transient descriptor pool
+        // gives each draw its own uSrc set, so the two blur draws don't clobber).
+        bloom.BuildPipelines((stage, surface) =>
+        {
+            var frag = stage.Name == "bloom-bright" ? "bloom_bright.frag.spv" : "bloom_blur.frag.spv";
+            var program = vk.CreateShaderProgramFromSpv(
+                presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, frag)), stage.Interface, stage.Name);
+            return vk.CreatePipeline(new PipelineDescription(
+                program,
+                VertexPosition3NormalTexture.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.Disabled,
+                RasterizerState.NoCulling,
+                new[] { BlendState.Disabled },
+                RenderTarget: surface), stage.Name);
+        });
 
         // --- Materials --------------------------------------------------
         cubeMaterial = vk.CreateMaterial(litShaderProgram, name: "cube.material")
@@ -1071,18 +1044,17 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 pushConstants: LitPush(cesiumWorldModel, metallic: 0.0f, roughness: 0.6f));
         }, clearColor: new GraphicsColor(0.04f, 0.06f, 0.10f, 1.0f));
 
-        // Bloom chain: bright(hdr) → blurH → blurV at quarter res. texelStep
-        // is direction / bloom-target-resolution.
+        // Bloom chain: bright(hdr) → blurH → blurV at quarter res. The chain resolves
+        // each stage's input from its wiring; bright reads a const threshold in-shader
+        // (no push), each blur takes a texel step (direction / bloom-target-resolution).
         var bloomW = MathF.Max(1f, frame.Width * BloomScale);
         var bloomH = MathF.Max(1f, frame.Height * BloomScale);
-        RecordFullscreen(bloomBrightPassHandle, bloomBrightPipeline,
-            new ShaderTextureBinding("uHdr", graph.GetColorTexture(hdrHandle), Slot: 0), null);
-        RecordFullscreen(bloomBlurHPassHandle, bloomBlurPipeline,
-            new ShaderTextureBinding("uSrc", graph.GetColorTexture(bloomBrightHandle), Slot: 0),
-            Vec2Bytes(1f / bloomW, 0f));
-        RecordFullscreen(bloomBlurVPassHandle, bloomBlurPipeline,
-            new ShaderTextureBinding("uSrc", graph.GetColorTexture(bloomBlurHHandle), Slot: 0),
-            Vec2Bytes(0f, 1f / bloomH));
+        bloom.Record((i, stage) => i switch
+        {
+            0 => null,
+            1 => Vec2Bytes(1f / bloomW, 0f),
+            _ => Vec2Bytes(0f, 1f / bloomH),
+        });
 
         graph.Execute(commandList);
 
@@ -1096,7 +1068,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             View.SceneDepth => (graph.GetDepthTexture(sceneDepthHandle), presentDepthPipeline),
             _ => (graph.GetColorTexture(hdrHandle), presentPipeline),
         };
-        var bloomTex = graph.GetColorTexture(bloomBlurVHandle);
+        var bloomTex = graph.GetColorTexture(bloom.Output);
         var presentPush = new byte[8];
         System.Runtime.InteropServices.MemoryMarshal.Write(presentPush.AsSpan(0, 4), in exposure);
         var bloomI = bloomEnabled ? BloomIntensity : 0f;
@@ -1131,12 +1103,6 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
 
     // Record a fullscreen graph pass: draw the fullscreen triangle sampling
     // one input texture, optional push payload. Used by the bloom chain.
-    private void RecordFullscreen(PassHandle pass, PipelineHandle pipeline,
-        ShaderTextureBinding input, byte[]? push)
-    {
-        graph.Pass(pass, scope => fullscreen.Draw(scope, pipeline, new[] { input }, push));
-    }
-
     private static byte[] Vec2Bytes(float x, float y)
     {
         var bytes = new byte[8];
@@ -1319,6 +1285,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     public void Dispose()
     {
         graph?.Dispose();
+        bloom?.Dispose();
         fullscreen?.Dispose();
     }
 
