@@ -26,6 +26,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <GlslShader Include="Shaders\cube.vert" />
     <GlslShader Include="Shaders\cube.frag" />
     <GlslShader Include="Shaders\sky.vert" />

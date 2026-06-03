@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix;
+using Blix.Assets;
 using Blix.Core;
 using Blix.Diagnostics;
 using Blix.Geometry;
@@ -74,13 +75,27 @@ internal sealed class TankFeel
     [Tune(2f, 40f)]    public float EnemyDamage = 18f;
 }
 
+// Live-tunable fit for the glTF tank model -> game rig. Screenshots don't work, so
+// these are dialled in the --debug overlay until the model sits right: GlobalScale
+// maps the asset's model-world units (the Quaternius tank is ~14 units long) into
+// game units; YawFix rotates the asset's -X forward onto the engine's -Z forward
+// (-90°); ModelLift seats the chassis on the ground. The part pivots/offsets come
+// from the asset's measured node transforms, so only these three knobs remain.
+internal sealed class TankModelFit
+{
+    [Tune(0.15f, 1.2f)]   public float GlobalScale = 0.4f;
+    [Tune(-3.15f, 3.15f)] public float YawFix = -1.5708f;   // -90°: model -X -> engine -Z
+    [Tune(-3f, 3f)]       public float ModelLift = -0.15f;  // vertical seat onto the ground
+}
+
 // One tank: the hull -> turret -> barrel transform hierarchy plus its combat state.
 // Local yaws drive the parts; WorldMatrix composes the chain for rendering + aim.
 internal sealed class Tank
 {
-    public static readonly Vector3 HullScale = new(2.2f, 0.7f, 3.2f);
-    public static readonly Vector3 TurretScale = new(1.3f, 0.6f, 1.3f);
-    public static readonly Vector3 BarrelScale = new(0.24f, 0.24f, 1.8f);
+    // Collision/gameplay chassis footprint (width, height, length) — sized to the
+    // tank model at the default GlobalScale. The visual model is taller (turret);
+    // this is just the box that rests on the ground and slides along walls.
+    public static readonly Vector3 HullScale = new(3.6f, 1.4f, 5.0f);
     private const float GravityValue = -32f;   // snappy fall/settle
 
     public readonly Transform3D Hull = new();
@@ -99,11 +114,9 @@ internal sealed class Tank
     {
         Physics = new PhysicsHost3D { Target = Hull, GravityScale = 1f, Gravity = new Vector3(0f, GravityValue, 0f) };
         Hull.Position = new Vector3(0f, HullScale.Y * 0.5f, 0f);
-        Turret.Position = new Vector3(0f, HullScale.Y * 0.5f + TurretScale.Y * 0.5f, 0f);
+        // Turret/Barrel local positions are the model's yaw/pitch pivots, seated each
+        // frame from the live fit (TankArenaLoop.SeatRig) — the asset measures them.
         Turret.Parent = Hull;
-        // Barrel pivots at the breach (turret front face); its box is pushed forward
-        // at draw time so it elevates from the mount, not its midpoint.
-        Barrel.Position = new Vector3(0f, TurretScale.Y * 0.15f, -TurretScale.Z * 0.5f);
         Barrel.Parent = Turret;
     }
 
@@ -138,8 +151,39 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     // Live-tunable feel knobs (movement / camera / turning / ballistics), exposed in
     // the --debug overlay. Read each frame so dragging a slider updates the game live.
     private readonly TankFeel feel = new();
+    private readonly TankModelFit fit = new();
     private ObjectTunables tunables = null!;
     private readonly bool debugOverlay;
+
+    // Model-space pivots measured from tank.glb's node transforms (model-world units;
+    // the asset's ×100 node scale is baked into the part meshes at load). The rig's
+    // turret/barrel local positions are these offsets mapped through the fit each
+    // frame, so the rendered parts and the gameplay rig stay locked together.
+    private static readonly Vector3 HullPivotModel = new(0f, 1.3f, -0.07f);
+    private static readonly Vector3 TurretPivotModel = new(1.55f, 3.72f, -0.04f);
+    private static readonly Vector3 GunPivotModel = new(-0.54f, 3.9f, -0.07f);
+    private static readonly Vector3 TurretOffsetModel = TurretPivotModel - HullPivotModel;
+    private static readonly Vector3 GunOffsetModel = GunPivotModel - TurretPivotModel;
+    private const float GunLengthModel = 9.3f;   // breach -> muzzle, for shell spawn
+
+    // Which rig transform a tank part rides. Hull carries body + tracks; Turret yaws
+    // the turret mesh; Barrel pitches the gun.
+    private enum Attach { Hull, Turret, Barrel }
+
+    // One drawable tank part: a model-space mesh plus its world + shadow-caster
+    // batches. FixedTint null => the part takes the tank's team colour (body/turret);
+    // otherwise a constant (tracks, gun).
+    private sealed class TankPart
+    {
+        public required Attach Attach;
+        public required Vector4? FixedTint;
+        public required InstancedBatch World;
+        public required InstancedBatch Caster;
+        public required InstanceBuffer WorldInstances;
+        public required InstanceBuffer CasterInstances;
+    }
+
+    private readonly List<TankPart> tankParts = new();
 
     private readonly int exitAfterFrames;
     private VulkanGraphicsDevice vk = null!;
@@ -284,10 +328,152 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled }), "present");
         fullscreen = new FullscreenPass(vk, "fullscreen");
 
-        tunables = new ObjectTunables(feel);
+        LoadTankParts(worldShader, casterShader);
+
+        tunables = new ObjectTunables(feel, fit);   // grouped by type: feel + model-fit
         BuildWorld();
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         Reset();
+    }
+
+    // Load the articulated tank model and split it into the four drawable parts
+    // (body / tracks / turret / gun), each baked to its rig pivot. ImportNodes keeps
+    // every node in LOCAL space; we compose each node's world transform, bake
+    // (assemble + recentre-on-pivot) into the part mesh, and hand the rest of the
+    // fit (scale / yaw / lift) to the per-frame instance matrix so the live knobs
+    // stay cheap. Body + turret take the team tint; tracks + gun are constant.
+    private void LoadTankParts(ShaderProgramHandle worldShader, ShaderProgramHandle casterShader)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Assets", "models", "tank.glb");
+        var model = new GltfStaticImporter().ImportNodes(
+            new Blix.Assets.AssetImportContext(Blix.Assets.AssetId.Parse("tank"), path));
+        var nodes = model.Nodes;
+
+        int Find(string name) => Array.FindIndex(nodes, n => n.Name == name);
+        Matrix4x4 World(int i)
+        {
+            var m = nodes[i].LocalTransform;
+            for (var p = nodes[i].ParentIndex; p >= 0; p = nodes[p].ParentIndex) m *= nodes[p].LocalTransform;
+            return m;
+        }
+        // Assemble a node's primitives, recentred so `pivot` sits at the origin.
+        IEnumerable<(MeshData, Matrix4x4)> Baked(int node, Vector3 pivot)
+        {
+            var xform = World(node) * Matrix4x4.CreateTranslation(-pivot);
+            return nodes[node].Primitives.Select(prim => (prim.Mesh, xform));
+        }
+
+        var body = BakeMerge("tank.body", Baked(Find("Tank_body"), HullPivotModel));
+        var tracks = BakeMerge("tank.tracks",
+            Baked(Find("TrackMesh.L"), HullPivotModel).Concat(Baked(Find("TrackMesh.R"), HullPivotModel)));
+        var turret = BakeMerge("tank.turret", Baked(Find("Tank_Turret"), TurretPivotModel));
+        var gun = BakeMerge("tank.gun", Baked(Find("Tank_Gun"), GunPivotModel));
+
+        TankPart Part(MeshData md, Attach attach, Vector4? tint)
+        {
+            var mesh = UploadMesh(md);
+            var wInst = new InstanceBuffer(vk, worldShader, $"{md.Name}.w");
+            var cInst = new InstanceBuffer(vk, casterShader, $"{md.Name}.c");
+            return new TankPart
+            {
+                Attach = attach,
+                FixedTint = tint,
+                WorldInstances = wInst,
+                CasterInstances = cInst,
+                World = new InstancedBatch(mesh, worldPipeline, wInst),
+                Caster = new InstancedBatch(mesh, casterPipeline, cInst),
+            };
+        }
+
+        var trackTint = new Vector4(0.12f, 0.12f, 0.13f, 1f);   // dark rubber/steel
+        var gunTint = new Vector4(0.30f, 0.31f, 0.34f, 1f);     // gunmetal
+        tankParts.Add(Part(body, Attach.Hull, null));
+        tankParts.Add(Part(tracks, Attach.Hull, trackTint));
+        tankParts.Add(Part(turret, Attach.Turret, null));
+        tankParts.Add(Part(gun, Attach.Barrel, gunTint));
+    }
+
+    // Transform each part mesh by its bake matrix (positions + normals) and
+    // concatenate into one VertexPosition3NormalTexture mesh, reindexing as we go.
+    // Tank parts are small (<65k verts) so u16 indices always suffice.
+    private static MeshData BakeMerge(string name, IEnumerable<(MeshData Mesh, Matrix4x4 Xform)> parts)
+    {
+        var floats = new List<float>();
+        var indices = new List<ushort>();
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+        var vbase = 0;
+        var stride = VertexPosition3NormalTexture.Layout.Stride;
+        foreach (var (md, xform) in parts)
+        {
+            Matrix4x4.Invert(xform, out var inv);
+            var normalMatrix = Matrix4x4.Transpose(inv);
+            for (var v = 0; v < md.VertexCount; v++)
+            {
+                var o = v * stride;
+                var p = new Vector3(
+                    BitConverter.ToSingle(md.VertexBytes, o),
+                    BitConverter.ToSingle(md.VertexBytes, o + 4),
+                    BitConverter.ToSingle(md.VertexBytes, o + 8));
+                var n = new Vector3(
+                    BitConverter.ToSingle(md.VertexBytes, o + 12),
+                    BitConverter.ToSingle(md.VertexBytes, o + 16),
+                    BitConverter.ToSingle(md.VertexBytes, o + 20));
+                var pw = Vector3.Transform(p, xform);
+                var nw = Vector3.Normalize(Vector3.TransformNormal(n, normalMatrix));
+                min = Vector3.Min(min, pw); max = Vector3.Max(max, pw);
+                floats.Add(pw.X); floats.Add(pw.Y); floats.Add(pw.Z);
+                floats.Add(nw.X); floats.Add(nw.Y); floats.Add(nw.Z);
+                floats.Add(BitConverter.ToSingle(md.VertexBytes, o + 24));   // u
+                floats.Add(BitConverter.ToSingle(md.VertexBytes, o + 28));   // v
+            }
+            foreach (var idx in md.Indices)
+            {
+                checked { indices.Add((ushort)(idx + vbase)); }
+            }
+            vbase += md.VertexCount;
+            if (vbase > ushort.MaxValue)
+                throw new InvalidOperationException($"Tank part '{name}' exceeds u16 index range ({vbase} verts).");
+        }
+
+        var bytes = new byte[floats.Count * sizeof(float)];
+        Buffer.BlockCopy(floats.ToArray(), 0, bytes, 0, bytes.Length);
+        return new MeshData(name, bytes, indices.ToArray(),
+            VertexPosition3NormalTexture.Layout, new Bounds3(min, max));
+    }
+
+    private Mesh UploadMesh(MeshData md)
+    {
+        var vb = vk.CreateVertexBuffer(
+            new VertexBufferData(new VertexBufferDescription(md.Layout, md.VertexCount, GraphicsBufferUsage.Static), md.VertexBytes),
+            $"{md.Name}.vb");
+        var ib = vk.CreateIndexBuffer(md.Indices, name: $"{md.Name}.ib");
+        return new Mesh(md.Name, vb, ib, md.Indices.Length, md.Bounds);
+    }
+
+    // Seat a tank's turret/barrel rig pivots from the live fit. The model's measured
+    // pivot offsets, mapped through YawFix + GlobalScale, become the local positions
+    // of the turret (relative to hull) and barrel (relative to turret) — so changing
+    // the scale/yaw knobs keeps the articulation pivots aligned with the meshes.
+    private void SeatRig(Tank t)
+    {
+        var rotY = Matrix4x4.CreateRotationY(fit.YawFix);
+        t.Turret.Position = Vector3.Transform(TurretOffsetModel * fit.GlobalScale, rotY);
+        t.Barrel.Position = Vector3.Transform(GunOffsetModel * fit.GlobalScale, rotY);
+    }
+
+    // The instance matrix for a tank part: bake-space mesh -> scale + yaw-fix ->
+    // articulated rig transform -> global vertical seat.
+    private Matrix4x4 PartModel(Tank t, Attach attach)
+    {
+        var bind = Matrix4x4.CreateScale(fit.GlobalScale) * Matrix4x4.CreateRotationY(fit.YawFix);
+        var rig = attach switch
+        {
+            Attach.Hull => t.Hull.WorldMatrix,
+            Attach.Turret => t.Turret.WorldMatrix,
+            _ => t.Barrel.WorldMatrix,
+        };
+        return bind * rig * Matrix4x4.CreateTranslation(0f, fit.ModelLift, 0f);
     }
 
     // Sun shadow view-projection: light eye up the sun direction, looking at the
@@ -345,6 +531,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         waveTimer = 0f;
         spawnTimer = 0f;
         gameOver = false;
+        SeatRig(player);
         player.Apply();
         UpdateTitle();
     }
@@ -401,6 +588,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         if (held.Contains(Key.Up)) player.BarrelPitch += feel.PitchSpeed * dt;
         if (held.Contains(Key.Down)) player.BarrelPitch -= feel.PitchSpeed * dt;
         player.BarrelPitch = Math.Clamp(player.BarrelPitch, 0f, feel.MaxPitch);
+        SeatRig(player);
         player.Apply();
 
         // Drive sets horizontal velocity along the hull facing; gravity owns vertical.
@@ -462,6 +650,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         // hull. (M2 will smooth this rather than snap — a likely rotate-toward helper.)
         var worldAim = MathF.Atan2(-toPlayer.X, -toPlayer.Z);
         e.TurretYaw = worldAim - e.HullYaw;
+        SeatRig(e);
         e.Apply();
 
         // Drive toward the player until standoff range; gravity + walls via Resolve.
@@ -482,7 +671,10 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         tank.FireTimer = fromPlayer ? feel.Reload : feel.EnemyReload;
         // Spawn the shell as a child of the barrel at the muzzle, then detach it into
         // world space keeping that pose — it leaves exactly where the barrel points.
-        var shell = new Transform3D { Position = new Vector3(0f, 0f, -Tank.BarrelScale.Z), Parent = tank.Barrel };
+        // Muzzle is the gun length (breach->tip) scaled by the fit, so shells leave
+        // the real gun tip rather than a fixed offset.
+        var muzzle = GunLengthModel * fit.GlobalScale;
+        var shell = new Transform3D { Position = new Vector3(0f, 0f, -muzzle), Parent = tank.Barrel };
         shell.SetParent(null, keepWorldPose: true);
         var physics = new PhysicsHost3D { Target = shell, Velocity = tank.BarrelForward * feel.MuzzleSpeed, GravityScale = 1f, Gravity = new Vector3(0f, feel.ShellGravity, 0f) };
         shells.Add(new Shell { Transform = shell, Physics = physics, FromPlayer = fromPlayer });
@@ -570,37 +762,42 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         MemoryMarshal.Write(skyPush.AsSpan(80, 16), in sun);
         MemoryMarshal.Write(shadowPush.AsSpan(0, 64), in sunShadowVP);
 
-        // Lit world: ground + walls + tanks + shells.
+        // Lit world cubes: ground + walls + shells. Tanks draw as their model parts.
         batch.Begin(worldPush);
         batch.Add(Matrix4x4.CreateScale(GroundScale) * Matrix4x4.CreateTranslation(0f, -0.1f, 0f),
             new Vector4(0.38f, 0.50f, 0.33f, 1f));   // grassy ground
         var wallTint = new Vector4(0.62f, 0.50f, 0.36f, 1f);   // warm tan
         foreach (var (c, s) in Walls)
             batch.Add(Matrix4x4.CreateScale(s) * Matrix4x4.CreateTranslation(c), wallTint);
-        AddTank(player, new Vector4(0.22f, 0.52f, 0.92f, 1f), new Vector4(0.30f, 0.60f, 0.98f, 1f));
-        foreach (var e in enemies)
-            AddTank(e, new Vector4(0.86f, 0.30f, 0.24f, 1f), new Vector4(0.94f, 0.40f, 0.30f, 1f));
         foreach (var s in shells)
         {
             var tint = s.FromPlayer ? new Vector4(0.80f, 0.92f, 1f, 1f) : new Vector4(1f, 0.62f, 0.25f, 1f);
             batch.Add(Matrix4x4.CreateScale(0.28f) * s.Transform.WorldMatrix, tint);
         }
 
-        // Shadow casters: walls + tanks (not the ground receiver or tiny shells).
-        // Depth-only, so tint is unused.
+        // Tank model parts (world + shadow caster), team-tinted hull/turret.
+        foreach (var part in tankParts) { part.World.Begin(worldPush); part.Caster.Begin(shadowPush); }
+        AddTankParts(player, PlayerTeam);
+        foreach (var e in enemies) AddTankParts(e, EnemyTeam);
+
+        // Shadow casters: walls (not the ground receiver or tiny shells); tanks via parts.
         casterBatch.Begin(shadowPush);
         foreach (var (c, s) in Walls)
             casterBatch.Add(Matrix4x4.CreateScale(s) * Matrix4x4.CreateTranslation(c), Vector4.Zero);
-        AddTankCaster(player);
-        foreach (var e in enemies) AddTankCaster(e);
 
         // Record: shadow depth pass -> HDR scene pass (samples the shadow map) -> present.
-        graph.Pass(shadowPassHandle, scope => casterBatch.End(scope));
+        graph.Pass(shadowPassHandle, scope =>
+        {
+            casterBatch.End(scope);
+            foreach (var part in tankParts) part.Caster.End(scope);
+        });
         var shadowTex = graph.GetDepthTexture(sunShadowHandle);
         graph.Pass(scenePassHandle, scope =>
         {
             fullscreen.Draw(scope, skyPipeline, Array.Empty<ShaderTextureBinding>(), skyPush);
-            batch.End(scope, new[] { new ShaderTextureBinding("uSunShadowMap", shadowTex, Slot: 0) });
+            var shadowBind = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTex, Slot: 0) };
+            batch.End(scope, shadowBind);
+            foreach (var part in tankParts) part.World.End(scope, shadowBind);
         });
         graph.Execute(commandList);
 
@@ -632,29 +829,21 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         };
     }
 
-    private void AddTankCaster(Tank t)
+    private static readonly Vector4 PlayerTeam = new(0.22f, 0.52f, 0.92f, 1f);   // blue
+    private static readonly Vector4 EnemyTeam = new(0.86f, 0.30f, 0.24f, 1f);    // red
+
+    // Stage one tank into every part batch (world + caster). Body/turret take the
+    // team tint; tracks/gun their fixed colour. PartModel composes the live fit with
+    // the part's rig transform.
+    private void AddTankParts(Tank t, Vector4 team)
     {
-        var (hull, turret, barrel) = TankCubeModels(t);
-        casterBatch.Add(hull, Vector4.Zero);
-        casterBatch.Add(turret, Vector4.Zero);
-        casterBatch.Add(barrel, Vector4.Zero);
+        foreach (var part in tankParts)
+        {
+            var model = PartModel(t, part.Attach);
+            part.World.Add(model, part.FixedTint ?? team);
+            part.Caster.Add(model, Vector4.Zero);
+        }
     }
-
-    // The three drawable cube models for a tank (hull / turret / barrel-from-breach),
-    // shared by the lit draw and the planar-shadow projection.
-    private static (Matrix4x4 Hull, Matrix4x4 Turret, Matrix4x4 Barrel) TankCubeModels(Tank t) => (
-        Matrix4x4.CreateScale(Tank.HullScale) * t.Hull.WorldMatrix,
-        Matrix4x4.CreateScale(Tank.TurretScale) * t.Turret.WorldMatrix,
-        Matrix4x4.CreateScale(Tank.BarrelScale) * Matrix4x4.CreateTranslation(0f, 0f, -Tank.BarrelScale.Z * 0.5f) * t.Barrel.WorldMatrix);
-
-    private void AddTank(Tank t, Vector4 hullTint, Vector4 turretTint)
-    {
-        var (hull, turret, barrel) = TankCubeModels(t);
-        batch.Add(hull, hullTint);
-        batch.Add(turret, turretTint);
-        batch.Add(barrel, new Vector4(0.30f, 0.31f, 0.34f, 1f));   // gunmetal
-    }
-
 
     public string DebugName => "tank-arena";
 
@@ -665,7 +854,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         debug.State.Enabled = debugOverlay;
         if (!debugOverlay) return;
 
-        tunables.BuildControls(debug);   // live [Tune] sliders for the feel knobs
+        tunables.BuildControls(debug);   // live [Tune] sliders: feel + tank-model fit
 
         using (debug.Scope("arena"))
         {
@@ -695,5 +884,10 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         fullscreen?.Dispose();
         instanceBuffer?.Dispose();
         casterInstances?.Dispose();
+        foreach (var part in tankParts)
+        {
+            part.WorldInstances.Dispose();
+            part.CasterInstances.Dispose();
+        }
     }
 }
