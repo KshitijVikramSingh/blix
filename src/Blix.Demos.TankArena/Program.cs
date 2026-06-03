@@ -56,6 +56,7 @@ internal sealed class Tank
     public readonly PhysicsHost3D Physics;
     public float HullYaw;
     public float TurretYaw;     // LOCAL turret yaw, relative to the hull
+    public float BarrelPitch;   // gun elevation — sets the ballistic arc / range
     public float Health;
     public float FireTimer;
 
@@ -82,6 +83,7 @@ internal sealed class Tank
     {
         Hull.Rotation = Quaternion.CreateFromAxisAngle(Vector3.UnitY, HullYaw);
         Turret.Rotation = Quaternion.CreateFromAxisAngle(Vector3.UnitY, TurretYaw);
+        Barrel.Rotation = Quaternion.CreateFromAxisAngle(Vector3.UnitX, BarrelPitch);
     }
 
     public Vector3 BarrelForward => Vector3.Transform(-Vector3.UnitZ, Barrel.WorldRotation);
@@ -90,25 +92,28 @@ internal sealed class Tank
 internal sealed class TankArenaLoop : IGameLoop, IInputHandler
 {
     private const float ArenaHalf = 42f;
-    private const float DriveSpeed = 12f;
-    private const float ReverseSpeed = 6f;
-    private const float DriveAccel = 32f;       // ramp up
-    private const float DriveDecel = 48f;       // ramp down (crisper stop, less glide)
-    private const float TurnSpeed = 1.15f;      // max yaw rate (rad/s)
+    // Deliberate, tactical pace — positioning + ballistic aim, not twitch.
+    private const float DriveSpeed = 8f;
+    private const float ReverseSpeed = 4.5f;
+    private const float DriveAccel = 22f;       // ramp up
+    private const float DriveDecel = 36f;       // ramp down (crisper stop, less glide)
+    private const float TurnSpeed = 0.85f;      // max yaw rate (rad/s)
     private const float PivotFactor = 0f;       // no in-place spin — must be moving to turn
-    private const float TurretSpeed = 2.4f;
-    private const float ShellGravity = -9f;     // mostly-flat shells, slight drop
-    private const float CamDistance = 9f;
-    private const float CamHeight = 4.5f;
-    private const float CamSmooth = 6f;          // camera-yaw follow rate
-    private const float MuzzleSpeed = 48f;
-    private const float PlayerFireCooldown = 0.35f;
-    private const float EnemyFireCooldown = 2.2f;
-    private const float ShellLife = 5f;
-    private const float HitRadius = 1.6f;
-    private const float EnemySpeed = 5.5f;
-    private const float EnemyStandoff = 16f;
-    private const float EnemyFireRange = 36f;
+    private const float TurretSpeed = 1.5f;     // turret yaw aim speed
+    private const float PitchSpeed = 0.85f;     // barrel elevation speed
+    private const float MaxPitch = 0.8f;        // ~46deg up; flat (0) is min
+    private const float ShellGravity = -16f;    // proper arc — pitch sets the range
+    private const float CamDistance = 16f;      // pulled back for a tactical view
+    private const float CamHeight = 10f;
+    private const float CamSmooth = 5f;          // camera-yaw follow rate
+    private const float MuzzleSpeed = 32f;      // tuned with ShellGravity so pitch spans the arena
+    private const float PlayerFireCooldown = 0.95f;   // slower reload — make each shot count
+    private const float EnemyFireCooldown = 2.8f;
+    private const float ShellLife = 6f;
+    private const float HitRadius = 2.0f;       // a touch forgiving for lobbed arcs
+    private const float EnemySpeed = 4.5f;
+    private const float EnemyStandoff = 12f;
+    private const float EnemyFireRange = 28f;
     private const float PlayerMaxHealth = 100f;
     private const float EnemyShellDamage = 18f;
     private const int MaxEnemies = 12;
@@ -285,6 +290,10 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
 
         if (held.Contains(Key.Left)) player.TurretYaw += TurretSpeed * dt;
         if (held.Contains(Key.Right)) player.TurretYaw -= TurretSpeed * dt;
+        // Up/Down elevate the gun — higher pitch lobs the shell further (range control).
+        if (held.Contains(Key.Up)) player.BarrelPitch += PitchSpeed * dt;
+        if (held.Contains(Key.Down)) player.BarrelPitch -= PitchSpeed * dt;
+        player.BarrelPitch = Math.Clamp(player.BarrelPitch, 0f, MaxPitch);
         player.Apply();
 
         // Drive sets horizontal velocity along the hull facing; gravity owns vertical.
