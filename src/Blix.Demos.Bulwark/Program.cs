@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix;
+using Blix.Assets;
 using Blix.Core;
 using Blix.Geometry;
 using Blix.Graphics;
@@ -33,20 +34,26 @@ namespace Blix.Demos.Bulwark;
 // shots; enemies have HP; a kill pays scrap, a leak costs a life; scrap builds more
 // towers. Each tower aims with a Transform3D turret→barrel rig — the SAME pattern as
 // TankArena's tank turret (LookAt to yaw, a parented barrel whose WorldPosition is
-// the muzzle), now its SECOND consumer. Also kept local; the TurretRig extraction
-// call waits, like nav.
+// the muzzle), now its SECOND consumer. Kept local; the TurretRig extraction call
+// waits, like nav.
 //
-// Everything goes through one InstancedBatch (tiles + towers + enemies + shots +
-// ghost), lifted from VulkanInstanced. The sun-shadow + HDR graph from TankArena
-// lands at M3.
+// M2a — The game: a discrete wave director (escalating size + HP, win on clearing
+// the last wave, defeat at 0 lives, ENTER to restart), tower upgrades (left-click an
+// existing tower to level it up — more damage + range), and a SpriteBatch/Font HUD
+// (wave / lives / scrap + centre banners). [M2b adds impact particles + SFX.]
+//
+// Everything 3D goes through one InstancedBatch (tiles + towers + enemies + shots +
+// ghost), lifted from VulkanInstanced; the HUD is a SpriteBatch over the same pass.
+// The sun-shadow + HDR graph from TankArena lands at M3.
 //
 // ── Executable spec for (engine primitives this demo proves) ──
 //   • Picking: Camera3D.ScreenPointToRay → Intersection.Raycast(ray, ground) → cell
 //   • A* grid pathfinding: dynamic re-path + wall-off rejection (nav's 2nd consumer)
 //   • Transform3D turret→barrel aim rig: LookAt + parented-barrel muzzle (rig's 2nd consumer)
-//   • Orbit/zoom RTS camera; build UI (hover ghost, place/remove, scrap economy)
+//   • SpriteBatch/Font HUD composited over the 3D pass (Vulkan-NDC ortho)
+//   • Orbit/zoom RTS camera; build/upgrade UI + scrap economy
 // ── Intentionally owns (stays local — NOT extracted) ──
-//   • the grid model, A* + path-following, turret aim, economy, wave spawn, camera feel
+//   • grid, A* + path-following, turret aim, economy, wave director, HUD layout, camera feel
 public static class Program
 {
     public static void Main(string[] args)
@@ -66,7 +73,7 @@ public static class Program
         }
 
         var loop = new BulwarkLoop(exitAfterFrames);
-        using var window = new Window(loop, new WindowOptions("Blix — Bulwark (M1: Playable Core)", 1280, 720));
+        using var window = new Window(loop, new WindowOptions("Blix — Bulwark (M2: Tower Defense)", 1280, 720));
         window.Run();
     }
 }
@@ -132,6 +139,9 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     private const int MaxAlive = 14;
     private const float ProjSpeed = 22f;
 
+    private const int TotalWaves = 5;
+    private const int MaxLevel = 3;
+
     private readonly List<Enemy> enemies = new();
     private readonly Dictionary<int, Tower> towers = new();
     private readonly List<Projectile> shots = new();
@@ -139,14 +149,29 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     private float statusTimer;
     private int lives = StartLives;
     private int scrap = StartScrap;
-    private bool gameOver;
+
+    // Wave director. Prep = build freely + SPACE to launch; Wave = enemies inbound;
+    // Won/Lost = end states (ENTER to restart). autoPlay launches waves with no key
+    // input for the headless --frames smoke.
+    private Phase phase = Phase.Prep;
+    private int wave;        // 0 before the first wave starts
+    private int toSpawn;     // enemies left to spawn this wave
+    private readonly bool autoPlay;
+
+    // HUD: a SpriteBatch over the swapchain + the Bowlby font (best-effort load).
+    private SpriteBatch hud = null!;
+    private Font? hudFont;
 
     // Held-key orbit state (OnKeyDown/Up is edge-triggered; apply in OnUpdate).
     private bool orbitLeft, orbitRight, orbitUp, orbitDown;
 
     private int frameCount;
 
-    public BulwarkLoop(int exitAfterFrames) => this.exitAfterFrames = exitAfterFrames;
+    public BulwarkLoop(int exitAfterFrames)
+    {
+        this.exitAfterFrames = exitAfterFrames;
+        autoPlay = exitAfterFrames > 0;   // headless smoke: auto-run waves (no key input)
+    }
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
@@ -184,15 +209,16 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         mouseX = host.LogicalSize.Width * 0.5f;
         mouseY = host.LogicalSize.Height * 0.5f;
 
+        CreateHud();
         UpdateCamera();
         UpdatePick();
         SeedStarterTowers();
         Recompute();
 
-        Console.WriteLine("Bulwark M1 — Playable Core");
-        Console.WriteLine("  left-click: build tower (50 scrap)   right-click: sell   arrows: orbit   wheel: zoom");
-        Console.WriteLine($"  towers shoot marching enemies; kills pay scrap, leaks cost lives");
-        Console.WriteLine($"  start: {StartLives} lives, {StartScrap} scrap   Esc: quit");
+        Console.WriteLine("Bulwark M2 — Tower Defense");
+        Console.WriteLine("  SPACE: launch wave   left-click: build (50) / upgrade existing   right-click: sell");
+        Console.WriteLine("  arrows: orbit   wheel: zoom   ENTER: restart (after win/lose)   Esc: quit");
+        Console.WriteLine($"  survive {TotalWaves} waves — start: {StartLives} lives, {StartScrap} scrap");
     }
 
     public void OnResize(int width, int height)
@@ -215,14 +241,26 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         UpdateCamera();
         UpdatePick();
 
-        if (!gameOver)
+        if (phase == Phase.Prep && autoPlay) StartWave();
+
+        if (phase == Phase.Wave)
         {
-            Spawn(dt);
-            UpdateEnemies(dt);
+            SpawnWave(dt);
+            UpdateEnemies(dt);   // may flip phase → Lost on a fatal leak
             UpdateTowers(dt);
             UpdateShots(dt);
-            PrintStatus(dt);
+
+            // Wave cleared when nothing is left to spawn and the field is empty.
+            if (phase == Phase.Wave && toSpawn == 0 && enemies.Count == 0)
+            {
+                phase = wave >= TotalWaves ? Phase.Won : Phase.Prep;
+                Console.WriteLine(phase == Phase.Won
+                    ? "  *** VICTORY — all waves cleared ***"
+                    : $"  wave {wave} cleared — build, then SPACE for wave {wave + 1}");
+            }
         }
+
+        PrintStatus(dt);
     }
 
     // Rebuild the Camera3D pose from the orbit params. eye = target + dir*distance,
@@ -281,7 +319,11 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
                 Target: RenderSurfaceHandle.Default,
                 ClearColors: new GraphicsColor?[] { new GraphicsColor(0.05f, 0.07f, 0.10f, 1f) },
                 ClearDepth: true),
-            pass => batch.End(pass));
+            pass =>
+            {
+                batch.End(pass);
+                DrawHud(pass, frame.Width, frame.Height);   // depth-disabled, alpha-blended, over the 3D
+            });
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames) host.RequestClose();
     }
@@ -329,7 +371,13 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
                 Matrix4x4.CreateScale(Cell * 0.5f, 1.0f, Cell * 0.5f) *
                 Matrix4x4.CreateTranslation(t.Pos.X, 0.5f, t.Pos.Z),
                 new Vector4(0.30f, 0.34f, 0.42f, 1f)));
-            instances.Add(new InstanceData(t.Turret.ToMatrix(), new Vector4(0.45f, 0.60f, 0.90f, 1f)));
+            var turretTint = t.Level switch   // brighter → gold as it upgrades
+            {
+                >= 3 => new Vector4(0.95f, 0.82f, 0.35f, 1f),
+                2 => new Vector4(0.55f, 0.75f, 1.00f, 1f),
+                _ => new Vector4(0.45f, 0.60f, 0.90f, 1f),
+            };
+            instances.Add(new InstanceData(t.Turret.ToMatrix(), turretTint));
         }
 
         // Enemies, tinted green (full HP) → red (dying).
@@ -337,7 +385,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         var red = new Vector4(0.95f, 0.22f, 0.16f, 1f);
         foreach (var e in enemies)
         {
-            var hp = Math.Clamp(e.Health / EnemyMaxHp, 0f, 1f);
+            var hp = Math.Clamp(e.Health / e.MaxHealth, 0f, 1f);
             var tint = Vector4.Lerp(red, green, hp);
             instances.Add(new InstanceData(
                 Matrix4x4.CreateScale(0.85f) * Matrix4x4.CreateTranslation(e.Pos.X, 0.45f, e.Pos.Z), tint));
@@ -433,15 +481,46 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
 
     // ── Combat (M1) — all local to this demo ──
 
-    // Trickle a wave from the spawn cell up to the alive cap.
-    private void Spawn(float dt)
+    // Launch the next wave: escalating count, HP scales in SpawnWave.
+    private void StartWave()
     {
+        wave++;
+        toSpawn = 5 + wave * 3;
+        spawnTimer = 0f;
+        phase = Phase.Wave;
+        Console.WriteLine($"  -- WAVE {wave}/{TotalWaves} -- {toSpawn} inbound");
+    }
+
+    // Emit this wave's enemies from the spawn cell on an interval, up to the alive cap.
+    // HP scales ~18% per wave so later waves need upgraded towers.
+    private void SpawnWave(float dt)
+    {
+        if (toSpawn <= 0) return;
         spawnTimer -= dt;
         if (spawnTimer <= 0f && enemies.Count < MaxAlive)
         {
             spawnTimer = SpawnInterval;
-            enemies.Add(new Enemy { Pos = Center((SpawnCx, SpawnCz)), Health = EnemyMaxHp });
+            var hp = EnemyMaxHp * (1f + 0.18f * (wave - 1));
+            enemies.Add(new Enemy { Pos = Center((SpawnCx, SpawnCz)), Health = hp, MaxHealth = hp });
+            toSpawn--;
         }
+    }
+
+    // Reset to a fresh game (ENTER from Won/Lost).
+    private void Restart()
+    {
+        enemies.Clear();
+        shots.Clear();
+        towers.Clear();
+        Array.Clear(occupied);
+        placedCount = 0;
+        lives = StartLives;
+        scrap = StartScrap;
+        wave = 0;
+        phase = Phase.Prep;
+        SeedStarterTowers();
+        Recompute();
+        Console.WriteLine("  -- restarted --");
     }
 
     // March enemies along the current path (nearest-node lookahead, same as Gate B),
@@ -478,7 +557,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
                 enemies.RemoveAt(i);
                 lives--;
                 Console.WriteLine($"  LEAK — lives {lives}");
-                if (lives <= 0) { gameOver = true; Console.WriteLine("  *** GAME OVER ***"); }
+                if (lives <= 0) { phase = Phase.Lost; Console.WriteLine("  *** DEFEAT ***"); }
             }
         }
     }
@@ -490,7 +569,8 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         foreach (var t in towers.Values)
         {
             t.Cooldown -= dt;
-            var target = NearestEnemyInRange(t.Pos, TowerRange);
+            var range = TowerRange + (t.Level - 1) * 1.5f;     // upgrades extend reach
+            var target = NearestEnemyInRange(t.Pos, range);
             if (target is null) continue;
 
             // Aim flat at the target (yaw only — barrel stays level).
@@ -498,7 +578,8 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             if (t.Cooldown <= 0f)
             {
                 t.Cooldown = FireInterval;
-                shots.Add(new Projectile { Pos = t.Barrel.WorldPosition, Target = target, Damage = ShotDamage });
+                var dmg = ShotDamage * (1f + 0.6f * (t.Level - 1));   // and damage
+                shots.Add(new Projectile { Pos = t.Barrel.WorldPosition, Target = target, Damage = dmg });
             }
         }
     }
@@ -565,7 +646,67 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         statusTimer -= dt;
         if (statusTimer > 0f) return;
         statusTimer = 2f;
-        Console.WriteLine($"  [lives {lives} | scrap {scrap} | enemies {enemies.Count} | towers {towers.Count}]");
+        Console.WriteLine($"  [{phase} w{wave}/{TotalWaves} | lives {lives} | scrap {scrap} | enemies {enemies.Count} | towers {towers.Count}]");
+    }
+
+    // ── HUD (SpriteBatch + Font) — composited over the 3D pass ──
+
+    private void CreateHud()
+    {
+        hud = new SpriteBatch(vk);   // null render target = swapchain
+        try
+        {
+            var assets = new AssetDatabase()
+                .RegisterImporter(new FontImporter())
+                .LoadManifest(Path.Combine(AppContext.BaseDirectory, "Assets", "manifest.json"));
+            hudFont = Font.Upload(vk, assets.Load<FontData>(AssetId.Parse("fonts/bowlby")));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  font unavailable, HUD text won't render: {ex.Message}");
+        }
+    }
+
+    // Wave / lives / scrap top-left, a centred banner for the current phase. Screen-
+    // space ortho in framebuffer pixels (pixelSize is physical px, dpiScale = 1) —
+    // SpriteBatch is depth-disabled + alpha-blended, so it draws over the 3D scene.
+    private void DrawHud(RenderPassBuilder pass, int width, int height)
+    {
+        if (hudFont is null) return;
+        var ortho = GraphicsMatrices.CreateOrthographicOffCenterVulkan(0f, width, height, 0f, -1f, 1f);
+        hud.Begin(ortho);
+
+        var pad = height * 0.03f;
+        var size = height * 0.042f;
+        hud.DrawText(hudFont, size, $"WAVE {Math.Max(wave, 1)}/{TotalWaves}", new Vector2(pad, pad), new GraphicsColor(0.85f, 0.92f, 1f, 1f));
+        hud.DrawText(hudFont, size, $"LIVES {lives}", new Vector2(pad, pad + size * 1.2f), new GraphicsColor(0.55f, 0.95f, 0.55f, 1f));
+        hud.DrawText(hudFont, size, $"SCRAP {scrap}", new Vector2(pad, pad + size * 2.4f), new GraphicsColor(0.96f, 0.82f, 0.30f, 1f));
+
+        var banner = phase switch
+        {
+            Phase.Prep => wave == 0 ? "SPACE TO START" : $"SPACE — WAVE {wave + 1}",
+            Phase.Won => "VICTORY",
+            Phase.Lost => "DEFEAT",
+            _ => null,
+        };
+        if (banner is not null)
+        {
+            var big = height * 0.10f;
+            var col = phase == Phase.Lost ? new GraphicsColor(0.96f, 0.36f, 0.30f, 1f)
+                                          : new GraphicsColor(0.95f, 0.90f, 0.50f, 1f);
+            var bs = SpriteBatchUiExtensions.MeasureText(hudFont, big, banner);
+            hud.DrawText(hudFont, big, banner, new Vector2((width - bs.X) * 0.5f, height * 0.30f), col);
+
+            if (phase is Phase.Won or Phase.Lost)
+            {
+                const string prompt = "ENTER TO RESTART";
+                var sub = height * 0.04f;
+                var ps = SpriteBatchUiExtensions.MeasureText(hudFont, sub, prompt);
+                hud.DrawText(hudFont, sub, prompt, new Vector2((width - ps.X) * 0.5f, height * 0.30f + big), new GraphicsColor(0.90f, 0.92f, 0.96f, 1f));
+            }
+        }
+
+        hud.End(pass);
     }
 
     // Deterministic proof of the Gate B nav invariants — no window, no device. Run
@@ -619,21 +760,28 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
 
     public void OnMouseDown(MouseButton button)
     {
-        if (gameOver || !hoverValid) return;
+        if (!hoverValid || phase is Phase.Won or Phase.Lost) return;
         var idx = hoverCz * GridW + hoverCx;
-        // The spawn and the core are never buildable.
-        if ((hoverCx == SpawnCx && hoverCz == SpawnCz) || (hoverCx == CoreCx && hoverCz == CoreCz))
+        var onEndpoint = (hoverCx == SpawnCx && hoverCz == SpawnCz) || (hoverCx == CoreCx && hoverCz == CoreCz);
+
+        if (button == MouseButton.Left)
         {
-            if (button == MouseButton.Left) Console.WriteLine("  can't build on the spawn or the core");
-            return;
-        }
-        if (button == MouseButton.Left && !occupied[idx])
-        {
-            if (scrap < TowerCost)
+            if (onEndpoint) { Console.WriteLine("  can't build on the spawn or the core"); return; }
+
+            if (towers.TryGetValue(idx, out var existing))
             {
-                Console.WriteLine($"  need {TowerCost} scrap (have {scrap})");
+                // Upgrade an existing tower.
+                if (existing.Level >= MaxLevel) { Console.WriteLine("  tower already at max level"); return; }
+                var upCost = 40 * existing.Level;
+                if (scrap < upCost) { Console.WriteLine($"  upgrade needs {upCost} scrap (have {scrap})"); return; }
+                scrap -= upCost;
+                existing.Level++;
+                Console.WriteLine($"  upgraded tower ({hoverCx}, {hoverCz}) → L{existing.Level}, scrap {scrap}");
                 return;
             }
+
+            // Build a new tower.
+            if (scrap < TowerCost) { Console.WriteLine($"  need {TowerCost} scrap (have {scrap})"); return; }
             occupied[idx] = true;
             // Reject a placement that would fully wall the route: tentatively occupy,
             // re-run A*, and revert if no path survives.
@@ -651,12 +799,13 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         }
         else if (button == MouseButton.Right && occupied[idx])
         {
+            var refund = 25 + 20 * (towers.TryGetValue(idx, out var t) ? t.Level - 1 : 0);
             occupied[idx] = false;
             towers.Remove(idx);
             placedCount--;
-            scrap += TowerCost / 2;   // partial refund on sell
+            scrap += refund;
             Recompute();
-            Console.WriteLine($"  sold tower ({hoverCx}, {hoverCz}) — scrap {scrap}, {placedCount} towers, path {path.Count}");
+            Console.WriteLine($"  sold tower ({hoverCx}, {hoverCz}) (+{refund}) — scrap {scrap}, {placedCount} towers, path {path.Count}");
         }
     }
 
@@ -670,6 +819,8 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         switch (key)
         {
             case Key.Escape: host.RequestClose(); break;
+            case Key.Space: if (phase == Phase.Prep) StartWave(); break;
+            case Key.Enter: if (phase is Phase.Won or Phase.Lost) Restart(); break;
             case Key.Left: orbitLeft = true; break;
             case Key.Right: orbitRight = true; break;
             case Key.Up: orbitUp = true; break;
@@ -689,12 +840,15 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     }
 }
 
-// ── Combat actors (M1) — plain mutable data, local to the demo ──
+// ── Game state + combat actors — plain mutable data, local to the demo ──
+
+internal enum Phase { Prep, Wave, Won, Lost }
 
 internal sealed class Enemy
 {
     public Vector3 Pos;
     public float Health;
+    public float MaxHealth;   // for the HP tint (scales per wave)
 }
 
 internal sealed class Tower
@@ -705,6 +859,7 @@ internal sealed class Tower
     public Transform3D Turret = null!;   // root aim transform; LookAts the target
     public Transform3D Barrel = null!;   // child of Turret; WorldPosition is the muzzle
     public float Cooldown;
+    public int Level = 1;                // 1..MaxLevel; boosts damage + range
 }
 
 internal sealed class Projectile

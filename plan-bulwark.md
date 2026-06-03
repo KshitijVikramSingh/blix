@@ -54,8 +54,13 @@ RTS camera (orbit / zoom / pan) · wave director + economy.
   enemy in range and fire homing shots; enemies have HP; a leak costs a life; a kill
   pays scrap; scrap builds towers (with cost + wall-off gating). Continuous spawn +
   3 free starter towers. Verified clean under validation; combat exercised headless.
-- **M2 · The game**: wave director, tower upgrades, win/lose, juice (impact
-  particles, SFX, HUD readouts).
+- **M2a · Game structure + HUD** *(done)*: discrete wave director (escalating
+  count/HP, win on clearing wave 5, defeat at 0 lives, ENTER to restart), tower
+  upgrades (left-click an existing tower → +damage/+range, gold at max), and a
+  SpriteBatch/Font HUD (wave/lives/scrap + centre banners) composited over the 3D
+  pass. Verified clean under validation; waves auto-run in the `--frames` smoke.
+- **M2b · Juice** *(next)*: impact/death particles (`ParticleBatch` showcase →
+  mechanic) + OpenAL SFX (fire/hit/death).
 - **M3 · Polish**: 2–3 tower + enemy types, CC0 art pass (KayKit Tower Defense pack
   — CC0, license-check per the sourcing rule), README + overview.
 

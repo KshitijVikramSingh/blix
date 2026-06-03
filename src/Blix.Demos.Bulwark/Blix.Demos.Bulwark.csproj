@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\Blix.Assets\Blix.Assets.csproj" />
     <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
@@ -24,6 +25,12 @@
     <Glslc Condition="'$(Glslc)' == '' AND Exists('/usr/local/bin/glslc')">/usr/local/bin/glslc</Glslc>
     <Glslc Condition="'$(Glslc)' == ''">glslc</Glslc>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Font asset (+ manifest) for the HUD; SpriteBatch's sprite.*.spv ship from
+         Blix.Render via content propagation. -->
+    <None Include="Assets/**/*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 
   <ItemGroup>
     <GlslShader Include="Shaders\cube.vert" />
