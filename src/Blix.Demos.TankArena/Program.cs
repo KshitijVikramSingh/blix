@@ -61,6 +61,13 @@ internal sealed class TankFeel
     [Tune(6f, 30f)]    public float CamDistance = 16f;
     [Tune(3f, 22f)]    public float CamHeight = 10f;
     [Tune(1f, 14f)]    public float CamSmooth = 5f;
+
+    // Enemy knobs — turn them down/off to tune in peace.
+    [Tune(0f, 8f)]     public float EnemyMax = 1f;       // 0 clears the arena
+    [Tune]             public bool EnemiesFire = true;   // off = present but harmless
+    [Tune(1.5f, 9f)]   public float EnemySpeed = 4.5f;
+    [Tune(0.5f, 6f)]   public float EnemyReload = 2.8f;
+    [Tune(2f, 40f)]    public float EnemyDamage = 18f;
 }
 
 // One tank: the hull -> turret -> barrel transform hierarchy plus its combat state.
@@ -117,14 +124,11 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
 {
     private const float ArenaHalf = 42f;
     private const float PivotFactor = 0f;       // no in-place spin — must be moving to turn
-    private const float EnemyFireCooldown = 2.8f;
     private const float ShellLife = 6f;
     private const float HitRadius = 2.0f;       // a touch forgiving for lobbed arcs
-    private const float EnemySpeed = 4.5f;
     private const float EnemyStandoff = 12f;
     private const float EnemyFireRange = 28f;
     private const float PlayerMaxHealth = 100f;
-    private const float EnemyShellDamage = 18f;
     private static readonly Vector3 GroundScale = new(2f * ArenaHalf, 0.2f, 2f * ArenaHalf);
 
     // Live-tunable feel knobs (movement / camera / turning / ballistics), exposed in
@@ -340,8 +344,10 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
         waveTimer += dt;
         if (waveTimer > 18f) { waveTimer = 0f; wave++; UpdateTitle(); }
 
-        // One enemy at a time for now — respawns shortly after the current one dies.
-        const int target = 1;
+        // Concurrent-enemy target is a live knob; 0 clears the arena. Despawn extras
+        // immediately when it's lowered, spawn up to it otherwise.
+        var target = (int)MathF.Round(feel.EnemyMax);
+        while (enemies.Count > target) enemies.RemoveAt(enemies.Count - 1);
         spawnTimer -= dt;
         if (enemies.Count < target && (spawnTimer <= 0f || enemies.Count == 0))
         {
@@ -353,7 +359,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
     private void SpawnEnemy()
     {
         var angle = (float)(rng.NextDouble() * Math.Tau);
-        var e = new Tank { Health = 1f, FireTimer = EnemyFireCooldown * (0.4f + (float)rng.NextDouble()) };
+        var e = new Tank { Health = 1f, FireTimer = feel.EnemyReload * (0.4f + (float)rng.NextDouble()) };
         e.Position = new Vector3(
             MathF.Sin(angle) * (ArenaHalf - 4f), 4f, MathF.Cos(angle) * (ArenaHalf - 4f));   // drop in
         enemies.Add(e);
@@ -374,13 +380,13 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
         e.Apply();
 
         // Drive toward the player until standoff range; gravity + walls via Resolve.
-        SetHorizontalVelocity(e, dist > EnemyStandoff ? dir * EnemySpeed : Vector3.Zero);
+        SetHorizontalVelocity(e, dist > EnemyStandoff ? dir * feel.EnemySpeed : Vector3.Zero);
         e.Physics.Gravity = new Vector3(0f, feel.TankGravity, 0f);
         e.Physics.FixedUpdate(new Time(time.Total, dt));
         ResolveTank(e);
 
         e.FireTimer -= dt;
-        if (dist < EnemyFireRange && e.FireTimer <= 0f)
+        if (feel.EnemiesFire && dist < EnemyFireRange && e.FireTimer <= 0f)
         {
             Fire(e, fromPlayer: false);
         }
@@ -388,7 +394,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
 
     private void Fire(Tank tank, bool fromPlayer)
     {
-        tank.FireTimer = fromPlayer ? feel.Reload : EnemyFireCooldown;
+        tank.FireTimer = fromPlayer ? feel.Reload : feel.EnemyReload;
         // Spawn the shell as a child of the barrel at the muzzle, then detach it into
         // world space keeping that pose — it leaves exactly where the barrel points.
         var shell = new Transform3D { Position = new Vector3(0f, 0f, -Tank.BarrelScale.Z), Parent = tank.Barrel };
@@ -424,7 +430,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
             else if (Vector3.Distance(pos, player.Position) < HitRadius)
             {
                 shells.RemoveAt(i);
-                health -= EnemyShellDamage;
+                health -= feel.EnemyDamage;
                 if (health <= 0f) { health = 0f; gameOver = true; }
                 UpdateTitle();
             }
