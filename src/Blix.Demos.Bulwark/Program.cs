@@ -120,7 +120,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     private const int SpawnCz = GridH / 2;
     private const int CoreCx = GridW - 1;
     private const int CoreCz = GridH / 2;
-    private const float EnemySpeed = 3.2f;
+    private const float EnemySpeed = 3.6f;
     private List<(int cx, int cz)> path = new();
     private readonly HashSet<int> pathCells = new();
 
@@ -128,15 +128,15 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     // TankArena, kept local) target the nearest enemy in range and fire homing shots;
     // enemies have HP; a kill pays scrap, a leak costs a life; scrap builds towers.
     private const int TowerCost = 50;
-    private const int KillReward = 12;
-    private const int StartScrap = 150;
+    private const int KillReward = 9;
+    private const int StartScrap = 150;   // = 3 towers; you must build during Prep
     private const int StartLives = 20;
-    private const float TowerRange = 7f;
+    private const float TowerRange = 6f;
     private const float FireInterval = 0.55f;
-    private const float ShotDamage = 12f;
-    private const float EnemyMaxHp = 32f;
-    private const float SpawnInterval = 1.3f;
-    private const int MaxAlive = 14;
+    private const float ShotDamage = 11f;
+    private const float EnemyMaxHp = 55f;
+    private const float SpawnInterval = 1.0f;
+    private const int MaxAlive = 20;
     private const float ProjSpeed = 22f;
 
     private const int TotalWaves = 5;
@@ -212,7 +212,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         CreateHud();
         UpdateCamera();
         UpdatePick();
-        SeedStarterTowers();
+        if (autoPlay) SeedStarterTowers();   // headless smoke only — the player builds their own
         Recompute();
 
         Console.WriteLine("Bulwark M2 — Tower Defense");
@@ -485,7 +485,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     private void StartWave()
     {
         wave++;
-        toSpawn = 5 + wave * 3;
+        toSpawn = 6 + wave * 4;   // w1=10 … w5=26
         spawnTimer = 0f;
         phase = Phase.Wave;
         Console.WriteLine($"  -- WAVE {wave}/{TotalWaves} -- {toSpawn} inbound");
@@ -500,7 +500,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         if (spawnTimer <= 0f && enemies.Count < MaxAlive)
         {
             spawnTimer = SpawnInterval;
-            var hp = EnemyMaxHp * (1f + 0.18f * (wave - 1));
+            var hp = EnemyMaxHp * (1f + 0.30f * (wave - 1));   // w5 ≈ 2.2× base
             enemies.Add(new Enemy { Pos = Center((SpawnCx, SpawnCz)), Health = hp, MaxHealth = hp });
             toSpawn--;
         }
@@ -518,7 +518,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         scrap = StartScrap;
         wave = 0;
         phase = Phase.Prep;
-        SeedStarterTowers();
+        if (autoPlay) SeedStarterTowers();
         Recompute();
         Console.WriteLine("  -- restarted --");
     }
@@ -627,9 +627,9 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         return new Tower { Cx = cx, Cz = cz, Pos = c, Turret = turret, Barrel = barrel };
     }
 
-    // A few free starter towers flanking the lane, so the field is defended from
-    // frame 0 (and the headless --frames smoke exercises aim + fire under validation).
-    // All sit off the spawn→core row, so the straight path is unaffected.
+    // Headless-only: the --frames smoke has no mouse, so seed a few towers off the
+    // lane to exercise aim + fire under validation. Interactive play starts empty —
+    // the player must build during Prep (do nothing → leaks → defeat).
     private void SeedStarterTowers()
     {
         foreach (var (cx, cz) in new[] { (4, 7), (8, 9), (11, 7) })
@@ -684,7 +684,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
 
         var banner = phase switch
         {
-            Phase.Prep => wave == 0 ? "SPACE TO START" : $"SPACE — WAVE {wave + 1}",
+            Phase.Prep => wave == 0 ? "BUILD — THEN SPACE" : $"SPACE — WAVE {wave + 1}",
             Phase.Won => "VICTORY",
             Phase.Lost => "DEFEAT",
             _ => null,
