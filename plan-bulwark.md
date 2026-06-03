@@ -41,12 +41,14 @@ RTS camera (orbit / zoom / pan) · wave director + economy.
 
 ## Milestones — proof-gate-first
 
-- **M0 · Gate A — Pick & Place** *(in progress)*: angled orbit cam over a flat
-  grid; mouse ray → cell; hover ghost (green placeable / red blocked); click place,
-  right-click remove. Proves picking + camera + grid + build UI. `--frames` smoke.
-- **M0 · Gate B — Path & March**: A* spawn→core; placed towers block; **reject a
-  placement that fully walls the path**; instanced markers march the path; re-path
-  on every build. Proves pathfinding (the 2nd nav consumer) + dynamic grid.
+- **M0 · Gate A — Pick & Place** *(done)*: angled orbit cam over a flat grid; mouse
+  ray → cell; hover ghost (green placeable / red blocked); click place, right-click
+  remove. Proves picking + camera + grid + build UI. Pinned by Test.Graphics
+  Section AK + `--frames` smoke.
+- **M0 · Gate B — Path & March** *(done)*: A* spawn→core; placed towers block;
+  **reject a placement that fully walls the path**; instanced markers march the path;
+  re-path on every build. Nav kept **local** (not extracted). Proven by the demo's
+  `--selftest` (A* + wall-off + dynamic re-path) + `--frames` smoke.
 - **M1 · Playable core**: real tower (turret-aim rig lifted from Tank Arena)
   targets + fires; enemies have HP; reach-core = lose a life; kill = scrap; scrap =
   place tower. One hand-placed wave.
