@@ -20,7 +20,7 @@ Blix is still early — APIs are changing, the demos do real engine work, and so
 
 ## Demos
 
-Seven demos ship in `src/`, all on the Vulkan backend, each a standalone entry point. **Vulkan Sponza** is the capabilities demo — the forward edge of what the engine can pull off. Two are complete, end-to-end playable games: **Pong** (2D, the `SpriteBatch`/font path) and the **Runner** (a 3D endless runner — an instanced world, a skinned animated character, kinematic physics, procedural sky + fog, HUD, and audio). The other four are focused references: **Vulkan Instanced** (the per-instance instancing foundation the Runner builds on), **Vulkan Lit** (the lit/shadow/PBR/IBL/bloom path), **Vulkan Graph** (render-graph topology), and **Vulkan Hello** (the Vulkan bring-up path). (The OpenGL backend and its four heavy demos were sunset; Pong was rebuilt on the Vulkan `SpriteBatch`.)
+Eight demos ship in `src/`, all on the Vulkan backend, each a standalone entry point. **Vulkan Sponza** is the capabilities demo — the forward edge of what the engine can pull off. Two are complete, end-to-end playable games: **Pong** (2D, the `SpriteBatch`/font path) and the **Runner** (a 3D endless runner — an instanced world, a skinned animated character, kinematic physics, procedural sky + fog, HUD, and audio). **Vulkan Particles** is the VFX showcase — the CPU-simulated particle system over the engine's fullscreen/post-process primitives. The other four are focused references: **Vulkan Instanced** (the per-instance instancing foundation the Runner builds on), **Vulkan Lit** (the lit/shadow/PBR/IBL/bloom path), **Vulkan Graph** (render-graph topology), and **Vulkan Hello** (the Vulkan bring-up path). (The OpenGL backend and its four heavy demos were sunset; Pong was rebuilt on the Vulkan `SpriteBatch`.)
 
 ### Vulkan Sponza — capabilities demo
 
@@ -55,6 +55,16 @@ The second complete game, and the engine's instancing + skeletal-animation showc
 
 - `←` / `A`, `→` / `D` — switch lanes. `Space` / `W` / `↑` — jump. `Enter` / `R` — restart after game-over. `Esc` — quit. `` ` `` — toggle the diagnostics overlay.
 - Character + props are CC0 KayKit assets (Kay Lousberg, kaylousberg.com); see `src/Blix.Demos.Runner/Assets/models/CREDITS.txt`.
+
+### Vulkan Particles — VFX + post-process showcase
+
+```sh
+tools/run-particles.sh           # interactive; --frames N auto-exits for a headless validation run
+```
+
+The particle and post-process showcase. `ParticleBatch` (`Blix.Render`) is a CPU-simulated billboard system — colour- and size-over-life ramps, velocity drag — that expands its live set into one per-frame slice of the transient vertex arena. It stays a pure geometry primitive: the caller brings the pipeline, push constants, and texture bindings. The demo drives three effects (a spark fountain with drifting smoke, a periodic explosion burst, and a swirling vortex) over two blend-variant pipelines — a shared additive pipeline for sparks/explosion/vortex, premultiplied-alpha for the depth-sorted smoke — with **soft-particle depth fade** (billboards dissolve into geometry instead of clipping through it).
+
+It's also the proving ground for the fullscreen/post-process primitives. Every present/post/sky/CRT pass in the engine draws through **`FullscreenPass`** (the dummy-VB + `gl_VertexIndex` fullscreen-triangle draw — caller brings the pipeline/textures/push). Bloom runs as a **`PostChain`**: a linear chain of fullscreen image→image passes (`bright → blurH → blurV`) over auto-managed intermediate targets that declares its own targets+passes and yields an output texture, while the demo's present pass keeps composite + tonemap. The full `RenderGraph` is `depth pre-pass → scene → bloom chain → ACES tonemap present`. The bloom/fullscreen kernels live in the shared `Blix.Shaders` library (`fullscreen.glsl`, `bloom.glsl`, `tonemap.glsl`), consumed via a wired `glslc -I` include path. Interactive orbit camera + a live `--debug` tuning overlay.
 
 ### Vulkan Instanced — instancing foundation
 
@@ -120,16 +130,6 @@ dotnet build Blix.sln
 ```
 
 Target framework: net8.0. The 2D physics CLI test harness lives at `src/Blix.Test.Physics2D` — run with `dotnet run --project src/Blix.Test.Physics2D/Blix.Test.Physics2D.csproj`.
-
-## Roadmap
-
-- **Particles (v2 shipped)** — `ParticleBatch` (`Blix.Render`) is a CPU-simulated billboard system with colour- and size-over-life ramps and velocity drag, riding the per-frame transient vertex arena. It stays a pure geometry primitive: the caller brings the pipeline, push constants, and any texture bindings. `Blix.Demos.VulkanParticles` showcases three effects — a spark fountain with drifting smoke, a periodic explosion burst, and a swirling vortex — through an HDR bloom pipeline (`RenderGraph`: depth pre-pass → scene → separable bloom → ACES tonemap present) with **soft-particle depth fade** (billboards dissolve into geometry instead of clipping) over two blend-variant pipelines (a shared additive pipeline for sparks/explosion/vortex, premultiplied-alpha for the depth-sorted smoke). Interactive orbit camera + a live `--debug` tuning overlay.
-- **Post-process (shipped)** — two layered `Blix.Render` primitives. `FullscreenPass` owns the fullscreen-triangle draw (dummy VB + `gl_VertexIndex` synthesis); every present/post/sky/CRT pass across the demos uses it. `PostChain` is the orchestration above it — a linear chain of fullscreen image→image passes over auto-managed intermediate targets, declaring its own targets+passes and yielding an output texture while the caller keeps composite + tonemap. Bloom is the proving consumer (VulkanLit, VulkanParticles); the kernels live in the shared `Blix.Shaders` library (`fullscreen.glsl`, `bloom.glsl`, `tonemap.glsl`), consumed via a wired `glslc -I` include path. Next: an effect-preset layer on top, optional GPU particle simulation.
-- **More demos** — beyond the current Vulkan set; Pong (2D), the Runner (3D), and now the particle fountain (VFX) each stress a different slice of the engine.
-
-The per-frame **transient vertex arena** (`IGraphicsDevice.AllocVertices` → a ring of host-visible buffers bound by offset) is the substrate dynamic-vertex helpers share — `SpriteBatch`, `VkLineDrawer`, and `ParticleBatch` all ride it, so no helper hand-rolls its own per-frame upload (or its frames-in-flight hazard). Descriptor-backed per-frame data (per-instance SSBO, bone palettes) stays in `MaterialBindings`. Pipelines dedupe via `GetOrCreatePipeline`, and shader `#define` variants expand at cook time (csproj `Variant`/`Defines` → `ShaderVariantPath`).
-
-The shader library at `src/Blix.Shaders/` (tonemap, noise, PBR primitives) is the substrate both new features build on; the include preprocessor + `ShaderLoader` make new shaders cheap to author.
 
 ## Platform notes
 
