@@ -46,6 +46,7 @@ internal sealed class Tank
     public static readonly Vector3 HullScale = new(2.2f, 0.7f, 3.2f);
     public static readonly Vector3 TurretScale = new(1.3f, 0.6f, 1.3f);
     public static readonly Vector3 BarrelScale = new(0.24f, 0.24f, 1.8f);
+    private const float GravityValue = -32f;   // snappy fall/settle
 
     public readonly Transform3D Hull = new();
     public readonly Transform3D Turret = new();
@@ -60,7 +61,7 @@ internal sealed class Tank
 
     public Tank()
     {
-        Physics = new PhysicsHost3D { Target = Hull, GravityScale = 1f };
+        Physics = new PhysicsHost3D { Target = Hull, GravityScale = 1f, Gravity = new Vector3(0f, GravityValue, 0f) };
         Hull.Position = new Vector3(0f, HullScale.Y * 0.5f, 0f);
         Turret.Position = new Vector3(0f, HullScale.Y * 0.5f + TurretScale.Y * 0.5f, 0f);
         Turret.Parent = Hull;
@@ -89,16 +90,18 @@ internal sealed class Tank
 internal sealed class TankArenaLoop : IGameLoop, IInputHandler
 {
     private const float ArenaHalf = 42f;
-    private const float DriveSpeed = 11f;
-    private const float ReverseSpeed = 5.5f;
-    private const float DriveAccel = 26f;       // m/s^2 ramp — gives the hull weight
-    private const float TurnSpeed = 1.05f;      // max yaw rate (rad/s)
-    private const float PivotFactor = 0.22f;    // fraction of TurnSpeed available when stationary
+    private const float DriveSpeed = 12f;
+    private const float ReverseSpeed = 6f;
+    private const float DriveAccel = 32f;       // ramp up
+    private const float DriveDecel = 48f;       // ramp down (crisper stop, less glide)
+    private const float TurnSpeed = 1.15f;      // max yaw rate (rad/s)
+    private const float PivotFactor = 0f;       // no in-place spin — must be moving to turn
     private const float TurretSpeed = 2.4f;
+    private const float ShellGravity = -9f;     // mostly-flat shells, slight drop
     private const float CamDistance = 9f;
     private const float CamHeight = 4.5f;
-    private const float CamSmooth = 6f;         // camera-yaw follow rate
-    private const float MuzzleSpeed = 42f;
+    private const float CamSmooth = 6f;          // camera-yaw follow rate
+    private const float MuzzleSpeed = 48f;
     private const float PlayerFireCooldown = 0.35f;
     private const float EnemyFireCooldown = 2.2f;
     private const float ShellLife = 5f;
@@ -270,7 +273,8 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
         // Ramp forward speed toward the throttle target (W forward / S reverse) so the
         // hull has weight instead of snapping to full speed.
         var targetSpeed = (held.Contains(Key.W) ? DriveSpeed : 0f) - (held.Contains(Key.S) ? ReverseSpeed : 0f);
-        playerSpeed = MoveToward(playerSpeed, targetSpeed, DriveAccel * dt);
+        var rate = MathF.Abs(targetSpeed) > MathF.Abs(playerSpeed) ? DriveAccel : DriveDecel;
+        playerSpeed = MoveToward(playerSpeed, targetSpeed, rate * dt);
 
         // Steering is coupled to motion: full turn rate while driving, only a slow
         // pivot when parked — so the tank carves a turn radius rather than spinning
@@ -359,7 +363,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
         // world space keeping that pose — it leaves exactly where the barrel points.
         var shell = new Transform3D { Position = new Vector3(0f, 0f, -Tank.BarrelScale.Z), Parent = tank.Barrel };
         shell.SetParent(null, keepWorldPose: true);
-        var physics = new PhysicsHost3D { Target = shell, Velocity = tank.BarrelForward * MuzzleSpeed, GravityScale = 1f };
+        var physics = new PhysicsHost3D { Target = shell, Velocity = tank.BarrelForward * MuzzleSpeed, GravityScale = 1f, Gravity = new Vector3(0f, ShellGravity, 0f) };
         shells.Add(new Shell { Transform = shell, Physics = physics, FromPlayer = fromPlayer });
     }
 
@@ -408,10 +412,11 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
     {
         frameCount++;
 
-        // Chase cam that trails the hull's facing (smoothed), so "forward" always
-        // drives into the screen and you can see where you're pointed. camYaw eases
-        // toward the hull yaw rather than snapping, to soften turns.
-        camYaw += (player.HullYaw - camYaw) * MathF.Min(1f, CamSmooth * (float)time.Delta);
+        // Chase cam that trails the TURRET's world facing (hull + turret yaw),
+        // smoothed — the camera looks where the gun points, so aiming the turret
+        // scans the arena and you can see what you're shooting at.
+        var aimYaw = player.HullYaw + player.TurretYaw;
+        camYaw += (aimYaw - camYaw) * MathF.Min(1f, CamSmooth * (float)time.Delta);
         var camForward = Vector3.Transform(-Vector3.UnitZ, Quaternion.CreateFromAxisAngle(Vector3.UnitY, camYaw));
         var p = player.Position;
         var eye = p - camForward * CamDistance + Vector3.UnitY * CamHeight;
@@ -424,6 +429,15 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
 
         batch.Add(Matrix4x4.CreateScale(GroundScale) * Matrix4x4.CreateTranslation(0f, -0.1f, 0f),
             new Vector4(0.11f, 0.13f, 0.17f, 1f));
+
+        // Low perimeter walls for spatial reference (the tall colliders are invisible).
+        const float w = ArenaHalf;
+        var wallTint = new Vector4(0.22f, 0.25f, 0.32f, 1f);
+        var span = 2f * w + 1f;
+        AddBox(new Vector3(-w, 0.7f, 0f), new Vector3(1f, 1.4f, span), wallTint);
+        AddBox(new Vector3(w, 0.7f, 0f), new Vector3(1f, 1.4f, span), wallTint);
+        AddBox(new Vector3(0f, 0.7f, -w), new Vector3(span, 1.4f, 1f), wallTint);
+        AddBox(new Vector3(0f, 0.7f, w), new Vector3(span, 1.4f, 1f), wallTint);
 
         AddTank(player, new Vector4(0.30f, 0.55f, 0.85f, 1f), new Vector4(0.38f, 0.62f, 0.9f, 1f));
         foreach (var e in enemies)
@@ -445,6 +459,9 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames) host.RequestClose();
     }
+
+    private void AddBox(Vector3 center, Vector3 scale, Vector4 tint) =>
+        batch.Add(Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(center), tint);
 
     private void AddTank(Tank t, Vector4 hullTint, Vector4 turretTint)
     {
