@@ -142,7 +142,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     private const float ArenaHalf = 42f;
     private const float PivotFactor = 0f;       // no in-place spin — must be moving to turn
     private const float ShellLife = 6f;
-    private const float HitRadius = 2.0f;       // a touch forgiving for lobbed arcs
+    private const float HitRadius = 2.8f;       // covers the (larger) model hull; forgiving for lobs
     private const float EnemyStandoff = 12f;
     private const float EnemyFireRange = 28f;
     private const float PlayerMaxHealth = 100f;
@@ -184,6 +184,33 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     }
 
     private readonly List<TankPart> tankParts = new();
+
+    // Static environment props (barrels / crates) — cover that blocks driving and
+    // flat shots, and casts shadows. A PropType is one loaded model (one mesh + its
+    // material colour per primitive); placements share it. Unlike the tank's gameplay
+    // team tints, props keep their authored material colours (the world shader is
+    // tint×lighting, so per-primitive BaseColorFactor reproduces the model's look).
+    private sealed class PropPrim
+    {
+        public required Vector4 Tint;
+        public required InstancedBatch World;
+        public required InstancedBatch Caster;
+        public required InstanceBuffer WorldInstances;
+        public required InstanceBuffer CasterInstances;
+    }
+    private sealed class PropType
+    {
+        public required string Name;
+        public required float Scale;          // model units -> game
+        public required float Radius;         // game-space horizontal half-extent (cover footprint)
+        public required float Height;         // game-space height (shells lob over the top)
+        public required IReadOnlyList<PropPrim> Prims;
+    }
+    private readonly record struct PropInstance(PropType Type, Vector3 Position, float Yaw);
+
+    private readonly List<PropType> propTypes = new();
+    private readonly List<PropInstance> props = new();
+    private readonly List<Bounds3> propBounds = new();   // shell-vs-prop test (flat shots stop, lobs clear)
 
     private readonly int exitAfterFrames;
     private VulkanGraphicsDevice vk = null!;
@@ -329,9 +356,13 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         fullscreen = new FullscreenPass(vk, "fullscreen");
 
         LoadTankParts(worldShader, casterShader);
+        propTypes.Add(LoadProp("barrel.glb", targetHeight: 1.4f, worldShader, casterShader));
+        propTypes.Add(LoadProp("crate.glb", targetHeight: 1.5f, worldShader, casterShader));
+        propTypes.Add(LoadProp("barrel_explosive.glb", targetHeight: 1.4f, worldShader, casterShader));
 
         tunables = new ObjectTunables(feel, fit);   // grouped by type: feel + model-fit
         BuildWorld();
+        PlaceProps();
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         Reset();
     }
@@ -447,8 +478,82 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         var vb = vk.CreateVertexBuffer(
             new VertexBufferData(new VertexBufferDescription(md.Layout, md.VertexCount, GraphicsBufferUsage.Static), md.VertexBytes),
             $"{md.Name}.vb");
-        var ib = vk.CreateIndexBuffer(md.Indices, name: $"{md.Name}.ib");
-        return new Mesh(md.Name, vb, ib, md.Indices.Length, md.Bounds);
+        // u16 covers the tank parts + props; handle u32 too so the loader is general.
+        var (ib, count) = md.Indices32 is { } u32
+            ? (vk.CreateIndexBuffer(u32, name: $"{md.Name}.ib"), u32.Length)
+            : (vk.CreateIndexBuffer(md.Indices, name: $"{md.Name}.ib"), md.Indices.Length);
+        return new Mesh(md.Name, vb, ib, count, md.Bounds);
+    }
+
+    // Load a static prop model: flat Import (bakes node transforms into one space),
+    // uniformly scaled so the model is `targetHeight` game units tall. Each primitive
+    // becomes an instanced batch tinted by its material's base colour. Returns the
+    // shared PropType; PlaceProps scatters instances.
+    private PropType LoadProp(string file, float targetHeight, ShaderProgramHandle worldShader, ShaderProgramHandle casterShader)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Assets", "models", file);
+        var model = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse(file), path));
+
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+        foreach (var prim in model.Primitives)
+        {
+            min = Vector3.Min(min, prim.Mesh.Bounds.Min);
+            max = Vector3.Max(max, prim.Mesh.Bounds.Max);
+        }
+        var size = max - min;
+        var scale = size.Y > 1e-3f ? targetHeight / size.Y : 1f;
+        var radius = 0.5f * MathF.Max(size.X, size.Z) * scale;
+
+        var prims = new List<PropPrim>();
+        foreach (var prim in model.Primitives)
+        {
+            var mesh = UploadMesh(prim.Mesh);
+            var c = prim.Material?.BaseColorFactor ?? new Vector4(0.7f, 0.7f, 0.7f, 1f);
+            var wInst = new InstanceBuffer(vk, worldShader, $"{mesh.Name}.w");
+            var cInst = new InstanceBuffer(vk, casterShader, $"{mesh.Name}.c");
+            prims.Add(new PropPrim
+            {
+                Tint = new Vector4(c.X, c.Y, c.Z, 1f),
+                WorldInstances = wInst,
+                CasterInstances = cInst,
+                World = new InstancedBatch(mesh, worldPipeline, wInst),
+                Caster = new InstancedBatch(mesh, casterPipeline, cInst),
+            });
+        }
+        return new PropType { Name = file, Scale = scale, Radius = radius, Height = targetHeight, Prims = prims };
+    }
+
+    // Scatter cover props in a mid-arena ring (deterministic), keeping clear of the
+    // player's centre spawn and the enemy edge ring, and not overlapping each other.
+    // Each placement seeds a collision box (tanks can't drive through) + a bounds
+    // entry for shell hits.
+    private void PlaceProps()
+    {
+        if (propTypes.Count == 0) return;
+        var prng = new Random(20260604);
+        const int target = 16;
+        var placed = new List<Vector3>();
+        var attempts = 0;
+        while (props.Count < target && attempts++ < 400)
+        {
+            var angle = (float)(prng.NextDouble() * Math.Tau);
+            var dist = 9f + (float)prng.NextDouble() * 25f;          // ring [9, 34]
+            var pos = new Vector3(MathF.Sin(angle) * dist, 0f, MathF.Cos(angle) * dist);
+            var type = propTypes[prng.Next(propTypes.Count)];
+            // Reject overlaps (prop-vs-prop) and the immediate spawn circle.
+            if (pos.Length() < 8f) continue;
+            if (placed.Any(q => Vector3.Distance(q, pos) < type.Radius + 2.5f)) continue;
+
+            var yaw = (float)(prng.NextDouble() * Math.Tau);
+            props.Add(new PropInstance(type, pos, yaw));
+            placed.Add(pos);
+
+            var r = type.Radius;
+            var box = new Bounds3(pos + new Vector3(-r, 0f, -r), pos + new Vector3(r, type.Height, r));
+            propBounds.Add(box);
+            world.Add(100 + props.Count, box);   // tanks resolve against it (cover blocks driving)
+        }
     }
 
     // Seat a tank's turret/barrel rig pivots from the live fit. The model's measured
@@ -698,7 +803,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             s.Physics.FixedUpdate(new Time(time.Total, dt));
             s.Age += dt;
             var pos = s.Transform.WorldPosition;
-            if (s.Age > ShellLife || pos.Y < -1f || OutOfArena(pos)) { shells.RemoveAt(i); continue; }
+            if (s.Age > ShellLife || pos.Y < -1f || OutOfArena(pos) || HitsProp(pos)) { shells.RemoveAt(i); continue; }
 
             if (s.FromPlayer)
             {
@@ -726,6 +831,22 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
 
     private static bool OutOfArena(Vector3 p) =>
         MathF.Abs(p.X) > ArenaHalf + 4f || MathF.Abs(p.Z) > ArenaHalf + 4f;
+
+    // A shell hits a prop when its point is inside the prop's cover box. Boxes are
+    // only as tall as the prop, so a high lob clears the cover — flat shots don't.
+    private bool HitsProp(Vector3 p)
+    {
+        foreach (var b in propBounds)
+        {
+            if (p.X >= b.Min.X && p.X <= b.Max.X &&
+                p.Y >= b.Min.Y && p.Y <= b.Max.Y &&
+                p.Z >= b.Min.Z && p.Z <= b.Max.Z)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     private void UpdateTitle() => host.SetTitle(gameOver
         ? $"Blix — Tank Arena | GAME OVER — score {score}, wave {wave} — Enter to restart"
@@ -780,6 +901,17 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         AddTankParts(player, PlayerTeam);
         foreach (var e in enemies) AddTankParts(e, EnemyTeam);
 
+        // Environment props (cover): material-coloured, instanced across placements.
+        foreach (var pt in propTypes)
+            foreach (var pp in pt.Prims) { pp.World.Begin(worldPush); pp.Caster.Begin(shadowPush); }
+        foreach (var inst in props)
+        {
+            var m = Matrix4x4.CreateScale(inst.Type.Scale)
+                * Matrix4x4.CreateRotationY(inst.Yaw)
+                * Matrix4x4.CreateTranslation(inst.Position);
+            foreach (var pp in inst.Type.Prims) { pp.World.Add(m, pp.Tint); pp.Caster.Add(m, Vector4.Zero); }
+        }
+
         // Shadow casters: walls (not the ground receiver or tiny shells); tanks via parts.
         casterBatch.Begin(shadowPush);
         foreach (var (c, s) in Walls)
@@ -790,6 +922,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         {
             casterBatch.End(scope);
             foreach (var part in tankParts) part.Caster.End(scope);
+            foreach (var pt in propTypes) foreach (var pp in pt.Prims) pp.Caster.End(scope);
         });
         var shadowTex = graph.GetDepthTexture(sunShadowHandle);
         graph.Pass(scenePassHandle, scope =>
@@ -798,6 +931,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             var shadowBind = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTex, Slot: 0) };
             batch.End(scope, shadowBind);
             foreach (var part in tankParts) part.World.End(scope, shadowBind);
+            foreach (var pt in propTypes) foreach (var pp in pt.Prims) pp.World.End(scope, shadowBind);
         });
         graph.Execute(commandList);
 
@@ -889,5 +1023,11 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             part.WorldInstances.Dispose();
             part.CasterInstances.Dispose();
         }
+        foreach (var pt in propTypes)
+            foreach (var pp in pt.Prims)
+            {
+                pp.WorldInstances.Dispose();
+                pp.CasterInstances.Dispose();
+            }
     }
 }
