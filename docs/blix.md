@@ -243,11 +243,27 @@ t.LookAt(new Vector3(0, 0, 0), Vector3.UnitY);
 
 `Forward` is the rotation applied to `-Z`. Identity rotation looks down `-Z`, matching the default camera convention. `LookAt(target, up)` solves the rotation that aligns local `-Z` with the target direction.
 
+#### Parenting
+
+`Position` / `Rotation` / `Scale` are **local**; an optional `Parent` composes them up a hierarchy. `WorldMatrix` is the local matrix composed with the parent chain (`world = local * parentWorld`, matching `Skeleton`'s hierarchy walk), and `WorldPosition` / `WorldRotation` read the world pose for consumers outside the hierarchy (a chase camera, a muzzle spawn point). Assigning a `Parent` that would form a cycle throws.
+
+```csharp
+var hull = new Transform3D { Position = new Vector3(0, 0.5f, 0) };
+var turret = new Transform3D { Parent = hull };                  // rides the hull, yaws on its own
+var barrel = new Transform3D { Position = new Vector3(0, 0, -1.4f), Parent = turret };
+// driving the hull carries turret + barrel; turret.Rotation aims independently.
+
+var worldMuzzle = barrel.WorldPosition;   // composed down hull -> turret -> barrel
+```
+
+`SetParent(newParent, keepWorldPose)` re-parents; with `keepWorldPose: true` the local TRS is recomputed so the **world** pose is unchanged across the switch — e.g. `shell.SetParent(null, keepWorldPose: true)` detaches a shell from a moving barrel at its current muzzle pose so it flies straight instead of snapping to the barrel's local frame. `WorldMatrix` is a `System.Numerics` model matrix (translation in the last row), fed straight to a `model * v` shader / `InstanceData.Model` with no transpose. `Blix.Demos.VehicleParenting` is the working reference; the composition + render convention are pinned by `Blix.Test.Graphics` Section AH.
+
 #### Deliberate limits
 
 - Class, not struct. Game code regularly hands the same transform to multiple consumers; reference semantics are the right default.
-- No parent/child. Worlds with hierarchical poses (rig bones, mounted props) need a `Transform3D.Parent` and a `WorldMatrix` accessor; they'll come when something needs them.
-- No dirty-flag caching for `ToMatrix()`. Matrix composition is four small multiplies.
+- No parent/child container on `GameObject` — parenting is pose-level on `Transform3D`. Game code wires `Transform.Parent` and keeps its own object lists; there's no automatic scene-graph that owns children, draw order, or lifetimes.
+- No dirty-flag caching for `ToMatrix()` / `WorldMatrix`. Matrix composition is a few small multiplies and hierarchies here are shallow; `WorldMatrix` re-walks the parent chain on each access (add caching when a deep rig needs it). Cycle-checking happens once, on `Parent` assignment.
+- Non-uniform parent scale combined with a child rotation can shear the child (the standard TRS-hierarchy limitation; content keeps non-uniform scale off shared parents, mirroring the rigid-bone skinning assumption — the vehicle demo scales each part's box at draw time, not in the pose hierarchy).
 - No `Origin` / `Pivot`. Mesh-side authored offsets are normalised at import time (`ObjImporter.RecenterToOrigin`, default true); game code uses plain `Transform.Position`.
 
 ### Transform2D
