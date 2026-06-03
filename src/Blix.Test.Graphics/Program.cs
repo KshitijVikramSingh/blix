@@ -1878,6 +1878,28 @@ static ShaderInterface MinimalShader() => new(new[]
         !sliceFields.Any(n => n.Contains("Set") || n.Contains("Binding") || n.Contains("Descriptor")));
 }
 
+// ============================================================================
+// Section AG — ParticleBatch vertex layout (first new arena consumer).
+// ============================================================================
+//
+// ParticleBatch expands billboards into pos(3)+color(4)+uv(2) and uploads them to
+// the transient arena. The public VertexLayoutDescription is the contract callers
+// build their pipeline against; lock its stride + attribute offsets so a packing
+// change can't silently desync from a caller's pipeline. The live additive/alpha
+// draw is proven by VulkanParticles under validation.
+
+{
+    var layout = Blix.Render.ParticleBatch.VertexLayoutDescription;
+    t.ExpectClose("AG.1 stride == 9 floats (pos3 + color4 + uv2)", layout.Stride, 9 * sizeof(float));
+    t.ExpectClose("AG.1 three attributes", layout.Attributes.Count, 3);
+    t.ExpectTrue("AG.2 attr0 = Float3 @ 0 (position)",
+        layout.Attributes[0].Format == VertexAttributeFormat.Float3 && layout.Attributes[0].Offset == 0);
+    t.ExpectTrue("AG.2 attr1 = Float4 @ 12 (color)",
+        layout.Attributes[1].Format == VertexAttributeFormat.Float4 && layout.Attributes[1].Offset == 3 * sizeof(float));
+    t.ExpectTrue("AG.2 attr2 = Float2 @ 28 (uv)",
+        layout.Attributes[2].Format == VertexAttributeFormat.Float2 && layout.Attributes[2].Offset == 7 * sizeof(float));
+}
+
 t.PrintSummary();
 return t.FailedCount;
 

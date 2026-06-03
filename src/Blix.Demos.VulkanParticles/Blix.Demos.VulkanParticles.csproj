@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
+    <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
+    <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
+    <ProjectReference Include="..\Blix.Runtime.Silk\Blix.Runtime.Silk.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Blix.Demos.VulkanParticles</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Glslc Condition="'$(Glslc)' == '' AND Exists('/opt/homebrew/bin/glslc')">/opt/homebrew/bin/glslc</Glslc>
+    <Glslc Condition="'$(Glslc)' == '' AND Exists('/usr/local/bin/glslc')">/usr/local/bin/glslc</Glslc>
+    <Glslc Condition="'$(Glslc)' == ''">glslc</Glslc>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <GlslShader Include="Shaders\particle.vert" />
+    <GlslShader Include="Shaders\particle.frag" />
+  </ItemGroup>
+
+  <Target Name="CompileSpirV"
+          AfterTargets="CopyFilesToOutputDirectory"
+          Inputs="@(GlslShader)"
+          Outputs="@(GlslShader -> '$(OutDir)Shaders\%(Filename)%(Extension).spv')">
+    <MakeDir Directories="$(OutDir)Shaders" />
+    <Message Text="Compiling SPIR-V: %(GlslShader.Identity)" Importance="high" />
+    <Exec Command="&quot;$(Glslc)&quot; -o &quot;$(OutDir)Shaders\%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; &quot;%(GlslShader.Identity)&quot;" />
+  </Target>
+
+</Project>
