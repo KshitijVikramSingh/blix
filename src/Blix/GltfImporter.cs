@@ -20,10 +20,9 @@ namespace Blix;
 // - No morph-target weights.
 // - Indices wider than ushort throw.
 //
-// All math is converted to the engine's column-vector matrix convention at the
-// import boundary — glTF / SharpGLTF deliver matrices in row-vector form (System.
-// Numerics convention); the importer transposes inverse-bind matrices once so the
-// downstream skeleton math doesn't have to think about it.
+// Matrices need no conversion at the boundary: glTF / SharpGLTF deliver them in
+// System.Numerics row-vector form, which is exactly the engine's convention
+// (F-016) — inverse-bind matrices pass through untransposed.
 public sealed class GltfImporter : IAssetImporter<GltfModel>
 {
     public string Name => "rigged-model.gltf";
@@ -423,10 +422,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             oldToNew[orderNewToOld[newIdx]] = newIdx;
         }
 
-        // Emit bones in the new (topo-sorted) order with remapped parent indices
-        // and IBMs transposed to our column-vector convention. SharpGLTF returns
-        // System.Numerics-style row-vector matrices; transpose maps the layout
-        // into the column-vector form the rest of the engine expects.
+        // Emit bones in the new (topo-sorted) order with remapped parent indices.
+        // IBMs pass through untransposed: SharpGLTF returns System.Numerics
+        // row-vector matrices, which is exactly the engine's convention (F-016).
         var bones = new Bone[n];
         for (var newIdx = 0; newIdx < n; newIdx++)
         {

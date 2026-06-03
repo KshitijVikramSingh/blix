@@ -561,13 +561,11 @@ public sealed class BonePalette
 
 `BonePalette` is a typed wrapper around `Matrix4x4[]` — the GPU-ready output. Bind via `new ShaderUniform("uBones", new Matrix4x4ArrayUniform(palette.Matrices))`.
 
-### Column-vector convention gotcha
+### Matrix convention (F-016)
 
-The engine uses **column-vector** matrices (translation in `M14/M24/M34`, the `T * R * S` form `GraphicsMatrices.CreateModel` produces). `System.Numerics.Matrix4x4.CreateTranslation` produces **row-vector** matrices (translation in `M41/M42/M43`); `Matrix4x4.Decompose` reads from row-vector positions.
+Skeletal math uses the same convention as the rest of the engine: **`System.Numerics` row-vector form** — translation in `M41/M42/M43`, a vertex flows left-to-right (`v_row * M`, and `M = A * B` applies `A` first). `GraphicsMatrices.CreateModel` (and therefore `BoneTransform.ToMatrix`) is `Scale * Rotation * Translation` in that form. There are **no transposes** in the skeletal path: `Matrix4x4.Decompose` reads `System.Numerics` matrices directly, so `BoneTransform.FromMatrix` decomposes the matrix as-is, and `Skeleton.ComputeBonePalette` composes `child = local * parentWorld` straight (the same walk `Transform3D.WorldMatrix` uses). See [`architecture.md` → Matrices](architecture.md#conventions) for the full convention and the upload→GLSL story; `Blix.Test.Graphics` Section AH pins it.
 
-Anything that builds an inverse-bind matrix manually must use the column-vector form (`GraphicsMatrices.CreateModel(bindPos, bindRot, bindScale)` then invert). `GltfImporter` handles this once at the format boundary — every IBM is transposed on import so all downstream skeleton math lives in column-vector land.
-
-`BoneTransform.FromMatrix` transposes before decomposing so it reads column-vector matrices correctly. Callers don't see this; it's an internal adaptation to `Matrix4x4.Decompose`'s row-vector assumption.
+A manually built inverse-bind matrix is just `GraphicsMatrices.CreateModel(bindPos, bindRot, bindScale)` inverted — no transpose. `GltfImporter` doesn't transpose either: SharpGLTF already hands back IBMs in this row-vector form.
 
 ### Clips
 
@@ -732,7 +730,7 @@ Per-file invariants the importer enforces or normalises:
 
 - **First skinned mesh wins as the primary skin.** Multi-mesh characters (body + hair + clothing) sharing one skin are all collected and concatenated into `Primitives[]` provided they share the primary node's `WorldMatrix`.
 - **Joints topo-sorted.** glTF's `Skin.Joints` is an ordered list of nodes, but the order isn't required to be hierarchy-ordered. The importer computes parent indices by walking each joint's `VisualParent` chain up to the next ancestor that's also a joint, then DFS-orders the joints so parents come first.
-- **Inverse-bind matrices transposed to column-vector form** at the boundary (see "Column-vector convention gotcha" above).
+- **Inverse-bind matrices kept in the engine's row-vector form** at the boundary — SharpGLTF already returns them that way, so no transpose is applied (see "Matrix convention (F-016)" above).
 - **`LINEAR` interpolation only.** glTF also defines `STEP` and `CUBICSPLINE`; the importer throws `NotSupportedException` on either.
 - **Channel filtering by skin.** Animations that don't touch the skin's joints produce empty `AnimationClip`s and are dropped.
 - **Morph-target weight channels skipped.** Lands alongside their first real use.

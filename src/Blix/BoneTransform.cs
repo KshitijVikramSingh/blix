@@ -20,20 +20,20 @@ public readonly record struct BoneTransform(
     public static BoneTransform Identity { get; } =
         new(Vector3.Zero, Quaternion.Identity, Vector3.One);
 
-    // Build the 4×4 model matrix for this local transform under the engine's
-    // column-vector convention: T · R · S, applied to a local vertex as scale-
-    // first, then rotate, then translate. Same composition used by Transform3D.
+    // Build the 4x4 model matrix for this local transform under the engine's
+    // row-vector convention (F-016): Scale * Rotation * Translation, applied to a
+    // local vertex left-to-right as scale-first, then rotate, then translate.
+    // Same composition GraphicsMatrices.CreateModel / Transform3D use.
     public Matrix4x4 ToMatrix() =>
         GraphicsMatrices.CreateModel(Translation, Rotation, Scale);
 
-    // Decompose an affine matrix (in the engine's COLUMN-vector convention) into
-    // TRS form. Used by Skeleton.CreateRestPose when reconstructing local rest
+    // Decompose an affine matrix (in the engine's row-vector convention) into TRS
+    // form. Used by Skeleton.CreateRestPose when reconstructing local rest
     // transforms from inverse-bind matrices.
     //
-    // Convention gotcha: System.Numerics.Matrix4x4.Decompose assumes row-vector
-    // form (translation in M41/M42/M43, rotation×scale stored row-wise). Our
-    // F-016: engine matrices are row-vector form, matching System.Numerics's
-    // Matrix4x4.Decompose. No transpose needed — pass through directly.
+    // F-016: engine matrices are System.Numerics row-vector form (translation in
+    // M41/M42/M43), matching System.Numerics's Matrix4x4.Decompose. No transpose
+    // needed — pass through directly.
     //
     // Degenerate inputs that Decompose can't handle (zero scale, non-affine,
     // perspective row) fall back to Identity rather than throwing — bad input
