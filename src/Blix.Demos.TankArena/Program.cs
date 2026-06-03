@@ -146,7 +146,11 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
     private IRenderHost host = null!;
     private InstanceBuffer instanceBuffer = null!;
     private InstancedBatch batch = null!;
-    private readonly byte[] pushBytes = new byte[64];
+    private FullscreenPass sky = null!;
+    private PipelineHandle skyPipeline;
+    private readonly byte[] pushBytes = new byte[96];   // viewProj + camPos + sunDir
+    private readonly byte[] skyPush = new byte[96];     // invViewProj + camPos + sunDir
+    private static readonly Vector3 SunDir = Vector3.Normalize(new Vector3(0.35f, 0.82f, 0.45f));
 
     private sealed class Shell
     {
@@ -207,9 +211,10 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
                 new VertexAttribute(0, VertexAttributeFormat.Float3, 0),
                 new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
             });
+        // Push: viewProj (vertex) + camPos + sunDir (fragment lighting/fog) = 96 bytes.
         var iface = new ShaderInterface(
             Slots: new[] { InstanceBuffer.Slot },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 96) });
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         var shader = vk.CreateShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv")),
@@ -220,6 +225,21 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
                 DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled }),
             "cube");
         instanceBuffer = new InstanceBuffer(vk, shader, "tanks");
+
+        // Procedural daylight sky: a fullscreen-triangle pass drawn first (depth off)
+        // so the world draws over it. Push = inverse-VP + camPos + sunDir.
+        var skyIface = new ShaderInterface(
+            Slots: Array.Empty<DescriptorSetSlot>(),
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 96) });
+        var skyShader = vk.CreateShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "sky.vert.spv")),
+            File.ReadAllBytes(Path.Combine(shaderDir, "sky.frag.spv")),
+            skyIface, "sky");
+        skyPipeline = vk.CreatePipeline(
+            new PipelineDescription(skyShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
+                DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled }),
+            "sky");
+        sky = new FullscreenPass(vk, "sky");
         batch = new InstancedBatch(cube, pipeline, instanceBuffer);
         tunables = new ObjectTunables(feel);
 
@@ -481,28 +501,39 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
         var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, aspect, 0.3f, 400f);
         viewProj = view * proj;
 
+        // Push payloads: viewProj/invViewProj + camera pos + sun dir, shared by the
+        // world (lighting + fog) and the sky (view-ray reconstruction).
+        var camPos = new Vector4(eye, 1f);
+        var sun = new Vector4(SunDir, 0f);
+        Matrix4x4.Invert(viewProj, out var invViewProj);
         MemoryMarshal.Write(pushBytes.AsSpan(0, 64), in viewProj);
+        MemoryMarshal.Write(pushBytes.AsSpan(64, 16), in camPos);
+        MemoryMarshal.Write(pushBytes.AsSpan(80, 16), in sun);
+        MemoryMarshal.Write(skyPush.AsSpan(0, 64), in invViewProj);
+        MemoryMarshal.Write(skyPush.AsSpan(64, 16), in camPos);
+        MemoryMarshal.Write(skyPush.AsSpan(80, 16), in sun);
+
         batch.Begin(pushBytes);
 
         batch.Add(Matrix4x4.CreateScale(GroundScale) * Matrix4x4.CreateTranslation(0f, -0.1f, 0f),
-            new Vector4(0.11f, 0.13f, 0.17f, 1f));
+            new Vector4(0.38f, 0.50f, 0.33f, 1f));   // grassy ground
 
         // Low perimeter walls for spatial reference (the tall colliders are invisible).
         const float w = ArenaHalf;
-        var wallTint = new Vector4(0.22f, 0.25f, 0.32f, 1f);
+        var wallTint = new Vector4(0.62f, 0.50f, 0.36f, 1f);   // warm tan
         var span = 2f * w + 1f;
         AddBox(new Vector3(-w, 0.7f, 0f), new Vector3(1f, 1.4f, span), wallTint);
         AddBox(new Vector3(w, 0.7f, 0f), new Vector3(1f, 1.4f, span), wallTint);
         AddBox(new Vector3(0f, 0.7f, -w), new Vector3(span, 1.4f, 1f), wallTint);
         AddBox(new Vector3(0f, 0.7f, w), new Vector3(span, 1.4f, 1f), wallTint);
 
-        AddTank(player, new Vector4(0.30f, 0.55f, 0.85f, 1f), new Vector4(0.38f, 0.62f, 0.9f, 1f));
+        AddTank(player, new Vector4(0.22f, 0.52f, 0.92f, 1f), new Vector4(0.30f, 0.60f, 0.98f, 1f));
         foreach (var e in enemies)
-            AddTank(e, new Vector4(0.78f, 0.28f, 0.24f, 1f), new Vector4(0.86f, 0.36f, 0.3f, 1f));
+            AddTank(e, new Vector4(0.86f, 0.30f, 0.24f, 1f), new Vector4(0.94f, 0.40f, 0.30f, 1f));
 
         foreach (var s in shells)
         {
-            var tint = s.FromPlayer ? new Vector4(0.6f, 0.85f, 1f, 1f) : new Vector4(1f, 0.7f, 0.3f, 1f);
+            var tint = s.FromPlayer ? new Vector4(0.80f, 0.92f, 1f, 1f) : new Vector4(1f, 0.62f, 0.25f, 1f);
             batch.Add(Matrix4x4.CreateScale(0.28f) * s.Transform.WorldMatrix, tint);
         }
 
@@ -510,9 +541,13 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
             "arena",
             new RenderPassDescription(
                 Target: RenderSurfaceHandle.Default,
-                ClearColors: new GraphicsColor?[] { new GraphicsColor(0.05f, 0.06f, 0.09f, 1f) },
+                ClearColors: new GraphicsColor?[] { new GraphicsColor(0.72f, 0.84f, 0.94f, 1f) },
                 ClearDepth: true),
-            pass => batch.End(pass));
+            pass =>
+            {
+                sky.Draw(pass, skyPipeline, Array.Empty<ShaderTextureBinding>(), skyPush);   // background
+                batch.End(pass);                                                              // world over it
+            });
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames) host.RequestClose();
     }
@@ -527,7 +562,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
         // Barrel box pushed forward half a length so it runs from the breach to the muzzle.
         batch.Add(
             Matrix4x4.CreateScale(Tank.BarrelScale) * Matrix4x4.CreateTranslation(0f, 0f, -Tank.BarrelScale.Z * 0.5f) * t.Barrel.WorldMatrix,
-            new Vector4(0.18f, 0.2f, 0.22f, 1f));
+            new Vector4(0.30f, 0.31f, 0.34f, 1f));   // gunmetal
     }
 
     public string DebugName => "tank-arena";
