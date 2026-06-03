@@ -38,10 +38,15 @@ public sealed class ParticleBatch : IDisposable
     {
         public Vector3 Position;
         public Vector3 Velocity;
-        public Vector4 Color;
+        // Colour and size interpolate from Start→End across the particle's life, so
+        // sparks can cool (white-hot → ember → transparent) and smoke can swell.
+        // End-colour alpha 0 makes a particle dissolve rather than pop on cull.
+        public Vector4 StartColor;
+        public Vector4 EndColor;
+        public float StartSize;
+        public float EndSize;
         public float Age;
         public float Life;
-        public float Size;
     }
 
     private readonly VulkanGraphicsDevice device;
@@ -84,25 +89,35 @@ public sealed class ParticleBatch : IDisposable
 
     public int Count => count;
 
-    // Spawn one particle (dropped silently if at capacity — emission shouldn't crash).
-    public void Emit(Vector3 position, Vector3 velocity, Vector4 color, float life, float size)
+    // Spawn one particle with colour/size ramps (dropped silently if at capacity —
+    // emission shouldn't crash). startColor→endColor and startSize→endSize lerp
+    // across `life`.
+    public void Emit(
+        Vector3 position, Vector3 velocity,
+        Vector4 startColor, Vector4 endColor,
+        float startSize, float endSize, float life)
     {
         if (count >= maxParticles) return;
         particles[count++] = new Particle
         {
             Position = position,
             Velocity = velocity,
-            Color = color,
+            StartColor = startColor,
+            EndColor = endColor,
+            StartSize = startSize,
+            EndSize = endSize,
             Age = 0f,
             Life = life,
-            Size = size,
         };
     }
 
     // Integrate + age. Dead particles are swap-removed so the live set stays packed
-    // at the front. `acceleration` is gravity/wind applied to every particle.
-    public void Update(float dt, Vector3 acceleration)
+    // at the front. `acceleration` is gravity/wind applied to every particle; `drag`
+    // is a per-second velocity damping (0 = none) that makes sparks/vortices curl
+    // and settle instead of flying straight forever.
+    public void Update(float dt, Vector3 acceleration, float drag = 0f)
     {
+        var damp = Math.Clamp(1f - drag * dt, 0f, 1f);
         for (var i = 0; i < count; i++)
         {
             ref var p = ref particles[i];
@@ -113,7 +128,7 @@ public sealed class ParticleBatch : IDisposable
                 i--;
                 continue;
             }
-            p.Velocity += acceleration * dt;
+            p.Velocity = (p.Velocity + acceleration * dt) * damp;
             p.Position += p.Velocity * dt;
         }
     }
@@ -155,20 +170,20 @@ public sealed class ParticleBatch : IDisposable
         for (var oi = 0; oi < count; oi++)
         {
             ref var p = ref particles[order[oi]];
-            // Fade alpha out over the particle's life so it dissolves rather than
-            // popping when culled.
-            var fade = 1f - (p.Age / p.Life);
-            var c = p.Color;
+            // Interpolate colour + size across the particle's life.
+            var life = MathF.Min(p.Age / p.Life, 1f);
+            var c = Vector4.Lerp(p.StartColor, p.EndColor, life);
+            var size = float.Lerp(p.StartSize, p.EndSize, life);
             for (var k = 0; k < 4; k++)
             {
-                var world = p.Position + (camRight * corners[k].X + camUp * corners[k].Y) * p.Size;
+                var world = p.Position + (camRight * corners[k].X + camUp * corners[k].Y) * size;
                 scratch[f++] = world.X;
                 scratch[f++] = world.Y;
                 scratch[f++] = world.Z;
                 scratch[f++] = c.X;
                 scratch[f++] = c.Y;
                 scratch[f++] = c.Z;
-                scratch[f++] = c.W * fade;
+                scratch[f++] = c.W;
                 scratch[f++] = corners[k].X * 0.5f + 0.5f;   // uv
                 scratch[f++] = corners[k].Y * 0.5f + 0.5f;
             }
