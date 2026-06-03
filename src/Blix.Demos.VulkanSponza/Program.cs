@@ -31,6 +31,17 @@ namespace Blix.Demos.VulkanSponza;
 // Asset story: shares the existing Blix.Demos.SponzaModern/Assets tree
 // (csproj links it in, runtime reads from the demo's own Assets/ copy
 // in bin/). Missing-asset path prints a clear instruction and exits 0.
+//
+// ── Executable spec for (engine primitives this demo proves) ──
+//   • Cooked-asset pipeline: .blixmesh/.blixtex/.blixprobe via GltfTextureLoader
+//     + AsyncLoadQueue + MeshBundler (one shared VB/IB, draws are sub-ranges)
+//   • GPU-driven indirect draw, screen-space-error LOD over meshopt chains
+//   • RenderGraph at scale: cascaded shadows, froxel-fog compute, depth pre-pass,
+//     MSAA → resolve → tonemap
+// ── Intentionally owns (stays local; don't extract until a 2nd consumer needs it) ──
+//   • Sponza-specific draw groups, LOD/cull policy, cutout-foliage routing
+//   • the exact pass wiring + per-scene tuning (this is the renderer's torture test,
+//     not a reusable scene renderer — there deliberately isn't one)
 public static class Program
 {
     public static void Main()

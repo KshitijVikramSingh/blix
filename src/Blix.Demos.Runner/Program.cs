@@ -31,6 +31,14 @@ namespace Blix.Demos.Runner;
 // One file by design (a demo reads top-to-bottom): load/setup, OnUpdate (player +
 // world + collision), the per-mesh emit helpers, OnRender (sky → world → character
 // → HUD), input, and the IDebuggable Debug() pass.
+//
+// ── Executable spec for (engine primitives this demo proves) ──
+//   • Per-mesh InstancedBatch (instanced world tiles / props / coins, set-3 SSBO)
+//   • Skinned glTF animation: bone-palette path, clip cadence tracking + jump blend
+//   • Kinematic PhysicsHost3D gravity + CollisionWorld3D.Overlap pickups/hits
+//   • SpriteBatch/Font HUD, OpenAL SFX, fullscreen procedural sky + fog
+// ── Intentionally owns (stays local; don't extract until a 2nd consumer needs it) ──
+//   • runner gameplay: lanes, scoring, speed ramp, procedural spawn/wrap, game-over
 public static class Program
 {
     public static void Main(string[] args)

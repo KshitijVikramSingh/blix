@@ -14,6 +14,17 @@ using var window = new Window(
     new WindowOptions("Blix · Pong", 1152, 576));
 window.Run();
 
+// Pong — the 2D game proving the Vulkan SpriteBatch + Font path, with a CRT
+// post-FX finish. Gameplay runs in a virtual playfield; sprites render to a 2×
+// offscreen target through a Vulkan-NDC ortho, then a CRT shader downsamples to
+// the swapchain.
+//
+// ── Executable spec for (engine primitives this demo proves) ──
+//   • SpriteBatch + Font on the Vulkan 2D path (Vulkan-NDC ortho, Y-down)
+//   • Offscreen render target → FullscreenPass CRT post-FX → swapchain
+//   • The Game base loop contract driving a complete 2D game
+// ── Intentionally owns (stays local) ──
+//   • Pong rules, paddle/ball physics, scoring, the CRT look + playfield layout
 internal sealed class PongGame : Game, IInputHandler
 {
     // Virtual playfield is the coordinate space gameplay logic uses; sprites

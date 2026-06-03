@@ -16,6 +16,13 @@ namespace Blix.Demos.VulkanHello;
 // The narrowest known-good Vulkan call site: it keeps the name-keyed
 // ShaderUniform("uModel", ...) API at the call site, so it doubles as the
 // simplest reference when something further up the stack breaks.
+//
+// ── Executable spec for (engine primitives this demo proves) ──
+//   • The narrowest known-good Vulkan path: depth attachment + descriptor sets +
+//     per-frame UBO + name-keyed ShaderUniform routed through a UniformBlockLayout
+//   • Offscreen pass → FullscreenPass present
+// ── Intentionally owns (stays local) ──
+//   • nothing gameplay — this is the minimal reference call site; keep it minimal
 public static class Program
 {
     public static void Main()

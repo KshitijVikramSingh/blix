@@ -6,7 +6,7 @@ One backend + runtime ship today: the Vulkan + Silk.NET pair. The original OpenG
 
 **Library, not framework.** The engine is a set of composable primitives game code calls — not a control-inverting framework. The split: the **engine owns asset loading, reading, and bundling** (decode/upload/dedup/stream textures, pack geometry into shared buffers, run an off-thread load queue); the **game owns synthesis and composition** (which passes run, how draws are recorded, material/pipeline choice, render-graph topology). There is no `SceneRenderer` that owns read→cull→draw: `VulkanSponza` composes the engine primitives (`MeshBundler`, `AsyncLoadQueue`, `GltfTextureLoader`, the `RenderGraph`) itself and keeps its own draw groups + LOD/cull policy. New rendering capability lands as a primitive the game calls, not a stage the engine runs for you.
 
-This doc orients you. For the game-engine layer game code targets, see [`blix.md`](blix.md). For the renderer — render graph, recording draws, shaders, and rendering techniques — see [`renderer.md`](renderer.md); `src/Blix.Demos.VulkanLit/` and `src/Blix.Demos.VulkanSponza/` are the working references it points at.
+This doc orients you. For the game-engine layer game code targets, see [`blix.md`](blix.md). For the renderer — render graph, recording draws, shaders, and rendering techniques — see [`renderer.md`](renderer.md); `src/Blix.Demos.VulkanLit/` and `src/Blix.Demos.VulkanSponza/` are the working references it points at. For the non-negotiable conventions at a glance — transform/matrix/asset/demo — and where each is enforced, see [`conventions.md`](conventions.md).
 
 ## Project graph
 
@@ -93,6 +93,10 @@ The game implements `IGameLoop` (in `Blix`) and optionally `IInputHandler` and `
 `Blix.Runtime.Silk.Window` implements `IRenderHost`, `IAudioHost`, and `IDebugHost` simultaneously — game code reads them via `Host`, `Host as IAudioHost`, `Host as IDebugHost` from inside `Game`.
 
 ## Conventions
+
+The non-negotiables (transform/matrix/asset/demo) are indexed in
+[`conventions.md`](conventions.md) with pointers to where each is enforced. The
+graphics-facing ones are spelled out below.
 
 **Coordinate system.** World space is right-handed. `+X` right, `+Y` up, default camera looks down `-Z`. A camera at `(0, 0, 2)` sees objects around the origin.
 

@@ -31,6 +31,14 @@ namespace Blix.Demos.VulkanParticles;
 // auto-orbit, R resets. Pass --debug to enable the tuning + diagnostics overlay (` then
 // shows/hides it). Auto-exits after --frames N (validation gate: BLIX_VK_VALIDATE=1,
 // grep [vk-ERR ]/[vk-WARN ]).
+//
+// ── Executable spec for (engine primitives this demo proves) ──
+//   • ParticleBatch as a PURE geometry primitive on the frame transient vertex arena
+//     (the demo brings pipeline + push + depth binding — the primitive owns only geometry)
+//   • Soft-particle depth fade off a sampleable depth pre-pass
+//   • HDR bloom + ACES composite; additive vs premultiplied-alpha sharing one shader
+// ── Intentionally owns (stays local) ──
+//   • the three effect simulations (fountain / explosion / vortex) + camera controls
 public static class Program
 {
     public static void Main(string[] args)
