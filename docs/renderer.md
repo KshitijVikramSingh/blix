@@ -76,6 +76,12 @@ For drawing one mesh many times, `DrawIndexedInstanced` issues a single `vkCmdDr
 
 **The binding model.** Materials bind by *reflected slot*, not by name-keyed bags. `CreateMaterial(program, setIndex, framesInFlight)` allocates a `MaterialBindings` against one SPIR-V-reflected descriptor set; `SetUniform(binding, "uName", value)` / `SetTexture(binding, handle)` write it by name, and `.Handle` is the `MaterialHandle` a draw (or `GameObject`) carries. Sets are organised by lifetime — set 0 per-frame, set 1 per-pass, set 2 per-material, set 3 per-draw — and per-draw data rides push constants (≤256 B) or a transient descriptor pool refilled each frame. Full detail: [`architecture.md` → The Vulkan binding model](architecture.md#the-vulkan-binding-model).
 
+**Per-frame transient data — two substrates, one boundary.** Dynamic data uploaded fresh every frame has exactly two homes, split by whether it needs a descriptor:
+
+- **Vertex/index data bound by offset → the transient arena.** `IGraphicsDevice.AllocVertices(span, stride)` sub-allocates from a ring of host-visible vertex buffers (`MaxFramesInFlight + 1` slots, mirroring the indirect ring) and returns a `TransientVertexSlice`; the draw binds the buffer at `slice.ByteOffset` (`DrawIndexedCommand.VertexBufferByteOffset`) and uses base-0 indices. This is the race-free replacement for the old "own one `Dynamic` vertex buffer and re-`UpdateVertexBuffer` it every frame" pattern, which collided with in-flight GPU reads. `SpriteBatch` and `VkLineDrawer` ride it; it's also what a `ParticleBatch`-style consumer expands its billboards into. The arena has **no descriptor** — a slice is just a `(buffer, offset, length)` triple.
+
+- **Per-frame SSBO/UBO that needs a descriptor → `MaterialBindings`.** Per-instance transforms (`InstanceBuffer`, a set-3 SSBO) and skinned bone palettes are frames-in-flight-replicated *and carry their own descriptor set*. These stay in `MaterialBindings` — it already owns the buffer **and** the descriptor write correctly. They do **not** belong in the transient arena: pushing a descriptor-backed buffer through the arena would mean rebuilding the per-frame descriptor machinery `MaterialBindings` already provides, for no gain. The rule: *arena = descriptor-less vertex/index data bound by offset; `MaterialBindings` = descriptor-backed per-frame storage.*
+
 ## Meshes, pipelines, vertex types
 
 `Mesh` (`Blix.Render`) bundles a vertex buffer + index buffer + count + mesh-local AABB under a name; build one from a `MeshData` via `IGraphicsDevice.CreateMesh(...)`, or bundle many primitives into one shared `(VB, IB)` with `MeshBundler.Bundle(...)` (draws become sub-ranges via `indexOffset`/`vertexOffset`).
@@ -123,6 +129,7 @@ All techniques run on Vulkan; the shader files below are the source of truth.
 | Depth pre-pass | `depth_prepass.frag` / `depth_prepass_mask.frag` (VulkanSponza) |
 | Glass / transmissive | Fresnel + alpha-blend pipeline in `lit.frag` (no refraction) |
 | GPU-driven indirect draw | `DrawIndexedIndirect`, per-material multi-draw (VulkanSponza) |
+| Per-frame transient vertices | `AllocVertices` → `TransientVertexSlice`, ring of host-visible buffers bound by offset (SpriteBatch, VkLineDrawer) |
 | Per-instance instancing | `DrawIndexedInstanced` + `InstanceBuffer` (set-3 SSBO) / `InstancedBatch` (VulkanInstanced, Runner) |
 | Skeletal animation (GPU skinning) | bone-palette set-3 SSBO; `skinned_lit.vert` (VulkanLit), `skinned.vert` (Runner) |
 | Screen-space-error LOD | `.blixmesh` per-level geometric error; runtime selects by SSE (VulkanSponza) |
