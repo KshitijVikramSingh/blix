@@ -62,7 +62,6 @@ internal sealed class TankFeel
     [Tune(-60f, -8f)]  public float TankGravity = -32f;       // kept
     [Tune(0.2f, 2.5f)] public float Reload = 0.95f;           // kept
     [Tune(0f, 12f)]    public float Knockback = 3f;           // recoil shove on firing
-    [Tune(0f, 0.7f)]   public float ShadowAlpha = 0.32f;      // planar sun-shadow darkness
     [Tune(6f, 30f)]    public float CamDistance = 6f;
     [Tune(3f, 22f)]    public float CamHeight = 3f;
     [Tune(1f, 14f)]    public float CamSmooth = 1f;
@@ -125,7 +124,7 @@ internal sealed class Tank
     public Vector3 BarrelForward => Vector3.Transform(-Vector3.UnitZ, Barrel.WorldRotation);
 }
 
-internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
+internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDisposable
 {
     private const float ArenaHalf = 42f;
     private const float PivotFactor = 0f;       // no in-place spin — must be moving to turn
@@ -146,15 +145,22 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
     private VulkanGraphicsDevice vk = null!;
     private IRenderHost host = null!;
     private InstanceBuffer instanceBuffer = null!;
-    private InstancedBatch batch = null!;
-    private FullscreenPass sky = null!;
-    private PipelineHandle skyPipeline;
-    private InstanceBuffer shadowInstances = null!;
-    private InstancedBatch shadowBatch = null!;
-    private readonly byte[] pushBytes = new byte[96];   // viewProj + camPos + sunDir
+    private InstancedBatch batch = null!;               // lit world (ground/walls/tanks/shells)
+    private InstanceBuffer casterInstances = null!;
+    private InstancedBatch casterBatch = null!;         // depth-only shadow casters
+    private FullscreenPass fullscreen = null!;          // sky background + present blit
+    private RenderGraph graph = null!;
+    private GraphResourceHandle hdrHandle, sceneDepthHandle, sunShadowHandle;
+    private PassHandle shadowPassHandle, scenePassHandle;
+    private PipelineHandle skyPipeline, worldPipeline, casterPipeline, presentPipeline;
+    private readonly byte[] worldPush = new byte[160];  // viewProj + camPos + sunDir + sunShadowVP
     private readonly byte[] skyPush = new byte[96];     // invViewProj + camPos + sunDir
+    private readonly byte[] shadowPush = new byte[64];  // sun shadow VP (caster pass)
+    private Matrix4x4 sunShadowVP;
     private static readonly Vector3 SunDir = Vector3.Normalize(new Vector3(0.35f, 0.82f, 0.45f));
-    private const float ShadowLift = 0.03f;             // planar shadows sit just above the ground
+    private const int ShadowMapSize = 2048;
+    private const float SunDistance = 120f;             // light eye height up the sun direction
+    private const float SunOrthoExtent = 150f;          // ortho covering the arena footprint
 
     private sealed class Shell
     {
@@ -215,55 +221,85 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
                 new VertexAttribute(0, VertexAttributeFormat.Float3, 0),
                 new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
             });
-        // Push: viewProj (vertex) + camPos + sunDir (fragment lighting/fog) = 96 bytes.
-        var iface = new ShaderInterface(
-            Slots: new[] { InstanceBuffer.Slot },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 96) });
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
-        var shader = vk.CreateShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv")),
-            File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv")),
-            iface, "cube");
-        var pipeline = vk.CreatePipeline(
-            new PipelineDescription(shader, meshLayout, PrimitiveTopology.Triangles,
-                DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled }),
-            "cube");
-        instanceBuffer = new InstanceBuffer(vk, shader, "tanks");
+        Func<string, byte[]> spv = name => File.ReadAllBytes(Path.Combine(shaderDir, name));
 
-        // Procedural daylight sky: a fullscreen-triangle pass drawn first (depth off)
-        // so the world draws over it. Push = inverse-VP + camPos + sunDir.
+        // --- Render graph: sun shadow depth pass -> HDR scene pass -> present -------
+        graph = new RenderGraph(vk);
+        var fullSize = new MatchSwapchainGraphSize(1.0f);
+        sunShadowHandle = graph.DepthTarget("sun-shadow", new FixedGraphSize(ShadowMapSize, ShadowMapSize));
+        hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
+        sceneDepthHandle = graph.DepthTarget("scene-depth", fullSize);
+
+        // Shadow caster: instanced depth-only, pushes the sun VP (64B).
+        var casterIface = new ShaderInterface(
+            Slots: new[] { InstanceBuffer.Slot },
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+        // World: instances (set 3) + sun shadow map (set 0, b0) + 160B push.
+        var worldIface = new ShaderInterface(
+            Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment), InstanceBuffer.Slot },
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 160) });
         var skyIface = new ShaderInterface(
             Slots: Array.Empty<DescriptorSetSlot>(),
             PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 96) });
-        var skyShader = vk.CreateShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "sky.vert.spv")),
-            File.ReadAllBytes(Path.Combine(shaderDir, "sky.frag.spv")),
-            skyIface, "sky");
-        skyPipeline = vk.CreatePipeline(
-            new PipelineDescription(skyShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
-                DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled }),
-            "sky");
-        sky = new FullscreenPass(vk, "sky");
+        var presentIface = new ShaderInterface(
+            Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment) },
+            PushConstants: Array.Empty<PushConstantRange>());
 
-        // Planar sun shadows: the world geometry re-drawn flattened onto the ground
-        // along the sun direction, dark + alpha-blended, depth-tested but not written.
-        // Reuses cube.vert (instanced) with a flat shadow.frag.
-        var shadowShader = vk.CreateShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv")),
-            File.ReadAllBytes(Path.Combine(shaderDir, "shadow.frag.spv")),
-            iface, "shadow");
-        var shadowPipeline = vk.CreatePipeline(
-            new PipelineDescription(shadowShader, meshLayout, PrimitiveTopology.Triangles,
-                DepthState.LessEqualNoWrite, RasterizerState.NoCulling, new[] { BlendState.AlphaBlend }),
-            "shadow");
-        shadowInstances = new InstanceBuffer(vk, shadowShader, "shadows");
-        shadowBatch = new InstancedBatch(cube, shadowPipeline, shadowInstances);
-        batch = new InstancedBatch(cube, pipeline, instanceBuffer);
+        shadowPassHandle = graph.GraphicsPass("sun-shadow")
+            .Depth(sunShadowHandle, LoadOp.Clear, StoreOp.Store)
+            .Shader(casterIface)
+            .Handle;
+        scenePassHandle = graph.GraphicsPass("scene")
+            .Target(hdrHandle, LoadOp.Clear, StoreOp.Store)
+            .Depth(sceneDepthHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(sunShadowHandle)
+            .Shader(skyIface, worldIface)
+            .Handle;
+        graph.Compile();
+
+        // Pipelines (after Compile; world/sky/caster target their pass surfaces).
+        var casterShader = vk.CreateShaderProgramFromSpv(spv("shadow_caster.vert.spv"), spv("shadow_caster.frag.spv"), casterIface, "caster");
+        casterPipeline = vk.CreatePipeline(new PipelineDescription(casterShader, meshLayout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, RasterizerState.NoCulling, Array.Empty<BlendState>(),
+            RenderTarget: graph.GetPassSurface(shadowPassHandle)), "caster");
+        casterInstances = new InstanceBuffer(vk, casterShader, "casters");
+        casterBatch = new InstancedBatch(cube, casterPipeline, casterInstances);
+
+        var worldShader = vk.CreateShaderProgramFromSpv(spv("cube.vert.spv"), spv("cube.frag.spv"), worldIface, "world");
+        worldPipeline = vk.CreatePipeline(new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(scenePassHandle)), "world");
+        instanceBuffer = new InstanceBuffer(vk, worldShader, "tanks");
+        batch = new InstancedBatch(cube, worldPipeline, instanceBuffer);
+
+        var skyShader = vk.CreateShaderProgramFromSpv(spv("sky.vert.spv"), spv("sky.frag.spv"), skyIface, "sky");
+        skyPipeline = vk.CreatePipeline(new PipelineDescription(skyShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
+            DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(scenePassHandle)), "sky");
+
+        // Present targets the swapchain (default), copying the HDR scene.
+        var presentShader = vk.CreateShaderProgramFromSpv(spv("present.vert.spv"), spv("present.frag.spv"), presentIface, "present");
+        presentPipeline = vk.CreatePipeline(new PipelineDescription(presentShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
+            DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled }), "present");
+        fullscreen = new FullscreenPass(vk, "fullscreen");
+
         tunables = new ObjectTunables(feel);
-
         BuildWorld();
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         Reset();
+    }
+
+    // Sun shadow view-projection: light eye up the sun direction, looking at the
+    // arena centre, with an ortho big enough to cover the arena footprint. Matches
+    // VulkanLit's construction (our SunDir points TOWARD the sun, so eye = +SunDir).
+    private static Matrix4x4 SunShadowVP()
+    {
+        var eye = SunDir * SunDistance;
+        var up = MathF.Abs(SunDir.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
+        var view = Matrix4x4.CreateLookAt(eye, Vector3.Zero, up);
+        var ortho = GraphicsMatrices.CreateOrthographicVulkan(SunOrthoExtent, SunOrthoExtent, 20f, SunDistance + 90f);
+        return view * ortho;
     }
 
     // Ground slab (solid below y=0) + four wall slabs just outside the arena. All
@@ -519,68 +555,90 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
         var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, aspect, 0.3f, 400f);
         viewProj = view * proj;
 
-        // Push payloads: viewProj/invViewProj + camera pos + sun dir, shared by the
-        // world (lighting + fog) and the sky (view-ray reconstruction).
+        // Push payloads. World: viewProj + camPos + sunDir + sun shadow VP (160B).
+        // Sky: invViewProj + camPos + sunDir (96B). Shadow caster: sun VP (64B).
+        sunShadowVP = SunShadowVP();
         var camPos = new Vector4(eye, 1f);
         var sun = new Vector4(SunDir, 0f);
         Matrix4x4.Invert(viewProj, out var invViewProj);
-        MemoryMarshal.Write(pushBytes.AsSpan(0, 64), in viewProj);
-        MemoryMarshal.Write(pushBytes.AsSpan(64, 16), in camPos);
-        MemoryMarshal.Write(pushBytes.AsSpan(80, 16), in sun);
+        MemoryMarshal.Write(worldPush.AsSpan(0, 64), in viewProj);
+        MemoryMarshal.Write(worldPush.AsSpan(64, 16), in camPos);
+        MemoryMarshal.Write(worldPush.AsSpan(80, 16), in sun);
+        MemoryMarshal.Write(worldPush.AsSpan(96, 64), in sunShadowVP);
         MemoryMarshal.Write(skyPush.AsSpan(0, 64), in invViewProj);
         MemoryMarshal.Write(skyPush.AsSpan(64, 16), in camPos);
         MemoryMarshal.Write(skyPush.AsSpan(80, 16), in sun);
+        MemoryMarshal.Write(shadowPush.AsSpan(0, 64), in sunShadowVP);
 
-        batch.Begin(pushBytes);
-
+        // Lit world: ground + walls + tanks + shells.
+        batch.Begin(worldPush);
         batch.Add(Matrix4x4.CreateScale(GroundScale) * Matrix4x4.CreateTranslation(0f, -0.1f, 0f),
             new Vector4(0.38f, 0.50f, 0.33f, 1f));   // grassy ground
-
-        // Low perimeter walls for spatial reference (the tall colliders are invisible).
-        const float w = ArenaHalf;
         var wallTint = new Vector4(0.62f, 0.50f, 0.36f, 1f);   // warm tan
-        var span = 2f * w + 1f;
-        AddBox(new Vector3(-w, 0.7f, 0f), new Vector3(1f, 1.4f, span), wallTint);
-        AddBox(new Vector3(w, 0.7f, 0f), new Vector3(1f, 1.4f, span), wallTint);
-        AddBox(new Vector3(0f, 0.7f, -w), new Vector3(span, 1.4f, 1f), wallTint);
-        AddBox(new Vector3(0f, 0.7f, w), new Vector3(span, 1.4f, 1f), wallTint);
-
+        foreach (var (c, s) in Walls)
+            batch.Add(Matrix4x4.CreateScale(s) * Matrix4x4.CreateTranslation(c), wallTint);
         AddTank(player, new Vector4(0.22f, 0.52f, 0.92f, 1f), new Vector4(0.30f, 0.60f, 0.98f, 1f));
         foreach (var e in enemies)
             AddTank(e, new Vector4(0.86f, 0.30f, 0.24f, 1f), new Vector4(0.94f, 0.40f, 0.30f, 1f));
-
         foreach (var s in shells)
         {
             var tint = s.FromPlayer ? new Vector4(0.80f, 0.92f, 1f, 1f) : new Vector4(1f, 0.62f, 0.25f, 1f);
             batch.Add(Matrix4x4.CreateScale(0.28f) * s.Transform.WorldMatrix, tint);
         }
 
-        // Planar sun shadows: tank geometry flattened onto the ground along the sun
-        // direction, drawn (blended) after the opaque world so they darken the ground.
-        var shadowMatrix = ShadowMatrix(SunDir);
-        var shadowTint = new Vector4(0f, 0f, 0f, feel.ShadowAlpha);
-        shadowBatch.Begin(pushBytes);
-        AddTankShadow(player, shadowMatrix, shadowTint);
-        foreach (var e in enemies) AddTankShadow(e, shadowMatrix, shadowTint);
+        // Shadow casters: walls + tanks (not the ground receiver or tiny shells).
+        // Depth-only, so tint is unused.
+        casterBatch.Begin(shadowPush);
+        foreach (var (c, s) in Walls)
+            casterBatch.Add(Matrix4x4.CreateScale(s) * Matrix4x4.CreateTranslation(c), Vector4.Zero);
+        AddTankCaster(player);
+        foreach (var e in enemies) AddTankCaster(e);
 
+        // Record: shadow depth pass -> HDR scene pass (samples the shadow map) -> present.
+        graph.Pass(shadowPassHandle, scope => casterBatch.End(scope));
+        var shadowTex = graph.GetDepthTexture(sunShadowHandle);
+        graph.Pass(scenePassHandle, scope =>
+        {
+            fullscreen.Draw(scope, skyPipeline, Array.Empty<ShaderTextureBinding>(), skyPush);
+            batch.End(scope, new[] { new ShaderTextureBinding("uSunShadowMap", shadowTex, Slot: 0) });
+        });
+        graph.Execute(commandList);
+
+        var hdrTex = graph.GetColorTexture(hdrHandle);
         commandList.Pass(
-            "arena",
+            "present",
             new RenderPassDescription(
                 Target: RenderSurfaceHandle.Default,
-                ClearColors: new GraphicsColor?[] { new GraphicsColor(0.72f, 0.84f, 0.94f, 1f) },
+                ClearColors: new GraphicsColor?[] { new GraphicsColor(0f, 0f, 0f, 1f) },
                 ClearDepth: true),
-            pass =>
-            {
-                sky.Draw(pass, skyPipeline, Array.Empty<ShaderTextureBinding>(), skyPush);   // background
-                batch.End(pass);                                                              // opaque world
-                shadowBatch.End(pass);                                                        // shadows on top
-            });
+            pass => fullscreen.Draw(pass, presentPipeline, new[] { new ShaderTextureBinding("uHdr", hdrTex, Slot: 0) }));
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames) host.RequestClose();
     }
 
-    private void AddBox(Vector3 center, Vector3 scale, Vector4 tint) =>
-        batch.Add(Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(center), tint);
+    // Arena perimeter walls (visual reference + shadow casters); shared by both batches.
+    private static readonly (Vector3 Center, Vector3 Scale)[] Walls = BuildWalls();
+
+    private static (Vector3, Vector3)[] BuildWalls()
+    {
+        const float w = ArenaHalf;
+        var span = 2f * w + 1f;
+        return new[]
+        {
+            (new Vector3(-w, 0.7f, 0f), new Vector3(1f, 1.4f, span)),
+            (new Vector3(w, 0.7f, 0f), new Vector3(1f, 1.4f, span)),
+            (new Vector3(0f, 0.7f, -w), new Vector3(span, 1.4f, 1f)),
+            (new Vector3(0f, 0.7f, w), new Vector3(span, 1.4f, 1f)),
+        };
+    }
+
+    private void AddTankCaster(Tank t)
+    {
+        var (hull, turret, barrel) = TankCubeModels(t);
+        casterBatch.Add(hull, Vector4.Zero);
+        casterBatch.Add(turret, Vector4.Zero);
+        casterBatch.Add(barrel, Vector4.Zero);
+    }
 
     // The three drawable cube models for a tank (hull / turret / barrel-from-breach),
     // shared by the lit draw and the planar-shadow projection.
@@ -597,25 +655,6 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
         batch.Add(barrel, new Vector4(0.30f, 0.31f, 0.34f, 1f));   // gunmetal
     }
 
-    private void AddTankShadow(Tank t, Matrix4x4 shadow, Vector4 tint)
-    {
-        var (hull, turret, barrel) = TankCubeModels(t);
-        shadowBatch.Add(hull * shadow, tint);
-        shadowBatch.Add(turret * shadow, tint);
-        shadowBatch.Add(barrel * shadow, tint);
-    }
-
-    // Planar projection that flattens world geometry onto the ground (y = ShadowLift)
-    // along the sun's travel direction — row-vector form (v * realModel * shadow).
-    private static Matrix4x4 ShadowMatrix(Vector3 sunDir)
-    {
-        var l = -sunDir;   // light travel direction (downward; l.Y < 0)
-        return new Matrix4x4(
-            1f, 0f, 0f, 0f,
-            -l.X / l.Y, 0f, -l.Z / l.Y, 0f,
-            0f, 0f, 1f, 0f,
-            0f, ShadowLift, 0f, 1f);
-    }
 
     public string DebugName => "tank-arena";
 
@@ -647,4 +686,14 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
     }
 
     public void OnKeyUp(Key key) => held.Remove(key);
+
+    // Disposed by Window after WaitIdle (the graph owns render passes + offscreen
+    // images that aren't in the device's auto-freed resource tables).
+    public void Dispose()
+    {
+        graph?.Dispose();
+        fullscreen?.Dispose();
+        instanceBuffer?.Dispose();
+        casterInstances?.Dispose();
+    }
 }

@@ -30,7 +30,10 @@
     <GlslShader Include="Shaders\cube.frag" />
     <GlslShader Include="Shaders\sky.vert" />
     <GlslShader Include="Shaders\sky.frag" />
-    <GlslShader Include="Shaders\shadow.frag" />
+    <GlslShader Include="Shaders\shadow_caster.vert" />
+    <GlslShader Include="Shaders\shadow_caster.frag" />
+    <GlslShader Include="Shaders\present.vert" />
+    <GlslShader Include="Shaders\present.frag" />
   </ItemGroup>
 
   <Target Name="CompileSpirV"

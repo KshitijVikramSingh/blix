@@ -82,7 +82,10 @@ public sealed class InstancedBatch
         count = instances.Length;
     }
 
-    public void End(RenderPassBuilder pass)
+    // Records the instanced draw. `textures` are frame-global samplers the pipeline's
+    // shader declares (e.g. a shadow map) — forwarded verbatim, mirroring
+    // ParticleBatch.Draw; the batch stays agnostic to what they mean. Null = none.
+    public void End(RenderPassBuilder pass, IReadOnlyList<ShaderTextureBinding>? textures = null)
     {
         ArgumentNullException.ThrowIfNull(pass);
         if (!inBatch)
@@ -100,7 +103,7 @@ public sealed class InstancedBatch
             mesh.IndexCount,
             instanceCount: count,
             Array.Empty<ShaderUniform>(),
-            Array.Empty<ShaderTextureBinding>(),
+            textures ?? Array.Empty<ShaderTextureBinding>(),
             perDrawMaterial: buffer.Material,
             pushConstants: pushConstants);
     }
