@@ -90,8 +90,14 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
 {
     private const float ArenaHalf = 42f;
     private const float DriveSpeed = 11f;
-    private const float TurnSpeed = 1.8f;
+    private const float ReverseSpeed = 5.5f;
+    private const float DriveAccel = 26f;       // m/s^2 ramp — gives the hull weight
+    private const float TurnSpeed = 1.05f;      // max yaw rate (rad/s)
+    private const float PivotFactor = 0.22f;    // fraction of TurnSpeed available when stationary
     private const float TurretSpeed = 2.4f;
+    private const float CamDistance = 9f;
+    private const float CamHeight = 4.5f;
+    private const float CamSmooth = 6f;         // camera-yaw follow rate
     private const float MuzzleSpeed = 42f;
     private const float PlayerFireCooldown = 0.35f;
     private const float EnemyFireCooldown = 2.2f;
@@ -139,6 +145,8 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
     private bool gameOver;
     private bool seededShot;
 
+    private float playerSpeed;   // current forward speed (ramped toward target)
+    private float camYaw;        // smoothed camera yaw, trails the hull facing
     private Matrix4x4 viewProj;
     private float aspect = 16f / 9f;
     private int frameCount;
@@ -215,6 +223,8 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
     {
         player = new Tank();
         player.Position = new Vector3(0f, 4f, 0f);   // drop in under gravity
+        playerSpeed = 0f;
+        camYaw = 0f;
         enemies.Clear();
         shells.Clear();
         health = PlayerMaxHealth;
@@ -257,23 +267,36 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
 
     private void UpdatePlayer(Time time, float dt)
     {
-        if (held.Contains(Key.A)) player.HullYaw += TurnSpeed * dt;
-        if (held.Contains(Key.D)) player.HullYaw -= TurnSpeed * dt;
+        // Ramp forward speed toward the throttle target (W forward / S reverse) so the
+        // hull has weight instead of snapping to full speed.
+        var targetSpeed = (held.Contains(Key.W) ? DriveSpeed : 0f) - (held.Contains(Key.S) ? ReverseSpeed : 0f);
+        playerSpeed = MoveToward(playerSpeed, targetSpeed, DriveAccel * dt);
+
+        // Steering is coupled to motion: full turn rate while driving, only a slow
+        // pivot when parked — so the tank carves a turn radius rather than spinning
+        // on a dime. (speedFrac scales the available yaw rate with current speed.)
+        var steer = (held.Contains(Key.A) ? 1f : 0f) - (held.Contains(Key.D) ? 1f : 0f);
+        var speedFrac = MathF.Min(1f, MathF.Abs(playerSpeed) / DriveSpeed);
+        player.HullYaw += steer * TurnSpeed * (PivotFactor + (1f - PivotFactor) * speedFrac) * dt;
+
         if (held.Contains(Key.Left)) player.TurretYaw += TurretSpeed * dt;
         if (held.Contains(Key.Right)) player.TurretYaw -= TurretSpeed * dt;
         player.Apply();
 
-        // Drive sets horizontal velocity; gravity (in Physics) owns the vertical.
+        // Drive sets horizontal velocity along the hull facing; gravity owns vertical.
         var forward = Vector3.Transform(-Vector3.UnitZ, player.Hull.Rotation);
-        var drive = Vector3.Zero;
-        if (held.Contains(Key.W)) drive += forward * DriveSpeed;
-        if (held.Contains(Key.S)) drive -= forward * DriveSpeed;
-        SetHorizontalVelocity(player, drive);
+        SetHorizontalVelocity(player, forward * playerSpeed);
         player.Physics.FixedUpdate(new Time(time.Total, dt));
         ResolveTank(player);
 
         player.FireTimer -= dt;
         if (held.Contains(Key.Space) && player.FireTimer <= 0f) Fire(player, fromPlayer: true);
+    }
+
+    private static float MoveToward(float current, float target, float maxDelta)
+    {
+        var delta = target - current;
+        return MathF.Abs(delta) <= maxDelta ? target : current + MathF.Sign(delta) * maxDelta;
     }
 
     private static void SetHorizontalVelocity(Tank tank, Vector3 horizontal) =>
@@ -385,11 +408,14 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler
     {
         frameCount++;
 
-        // Fixed-orientation chase, pulled in close behind + above the player so the
-        // tank reads big and turret aim is legible.
+        // Chase cam that trails the hull's facing (smoothed), so "forward" always
+        // drives into the screen and you can see where you're pointed. camYaw eases
+        // toward the hull yaw rather than snapping, to soften turns.
+        camYaw += (player.HullYaw - camYaw) * MathF.Min(1f, CamSmooth * (float)time.Delta);
+        var camForward = Vector3.Transform(-Vector3.UnitZ, Quaternion.CreateFromAxisAngle(Vector3.UnitY, camYaw));
         var p = player.Position;
-        var eye = p + new Vector3(0f, 7f, 9.5f);
-        var view = Matrix4x4.CreateLookAt(eye, p + Vector3.UnitY * 1f, Vector3.UnitY);
+        var eye = p - camForward * CamDistance + Vector3.UnitY * CamHeight;
+        var view = Matrix4x4.CreateLookAt(eye, p + Vector3.UnitY * 1.2f, Vector3.UnitY);
         var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, aspect, 0.3f, 400f);
         viewProj = view * proj;
 
