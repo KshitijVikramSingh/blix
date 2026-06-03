@@ -1283,7 +1283,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         debug.State.Enabled = debugOverlay;
         if (!debugOverlay) return;
 
-        tunables.BuildControls(debug);   // live [Tune] sliders: feel + tank-model fit
+        tunables.BuildControls(debug);   // live [Tune] sliders: feel + tank-model fit + juice
 
         using (debug.Scope("arena"))
         {
@@ -1292,8 +1292,11 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             debug.Values.Value("wave", wave);
             debug.Values.Value("enemies", enemies.Count);
             debug.Values.Value("shells", shells.Count);
+            debug.Values.Value("sparks", sparks.Count);
+            debug.Values.Value("props", props.Count(p => p.Alive));
             debug.Values.Value("speed", playerSpeed);
             debug.Values.Value("pitch", player.BarrelPitch);
+            debug.Values.Value("trauma", trauma);
         }
     }
 
