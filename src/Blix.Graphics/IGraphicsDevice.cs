@@ -13,7 +13,14 @@ public readonly record struct GraphicsDeviceDiagnostics(
     // size. Surfaced in the debug overlay so per-frame upload traffic is visible.
     int TransientArenaBytesUsed = 0,
     int TransientArenaHighWaterBytes = 0,
-    int TransientArenaCapacityBytes = 0);
+    int TransientArenaCapacityBytes = 0,
+    // Pipeline cache (GetOrCreatePipeline): distinct cached pipelines, plus
+    // cumulative cache hits/misses since device creation. Hits climbing while
+    // Distinct stays flat means variant/shared-state pipelines are being reused
+    // rather than rebuilt.
+    int PipelineCacheCount = 0,
+    int PipelineCacheHits = 0,
+    int PipelineCacheMisses = 0);
 
 public interface IGraphicsDevice : IDisposable
 {
@@ -61,6 +68,14 @@ public interface IGraphicsDevice : IDisposable
     void DestroyShaderProgram(ShaderProgramHandle handle);
 
     PipelineHandle CreatePipeline(PipelineDescription description, string? name = null);
+
+    // Cached, opt-in variant of CreatePipeline: returns the SAME handle for a
+    // structurally-equal description (deduping the VkPipeline + its layout). Cached
+    // pipelines are device-owned and live until teardown, so callers must NOT
+    // DestroyPipeline a handle obtained here while it may still be in use elsewhere.
+    // Use for pipelines whose description recurs (variant permutations, shared
+    // blend modes); use CreatePipeline when you want sole ownership + explicit destroy.
+    PipelineHandle GetOrCreatePipeline(PipelineDescription description, string? name = null);
 
     void DestroyPipeline(PipelineHandle handle);
 
