@@ -8,7 +8,7 @@ The renderer is one layer of a larger pipeline — cooking, streaming, LOD, and 
 
 - **`Blix.Graphics`** — the graphics command language. Opaque handles (`PipelineHandle`, `VertexBufferHandle`, `TextureHandle`, `MaterialHandle`, …), `PipelineDescription`, render surfaces, the `RenderCommandList`, vertex layouts, shader sources, and the GLSL include preprocessor. Backend-neutral.
 - **`Blix.Graphics.Vulkan`** — the backend (the sole `IGraphicsDevice`). Owns the instance/device/swapchain, the `RenderGraph`, `MaterialBindings`, per-draw transient descriptor pools, and SPIR-V reflection. On macOS it runs through MoltenVK.
-- **`Blix.Render`** — engine-facing rendering helpers: `Mesh`, `MeshBundler`, `ResourceUploader`, `AsyncLoadQueue<T>`, and the 2D path (`SpriteBatch` + `Font`).
+- **`Blix.Render`** — engine-facing rendering helpers: `Mesh`, `MeshBundler`, `ResourceUploader`, `AsyncLoadQueue<T>`, the 2D path (`SpriteBatch` + `Font`), and the fullscreen/post primitives (`FullscreenPass`, `PostChain`).
 - **`Blix.Graphics.Images`** — image decode (StbImageSharp) and the HDR IBL bake (`EquirectangularToCubemap`, `PbrIblBaker`, `BlixProbe`).
 - **`Blix.Shaders`** — the shared GLSL library (`#include`d by demo shaders).
 
@@ -98,15 +98,17 @@ Vertex layouts (`src/Blix.Graphics/`): `VertexPosition3Color`, `VertexPosition3T
 
 Shaders are authored in GLSL and compiled offline to SPIR-V with `glslc`. The Vulkan binding model is then **reflected** from the compiled `.spv` (spirv-cross JSON sidecars) into a `ShaderInterface` — descriptor sets + std140 UBO layouts + push-constant ranges — by `ShaderReflection` (`src/Blix.Graphics.Vulkan/ShaderReflection.cs`). There is no hand-maintained binding table to drift out of sync with the shader source.
 
-`GlslPreprocessor.PreprocessDetailed` resolves `#include "lib/<file>.glsl"` (recursive, cycle-detected, `#pragma once`) and emits `#line` directives so compile errors report the original file + line. `ShaderLoader.LoadVertexFragment(vert, frag, includeDirs?, defines?)` bundles read + preprocess + source-map plumbing; `defines` injects `#define` lines after `#version` so one library function serves multiple variants.
+`GlslPreprocessor.PreprocessDetailed` resolves `#include "<file>.glsl"` (recursive, cycle-detected, `#pragma once`) and emits `#line` directives so compile errors report the original file + line. `ShaderLoader.LoadVertexFragment(vert, frag, includeDirs?, defines?)` bundles read + preprocess + source-map plumbing; `defines` injects `#define` lines after `#version` so one library function serves multiple variants.
 
-The shared library (`src/Blix.Shaders/`, every symbol `blix_`-prefixed) is deliberately small — three files copied into each demo's `Shaders/lib/`:
+The shared library (`src/Blix.Shaders/`, every symbol `blix_`-prefixed) is deliberately small. Demo shaders consume it with `#include "<file>.glsl"`; each demo's `CompileSpirV` target passes `glslc -I <src/Blix.Shaders>` so the include resolves, and lists the library files in the target's `Inputs` so edits retrigger the cook.
 
 | File | Provides |
 | --- | --- |
 | `pbr.glsl` | Cook-Torrance BRDF — `blix_distributionGGX`, `blix_geometrySmith`, `blix_fresnelSchlick` |
 | `tonemap.glsl` | `blix_acesFilm` + a `blix_tonemap(hdr, mode)` selector (ACES / AgX / Reinhard / Neutral) |
 | `noise.glsl` | Pseudorandom jitter (PCF rotation, banding decorrelation) |
+| `fullscreen.glsl` | `blix_fullscreenTriangle` / `blix_fullscreenTriangleNdc` — the `gl_VertexIndex` fullscreen-triangle synthesis every present/post/sky `.vert` shares |
+| `bloom.glsl` | `blix_bloomThreshold` (luma bright-extract) + `blix_gaussianBlur9` (separable 9-tap) |
 
 Other GLSL helpers are demo-local includes rather than shared library — e.g. `src/Blix.Demos.VulkanLit/Shaders/` carries `ibl.glsl` (diffuse + split-sum specular sampling), `brdf.glsl` (BRDF LUT integration), `shadows.glsl` (depth compare + PCF), and `normal_mapping.glsl`. A helper graduates into `Blix.Shaders` when a second demo needs it.
 
@@ -126,7 +128,9 @@ All techniques run on Vulkan; the shader files below are the source of truth.
 | PCF filtering | `shadows.glsl` (VulkanLit); rotated-Vogel PCF (VulkanSponza) |
 | Alpha-cutout shadow casters | `depth_prepass_mask.frag` (alpha threshold + alpha-to-coverage) |
 | Tonemap | `tonemap.glsl` — ACES (with an AgX grade option) |
-| Bloom | separable-Gaussian chain: `bloom_bright.frag` → `bloom_blur.frag` (H then V) |
+| Fullscreen pass | `FullscreenPass` (`Blix.Render`) — dummy-VB + `gl_VertexIndex` triangle + `DrawIndexed(3)`; caller brings pipeline/textures/push (present, bloom, sky, CRT, invert) |
+| Bloom | `PostChain` of `bloom_bright.frag` → `bloom_blur.frag` (H then V) over `bloom.glsl`; composite + tonemap stay in the caller's present pass (VulkanLit, VulkanParticles) |
+| Fullscreen effect chain | `PostChain` (`Blix.Render`) — linear image→image passes over auto-managed intermediate targets; declares targets+passes, caller supplies pipelines, yields an output texture |
 | Froxel volumetric fog | `froxel.comp` compute pass, froxel grid (VulkanSponza, `--fog`) |
 | Depth pre-pass | `depth_prepass.frag` / `depth_prepass_mask.frag` (VulkanSponza) |
 | Glass / transmissive | Fresnel + alpha-blend pipeline in `lit.frag` (no refraction) |
@@ -139,6 +143,33 @@ All techniques run on Vulkan; the shader files below are the source of truth.
 | Geometry bundling | `MeshBundler` packs primitives into one shared `(VB, IB)`; draws are sub-ranges |
 
 **Not ported from the GL renderer.** Screen-space reflections (SSR), dual-filter (Kawase) bloom, and the MRT material G-buffer that fed SSR were GL-only techniques and did not survive the OpenGL sunset. Bloom on Vulkan is the separable-Gaussian chain above; reflections come from prefiltered-environment IBL, not SSR.
+
+## Fullscreen passes and post-process
+
+Two layered primitives in `Blix.Render`, kept separate the same way `InstanceBuffer`/`InstancedBatch` are:
+
+**`FullscreenPass`** is the draw. It owns a dummy 3-vertex VB/IB (never sampled — the vertex shader synthesises positions from `gl_VertexIndex` via `blix_fullscreenTriangle`) and exposes `Draw(pass, pipeline, textures, push?, uniforms?)`. It carries no shader and no policy: the caller brings the pipeline (bright extract, Gaussian tap, ACES vs AgX tonemap, CRT, invert…), the push bytes, and the bindings. Every present/post/sky pass across the demos goes through it.
+
+**`PostChain`** is the orchestration above it — a linear chain of fullscreen image→image passes over auto-managed intermediate targets. It declares one color target + one graphics pass per stage, wiring each stage's `Read` to the previous stage's output (stage 0 reads the chain input), and records the per-frame draws. It owns only that plumbing: like `FullscreenPass`, the caller brings the pipelines, and it **stops at a texture** — compositing the result back (exposure, intensity, tonemap) is the caller's own present pass, which is what lets a scene opt out of the chain and keep its own tonemap policy (Sponza does).
+
+The lifecycle is three calls, dictated by `RenderGraph`: passes/targets must be declared before `Compile()`, but render surfaces and sampleable textures only exist after it.
+
+```csharp
+// 1. ctor — declare targets + passes (before Compile)
+var bloom = new PostChain(device, graph, hdrHandle, new[] {
+    new PostStage("bloom-bright", Rgba16F, quarterRes, brightInterface, "uHdr"),
+    new PostStage("bloom-blurH",  Rgba16F, quarterRes, blurInterface,   "uSrc"),
+    new PostStage("bloom-blurV",  Rgba16F, quarterRes, blurInterface,   "uSrc"),
+});
+graph.Compile();
+// 2. after Compile — caller builds each stage's pipeline against its surface
+bloom.BuildPipelines((stage, surface) => device.GetOrCreatePipeline(descFor(stage, surface), stage.Name));
+// 3. per frame — record; per-stage push (bright threshold, each blur's texel step)
+bloom.Record((i, stage) => i == 0 ? thresholdPush : texelStep(i));
+// caller's present pass composites graph.GetColorTexture(bloom.Output) over hdr, then tonemaps
+```
+
+Bloom is the proving consumer (`VulkanLit`, `VulkanParticles`); the stage shaders are the shared `bloom.glsl` + `blix_acesFilm`.
 
 ## Sprites, text, and UI
 
