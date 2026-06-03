@@ -1,5 +1,7 @@
 #version 450
 
+#include "fullscreen.glsl"
+
 // Fullscreen-triangle skybox vertex shader. Outputs a world-space direction
 // reconstructed from the clip-space corner positions; the fragment shader
 // uses that direction to sample the env cube. Placed at z = w so the post-
@@ -29,12 +31,7 @@ layout(location = 2) in vec2 inUv;
 layout(location = 0) out vec3 vWorldDir;
 
 void main() {
-    vec2 positions[3] = vec2[3](
-        vec2(-1.0, -1.0),
-        vec2( 3.0, -1.0),
-        vec2(-1.0,  3.0)
-    );
-    vec2 ndc = positions[gl_VertexIndex];
+    vec2 ndc = blix_fullscreenTriangleNdc(gl_VertexIndex);
     // Reconstruct the world-space point on the far plane that maps to this
     // NDC position. World direction from the camera to that point is what
     // we sample the cube by.

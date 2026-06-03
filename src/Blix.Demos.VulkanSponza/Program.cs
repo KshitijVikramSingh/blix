@@ -8,6 +8,7 @@ using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Images;
 using Blix.Graphics.Vulkan;
+using Blix.Render;
 using Blix.Runtime.Silk;
 
 namespace Blix.Demos.VulkanSponza;
@@ -97,8 +98,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // Present.
     private ShaderProgramHandle presentProgram;
     private PipelineHandle presentPipeline;
-    private VertexBufferHandle presentDummyVB;
-    private IndexBufferHandle presentDummyIB;
+    private FullscreenPass fullscreen = null!;
 
     // --- Froxel volumetric fog --------------------------------------------
     // A compute pass fills a view-aligned 3D grid with sun in-scattering and
@@ -397,7 +397,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // fallback) so de-batched per-primitive drawables don't build duplicates.
     private readonly Dictionary<GltfMaterial, (MaterialHandle Mat, TextureHandle Albedo, float Cutoff, float Alpha)> materialCache = new();
     private (MaterialHandle Mat, TextureHandle Albedo, float Cutoff, float Alpha)? noMaterialCache;
-    public void Dispose() { }
+    public void Dispose() => fullscreen?.Dispose();
 
 }
 

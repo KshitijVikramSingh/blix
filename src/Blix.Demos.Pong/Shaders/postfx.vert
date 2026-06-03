@@ -1,11 +1,12 @@
 #version 450
 
-// Fullscreen-triangle present (same shape as the Vulkan demos' present.vert):
-// positions generated from gl_VertexIndex, vertex inputs declared only for
-// pipeline-layout compatibility and ignored. Vulkan clip space is +Y down and
-// the UV origin is top-left, matching the offscreen image's row order (the
-// SpriteBatch rendered it with a top-left-origin ortho).
+#include "fullscreen.glsl"
 
+// Fullscreen-triangle present (same shape as the Vulkan demos' present.vert):
+// the triangle is generated from gl_VertexIndex by blix_fullscreenTriangle;
+// vertex inputs are declared only for pipeline-layout compatibility and ignored.
+// UV origin is top-left, matching the offscreen image's row order (the
+// SpriteBatch rendered it with a top-left-origin ortho).
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec2 inUv;
 
@@ -13,14 +14,5 @@ layout(location = 0) out vec2 vScreenUV;
 
 void main()
 {
-    vec2 positions[3] = vec2[3](
-        vec2(-1.0, -1.0),
-        vec2( 3.0, -1.0),
-        vec2(-1.0,  3.0));
-    vec2 uvs[3] = vec2[3](
-        vec2(0.0, 0.0),
-        vec2(2.0, 0.0),
-        vec2(0.0, 2.0));
-    gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
-    vScreenUV = uvs[gl_VertexIndex];
+    gl_Position = blix_fullscreenTriangle(gl_VertexIndex, vScreenUV);
 }

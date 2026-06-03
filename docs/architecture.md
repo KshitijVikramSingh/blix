@@ -33,7 +33,8 @@ Blix                           ← layer game code targets
    │   │   Blix.Render          ← engine-facing rendering + asset pipeline
    │   │      ↑                    (Mesh, GraphicsDeviceMeshExtensions, ResourceUploader,
    │   │                            MeshBundler, AsyncLoadQueue; SpriteBatch + Font + UI
-   │   │                            — Vulkan 2D path)
+   │   │                            — Vulkan 2D path; FullscreenPass + PostChain
+   │   │                            — fullscreen/post-process primitives)
    │ Blix.Geometry              ← primitives + intersection tests
    │                              (Bounds3/2, Sphere, Capsule, OBB, mesh colliders)
 Blix.Graphics                  ← graphics command language
@@ -48,8 +49,8 @@ Blix.Graphics.Images           ← image decode + HDR IBL bake pipeline
                                   (StbImageSharp, EquirectangularToCubemap,
                                    PbrIblBaker, HdrSunFinder)
 Blix.Shaders                   ← engine-level GLSL library (no csproj; .glsl
-                                  files copied into each demo's bin via csproj
-                                  globs; tonemap.glsl, noise.glsl, pbr.glsl)
+                                  included by demo shaders, resolved via a
+                                  glslc -I path; pbr/tonemap/noise/fullscreen/bloom)
 Blix.Diagnostics               ← contribution-based debug system
         ↑                         (DebugFrame snapshots + history ring,
                                    Values/Controls/Draw/Stats/Timers/Events
@@ -73,7 +74,7 @@ The renderer's defining choice is that the binding model is *derived*, not decla
 
 The Vulkan path is now the sole renderer, and in `VulkanSponza` it has moved well past the old GL feature set: that SPIR-V-reflected binding model, per-material descriptor sets, push constants, per-draw transient descriptor pools, a declarative render graph (`Blix.Graphics.Vulkan/RenderGraph.cs`), glTF + skinning (via the existing `Blix.Assets` importers), PBR + IBL (procedural-sky or cooked-probe environment + irradiance cube + split-sum BRDF LUT), HDR + ACES/AgX tonemap, and a separable-Gaussian bloom chain. `VulkanSponza` adds cascaded directional shadows (texel-snapped + cached), a depth pre-pass, froxel volumetric fog, GPU-driven indirect rendering, screen-space-error LOD over meshopt chains, and the cooked-asset pipeline (`.blixmesh`/`.blixtex`/`.blixprobe`) streamed through the engine's `GltfTextureLoader` + `AsyncLoadQueue` + `MeshBundler`. The 2D path (`SpriteBatch` + `Font`, used by `Pong`) was rebuilt on the Vulkan binding model. SSR and the dual-filter bloom were GL-only techniques and did not survive the sunset; froxel fog now lives on Vulkan in VulkanSponza.
 
-`Blix.Shaders` isn't a code project — it's a folder of `.glsl` files copied into each demo's output via `<None Include="..\Blix.Shaders\**\*.glsl" Link="Shaders\lib\...">` in the demo csproj. Demo shaders write `#include "lib/tonemap.glsl"` and the include preprocessor resolves it at load time (see **Shader library** under Conventions below).
+`Blix.Shaders` isn't a code project — it's a folder of `blix_`-prefixed `.glsl` library files. Demo shaders `#include "<file>.glsl"`; each demo's `CompileSpirV` target passes `glslc -I <src/Blix.Shaders>` so the include resolves at cook time, and lists the library files in the target's `Inputs` so edits retrigger the cook (see **Shader library** under Conventions below).
 
 ## Host contracts
 
@@ -105,7 +106,7 @@ The game implements `IGameLoop` (in `Blix`) and optionally `IInputHandler` and `
 
 `Blix.Graphics.ShaderLoader.LoadVertexFragment(vertPath, fragPath, includeDirs?, defines?)` bundles read + preprocess + naming + source-map plumbing. The optional `defines` dictionary injects `#define KEY VALUE` lines right after `#version` so the same library function can serve multiple variants.
 
-**Shader library.** Engine-shared GLSL lives at `src/Blix.Shaders/*.glsl` with a `blix_` prefix on every symbol. Demo shaders consume them with `#include "lib/<file>.glsl"`. New library files start with `#pragma once`.
+**Shader library.** Engine-shared GLSL lives at `src/Blix.Shaders/*.glsl` with a `blix_` prefix on every symbol. Demo shaders consume them with `#include "<file>.glsl"`, resolved by the `glslc -I <src/Blix.Shaders>` path each demo's `CompileSpirV` target passes (the library files are also in that target's `Inputs`, so editing one re-cooks every dependent shader). New library files start with `#pragma once`.
 
 **GLSL ASCII only.** Shaders are compiled offline to SPIR-V with `glslc` (Khronos); the old Apple GL 4.1 compiler quirks no longer apply at runtime. Pure ASCII remains the `glslc`-portability convention for the shader library — keep shader files pure ASCII.
 
