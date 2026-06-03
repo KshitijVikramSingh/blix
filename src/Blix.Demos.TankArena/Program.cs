@@ -73,6 +73,7 @@ internal sealed class TankFeel
     [Tune(0f, 8f)]     public float EnemyMax = 1f;       // 0 clears the arena
     [Tune]             public bool EnemiesFire = true;   // off = present but harmless
     [Tune(1.5f, 9f)]   public float EnemySpeed = 4.5f;
+    [Tune(0.8f, 5f)]   public float EnemyTurn = 2.2f;    // hull turn rate (rad/s) — smooths steering
     [Tune(0.5f, 6f)]   public float EnemyReload = 2.8f;
     [Tune(2f, 40f)]    public float EnemyDamage = 18f;
 }
@@ -743,6 +744,15 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         return MathF.Abs(delta) <= maxDelta ? target : current + MathF.Sign(delta) * maxDelta;
     }
 
+    // Rotate an angle toward a target by at most maxDelta, taking the shortest way
+    // around the circle (so turning past ±π doesn't spin the long way).
+    private static float TurnToward(float current, float target, float maxDelta)
+    {
+        var delta = MathF.IEEERemainder(target - current, MathF.Tau);   // wrap to [-π, π]
+        if (MathF.Abs(delta) <= maxDelta) return target;
+        return current + MathF.Sign(delta) * maxDelta;
+    }
+
     private static void SetHorizontalVelocity(Tank tank, Vector3 horizontal) =>
         tank.Physics.Velocity = new Vector3(horizontal.X, tank.Physics.Velocity.Y, horizontal.Z);
 
@@ -763,13 +773,38 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         }
     }
 
+    private const float SpawnMinRange = 26f;   // never closer than this to the player
+    private const float SpawnMaxRange = 36f;
+
+    // Spawn at a fair distance band AROUND THE PLAYER (not a random arena-edge point),
+    // so enemies always roll in from a reasonable range with reaction time — never on
+    // top of you, inside a wall, or on a prop. Re-rolls a few times, then falls back.
     private void SpawnEnemy()
     {
-        var angle = (float)(rng.NextDouble() * Math.Tau);
+        var pos = new Vector3(0f, 4f, 0f);
+        for (var attempt = 0; attempt < 24; attempt++)
+        {
+            var angle = (float)(rng.NextDouble() * Math.Tau);
+            var range = SpawnMinRange + (float)rng.NextDouble() * (SpawnMaxRange - SpawnMinRange);
+            var c = player.Position + new Vector3(MathF.Sin(angle) * range, 0f, MathF.Cos(angle) * range);
+            if (MathF.Abs(c.X) > ArenaHalf - 3f || MathF.Abs(c.Z) > ArenaHalf - 3f) continue;   // inside walls
+            if (OnProp(c)) continue;                                                             // clear of cover
+            pos = new Vector3(c.X, 4f, c.Z);   // drop in
+            break;
+        }
         var e = new Tank { Health = 1f, FireTimer = feel.EnemyReload * (0.4f + (float)rng.NextDouble()) };
-        e.Position = new Vector3(
-            MathF.Sin(angle) * (ArenaHalf - 4f), 4f, MathF.Cos(angle) * (ArenaHalf - 4f));   // drop in
+        e.Position = pos;
         enemies.Add(e);
+    }
+
+    // True if a horizontal point sits on (or hard against) an alive prop's footprint.
+    private bool OnProp(Vector3 p)
+    {
+        foreach (var prop in props)
+        {
+            if (prop.Alive && Flatten(p - prop.Position).Length() < prop.Type.Radius + 2.5f) return true;
+        }
+        return false;
     }
 
     private void UpdateEnemy(Tank e, Time time, float dt)
@@ -779,17 +814,21 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         var dist = toPlayer.Length();
         var seek = dist > 0.0001f ? toPlayer / dist : -Vector3.UnitZ;
 
-        // Steer the HULL around cover (drive direction); the TURRET keeps aiming
-        // straight at the player regardless of how the hull is weaving.
+        // Steer the HULL around cover, but TURN toward that heading at a limited rate
+        // (real tanks don't pivot instantly) — this is what stops the snapping when the
+        // steer target shifts. The TURRET still tracks the player exactly.
         var drive = AvoidObstacles(e.Position, seek);
-        e.HullYaw = MathF.Atan2(-drive.X, -drive.Z);
+        var desiredYaw = MathF.Atan2(-drive.X, -drive.Z);
+        e.HullYaw = TurnToward(e.HullYaw, desiredYaw, feel.EnemyTurn * dt);
         var worldAim = MathF.Atan2(-toPlayer.X, -toPlayer.Z);
         e.TurretYaw = worldAim - e.HullYaw;
         SeatRig(e);
         e.Apply();
 
-        // Drive along the steered heading until standoff range; gravity + walls via Resolve.
-        SetHorizontalVelocity(e, dist > EnemyStandoff ? drive * feel.EnemySpeed : Vector3.Zero);
+        // Drive along the hull's ACTUAL facing (not the raw steer target) so motion
+        // curves smoothly with the turn instead of sliding sideways.
+        var forward = Vector3.Transform(-Vector3.UnitZ, Quaternion.CreateFromAxisAngle(Vector3.UnitY, e.HullYaw));
+        SetHorizontalVelocity(e, dist > EnemyStandoff ? forward * feel.EnemySpeed : Vector3.Zero);
         e.Physics.Gravity = new Vector3(0f, feel.TankGravity, 0f);
         e.Physics.FixedUpdate(new Time(time.Total, dt));
         ResolveTank(e);
