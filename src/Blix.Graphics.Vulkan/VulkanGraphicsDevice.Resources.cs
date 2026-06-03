@@ -724,8 +724,18 @@ public sealed partial class VulkanGraphicsDevice
             BlendEnable = blendState.Enabled,
             ColorWriteMask = ColorComponentFlags.RBit | ColorComponentFlags.GBit
                            | ColorComponentFlags.BBit | ColorComponentFlags.ABit,
-            SrcColorBlendFactor = blendState.Mode == BlendMode.Additive ? BlendFactor.One : BlendFactor.SrcAlpha,
-            DstColorBlendFactor = blendState.Mode == BlendMode.Additive ? BlendFactor.One : BlendFactor.OneMinusSrcAlpha,
+            // Additive: (One, One). PremultipliedAlpha: (One, 1-SrcA) — the source
+            // already carries colour*alpha, so don't scale it by alpha again. Alpha:
+            // (SrcA, 1-SrcA) — classic straight-alpha blend.
+            SrcColorBlendFactor = blendState.Mode switch
+            {
+                BlendMode.Additive => BlendFactor.One,
+                BlendMode.PremultipliedAlpha => BlendFactor.One,
+                _ => BlendFactor.SrcAlpha,
+            },
+            DstColorBlendFactor = blendState.Mode == BlendMode.Additive
+                ? BlendFactor.One
+                : BlendFactor.OneMinusSrcAlpha,
             ColorBlendOp = BlendOp.Add,
             SrcAlphaBlendFactor = BlendFactor.One,
             DstAlphaBlendFactor = BlendFactor.Zero,
