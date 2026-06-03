@@ -62,6 +62,7 @@ internal sealed class TankFeel
     [Tune(-60f, -8f)]  public float TankGravity = -32f;       // kept
     [Tune(0.2f, 2.5f)] public float Reload = 0.95f;           // kept
     [Tune(0f, 12f)]    public float Knockback = 3f;           // recoil shove on firing
+    [Tune(0f, 0.7f)]   public float ShadowAlpha = 0.32f;      // planar sun-shadow darkness
     [Tune(6f, 30f)]    public float CamDistance = 6f;
     [Tune(3f, 22f)]    public float CamHeight = 3f;
     [Tune(1f, 14f)]    public float CamSmooth = 1f;
@@ -148,9 +149,12 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
     private InstancedBatch batch = null!;
     private FullscreenPass sky = null!;
     private PipelineHandle skyPipeline;
+    private InstanceBuffer shadowInstances = null!;
+    private InstancedBatch shadowBatch = null!;
     private readonly byte[] pushBytes = new byte[96];   // viewProj + camPos + sunDir
     private readonly byte[] skyPush = new byte[96];     // invViewProj + camPos + sunDir
     private static readonly Vector3 SunDir = Vector3.Normalize(new Vector3(0.35f, 0.82f, 0.45f));
+    private const float ShadowLift = 0.03f;             // planar shadows sit just above the ground
 
     private sealed class Shell
     {
@@ -240,6 +244,20 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
                 DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled }),
             "sky");
         sky = new FullscreenPass(vk, "sky");
+
+        // Planar sun shadows: the world geometry re-drawn flattened onto the ground
+        // along the sun direction, dark + alpha-blended, depth-tested but not written.
+        // Reuses cube.vert (instanced) with a flat shadow.frag.
+        var shadowShader = vk.CreateShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv")),
+            File.ReadAllBytes(Path.Combine(shaderDir, "shadow.frag.spv")),
+            iface, "shadow");
+        var shadowPipeline = vk.CreatePipeline(
+            new PipelineDescription(shadowShader, meshLayout, PrimitiveTopology.Triangles,
+                DepthState.LessEqualNoWrite, RasterizerState.NoCulling, new[] { BlendState.AlphaBlend }),
+            "shadow");
+        shadowInstances = new InstanceBuffer(vk, shadowShader, "shadows");
+        shadowBatch = new InstancedBatch(cube, shadowPipeline, shadowInstances);
         batch = new InstancedBatch(cube, pipeline, instanceBuffer);
         tunables = new ObjectTunables(feel);
 
@@ -537,6 +555,14 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
             batch.Add(Matrix4x4.CreateScale(0.28f) * s.Transform.WorldMatrix, tint);
         }
 
+        // Planar sun shadows: tank geometry flattened onto the ground along the sun
+        // direction, drawn (blended) after the opaque world so they darken the ground.
+        var shadowMatrix = ShadowMatrix(SunDir);
+        var shadowTint = new Vector4(0f, 0f, 0f, feel.ShadowAlpha);
+        shadowBatch.Begin(pushBytes);
+        AddTankShadow(player, shadowMatrix, shadowTint);
+        foreach (var e in enemies) AddTankShadow(e, shadowMatrix, shadowTint);
+
         commandList.Pass(
             "arena",
             new RenderPassDescription(
@@ -546,7 +572,8 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
             pass =>
             {
                 sky.Draw(pass, skyPipeline, Array.Empty<ShaderTextureBinding>(), skyPush);   // background
-                batch.End(pass);                                                              // world over it
+                batch.End(pass);                                                              // opaque world
+                shadowBatch.End(pass);                                                        // shadows on top
             });
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames) host.RequestClose();
@@ -555,14 +582,39 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable
     private void AddBox(Vector3 center, Vector3 scale, Vector4 tint) =>
         batch.Add(Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(center), tint);
 
+    // The three drawable cube models for a tank (hull / turret / barrel-from-breach),
+    // shared by the lit draw and the planar-shadow projection.
+    private static (Matrix4x4 Hull, Matrix4x4 Turret, Matrix4x4 Barrel) TankCubeModels(Tank t) => (
+        Matrix4x4.CreateScale(Tank.HullScale) * t.Hull.WorldMatrix,
+        Matrix4x4.CreateScale(Tank.TurretScale) * t.Turret.WorldMatrix,
+        Matrix4x4.CreateScale(Tank.BarrelScale) * Matrix4x4.CreateTranslation(0f, 0f, -Tank.BarrelScale.Z * 0.5f) * t.Barrel.WorldMatrix);
+
     private void AddTank(Tank t, Vector4 hullTint, Vector4 turretTint)
     {
-        batch.Add(Matrix4x4.CreateScale(Tank.HullScale) * t.Hull.WorldMatrix, hullTint);
-        batch.Add(Matrix4x4.CreateScale(Tank.TurretScale) * t.Turret.WorldMatrix, turretTint);
-        // Barrel box pushed forward half a length so it runs from the breach to the muzzle.
-        batch.Add(
-            Matrix4x4.CreateScale(Tank.BarrelScale) * Matrix4x4.CreateTranslation(0f, 0f, -Tank.BarrelScale.Z * 0.5f) * t.Barrel.WorldMatrix,
-            new Vector4(0.30f, 0.31f, 0.34f, 1f));   // gunmetal
+        var (hull, turret, barrel) = TankCubeModels(t);
+        batch.Add(hull, hullTint);
+        batch.Add(turret, turretTint);
+        batch.Add(barrel, new Vector4(0.30f, 0.31f, 0.34f, 1f));   // gunmetal
+    }
+
+    private void AddTankShadow(Tank t, Matrix4x4 shadow, Vector4 tint)
+    {
+        var (hull, turret, barrel) = TankCubeModels(t);
+        shadowBatch.Add(hull * shadow, tint);
+        shadowBatch.Add(turret * shadow, tint);
+        shadowBatch.Add(barrel * shadow, tint);
+    }
+
+    // Planar projection that flattens world geometry onto the ground (y = ShadowLift)
+    // along the sun's travel direction — row-vector form (v * realModel * shadow).
+    private static Matrix4x4 ShadowMatrix(Vector3 sunDir)
+    {
+        var l = -sunDir;   // light travel direction (downward; l.Y < 0)
+        return new Matrix4x4(
+            1f, 0f, 0f, 0f,
+            -l.X / l.Y, 0f, -l.Z / l.Y, 0f,
+            0f, 0f, 1f, 0f,
+            0f, ShadowLift, 0f, 1f);
     }
 
     public string DebugName => "tank-arena";
