@@ -66,8 +66,7 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
     // buffers (shared with invert).
     private ShaderProgramHandle presentShaderProgram;
     private PipelineHandle presentPipeline;
-    private VertexBufferHandle fullscreenVB;
-    private IndexBufferHandle fullscreenIB;
+    private FullscreenPass fullscreen = null!;
 
     // Per-frame state.
     private readonly byte[] modelPushBytes = new byte[64];
@@ -204,16 +203,8 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
             .SetTexture(binding: 1, albedoTexture)
             .Handle;
 
-        // --- Dummy fullscreen-quad buffers (shared) -------------------
-        var dummyVerts = new VertexPosition3Texture[]
-        {
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
-        };
-        fullscreenVB = vk.CreateVertexBuffer(
-            VertexPosition3Texture.CreateBufferData(dummyVerts), "fullscreen.vb");
-        fullscreenIB = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "fullscreen.ib");
+        // Fullscreen triangle shared by the invert + present passes.
+        fullscreen = new FullscreenPass(vk, "fullscreen");
 
         // --- Camera ---------------------------------------------------
         var aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
@@ -257,15 +248,8 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
         // graph Read edge declared at compile time.
         var hdrTexture = graph.GetColorTexture(hdrHandle);
         graph.Pass(invertPassHandle, scope =>
-        {
-            scope.DrawIndexed(
-                vertexBuffer: fullscreenVB,
-                indexBuffer: fullscreenIB,
-                pipeline: invertPipeline,
-                indexCount: 3,
-                uniforms: Array.Empty<ShaderUniform>(),
-                textures: new[] { new ShaderTextureBinding("uHdr", hdrTexture, Slot: 0) });
-        });
+            fullscreen.Draw(scope, invertPipeline,
+                new[] { new ShaderTextureBinding("uHdr", hdrTexture, Slot: 0) }));
 
         // Append graph passes to the command list.
         graph.Execute(commandList);
@@ -278,16 +262,8 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
                 Target: RenderSurfaceHandle.Default,
                 ClearColors: new GraphicsColor?[] { new GraphicsColor(0, 0, 0, 1) },
                 ClearDepth: true),
-            pass =>
-            {
-                pass.DrawIndexed(
-                    vertexBuffer: fullscreenVB,
-                    indexBuffer: fullscreenIB,
-                    pipeline: presentPipeline,
-                    indexCount: 3,
-                    uniforms: Array.Empty<ShaderUniform>(),
-                    textures: new[] { new ShaderTextureBinding("uInverted", invertedTexture, Slot: 0) });
-            });
+            pass => fullscreen.Draw(pass, presentPipeline,
+                new[] { new ShaderTextureBinding("uInverted", invertedTexture, Slot: 0) }));
     }
 
     public void Debug(DebugContext debug)
@@ -327,6 +303,7 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
     public void Dispose()
     {
         graph?.Dispose();
+        fullscreen?.Dispose();
     }
 
     private static (VertexPosition3Texture[] Vertices, ushort[] Indices) BuildCube()

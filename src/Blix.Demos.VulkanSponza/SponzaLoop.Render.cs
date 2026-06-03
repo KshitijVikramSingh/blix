@@ -284,15 +284,9 @@ internal sealed partial class SponzaLoop
                     material: g.Material,
                     pushConstants: identityPush);
             }
-            // Sky after opaque, before blend. Fullscreen triangle drawn
-            // from the dummy VB; positions are synthesised in skybox.vert.
-            scope.DrawIndexed(
-                vertexBuffer: presentDummyVB,
-                indexBuffer: presentDummyIB,
-                pipeline: skyPipeline,
-                indexCount: 3,
-                uniforms: perFrame,
-                textures: passBindings);
+            // Sky after opaque, before blend. Fullscreen triangle; positions are
+            // synthesised in skybox.vert, so it binds set-0 perFrame + textures only.
+            fullscreen.Draw(scope, skyPipeline, passBindings, uniforms: perFrame);
             // Blend (glass), depth-test only, after opaque + sky. One indirect
             // draw per (pipeline, material) group, same as opaque.
             foreach (var g in blendGroups)
@@ -330,20 +324,10 @@ internal sealed partial class SponzaLoop
                 Target: RenderSurfaceHandle.Default,
                 ClearColors: new GraphicsColor?[] { new GraphicsColor(0, 0, 0, 1) },
                 ClearDepth: true),
-            pass =>
-            {
-                pass.DrawIndexed(
-                    vertexBuffer: presentDummyVB,
-                    indexBuffer: presentDummyIB,
-                    pipeline: presentPipeline,
-                    indexCount: 3,
-                    uniforms: Array.Empty<ShaderUniform>(),
-                    textures: new[]
-                    {
-                        new ShaderTextureBinding("uHdr", hdrTex, Slot: 0),
-                    },
-                    pushConstants: push);
-            });
+            pass => fullscreen.Draw(
+                pass, presentPipeline,
+                new[] { new ShaderTextureBinding("uHdr", hdrTex, Slot: 0) },
+                push));
     }
 
     private static byte[] ModelPushBytes(Matrix4x4 model)

@@ -8,6 +8,7 @@ using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Images;
 using Blix.Graphics.Vulkan;
+using Blix.Render;
 using Blix.Runtime.Silk;
 
 namespace Blix.Demos.VulkanSponza;
@@ -267,17 +268,9 @@ internal sealed partial class SponzaLoop
             RasterizerState.NoCulling,
             BlendState.Disabled), "present");
 
-        // Dummy VB/IB so the fullscreen-triangle present pass has something
-        // to bind. The vertex shader synthesises positions from gl_VertexIndex.
-        var dummyVerts = new VertexPosition3NormalTexture[]
-        {
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector3(0, 0, 1), new GraphicsVector2(0, 0)),
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector3(0, 0, 1), new GraphicsVector2(0, 0)),
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector3(0, 0, 1), new GraphicsVector2(0, 0)),
-        };
-        presentDummyVB = vk.CreateVertexBuffer(
-            VertexPosition3NormalTexture.CreateBufferData(dummyVerts), "present.dummy.vb");
-        presentDummyIB = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "present.dummy.ib");
+        // Fullscreen triangle for the sky + present passes (positions synthesised
+        // from gl_VertexIndex in the vertex shader — the buffer is never sampled).
+        fullscreen = new FullscreenPass(vk, "present.dummy");
 
         // --- Froxel fog compute program + grid ---------------------------
         var froxelSpv = File.ReadAllBytes(Path.Combine(shaderDir, "froxel.comp.spv"));

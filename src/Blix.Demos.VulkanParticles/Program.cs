@@ -115,8 +115,7 @@ internal sealed class ParticlesLoop : IGameLoop, IInputHandler, IDebuggable, IDi
 
     // Opaque backdrop geometry (drawn in both the depth pre-pass and the scene pass).
     private readonly List<OpaqueMesh> opaques = new();
-    private VertexBufferHandle fullscreenVB;
-    private IndexBufferHandle fullscreenIB;
+    private FullscreenPass fullscreen = null!;
 
     // Scratch push buffers (reused; sizes match the shader push ranges).
     private readonly byte[] depthPush = new byte[128];     // model + viewProj
@@ -268,14 +267,7 @@ internal sealed class ParticlesLoop : IGameLoop, IInputHandler, IDebuggable, IDi
 
         // --- Geometry + batches ------------------------------------------
         BuildOpaqueGeometry();
-        var dummy = new VertexPosition3NormalTexture[]
-        {
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector3(0, 0, 1), new GraphicsVector2(0, 0)),
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector3(0, 0, 1), new GraphicsVector2(0, 0)),
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector3(0, 0, 1), new GraphicsVector2(0, 0)),
-        };
-        fullscreenVB = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(dummy), "fullscreen.vb");
-        fullscreenIB = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "fullscreen.ib");
+        fullscreen = new FullscreenPass(vk, "fullscreen");
 
         sparks = new ParticleBatch(vk, 8192, "sparks");
         explosion = new ParticleBatch(vk, 6144, "explosion");
@@ -520,19 +512,14 @@ internal sealed class ParticlesLoop : IGameLoop, IInputHandler, IDebuggable, IDi
                 Target: RenderSurfaceHandle.Default,
                 ClearColors: new GraphicsColor?[] { new GraphicsColor(0, 0, 0, 1) },
                 ClearDepth: true),
-            pass =>
-            {
-                pass.DrawIndexed(
-                    vertexBuffer: fullscreenVB, indexBuffer: fullscreenIB,
-                    pipeline: presentPipeline, indexCount: 3,
-                    uniforms: Array.Empty<ShaderUniform>(),
-                    textures: new[]
-                    {
-                        new ShaderTextureBinding("uHdr", hdrTex, Slot: 0),
-                        new ShaderTextureBinding("uBloom", bloomTex, Slot: 1),
-                    },
-                    pushConstants: presentPush);
-            });
+            pass => fullscreen.Draw(
+                pass, presentPipeline,
+                new[]
+                {
+                    new ShaderTextureBinding("uHdr", hdrTex, Slot: 0),
+                    new ShaderTextureBinding("uBloom", bloomTex, Slot: 1),
+                },
+                presentPush));
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames)
         {
@@ -560,16 +547,7 @@ internal sealed class ParticlesLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     {
         graph.Pass(pass, scope =>
         {
-            if (push is null)
-            {
-                scope.DrawIndexed(fullscreenVB, fullscreenIB, pipeline, indexCount: 3,
-                    Array.Empty<ShaderUniform>(), new[] { input });
-            }
-            else
-            {
-                scope.DrawIndexed(fullscreenVB, fullscreenIB, pipeline, indexCount: 3,
-                    Array.Empty<ShaderUniform>(), new[] { input }, push);
-            }
+            fullscreen.Draw(scope, pipeline, new[] { input }, push);
         });
     }
 
@@ -657,5 +635,9 @@ internal sealed class ParticlesLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     // Window.Dispose disposes the loop after WaitIdle and before device teardown — the
     // safe point to free the graph's render passes + offscreen images (not in the
     // device's auto-freed tables). Batch buffers + pipelines live in device tables.
-    public void Dispose() => graph?.Dispose();
+    public void Dispose()
+    {
+        graph?.Dispose();
+        fullscreen?.Dispose();
+    }
 }

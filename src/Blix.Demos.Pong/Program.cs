@@ -108,8 +108,7 @@ internal sealed class PongGame : Game, IInputHandler
     private PassHandle spritePass;
     private ShaderProgramHandle postfxShader;
     private PipelineHandle postfxPipeline;
-    private VertexBufferHandle fullscreenVB;
-    private IndexBufferHandle fullscreenIB;
+    private FullscreenPass fullscreen = null!;
     private readonly byte[] postfxPush = new byte[64];
 
     private AudioClipHandle paddleClip = AudioClipHandle.Invalid;
@@ -166,17 +165,9 @@ internal sealed class PongGame : Game, IInputHandler
             RasterizerState.NoCulling,
             BlendState.Disabled), "pong.postfx");
 
-        // Dummy 3-vertex buffers — the fullscreen-triangle vertex shader
-        // generates positions from gl_VertexIndex and ignores these.
-        var dummyVerts = new VertexPosition3Texture[]
-        {
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
-        };
-        fullscreenVB = vk.CreateVertexBuffer(
-            VertexPosition3Texture.CreateBufferData(dummyVerts), "pong.fs.vb");
-        fullscreenIB = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "pong.fs.ib");
+        // Fullscreen triangle for the CRT post-FX present pass (positions are
+        // synthesised from gl_VertexIndex; the buffer is never sampled).
+        fullscreen = new FullscreenPass(vk, "pong.fs");
 
         try
         {
@@ -486,17 +477,10 @@ internal sealed class PongGame : Game, IInputHandler
                 RenderSurfaceHandle.Default,
                 ClearColors: new GraphicsColor?[] { new(0, 0, 0, 1) },
                 ClearDepth: true),
-            pass =>
-            {
-                pass.DrawIndexed(
-                    fullscreenVB,
-                    fullscreenIB,
-                    postfxPipeline,
-                    indexCount: 3,
-                    Array.Empty<ShaderUniform>(),
-                    new ShaderTextureBinding[] { new("uScene", sceneTex, Slot: 0) },
-                    postfxPush);
-            });
+            pass => fullscreen.Draw(
+                pass, postfxPipeline,
+                new ShaderTextureBinding[] { new("uScene", sceneTex, Slot: 0) },
+                postfxPush));
     }
 
     private void DrawCentreNet()

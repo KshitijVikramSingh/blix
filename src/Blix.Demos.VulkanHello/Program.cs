@@ -43,8 +43,7 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
     private TextureHandle offscreenColor;
     private ShaderProgramHandle presentShaderProgram;
     private PipelineHandle presentPipeline;
-    private VertexBufferHandle presentVertexBuffer;
-    private IndexBufferHandle presentIndexBuffer;
+    private FullscreenPass fullscreen = null!;
 
     private int frameCount;
     private Matrix4x4 viewProj;
@@ -200,19 +199,9 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
             RasterizerState.NoCulling,
             BlendState.Disabled), "present");
 
-        // Dummy 3-vertex / 3-index buffer. present.vert ignores inPosition
-        // and inUv — gl_VertexIndex generates the fullscreen triangle. But
-        // the engine's vertex layout requires a non-empty binding, so we
-        // ship three throwaway vertices.
-        var dummyVerts = new VertexPosition3Texture[]
-        {
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector2(0, 0)),
-        };
-        presentVertexBuffer = vk.CreateVertexBuffer(
-            VertexPosition3Texture.CreateBufferData(dummyVerts), "present.vb");
-        presentIndexBuffer = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "present.ib");
+        // Fullscreen triangle for the present pass (positions synthesised from
+        // gl_VertexIndex in present.vert; the buffer is never sampled).
+        fullscreen = new FullscreenPass(vk, "present");
 
         // Camera pulled back + raised so both cubes fit. Two cubes at
         // x = ±CubeSeparation; camera at (3.5, 1.9, 4.5) looking at origin.
@@ -294,19 +283,9 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
                 Target: RenderSurfaceHandle.Default,
                 ClearColors: new GraphicsColor?[] { new GraphicsColor(0, 0, 0, 1) },
                 ClearDepth: true),
-            pass =>
-            {
-                pass.DrawIndexed(
-                    vertexBuffer: presentVertexBuffer,
-                    indexBuffer: presentIndexBuffer,
-                    pipeline: presentPipeline,
-                    indexCount: 3,
-                    uniforms: Array.Empty<ShaderUniform>(),
-                    textures: new[]
-                    {
-                        new ShaderTextureBinding("uOffscreen", offscreenColor, Slot: 0),
-                    });
-            });
+            pass => fullscreen.Draw(
+                pass, presentPipeline,
+                new[] { new ShaderTextureBinding("uOffscreen", offscreenColor, Slot: 0) }));
     }
 
     private static void PackMatrix(Matrix4x4 m, byte[] target)

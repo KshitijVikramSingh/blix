@@ -140,8 +140,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     internal float BloomIntensity { get; set; } = 0.7f;
 
     // Present.
-    private VertexBufferHandle fullscreenVB;
-    private IndexBufferHandle fullscreenIB;
+    private FullscreenPass fullscreen = null!;
 
     // Per-frame state.
     private int frameCount;
@@ -718,16 +717,8 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             name: "cesium.bonepalette");
         cesiumBoneMaterial = cesiumBonePalette.Handle;
 
-        // --- Dummy fullscreen quad --------------------------------------
-        var dummyVerts = new VertexPosition3NormalTexture[]
-        {
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector3(0, 0, 1), new GraphicsVector2(0, 0)),
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector3(0, 0, 1), new GraphicsVector2(0, 0)),
-            new(new GraphicsVector3(0, 0, 0), new GraphicsVector3(0, 0, 1), new GraphicsVector2(0, 0)),
-        };
-        fullscreenVB = vk.CreateVertexBuffer(
-            VertexPosition3NormalTexture.CreateBufferData(dummyVerts), "fullscreen.vb");
-        fullscreenIB = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "fullscreen.ib");
+        // --- Fullscreen triangle (present + bloom passes) ----------------
+        fullscreen = new FullscreenPass(vk, "fullscreen");
 
         // --- Camera + transforms ----------------------------------------
         cameraPosition = new Vector3(3.5f, 2.4f, 4.4f);
@@ -1120,24 +1111,20 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             {
                 if (isFinal)
                 {
-                    pass.DrawIndexed(
-                        vertexBuffer: fullscreenVB, indexBuffer: fullscreenIB,
-                        pipeline: presentPipe, indexCount: 3,
-                        uniforms: Array.Empty<ShaderUniform>(),
-                        textures: new[]
+                    fullscreen.Draw(
+                        pass, presentPipe,
+                        new[]
                         {
                             new ShaderTextureBinding("uHdr", presentTex, Slot: 0),
                             new ShaderTextureBinding("uBloom", bloomTex, Slot: 1),
                         },
-                        pushConstants: presentPush);
+                        presentPush);
                 }
                 else
                 {
-                    pass.DrawIndexed(
-                        vertexBuffer: fullscreenVB, indexBuffer: fullscreenIB,
-                        pipeline: presentPipe, indexCount: 3,
-                        uniforms: Array.Empty<ShaderUniform>(),
-                        textures: new[] { new ShaderTextureBinding("uOffscreen", presentTex, Slot: 0) });
+                    fullscreen.Draw(
+                        pass, presentPipe,
+                        new[] { new ShaderTextureBinding("uOffscreen", presentTex, Slot: 0) });
                 }
             });
     }
@@ -1147,24 +1134,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private void RecordFullscreen(PassHandle pass, PipelineHandle pipeline,
         ShaderTextureBinding input, byte[]? push)
     {
-        graph.Pass(pass, scope =>
-        {
-            if (push is null)
-            {
-                scope.DrawIndexed(
-                    vertexBuffer: fullscreenVB, indexBuffer: fullscreenIB,
-                    pipeline: pipeline, indexCount: 3,
-                    uniforms: Array.Empty<ShaderUniform>(), textures: new[] { input });
-            }
-            else
-            {
-                scope.DrawIndexed(
-                    vertexBuffer: fullscreenVB, indexBuffer: fullscreenIB,
-                    pipeline: pipeline, indexCount: 3,
-                    uniforms: Array.Empty<ShaderUniform>(), textures: new[] { input },
-                    pushConstants: push);
-            }
-        });
+        graph.Pass(pass, scope => fullscreen.Draw(scope, pipeline, new[] { input }, push));
     }
 
     private static byte[] Vec2Bytes(float x, float y)
@@ -1349,6 +1319,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     public void Dispose()
     {
         graph?.Dispose();
+        fullscreen?.Dispose();
     }
 
     // Perspective shadow VP for a spot light. FOV covers the outer cone with
