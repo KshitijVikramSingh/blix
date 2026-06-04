@@ -27,24 +27,15 @@ const vec3 kFogColor      = vec3(0.72, 0.84, 0.94);
 const float kFogStart     = 38.0;
 const float kFogEnd       = 130.0;
 
-// Single-tap sun shadow: NDC->UV (Vulkan: Z already [0,1], Y-flip baked into the
-// shadow ortho), with an angle-dependent bias to avoid acne. 1 = lit, 0 = shadowed.
-float sunShadow(vec4 coord, float ndotl) {
-    vec3 ndc = coord.xyz / coord.w;
-    vec2 uv = ndc.xy * 0.5 + 0.5;
-    float current = ndc.z;
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || current < 0.0 || current > 1.0) {
-        return 1.0;
-    }
-    float bias = mix(0.004, 0.0006, ndotl);
-    float closest = texture(uSunShadowMap, uv).r;
-    return (current - bias > closest) ? 0.0 : 1.0;
-}
+// Shared single-tap sun-shadow technique (the look-free, fiddly bit) — see
+// src/Blix.Shaders/shadow.glsl. The daylight mood (ambient/sun/fog colours above)
+// stays local to this demo.
+#include "shadow.glsl"
 
 void main() {
     vec3 n = normalize(vNormal);
     float ndotl = max(dot(n, normalize(uSunDir.xyz)), 0.0);
-    float shadow = sunShadow(vSunShadowCoord, ndotl);
+    float shadow = blix_sun_shadow(uSunShadowMap, vSunShadowCoord, ndotl);
 
     vec3 ambient = mix(kGroundAmbient, kSkyAmbient, n.y * 0.5 + 0.5);
     vec3 lit = vTint.rgb * (ambient + kSunColor * ndotl * 0.9 * shadow);

@@ -437,16 +437,10 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     private static Vector3 CellCenter(int cx, int cz) =>
         new((cx - GridW / 2f + 0.5f) * Cell, 0f, (cz - GridH / 2f + 0.5f) * Cell);
 
-    // Sun shadow view-projection: light eye up the sun direction looking at the grid
-    // centre, ortho sized to the grid footprint. (Lifted from TankArena.)
-    private static Matrix4x4 SunShadowVP()
-    {
-        var eye = SunDir * SunDistance;
-        var up = MathF.Abs(SunDir.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
-        var view = Matrix4x4.CreateLookAt(eye, Vector3.Zero, up);
-        var ortho = GraphicsMatrices.CreateOrthographicVulkan(SunOrthoExtent, SunOrthoExtent, 20f, SunDistance + 90f);
-        return view * ortho;
-    }
+    // Sun shadow view-projection — the shared engine helper (extent/distance are this
+    // demo's scene tuning; pairs with Blix.Shaders/shadow.glsl's blix_sun_shadow).
+    private static Matrix4x4 SunShadowVP() =>
+        GraphicsMatrices.SunShadowViewProjection(SunDir, SunDistance, SunOrthoExtent, 20f, SunDistance + 90f);
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
