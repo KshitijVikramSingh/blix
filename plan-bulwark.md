@@ -104,8 +104,9 @@ RTS camera (orbit / zoom / pan) · wave director + economy.
     upload. Built local (the `SkinnedInstancedBatch` candidate — promote to
     `Blix.Render` only on a 2nd consumer). HP tint deferred (constant robot colour).
     **Closes the skinned-instancing engine gap.**
-  - **Deferred to polish:** Death clip on kill (dying-state + corpse hold); 2–3
-    tower/enemy types; README + overview.
+  - **Polish:** Death clip on kill (dying-state + corpse hold) — *done*; README +
+    architecture demo entry + header cleanup — *done*. Still open: per-instance HP
+    feedback (dropped for the single-material instanced draw), 2–3 tower/enemy types.
 
 ## The extraction decisions — RESOLVED (decided on real code, not guessed)
 

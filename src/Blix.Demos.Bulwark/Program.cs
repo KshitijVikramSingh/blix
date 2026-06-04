@@ -14,58 +14,40 @@ using Plane = Blix.Geometry.Plane;
 
 namespace Blix.Demos.Bulwark;
 
-// Bulwark — tower-defense game #2 (see plan-bulwark.md). M0 proof gates, built on
-// reused primitives so build effort flows to the new axes.
+// Bulwark — tower-defense, Blix game #2 (see plan-bulwark.md). Defend a central core
+// from waves of enemies converging on four fronts: build + upgrade towers with the
+// scrap you earn from kills, survive 5 waves (a leak costs a life). Built to pressure
+// the engine where TankArena/Runner/Pong didn't — pointer-driven picking, navigation,
+// and a skinned animated crowd.
 //
-// Gate A — Pick & Place: an orbiting RTS camera over a flat grid; the cursor casts a
-// ray (Camera3D.ScreenPointToRay) onto the ground plane (Intersection.Raycast); the
-// hit maps to a grid cell; a ghost snaps there (green placeable / red occupied);
-// left-click places a tower, right-click removes. The SAME Camera3D feeds picking
-// and the render view-projection, so the pick stays locked to what's on screen as
-// the camera orbits.
+// Frame shape: a RenderGraph (lifted from TankArena) — sun shadow depth pass → HDR
+// scene pass (procedural sky + single-tap sun shadow + distance fog) → present; the
+// SpriteBatch/Font HUD composites on the present pass. The scene is all instanced
+// draws: grid tiles / shots / hover ghost (cubes), CC0 props (Quaternius Turret
+// Cannon on the aim rig, iPoly3D Crystal core), and the animated enemy crowd via
+// skinned-mesh instancing. Particles are additive bursts into the HDR; SFX are
+// synthesized through OpenAL.
 //
-// Gate B — Path & March: the core sits at the CENTRE and enemies converge from four
-// spawn fronts (N/S/E/W), each marching its own A* path to the core. Paths recompute
-// on every build, and a placement that would wall off ANY front is rejected. This is
-// the engine's SECOND consumer of navigation (after TankArena's steering) — kept
-// deliberately LOCAL: the extraction call (a shared NavGrid + A*?) waits until the
-// duplication is real and visible, per docs/conventions.md §4.
+// Engine-learning notes (the point of building game #2): navigation (grid A*) and the
+// turret aim rig are each a 2nd consumer vs TankArena, but after building both the
+// verdict was to extract NEITHER — the turret rig is incidental sharing of primitives
+// that already exist, and grid-A* vs continuous steering are too different to unify
+// (docs/conventions.md §4). Skinned-mesh instancing is the one genuinely new capability
+// and is built LOCAL here (the SkinnedInstancedBatch candidate) — to be promoted to
+// Blix.Render only when a 2nd consumer appears.
 //
-// M1 — Playable core: towers target the nearest enemy in range and fire homing
-// shots; enemies have HP; a kill pays scrap, a leak costs a life; scrap builds more
-// towers. Each tower aims with a Transform3D turret→barrel rig — the SAME pattern as
-// TankArena's tank turret (LookAt to yaw, a parented barrel whose WorldPosition is
-// the muzzle), now its SECOND consumer. Verdict after building both: keep it local —
-// incidental sharing of existing primitives, not engine substance (nav likewise:
-// grid-A* vs steering are too different to unify). See plan-bulwark.md / conventions §4.
-//
-// M2a — The game: a discrete wave director (escalating size + HP, win on clearing
-// the last wave, defeat at 0 lives, ENTER to restart), tower upgrades (left-click an
-// existing tower to level it up — more damage + range), and a SpriteBatch/Font HUD
-// (wave / lives / scrap + centre banners).
-//
-// M2b — Juice: ParticleBatch (the showcase primitive, now a gameplay mechanic) for
-// additive impact + death bursts drawn over the scene, and synthesized OpenAL SFX
-// (fire / death / leak). ParticleBatch stays geometry-only — the demo brings a
-// minimal descriptor-less additive pipeline; no soft-depth / HDR / bloom.
-//
-// M3 — Art + lighting: real CC0 meshes (Quaternius Turret Cannon + Robot Enemy,
-// iPoly3D Crystal) replace the hero cubes, and a RenderGraph lifted from TankArena
-// lights the scene — sun shadow depth pass → HDR scene pass (procedural sky + a
-// single-tap sun shadow) → present. Casters (towers/enemy/core) draw a second time
-// into the shadow map; tiles/shots/ghost are scene-only receivers; particles draw
-// additively into the HDR; the HUD composites on the present pass.
-//
-// ── Executable spec for (engine primitives this demo proves) ──
-//   • Picking: Camera3D.ScreenPointToRay → Intersection.Raycast(ray, ground) → cell
-//   • A* grid pathfinding: dynamic re-path + wall-off rejection (nav's 2nd consumer)
-//   • Transform3D turret→barrel aim rig: LookAt + parented-barrel muzzle (rig's 2nd consumer)
-//   • glTF ImportNodes + BakeMerge → per-mesh InstancedBatch on a shared pipeline
-//   • RenderGraph sun-shadow + HDR (shadow pass → HDR scene → present), procedural sky
-//   • SpriteBatch/Font HUD; ParticleBatch gameplay bursts; synthesized OpenAL SFX
-//   • Orbit/zoom RTS camera; build/upgrade UI + scrap economy
+// ── Executable spec for (engine capabilities this demo proves) ──
+//   • Picking: Camera3D.ScreenPointToRay → Intersection.Raycast(ray, ground) → grid cell
+//   • A* grid pathfinding: multi-front, dynamic re-path, wall-off rejection
+//   • Transform3D turret→barrel aim rig (LookAt yaw + parented-barrel muzzle)
+//   • glTF static import (ImportNodes + BakeMerge) AND skinned import (GltfImporter + clips)
+//   • Skinned-mesh INSTANCING: one [N×bones] world-baked palette indexed by
+//     gl_InstanceIndex → the whole animated crowd in one instanced draw per primitive,
+//     in both the lit scene pass and the shadow caster
+//   • RenderGraph sun-shadow + HDR; SpriteBatch/Font HUD; ParticleBatch bursts; OpenAL SFX
 // ── Intentionally owns (stays local — NOT extracted) ──
-//   • grid, A* + path-following, turret aim, economy, wave director, HUD layout, camera feel
+//   • grid + A* + path-following, turret aim, economy, wave director, HUD layout,
+//     the skinned-instancing crowd code, camera feel
 public static class Program
 {
     public static void Main(string[] args)
@@ -243,6 +225,8 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     private BonePalette enemyBonePalette = null!;
     private byte[] enemyPalettePayload = Array.Empty<byte>();   // [MaxAlive × EnemyBones] world-space mat4s
     private AnimationClip enemyWalk = null!;
+    private AnimationClip enemyDeath = null!;
+    private float enemyDeathHold = 0.8f;   // corpse lingers playing the Death clip, then is removed
     private Matrix4x4 enemyMeshNodeTransform = Matrix4x4.Identity;
     private MaterialBindings enemyBones = null!;   // set 3 palette SSBO, frames-in-flight; shared by both skinned pipelines
     private const int EnemyBones = 15;             // the robot skeleton; the loader asserts it (matches the shaders' BONE_COUNT)
@@ -841,9 +825,19 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
         for (var i = enemies.Count - 1; i >= 0; i--)
         {
             var e = enemies[i];
+
+            // A killed enemy lingers as a corpse playing the Death clip, then is removed
+            // (corpses don't move, leak, or get targeted).
+            if (e.Dying)
+            {
+                e.DyingTime += dt;
+                if (e.DyingTime >= enemyDeathHold) enemies.RemoveAt(i);
+                continue;
+            }
             if (e.Health <= 0f)
             {
-                enemies.RemoveAt(i);
+                e.Dying = true;
+                e.DyingTime = 0f;
                 scrap += KillReward;
                 EmitBurst(e.Pos + new Vector3(0f, 0.5f, 0f), new Vector4(1.0f, 0.55f, 0.18f, 1f), 16, 5.5f, 0.55f, 0.6f);
                 PlaySfx(deathSfx, 0.9f + (float)rng.NextDouble() * 0.2f);
@@ -927,7 +921,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
         var bestD = range * range;
         foreach (var e in enemies)
         {
-            if (e.Health <= 0f) continue;
+            if (e.Dying || e.Health <= 0f) continue;   // don't shoot corpses
             var d = Vector3.DistanceSquared(from, e.Pos);
             if (d <= bestD) { bestD = d; best = e; }
         }
@@ -1091,6 +1085,8 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
             enemyPalettePayload = new byte[MaxAlive * EnemyBones * 64];   // one world-space palette per instance
             enemyMeshNodeTransform = model.MeshNodeTransform;
             enemyWalk = FindEnemyClip(model, "Walk") ?? FindEnemyClip(model, "Run") ?? model.Animations[0];
+            enemyDeath = FindEnemyClip(model, "Death") ?? enemyWalk;
+            enemyDeathHold = (float)(enemyDeath.Duration > 0 ? enemyDeath.Duration : 0.8);
 
             // Set 3 b0: a [MaxAlive × EnemyBones] palette SSBO indexed by gl_InstanceIndex.
             var boneLayout = new UniformBlockLayout(
@@ -1162,14 +1158,20 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     // N skeleton evals/frame (cheap at this crowd size); gl_InstanceIndex reads the slot.
     private void WriteCrowdPalette()
     {
-        var dur = enemyWalk.Duration > 0 ? enemyWalk.Duration : 1.0;
+        var walkDur = enemyWalk.Duration > 0 ? enemyWalk.Duration : 1.0;
+        var deathDur = enemyDeath.Duration > 0 ? enemyDeath.Duration : 1.0;
         var f = MemoryMarshal.Cast<byte, float>(enemyPalettePayload.AsSpan());
         var count = Math.Min(enemies.Count, MaxAlive);
         for (var i = 0; i < count; i++)
         {
             var e = enemies[i];
+            // Dying → play the Death clip once (clamp = settle on the final frame);
+            // alive → looping Walk, phase-staggered so the crowd doesn't lockstep.
+            var (clip, t) = e.Dying
+                ? (enemyDeath, Math.Min(e.DyingTime, deathDur))
+                : (enemyWalk, (gameTime + e.AnimPhase) % walkDur);
             enemyPose.CopyFrom(enemyRestPose);
-            enemyWalk.Sample((gameTime + e.AnimPhase) % dur, enemyPose);   // staggered so they don't lockstep
+            clip.Sample(t, enemyPose);
             enemySkeleton.ComputeBonePalette(enemyPose, enemyBonePalette);
             var model = SkinnedEnemyModel(e.Pos);
             var slot = i * EnemyBones * 16;
@@ -1472,6 +1474,8 @@ internal sealed class Enemy
     public float MaxHealth;   // for the HP tint (scales per wave)
     public int Lane;          // which spawn front → which path it follows
     public float AnimPhase;   // per-enemy Walk-clip offset so the crowd doesn't lockstep
+    public bool Dying;        // killed → playing the Death clip before removal
+    public float DyingTime;
 }
 
 internal sealed class Tower
