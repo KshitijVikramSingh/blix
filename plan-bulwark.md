@@ -95,12 +95,15 @@ RTS camera (orbit / zoom / pan) · wave director + economy.
     → set-3 SSBO, rendered shadow-aware via the shared `cube.frag`. enemies[0] draws
     skinned; the rest stay static. Validation-clean. Dials: `SkinnedEnemyScale`,
     `SkinnedEnemyYawFix`. (No cast shadow yet — Gate B.)
-  - **Gate B — promote to skinned instancing:** a `[N×bones]` palette SSBO + a skinned
-    *instanced* shader that picks its palette by `gl_InstanceIndex` + per-instance
-    model → ONE draw for all enemies. The artifact is a local **`SkinnedInstancedBatch`**
-    (InstanceData carries model+tint; skinning adds a per-instance palette slot). Adds
-    the skinned shadow caster (reuses the palette). Phase-staggered Walk; Run when the
-    wave speeds up.
+  - **Gate B — skinned instancing** *(done — visual review pending)*: a
+    `[MaxAlive×15]` world-baked palette SSBO (set 3) + an instanced skinned shader that
+    reads its palette at `gl_InstanceIndex × BONE_COUNT`; the whole crowd draws as 5
+    instanced draws (one per primitive) in BOTH the scene pass (lit, shadow-aware via
+    cube.frag) and a new instanced skinned shadow caster (animated shadows). Per-frame:
+    pose each enemy (phase-staggered Walk) → bake palette × model into its slot → one
+    upload. Built local (the `SkinnedInstancedBatch` candidate — promote to
+    `Blix.Render` only on a 2nd consumer). HP tint deferred (constant robot colour).
+    **Closes the skinned-instancing engine gap.**
   - **Deferred to polish:** Death clip on kill (dying-state + corpse hold); 2–3
     tower/enemy types; README + overview.
 

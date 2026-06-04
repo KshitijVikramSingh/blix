@@ -44,7 +44,8 @@
     <GlslShader Include="Shaders\sky.frag" />
     <GlslShader Include="Shaders\present.vert" />
     <GlslShader Include="Shaders\present.frag" />
-    <GlslShader Include="Shaders\skinned.vert" />
+    <GlslShader Include="Shaders\skinned_instanced.vert" />
+    <GlslShader Include="Shaders\skinned_shadow_instanced.vert" />
   </ItemGroup>
 
   <Target Name="CompileSpirV"
