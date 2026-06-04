@@ -49,16 +49,20 @@ namespace Blix.Demos.Bulwark;
 // (fire / death / leak). ParticleBatch stays geometry-only — the demo brings a
 // minimal descriptor-less additive pipeline; no soft-depth / HDR / bloom.
 //
-// Everything 3D goes through one InstancedBatch (tiles + towers + enemies + shots +
-// ghost), lifted from VulkanInstanced; the HUD is a SpriteBatch over the same pass.
-// The sun-shadow + HDR graph from TankArena lands at M3.
+// M3 — Art + lighting: real CC0 meshes (Quaternius Turret Cannon + Robot Enemy,
+// iPoly3D Crystal) replace the hero cubes, and a RenderGraph lifted from TankArena
+// lights the scene — sun shadow depth pass → HDR scene pass (procedural sky + a
+// single-tap sun shadow) → present. Casters (towers/enemy/core) draw a second time
+// into the shadow map; tiles/shots/ghost are scene-only receivers; particles draw
+// additively into the HDR; the HUD composites on the present pass.
 //
 // ── Executable spec for (engine primitives this demo proves) ──
 //   • Picking: Camera3D.ScreenPointToRay → Intersection.Raycast(ray, ground) → cell
 //   • A* grid pathfinding: dynamic re-path + wall-off rejection (nav's 2nd consumer)
 //   • Transform3D turret→barrel aim rig: LookAt + parented-barrel muzzle (rig's 2nd consumer)
-//   • SpriteBatch/Font HUD composited over the 3D pass (Vulkan-NDC ortho)
-//   • ParticleBatch as a gameplay mechanic (additive bursts) + synthesized OpenAL SFX
+//   • glTF ImportNodes + BakeMerge → per-mesh InstancedBatch on a shared pipeline
+//   • RenderGraph sun-shadow + HDR (shadow pass → HDR scene → present), procedural sky
+//   • SpriteBatch/Font HUD; ParticleBatch gameplay bursts; synthesized OpenAL SFX
 //   • Orbit/zoom RTS camera; build/upgrade UI + scrap economy
 // ── Intentionally owns (stays local — NOT extracted) ──
 //   • grid, A* + path-following, turret aim, economy, wave director, HUD layout, camera feel
@@ -81,12 +85,12 @@ public static class Program
         }
 
         var loop = new BulwarkLoop(exitAfterFrames);
-        using var window = new Window(loop, new WindowOptions("Blix — Bulwark (M2: Tower Defense)", 1280, 720));
+        using var window = new Window(loop, new WindowOptions("Blix — Bulwark (Tower Defense)", 1280, 720));
         window.Run();
     }
 }
 
-internal sealed class BulwarkLoop : IGameLoop, IInputHandler
+internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
 {
     // Grid: GridW × GridH square cells of Cell units, centred on the world origin.
     private const int GridW = 16;
@@ -206,6 +210,24 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     private const float CoreScale = 0.22f;
     private const float CoreLift = 0.2f;
 
+    // M3b lighting: a RenderGraph — sun shadow depth pass → HDR scene pass (samples
+    // the shadow map, procedural sky) → present. Lifted from TankArena. Casters
+    // (towers/enemy/core) draw a second time into the shadow map; tiles/shots/ghost
+    // are scene-only receivers. Particles draw additively into the HDR scene.
+    private RenderGraph graph = null!;
+    private GraphResourceHandle hdrHandle, sceneDepthHandle, sunShadowHandle;
+    private PassHandle shadowPassHandle, scenePassHandle;
+    private PipelineHandle worldPipeline, casterPipeline, skyPipeline, presentPipeline;
+    private FullscreenPass fullscreen = null!;
+    private InstancedBatch turretBaseCaster = null!, turretTopCaster = null!, enemyCaster = null!, coreCaster = null!;
+    private readonly byte[] worldPush = new byte[160];   // viewProj + camPos + sunDir + sunShadowVP
+    private readonly byte[] skyPush = new byte[96];      // invViewProj + camPos + sunDir
+    private readonly byte[] shadowPush = new byte[64];   // sun shadow VP (caster pass)
+    private const int ShadowMapSize = 2048;
+    private const float SunOrthoExtent = 44f;            // covers the 32-unit grid + margin
+    private const float SunDistance = 120f;
+    private static readonly Vector3 SunDir = Vector3.Normalize(new Vector3(0.35f, 0.82f, 0.45f));
+
     // Held-key orbit state (OnKeyDown/Up is edge-triggered; apply in OnUpdate).
     private bool orbitLeft, orbitRight, orbitUp, orbitDown;
 
@@ -234,37 +256,75 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
                 new VertexAttribute(0, VertexAttributeFormat.Float3, 0),
                 new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
             });
-        var iface = new ShaderInterface(
+        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        byte[] Spv(string n) => File.ReadAllBytes(Path.Combine(shaderDir, n));
+
+        // RenderGraph: sun shadow depth → HDR scene (samples shadow + procedural sky) → present.
+        graph = new RenderGraph(vk);
+        var fullSize = new MatchSwapchainGraphSize(1.0f);
+        sunShadowHandle = graph.DepthTarget("sun-shadow", new FixedGraphSize(ShadowMapSize, ShadowMapSize));
+        hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
+        sceneDepthHandle = graph.DepthTarget("scene-depth", fullSize);
+
+        var casterIface = new ShaderInterface(
             Slots: new[] { InstanceBuffer.Slot },
             PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
-        var shader = vk.CreateShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv")),
-            File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv")),
-            iface, "cube");
-        var pipeline = vk.CreatePipeline(
-            new PipelineDescription(shader, meshLayout, PrimitiveTopology.Triangles,
-                DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled }),
-            "cube");
-        instanceBuffer = new InstanceBuffer(vk, shader, "bulwark");
-        batch = new InstancedBatch(cube, pipeline, instanceBuffer);
-        LoadArt(shader, pipeline);   // real meshes on the same pipeline (best-effort)
+        var worldIface = new ShaderInterface(
+            Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment), InstanceBuffer.Slot },
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 160) });
+        var skyIface = new ShaderInterface(
+            Slots: Array.Empty<DescriptorSetSlot>(),
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 96) });
+        var presentIface = new ShaderInterface(
+            Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment) },
+            PushConstants: Array.Empty<PushConstantRange>());
 
-        // Particle pipeline: ParticleBatch is geometry-only, so we bring a minimal
-        // descriptor-less additive pipeline (push = view-projection) drawn over the
-        // cubes — no soft-depth / HDR / bloom (that's the VulkanParticles showcase).
+        shadowPassHandle = graph.GraphicsPass("sun-shadow")
+            .Depth(sunShadowHandle, LoadOp.Clear, StoreOp.Store)
+            .Shader(casterIface)
+            .Handle;
+        scenePassHandle = graph.GraphicsPass("scene")
+            .Target(hdrHandle, LoadOp.Clear, StoreOp.Store)
+            .Depth(sceneDepthHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(sunShadowHandle)
+            .Shader(skyIface, worldIface)
+            .Handle;
+        graph.Compile();
+
+        // Pipelines target their pass surfaces (caster→shadow, world/sky/particle→scene).
+        var casterShader = vk.CreateShaderProgramFromSpv(Spv("shadow_caster.vert.spv"), Spv("shadow_caster.frag.spv"), casterIface, "caster");
+        casterPipeline = vk.CreatePipeline(new PipelineDescription(casterShader, meshLayout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, RasterizerState.NoCulling, Array.Empty<BlendState>(),
+            RenderTarget: graph.GetPassSurface(shadowPassHandle)), "caster");
+
+        var worldShader = vk.CreateShaderProgramFromSpv(Spv("cube.vert.spv"), Spv("cube.frag.spv"), worldIface, "world");
+        worldPipeline = vk.CreatePipeline(new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(scenePassHandle)), "world");
+        instanceBuffer = new InstanceBuffer(vk, worldShader, "bulwark");
+        batch = new InstancedBatch(cube, worldPipeline, instanceBuffer);
+
+        var skyShader = vk.CreateShaderProgramFromSpv(Spv("sky.vert.spv"), Spv("sky.frag.spv"), skyIface, "sky");
+        skyPipeline = vk.CreatePipeline(new PipelineDescription(skyShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
+            DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(scenePassHandle)), "sky");
+
+        var presentShader = vk.CreateShaderProgramFromSpv(Spv("present.vert.spv"), Spv("present.frag.spv"), presentIface, "present");
+        presentPipeline = vk.CreatePipeline(new PipelineDescription(presentShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
+            DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled }), "present");
+        fullscreen = new FullscreenPass(vk, "fullscreen");
+
+        LoadArt(worldShader, worldPipeline, casterShader, casterPipeline);   // world + shadow-caster batches
+
+        // Particle pipeline: geometry-only ParticleBatch + a minimal additive pipeline
+        // (push = view-projection) into the HDR scene pass. No soft-depth / bloom.
         var particleIface = new ShaderInterface(
             Slots: Array.Empty<DescriptorSetSlot>(),
             PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
-        var particleShader = vk.CreateShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "particle.vert.spv")),
-            File.ReadAllBytes(Path.Combine(shaderDir, "particle.frag.spv")),
-            particleIface, "particle");
-        particlePipeline = vk.CreatePipeline(
-            new PipelineDescription(particleShader, ParticleBatch.VertexLayoutDescription,
-                PrimitiveTopology.Triangles, DepthState.Disabled, RasterizerState.NoCulling,
-                new[] { BlendState.Additive }),
-            "particle");
+        var particleShader = vk.CreateShaderProgramFromSpv(Spv("particle.vert.spv"), Spv("particle.frag.spv"), particleIface, "particle");
+        particlePipeline = vk.CreatePipeline(new PipelineDescription(particleShader, ParticleBatch.VertexLayoutDescription,
+            PrimitiveTopology.Triangles, DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Additive },
+            RenderTarget: graph.GetPassSurface(scenePassHandle)), "particle");
         particles = new ParticleBatch(vk, maxParticles: 2048, "bulwark.particles");
 
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
@@ -278,7 +338,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         if (autoPlay) SeedStarterTowers();   // headless smoke only — the player builds their own
         Recompute();
 
-        Console.WriteLine("Bulwark M2 — Tower Defense");
+        Console.WriteLine("Bulwark — Tower Defense");
         Console.WriteLine("  SPACE: launch wave   left-click: build (50) / upgrade existing   right-click: sell");
         Console.WriteLine("  arrows: orbit   wheel: zoom   ENTER: restart (after win/lose)   Esc: quit");
         Console.WriteLine($"  survive {TotalWaves} waves — start: {StartLives} lives, {StartScrap} scrap");
@@ -371,47 +431,113 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     private static Vector3 CellCenter(int cx, int cz) =>
         new((cx - GridW / 2f + 0.5f) * Cell, 0f, (cz - GridH / 2f + 0.5f) * Cell);
 
+    // Sun shadow view-projection: light eye up the sun direction looking at the grid
+    // centre, ortho sized to the grid footprint. (Lifted from TankArena.)
+    private static Matrix4x4 SunShadowVP()
+    {
+        var eye = SunDir * SunDistance;
+        var up = MathF.Abs(SunDir.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
+        var view = Matrix4x4.CreateLookAt(eye, Vector3.Zero, up);
+        var ortho = GraphicsMatrices.CreateOrthographicVulkan(SunOrthoExtent, SunOrthoExtent, 20f, SunDistance + 90f);
+        return view * ortho;
+    }
+
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
         frameCount++;
         BuildInstances();
 
+        // Camera + sun push payloads (world 160B / sky 96B / shadow 64B; particles reuse
+        // the 64B view-projection in pushBytes).
         var viewProj = camera.GetViewProjection(aspect);
+        var sunVP = SunShadowVP();
+        var camPos = new Vector4(camera.Transform.Position, 1f);
+        var sun = new Vector4(SunDir, 0f);
+        Matrix4x4.Invert(viewProj, out var invViewProj);
+        MemoryMarshal.Write(worldPush.AsSpan(0, 64), in viewProj);
+        MemoryMarshal.Write(worldPush.AsSpan(64, 16), in camPos);
+        MemoryMarshal.Write(worldPush.AsSpan(80, 16), in sun);
+        MemoryMarshal.Write(worldPush.AsSpan(96, 64), in sunVP);
+        MemoryMarshal.Write(skyPush.AsSpan(0, 64), in invViewProj);
+        MemoryMarshal.Write(skyPush.AsSpan(64, 16), in camPos);
+        MemoryMarshal.Write(skyPush.AsSpan(80, 16), in sun);
+        MemoryMarshal.Write(shadowPush.AsSpan(0, 64), in sunVP);
         MemoryMarshal.Write(pushBytes.AsSpan(0, 64), in viewProj);
 
-        batch.Begin(pushBytes);
+        // Stage: world batch (scene) + per-mesh world & shadow-caster batches.
+        batch.Begin(worldPush);
         batch.SetInstances(CollectionsMarshal.AsSpan(instances));
         if (artLoaded)
         {
-            turretBaseBatch.Begin(pushBytes); turretBaseBatch.SetInstances(CollectionsMarshal.AsSpan(turretBaseInst));
-            turretTopBatch.Begin(pushBytes); turretTopBatch.SetInstances(CollectionsMarshal.AsSpan(turretTopInst));
-            enemyBatch.Begin(pushBytes); enemyBatch.SetInstances(CollectionsMarshal.AsSpan(enemyInst));
-            coreBatch.Begin(pushBytes); coreBatch.SetInstances(CollectionsMarshal.AsSpan(coreInst));
+            turretBaseBatch.Begin(worldPush); turretBaseBatch.SetInstances(CollectionsMarshal.AsSpan(turretBaseInst));
+            turretTopBatch.Begin(worldPush); turretTopBatch.SetInstances(CollectionsMarshal.AsSpan(turretTopInst));
+            enemyBatch.Begin(worldPush); enemyBatch.SetInstances(CollectionsMarshal.AsSpan(enemyInst));
+            coreBatch.Begin(worldPush); coreBatch.SetInstances(CollectionsMarshal.AsSpan(coreInst));
+            turretBaseCaster.Begin(shadowPush); turretBaseCaster.SetInstances(CollectionsMarshal.AsSpan(turretBaseInst));
+            turretTopCaster.Begin(shadowPush); turretTopCaster.SetInstances(CollectionsMarshal.AsSpan(turretTopInst));
+            enemyCaster.Begin(shadowPush); enemyCaster.SetInstances(CollectionsMarshal.AsSpan(enemyInst));
+            coreCaster.Begin(shadowPush); coreCaster.SetInstances(CollectionsMarshal.AsSpan(coreInst));
         }
+
+        // Shadow depth pass: casters only (towers + enemies + core block the sun).
+        graph.Pass(shadowPassHandle, scope =>
+        {
+            if (artLoaded)
+            {
+                turretBaseCaster.End(scope);
+                turretTopCaster.End(scope);
+                enemyCaster.End(scope);
+                coreCaster.End(scope);
+            }
+        });
+
+        // HDR scene pass: procedural sky → lit world (samples the shadow map) → particles.
+        var shadowTex = graph.GetDepthTexture(sunShadowHandle);
+        var shadowBind = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTex, Slot: 0) };
+        graph.Pass(scenePassHandle, scope =>
+        {
+            fullscreen.Draw(scope, skyPipeline, Array.Empty<ShaderTextureBinding>(), skyPush);
+            batch.End(scope, shadowBind);   // tiles + shots + ghost (receivers)
+            if (artLoaded)
+            {
+                turretBaseBatch.End(scope, shadowBind);
+                turretTopBatch.End(scope, shadowBind);
+                enemyBatch.End(scope, shadowBind);
+                coreBatch.End(scope, shadowBind);
+            }
+            particles.Draw(scope, particlePipeline,
+                camera.Transform.Right, camera.Transform.Up, camera.Transform.Position,
+                sortByDepth: false, pushBytes, Array.Empty<ShaderTextureBinding>());
+        });
+        graph.Execute(commandList);
+
+        // Present the HDR scene to the swapchain, then the HUD on top.
+        var hdrTex = graph.GetColorTexture(hdrHandle);
         commandList.Pass(
-            "bulwark-grid",
+            "present",
             new RenderPassDescription(
                 Target: RenderSurfaceHandle.Default,
-                ClearColors: new GraphicsColor?[] { new GraphicsColor(0.05f, 0.07f, 0.10f, 1f) },
+                ClearColors: new GraphicsColor?[] { new GraphicsColor(0f, 0f, 0f, 1f) },
                 ClearDepth: true),
             pass =>
             {
-                batch.End(pass);   // tiles + shots + ghost (cubes)
-                if (artLoaded)
-                {
-                    turretBaseBatch.End(pass);
-                    turretTopBatch.End(pass);
-                    enemyBatch.End(pass);
-                    coreBatch.End(pass);
-                }
-                // Additive billboards over the 3D scene (impact/death bursts), then the HUD on top.
-                particles.Draw(pass, particlePipeline,
-                    camera.Transform.Right, camera.Transform.Up, camera.Transform.Position,
-                    sortByDepth: false, pushBytes, Array.Empty<ShaderTextureBinding>());
-                DrawHud(pass, frame.Width, frame.Height);   // depth-disabled, alpha-blended, over the 3D
+                fullscreen.Draw(pass, presentPipeline, new[] { new ShaderTextureBinding("uHdr", hdrTex, Slot: 0) });
+                DrawHud(pass, frame.Width, frame.Height);   // depth-disabled, alpha-blended, on top
             });
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames) host.RequestClose();
+    }
+
+    // The Window calls Dispose AFTER WaitIdle (OnUnload fires at Closing, before the
+    // GPU is idle — disposing there trips destroy-in-use). The graph owns render passes
+    // + offscreen images that aren't in the device's auto-freed tables, so free them
+    // here; same pattern as TankArena.
+    public void Dispose()
+    {
+        graph?.Dispose();
+        fullscreen?.Dispose();
+        particles?.Dispose();
+        instanceBuffer?.Dispose();
     }
 
     // One instanced draw holds the whole scene: a flat tile per cell (checkerboard,
@@ -799,7 +925,8 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     // VertexPosition3NormalTexture mesh (lifting TankArena's BakeMerge/UploadMesh) and
     // wrapped in an InstancedBatch on the SHARED cube pipeline. Any failure leaves
     // artLoaded=false and the demo falls back to primitives.
-    private void LoadArt(ShaderProgramHandle shader, PipelineHandle pipeline)
+    private void LoadArt(ShaderProgramHandle worldShader, PipelineHandle worldPipe,
+                         ShaderProgramHandle casterShader, PipelineHandle casterPipe)
     {
         try
         {
@@ -822,11 +949,18 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
                 return UploadMesh(BakeMerge(meshName, nodes[idx].Primitives.Select(prim => (prim.Mesh, w))));
             }
 
-            InstancedBatch Batch(Mesh m, string name) => new(m, pipeline, new InstanceBuffer(vk, shader, name));
-            turretBaseBatch = Batch(NodeMesh("turret.glb", "Turret_Cannon_Base", "art.turretBase"), "art.turretBase");
-            turretTopBatch = Batch(NodeMesh("turret.glb", "Turret_Cannon_Top", "art.turretTop"), "art.turretTop");
-            enemyBatch = Batch(NodeMesh("enemy.glb", "Enemy_Robot_2Legs", "art.enemy"), "art.enemy");
-            coreBatch = Batch(NodeMesh("core.glb", "crystal_4", "art.core"), "art.core");
+            // Each mesh gets a world batch (lit scene pass) + a caster batch (shadow pass).
+            (InstancedBatch World, InstancedBatch Caster) Pair(string file, string node, string name)
+            {
+                var m = NodeMesh(file, node, name);
+                return (new InstancedBatch(m, worldPipe, new InstanceBuffer(vk, worldShader, name + ".w")),
+                        new InstancedBatch(m, casterPipe, new InstanceBuffer(vk, casterShader, name + ".c")));
+            }
+
+            (turretBaseBatch, turretBaseCaster) = Pair("turret.glb", "Turret_Cannon_Base", "art.turretBase");
+            (turretTopBatch, turretTopCaster) = Pair("turret.glb", "Turret_Cannon_Top", "art.turretTop");
+            (enemyBatch, enemyCaster) = Pair("enemy.glb", "Enemy_Robot_2Legs", "art.enemy");
+            (coreBatch, coreCaster) = Pair("core.glb", "crystal_4", "art.core");
             artLoaded = true;
             Console.WriteLine("  art: loaded turret + enemy + core meshes (CC0)");
         }

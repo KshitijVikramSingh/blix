@@ -71,15 +71,22 @@ RTS camera (orbit / zoom / pan) · wave director + economy.
   additive pipeline — no soft-depth/HDR/bloom), and synthesized OpenAL SFX
   (fire/death/leak), both lifted patterns. Verified clean under validation; audio
   device loads in the headless smoke. **M2 complete.**
-- **M3a · Art (meshes)** *(wired; visual tuning pending)*: CC0 models fetched from
+- **M3a · Art (meshes)** *(done)*: CC0 models fetched from
   poly.pizza — Quaternius **Turret Cannon** (base + aiming top on the rig), Quaternius
   **Robot Enemy** (bind-pose static), iPoly3D **Crystal** core — imported via
   `ImportNodes` + `BakeMerge` (lifted from TankArena) onto the shared cube pipeline,
   one `InstancedBatch` per mesh; tiles/shots/ghost stay cubes. Builds + renders clean
   under validation; fit knobs (`TowerScale`/`TurretYawFix`/`EnemyScale`/`CoreScale`/
   `CoreLift`) exposed for the playtest dial-in. Falls back to primitives if load fails.
-- **M3b · Lighting & HDR** *(next)*: lift TankArena's sun-shadow + HDR RenderGraph.
-- **M3c · Polish**: 2–3 tower/enemy types, README + overview.
+- **M3b · Lighting & HDR** *(done — visual review pending)*: lifted TankArena's
+  RenderGraph — sun shadow depth pass → HDR scene pass (procedural sky + single-tap
+  sun shadow + distance fog) → present. Casters (towers/enemy/core) draw twice
+  (shadow + scene); tiles/shots/ghost are scene-only receivers; particles additive
+  into HDR; HUD on present. Renders clean under validation incl. teardown
+  (IDisposable, not OnUnload). Shadow/fog/sun constants exposed for the look-dial.
+- **Next**: animate the enemies — the rigged Robot Enemy + skinned-mesh **instancing**
+  (a real engine gap), per the playtest direction. Then polish (2–3 tower/enemy
+  types, README + overview).
 
 ## The extraction decisions — RESOLVED (decided on real code, not guessed)
 
