@@ -9,9 +9,11 @@ tells us what (if anything) to extract. See [`docs/conventions.md`](docs/convent
 
 ## Concept + core loop
 
-Place towers on a grid. Waves of enemies path from a spawn to your core. Hold the
-line, earn scrap on kills, build + upgrade between waves, survive N waves. A leak
-costs a life; lose all lives → game over.
+Place towers on a grid to defend a **central core** from enemies that converge from
+**multiple fronts** (N/S/E/W) in coordinated waves. Earn scrap on kills, build +
+upgrade between/within waves, survive N waves. A leak costs a life; lose all lives →
+game over. (The core was originally a single corner-to-corner lane; moving it to the
+centre with four fronts turned a shooting gallery into a real coverage problem.)
 
 ## The engine thesis (why this game)
 
@@ -59,6 +61,11 @@ RTS camera (orbit / zoom / pan) · wave director + economy.
   upgrades (left-click an existing tower → +damage/+range, gold at max), and a
   SpriteBatch/Font HUD (wave/lives/scrap + centre banners) composited over the 3D
   pass. Verified clean under validation; waves auto-run in the `--frames` smoke.
+- **M2a.1 · Multi-front map** *(done)*: core moved to the centre; four spawn fronts
+  (N/S/E/W), each with its own A* path; coordinated bursts (one enemy per front per
+  tick); a build that walls off *any* front is rejected. Tuned for active play (no
+  free towers in interactive; tankier/faster enemies; 200 start scrap ≈ one tower
+  per front). Nav self-test rewritten for the centre topology (11 checks).
 - **M2b · Juice** *(next)*: impact/death particles (`ParticleBatch` showcase →
   mechanic) + OpenAL SFX (fire/hit/death).
 - **M3 · Polish**: 2–3 tower + enemy types, CC0 art pass (KayKit Tower Defense pack

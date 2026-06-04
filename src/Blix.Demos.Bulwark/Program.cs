@@ -23,12 +23,12 @@ namespace Blix.Demos.Bulwark;
 // and the render view-projection, so the pick stays locked to what's on screen as
 // the camera orbits.
 //
-// Gate B — Path & March: enemies walk a shortest path from the spawn edge to the
-// core (A* over the grid, towers impassable). The path recomputes on every build,
-// and a placement that would fully wall the route is rejected. This is the engine's
-// SECOND consumer of navigation (after TankArena's steering) — kept deliberately
-// LOCAL: the extraction call (a shared NavGrid + A*?) waits until the duplication is
-// real and visible, per docs/conventions.md §4.
+// Gate B — Path & March: the core sits at the CENTRE and enemies converge from four
+// spawn fronts (N/S/E/W), each marching its own A* path to the core. Paths recompute
+// on every build, and a placement that would wall off ANY front is rejected. This is
+// the engine's SECOND consumer of navigation (after TankArena's steering) — kept
+// deliberately LOCAL: the extraction call (a shared NavGrid + A*?) waits until the
+// duplication is real and visible, per docs/conventions.md §4.
 //
 // M1 — Playable core: towers target the nearest enemy in range and fire homing
 // shots; enemies have HP; a kill pays scrap, a leak costs a life; scrap builds more
@@ -113,15 +113,21 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     private readonly bool[] occupied = new bool[GridW * GridH];
     private int placedCount;
 
-    // Navigation (kept local; see header). Enemies march a shortest path spawn→core;
-    // A* runs on placement (not per frame), towers are impassable, and a build that
-    // would wall the route is rejected. Spawn + core sit on opposite edges.
-    private const int SpawnCx = 0;
-    private const int SpawnCz = GridH / 2;
-    private const int CoreCx = GridW - 1;
+    // Navigation (kept local; see header). The core sits at the CENTRE; enemies
+    // converge from four spawn fronts (N/S/E/W edge midpoints), each marching its own
+    // A* path to the core. A* runs on placement (not per frame), towers are
+    // impassable, and a build that would wall off ANY front is rejected.
+    private const int CoreCx = GridW / 2;
     private const int CoreCz = GridH / 2;
-    private const float EnemySpeed = 3.6f;
-    private List<(int cx, int cz)> path = new();
+    private static readonly (int cx, int cz)[] Spawns =
+    {
+        (0, GridH / 2),           // west
+        (GridW - 1, GridH / 2),   // east
+        (GridW / 2, 0),           // north
+        (GridW / 2, GridH - 1),   // south
+    };
+    private const float EnemySpeed = 3.0f;   // paths are ~half as long now (edge→centre)
+    private readonly List<(int cx, int cz)>[] paths = new List<(int cx, int cz)>[Spawns.Length];
     private readonly HashSet<int> pathCells = new();
 
     // M1 — combat loop. Towers (a Transform3D turret→barrel aim rig lifted from
@@ -129,7 +135,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     // enemies have HP; a kill pays scrap, a leak costs a life; scrap builds towers.
     private const int TowerCost = 50;
     private const int KillReward = 9;
-    private const int StartScrap = 150;   // = 3 towers; you must build during Prep
+    private const int StartScrap = 200;   // ~4 towers — one per front; you build during Prep
     private const int StartLives = 20;
     private const float TowerRange = 6f;
     private const float FireInterval = 0.55f;
@@ -347,7 +353,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
                 var tint = dark ? new Vector4(0.16f, 0.22f, 0.18f, 1f)
                                 : new Vector4(0.22f, 0.30f, 0.24f, 1f);
                 if (pathCells.Contains(idx)) tint = new Vector4(0.45f, 0.40f, 0.28f, 1f);   // the route
-                if (cx == SpawnCx && cz == SpawnCz) tint = new Vector4(0.85f, 0.62f, 0.18f, 1f); // spawn
+                if (IsSpawn(cx, cz)) tint = new Vector4(0.85f, 0.62f, 0.18f, 1f);                 // spawn fronts
                 if (cx == CoreCx && cz == CoreCz) tint = new Vector4(0.18f, 0.62f, 0.78f, 1f);   // core
                 // Brighten the hovered tile so the pick reads even under the ghost.
                 if (hoverValid && cx == hoverCx && cz == hoverCz)
@@ -405,7 +411,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             var ghost = Matrix4x4.CreateScale(Cell * 0.55f, 1.6f, Cell * 0.55f) *
                         Matrix4x4.CreateTranslation(center.X, 0.8f, center.Z);
             var buildable = !occupied[hoverCz * GridW + hoverCx]
-                && !(hoverCx == SpawnCx && hoverCz == SpawnCz)
+                && !IsSpawn(hoverCx, hoverCz)
                 && !(hoverCx == CoreCx && hoverCz == CoreCz);
             var tint = buildable ? new Vector4(0.30f, 0.90f, 0.40f, 1f)
                                  : new Vector4(0.90f, 0.25f, 0.25f, 1f);
@@ -419,21 +425,39 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
 
     private static Vector3 Center((int cx, int cz) c) => CellCenter(c.cx, c.cz);
 
-    // Recompute the spawn→core path and the path-cell set. Called on load and after
-    // every successful place/remove — never per frame.
-    private void Recompute()
+    private static bool IsSpawn(int cx, int cz)
     {
-        path = FindPath() ?? path;   // FindPath only returns null on a walled grid, which placement rejects
-        pathCells.Clear();
-        foreach (var c in path) pathCells.Add(Idx(c.cx, c.cz));
+        foreach (var s in Spawns) if (s.cx == cx && s.cz == cz) return true;
+        return false;
     }
 
-    // A* over the grid: 4-connected, uniform step cost, Manhattan heuristic. Occupied
-    // cells (towers) are impassable. Returns the cell path spawn→core, or null if the
-    // grid is fully walled.
-    private List<(int cx, int cz)>? FindPath()
+    // True if any front has lost its route to the core — used to reject a placement.
+    private bool AnyLaneBlocked()
     {
-        int start = Idx(SpawnCx, SpawnCz), goal = Idx(CoreCx, CoreCz);
+        foreach (var s in Spawns) if (FindPath(s) is null) return true;
+        return false;
+    }
+
+    // Recompute every front's path to the core + the union of their cells. Called on
+    // load and after every successful place/remove — never per frame.
+    private void Recompute()
+    {
+        pathCells.Clear();
+        for (var i = 0; i < Spawns.Length; i++)
+        {
+            // FindPath only returns null on a walled grid, which placement rejects —
+            // keep the prior path as a fallback so a lane is never momentarily empty.
+            paths[i] = FindPath(Spawns[i]) ?? paths[i] ?? new List<(int cx, int cz)>();
+            foreach (var c in paths[i]) pathCells.Add(Idx(c.cx, c.cz));
+        }
+    }
+
+    // A* over the grid from a spawn to the core: 4-connected, uniform step cost,
+    // Manhattan heuristic. Occupied cells (towers) are impassable. Returns the cell
+    // path spawn→core, or null if that front is fully walled off.
+    private List<(int cx, int cz)>? FindPath((int cx, int cz) spawn)
+    {
+        int start = Idx(spawn.cx, spawn.cz), goal = Idx(CoreCx, CoreCz);
         var g = new float[GridW * GridH];
         var from = new int[GridW * GridH];
         var closed = new bool[GridW * GridH];
@@ -491,17 +515,19 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         Console.WriteLine($"  -- WAVE {wave}/{TotalWaves} -- {toSpawn} inbound");
     }
 
-    // Emit this wave's enemies from the spawn cell on an interval, up to the alive cap.
-    // HP scales ~18% per wave so later waves need upgraded towers.
+    // Coordinated multi-front spawn: each interval, emit one enemy from EVERY front
+    // at once (up to the alive cap), so the player defends all sides simultaneously.
+    // HP scales 30%/wave so later waves need upgraded / more towers.
     private void SpawnWave(float dt)
     {
         if (toSpawn <= 0) return;
         spawnTimer -= dt;
-        if (spawnTimer <= 0f && enemies.Count < MaxAlive)
+        if (spawnTimer > 0f) return;
+        spawnTimer = SpawnInterval;
+        var hp = EnemyMaxHp * (1f + 0.30f * (wave - 1));   // w5 ≈ 2.2× base
+        for (var lane = 0; lane < Spawns.Length && toSpawn > 0 && enemies.Count < MaxAlive; lane++)
         {
-            spawnTimer = SpawnInterval;
-            var hp = EnemyMaxHp * (1f + 0.30f * (wave - 1));   // w5 ≈ 2.2× base
-            enemies.Add(new Enemy { Pos = Center((SpawnCx, SpawnCz)), Health = hp, MaxHealth = hp });
+            enemies.Add(new Enemy { Pos = Center(Spawns[lane]), Health = hp, MaxHealth = hp, Lane = lane });
             toSpawn--;
         }
     }
@@ -523,13 +549,12 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         Console.WriteLine("  -- restarted --");
     }
 
-    // March enemies along the current path (nearest-node lookahead, same as Gate B),
-    // and resolve deaths (→ scrap) and leaks (→ a life). Backwards iteration so
-    // removal during the loop is safe.
+    // March each enemy toward the core along ITS front's path (nearest-node lookahead,
+    // same as Gate B — automatically reroutes on a re-path). Resolve deaths (→ scrap)
+    // and leaks (→ a life). Backwards iteration so removal during the loop is safe.
     private void UpdateEnemies(float dt)
     {
-        if (path.Count < 2) return;
-        var core = Center(path[^1]);
+        var core = CellCenter(CoreCx, CoreCz);
         for (var i = enemies.Count - 1; i >= 0; i--)
         {
             var e = enemies[i];
@@ -540,17 +565,21 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
                 continue;
             }
 
-            var nearest = 0;
-            var best = float.MaxValue;
-            for (var k = 0; k < path.Count; k++)
+            var lane = paths[e.Lane];
+            if (lane.Count >= 2)
             {
-                var d = Vector3.DistanceSquared(e.Pos, Center(path[k]));
-                if (d < best) { best = d; nearest = k; }
+                var nearest = 0;
+                var best = float.MaxValue;
+                for (var k = 0; k < lane.Count; k++)
+                {
+                    var d = Vector3.DistanceSquared(e.Pos, Center(lane[k]));
+                    if (d < best) { best = d; nearest = k; }
+                }
+                var target = Center(lane[Math.Min(nearest + 1, lane.Count - 1)]);
+                var to = target - e.Pos;
+                var dist = to.Length();
+                if (dist > 1e-4f) e.Pos += to / dist * Math.Min(EnemySpeed * dt, dist);
             }
-            var target = Center(path[Math.Min(nearest + 1, path.Count - 1)]);
-            var to = target - e.Pos;
-            var dist = to.Length();
-            if (dist > 1e-4f) e.Pos += to / dist * Math.Min(EnemySpeed * dt, dist);
 
             if (Vector3.Distance(e.Pos, core) < 0.5f)
             {
@@ -627,12 +656,12 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         return new Tower { Cx = cx, Cz = cz, Pos = c, Turret = turret, Barrel = barrel };
     }
 
-    // Headless-only: the --frames smoke has no mouse, so seed a few towers off the
-    // lane to exercise aim + fire under validation. Interactive play starts empty —
-    // the player must build during Prep (do nothing → leaks → defeat).
+    // Headless-only: the --frames smoke has no mouse, so seed a defensive ring around
+    // the core (one per front) to exercise aim + fire under validation. Interactive
+    // play starts empty — the player must build during Prep (do nothing → leaks → defeat).
     private void SeedStarterTowers()
     {
-        foreach (var (cx, cz) in new[] { (4, 7), (8, 9), (11, 7) })
+        foreach (var (cx, cz) in new[] { (CoreCx - 2, CoreCz), (CoreCx + 2, CoreCz), (CoreCx, CoreCz - 2), (CoreCx, CoreCz + 2) })
         {
             var idx = Idx(cx, cz);
             occupied[idx] = true;
@@ -709,9 +738,10 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         hud.End(pass);
     }
 
-    // Deterministic proof of the Gate B nav invariants — no window, no device. Run
-    // via `--selftest` (returns the failure count). Straight = Manhattan + 1: spawn
-    // (0,8) → core (15,8) is one row, so 16 cells.
+    // Deterministic proof of the nav invariants — no window, no device. Run via
+    // `--selftest` (returns the failure count). Topology: core at the centre
+    // (GridW/2, GridH/2), four edge-midpoint spawns; straight = Manhattan + 1, so the
+    // west front (0,8)→(8,8) is 9 cells.
     public int RunNavSelfTest()
     {
         var failed = 0;
@@ -721,31 +751,31 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             if (!ok) failed++;
         }
 
-        // 1. Empty grid → a straight 16-cell path with the right endpoints.
+        // 1. Empty grid → every front reaches the core, with the right endpoints/length.
         Array.Clear(occupied);
-        var p = FindPath();
-        Check("empty grid has a path", p is not null);
-        Check("path starts at spawn", p is { } && p[0] == (SpawnCx, SpawnCz));
-        Check("path ends at core", p is { } && p[^1] == (CoreCx, CoreCz));
-        Check("straight path is 16 cells", p is { Count: 16 });
+        foreach (var s in Spawns)
+            Check($"front ({s.cx},{s.cz}) reaches the core", FindPath(s) is not null);
+        var west = FindPath((0, GridH / 2));
+        Check("west front starts at its spawn", west is { } && west[0] == (0, GridH / 2));
+        Check("west front ends at the core", west is { } && west[^1] == (CoreCx, CoreCz));
+        Check("west front is 9 cells (Manhattan 8 + 1)", west is { Count: 9 });
 
-        // 2. A wall down column 8 with the top row open → still a path, but longer.
+        // 2. Box in the core (occupy its four neighbours) → NO front can reach it.
         Array.Clear(occupied);
-        for (var cz = 1; cz < GridH; cz++) occupied[Idx(8, cz)] = true;
-        var detour = FindPath();
-        Check("partial wall still has a path", detour is not null);
-        Check("detour is longer than the straight route", detour is { } && detour.Count > 16);
+        foreach (var (nx, nz) in new[] { (CoreCx + 1, CoreCz), (CoreCx - 1, CoreCz), (CoreCx, CoreCz + 1), (CoreCx, CoreCz - 1) })
+            occupied[Idx(nx, nz)] = true;
+        Check("core boxed in → all fronts blocked (wall-off detected)", Spawns.All(s => FindPath(s) is null));
 
-        // 3. A full column 8 wall → no path at all (wall-off detection: the rejection rule).
+        // 3. Open one side of the box → at least one front's route returns.
+        occupied[Idx(CoreCx - 1, CoreCz)] = false;
+        Check("opening a side restores a front", Spawns.Any(s => FindPath(s) is not null));
+
+        // 4. A partial wall across one front still leaves a (longer) route.
         Array.Clear(occupied);
-        for (var cz = 0; cz < GridH; cz++) occupied[Idx(8, cz)] = true;
-        Check("full wall has NO path (wall-off detected)", FindPath() is null);
-
-        // 4. Open one gap in the wall → the path returns, threaded through the gap.
-        occupied[Idx(8, 3)] = false;
-        var threaded = FindPath();
-        Check("opening a gap restores the path", threaded is not null);
-        Check("threaded path detours longer than straight", threaded is { } && threaded.Count > 16);
+        for (var cz = 1; cz < GridH; cz++) occupied[Idx(CoreCx - 2, cz)] = true;   // gap at cz=0
+        var detour = FindPath((0, GridH / 2));
+        Check("partial wall still has a route", detour is not null);
+        Check("detour is longer than the straight 9", detour is { } && detour.Count > 9);
 
         Array.Clear(occupied);
         Console.WriteLine($"  nav self-test: {(failed == 0 ? "all passed" : failed + " FAILED")}");
@@ -762,7 +792,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     {
         if (!hoverValid || phase is Phase.Won or Phase.Lost) return;
         var idx = hoverCz * GridW + hoverCx;
-        var onEndpoint = (hoverCx == SpawnCx && hoverCz == SpawnCz) || (hoverCx == CoreCx && hoverCz == CoreCz);
+        var onEndpoint = IsSpawn(hoverCx, hoverCz) || (hoverCx == CoreCx && hoverCz == CoreCz);
 
         if (button == MouseButton.Left)
         {
@@ -783,19 +813,19 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             // Build a new tower.
             if (scrap < TowerCost) { Console.WriteLine($"  need {TowerCost} scrap (have {scrap})"); return; }
             occupied[idx] = true;
-            // Reject a placement that would fully wall the route: tentatively occupy,
-            // re-run A*, and revert if no path survives.
-            if (FindPath() is null)
+            // Reject a placement that would wall off ANY front: tentatively occupy,
+            // re-run A* per spawn, and revert if a lane loses its route.
+            if (AnyLaneBlocked())
             {
                 occupied[idx] = false;
-                Console.WriteLine($"  blocked: a tower at ({hoverCx}, {hoverCz}) would wall off the path");
+                Console.WriteLine($"  blocked: a tower at ({hoverCx}, {hoverCz}) would wall off a front");
                 return;
             }
             scrap -= TowerCost;
             placedCount++;
             towers[idx] = MakeTower(hoverCx, hoverCz);
             Recompute();
-            Console.WriteLine($"  built tower ({hoverCx}, {hoverCz}) — scrap {scrap}, {placedCount} towers, path {path.Count}");
+            Console.WriteLine($"  built tower ({hoverCx}, {hoverCz}) — scrap {scrap}, {placedCount} towers");
         }
         else if (button == MouseButton.Right && occupied[idx])
         {
@@ -805,7 +835,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             placedCount--;
             scrap += refund;
             Recompute();
-            Console.WriteLine($"  sold tower ({hoverCx}, {hoverCz}) (+{refund}) — scrap {scrap}, {placedCount} towers, path {path.Count}");
+            Console.WriteLine($"  sold tower ({hoverCx}, {hoverCz}) (+{refund}) — scrap {scrap}, {placedCount} towers");
         }
     }
 
@@ -849,6 +879,7 @@ internal sealed class Enemy
     public Vector3 Pos;
     public float Health;
     public float MaxHealth;   // for the HP tint (scales per wave)
+    public int Lane;          // which spawn front → which path it follows
 }
 
 internal sealed class Tower
