@@ -643,14 +643,8 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     // Sun shadow view-projection: light eye up the sun direction, looking at the
     // arena centre, with an ortho big enough to cover the arena footprint. Matches
     // VulkanLit's construction (our SunDir points TOWARD the sun, so eye = +SunDir).
-    private static Matrix4x4 SunShadowVP()
-    {
-        var eye = SunDir * SunDistance;
-        var up = MathF.Abs(SunDir.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
-        var view = Matrix4x4.CreateLookAt(eye, Vector3.Zero, up);
-        var ortho = GraphicsMatrices.CreateOrthographicVulkan(SunOrthoExtent, SunOrthoExtent, 20f, SunDistance + 90f);
-        return view * ortho;
-    }
+    private static Matrix4x4 SunShadowVP() =>
+        GraphicsMatrices.SunShadowViewProjection(SunDir, SunDistance, SunOrthoExtent, 20f, SunDistance + 90f);
 
     // Ground slab (solid below y=0) + four wall slabs just outside the arena. All
     // Bounds3 so tank-AABB resolution is plain box-vs-box.

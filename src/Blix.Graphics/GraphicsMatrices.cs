@@ -263,6 +263,23 @@ public static class GraphicsMatrices
             0.0f,                      0.0f,        (nearPlane * farPlane) / depth, 0.0f);
     }
 
+    // View-projection for a directional (sun) shadow map. The light eye sits up the
+    // `sunDirToward` direction (the direction TOWARD the sun) at `distance`, looks at the
+    // origin, and a square Vulkan-NDC orthographic of side `orthoExtent` covers the scene
+    // footprint. `orthoExtent`/`distance`/planes are scene tuning the caller supplies; the
+    // construction (eye placement, up-vector degeneracy guard, ortho) is the shared
+    // technique — pair it with the GLSL blix_sun_shadow() lookup (Blix.Shaders/shadow.glsl).
+    public static Matrix4x4 SunShadowViewProjection(
+        Vector3 sunDirToward, float distance, float orthoExtent, float nearPlane, float farPlane)
+    {
+        var dir = Vector3.Normalize(sunDirToward);
+        var eye = dir * distance;
+        var up = MathF.Abs(dir.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
+        var view = CreateLookAt(eye, Vector3.Zero, up);
+        var ortho = CreateOrthographicVulkan(orthoExtent, orthoExtent, nearPlane, farPlane);
+        return view * ortho;
+    }
+
     private static Matrix4x4 CreateTranslation(Vector3 position)
     {
         return new Matrix4x4(
