@@ -61,9 +61,14 @@ behaviour here, that test should fail first.
   the orthographics) are authored directly in shader-space (column form). Don't
   pattern-match off them when reasoning about *model* matrices.
 - **Vulkan is the sole backend.** There is no cross-backend parity promise; new
-  rendering capability is allowed to be Vulkan-shaped. The binding model is
-  *derived* (SPIR-V reflection → `ShaderInterface`), never a hand-maintained
-  table that can drift from the shader.
+  rendering capability is allowed to be Vulkan-shaped. The binding model *can be
+  derived* — SPIR-V reflection → `ShaderInterface` (`spirv-cross --reflect` →
+  `ShaderReflection.Load`) is the path that removes the hand-maintained table
+  that drifts from the shader, and the streaming target (`VulkanSponza`) uses it.
+  Small demos still hand-author `ShaderInterface` at load — acceptable at demo
+  scale, the same honest line §3 draws for raw-vs-cooked assets. What's
+  non-negotiable is that the layout is a `ShaderInterface` value (not scattered
+  magic offsets), so reflection can replace authoring without touching consumers.
 - World space is right-handed: `+X` right, `+Y` up, camera looks down `−Z`.
   Logical pixels (mouse, `LogicalSize`) and physical pixels
   (`RenderFrameContext.Width/Height`, ~2× on Retina) don't mix.
