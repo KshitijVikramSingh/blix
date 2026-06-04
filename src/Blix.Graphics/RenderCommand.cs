@@ -8,13 +8,6 @@ public abstract record RenderCommand;
 // null on a draw means "use the pass-wide scissor".
 public readonly record struct ScissorRect(int X, int Y, int Width, int Height);
 
-// Wrap one or more DrawIndexedCommands to scope an occlusion query.
-// QueryId is allocated by the graphics device's occlusion-query pool and
-// the result is read back asynchronously (typically next frame); any draws
-// between the begin and end contribute samples to the result.
-public sealed record BeginOcclusionQueryCommand(int QueryId) : RenderCommand;
-public sealed record EndOcclusionQueryCommand : RenderCommand;
-
 // A compute dispatch (Vulkan-only). The pipeline is a compute pipeline; the
 // work-group counts are the vkCmdDispatch arguments. Uniforms write the
 // program's UBOs; Textures bind sampled (read) and storage (read/write) images
