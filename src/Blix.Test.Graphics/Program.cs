@@ -2141,6 +2141,36 @@ static ShaderInterface MinimalShader() => new(new[]
     }
 }
 
+// ============================================================================
+// Section AL — GraphicsMatrices.SunShadowViewProjection (extracted sun-shadow technique).
+// ============================================================================
+//
+// The CPU half of the shared sun-shadow technique (pairs with the GLSL blix_sun_shadow
+// in Blix.Shaders/shadow.glsl), extracted from TankArena/Bulwark. Pins that the light
+// frustum covers the scene origin (in Vulkan [0,1] shadow depth) and excludes points
+// beyond its ortho extent — a regression here silently drops or mis-clips every shadow.
+{
+    var sunDir = Vector3.Normalize(new Vector3(0.35f, 0.82f, 0.45f));
+    var vp = GraphicsMatrices.SunShadowViewProjection(sunDir, distance: 120f, orthoExtent: 44f, nearPlane: 20f, farPlane: 200f);
+
+    static Vector3 Ndc(Matrix4x4 m, Vector3 p)
+    {
+        var h = Vector4.Transform(new Vector4(p, 1f), m);
+        return new Vector3(h.X / h.W, h.Y / h.W, h.Z / h.W);
+    }
+
+    var origin = Ndc(vp, Vector3.Zero);
+    t.ExpectTrue("AL.1 scene origin inside the light frustum (NDC xy in [-1,1])",
+        MathF.Abs(origin.X) <= 1f && MathF.Abs(origin.Y) <= 1f);
+    t.ExpectTrue("AL.1 scene origin within Vulkan shadow depth [0,1]",
+        origin.Z >= 0f && origin.Z <= 1f);
+
+    // A point well beyond the ortho half-extent (22) projects outside the [-1,1] frustum.
+    var far = Ndc(vp, new Vector3(60f, 0f, 60f));
+    t.ExpectTrue("AL.2 point beyond the ortho extent falls outside the frustum",
+        MathF.Abs(far.X) > 1f || MathF.Abs(far.Y) > 1f);
+}
+
 t.PrintSummary();
 return t.FailedCount;
 
