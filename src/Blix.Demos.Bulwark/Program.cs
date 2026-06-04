@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix;
 using Blix.Assets;
+using Blix.Audio;
 using Blix.Core;
 using Blix.Geometry;
 using Blix.Graphics;
@@ -40,7 +41,12 @@ namespace Blix.Demos.Bulwark;
 // M2a — The game: a discrete wave director (escalating size + HP, win on clearing
 // the last wave, defeat at 0 lives, ENTER to restart), tower upgrades (left-click an
 // existing tower to level it up — more damage + range), and a SpriteBatch/Font HUD
-// (wave / lives / scrap + centre banners). [M2b adds impact particles + SFX.]
+// (wave / lives / scrap + centre banners).
+//
+// M2b — Juice: ParticleBatch (the showcase primitive, now a gameplay mechanic) for
+// additive impact + death bursts drawn over the scene, and synthesized OpenAL SFX
+// (fire / death / leak). ParticleBatch stays geometry-only — the demo brings a
+// minimal descriptor-less additive pipeline; no soft-depth / HDR / bloom.
 //
 // Everything 3D goes through one InstancedBatch (tiles + towers + enemies + shots +
 // ghost), lifted from VulkanInstanced; the HUD is a SpriteBatch over the same pass.
@@ -51,6 +57,7 @@ namespace Blix.Demos.Bulwark;
 //   • A* grid pathfinding: dynamic re-path + wall-off rejection (nav's 2nd consumer)
 //   • Transform3D turret→barrel aim rig: LookAt + parented-barrel muzzle (rig's 2nd consumer)
 //   • SpriteBatch/Font HUD composited over the 3D pass (Vulkan-NDC ortho)
+//   • ParticleBatch as a gameplay mechanic (additive bursts) + synthesized OpenAL SFX
 //   • Orbit/zoom RTS camera; build/upgrade UI + scrap economy
 // ── Intentionally owns (stays local — NOT extracted) ──
 //   • grid, A* + path-following, turret aim, economy, wave director, HUD layout, camera feel
@@ -168,6 +175,16 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     private SpriteBatch hud = null!;
     private Font? hudFont;
 
+    // M2b juice. ParticleBatch (the showcase primitive, now a gameplay mechanic) for
+    // impact/death bursts — a caller-owned additive pipeline drawn over the cubes.
+    // SFX synthesized through OpenAL (best-effort; null if no audio backend).
+    private ParticleBatch particles = null!;
+    private PipelineHandle particlePipeline;
+    private readonly Random rng = new(20260604);
+    private IAudioDevice? audio;
+    private AudioSource? fireSfx, deathSfx, leakSfx;
+    private float fireSfxCooldown;
+
     // Held-key orbit state (OnKeyDown/Up is edge-triggered; apply in OnUpdate).
     private bool orbitLeft, orbitRight, orbitUp, orbitDown;
 
@@ -211,11 +228,29 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         instanceBuffer = new InstanceBuffer(vk, shader, "bulwark");
         batch = new InstancedBatch(cube, pipeline, instanceBuffer);
 
+        // Particle pipeline: ParticleBatch is geometry-only, so we bring a minimal
+        // descriptor-less additive pipeline (push = view-projection) drawn over the
+        // cubes — no soft-depth / HDR / bloom (that's the VulkanParticles showcase).
+        var particleIface = new ShaderInterface(
+            Slots: Array.Empty<DescriptorSetSlot>(),
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+        var particleShader = vk.CreateShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "particle.vert.spv")),
+            File.ReadAllBytes(Path.Combine(shaderDir, "particle.frag.spv")),
+            particleIface, "particle");
+        particlePipeline = vk.CreatePipeline(
+            new PipelineDescription(particleShader, ParticleBatch.VertexLayoutDescription,
+                PrimitiveTopology.Triangles, DepthState.Disabled, RasterizerState.NoCulling,
+                new[] { BlendState.Additive }),
+            "particle");
+        particles = new ParticleBatch(vk, maxParticles: 2048, "bulwark.particles");
+
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         mouseX = host.LogicalSize.Width * 0.5f;
         mouseY = host.LogicalSize.Height * 0.5f;
 
         CreateHud();
+        CreateAudio();
         UpdateCamera();
         UpdatePick();
         if (autoPlay) SeedStarterTowers();   // headless smoke only — the player builds their own
@@ -265,6 +300,10 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
                     : $"  wave {wave} cleared — build, then SPACE for wave {wave + 1}");
             }
         }
+
+        // Particles arc + fade every frame (so a wave's last bursts finish in Prep).
+        particles.Update(dt, new Vector3(0f, -9f, 0f), drag: 1.2f);
+        if (fireSfxCooldown > 0f) fireSfxCooldown -= dt;
 
         PrintStatus(dt);
     }
@@ -328,6 +367,10 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             pass =>
             {
                 batch.End(pass);
+                // Additive billboards over the 3D scene (impact/death bursts), then the HUD on top.
+                particles.Draw(pass, particlePipeline,
+                    camera.Transform.Right, camera.Transform.Up, camera.Transform.Position,
+                    sortByDepth: false, pushBytes, Array.Empty<ShaderTextureBinding>());
                 DrawHud(pass, frame.Width, frame.Height);   // depth-disabled, alpha-blended, over the 3D
             });
 
@@ -562,6 +605,8 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             {
                 enemies.RemoveAt(i);
                 scrap += KillReward;
+                EmitBurst(e.Pos + new Vector3(0f, 0.5f, 0f), new Vector4(1.0f, 0.55f, 0.18f, 1f), 16, 5.5f, 0.55f, 0.6f);
+                PlaySfx(deathSfx, 0.9f + (float)rng.NextDouble() * 0.2f);
                 continue;
             }
 
@@ -585,6 +630,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             {
                 enemies.RemoveAt(i);
                 lives--;
+                PlaySfx(leakSfx, 1f);
                 Console.WriteLine($"  LEAK — lives {lives}");
                 if (lives <= 0) { phase = Phase.Lost; Console.WriteLine("  *** DEFEAT ***"); }
             }
@@ -609,6 +655,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
                 t.Cooldown = FireInterval;
                 var dmg = ShotDamage * (1f + 0.6f * (t.Level - 1));   // and damage
                 shots.Add(new Projectile { Pos = t.Barrel.WorldPosition, Target = target, Damage = dmg });
+                if (fireSfxCooldown <= 0f) { PlaySfx(fireSfx, 1f + (float)rng.NextDouble() * 0.15f); fireSfxCooldown = 0.09f; }
             }
         }
     }
@@ -623,7 +670,13 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             if (s.Target is null || s.Target.Health <= 0f) { shots.RemoveAt(i); continue; }
             var to = s.Target.Pos - s.Pos;
             var dist = to.Length();
-            if (dist < 0.5f) { s.Target.Health -= s.Damage; shots.RemoveAt(i); continue; }
+            if (dist < 0.5f)
+            {
+                s.Target.Health -= s.Damage;
+                EmitBurst(s.Pos, new Vector4(1.0f, 0.92f, 0.45f, 1f), 5, 3f, 0.28f, 0.28f);   // impact spark
+                shots.RemoveAt(i);
+                continue;
+            }
             s.Pos += to / dist * Math.Min(ProjSpeed * dt, dist);
         }
     }
@@ -676,6 +729,69 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
         if (statusTimer > 0f) return;
         statusTimer = 2f;
         Console.WriteLine($"  [{phase} w{wave}/{TotalWaves} | lives {lives} | scrap {scrap} | enemies {enemies.Count} | towers {towers.Count}]");
+    }
+
+    // ── Juice (M2b) ──
+
+    // A short outward burst of additive billboards that arc + fade (gravity applied in
+    // particles.Update). Spawned on impacts and deaths.
+    private void EmitBurst(Vector3 pos, Vector4 color, int count, float speed, float size, float life)
+    {
+        var fade = new Vector4(color.X, color.Y, color.Z, 0f);   // dissolve, don't pop
+        for (var i = 0; i < count; i++)
+        {
+            var dir = new Vector3(
+                (float)rng.NextDouble() * 2f - 1f,
+                (float)rng.NextDouble() * 1.2f + 0.2f,   // upward bias
+                (float)rng.NextDouble() * 2f - 1f);
+            if (dir.LengthSquared() > 1e-4f) dir = Vector3.Normalize(dir);
+            var v = dir * (speed * (0.5f + (float)rng.NextDouble()));
+            particles.Emit(pos, v, color, fade, size, size * 0.3f, life * (0.6f + 0.6f * (float)rng.NextDouble()));
+        }
+    }
+
+    // Synthesized one-shot SFX through the runtime's OpenAL device (best-effort —
+    // null if no backend). Lifted from Runner.
+    private void CreateAudio()
+    {
+        try { audio = (host as IAudioHost)?.AudioDevice; }
+        catch { audio = null; }
+        if (audio is not { } a) return;
+        fireSfx = AudioSource.Create(a, a.CreateClip(SynthBlip(440f, 0.06f, 0.30f, rising: false), "bulwark.fire"), "bulwark.fire");
+        deathSfx = AudioSource.Create(a, a.CreateClip(SynthBlip(180f, 0.18f, 0.50f, rising: false), "bulwark.death"), "bulwark.death");
+        leakSfx = AudioSource.Create(a, a.CreateClip(SynthBlip(90f, 0.32f, 0.60f, rising: false), "bulwark.leak"), "bulwark.leak");
+    }
+
+    private void PlaySfx(AudioSource? source, float pitch)
+    {
+        if (source is null || audio is not { } a) return;
+        source.Pitch = pitch;
+        source.Gain = 0.5f;
+        source.Sync(a);
+        source.Stop(a);   // rewind so rapid re-triggers restart cleanly
+        source.Play(a);
+    }
+
+    // Square-wave blip with a decay envelope + pitch sweep. 16-bit mono PCM, no asset.
+    private static AudioClipData SynthBlip(float baseFreq, float seconds, float amplitude, bool rising)
+    {
+        const int rate = 44100;
+        var n = (int)(rate * seconds);
+        var pcm = new byte[n * 2];
+        var phase = 0f;
+        for (var i = 0; i < n; i++)
+        {
+            var u = (float)i / n;
+            var env = 1f - u;
+            var freq = rising ? baseFreq * (1f + 0.8f * u) : baseFreq * (1f - 0.5f * u);
+            phase += freq / rate;
+            if (phase >= 1f) phase -= 1f;
+            var square = phase < 0.5f ? 1f : -1f;
+            var s = (short)(square * env * amplitude * short.MaxValue);
+            pcm[i * 2 + 0] = (byte)(s & 0xFF);
+            pcm[i * 2 + 1] = (byte)((s >> 8) & 0xFF);
+        }
+        return new AudioClipData(SampleRate: rate, Channels: 1, BitsPerSample: 16, PcmData: pcm);
     }
 
     // ── HUD (SpriteBatch + Font) — composited over the 3D pass ──

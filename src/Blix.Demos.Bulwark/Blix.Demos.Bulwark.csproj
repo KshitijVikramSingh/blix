@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Blix\Blix.csproj" />
     <ProjectReference Include="..\Blix.Assets\Blix.Assets.csproj" />
+    <ProjectReference Include="..\Blix.Audio\Blix.Audio.csproj" />
     <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
@@ -35,6 +36,8 @@
   <ItemGroup>
     <GlslShader Include="Shaders\cube.vert" />
     <GlslShader Include="Shaders\cube.frag" />
+    <GlslShader Include="Shaders\particle.vert" />
+    <GlslShader Include="Shaders\particle.frag" />
   </ItemGroup>
 
   <Target Name="CompileSpirV"

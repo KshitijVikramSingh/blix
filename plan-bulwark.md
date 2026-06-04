@@ -66,8 +66,11 @@ RTS camera (orbit / zoom / pan) · wave director + economy.
   tick); a build that walls off *any* front is rejected. Tuned for active play (no
   free towers in interactive; tankier/faster enemies; 200 start scrap ≈ one tower
   per front). Nav self-test rewritten for the centre topology (11 checks).
-- **M2b · Juice** *(next)*: impact/death particles (`ParticleBatch` showcase →
-  mechanic) + OpenAL SFX (fire/hit/death).
+- **M2b · Juice** *(done)*: impact + death bursts via `ParticleBatch` (showcase →
+  gameplay mechanic; geometry-only primitive driven by a minimal caller-owned
+  additive pipeline — no soft-depth/HDR/bloom), and synthesized OpenAL SFX
+  (fire/death/leak), both lifted patterns. Verified clean under validation; audio
+  device loads in the headless smoke. **M2 complete.**
 - **M3 · Polish**: 2–3 tower + enemy types, CC0 art pass (KayKit Tower Defense pack
   — CC0, license-check per the sourcing rule), README + overview.
 
