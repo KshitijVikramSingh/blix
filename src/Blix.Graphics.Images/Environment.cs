@@ -160,7 +160,7 @@ public static class EnvironmentBaker
     }
 
     // Upload a previously-cooked BlixProbeData blob into a BakedEnvironment.
-    // No HDR sampling, no integration -- pure memcpy from CPU arrays to GL
+    // No HDR sampling, no integration -- pure memcpy from CPU arrays to GPU
     // texture storage.
     public static BakedEnvironment UploadCookedProbe(
         IGraphicsDevice device,

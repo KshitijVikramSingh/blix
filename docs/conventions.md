@@ -133,6 +133,20 @@ pose).
 
 ---
 
+## Where the surface stands
+
+Blix now reaches across the corners it set out to cover — rendering,
+assets/streaming, animation, physics, audio, 2D, diagnostics, and the
+game-layer — each *proven by a demo or game* rather than declared. That breadth
+is the milestone worth naming. It is **not** a stability promise: the principles
+above are frozen, but signatures still move, a primitive may be reshaped, and a
+corner may be restructured when a real consumer shows the current shape is
+wrong. New capability lands under the extract-under-pressure rule (§4), inside
+the existing layering until something earns a change to it. Pin behaviour you
+rely on with a `Blix.Test.Graphics` section, not with a frozen signature.
+
+---
+
 ## What Blix deliberately does *not* have
 
 Stated so the absence reads as a decision, not an oversight. Each answers a

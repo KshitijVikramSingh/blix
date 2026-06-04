@@ -2,7 +2,7 @@ namespace Blix.Graphics;
 
 // Snapshot of device-level diagnostic counters surfaced to UI / overlays /
 // CI. Frame-scoped values (FrameErrorCount, LastError*) reset at the start
-// of each Execute() so a HUD line that reads "GL errors: 3" reflects the
+// of each Execute() so a HUD line that reads "errors: 3" reflects the
 // frame currently on screen — not the all-time total.
 public readonly record struct GraphicsDeviceDiagnostics(
     int FrameErrorCount,
@@ -52,8 +52,8 @@ public interface IGraphicsDevice : IDisposable
 
     // 32-bit index buffer. Use for meshes with >65535 vertices in a single
     // primitive (large authored scenes -- some Sponza Modern packs hit this).
-    // The backend records the format per handle; DrawElements picks the
-    // matching GL element type at draw time without caller involvement.
+    // The backend records the format per handle; the draw path picks the
+    // matching VkIndexType at draw time without caller involvement.
     IndexBufferHandle CreateIndexBuffer(
         IReadOnlyList<uint> indices,
         GraphicsBufferUsage usage = GraphicsBufferUsage.Static,
@@ -61,10 +61,9 @@ public interface IGraphicsDevice : IDisposable
 
     void DestroyIndexBuffer(IndexBufferHandle handle);
 
-    ShaderProgramHandle CreateShaderProgram(ShaderSources sources);
-
-    ShaderProgramHandle CreateShaderProgram(ShaderProgramDescription description);
-
+    // Shader-program *creation* is backend-specific: the Vulkan backend builds
+    // programs from compiled SPIR-V (VulkanGraphicsDevice.CreateShaderProgramFromSpv),
+    // so it isn't on the backend-neutral contract. Destruction is generic.
     void DestroyShaderProgram(ShaderProgramHandle handle);
 
     PipelineHandle CreatePipeline(PipelineDescription description, string? name = null);
@@ -125,18 +124,6 @@ public interface IGraphicsDevice : IDisposable
         SamplerDescription sampler,
         ReadOnlySpan<byte> pixels,
         string? name = null);
-
-    // Creates a cubemap texture from six square face images, laid out in GL face order:
-    // [+X, -X, +Y, -Y, +Z, -Z]. Each face is RGBA8, face*4 bytes long. The resulting
-    // texture is sampled in shaders via a samplerCube uniform with a 3D direction.
-    TextureHandle CreateTextureCube(int faceSize, ReadOnlySpan<byte> faces, SamplerDescription sampler, string? name = null);
-
-    // Creates an empty depth-format cubemap intended as a shadow-map render target.
-    // Each face gets its own depth attachment via DepthCubeFace render surfaces.
-    // The returned handle is sampled in shaders as samplerCubeShadow (the sampler
-    // descriptor should have Compare = true) -- texture(uShadowCube, vec4(dir, ref))
-    // does the hardware PCF compare in cubemap space.
-    TextureHandle CreateTextureCubeDepth(int faceSize, SamplerDescription sampler, string? name = null);
 
     // HDR cubemap with Rgba16F (half-float) storage, uploaded from caller-supplied
     // Half data laid out [+X, -X, +Y, -Y, +Z, -Z] face order, 4 channels per pixel

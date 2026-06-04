@@ -4,9 +4,9 @@ using OpenTK.Audio.OpenAL;
 
 namespace Blix.Audio.OpenAL;
 
-// OpenAL Soft implementation of IAudioDevice. Mirrors the Blix.Graphics.OpenGL
-// pattern: this assembly knows about OpenAL; everyone above it only sees the
-// abstract IAudioDevice. One device, one context, one thread.
+// OpenAL Soft implementation of IAudioDevice. Same backend-isolation pattern
+// as Blix.Graphics.Vulkan: this assembly knows about OpenAL; everyone above it
+// only sees the abstract IAudioDevice. One device, one context, one thread.
 //
 // Resource tracking uses int-id dictionaries to mirror the AL buffer/source
 // integer handles, with a separate counter so external handle ids don't
