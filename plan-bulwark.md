@@ -84,9 +84,23 @@ RTS camera (orbit / zoom / pan) · wave director + economy.
   (shadow + scene); tiles/shots/ghost are scene-only receivers; particles additive
   into HDR; HUD on present. Renders clean under validation incl. teardown
   (IDisposable, not OnUnload). Shadow/fog/sun constants exposed for the look-dial.
-- **Next**: animate the enemies — the rigged Robot Enemy + skinned-mesh **instancing**
-  (a real engine gap), per the playtest direction. Then polish (2–3 tower/enemy
-  types, README + overview).
+- **M4 · Animated enemies — skinned-mesh instancing** *(planned)*. The Robot Enemy
+  ships 7 clips (Walk/Run/Idle/Death/…), 15-joint skin. The engine only skins ONE
+  character (Runner/VulkanLit, per-frame bone-palette SSBO + one draw); a *crowd* of
+  skinned characters is a real engine gap. Proof-gated, built local-first (extraction
+  to `Blix.Render` only on a 2nd consumer — same discipline as the turret-rig/nav verdicts):
+  - **Gate A — one skinned, animated enemy:** import via `GltfImporter` (Skeleton +
+    clips + JOINTS/WEIGHTS), lift Runner's bone-palette path, drive the **Walk** clip,
+    render it shadow-aware in the scene pass. De-risks model + clips + skinned pipeline
+    × RenderGraph. (No cast shadow yet.)
+  - **Gate B — promote to skinned instancing:** a `[N×bones]` palette SSBO + a skinned
+    *instanced* shader that picks its palette by `gl_InstanceIndex` + per-instance
+    model → ONE draw for all enemies. The artifact is a local **`SkinnedInstancedBatch`**
+    (InstanceData carries model+tint; skinning adds a per-instance palette slot). Adds
+    the skinned shadow caster (reuses the palette). Phase-staggered Walk; Run when the
+    wave speeds up.
+  - **Deferred to polish:** Death clip on kill (dying-state + corpse hold); 2–3
+    tower/enemy types; README + overview.
 
 ## The extraction decisions — RESOLVED (decided on real code, not guessed)
 
