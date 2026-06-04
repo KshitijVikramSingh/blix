@@ -228,6 +228,26 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     private const float SunDistance = 120f;
     private static readonly Vector3 SunDir = Vector3.Normalize(new Vector3(0.35f, 0.82f, 0.45f));
 
+    // M4 Gate A: one skinned, animated enemy (de-risks the skinned path × RenderGraph
+    // before Gate B generalises it to an instanced crowd). Reuses Runner's bone-palette
+    // approach; the palette is baked into world space per frame so skinned.vert needs
+    // no model push (matches the Gate B instanced plan). Best-effort.
+    private bool skinnedLoaded;
+    private PipelineHandle skinnedPipeline;
+    private VertexBufferHandle[] enemyVBs = Array.Empty<VertexBufferHandle>();
+    private IndexBufferHandle[] enemyIBs = Array.Empty<IndexBufferHandle>();
+    private int[] enemyIndexCounts = Array.Empty<int>();
+    private Skeleton enemySkeleton = null!;
+    private Pose enemyRestPose = null!, enemyPose = null!;
+    private BonePalette enemyBonePalette = null!;
+    private byte[] enemyPalettePayload = Array.Empty<byte>();
+    private AnimationClip enemyWalk = null!;
+    private Matrix4x4 enemyMeshNodeTransform = Matrix4x4.Identity;
+    private MaterialBindings enemyBones = null!;   // set 3, frames-in-flight
+    private float enemyAnimTime;
+    private const float SkinnedEnemyScale = 1.15f;   // visual dial
+    private const float SkinnedEnemyYawFix = 0f;     // model forward → engine; dial if facing is off
+
     // Held-key orbit state (OnKeyDown/Up is edge-triggered; apply in OnUpdate).
     private bool orbitLeft, orbitRight, orbitUp, orbitDown;
 
@@ -315,6 +335,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
         fullscreen = new FullscreenPass(vk, "fullscreen");
 
         LoadArt(worldShader, worldPipeline, casterShader, casterPipeline);   // world + shadow-caster batches
+        LoadSkinnedEnemy(shaderDir);   // M4 Gate A: one animated enemy (best-effort)
 
         // Particle pipeline: geometry-only ParticleBatch + a minimal additive pipeline
         // (push = view-projection) into the HDR scene pass. No soft-depth / bloom.
@@ -353,6 +374,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     {
         var dt = (float)time.Delta;
         gameTime += dt;
+        AdvanceSkinnedPose(dt);
         var yawRate = 1.4f;
         var pitchRate = 1.0f;
         if (orbitLeft) camYaw -= yawRate * dt;
@@ -505,6 +527,16 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
                 enemyBatch.End(scope, shadowBind);
                 coreBatch.End(scope, shadowBind);
             }
+            // Gate A: one skinned, animated enemy (enemies[0]) — world-baked palette to
+            // set 3, shadow map at set 0, lit by the shared cube.frag.
+            if (skinnedLoaded && enemies.Count > 0)
+            {
+                BakePalette(SkinnedEnemyModel(enemies[0].Pos), enemyPalettePayload);
+                enemyBones.WriteBuffer(vk.CurrentFrameSlot, 0, enemyPalettePayload);
+                for (var i = 0; i < enemyVBs.Length; i++)
+                    scope.DrawIndexedSkinnedShadow(enemyVBs[i], enemyIBs[i], skinnedPipeline, enemyIndexCounts[i],
+                        Array.Empty<ShaderUniform>(), shadowBind, enemyBones.Handle, worldPush);
+            }
             particles.Draw(scope, particlePipeline,
                 camera.Transform.Right, camera.Transform.Up, camera.Transform.Position,
                 sortByDepth: false, pushBytes, Array.Empty<ShaderTextureBinding>());
@@ -606,8 +638,10 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
                     TurretTint(t.Level)));
             }
 
-            foreach (var e in enemies)
+            // enemies[0] renders as the skinned, animated enemy (Gate A); rest stay static.
+            for (var ei = skinnedLoaded ? 1 : 0; ei < enemies.Count; ei++)
             {
+                var e = enemies[ei];
                 var hp = Math.Clamp(e.Health / e.MaxHealth, 0f, 1f);
                 enemyInst.Add(new InstanceData(
                     Matrix4x4.CreateScale(EnemyScale) * Matrix4x4.CreateTranslation(e.Pos.X, 0f, e.Pos.Z),
@@ -627,8 +661,9 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
                     new Vector4(0.30f, 0.34f, 0.42f, 1f)));
                 instances.Add(new InstanceData(t.Turret.ToMatrix(), TurretTint(t.Level)));
             }
-            foreach (var e in enemies)
+            for (var ei = skinnedLoaded ? 1 : 0; ei < enemies.Count; ei++)
             {
+                var e = enemies[ei];
                 var hp = Math.Clamp(e.Health / e.MaxHealth, 0f, 1f);
                 instances.Add(new InstanceData(
                     Matrix4x4.CreateScale(0.85f) * Matrix4x4.CreateTranslation(e.Pos.X, 0.45f, e.Pos.Z),
@@ -1026,6 +1061,117 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
             ? (vk.CreateIndexBuffer(u32, name: $"{md.Name}.ib"), u32.Length)
             : (vk.CreateIndexBuffer(md.Indices, name: $"{md.Name}.ib"), md.Indices.Length);
         return new Mesh(md.Name, vb, ib, count, md.Bounds);
+    }
+
+    // ── Skinned enemy (M4 Gate A) — full GltfImporter (Skeleton + clips + JOINTS/
+    // WEIGHTS); one animated enemy, shadow-aware via the shared cube.frag. ──
+    private void LoadSkinnedEnemy(string shaderDir)
+    {
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "Assets", "models", "enemy.glb");
+            var model = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("enemy.skinned"), path));
+            if (model.Animations.Length == 0) throw new InvalidOperationException("no animations");
+
+            enemySkeleton = model.Skeleton;
+            enemyRestPose = enemySkeleton.CreateRestPose();
+            enemyPose = enemySkeleton.CreateRestPose();
+            enemyBonePalette = new BonePalette(enemySkeleton.BoneCount);
+            enemyPalettePayload = new byte[enemySkeleton.BoneCount * 64];
+            enemyMeshNodeTransform = model.MeshNodeTransform;
+            enemyWalk = FindEnemyClip(model, "Walk") ?? FindEnemyClip(model, "Run") ?? model.Animations[0];
+
+            var boneLayout = new UniformBlockLayout(
+                TotalSize: enemySkeleton.BoneCount * 64,
+                Members: new[] { new UniformBlockMember("bones", 0, enemySkeleton.BoneCount * 64, ElementStride: 64) });
+            // Shadow sampler (set 0, frag) + bone palette (set 3, vertex); the 160B push
+            // matches cube.vert/frag so the shared cube.frag shades it shadow-aware.
+            var iface = new ShaderInterface(
+                Slots: new[]
+                {
+                    new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                    new DescriptorSetSlot(3, 0, ShaderResourceType.StorageBuffer, ShaderStages.Vertex, BlockLayout: boneLayout),
+                },
+                PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 160) });
+            var shader = vk.CreateShaderProgramFromSpv(
+                File.ReadAllBytes(Path.Combine(shaderDir, "skinned.vert.spv")),
+                File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv")), iface, "skinned");
+            skinnedPipeline = vk.CreatePipeline(new PipelineDescription(shader,
+                VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
+                DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
+                RenderTarget: graph.GetPassSurface(scenePassHandle)), "skinned");
+
+            var n = model.Primitives.Length;
+            enemyVBs = new VertexBufferHandle[n];
+            enemyIBs = new IndexBufferHandle[n];
+            enemyIndexCounts = new int[n];
+            for (var i = 0; i < n; i++)
+            {
+                var mesh = model.Primitives[i].Mesh;
+                enemyVBs[i] = vk.CreateVertexBuffer(
+                    new VertexBufferData(new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static), mesh.VertexBytes),
+                    $"enemy.vb{i}");
+                enemyIBs[i] = mesh.Indices32 is { } u32
+                    ? vk.CreateIndexBuffer(u32, name: $"enemy.ib{i}")
+                    : vk.CreateIndexBuffer(mesh.Indices, name: $"enemy.ib{i}");
+                enemyIndexCounts[i] = mesh.IndexCount;
+            }
+            enemyBones = vk.CreateMaterial(shader, setIndex: 3, framesInFlight: vk.MaxFramesInFlightCount, name: "enemy.bones");
+            skinnedLoaded = true;
+            Console.WriteLine($"  skinned enemy: {n} prim(s), {enemySkeleton.BoneCount} bones, clip '{enemyWalk.Name}'");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  skinned enemy unavailable, enemies stay static: {ex.Message}");
+            skinnedLoaded = false;
+        }
+    }
+
+    private static AnimationClip? FindEnemyClip(GltfModel model, string contains)
+    {
+        foreach (var c in model.Animations)
+            if (c.Name.Contains(contains, StringComparison.OrdinalIgnoreCase)) return c;
+        return null;
+    }
+
+    // Advance the Walk clip into enemyBonePalette (model-independent; the model is baked
+    // in per-enemy at upload time).
+    private void AdvanceSkinnedPose(float dt)
+    {
+        if (!skinnedLoaded) return;
+        enemyAnimTime += dt;
+        var dur = enemyWalk.Duration > 0 ? enemyWalk.Duration : 1.0;
+        enemyPose.CopyFrom(enemyRestPose);
+        enemyWalk.Sample(enemyAnimTime % dur, enemyPose);
+        enemySkeleton.ComputeBonePalette(enemyPose, enemyBonePalette);
+    }
+
+    // Place/scale/face the skinned enemy at a world position (faces the core it marches to).
+    private Matrix4x4 SkinnedEnemyModel(Vector3 pos)
+    {
+        var core = CellCenter(CoreCx, CoreCz);
+        var to = new Vector3(core.X - pos.X, 0f, core.Z - pos.Z);
+        var yaw = (to.LengthSquared() > 1e-4f ? MathF.Atan2(to.X, to.Z) : 0f) + SkinnedEnemyYawFix;
+        var user = Matrix4x4.CreateScale(SkinnedEnemyScale)
+                 * Matrix4x4.CreateRotationY(yaw)
+                 * Matrix4x4.CreateTranslation(pos.X, 0f, pos.Z);
+        return enemyMeshNodeTransform * user;
+    }
+
+    // Bake the world model into each skin matrix (row-vector: skin * model) so skinning
+    // lands in world space — skinned.vert then needs no model push. Matches Gate B.
+    private void BakePalette(Matrix4x4 model, byte[] dst)
+    {
+        var f = MemoryMarshal.Cast<byte, float>(dst.AsSpan());
+        for (var i = 0; i < enemyBonePalette.BoneCount; i++)
+        {
+            var m = enemyBonePalette.Matrices[i] * model;
+            var o = i * 16;
+            f[o + 0] = m.M11; f[o + 1] = m.M12; f[o + 2] = m.M13; f[o + 3] = m.M14;
+            f[o + 4] = m.M21; f[o + 5] = m.M22; f[o + 6] = m.M23; f[o + 7] = m.M24;
+            f[o + 8] = m.M31; f[o + 9] = m.M32; f[o + 10] = m.M33; f[o + 11] = m.M34;
+            f[o + 12] = m.M41; f[o + 13] = m.M42; f[o + 14] = m.M43; f[o + 15] = m.M44;
+        }
     }
 
     private void PrintStatus(float dt)

@@ -89,10 +89,12 @@ RTS camera (orbit / zoom / pan) · wave director + economy.
   character (Runner/VulkanLit, per-frame bone-palette SSBO + one draw); a *crowd* of
   skinned characters is a real engine gap. Proof-gated, built local-first (extraction
   to `Blix.Render` only on a 2nd consumer — same discipline as the turret-rig/nav verdicts):
-  - **Gate A — one skinned, animated enemy:** import via `GltfImporter` (Skeleton +
-    clips + JOINTS/WEIGHTS), lift Runner's bone-palette path, drive the **Walk** clip,
-    render it shadow-aware in the scene pass. De-risks model + clips + skinned pipeline
-    × RenderGraph. (No cast shadow yet.)
+  - **Gate A — one skinned, animated enemy** *(done — visual review pending)*: imports
+    via `GltfImporter` (15-bone skeleton + 7 clips), Walk clip → pose → world-baked
+    bone palette (skin × model, so `skinned.vert` needs no model push — matches Gate B)
+    → set-3 SSBO, rendered shadow-aware via the shared `cube.frag`. enemies[0] draws
+    skinned; the rest stay static. Validation-clean. Dials: `SkinnedEnemyScale`,
+    `SkinnedEnemyYawFix`. (No cast shadow yet — Gate B.)
   - **Gate B — promote to skinned instancing:** a `[N×bones]` palette SSBO + a skinned
     *instanced* shader that picks its palette by `gl_InstanceIndex` + per-instance
     model → ONE draw for all enemies. The artifact is a local **`SkinnedInstancedBatch`**
