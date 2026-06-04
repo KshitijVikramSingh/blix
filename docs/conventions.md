@@ -113,6 +113,15 @@ pose).
   engine primitive when a *second* consumer wants the same decision — not because
   one demo found it convenient. Duplication across demos is information-gathering;
   premature abstraction is the more expensive mistake here.
+  - *Worked example (a `Bulwark` was built partly to generate this signal):* a
+    second consumer is necessary but **not sufficient**. `Bulwark` and `TankArena`
+    both grew a turret→barrel aim rig and a navigation system — yet **neither was
+    extracted.** The turret rig is a few lines composing primitives that already
+    exist (`Transform3D` + `LookAt` + `WorldPosition`) — shared incidentally, no new
+    capability to abstract. The nav systems are *different algorithms* (grid A* vs
+    continuous steering) — unifying them would force one shape onto two. The test
+    isn't "is it duplicated?" but "do two consumers want the *same decision*, and
+    does naming it add capability?" Often the honest answer is no.
 - **Library, not framework.** New rendering capability lands as a *primitive the
   game calls*, not a stage the engine runs for you. There is no `SceneRenderer`
   that owns read→cull→draw; demos compose engine primitives and keep their own

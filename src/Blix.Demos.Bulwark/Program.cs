@@ -35,8 +35,9 @@ namespace Blix.Demos.Bulwark;
 // shots; enemies have HP; a kill pays scrap, a leak costs a life; scrap builds more
 // towers. Each tower aims with a Transform3D turret→barrel rig — the SAME pattern as
 // TankArena's tank turret (LookAt to yaw, a parented barrel whose WorldPosition is
-// the muzzle), now its SECOND consumer. Kept local; the TurretRig extraction call
-// waits, like nav.
+// the muzzle), now its SECOND consumer. Verdict after building both: keep it local —
+// incidental sharing of existing primitives, not engine substance (nav likewise:
+// grid-A* vs steering are too different to unify). See plan-bulwark.md / conventions §4.
 //
 // M2a — The game: a discrete wave director (escalating size + HP, win on clearing
 // the last wave, defeat at 0 lives, ENTER to restart), tower upgrades (left-click an
@@ -201,7 +202,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     // ── visual fit knobs (tweak to taste) ──
     private const float TowerScale = 1.3f;
     private const float TurretYawFix = MathF.PI;   // model barrel +Z → engine -Z forward
-    private const float EnemyScale = 0.9f;
+    private const float EnemyScale = 1.15f;
     private const float CoreScale = 0.22f;
     private const float CoreLift = 0.2f;
 

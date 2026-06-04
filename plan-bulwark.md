@@ -81,18 +81,29 @@ RTS camera (orbit / zoom / pan) · wave director + economy.
 - **M3b · Lighting & HDR** *(next)*: lift TankArena's sun-shadow + HDR RenderGraph.
 - **M3c · Polish**: 2–3 tower/enemy types, README + overview.
 
-## The four extraction decisions (decided on real code, not guessed)
+## The extraction decisions — RESOLVED (decided on real code, not guessed)
 
-1. **Navigation** — grid-A* (here) vs steering-`AvoidObstacles` (Tank Arena).
-   Extract a `NavGrid` + A* primitive, or rule it premature because steering ≠
-   grid-search? **The headline signal.**
-2. **Turret rig** — TD tower aim vs Tank Arena turret aim are both Transform3D
-   turret→barrel + lead-target → a real 2nd consumer. Extract a `TurretRig`/aim
-   helper?
-3. **`Grid2D<T>`** — placement + nav share one grid → does it earn a spot in
-   `Blix.Geometry`?
-4. **Picking** — 1st consumer → almost certainly keep local + annotate "1st
-   pressure," exactly as Tank Arena did with nav.
+The point of game #2 was to make these calls against real duplication. Verdicts
+(by the engine owner, 2026-06-04): **extract nothing.**
+
+1. **Navigation** — *hold (don't extract).* Two consumers (Bulwark grid-A* vs Tank
+   Arena steering) but they differ enough — grid shortest-path search vs continuous
+   obstacle-avoidance steering — that a shared `NavGrid`/`A*` primitive would be a
+   forced abstraction over two genuinely different algorithms. Revisit only if a
+   third consumer wants the *same* shape.
+2. **Turret rig** — *don't extract.* The Transform3D turret→barrel + LookAt + muzzle
+   pattern is something these two games happen to share, not engine substance — it's
+   a few lines of composition over primitives that already exist (`Transform3D`,
+   `LookAt`, `WorldPosition`). Abstracting it would add an API without adding
+   capability.
+3. **`Grid2D<T>`** — *not now.* One real consumer (Bulwark); a `bool[]` + `Idx`
+   helper is the right size. Earns a place only if a second grid-shaped consumer
+   appears.
+4. **Picking** — *keep local* (1st consumer), annotated, exactly as Tank Arena did
+   with nav.
+
+This is the conventions principle working as intended: real duplication surfaced,
+inspected, and **deliberately not abstracted** — see `docs/conventions.md` §4.
 
 ## Defaults
 
