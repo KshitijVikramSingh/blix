@@ -185,6 +185,26 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     private AudioSource? fireSfx, deathSfx, leakSfx;
     private float fireSfxCooldown;
 
+    // M3 art: real CC0 meshes (Quaternius Turret Cannon + Robot Enemy, iPoly3D Crystal).
+    // Each is its own InstancedBatch on the SHARED cube pipeline (same pos+normal layout);
+    // tiles / shots / ghost stay cubes. Best-effort — falls back to primitives on load
+    // failure (artLoaded=false). Fit knobs below are exposed for visual tuning (no live
+    // overlay yet — edit + rerun, or tell me the values).
+    private bool artLoaded;
+    private InstancedBatch turretBaseBatch = null!, turretTopBatch = null!, enemyBatch = null!, coreBatch = null!;
+    private readonly List<InstanceData> turretBaseInst = new();
+    private readonly List<InstanceData> turretTopInst = new();
+    private readonly List<InstanceData> enemyInst = new();
+    private readonly List<InstanceData> coreInst = new(1);
+    private float gameTime;   // drives the crystal-core spin
+
+    // ── visual fit knobs (tweak to taste) ──
+    private const float TowerScale = 1.3f;
+    private const float TurretYawFix = MathF.PI;   // model barrel +Z → engine -Z forward
+    private const float EnemyScale = 0.9f;
+    private const float CoreScale = 0.22f;
+    private const float CoreLift = 0.2f;
+
     // Held-key orbit state (OnKeyDown/Up is edge-triggered; apply in OnUpdate).
     private bool orbitLeft, orbitRight, orbitUp, orbitDown;
 
@@ -227,6 +247,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             "cube");
         instanceBuffer = new InstanceBuffer(vk, shader, "bulwark");
         batch = new InstancedBatch(cube, pipeline, instanceBuffer);
+        LoadArt(shader, pipeline);   // real meshes on the same pipeline (best-effort)
 
         // Particle pipeline: ParticleBatch is geometry-only, so we bring a minimal
         // descriptor-less additive pipeline (push = view-projection) drawn over the
@@ -270,6 +291,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     public void OnUpdate(Time time)
     {
         var dt = (float)time.Delta;
+        gameTime += dt;
         var yawRate = 1.4f;
         var pitchRate = 1.0f;
         if (orbitLeft) camYaw -= yawRate * dt;
@@ -358,6 +380,13 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
 
         batch.Begin(pushBytes);
         batch.SetInstances(CollectionsMarshal.AsSpan(instances));
+        if (artLoaded)
+        {
+            turretBaseBatch.Begin(pushBytes); turretBaseBatch.SetInstances(CollectionsMarshal.AsSpan(turretBaseInst));
+            turretTopBatch.Begin(pushBytes); turretTopBatch.SetInstances(CollectionsMarshal.AsSpan(turretTopInst));
+            enemyBatch.Begin(pushBytes); enemyBatch.SetInstances(CollectionsMarshal.AsSpan(enemyInst));
+            coreBatch.Begin(pushBytes); coreBatch.SetInstances(CollectionsMarshal.AsSpan(coreInst));
+        }
         commandList.Pass(
             "bulwark-grid",
             new RenderPassDescription(
@@ -366,7 +395,14 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
                 ClearDepth: true),
             pass =>
             {
-                batch.End(pass);
+                batch.End(pass);   // tiles + shots + ghost (cubes)
+                if (artLoaded)
+                {
+                    turretBaseBatch.End(pass);
+                    turretTopBatch.End(pass);
+                    enemyBatch.End(pass);
+                    coreBatch.End(pass);
+                }
                 // Additive billboards over the 3D scene (impact/death bursts), then the HUD on top.
                 particles.Draw(pass, particlePipeline,
                     camera.Transform.Right, camera.Transform.Up, camera.Transform.Position,
@@ -383,6 +419,10 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
     private void BuildInstances()
     {
         instances.Clear();
+        turretBaseInst.Clear();
+        turretTopInst.Clear();
+        enemyInst.Clear();
+        coreInst.Clear();
 
         for (var cz = 0; cz < GridH; cz++)
         {
@@ -405,39 +445,68 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             }
         }
 
-        // Core pillar — the objective the enemies march toward.
         var core = CellCenter(CoreCx, CoreCz);
-        instances.Add(new InstanceData(
-            Matrix4x4.CreateScale(Cell * 0.4f, 2.4f, Cell * 0.4f) *
-            Matrix4x4.CreateTranslation(core.X, 1.2f, core.Z),
-            new Vector4(0.30f, 0.85f, 1.0f, 1f)));
-
-        // Towers: a fixed pedestal + the aiming turret (oriented by its Transform3D,
-        // so the elongated box visibly points its -Z barrel at the current target).
-        foreach (var t in towers.Values)
-        {
-            instances.Add(new InstanceData(
-                Matrix4x4.CreateScale(Cell * 0.5f, 1.0f, Cell * 0.5f) *
-                Matrix4x4.CreateTranslation(t.Pos.X, 0.5f, t.Pos.Z),
-                new Vector4(0.30f, 0.34f, 0.42f, 1f)));
-            var turretTint = t.Level switch   // brighter → gold as it upgrades
-            {
-                >= 3 => new Vector4(0.95f, 0.82f, 0.35f, 1f),
-                2 => new Vector4(0.55f, 0.75f, 1.00f, 1f),
-                _ => new Vector4(0.45f, 0.60f, 0.90f, 1f),
-            };
-            instances.Add(new InstanceData(t.Turret.ToMatrix(), turretTint));
-        }
-
-        // Enemies, tinted green (full HP) → red (dying).
         var green = new Vector4(0.30f, 0.90f, 0.35f, 1f);
         var red = new Vector4(0.95f, 0.22f, 0.16f, 1f);
-        foreach (var e in enemies)
+        Vector4 TurretTint(int level) => level switch   // brighter → gold as it upgrades
         {
-            var hp = Math.Clamp(e.Health / e.MaxHealth, 0f, 1f);
-            var tint = Vector4.Lerp(red, green, hp);
+            >= 3 => new Vector4(0.95f, 0.82f, 0.35f, 1f),
+            2 => new Vector4(0.55f, 0.75f, 1.00f, 1f),
+            _ => new Vector4(0.55f, 0.62f, 0.72f, 1f),
+        };
+
+        if (artLoaded)
+        {
+            // Core: the slowly-spinning crystal.
+            coreInst.Add(new InstanceData(
+                Matrix4x4.CreateScale(CoreScale) *
+                Matrix4x4.CreateRotationY(gameTime * 0.5f) *
+                Matrix4x4.CreateTranslation(core.X, CoreLift, core.Z),
+                new Vector4(0.45f, 0.95f, 1.0f, 1f)));
+
+            foreach (var t in towers.Values)
+            {
+                // Base sits flat at the cell; top yaws to aim (its model +Z barrel is
+                // flipped by TurretYawFix so it points along the turret's -Z aim).
+                var place = Matrix4x4.CreateTranslation(t.Pos.X, 0f, t.Pos.Z);
+                turretBaseInst.Add(new InstanceData(
+                    Matrix4x4.CreateScale(TowerScale) * place,
+                    new Vector4(0.40f, 0.43f, 0.48f, 1f)));
+                turretTopInst.Add(new InstanceData(
+                    Matrix4x4.CreateScale(TowerScale) *
+                    Matrix4x4.CreateRotationY(TurretYawFix) *
+                    Matrix4x4.CreateFromQuaternion(t.Turret.Rotation) * place,
+                    TurretTint(t.Level)));
+            }
+
+            foreach (var e in enemies)
+            {
+                var hp = Math.Clamp(e.Health / e.MaxHealth, 0f, 1f);
+                enemyInst.Add(new InstanceData(
+                    Matrix4x4.CreateScale(EnemyScale) * Matrix4x4.CreateTranslation(e.Pos.X, 0f, e.Pos.Z),
+                    Vector4.Lerp(red, green, hp)));
+            }
+        }
+        else
+        {
+            // Fallback to primitives (art failed to load).
             instances.Add(new InstanceData(
-                Matrix4x4.CreateScale(0.85f) * Matrix4x4.CreateTranslation(e.Pos.X, 0.45f, e.Pos.Z), tint));
+                Matrix4x4.CreateScale(Cell * 0.4f, 2.4f, Cell * 0.4f) * Matrix4x4.CreateTranslation(core.X, 1.2f, core.Z),
+                new Vector4(0.30f, 0.85f, 1.0f, 1f)));
+            foreach (var t in towers.Values)
+            {
+                instances.Add(new InstanceData(
+                    Matrix4x4.CreateScale(Cell * 0.5f, 1.0f, Cell * 0.5f) * Matrix4x4.CreateTranslation(t.Pos.X, 0.5f, t.Pos.Z),
+                    new Vector4(0.30f, 0.34f, 0.42f, 1f)));
+                instances.Add(new InstanceData(t.Turret.ToMatrix(), TurretTint(t.Level)));
+            }
+            foreach (var e in enemies)
+            {
+                var hp = Math.Clamp(e.Health / e.MaxHealth, 0f, 1f);
+                instances.Add(new InstanceData(
+                    Matrix4x4.CreateScale(0.85f) * Matrix4x4.CreateTranslation(e.Pos.X, 0.45f, e.Pos.Z),
+                    Vector4.Lerp(red, green, hp)));
+            }
         }
 
         // In-flight homing shots.
@@ -721,6 +790,107 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler
             towers[idx] = MakeTower(cx, cz);
             placedCount++;
         }
+    }
+
+    // ── Art (M3): load the CC0 meshes, best-effort ──
+    //
+    // Each mesh-bearing node is baked from its composed-world transform into one
+    // VertexPosition3NormalTexture mesh (lifting TankArena's BakeMerge/UploadMesh) and
+    // wrapped in an InstancedBatch on the SHARED cube pipeline. Any failure leaves
+    // artLoaded=false and the demo falls back to primitives.
+    private void LoadArt(ShaderProgramHandle shader, PipelineHandle pipeline)
+    {
+        try
+        {
+            var dir = Path.Combine(AppContext.BaseDirectory, "Assets", "models");
+
+            Mesh NodeMesh(string file, string nodeName, string meshName)
+            {
+                var model = new GltfStaticImporter().ImportNodes(
+                    new AssetImportContext(AssetId.Parse(meshName), Path.Combine(dir, file)));
+                var nodes = model.Nodes;
+                var idx = Array.FindIndex(nodes, n => n.Name == nodeName);
+                if (idx < 0) throw new InvalidOperationException($"node '{nodeName}' not found in {file}");
+                Matrix4x4 World(int i)
+                {
+                    var m = nodes[i].LocalTransform;
+                    for (var p = nodes[i].ParentIndex; p >= 0; p = nodes[p].ParentIndex) m *= nodes[p].LocalTransform;
+                    return m;
+                }
+                var w = World(idx);
+                return UploadMesh(BakeMerge(meshName, nodes[idx].Primitives.Select(prim => (prim.Mesh, w))));
+            }
+
+            InstancedBatch Batch(Mesh m, string name) => new(m, pipeline, new InstanceBuffer(vk, shader, name));
+            turretBaseBatch = Batch(NodeMesh("turret.glb", "Turret_Cannon_Base", "art.turretBase"), "art.turretBase");
+            turretTopBatch = Batch(NodeMesh("turret.glb", "Turret_Cannon_Top", "art.turretTop"), "art.turretTop");
+            enemyBatch = Batch(NodeMesh("enemy.glb", "Enemy_Robot_2Legs", "art.enemy"), "art.enemy");
+            coreBatch = Batch(NodeMesh("core.glb", "crystal_4", "art.core"), "art.core");
+            artLoaded = true;
+            Console.WriteLine("  art: loaded turret + enemy + core meshes (CC0)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  art models unavailable, using primitives: {ex.Message}");
+            artLoaded = false;
+        }
+    }
+
+    // Transform each part's primitives by its bake matrix (positions + normals) and
+    // concatenate into one VertexPosition3NormalTexture mesh, reindexing as we go.
+    // (Lifted from TankArena.) These meshes are < 65k verts so u16 indices suffice.
+    private static MeshData BakeMerge(string name, IEnumerable<(MeshData Mesh, Matrix4x4 Xform)> parts)
+    {
+        var floats = new List<float>();
+        var indices = new List<ushort>();
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+        var vbase = 0;
+        var stride = VertexPosition3NormalTexture.Layout.Stride;
+        foreach (var (md, xform) in parts)
+        {
+            Matrix4x4.Invert(xform, out var inv);
+            var normalMatrix = Matrix4x4.Transpose(inv);
+            for (var v = 0; v < md.VertexCount; v++)
+            {
+                var o = v * stride;
+                var p = new Vector3(
+                    BitConverter.ToSingle(md.VertexBytes, o),
+                    BitConverter.ToSingle(md.VertexBytes, o + 4),
+                    BitConverter.ToSingle(md.VertexBytes, o + 8));
+                var n = new Vector3(
+                    BitConverter.ToSingle(md.VertexBytes, o + 12),
+                    BitConverter.ToSingle(md.VertexBytes, o + 16),
+                    BitConverter.ToSingle(md.VertexBytes, o + 20));
+                var pw = Vector3.Transform(p, xform);
+                var nw = Vector3.Normalize(Vector3.TransformNormal(n, normalMatrix));
+                min = Vector3.Min(min, pw); max = Vector3.Max(max, pw);
+                floats.Add(pw.X); floats.Add(pw.Y); floats.Add(pw.Z);
+                floats.Add(nw.X); floats.Add(nw.Y); floats.Add(nw.Z);
+                floats.Add(BitConverter.ToSingle(md.VertexBytes, o + 24));   // u
+                floats.Add(BitConverter.ToSingle(md.VertexBytes, o + 28));   // v
+            }
+            foreach (var idx in md.Indices) checked { indices.Add((ushort)(idx + vbase)); }
+            vbase += md.VertexCount;
+            if (vbase > ushort.MaxValue)
+                throw new InvalidOperationException($"art mesh '{name}' exceeds u16 index range ({vbase} verts).");
+        }
+
+        var bytes = new byte[floats.Count * sizeof(float)];
+        Buffer.BlockCopy(floats.ToArray(), 0, bytes, 0, bytes.Length);
+        return new MeshData(name, bytes, indices.ToArray(),
+            VertexPosition3NormalTexture.Layout, new Bounds3(min, max));
+    }
+
+    private Mesh UploadMesh(MeshData md)
+    {
+        var vb = vk.CreateVertexBuffer(
+            new VertexBufferData(new VertexBufferDescription(md.Layout, md.VertexCount, GraphicsBufferUsage.Static), md.VertexBytes),
+            $"{md.Name}.vb");
+        var (ib, count) = md.Indices32 is { } u32
+            ? (vk.CreateIndexBuffer(u32, name: $"{md.Name}.ib"), u32.Length)
+            : (vk.CreateIndexBuffer(md.Indices, name: $"{md.Name}.ib"), md.Indices.Length);
+        return new Mesh(md.Name, vb, ib, count, md.Bounds);
     }
 
     private void PrintStatus(float dt)

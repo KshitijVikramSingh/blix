@@ -71,8 +71,15 @@ RTS camera (orbit / zoom / pan) · wave director + economy.
   additive pipeline — no soft-depth/HDR/bloom), and synthesized OpenAL SFX
   (fire/death/leak), both lifted patterns. Verified clean under validation; audio
   device loads in the headless smoke. **M2 complete.**
-- **M3 · Polish**: 2–3 tower + enemy types, CC0 art pass (KayKit Tower Defense pack
-  — CC0, license-check per the sourcing rule), README + overview.
+- **M3a · Art (meshes)** *(wired; visual tuning pending)*: CC0 models fetched from
+  poly.pizza — Quaternius **Turret Cannon** (base + aiming top on the rig), Quaternius
+  **Robot Enemy** (bind-pose static), iPoly3D **Crystal** core — imported via
+  `ImportNodes` + `BakeMerge` (lifted from TankArena) onto the shared cube pipeline,
+  one `InstancedBatch` per mesh; tiles/shots/ghost stay cubes. Builds + renders clean
+  under validation; fit knobs (`TowerScale`/`TurretYawFix`/`EnemyScale`/`CoreScale`/
+  `CoreLift`) exposed for the playtest dial-in. Falls back to primitives if load fails.
+- **M3b · Lighting & HDR** *(next)*: lift TankArena's sun-shadow + HDR RenderGraph.
+- **M3c · Polish**: 2–3 tower/enemy types, README + overview.
 
 ## The four extraction decisions (decided on real code, not guessed)
 
