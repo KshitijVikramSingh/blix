@@ -1566,7 +1566,13 @@ internal static class SimulationSelfTests
             AgentDefaults.Radius);
 
         var manyRegions = world.RegionCount >= 25 && world.PortalCount >= 100;
+        // No tile may be built while a crossing out of its region has no price. That is the
+        // precise mechanism by which cells go unreachable, and it is asserted separately from
+        // the cell count because it is the cause rather than the symptom — a goal-directed
+        // search pushed harder than exact trips this first, and the fallback that is supposed
+        // to catch it has been seen not to.
         var passed = manyRegions &&
+                     world.UnpricedAfterFallback == 0 &&
                      fidelity.UnreachableCells == 0 &&
                      fidelity.MeanRatio < 1.02f &&
                      fidelity.NinetyNinthRatio < 1.12f &&
@@ -1577,7 +1583,8 @@ internal static class SimulationSelfTests
                 $"    fidelity: {world.RegionCount} regions, {world.PortalCount} portals, " +
                 $"mean={fidelity.MeanRatio:F4}, p99={fidelity.NinetyNinthRatio:F4}, " +
                 $"worst={fidelity.WorstRatio:F3} at {fidelity.WorstCell.X},{fidelity.WorstCell.Z}, " +
-                $"lost={fidelity.UnreachableCells}/{fidelity.ReachableCells}");
+                $"lost={fidelity.UnreachableCells}/{fidelity.ReachableCells}, " +
+                $"unpriced-after-fallback={world.UnpricedAfterFallback}");
         }
 
         return passed;

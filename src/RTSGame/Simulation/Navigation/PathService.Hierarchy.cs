@@ -63,6 +63,8 @@ internal sealed partial class PathService
     public long RegionSearches { get; private set; }
     /// <summary>Tiles refined since construction.</summary>
     public long TileRefinements { get; private set; }
+    /// <summary>Tiles built while some crossing out of their region had no price.</summary>
+    public long UnpricedAfterFallback { get; private set; }
 
     private static int RadiusKey(float agentRadius) => (int)MathF.Round(agentRadius * 100f);
 
@@ -387,9 +389,15 @@ internal sealed partial class PathService
         // read as unreachable to a body standing on them. Measured on the walled map, the
         // fast pass alone lost 3.5% of the ground; this falls back on four regions in
         // forty-nine and loses none.
-        if (!field.SettleRegion(region, RegionSpanSeconds, HeuristicWeight) && HeuristicWeight > 1f)
+        var fastPassComplete = field.SettleRegion(region, RegionSpanSeconds, HeuristicWeight);
+        if (!fastPassComplete && HeuristicWeight > 1f)
         {
-            field.SettleRegion(region, RegionSpanSeconds, 1f);
+            var exactPassComplete = field.SettleRegion(region, RegionSpanSeconds, 1f);
+            if (!exactPassComplete) UnpricedAfterFallback++;
+        }
+        else if (!fastPassComplete)
+        {
+            UnpricedAfterFallback++;
         }
 
         var seeds = new List<(GridCell Cell, float Cost)>(nodes.Length + 1);

@@ -255,16 +255,23 @@ internal static class ScaleScenarios
         // goal, so the question is how much of the first order's price the second one
         // inherits — and every case above answered a different question by building a fresh
         // world each time.
-        Console.WriteLine("  successive orders in one world, alternating ends");
+        // Scattered around the map rather than back and forth along one line. Alternating
+        // between two ends flatters the cache badly: the second order re-uses the corridor
+        // the first one paid for, and every order after that is nearly free — which is not
+        // what a player does, and not what "every click hitches" meant.
+        Console.WriteLine("  successive orders in one world, scattered targets");
         var repeated = new SimulationWorld(extentMeters);
         var crowd = Populate(repeated, agentCount, issueGroupMove: false);
         repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);
         for (var order = 0; order < 8; order++)
         {
-            var side = order % 2 == 0 ? 1f : -1f;
-            var drift = 1f - order * 0.07f;
+            // Eight points around the map, each well away from the last.
+            var angle = order * MathF.Tau * 0.375f;
+            var reach = (half - 20f) * (order % 3 == 0 ? 0.95f : 0.6f);
             var searchesBefore = repeated.RegionSearches;
-            repeated.QueueMove(crowd, new Vector2((half - 20f) * side * drift, (half - 20f) * side * 0.3f));
+            repeated.QueueMove(
+                crowd,
+                new Vector2(MathF.Cos(angle) * reach, MathF.Sin(angle) * reach));
             var start = Stopwatch.GetTimestamp();
             repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);
             repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);

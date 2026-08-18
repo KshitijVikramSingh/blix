@@ -57,7 +57,8 @@ internal static class RegionRoutingScenarios
                 $"lost {fidelity.UnreachableCells}/{fidelity.ReachableCells} | " +
                 $"settled {fidelity.SettledNodes} | tiles {fidelity.RefinedRegions} | " +
                 $"searches {fidelity.RegionSearches} | " +
-                $"seedless {fidelity.SeedlessRegions} | partial {fidelity.UnpricedSeedRegions}");
+                $"seedless {fidelity.SeedlessRegions} | partial {fidelity.UnpricedSeedRegions} | " +
+                $"fallback-failed {world.UnpricedAfterFallback}");
         }
 
         PathService.HeuristicWeight = original;

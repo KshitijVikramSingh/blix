@@ -47,10 +47,19 @@ internal static class MovementStressScenarios
         bool blockPrimary = false)
     {
         var walls = new HashSet<GridCell>();
-        const int left = 6;
-        const int right = 14;
-        const int bottom = 5;
-        const int top = 14;
+        // The pen was written as placement-cell indices against the 20x20 grid of the tuned
+        // 30 m world, where cells 5..14 happen to straddle the origin. On the 400x400 grid of
+        // a 600 m world the same indices are fifteen metres from the corner, so the pen sat
+        // at the edge of the map while the crowd spawned in the middle of it — visible as a
+        // small walled square in the far corner and nothing to escape from anywhere near the
+        // units. Offsetting by the grid's own centre puts it back around the origin at any
+        // extent, and is exactly zero on the world every threshold here was tuned against.
+        var centreX = (world.Placement.Transform.Width - 20) / 2;
+        var centreZ = (world.Placement.Transform.Height - 20) / 2;
+        var left = 6 + centreX;
+        var right = 14 + centreX;
+        var bottom = 5 + centreZ;
+        var top = 14 + centreZ;
         // The obvious/main opening deliberately points away from the north-east
         // target. Every successful route must first leave in the wrong direction
         // and then wrap around the pen.

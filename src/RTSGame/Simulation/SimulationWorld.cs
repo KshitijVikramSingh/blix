@@ -145,6 +145,8 @@ internal sealed class SimulationWorld
     public long InheritedTiles => pathService.InheritedTiles;
     /// <summary>Cached region-crossing cost sets held by the router.</summary>
     public int CachedIngressCount => pathService.CachedIngressCount;
+    /// <summary>Tiles built while some crossing out of their region had no price.</summary>
+    public long UnpricedAfterFallback => pathService.UnpricedAfterFallback;
 
     /// <summary>How far hierarchical routing sits above the flat optimum on this map.</summary>
     internal RoutingFidelity MeasureRoutingFidelity(Vector2 goalPosition, float agentRadius)

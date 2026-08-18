@@ -287,13 +287,52 @@ internal sealed class TerrainMap
         return maximumHeight - minimumHeight <= 0.32f && SampleGrade(center) <= 0.45f;
     }
 
-    public bool TryRaycast(Vector3 origin, Vector3 direction, out Vector2 world, float maximumDistance = 150f)
+    /// <summary>
+    /// Where a ray meets the ground, or false if it never does.
+    /// </summary>
+    /// <remarks>
+    /// The march used to start at the eye and give up after 150 m, which was more than a 30 m
+    /// square could ever need and less than the near edge of a 600 m one: a camera pulled back
+    /// far enough to see the map put every blade of grass out of range, so the pointer found no
+    /// ground and orders were silently dropped over most of the screen. It read as "beyond a
+    /// certain distance they will not take instructions", which is exactly what it was.
+    /// <para>
+    /// It now clips the ray against the map's own bounds before stepping — entry and exit in
+    /// the horizontal plane, and the height above which no ground can exist — so the march
+    /// covers the part of the ray that could possibly hit something and no more. That makes it
+    /// correct at any extent and cheaper than the fixed window it replaces, since a ray aimed
+    /// at the sky now costs nothing instead of seven hundred and fifty samples.
+    /// </para>
+    /// </remarks>
+    public bool TryRaycast(
+        Vector3 origin,
+        Vector3 direction,
+        out Vector2 world,
+        float maximumDistance = float.PositiveInfinity)
     {
+        world = default;
         const float step = 0.20f;
-        var previousTime = 0f;
+        // Nothing on this map is higher than this, so a descending ray cannot touch ground
+        // until it is below it, and an ascending ray already above it never will.
+        const float highestGround = 64f;
+        var enter = 0f;
+        var exit = MathF.Min(maximumDistance, HorizontalExit(origin, direction, ref enter));
+        if (direction.Y < -0.0001f)
+        {
+            enter = MathF.Max(enter, (origin.Y - highestGround) / -direction.Y);
+        }
+        else if (origin.Y > highestGround)
+        {
+            return false;
+        }
+
+        enter = MathF.Max(0f, enter);
+        if (exit <= enter) return false;
+
+        var previousTime = enter;
         var previousInside = false;
         var previousDifference = float.PositiveInfinity;
-        for (var time = 0f; time <= maximumDistance; time += step)
+        for (var time = enter; time <= exit; time += step)
         {
             var point = origin + direction * time;
             var horizontal = new Vector2(point.X, point.Z);
@@ -322,7 +361,34 @@ internal sealed class TerrainMap
             previousInside = inside;
             previousTime = time;
         }
-        world = default;
+
         return false;
+    }
+
+    /// <summary>
+    /// Range of ray parameters over which the ray is inside the map's horizontal bounds.
+    /// </summary>
+    private float HorizontalExit(Vector3 origin, Vector3 direction, ref float enter)
+    {
+        var exit = float.PositiveInfinity;
+        Slab(origin.X, direction.X, Minimum.X, Maximum.X, ref enter, ref exit);
+        Slab(origin.Z, direction.Z, Minimum.Y, Maximum.Y, ref enter, ref exit);
+        return exit;
+
+        static void Slab(float start, float delta, float low, float high, ref float enter, ref float exit)
+        {
+            if (MathF.Abs(delta) < 0.0001f)
+            {
+                // Parallel to this pair of edges: either always between them or never.
+                if (start < low || start > high) exit = float.NegativeInfinity;
+                return;
+            }
+
+            var first = (low - start) / delta;
+            var second = (high - start) / delta;
+            if (first > second) (first, second) = (second, first);
+            enter = MathF.Max(enter, first);
+            exit = MathF.Min(exit, second);
+        }
     }
 }

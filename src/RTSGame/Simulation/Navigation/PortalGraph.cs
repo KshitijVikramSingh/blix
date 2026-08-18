@@ -42,7 +42,7 @@ internal sealed class PortalGraph
     /// enough that a wholly open border becomes four evenly spaced crossings rather than
     /// one funnel in the middle.
     /// </remarks>
-    public const int CellsPerOpening = 16;
+    public static int CellsPerOpening = 16;
 
     private readonly Portal[] portals;
     private readonly int[] regionNodeStart;
