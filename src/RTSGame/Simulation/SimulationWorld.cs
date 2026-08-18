@@ -29,6 +29,8 @@ internal sealed class SimulationWorld
     private const float CornerBlendStrength = 0.70f;
     /// <summary>How hard a travelling member pulls back toward its station.</summary>
     private const float FormationKeepingGain = 1.6f;
+    /// <summary>How hard station-keeping brakes against its own closing speed.</summary>
+    private const float FormationKeepingDamping = 0.45f;
     /// <summary>Cap on station-keeping speed, as a fraction of travel speed.</summary>
     private const float FormationLateralSpeedFraction = 0.45f;
     /// <summary>Per-tick blend of the newly sampled flow direction into the smoothed one.</summary>
@@ -69,12 +71,33 @@ internal sealed class SimulationWorld
     private const float CongestionRecoveryInterval = 0.5f;
     /// <summary>How many bodies may be offered a detour at once.</summary>
     private const int CongestionRecoveryBatch = 4;
+    /// <summary>
+    /// Expected delay, in seconds, from routing a granted re-plan through another
+    /// body — settled, stopped, or moving.
+    /// </summary>
+    /// <remarks>
+    /// Fed to A* alongside terrain and congestion, which are also seconds, and these
+    /// mean what they say: walking round a settled body costs about a second, round a
+    /// stopped one rather less, past a moving one almost nothing because it will not be
+    /// there. The ceiling is what a bad pile-up costs, not a stand-in for impassable.
+    /// <para>
+    /// They were 9 / 6 / 2 with a ceiling of 24 — between eighty and two hundred cells
+    /// of detour to avoid walking near a unit, which does not express a delay, it forbids
+    /// a route. See PathService.DetourAvoidanceSeconds for why they could be honest here
+    /// only once the congestion field stopped remembering jams for 4.5 s.
+    /// </para>
+    /// </remarks>
+    private const float SettledBodyDelaySeconds = 1.2f;
+    private const float StalledBodyDelaySeconds = 0.8f;
+    private const float MovingBodyDelaySeconds = 0.27f;
+    private const float MaximumBodyDelaySeconds = 3.19f;
+
     private readonly Queue<AgentCommand> commands = new();
     private readonly PathPool paths = new();
     private readonly PathService pathService;
     private readonly LocalSteeringSystem steeringSystem = new();
     private readonly CollisionSystem collisionSystem = new();
-    private readonly AgentSpatialIndex agentIndex = new(cellSize: 1.5f);
+    private readonly AgentSpatialIndex agentIndex;
     private readonly Dictionary<int, MoveGroup> moveGroups = new();
     private int nextMoveGroupId;
     private readonly Dictionary<GridCell, ColliderId> blockColliders = new();
@@ -121,6 +144,7 @@ internal sealed class SimulationWorld
         Congestion = new CongestionField(navigationTransform);
         RebuildTerrainNavigation();
         pathService = new PathService(Terrain, Placement, Navigation, Congestion);
+        agentIndex = new AgentSpatialIndex(cellSize: 1.5f, Terrain.Minimum, Terrain.Maximum);
     }
 
     public AgentId SpawnAgent(
@@ -1711,6 +1735,7 @@ internal sealed class SimulationWorld
         var costs = new float[Navigation.Width * Navigation.Height];
         var cellSize = Navigation.Transform.CellSize;
 
+
         for (var agentIndex = 0; agentIndex < agents.Length; agentIndex++)
         {
             ref readonly var other = ref agents[agentIndex];
@@ -1721,10 +1746,10 @@ internal sealed class SimulationWorld
             // position; queued or nearly stationary agents describe backpressure.
             var speedSquared = other.Velocity.LengthSquared();
             var baseCost = !other.HasDestination
-                ? 9f
+                ? SettledBodyDelaySeconds
                 : speedSquared < 0.04f
-                    ? 6f
-                    : 2f;
+                    ? StalledBodyDelaySeconds
+                    : MovingBodyDelaySeconds;
             var influenceRadius = MathF.Max(1.25f, other.Radius + 0.90f);
             var cellRadius = Math.Max(1, (int)MathF.Ceiling(influenceRadius / cellSize));
             if (!Navigation.TryWorldToCell(other.Position, out var centerCell)) continue;
@@ -1738,7 +1763,9 @@ internal sealed class SimulationWorld
                 if (distance >= influenceRadius) continue;
                 var proximity = 1f - distance / influenceRadius;
                 var index = Navigation.Transform.Index(cell);
-                costs[index] = MathF.Min(24f, costs[index] + baseCost * proximity * proximity);
+                costs[index] = MathF.Min(
+                    MaximumBodyDelaySeconds,
+                    costs[index] + baseCost * proximity * proximity);
             }
         }
 

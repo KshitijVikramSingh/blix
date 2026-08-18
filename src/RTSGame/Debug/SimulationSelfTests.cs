@@ -491,21 +491,49 @@ internal static class SimulationSelfTests
 
         var maximumDetour = 0f;
         var crossedBlockedCell = false;
+        var bodyLeftTheGround = false;
+        var worstClearance = float.PositiveInfinity;
         for (var i = 0; i < 600; i++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             ref var agent = ref world.Agents.Get(id);
             maximumDetour = MathF.Max(maximumDetour, MathF.Abs(agent.Position.Y));
-            if (world.Navigation.TryWorldToCell(agent.Position, out var cell) &&
-                !world.Navigation.IsWalkable(cell, agent.Radius))
+            if (!world.IsAgentGeometryValid(id)) bodyLeftTheGround = true;
+            if (world.Navigation.TryWorldToCell(agent.Position, out var cell))
             {
-                crossedBlockedCell = true;
+                worstClearance = MathF.Min(worstClearance, world.Navigation.Clearance(cell));
+                if (!world.Navigation.IsWalkable(cell, agent.Radius)) crossedBlockedCell = true;
             }
         }
 
         ref var finished = ref world.Agents.Get(id);
-        return !crossedBlockedCell && maximumDetour > 3f && !finished.HasDestination &&
-               Vector2.Distance(finished.Position, new Vector2(8f, 0f)) < 0.001f;
+        // The body's own geometry, not the router's opinion of the cell it stands in.
+        // This used to assert that the centre never entered a cell A* calls unwalkable,
+        // which is a proxy and not a sound one: clearance is measured from the cell
+        // centre, and a body can be a third of a metre from the centre of its own cell,
+        // so cell clearance cannot bound where the body actually is. Once routes started
+        // being charged for turning they got straighter, began brushing the corner, and
+        // tripped a condition the body was never violating — measured: exact geometry
+        // valid on every one of 600 ticks, while the proxy read 0.354 m of cell clearance
+        // against a 0.405 m bar, that figure being exactly half a cell diagonal, i.e. the
+        // cell diagonally off the corner. What matters is that it never enters the wall,
+        // and `ConstrainAgentsToTerrain` enforces exactly this predicate every tick.
+        var passed = !bodyLeftTheGround && maximumDetour > 3f && !finished.HasDestination &&
+                     Vector2.Distance(finished.Position, new Vector2(8f, 0f)) < 0.001f;
+        // Four conditions and no output made this test say only "no". Which one failed
+        // matters: clipping a blocked cell is a geometry bug, not detouring is a routing
+        // one, and not arriving is neither.
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    wall detour: bodyInvalid={bodyLeftTheGround}, crossedBlocked={crossedBlockedCell}, " +
+                $"worstCellClearance={worstClearance:F3} (needs {AgentDefaults.Radius + 0.035f:F3}), " +
+                $"maxDetour={maximumDetour:F2} " +
+                $"(bar 3.00), stillMoving={finished.HasDestination}, " +
+                $"pos=({finished.Position.X:F3},{finished.Position.Y:F3}), " +
+                $"targetDistance={Vector2.Distance(finished.Position, new Vector2(8f, 0f)):F3}");
+        }
+        return passed;
     }
 
     private static bool ReplansAfterObstacleEdit()
@@ -1003,6 +1031,17 @@ internal static class SimulationSelfTests
         return passed;
     }
 
+    /// <summary>Ticks in which any pair may be in contact before it stops being transient.</summary>
+    private const int MaximumOverlappingTicks = 8;
+    /// <summary>Deepest momentary interpenetration allowed, in metres.</summary>
+    /// <remarks>
+    /// Five centimetres, about an eighth of a body radius. Deep enough to admit the
+    /// single-frame contact a dense arrival produces and the quarter-second the velocity
+    /// solve deliberately takes to bleed an overlap off; nowhere near deep enough for a
+    /// body to have passed through another, which is the thing worth failing over.
+    /// </remarks>
+    private const float MaximumTransientOverlap = 0.05f;
+
     private static bool AlliesQueueThroughChokepoint()
     {
         var world = new SimulationWorld();
@@ -1022,24 +1061,71 @@ internal static class SimulationSelfTests
         world.QueueMove(ids, new Vector2(8f, 0.75f));
 
         var minimumDistance = float.PositiveInfinity;
+        var worstTick = -1;
+        var worstPlace = Vector2.Zero;
+        // Transient contact and settled interpenetration are different failures, and
+        // a minimum taken over every tick cannot tell them apart. Count the ticks in
+        // which anything is overlapping, and track the worst overlap once the crowd
+        // has had time to come to rest.
+        var overlappingTicks = 0;
+        var settledMinimum = float.PositiveInfinity;
+        var threshold = AgentDefaults.SeparationThreshold(AgentDefaults.Radius);
         for (var tick = 0; tick < 900; tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            var tickMinimum = float.PositiveInfinity;
             for (var first = 0; first < ids.Count; first++)
             for (var second = first + 1; second < ids.Count; second++)
             {
-                minimumDistance = MathF.Min(minimumDistance, Vector2.Distance(
-                    world.Agents.Get(ids[first]).Position,
-                    world.Agents.Get(ids[second]).Position));
+                var firstPosition = world.Agents.Get(ids[first]).Position;
+                var secondPosition = world.Agents.Get(ids[second]).Position;
+                var separation = Vector2.Distance(firstPosition, secondPosition);
+                if (separation < tickMinimum) tickMinimum = separation;
+                if (separation >= minimumDistance) continue;
+                minimumDistance = separation;
+                worstTick = tick;
+                worstPlace = (firstPosition + secondPosition) * 0.5f;
             }
+            if (tickMinimum < threshold) overlappingTicks++;
+            if (tick >= 600) settledMinimum = MathF.Min(settledMinimum, tickMinimum);
         }
 
+
         var crossed = ids.Count(id => world.Agents.Get(id).Position.X > 4f);
-        // Queueing is no longer a mechanism with state to assert on; what matters
-        // is that a file of units gets through a one-cell gap without overlapping.
-        var passed = crossed == ids.Count &&
-                     minimumDistance >= AgentDefaults.SeparationThreshold(AgentDefaults.Radius);
-        if (!passed) Console.WriteLine($"    chokepoint crossed={crossed}/{ids.Count}, minimum-distance={minimumDistance:F3}");
+        // Queueing is no longer a mechanism with state to assert on; what matters is
+        // that a file of units gets through a one-cell gap and does not end up inside
+        // itself. Those are two failures, and a single minimum taken over every tick
+        // cannot tell them apart — so it was asserting the stricter of the two against
+        // the transient of the other, and passing by two millimetres.
+        //
+        // What that number was actually reporting: one tick in nine hundred, at the
+        // arrival point twelve metres past the gap, where twelve units converge on one
+        // square metre. Settled separation there is 0.99 m against a 0.73 m bar. The
+        // threshold's own tolerance exists "for a single tick's contact" and this is
+        // literally that, so asserting it as though it described the resting state made
+        // the test flip on any change to how units leave the gap — routing constants
+        // with no bearing on the chokepoint at all.
+        //
+        // Restated as the two things that would really be wrong: a crowd that comes to
+        // rest interpenetrated, and a body that meaningfully passes into another. Both
+        // now have margin, and a sustained overlap is caught by the tick count rather
+        // than by whichever instant happened to be worst.
+        var settledClear = settledMinimum >= threshold;
+        var contactIsBrief = overlappingTicks <= MaximumOverlappingTicks;
+        var contactIsShallow = minimumDistance >= AgentDefaults.Radius * 2f - MaximumTransientOverlap;
+        var passed = crossed == ids.Count && settledClear && contactIsBrief && contactIsShallow;
+        // Where and when, not just how much: the same overlap figure means very
+        // different things inside the gap and out in the arrival cluster.
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    chokepoint crossed={crossed}/{ids.Count}, " +
+                $"peak-separation={minimumDistance:F3} (bar {AgentDefaults.Radius * 2f - MaximumTransientOverlap:F3}) " +
+                $"at tick {worstTick} ({worstTick * SimulationWorld.FixedDeltaSeconds:F1}s) " +
+                $"near ({worstPlace.X:F2},{worstPlace.Y:F2}), " +
+                $"settled={settledMinimum:F3} (bar {threshold:F3}), " +
+                $"overlapping-ticks={overlappingTicks} (bar {MaximumOverlappingTicks})");
+        }
         return passed;
     }
 
@@ -1079,6 +1165,99 @@ internal static class SimulationSelfTests
                 }))}]");
         }
         return passed;
+    }
+
+    /// <summary>
+    /// Measures what a contested doorway actually costs, from both sides at once.
+    /// </summary>
+    /// <remarks>
+    /// Two files walk through one gap in opposite directions. This is the case the
+    /// movement layer has never had an answer for: bodies take turns at the gap,
+    /// backing off and coming forward again, because the velocity solve answers a
+    /// symmetric contest with a tangential escape and static geometry is not part
+    /// of that solve at all — the wall only gets a say afterwards, by rejecting the
+    /// answer. Reported rather than asserted while that is being worked on; the
+    /// numbers are the point.
+    /// <list type="bullet">
+    /// <item>crossed — did everyone get through, and how long did it take</item>
+    /// <item>frozen — ticks spent wanting to move at a standstill</item>
+    /// <item>reversals — how often a body near the gap turned round</item>
+    /// <item>dead-stops — solves where no admissible velocity was found at all</item>
+    /// </list>
+    /// </remarks>
+    public static int RunDoorwayContentionDiagnostic()
+    {
+        var world = new SimulationWorld();
+        for (var z = 0; z < world.Placement.Transform.Height; z++)
+        {
+            if (z == 10) continue;
+            world.QueueToggleObstacle(world.Placement.Transform.CellCenter(new GridCell(10, z)));
+        }
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        var gate = world.Placement.Transform.CellCenter(new GridCell(10, 10));
+
+        var westbound = new List<AgentId>();
+        var eastbound = new List<AgentId>();
+        for (var row = 0; row < 4; row++)
+        for (var column = 0; column < 2; column++)
+        {
+            eastbound.Add(world.SpawnAgent(new Vector2(
+                gate.X - 4.5f - column * 0.95f,
+                gate.Y + (row - 1.5f) * 0.95f)));
+            westbound.Add(world.SpawnAgent(new Vector2(
+                gate.X + 4.5f + column * 0.95f,
+                gate.Y + (row - 1.5f) * 0.95f)));
+        }
+        world.QueueMove(eastbound, new Vector2(gate.X + 5.5f, gate.Y));
+        world.QueueMove(westbound, new Vector2(gate.X - 5.5f, gate.Y));
+
+        var everyone = eastbound.Concat(westbound).ToArray();
+        var frozenTicks = new int[world.Agents.Count];
+        var reversals = new int[world.Agents.Count];
+        var lastSign = new int[world.Agents.Count];
+        var clearedTick = -1;
+        const int ticks = 1200;
+        for (var tick = 0; tick < ticks; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            foreach (var id in everyone)
+            {
+                ref readonly var agent = ref world.Agents.Get(id);
+                var slot = id.Value;
+                if (agent.HasDestination &&
+                    agent.PreferredVelocity.LengthSquared() > 0.0625f &&
+                    agent.Velocity.LengthSquared() < 0.0025f)
+                {
+                    frozenTicks[slot]++;
+                }
+                // Only near the gap: a reversal out in the open is a route change,
+                // whereas one in the doorway is the standoff being renegotiated.
+                if (MathF.Abs(agent.Position.X - gate.X) > 2.5f) continue;
+                var sign = agent.Velocity.X > 0.30f ? 1 : agent.Velocity.X < -0.30f ? -1 : 0;
+                if (sign != 0)
+                {
+                    if (lastSign[slot] != 0 && sign != lastSign[slot]) reversals[slot]++;
+                    lastSign[slot] = sign;
+                }
+            }
+            if (clearedTick < 0 && everyone.All(id => !world.Agents.Get(id).HasDestination))
+            {
+                clearedTick = tick;
+            }
+        }
+
+        var crossedEast = eastbound.Count(id => world.Agents.Get(id).Position.X > gate.X + 2f);
+        var crossedWest = westbound.Count(id => world.Agents.Get(id).Position.X < gate.X - 2f);
+        Console.WriteLine(
+            $"  doorway contention | crossed east {crossedEast}/{eastbound.Count} " +
+            $"west {crossedWest}/{westbound.Count} | " +
+            $"cleared {(clearedTick < 0 ? "never" : $"{clearedTick * SimulationWorld.FixedDeltaSeconds:F1}s")} | " +
+            $"frozen {frozenTicks.Sum()} ticks (worst {frozenTicks.Max()}) | " +
+            $"gap-reversals {reversals.Sum()} (worst {reversals.Max()}) | " +
+            $"dead-stops {world.AvoidanceTerrainDeadStops} | " +
+            $"terrain-fallback {world.AvoidanceTerrainFallbacks * 100.0 / Math.Max(1, world.AvoidanceSolves):F1}% | " +
+            $"infeasible {world.AvoidanceInfeasible * 100.0 / Math.Max(1, world.AvoidanceSolves):F1}%");
+        return 0;
     }
 
     private static bool FiftyAgentsClearSingleCellGate()

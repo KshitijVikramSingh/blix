@@ -7,6 +7,8 @@ internal sealed class TerrainMap
 {
     private readonly float[] vertexHeights;
     private readonly TerrainSurface[] surfaces;
+    private readonly Dictionary<int, bool[]> levelNeighborhoods = new();
+    private int levelNeighborhoodRevision = -1;
 
     public const float MaximumTraversableGrade = 0.82f;
     public const float MaximumStepHeight = 0.46f;
@@ -119,9 +121,35 @@ internal sealed class TerrainMap
         return heightDelta <= MaximumStepHeight && heightDelta / distance <= MaximumTraversableGrade;
     }
 
+    /// <summary>
+    /// Whether a body of <paramref name="radius"/> centred here stands entirely on
+    /// passable, walkably-graded ground.
+    /// </summary>
+    /// <remarks>
+    /// The honest answer samples the body's outline — nine points, each needing a
+    /// surface lookup and a grade, and each grade is four bilinear height samples
+    /// of four clamped vertex fetches. Around a hundred and fifty height reads to
+    /// answer one question, asked per sample of every swept step and per candidate
+    /// of the solver's terrain fallback.
+    /// <para>
+    /// Over level ground the answer is knowable without looking: if every vertex
+    /// the outline's grade probes could reach carries the same height and every
+    /// cell it covers is passable, the grade is exactly zero everywhere on it and
+    /// the only remaining question is whether the body is inside the map — which
+    /// the bounds test above has already answered. Most of any map is like that,
+    /// including all of a flat one, so <see cref="LevelNeighborhood"/> precomputes
+    /// where it holds and the outline is only walked near genuine relief. This is a
+    /// memo, not an approximation: where it answers, it answers identically.
+    /// </para>
+    /// </remarks>
     public bool IsBodyTraversable(Vector2 center, float radius)
     {
         if (!Contains(center, radius + 0.035f)) return false;
+        if (Transform.TryWorldToCell(center, out var bodyCell) &&
+            LevelNeighborhood(NeighborhoodCells(radius))[Transform.Index(bodyCell)])
+        {
+            return true;
+        }
         for (var sample = 0; sample < 9; sample++)
         {
             var position = sample == 0
@@ -136,6 +164,105 @@ internal sealed class TerrainMap
             }
         }
         return true;
+    }
+
+    /// <summary>
+    /// How far, in cells, a body's grade probes can reach from the cell it stands in.
+    /// </summary>
+    /// <remarks>
+    /// The outline reaches <c>radius</c>, each grade probe a further half cell, and
+    /// bilinear height sampling a further cell's worth of vertices. Rounded up and
+    /// widened by one, so the region tested is a superset of the region read — a
+    /// larger level region is a stronger precondition, never a weaker one.
+    /// </remarks>
+    private int NeighborhoodCells(float radius) =>
+        (int)MathF.Ceiling((radius + Transform.CellSize) / Transform.CellSize) + 1;
+
+    /// <summary>
+    /// Cells whose surroundings, out to <paramref name="radiusCells"/>, are all
+    /// passable and all at one single height.
+    /// </summary>
+    /// <remarks>
+    /// Built by dilating per-cell passability and height extremes separably, so it
+    /// costs one pass per axis over the map rather than a neighbourhood scan per
+    /// cell. Rebuilt when the terrain revision moves, which is the same signal the
+    /// navigation raster keys on.
+    /// </remarks>
+    private bool[] LevelNeighborhood(int radiusCells)
+    {
+        if (levelNeighborhoodRevision != Revision)
+        {
+            levelNeighborhoods.Clear();
+            levelNeighborhoodRevision = Revision;
+        }
+        if (levelNeighborhoods.TryGetValue(radiusCells, out var cached)) return cached;
+
+        var width = Transform.Width;
+        var height = Transform.Height;
+        var count = width * height;
+        var passable = new bool[count];
+        var minimum = new float[count];
+        var maximum = new float[count];
+        for (var z = 0; z < height; z++)
+        for (var x = 0; x < width; x++)
+        {
+            var index = z * width + x;
+            passable[index] = TerrainSurfaceRules.IsPassable(surfaces[index]);
+            var h00 = VertexHeight(x, z);
+            var h10 = VertexHeight(x + 1, z);
+            var h01 = VertexHeight(x, z + 1);
+            var h11 = VertexHeight(x + 1, z + 1);
+            minimum[index] = MathF.Min(MathF.Min(h00, h10), MathF.Min(h01, h11));
+            maximum[index] = MathF.Max(MathF.Max(h00, h10), MathF.Max(h01, h11));
+        }
+
+        // Cells outside the map are treated as impassable so a body near the edge
+        // never takes the fast path on the strength of ground that does not exist.
+        var rowPassable = new bool[count];
+        var rowMinimum = new float[count];
+        var rowMaximum = new float[count];
+        for (var z = 0; z < height; z++)
+        for (var x = 0; x < width; x++)
+        {
+            var all = true;
+            var low = float.PositiveInfinity;
+            var high = float.NegativeInfinity;
+            for (var offset = -radiusCells; offset <= radiusCells; offset++)
+            {
+                var sample = x + offset;
+                if (sample < 0 || sample >= width) { all = false; break; }
+                var index = z * width + sample;
+                all &= passable[index];
+                low = MathF.Min(low, minimum[index]);
+                high = MathF.Max(high, maximum[index]);
+            }
+            var target = z * width + x;
+            rowPassable[target] = all;
+            rowMinimum[target] = low;
+            rowMaximum[target] = high;
+        }
+
+        var result = new bool[count];
+        for (var z = 0; z < height; z++)
+        for (var x = 0; x < width; x++)
+        {
+            var all = true;
+            var low = float.PositiveInfinity;
+            var high = float.NegativeInfinity;
+            for (var offset = -radiusCells; offset <= radiusCells; offset++)
+            {
+                var sample = z + offset;
+                if (sample < 0 || sample >= height) { all = false; break; }
+                var index = sample * width + x;
+                all &= rowPassable[index];
+                low = MathF.Min(low, rowMinimum[index]);
+                high = MathF.Max(high, rowMaximum[index]);
+            }
+            result[z * width + x] = all && high - low <= 0.00001f;
+        }
+
+        levelNeighborhoods[radiusCells] = result;
+        return result;
     }
 
     public bool CanPlace(Vector2 center, Vector2 halfExtents)

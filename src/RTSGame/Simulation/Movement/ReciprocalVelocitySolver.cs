@@ -36,6 +36,51 @@ internal sealed class ReciprocalVelocitySolver
     private const float OverlapRecoverySeconds = 0.25f;
     /// <summary>Extra separation aimed for by bodies already in contact.</summary>
     private const float ContactSeparationMargin = 0.015f;
+    /// <summary>
+    /// Horizon over which a body must be able to stop short of static geometry.
+    /// </summary>
+    /// <remarks>
+    /// Much shorter than the horizon used for other bodies, and for a different
+    /// reason. Predicting another unit is a negotiation — both sides move, and a
+    /// long horizon is how they agree early. A wall does not negotiate; the only
+    /// question is whether this body can still stop, so the constraint should bite
+    /// late and hard. A long horizon here would make units drift down the middle of
+    /// every corridor and refuse to enter a gap barely wider than themselves.
+    /// <para>
+    /// Measured across 0.12 / 0.18 / 0.25 / 0.35. The long end does exactly that: at
+    /// 0.35 bodies keep so far off the walls that they walk 7% further through a pen
+    /// and 9% further through a one-cell gate than they did with no static constraint
+    /// at all. The short end trades back the freezing this exists to remove — 0.12
+    /// gives nine frozen ticks at a contested doorway against two, and fails the
+    /// chokepoint and backpressure tests outright. This value is the only one that
+    /// improves direction stability in both constricted scenarios while costing
+    /// route length in neither.
+    /// </para>
+    /// </remarks>
+    private const float StaticTimeHorizon = 0.25f;
+    /// <summary>
+    /// Clearance a body defends off a wall, beyond its own radius.
+    /// </summary>
+    /// <remarks>
+    /// Small and positive. Being lenient here was tried, on the theory that the
+    /// constraint should grant the same couple of centimetres the movement sweep
+    /// grants against a placed block: it made things worse everywhere measured, and
+    /// the residual overlap it was meant to relieve turned out to be a contact-solver
+    /// matter at a crowded destination rather than anything to do with walls.
+    /// </remarks>
+    private const float StaticSeparationMargin = 0.01f;
+    /// <summary>
+    /// Most static constraints admitted per solve, worst clearance first.
+    /// </summary>
+    /// <remarks>
+    /// A body in a doorway is enclosed on several sides and every wall of it
+    /// generates a half-plane. Past two or three the linear program is being handed
+    /// a cone it can only satisfy by stopping, which is the opposite of the point:
+    /// the constraints that matter are the ones it is closest to violating.
+    /// </remarks>
+    private const int MaximumStaticLines = 3;
+    /// <summary>Normals closer than this are treated as the same wall.</summary>
+    private const float StaticNormalMergeDot = 0.92f;
     private const float Epsilon = 0.00001f;
     private readonly List<VelocityLine> lines = new();
     private readonly List<VelocityLine> projectedLines = new();
@@ -53,6 +98,7 @@ internal sealed class ReciprocalVelocitySolver
     public long Solves { get; private set; }
     private bool[] velocityChosen = Array.Empty<bool>();
     private int[] solveOrder = Array.Empty<int>();
+    private float[] priorityKey = Array.Empty<float>();
 
     public void Solve(
         AgentStore agents,
@@ -74,13 +120,27 @@ internal sealed class ReciprocalVelocitySolver
         // negotiates itself to a halt.
         for (var i = 0; i < source.Length; i++) solveOrder[i] = i;
         Array.Clear(velocityChosen, 0, source.Length);
+        // The ordering key is how far each body still has to go, so it is derived
+        // once per agent rather than inside the comparison. Recomputing it there
+        // cost two squared distances per comparison, and an insertion sort over a
+        // crowd makes a quadratic number of comparisons — the sort was doing a
+        // quarter of a million distance computations a tick at five hundred bodies
+        // to answer a question about five hundred numbers. Same key, same total
+        // order, same resulting permutation; only the arithmetic is hoisted.
+        for (var i = 0; i < source.Length; i++)
+        {
+            ref readonly var agent = ref source[i];
+            priorityKey[i] = agent.HasDestination
+                ? Vector2.DistanceSquared(agent.Position, agent.RequestedDestination)
+                : 0f;
+        }
         // Insertion sort is deterministic and allocation-free; typical local
         // crowds are already close to progress order.
         for (var i = 1; i < source.Length; i++)
         {
             var candidate = solveOrder[i];
             var insertion = i - 1;
-            while (insertion >= 0 && HasHigherPriority(source[candidate], source[solveOrder[insertion]]))
+            while (insertion >= 0 && HasHigherPriority(source, priorityKey, candidate, solveOrder[insertion]))
             {
                 solveOrder[insertion + 1] = solveOrder[insertion];
                 insertion--;
@@ -115,12 +175,13 @@ internal sealed class ReciprocalVelocitySolver
                     agent,
                     other,
                     otherVelocity,
-                    1f,
                     other.HasDestination ? TimeHorizon : StationaryTimeHorizon,
                     relativePosition,
                     distanceSquared,
                     deltaSeconds);
             }
+
+            AddStaticLines(agent, paths);
 
             // A body with no order is allowed to shuffle out of the way, not to
             // sprint. Without this cap the solve happily drives a settled unit at
@@ -182,19 +243,9 @@ internal sealed class ReciprocalVelocitySolver
         Array.Resize(ref solved, count);
         Array.Resize(ref velocityChosen, count);
         Array.Resize(ref solveOrder, count);
+        Array.Resize(ref priorityKey, count);
     }
 
-    /// <summary>
-    /// Share of a pair's correction this agent absorbs.
-    /// </summary>
-    /// <remarks>
-    /// A perfectly even 50/50 split is stable but has no way to break a symmetric
-    /// standoff, so a column of units meeting a doorway negotiates itself to a
-    /// halt. Skewing the split by progress order restores the right-of-way that
-    /// makes a queue flow, while keeping both agents below full responsibility so
-    /// neither pair member can be pinned the way the front-to-back solve pinned
-    /// them. The weights are antisymmetric, so a pair still sums to exactly one.
-    /// </remarks>
     /// <summary>
     /// A mover and a settled ally do not negotiate: the traveller walks through
     /// and the settled body steps aside.
@@ -214,12 +265,33 @@ internal sealed class ReciprocalVelocitySolver
         other.MaximumSpeed > 0f &&
         agent.Faction == other.Faction;
 
-    private static bool HasHigherPriority(in AgentState candidate, in AgentState incumbent)
+    private static bool HasHigherPriority(
+        ReadOnlySpan<AgentState> agents,
+        float[] priorityKey,
+        int candidateIndex,
+        int incumbentIndex)
     {
+        ref readonly var candidate = ref agents[candidateIndex];
+        ref readonly var incumbent = ref agents[incumbentIndex];
         if (candidate.HasDestination != incumbent.HasDestination) return candidate.HasDestination;
         if (!candidate.HasDestination) return candidate.Id.Value < incumbent.Id.Value;
-        var candidateDistance = Vector2.DistanceSquared(candidate.Position, candidate.RequestedDestination);
-        var incumbentDistance = Vector2.DistanceSquared(incumbent.Position, incumbent.RequestedDestination);
+        // A march order was tried here — group members ordered by their place in the
+        // column rather than by distance, so a queue would stop re-negotiating who goes
+        // first — and it is measurably wrong, in both the stale and the refreshed form
+        // (dead stops at a one-cell gate: 5 without it, 386 with a rank fixed at order
+        // time, 168 with one re-derived every half second).
+        //
+        // The reason is that this ordering is not right of way. It decides who takes
+        // *responsibility* for avoidance: the lower-priority body avoids the higher one's
+        // already-chosen velocity. Ordering by distance to goal means whoever is nearly
+        // finished gets to finish, which is coherent because the bodies yielding are the
+        // ones behind. Ordering by column rank makes bodies that are physically in front
+        // yield to one behind them — dodging someone who is not in their way — and the
+        // avoidance the group performs stops corresponding to the geometry it is in.
+        // Group-level sequencing is the right idea in the wrong layer; it belongs in
+        // deciding who enters a gap next, not in who avoids whom.
+        var candidateDistance = priorityKey[candidateIndex];
+        var incumbentDistance = priorityKey[incumbentIndex];
         return candidateDistance < incumbentDistance - 0.0001f ||
                MathF.Abs(candidateDistance - incumbentDistance) <= 0.0001f &&
                candidate.Id.Value < incumbent.Id.Value;
@@ -286,11 +358,131 @@ internal sealed class ReciprocalVelocitySolver
             agent.Position + velocity * deltaSeconds,
             agent.Radius);
 
+    /// <summary>
+    /// Constrains the velocity so the body cannot drive into static geometry.
+    /// </summary>
+    /// <remarks>
+    /// Walls used to reach this solve only as a veto on its output: the linear
+    /// program answered as though the map were empty, the result was swept against
+    /// the ground, and if it collided the answer was thrown away and replaced by
+    /// whichever of a hundred and seventy-five sampled directions happened to
+    /// survive. Two things were wrong with that. It is expensive, and it mostly
+    /// failed — at a chokepoint the cone search returned nothing at all more often
+    /// than it returned something, and nothing means the body freezes for a tick.
+    /// <para>
+    /// Worse, it made the doorway standoff unfixable in principle. Two bodies
+    /// meeting in a gap present the solve with a symmetric contest, whose natural
+    /// answer is for each to step sideways — into the wall, in a gap. Both answers
+    /// were then vetoed, both bodies stalled or took an arbitrary surviving
+    /// direction, and next tick the contest was re-run with the roles reversed.
+    /// That is the taking of turns: not a steering flaw above this layer, but the
+    /// consequence of asking for a velocity in a world with no walls in it and then
+    /// being surprised by the wall. With the wall present as a half-plane, the
+    /// sideways escape is not offered in the first place, and the solve is free to
+    /// find the answer that actually exists — one body waits, the other goes.
+    /// </para>
+    /// <para>
+    /// Each nearby box contributes one half-plane: the body may close on the
+    /// surface no faster than clearing it within <see cref="StaticTimeHorizon"/>,
+    /// and if it is already inside, must move out at that rate. Constraints are
+    /// deduplicated by normal and capped, so a corridor costs two lines and a
+    /// corner three rather than one per cell of wall.
+    /// </para>
+    /// </remarks>
+    private void AddStaticLines(in AgentState agent, PathService paths)
+    {
+        // Only geometry the body could reach within the horizon can constrain it.
+        var reach = agent.Radius + StaticSeparationMargin +
+                    agent.MaximumSpeed * StaticTimeHorizon;
+        Span<StaticBox> boxes = stackalloc StaticBox[24];
+        var boxCount = paths.GatherBlockingBoxes(agent.Position, reach, boxes);
+        if (boxCount == 0) return;
+
+        Span<Vector2> normals = stackalloc Vector2[MaximumStaticLines];
+        Span<float> clearances = stackalloc float[MaximumStaticLines];
+        var kept = 0;
+        var expansion = agent.Radius + StaticSeparationMargin;
+        for (var i = 0; i < boxCount; i++)
+        {
+            var box = boxes[i];
+            var closest = Vector2.Clamp(agent.Position, box.Minimum, box.Maximum);
+            var offset = agent.Position - closest;
+            var distance = offset.Length();
+            Vector2 normal;
+            if (distance > Epsilon)
+            {
+                normal = offset / distance;
+            }
+            else
+            {
+                // Centre inside the box: push out along the shallowest face, which
+                // is the shortest way back to legal ground.
+                var left = agent.Position.X - box.Minimum.X;
+                var right = box.Maximum.X - agent.Position.X;
+                var down = agent.Position.Y - box.Minimum.Y;
+                var up = box.Maximum.Y - agent.Position.Y;
+                var nearest = MathF.Min(MathF.Min(left, right), MathF.Min(down, up));
+                normal = nearest == left ? -Vector2.UnitX
+                    : nearest == right ? Vector2.UnitX
+                    : nearest == down ? -Vector2.UnitY
+                    : Vector2.UnitY;
+                distance = -nearest;
+            }
+            var clearance = distance - expansion;
+            if (clearance > agent.MaximumSpeed * StaticTimeHorizon) continue;
+
+            // One line per wall. Two cells of the same wall give near-identical
+            // normals, and keeping both only narrows the feasible region twice for
+            // the same fact; the tighter clearance is the one that binds.
+            var merged = false;
+            for (var existing = 0; existing < kept; existing++)
+            {
+                if (Vector2.Dot(normals[existing], normal) < StaticNormalMergeDot) continue;
+                if (clearance < clearances[existing])
+                {
+                    normals[existing] = normal;
+                    clearances[existing] = clearance;
+                }
+                merged = true;
+                break;
+            }
+            if (merged) continue;
+
+            if (kept < MaximumStaticLines)
+            {
+                normals[kept] = normal;
+                clearances[kept] = clearance;
+                kept++;
+                continue;
+            }
+            // Full: displace whichever kept constraint is least binding.
+            var loosest = 0;
+            for (var existing = 1; existing < kept; existing++)
+            {
+                if (clearances[existing] > clearances[loosest]) loosest = existing;
+            }
+            if (clearance < clearances[loosest])
+            {
+                normals[loosest] = normal;
+                clearances[loosest] = clearance;
+            }
+        }
+
+        var inverseHorizon = 1f / StaticTimeHorizon;
+        for (var i = 0; i < kept; i++)
+        {
+            var normal = normals[i];
+            // Feasible half-plane is dot(normal, v) >= -clearance / horizon: approach
+            // no faster than the gap allows, and separate if already inside it.
+            var bound = -clearances[i] * inverseHorizon;
+            lines.Add(new VelocityLine(normal * bound, new Vector2(normal.Y, -normal.X)));
+        }
+    }
+
     private void AddAgentLine(
         in AgentState agent,
         in AgentState other,
         Vector2 otherVelocity,
-        float responsibility,
         float timeHorizon,
         Vector2 relativePosition,
         float distanceSquared,
@@ -365,11 +557,11 @@ internal sealed class ReciprocalVelocitySolver
         }
 
         // Solve front-to-back. This agent takes full responsibility relative to
-        // the already chosen velocity of every higher-priority mover. Lower
-        // priority movers are solved later against this agent's actual result.
-        // Unlike asymmetric simultaneous solves, the pair therefore agrees on
-        // one concrete velocity prediction for the current tick.
-        lines.Add(new VelocityLine(agent.Velocity + correction * responsibility, direction));
+        // the already chosen velocity of every higher-priority mover — hence no
+        // split factor on the correction. Lower priority movers are solved later
+        // against this agent's actual result, so unlike an asymmetric simultaneous
+        // solve the pair agrees on one concrete velocity prediction for the tick.
+        lines.Add(new VelocityLine(agent.Velocity + correction, direction));
     }
 
     private static int LinearProgram2(

@@ -11,32 +11,52 @@ namespace RTSGame.Simulation.Spatial;
 /// resolution.
 /// </summary>
 /// <remarks>
+/// Buckets are a dense array over the world rather than a dictionary. The map is
+/// bounded and small, so the whole grid is a few hundred lists — while a hashed
+/// grid charges a tuple hash and a probe for every insert and, worse, for every
+/// cell of every query. This structure is swept several times per tick (once by
+/// the velocity solve, once per relaxation pass of the contact solve) and each
+/// sweep visits tens of cells per body, so that constant was the largest single
+/// cost left in the movement phases.
+/// <para>
 /// Query results are deterministic without sorting: buckets are filled in agent
-/// index order and cells are visited in a fixed (z, x) order.
+/// index order and cells are visited in a fixed (z, x) order. Positions outside
+/// the grid are clamped into the edge buckets, which can only ever widen the
+/// broad phase — every caller re-tests exact distance — and cannot happen for a
+/// body the simulation has constrained to the terrain.
+/// </para>
 /// </remarks>
 internal sealed class AgentSpatialIndex
 {
     private readonly float cellSize;
-    private readonly Dictionary<(int X, int Z), List<int>> buckets = new();
+    private readonly Vector2 origin;
+    private readonly int width;
+    private readonly int height;
+    private readonly List<int>[] buckets;
 
-    public AgentSpatialIndex(float cellSize)
+    public AgentSpatialIndex(float cellSize, Vector2 minimum, Vector2 maximum)
     {
         if (cellSize <= 0f) throw new ArgumentOutOfRangeException(nameof(cellSize));
         this.cellSize = cellSize;
+        origin = minimum;
+        var extent = maximum - minimum;
+        width = Math.Max(1, (int)MathF.Ceiling(extent.X / cellSize));
+        height = Math.Max(1, (int)MathF.Ceiling(extent.Y / cellSize));
+        buckets = new List<int>[width * height];
+        for (var i = 0; i < buckets.Length; i++) buckets[i] = new List<int>();
     }
 
     public void Rebuild(ReadOnlySpan<AgentState> agents)
     {
-        foreach (var bucket in buckets.Values) bucket.Clear();
+        foreach (var bucket in buckets) bucket.Clear();
         for (var index = 0; index < agents.Length; index++)
         {
             // Removed slots never enter the index, which is what keeps every
             // neighbour sweep built on it — avoidance and contact resolution
             // both — from seeing bodies that are no longer in the world.
             if (!agents[index].IsAlive) continue;
-            var key = Bucket(agents[index].Position);
-            if (!buckets.TryGetValue(key, out var values)) buckets[key] = values = new List<int>();
-            values.Add(index);
+            var (x, z) = Bucket(agents[index].Position);
+            buckets[z * width + x].Add(index);
         }
     }
 
@@ -47,19 +67,26 @@ internal sealed class AgentSpatialIndex
     public void Query(Vector2 center, float radius, int excludedIndex, List<int> results)
     {
         results.Clear();
-        var minimum = Bucket(center - new Vector2(radius));
-        var maximum = Bucket(center + new Vector2(radius));
-        for (var z = minimum.Z; z <= maximum.Z; z++)
-        for (var x = minimum.X; x <= maximum.X; x++)
+        var (minimumX, minimumZ) = Bucket(center - new Vector2(radius));
+        var (maximumX, maximumZ) = Bucket(center + new Vector2(radius));
+        for (var z = minimumZ; z <= maximumZ; z++)
         {
-            if (!buckets.TryGetValue((x, z), out var values)) continue;
-            foreach (var index in values)
+            var row = z * width;
+            for (var x = minimumX; x <= maximumX; x++)
             {
-                if (index != excludedIndex) results.Add(index);
+                foreach (var index in buckets[row + x])
+                {
+                    if (index != excludedIndex) results.Add(index);
+                }
             }
         }
     }
 
-    private (int X, int Z) Bucket(Vector2 point) =>
-        ((int)MathF.Floor(point.X / cellSize), (int)MathF.Floor(point.Y / cellSize));
+    private (int X, int Z) Bucket(Vector2 point)
+    {
+        var local = (point - origin) / cellSize;
+        return (
+            Math.Clamp((int)MathF.Floor(local.X), 0, width - 1),
+            Math.Clamp((int)MathF.Floor(local.Y), 0, height - 1));
+    }
 }

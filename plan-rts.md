@@ -1,11 +1,11 @@
 # RTSGame — locomotion layer: state, seams, and what not to break
 
-Status as of 2026-08-18. `--selftest` **37/37 passing**. ~9.2k lines in `src/RTSGame`.
-Untracked on `main` (nothing committed yet).
+Status as of 2026-08-18. `--selftest` **37/37 passing**. ~10k lines in `src/RTSGame`.
+Branch `rts-locomotion`.
 
 Run it: `tools/run-rts-game.sh [--debug-all]`
 Verify it: `dotnet run --project src/RTSGame/RTSGame.csproj -c Release -- --selftest`
-Measure it: same with `--benchmark`
+Measure it: same with `--benchmark`, and `--doorwaytest` for two-way gap contention
 
 ---
 
@@ -20,7 +20,7 @@ One fixed 30 Hz tick, in this order:
 | 3 | `UpdateBehaviors` + `UpdateGroupFormations` | locomotion states; cohort centroid; slot hand-off |
 | 4 | `RefreshInvalidPaths` (+ `ReconsiderCongestedRoute`) | route validity and congestion re-evaluation |
 | 5 | `PreparePreferredVelocities` | **intent** — path following or flow-gradient transit |
-| 6 | `LocalSteeringSystem` → `ReciprocalVelocitySolver` | **velocity** — ORCA is the only controller here |
+| 6 | `LocalSteeringSystem` → `ReciprocalVelocitySolver` | **velocity** — ORCA is the only controller here, and it sees walls |
 | 7 | `IntegrateMovement` | swept static check, then move |
 | 8 | `CollisionSystem` | **position** — static + agent depenetration |
 | 9 | `ConstrainAgentsToTerrain` | last-resort revert |
@@ -28,6 +28,38 @@ One fixed 30 Hz tick, in this order:
 
 **The layering rule that makes it work:** intent → velocity → position, each owning one
 thing. Every regression this session came from something reaching across those.
+
+### Static geometry is part of the velocity solve
+Walls reach the solver as half-plane constraints (`AddStaticLines`, fed by
+`PathService.GatherBlockingBoxes`), not as a veto on its output. They used to be the
+latter: the linear program answered as though the map were empty, the answer was
+swept against the ground, and a collision threw it away in favour of whichever of
+175 sampled directions survived. That search returned **nothing** more often than
+something — a body freezing for a tick — and it made the doorway standoff unfixable
+in principle, because the natural answer to a symmetric contest in a gap is to step
+sideways into the wall, which was then vetoed for both bodies, every tick, with the
+roles reversed. The sweep and the cone search remain as the safety net that
+guarantees no tunnelling; they now fire on well under 1% of solves.
+
+### Turning costs time in the router
+A turn of θ at turn rate ω costs `(θ - 2·sin(θ/2))/ω` seconds if the body can arc through
+it at speed, and the full `θ/ω` if the walls are closer than its turning circle, which the
+clearance field decides. Both derived, no tuned constant. Until this existed a hairpin
+priced exactly like a straight line, so a route could be optimal on paper and unfollowable
+in practice — the body found out by failing.
+
+It is an **approximation**: exact turn-aware routing needs the heading in the search state,
+which multiplies the state space by eight and puts the group-order hitch back, so instead
+each cell records the one heading its best-known route leaves with. A route that would
+rather arrive slower but better aligned cannot express that. Worth it — gap reversals at a
+two-way doorway fell 54 → 18 — but it is why routes are not provably optimal any more.
+
+**It did not deliver the turn-rate ↔ route-choice coupling it was expected to**, and the
+reason is arithmetic: a 90° turn in the open costs 0.039 s, about a third of a cell, while
+the pen's alternate exits are 60–90 cells further. Turn cost cannot outweigh that and should
+not be inflated until it does — that is the barrier-as-cost mistake in a new costume. What
+would move route choice is scaling congestion by local manoeuvre difficulty: at a
+constriction the cost is not *your* turn, it is that everyone must turn, one at a time.
 
 ### Routing model
 Cost is **seconds**, not arbitrary units. `TerrainSurfaceRules.PathCost` is *derived* as
@@ -37,6 +69,29 @@ resource-hauling game needs.
 
 Group moves build **one** flow field (shared Dijkstra) and members steer down its gradient
 with no stored path. Slots are claimed on arrival, not before.
+
+**Every term in the route cost is a genuine number of seconds, and that took two
+goes to get right.** The detour bubble, the group bottleneck reservation and the
+per-repath body-proximity grid used to be bare constants of 2.25 to 24 — between 20
+and 216 cells of detour, which is not a delay, it is a barrier. Restating them as
+honest delays *on their own* made things worse and looked like proof the barriers
+were load-bearing: the pen funnelled all thirty units through one gap instead of
+four, and finished slower.
+
+They were not load-bearing. They were compensating for `CongestionField.DecaySeconds`
+being 4.5 — nothing deposits pressure once a jam starts moving, so all of that is
+fade tail, and a cleared gap went on looking blocked for four and a half seconds.
+Honest costs were bidding against pressure that no longer existed, so only absurd
+ones could win. Shorten the fade to 2.2 s, and half a second for a detour and a
+second for a body in the way are not merely adequate but **better than the barriers
+were on every measure**: two exits instead of four, routes at 1.06× optimal against
+1.19×, pen cleared in 13.4 s against 19.2 s. The same stale tail was independently
+visible in play as units committing to a detour just as the jam they were avoiding
+finished draining. Two symptoms, one cause.
+
+The one term still stated in cells is `BlockedFlowCells`, and deliberately: it is a
+boundary value for sampling near a wall, not a claim about how long blocked ground
+takes to cross.
 
 ---
 
@@ -103,28 +158,100 @@ Each of these was measured. Reverting one costs specific tests.
     open. Otherwise a crowd saturates its own surroundings and poisons its escape route.
 12. **Route commitment (3 s).** Without it: the empty alternative looks better, the unit
     sets off, its own arrival makes it no better, the original drains, repeat.
+13. **`StaticTimeHorizon = 0.25`, and static geometry is reported at true cell extent.**
+    A long horizon (0.35) makes bodies defend ground they are nowhere near and they walk
+    7–9% further; a short one (0.12) brings the freezing back and fails two tests.
+    Separately: do *not* inset the boxes the way `IsPositionFreeOfPlacement` insets its
+    test. That inset is a tolerance on a point test, not geometry — applying it detaches
+    every block from its neighbour by 5 cm, so a solid wall acquires a slot per cell and
+    the solve steers bodies at gaps that do not exist. It cost 4× the dead stops at a gate.
+14. **The mover/idle sidestep bias scales down with overlap depth.** Rotating a correction
+    toward the mover's flank is what makes a brush-past look right, but only ~⅔ of it then
+    lies along the normal, so a genuinely interpenetrated pair separates slowly. In a crowd
+    converging on one destination the residual never gets a quiet tick to clear. A sidestep
+    for a touch; the shortest way apart for anything deeper than 15 mm.
+15. **The congestion field's fade must match how fast a jam actually clears.** At 4.5 s
+    every cost that competes with it has to be inflated to absurdity to be heard, and
+    detour decisions land after the jam has drained. This is the single highest-leverage
+    constant in the routing layer; changing it invalidates the tuning of every reservation.
+16. **`RelaxationPasses` is an optimum, not a floor.** 6 and 7 both break the terrain-ramp
+    crossing. If overlap appears, it is almost certainly not a convergence problem — check
+    *where* it happens first. The one that looked like a chokepoint failure was 12 m past
+    the wall, in the arrival cluster.
 
 ---
 
 ## 4. Measured baselines (regression detection)
 
-500 agents, 120 ticks, Release, M4:
+120 ticks, Release, M4. **Best of four runs** — see the warning below.
 
-| Metric | Value |
-|---|---|
-| wall / tick | **~4.3 ms** (500–547 ms per 120 ticks) |
-| group-order frame | ~5.8 ms |
-| `walked / optimal route` | 1.17× (pen), 1.56× (one-cell gate) |
-| mean direction change | 4.5–6.4 °/tick |
-| pen escape, 30 units | 17.0 s / 17.6 s, all out, 3–4 exits used |
-| terrain corner crossing | ~11 s |
+| Metric | Before this pass | Now |
+|---|---|---|
+| wall, 50 agents | 315 ms | **92 ms** |
+| wall, 200 agents | 430 ms | **194 ms** |
+| wall, 500 agents | 508 ms | **234 ms** |
+| terrain command frame | 11.3 ms | **6.3 ms** |
+| `walked / optimal`, pen | 1.17× | **1.06×** |
+| `walked / optimal`, gate | 1.56× | **1.40×** |
+| pen exits used (both seeds) | 3–4 | **2 / 2** |
+| pen clearing time | 17.0 / 17.6 s | **13.4 / 16.2 s** |
+| solver dead stops | 212 / 208 | **6 / 41** |
+| terrain fallback rate | 3.4% / 1.6% | **0.1% / 0.3%** |
+| two-way doorway, 16 units | 13.0 s, 31 frozen ticks, 68 gap reversals | **10.7 s, 0, 50** |
+| mean direction change | 4.5 / 6.4 °/tick | 5.0 / 6.7 |
+| turns > 60° | 1.09% / 1.37% | 1.23% / 1.47% |
 
-For reference: pen escape was **43.5 s / 59.8 s** and the terrain ramp **42 s** at the
-start of this work.
+The last two rows are the trade the congestion tuning made and are worth watching:
+routes this direct leave less room to give way, so bodies change direction slightly
+more often than they used to. Mid-pass, before the routing was tightened, they read
+4.2 / 6.3 and 0.75% / 1.22% — better than baseline on both. If direction stability
+ever matters more than route length, that trade is available by loosening the detour
+costs (12 cells / 0.2× body scale gives three exits and 1.14× / 1.45×, all tests
+passing).
 
-**Use the `wall` column, not the EMA phase table, for anything decision-grade.** The EMA is
-noisy run-to-run. (`Pathfinding` used to be recorded *per A\* call* while every other phase
-was per-tick — it read 4.3 ms at 50 agents and 2.9 ms at 500. Fixed, but the lesson stands.)
+For reference: pen escape was 43.5 s / 59.8 s and the terrain ramp 42 s at the start
+of the locomotion work.
+
+**`walked / optimal` is a ratio of two distances, and its denominator is built without
+turn cost on purpose.** When turn cost first landed the denominator included it, the figure
+went to 0.90 — a body apparently walking less far than the shortest route — and the gate
+appeared to improve from 1.40× to 1.27× when nothing about the route had changed. A metric
+that flatters the change being measured is worse than no metric. Note also that the
+denominator is cell-centre-to-cell-centre while bodies walk smoothed straight lines, so
+roughly 1.0 is the floor and values near it carry a few per cent of quantisation error.
+
+**Wall time is much noisier than it looks — take the best of several runs.** The same
+build measured 239 ms and 397 ms for the 500-agent scenario on consecutive runs; the
+first run of a batch is always the slowest. The quality columns, by contrast, are
+exactly reproducible and are the ones to trust from a single run. (Do not use the EMA
+phase table for anything decision-grade either. `Pathfinding` used to be recorded
+*per A\* call* while every other phase was per-tick — it read 4.3 ms at 50 agents and
+2.9 ms at 500. Fixed, but the lesson stands.)
+
+### Where the time went
+
+The whole 2× came from four memoizations and a partition, none of which changed a
+single behavioural metric — every quality number was bit-identical across them,
+which is what a correct memo looks like:
+
+- **Body traversability at cell centres** (`PathService.CellCenterAdmitsBody`). A*
+  asked this of eight neighbours per expansion and the honest answer is nine terrain
+  grade probes of four bilinear height samples each. Cell centres are a fixed finite
+  set; the answer cannot change until the raster does. A single A* query cost about
+  **4 ms** on a 3600-cell grid before this.
+- **Level-ground fast path** (`TerrainMap.LevelNeighborhood`). Where every vertex a
+  body's grade probes could reach is at one height, the grade is exactly zero and the
+  only question left is the bounds test. Most of any map, all of a flat one.
+- **Placement lookups by cell** (`IsPositionFreeOfPlacement`). Was a linear scan over
+  every occupied cell on the map — a few hundred box tests to answer a question about
+  one square metre — and it is the hottest predicate in the simulation.
+- **Collider hash partitioned by layer.** Every agent carries four proxies, all
+  re-centred twice a tick, and each write marked one shared hash stale, so the next
+  query rebuilt several thousand proxies from a fresh dictionary. The only query the
+  tick makes is for static geometry.
+- **Agent index as a dense array**, and the ORCA priority key hoisted out of the
+  comparison (an insertion sort makes a quadratic number of comparisons; it was doing
+  a quarter of a million squared distances a tick to order 500 numbers).
 
 ---
 
@@ -137,25 +264,89 @@ was per-tick — it read 4.3 ms at 50 agents and 2.9 ms at 500. Fixed, but the l
   `flow` / `flowRejects` / `noIntent`
 - `--benchmark` adds constricted scenarios with `walked/optimal`, `mean-turn`,
   `infeasible%`, `terrain-fallback%`, `dead-stops`, `detour-grants`, `congestion-reroutes`
+- `--doorwaytest` drives two files through one gap in opposite directions and reports
+  clearing time, frozen ticks, gap reversals and dead stops. This is the case with no
+  good answer historically, so it is a diagnostic rather than an assertion — the numbers
+  are the point. Promote it once gap reversals are genuinely low.
 
-**Tests must assert outcomes, not mechanisms.** Two assertions here were unsatisfiable by
-correct behaviour and had to be restated (`openFlowRatio`, and "no unit ever waits at a
-gap"). A test that passes because a mechanism exists will not notice when the mechanism
+**Tests must assert outcomes, not mechanisms.** Three assertions here were unsatisfiable by
+correct behaviour and had to be restated (`openFlowRatio`; "no unit ever waits at a gap";
+and the chokepoint's single minimum separation over 900 ticks, which was reporting one
+frame of contact in a twelve-body arrival cluster twelve metres past the gap as though it
+described the resting state — it passed by two millimetres and flipped on routing constants
+with no bearing on chokepoints. Now split into settled separation, contact duration and
+contact depth, each with margin). A test that passes because a mechanism exists will not notice when the mechanism
 stops helping — and a two-target version of the deadlock test passed while a unit stood
 still for 22 s in play. Sweep the space.
 
 ---
 
-## 6. Known open items
+## 6. Measured refusals — tried, worse, reverted
 
+Kept because each looked obviously right and cost real time to disprove.
+
+- **March order as ORCA priority.** Order group members by their place in the column
+  rather than by distance to goal, so a queue stops re-negotiating who goes first. Dead
+  stops at a one-cell gate: **5** without it, **386** with a rank fixed at order time,
+  **168** with one re-derived every half second. The ordering is not right of way — it
+  decides who takes *responsibility* for avoidance, and the lower-priority body avoids the
+  higher one's chosen velocity. By distance, the bodies yielding are the ones behind, which
+  matches the geometry. By column rank, bodies physically in front must yield to one behind
+  them, and the group's avoidance stops corresponding to where anything is. Group-level
+  sequencing is the right idea in the wrong layer: it belongs in who enters a gap next.
+- **Turn rate scaled by speed.** Honest physics — a turn is limited by lateral
+  acceleration, so `ω = a/v` and a stopped body pivots freely. One unit never escaped the
+  pen, gate dead stops went 5 → 288, infeasible solves 3.8% → 13.2%. `MaximumTurnSpeed` is
+  doing two jobs: a physical bound, and the low-pass that stops the velocity solve spinning
+  bodies on the spot. In a crowd every body is slow, so scaling by speed lifts the limit
+  precisely where it was doing the most work.
+- **Releasing flow smoothing for stalled bodies**, so a stuck unit can change its mind
+  sharply instead of easing round. Gate dead stops 5 → 98.
+- **Damped formation station-keeping** (subtract the closing rate). Fixes a group-level
+  swing on paper, and costs freezing: gate dead stops 5 → 28 at a damping of 0.3, and three
+  tests fail at 0.45. The swing it was aimed at was most likely march order's doing, and
+  went away when that did.
+
+The pattern in all four: the constants in this layer are load-bearing in more than one way
+at once, and a change justified by one of their jobs breaks the other.
+
+---
+
+## 7. Known open items
+
+- **Doorway turn-taking is improved, not solved.** Freezing and dead stops at a two-way
+  gap are gone (31 frozen ticks → 2, 28 dead stops → 0) and clearing is 24% quicker, but
+  bodies still reverse near the gap 48 times against 68. What remains is not the wall any
+  more: with static lines present the solve must pick who goes and who waits, and it picks
+  by progress order, which flips tick to tick between two near-equidistant contenders. A
+  yield *commitment* — a body that gave way keeps giving way briefly — is the untried idea.
+  Note that `HasHigherPriority` is not a strict weak ordering (the epsilon band makes it
+  intransitive), so it cannot simply be made hysteretic by persisting last tick's order.
+- **`terrain.Revision == 0` still forks routing.** Flat maps skip `grid.CanTraverse`, skip
+  per-sample walkability in `IsDirectPathClear`, and smooth with uncapped segments where
+  sculpted maps cap at two cells. The velocity solver deliberately deleted its equivalent
+  branch — "flat and sculpted maps ran genuinely different avoidance algorithms, so every
+  constant tuned here applied to exactly one of them" — and the same smell survives one
+  layer down, with three of five benchmark scenarios flat.
 - **Give-up behaviour is blunt.** A unit that cannot route stops and drops the order. An
   RTS should walk as close as it can get.
 - **Congestion delay does not scale with unit speed.** A jam costs everyone the same
   wall-clock seconds, so once unit speeds differ, fast units will under-value detours.
 - **`Avoidance` collider (radius + 0.30) is vestigial** — created and moved every tick,
-  read only by the debug renderer since steering moved to `AgentSpatialIndex`. Either use
-  it (detection ranges) or drop it.
-- **Doorway turn-taking.** Bodies still swap places at a contested gap. Attacked three ways
-  (aperture right-of-way, retreat clamping, turn-rate limiting); only the turn rate helped.
-  Genuinely wants obstacle-aware ORCA lines rather than another steering-layer patch.
+  read only by the debug renderer since steering moved to `AgentSpatialIndex`. It no longer
+  costs a hash rebuild now the collider hash is partitioned, so this is tidiness rather
+  than performance. Either use it (detection ranges) or drop it.
+- **`DestinationIsLocallyContested` is O(n) twice per path-following agent per tick.** It
+  did not show up as hot in these scenarios, because a group move puts most bodies on flow
+  transit and they return before reaching it — a game with many individually-pathing units
+  will feel it. The shared-destination count can be tallied once per tick, and the packing
+  loop wants `agentIndex` rather than a scan of every agent for neighbours within 0.82 m.
+  It is load-bearing (805 firings per 120 ticks at 500 agents), so make it cheap, not gone.
+- **Bodies bunch against an exit rather than backing off and going round.** The most
+  visible remaining flaw, and the one a player notices: a unit pressed against a full gap
+  keeps pressing when a person would turn round and walk to the next one. Everything tried
+  so far has attacked it as a steering or a cost problem and none of it worked (see the
+  refusals above). What has not been tried is giving a body the option to *abandon* a
+  contested aperture — a decision, taken once, held, and taken by the body at the back of
+  the queue rather than the one wedged at the front.
 - **No unit types, combat, resources, or production** — that is the next session.

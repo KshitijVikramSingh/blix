@@ -25,13 +25,25 @@ internal sealed class CongestionField
 {
     /// <summary>Time for a deposit to decay to ~37% of its value.</summary>
     /// <remarks>
-    /// Long relative to the deposit gain, on purpose: pressure builds in about a
-    /// second and fades over several. Symmetric fast response is what made the
-    /// crowd oscillate — a route was abandoned, its pressure vanished almost
-    /// immediately, and the field flipped straight back. Being slow to forgive a
-    /// bad route is what lets the alternative actually get used.
+    /// Still longer than the deposit gain — pressure builds in about a second and fades
+    /// over rather more than two — because symmetric fast response is what made the crowd
+    /// oscillate: a route was abandoned, its pressure vanished immediately, and the field
+    /// flipped straight back. Some reluctance to forgive a bad route is what lets the
+    /// alternative actually get used.
+    /// <para>
+    /// It was 4.5 s, and that was too much reluctance to be useful. Nothing deposits
+    /// pressure once a jam starts moving again, so everything after that is the fade
+    /// tail: a cleared gap went on looking blocked for four and a half seconds, and with
+    /// route adoption staggered on top, units were committing to a detour at about the
+    /// moment the thing they were detouring around finished draining. Visible in play as
+    /// re-deciding too late to matter, and it is also why the detour costs had to be
+    /// enormous to work at all — they were bidding against pressure that no longer
+    /// existed. Shortening this let those costs become honest delays, and the two changes
+    /// together take the pen from four exits and 19.2 s to two exits and 13.4 s, with
+    /// routes at 1.06x optimal against 1.19x.
+    /// </para>
     /// </remarks>
-    private const float DecaySeconds = 4.5f;
+    private const float DecaySeconds = 2.2f;
     /// <summary>Multiplier on the deposit rate, so build stays fast despite slow decay.</summary>
     /// <remarks>
     /// Sized so a fully committed jam settles near sixteen, which at the current

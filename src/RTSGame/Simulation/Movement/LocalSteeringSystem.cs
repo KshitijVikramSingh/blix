@@ -148,6 +148,18 @@ internal sealed class LocalSteeringSystem
     /// degrees per tick, against 7.1 and 8.2 unclamped). The swinging is lateral,
     /// not reversal, so only a turn rate addresses it.
     /// </para>
+    /// <para>
+    /// It is a flat rate, and scaling it by speed — which is the honest physics, since
+    /// what limits a turn is lateral acceleration and so <c>ω = a/v</c> — was measured and
+    /// is much worse: one unit never escaped the pen at all, dead stops at a one-cell gate
+    /// went from 5 to 288, infeasible solves from 3.8% to 13.2%. The reason is that this
+    /// limit does two jobs. It is a physical bound, and it is also the low-pass that keeps
+    /// the velocity solve from spinning bodies on the spot. In a crowd every body is slow,
+    /// so scaling by speed lifts the limit precisely where it was doing the most work.
+    /// A stuck body that ought to turn round is a real problem, but it is not this one:
+    /// it can already rotate, and what keeps it pointed at the obstruction is that its
+    /// intent keeps pointing there. That belongs in the layer above.
+    /// </para>
     /// </remarks>
     private static Vector2 LimitTurn(in AgentState agent, Vector2 solved, float deltaSeconds)
     {

@@ -5,6 +5,9 @@ using RTSGame.Simulation.Terrain;
 
 namespace RTSGame.Simulation.Navigation;
 
+/// <summary>Axis-aligned footprint of a piece of static geometry.</summary>
+internal readonly record struct StaticBox(Vector2 Minimum, Vector2 Maximum);
+
 internal readonly record struct PathResult(
     Vector2[] Waypoints,
     Vector2 Destination,
@@ -15,7 +18,30 @@ internal sealed class PathService
     public bool HasTerrainVariation => terrain.Revision > 0;
     private const float DiagonalCost = 1.41421356f;
     private const float CongestionAvoidanceRadius = 3f;
-    private const float CongestionPenalty = 10f;
+    /// <summary>
+    /// Peak delay charged at the centre of a granted detour's avoidance bubble.
+    /// </summary>
+    /// <remarks>
+    /// Route cost is seconds, and this is one of them: what it says is what going that
+    /// way is expected to cost. Walking round a three-metre bubble is about 1.7 m, or
+    /// 0.4 s, so half a second summed over the cells crossing it decides the matter
+    /// without overstating it. Enforcement, where it is needed, is
+    /// <see cref="SegmentAvoidsCongestion"/> forbidding the crossing outright — this
+    /// number only has to bias the search early enough not to need forbidding late.
+    /// <para>
+    /// It was ten seconds: ninety cells of detour, a barrier wearing the costume of a
+    /// cost. Restating it honestly on its own made things worse — the pen stopped using
+    /// its alternate exits at all — which looked like proof that the barrier was load
+    /// bearing. It was not. It was compensating for a congestion field that took 4.5 s
+    /// to forget a jam, so honest costs were competing against pressure that had already
+    /// gone. With the field's fade shortened to match how fast a jam actually clears
+    /// (see CongestionField.DecaySeconds) an honest half second is not merely adequate,
+    /// it is better than the barrier was on every measure: two exits instead of four,
+    /// routes at 1.06x optimal instead of 1.19x, and the pen clears in 13.4 s
+    /// instead of 19.2 s. Two symptoms, one cause.
+    /// </para>
+    /// </remarks>
+    private const float DetourAvoidanceSeconds = 0.5f;
     /// <summary>
     /// Nominal unit speed used to express route cost as travel time.
     /// </summary>
@@ -42,15 +68,49 @@ internal sealed class PathService
     private const float CongestionSecondsPerPressure = 0.40f;
     /// <summary>Extra seconds charged per metre of climb.</summary>
     private const float ClimbSecondsPerMetre = 0.60f;
+    /// <summary>
+    /// Nominal turn rate, in radians per second, that route cost prices turning at.
+    /// </summary>
+    /// <remarks>
+    /// The same device as <see cref="ReferenceSpeed"/> and carrying the same caveat: one
+    /// shared field stays correct for every unit only while they all turn at the same
+    /// rate. Mirrors <c>AgentDefaults.MaximumTurnSpeed</c> rather than referencing it, so
+    /// the navigation layer does not need to know what an agent is; if the two ever
+    /// diverge, routes will be planned for a body that does not exist.
+    /// </remarks>
+    private const float ReferenceTurnSpeed = 4.0f;
     /// <summary>Seconds to cross one cell of open ground at the reference speed.</summary>
     private float SecondsPerCell => grid.Transform.CellSize / ReferenceSpeed;
-    /// <summary>Cost an unreachable cell reports when sampling the flow field.</summary>
-    private const float BlockedFlowPenalty = 12f;
+    /// <summary>Travel time an unreachable cell reports when sampling the flow field.</summary>
+    /// <remarks>
+    /// Not a predicted cost but a boundary condition: it exists so bilinear sampling of
+    /// the cost field near a wall leans away from it instead of returning infinity and
+    /// poisoning the gradient with a NaN. It has to outweigh any genuine cost difference
+    /// across one probe ring, and stay finite.
+    /// <para>
+    /// A hundred and eight cells looks like far more than that argument needs, and it is
+    /// not: how steeply the field leans away from a wall is also what decides how wide a
+    /// body swings round it. Re-measured at 20 / 50 / 108 after the congestion tuning —
+    /// 20 gives marginally shorter routes (1.04x against 1.06x) and is 2.5 s slower to
+    /// clear the pen, and cost is denominated in time, so this wins. Stated in cells
+    /// rather than seconds because it is a boundary value, not a claim about how long
+    /// blocked ground takes to cross.
+    /// </para>
+    /// </remarks>
+    private float BlockedFlowSeconds => BlockedFlowCells * SecondsPerCell;
+
+    /// <summary>Cells of open ground the blocked-cell boundary value is worth.</summary>
+    private const float BlockedFlowCells = 108f;
     /// <summary>How many past congestion revisions stay resident for staggered adoption.</summary>
     private const int RetainedCongestionRevisions = 3;
     /// <summary>Directions probed when reading the cost field's downhill.</summary>
     private const int FlowProbeCount = 16;
     /// <summary>How much further than the straight line a slot may be, before it is judged unconnected.</summary>
+    /// <summary>
+    /// Delay charged for taking a bottleneck another member of the same group has
+    /// already reserved — what waiting a turn there is expected to cost.
+    /// </summary>
+    private const float BottleneckReservationSeconds = 0.5f;
     private const float SlotDetourTolerance = 2.0f;
     private const float SlotDetourSlack = 0.45f;
     private const float Epsilon = 0.00001f;
@@ -60,16 +120,98 @@ internal sealed class PathService
         new(1, 1), new(1, -1), new(-1, 1), new(-1, -1),
     };
 
+    /// <summary>
+    /// Seconds lost to changing heading between two step directions, indexed
+    /// <c>[from, to]</c>, for a body arcing through the turn at speed and for one
+    /// pivoting on the spot.
+    /// </summary>
+    /// <remarks>
+    /// Route cost is time, and turning takes time, but until now it was free here: a
+    /// hairpin priced exactly like a straight line. That is why making bodies turn more
+    /// slowly did not make them prefer routes with gentler corners — the router had no
+    /// idea turning had become more expensive. It also means a route could be optimal on
+    /// paper and unfollowable in practice, which is the most expensive kind of wrong,
+    /// because the body discovers it by failing.
+    /// <para>
+    /// Both tables are derived, not tuned. A body that can arc through a turn keeps its
+    /// speed and loses only the difference between the arc it travels and the straight
+    /// line it wanted: at turn rate w that is <c>(θ - 2·sin(θ/2)) / w</c> seconds, which
+    /// is almost nothing for a gentle bend and rises sharply toward a reversal. A body
+    /// that cannot arc — because the walls are closer than its turning circle — has to
+    /// stop and turn, costing the full <c>θ / w</c>. Which of the two applies is a
+    /// property of the ground, so the cost is interpolated by local clearance.
+    /// </para>
+    /// </remarks>
+    private static readonly float[,] ArcTurnSeconds = BuildTurnTable(pivot: false);
+    private static readonly float[,] PivotTurnSeconds = BuildTurnTable(pivot: true);
+
+    private static float[,] BuildTurnTable(bool pivot)
+    {
+        var table = new float[NeighborOffsets.Length, NeighborOffsets.Length];
+        for (var from = 0; from < NeighborOffsets.Length; from++)
+        for (var to = 0; to < NeighborOffsets.Length; to++)
+        {
+            var a = Vector2.Normalize(new Vector2(NeighborOffsets[from].X, NeighborOffsets[from].Z));
+            var b = Vector2.Normalize(new Vector2(NeighborOffsets[to].X, NeighborOffsets[to].Z));
+            var theta = MathF.Acos(Math.Clamp(Vector2.Dot(a, b), -1f, 1f));
+            table[from, to] = (pivot ? theta : theta - 2f * MathF.Sin(theta * 0.5f)) /
+                              ReferenceTurnSpeed;
+        }
+        return table;
+    }
+
+    /// <summary>
+    /// Seconds charged for arriving at <paramref name="cell"/> heading
+    /// <paramref name="fromDirection"/> and leaving it heading <paramref name="toDirection"/>.
+    /// </summary>
+    private float TurnCost(int fromDirection, int toDirection, GridCell cell, float agentRadius)
+    {
+        // Either heading unrecorded means there is no turn to charge: the route either
+        // starts here and is free to face anywhere, or ends here and turns no further.
+        if (fromDirection < 0 || toDirection < 0 || fromDirection == toDirection) return 0f;
+        var arc = ArcTurnSeconds[fromDirection, toDirection];
+        var pivot = PivotTurnSeconds[fromDirection, toDirection];
+        if (pivot <= arc) return arc;
+
+        // Whether the body can carry its speed through the turn depends on whether its
+        // turning circle fits. Same clearance ramp the congestion field uses to decide
+        // whether a stalled body is an obstruction or a nuisance.
+        var clearance = grid.Clearance(cell);
+        var turningRadius = ReferenceSpeed / ReferenceTurnSpeed;
+        var tight = agentRadius + turningRadius * 0.5f;
+        var open = agentRadius + turningRadius * 1.5f;
+        var confinement = clearance <= tight
+            ? 1f
+            : clearance >= open
+                ? 0f
+                : 1f - (clearance - tight) / (open - tight);
+        return float.Lerp(arc, pivot, confinement);
+    }
+
     private readonly TerrainMap terrain;
     private readonly PlacementGrid placement;
     private readonly NavigationGrid grid;
     private readonly CongestionField congestion;
-    private readonly List<Vector2> occupiedPlacementCenters = new();
-    private readonly Dictionary<(int Goal, int Radius, int Nav, int Congestion), float[]> flowFields = new();
-    private int cachedPlacementRevision = -1;
+    private readonly Dictionary<(int Goal, int Radius, int Nav, int Congestion, bool Turns), float[]> flowFields = new();
+    /// <summary>
+    /// Per-cell memo of whether a body of a given radius fits at the cell centre,
+    /// as 0 unknown / 1 admitted / 2 refused, keyed by radius in centimetres.
+    /// </summary>
+    /// <remarks>
+    /// Every route search asks this of eight neighbours per expansion, and the
+    /// honest answer costs a body-shaped terrain sample — nine grade probes, each
+    /// four bilinear height lookups — plus a placement test. That is the single
+    /// most expensive thing A* did, and it was recomputing an answer that cannot
+    /// change until the navigation raster does: cell centres are a fixed, finite
+    /// set of positions. Keyed on the raster revision, which is bumped by terrain
+    /// edits and by placement edits alike, so the memo cannot outlive its inputs.
+    /// </remarks>
+    private readonly Dictionary<int, byte[]> cellCenterAdmission = new();
+    private int cellCenterAdmissionRevision = -1;
     private int[] searchCameFrom = Array.Empty<int>();
     private float[] searchCost = Array.Empty<float>();
     private bool[] searchClosed = Array.Empty<bool>();
+    private int[] searchArrival = Array.Empty<int>();
     private readonly PriorityQueue<GridCell, float> searchQueue = new();
 
     /// <summary>Flow fields built since construction. A proxy for route churn:
@@ -104,14 +246,50 @@ internal sealed class PathService
     /// predictive at the group level rather than reactive per agent: nobody has to
     /// jam and then individually replan.
     /// </remarks>
-    private float CongestionCost(GridCell from, GridCell to)
+    private float CongestionCost(GridCell from, GridCell to, float turnSeconds)
     {
         var travel = grid.CellCenter(to) - grid.CellCenter(from);
         if (travel.LengthSquared() > 0.0001f) travel = Vector2.Normalize(travel);
         var pressure = congestion.At(from) * congestion.DirectionalFactor(from, travel) +
                        congestion.At(to) * congestion.DirectionalFactor(to, travel);
-        return pressure * 0.5f * CongestionSecondsPerPressure;
+        return pressure * 0.5f * CongestionSecondsPerPressure * ManoeuvreAmplification(turnSeconds);
     }
+
+    /// <summary>
+    /// How much longer a queue takes to drain through ground that is awkward to
+    /// manoeuvre through, as a multiple of the same queue on a straight run.
+    /// </summary>
+    /// <remarks>
+    /// Waiting behind a queue costs the queue's length times what one body takes to get
+    /// clear — and what one body takes to get clear is crossing the cell <em>plus</em>
+    /// whatever turn the cell demands. Charging a flat rate per unit of pressure says
+    /// every jam drains at the same speed, which is exactly wrong at the place jams
+    /// happen: a one-cell gap set at right angles to the approach makes thirty bodies
+    /// pivot, one at a time, and none of that appears in the cost of going that way.
+    /// <para>
+    /// This is the group-level reading of a turn, and it is what makes tightening the
+    /// turn rate divert traffic. A body's own turn is far too cheap to matter — 0.039 s
+    /// in the open, a third of a cell, against alternate routes sixty cells further — so
+    /// charging it individually can never move a route choice and must not be inflated
+    /// until it does. Multiplied by the number of bodies that have to perform it, the
+    /// same honest figure is decisive: an open bend amplifies a wait by about 1.35x, a
+    /// pivot in a gap by 4.5x, and halving the turn rate takes that to 8x.
+    /// </para>
+    /// <para>
+    /// It costs nothing where nothing is queueing, which is the property that matters —
+    /// pressure only accumulates where bodies want to move and are not moving, so an
+    /// empty awkward corner stays as cheap as it should be.
+    /// </para>
+    /// <para>
+    /// Charged at full derived strength. A scaling factor was measured at 1.0 / 0.5 / 0.25
+    /// against no amplification at all, and full strength is decisively the best on the
+    /// metric this exists to move — dead stops at a one-cell gate read 5 / 23 / 72 / 56
+    /// across those four — while route length and direction stability are flat across all
+    /// of them. So there is no knob here; the derivation is the value.
+    /// </para>
+    /// </remarks>
+    private float ManoeuvreAmplification(float turnSeconds) =>
+        turnSeconds <= 0f ? 1f : 1f + turnSeconds / SecondsPerCell;
 
     /// <summary>
     /// Whether a formation slot is genuinely reachable from its command point.
@@ -130,6 +308,15 @@ internal sealed class PathService
     /// no route exists. Diagnostics only — this is the denominator for judging
     /// how much further than necessary a body actually walked.
     /// </summary>
+    /// <remarks>
+    /// Deliberately measured without charging for turns, even though routing does charge
+    /// for them. The number it feeds is <c>walked / optimal</c>, a ratio of two distances,
+    /// and once the denominator started including turn time it stopped being one: the
+    /// figure fell as low as 0.90, a body apparently walking less far than the shortest
+    /// route, which is what a corrupted metric looks like rather than a good result. It
+    /// would also have silently flattered the turn-cost change and broken comparability
+    /// with every baseline recorded before it.
+    /// </remarks>
     public bool TryOptimalTravelTime(Vector2 goalPosition, Vector2 from, float agentRadius, out float seconds)
     {
         seconds = 0f;
@@ -139,7 +326,7 @@ internal sealed class PathService
             ? goalCell
             : FindNearestWalkable(goalCell, agentRadius);
         if (resolved is not { } goal) return false;
-        var costs = GetFlowField(goal, agentRadius, congestion.Revision);
+        var costs = GetFlowField(goal, agentRadius, congestion.Revision, chargeTurns: false);
         var cost = costs[grid.Transform.Index(fromCell)];
         if (!float.IsFinite(cost)) return false;
         seconds = cost;
@@ -252,8 +439,8 @@ internal sealed class PathService
             // Shared intent should not fan an army across an open field. Reserve
             // actual bottlenecks only; the arrival system handles convergence at
             // the common destination without manufacturing private approach lanes.
-            var bottleneckCost = clearanceMargin < 0.80f ? 2.25f : 0f;
-            routeCosts[grid.Transform.Index(cell)] += bottleneckCost;
+            var bottleneckSeconds = clearanceMargin < 0.80f ? BottleneckReservationSeconds : 0f;
+            routeCosts[grid.Transform.Index(cell)] += bottleneckSeconds;
         }
     }
 
@@ -281,13 +468,18 @@ internal sealed class PathService
         // Segment against block, not just the sampled points. This looks like a
         // duplicate of the swept check above and is not: it uses a slightly wider
         // margin, and removing it let smoothed routes hug blocks closely enough to
-        // fail both the wall-detour and chokepoint-separation tests. What it does
-        // not need is to walk the whole placement grid — only cells that are
-        // actually occupied can block anything, and that list is already cached.
-        RefreshOccupiedPlacementCenters();
+        // fail both the wall-detour and chokepoint-separation tests. Only cells the
+        // segment can actually reach are consulted.
         var halfCell = placement.Transform.CellSize * 0.5f + expansion;
-        foreach (var center in occupiedPlacementCenters)
+        PlacementCellRange(
+            Vector2.Min(start, end), Vector2.Max(start, end), halfCell,
+            out var low, out var high);
+        for (var z = low.Z; z <= high.Z; z++)
+        for (var x = low.X; x <= high.X; x++)
         {
+            var cell = new GridCell(x, z);
+            if (!placement.IsOccupied(cell)) continue;
+            var center = placement.Transform.CellCenter(cell);
             var minimum = center - new Vector2(halfCell);
             var maximum = center + new Vector2(halfCell);
             if (SegmentIntersectsAabb(start, end, minimum, maximum)) return false;
@@ -371,6 +563,65 @@ internal sealed class PathService
                (distance <= 0.25f || IsContinuousStepClear(start, end, agentRadius, escaping));
     }
 
+    /// <summary>
+    /// Static geometry within <paramref name="reach"/> of a point, as boxes.
+    /// </summary>
+    /// <remarks>
+    /// The velocity solve needs walls as constraints rather than as a veto applied to
+    /// its answer, and this is how it sees them. Navigation cells are the source
+    /// because they are the one representation carrying both kinds of static
+    /// obstruction — placed blocks and impassable or too-steep ground — as the same
+    /// fact, and because the placement grid is cell-aligned with them, so a block is
+    /// described exactly rather than approximately.
+    /// <para>
+    /// Boxes are reported at full cell extent, deliberately not inset the way
+    /// <see cref="IsPositionFreeOfPlacement"/> insets its test. That inset is a
+    /// tolerance on a point test and not a description of geometry: applying it here
+    /// detaches every block from its neighbour by five centimetres, so a solid wall
+    /// acquires a slot every cell and the solve steers bodies at gaps that are not
+    /// there. Measured, that alone cost four times the dead stops at a one-cell gate.
+    /// A wall is contiguous; the tolerance belongs to whoever measures against it.
+    /// </para>
+    /// <para>
+    /// Runs of blocked cells along a row are merged, so a long wall costs the solver
+    /// one constraint per row rather than one per cell.
+    /// </para>
+    /// </remarks>
+    public int GatherBlockingBoxes(Vector2 center, float reach, Span<StaticBox> boxes)
+    {
+        var transform = grid.Transform;
+        var lowLocal = (center - new Vector2(reach) - transform.Origin) / transform.CellSize;
+        var highLocal = (center + new Vector2(reach) - transform.Origin) / transform.CellSize;
+        var lowX = (int)MathF.Floor(lowLocal.X);
+        var lowZ = (int)MathF.Floor(lowLocal.Y);
+        var highX = (int)MathF.Ceiling(highLocal.X);
+        var highZ = (int)MathF.Ceiling(highLocal.Y);
+
+        var count = 0;
+        for (var z = lowZ; z <= highZ && count < boxes.Length; z++)
+        {
+            var runStart = int.MinValue;
+            for (var x = lowX; x <= highX + 1; x++)
+            {
+                // One past the end closes any open run. Cells outside the grid read
+                // as blocked, which is correct: the map edge is a wall.
+                var blocking = x <= highX && grid.IsBlocked(new GridCell(x, z));
+                if (blocking)
+                {
+                    if (runStart == int.MinValue) runStart = x;
+                    continue;
+                }
+                if (runStart == int.MinValue) continue;
+                transform.CellBounds(new GridCell(runStart, z), out var minimum, out _);
+                transform.CellBounds(new GridCell(x - 1, z), out _, out var maximum);
+                boxes[count++] = new StaticBox(minimum, maximum);
+                runStart = int.MinValue;
+                if (count >= boxes.Length) break;
+            }
+        }
+        return count;
+    }
+
     public bool IsPositionNavigable(Vector2 position, float agentRadius)
     {
         if (!terrain.IsBodyTraversable(position, agentRadius))
@@ -450,7 +701,7 @@ internal sealed class PathService
         var centerCost = costs[grid.Transform.Index(current)];
         if (!float.IsFinite(centerCost)) return Vector2.Zero;
 
-        var blockedCost = centerCost + BlockedFlowPenalty;
+        var blockedCost = centerCost + BlockedFlowSeconds;
         var probe = grid.Transform.CellSize;
 
         // Search directions rather than differentiating. A central difference
@@ -530,16 +781,22 @@ internal sealed class PathService
     /// reads as indecision even when each decision is correct. A caller that asks
     /// for a revision no longer held simply gets the current one.
     /// </remarks>
-    private float[] GetFlowField(GridCell goal, float agentRadius, int congestionRevision)
+    private float[] GetFlowField(
+        GridCell goal,
+        float agentRadius,
+        int congestionRevision,
+        bool chargeTurns = true)
     {
         var goalIndex = grid.Transform.Index(goal);
         var radiusKey = (int)MathF.Round(agentRadius * 100f);
-        if (flowFields.TryGetValue((goalIndex, radiusKey, grid.Revision, congestionRevision), out var retained))
+        if (flowFields.TryGetValue(
+                (goalIndex, radiusKey, grid.Revision, congestionRevision, chargeTurns),
+                out var retained))
         {
             return retained;
         }
 
-        var key = (goalIndex, radiusKey, grid.Revision, congestion.Revision);
+        var key = (goalIndex, radiusKey, grid.Revision, congestion.Revision, chargeTurns);
         if (flowFields.TryGetValue(key, out var costs)) return costs;
         // A navigation edit makes every older field unreachable, so those go
         // immediately. Congestion revisions are aged out instead of dropped, to
@@ -551,16 +808,24 @@ internal sealed class PathService
         {
             flowFields.Remove(existing);
         }
-        costs = BuildFlowField(goal, agentRadius);
+        costs = BuildFlowField(goal, agentRadius, chargeTurns);
         FlowFieldBuilds++;
         flowFields[key] = costs;
         return costs;
     }
 
-    private float[] BuildFlowField(GridCell goal, float agentRadius)
+    private float[] BuildFlowField(GridCell goal, float agentRadius, bool chargeTurns = true)
     {
         var costs = new float[grid.Width * grid.Height];
         var closed = new bool[costs.Length];
+        // The heading a cell's best-known route leaves it with. Exact turn-aware routing
+        // wants the heading in the search state, which multiplies it by eight and puts
+        // the group-order hitch back; recording one heading per cell keeps the search the
+        // size it was. It is therefore an approximation — a route that would rather reach
+        // a cell more slowly but better aligned cannot express that — and what it is for
+        // is producing routes a body can follow, not proving optimality.
+        var arrival = new int[costs.Length];
+        Array.Fill(arrival, -1);
         Array.Fill(costs, float.PositiveInfinity);
         var goalIndex = grid.Transform.Index(goal);
         costs[goalIndex] = 0f;
@@ -572,8 +837,9 @@ internal sealed class PathService
             var currentIndex = grid.Transform.Index(current);
             if (closed[currentIndex]) continue;
             closed[currentIndex] = true;
-            foreach (var offset in NeighborOffsets)
+            for (var directionIndex = 0; directionIndex < NeighborOffsets.Length; directionIndex++)
             {
+                var offset = NeighborOffsets[directionIndex];
                 var previous = new GridCell(current.X + offset.X, current.Z + offset.Z);
                 if (!CanTraverseFlow(previous, current, agentRadius)) continue;
                 var previousIndex = grid.Transform.Index(previous);
@@ -582,10 +848,19 @@ internal sealed class PathService
                 var surfaceCost = (grid.TraversalCost(current) + grid.TraversalCost(previous)) * 0.5f;
                 var elevationCost = MathF.Abs(grid.HeightAt(previous) - grid.HeightAt(current)) *
                                     ClimbSecondsPerMetre;
+                // Built backwards from the goal, so a body travelling this edge moves from
+                // `previous` to `current` and the heading it carries into `current` is the
+                // reverse of the offset being explored.
+                var travelDirection = OppositeDirection(directionIndex);
+                var turnSeconds = chargeTurns
+                    ? TurnCost(travelDirection, arrival[currentIndex], current, agentRadius)
+                    : 0f;
                 var nextCost = costs[currentIndex] + stepCost * SecondsPerCell * surfaceCost +
-                               elevationCost + CongestionCost(current, previous);
+                               elevationCost + CongestionCost(current, previous, turnSeconds) +
+                               turnSeconds;
                 if (nextCost >= costs[previousIndex]) continue;
                 costs[previousIndex] = nextCost;
+                arrival[previousIndex] = travelDirection;
                 open.Enqueue(previous, nextCost);
             }
         }
@@ -605,12 +880,28 @@ internal sealed class PathService
                grid.CanTraverse(secondCorner, to, agentRadius);
     }
 
+    /// <summary>
+    /// Whether a body at <paramref name="position"/> clears every placed block.
+    /// </summary>
+    /// <remarks>
+    /// This is the single hottest predicate in the simulation: it is consulted per
+    /// sample of every swept step, per neighbour of every A* expansion, and per
+    /// candidate of the solver's terrain fallback. It used to walk a cached list of
+    /// every occupied cell on the map, so its cost scaled with how much had been
+    /// built rather than with how much was nearby — a few hundred box tests to
+    /// answer a question about one square metre. The placement grid can say which
+    /// cells could possibly reach the body, and only those are tested.
+    /// </remarks>
     public bool IsPositionFreeOfPlacement(Vector2 position, float agentRadius)
     {
-        RefreshOccupiedPlacementCenters();
         var halfExtent = placement.Transform.CellSize * 0.5f - 0.025f;
-        foreach (var center in occupiedPlacementCenters)
+        PlacementCellRange(position, position, halfExtent + agentRadius, out var low, out var high);
+        for (var z = low.Z; z <= high.Z; z++)
+        for (var x = low.X; x <= high.X; x++)
         {
+            var cell = new GridCell(x, z);
+            if (!placement.IsOccupied(cell)) continue;
+            var center = placement.Transform.CellCenter(cell);
             var closest = Vector2.Clamp(
                 position,
                 center - new Vector2(halfExtent),
@@ -624,16 +915,45 @@ internal sealed class PathService
         return true;
     }
 
+    /// <summary>
+    /// Range of placement cells whose boxes, grown by <paramref name="reach"/>, can
+    /// overlap the given world bounds. Clamped to the grid, so cells outside the map
+    /// are skipped rather than treated as occupied.
+    /// </summary>
+    private void PlacementCellRange(
+        Vector2 minimum,
+        Vector2 maximum,
+        float reach,
+        out GridCell low,
+        out GridCell high)
+    {
+        var transform = placement.Transform;
+        var lowLocal = (minimum - new Vector2(reach) - transform.Origin) / transform.CellSize;
+        var highLocal = (maximum + new Vector2(reach) - transform.Origin) / transform.CellSize;
+        low = new GridCell(
+            Math.Max(0, (int)MathF.Floor(lowLocal.X)),
+            Math.Max(0, (int)MathF.Floor(lowLocal.Y)));
+        high = new GridCell(
+            Math.Min(transform.Width - 1, (int)MathF.Ceiling(highLocal.X)),
+            Math.Min(transform.Height - 1, (int)MathF.Ceiling(highLocal.Y)));
+    }
+
     private bool SegmentAvoidsPlacement(
         Vector2 start,
         Vector2 end,
         float expansion,
         bool allowEscapeFromStart)
     {
-        RefreshOccupiedPlacementCenters();
         var halfCell = placement.Transform.CellSize * 0.5f + expansion;
-        foreach (var center in occupiedPlacementCenters)
+        PlacementCellRange(
+            Vector2.Min(start, end), Vector2.Max(start, end), halfCell,
+            out var low, out var high);
+        for (var z = low.Z; z <= high.Z; z++)
+        for (var x = low.X; x <= high.X; x++)
         {
+            var cell = new GridCell(x, z);
+            if (!placement.IsOccupied(cell)) continue;
+            var center = placement.Transform.CellCenter(cell);
             var minimum = center - new Vector2(halfCell);
             var maximum = center + new Vector2(halfCell);
             if (allowEscapeFromStart && PointInsideAabb(start, minimum, maximum))
@@ -645,20 +965,6 @@ internal sealed class PathService
             if (SegmentIntersectsAabb(start, end, minimum, maximum)) return false;
         }
         return true;
-    }
-
-    private void RefreshOccupiedPlacementCenters()
-    {
-        if (cachedPlacementRevision == placement.Revision) return;
-        occupiedPlacementCenters.Clear();
-        for (var z = 0; z < placement.Transform.Height; z++)
-        for (var x = 0; x < placement.Transform.Width; x++)
-        {
-            var cell = new GridCell(x, z);
-            if (placement.IsOccupied(cell))
-                occupiedPlacementCenters.Add(placement.Transform.CellCenter(cell));
-        }
-        cachedPlacementRevision = placement.Revision;
     }
 
     private static bool PointInsideAabb(Vector2 point, Vector2 minimum, Vector2 maximum) =>
@@ -757,12 +1063,14 @@ internal sealed class PathService
             searchCameFrom = new int[count];
             searchCost = new float[count];
             searchClosed = new bool[count];
+            searchArrival = new int[count];
         }
         var cameFrom = searchCameFrom;
         var cost = searchCost;
         var closed = searchClosed;
         Array.Fill(cameFrom, -1);
         Array.Fill(cost, float.PositiveInfinity);
+        Array.Fill(searchArrival, -1);
         Array.Clear(closed);
         searchQueue.Clear();
 
@@ -784,8 +1092,9 @@ internal sealed class PathService
             closed[currentIndex] = true;
             if (currentIndex == goalIndex) return Reconstruct(cameFrom, startIndex, goalIndex);
 
-            foreach (var offset in NeighborOffsets)
+            for (var directionIndex = 0; directionIndex < NeighborOffsets.Length; directionIndex++)
             {
+                var offset = NeighborOffsets[directionIndex];
                 var next = new GridCell(current.X + offset.X, current.Z + offset.Z);
                 if (!CanTraverse(current, next, agentRadius)) continue;
                 var nextIndex = grid.Transform.Index(next);
@@ -795,13 +1104,17 @@ internal sealed class PathService
                 var elevationCost = MathF.Abs(grid.HeightAt(next) - grid.HeightAt(current)) *
                                     ClimbSecondsPerMetre;
                 var additionalCost = additionalNavigationCosts is null ? 0f : additionalNavigationCosts[nextIndex];
+                var turnSeconds = TurnCost(
+                    searchArrival[currentIndex], directionIndex, current, agentRadius);
                 var nextCost = cost[currentIndex] + stepCost * SecondsPerCell * surfaceCost +
                                elevationCost +
                                PointCongestionCost(next, congestionAvoidanceCenter) +
-                               CongestionCost(current, next) +
-                               additionalCost;
+                               CongestionCost(current, next, turnSeconds) +
+                               additionalCost +
+                               turnSeconds;
                 if (nextCost >= cost[nextIndex]) continue;
                 cost[nextIndex] = nextCost;
+                searchArrival[nextIndex] = directionIndex;
                 cameFrom[nextIndex] = currentIndex;
                 open.Enqueue(next, nextCost + Heuristic(next, goal) * heuristicScale);
             }
@@ -809,14 +1122,37 @@ internal sealed class PathService
         return null;
     }
 
+    /// <summary>
+    /// Whether a body of <paramref name="agentRadius"/> stands clear of terrain and
+    /// placed blocks at the centre of <paramref name="cell"/>. Memoized per raster
+    /// revision; see <see cref="cellCenterAdmission"/>.
+    /// </summary>
+    private bool CellCenterAdmitsBody(GridCell cell, float agentRadius)
+    {
+        if (!grid.Contains(cell)) return false;
+        if (cellCenterAdmissionRevision != grid.Revision)
+        {
+            cellCenterAdmission.Clear();
+            cellCenterAdmissionRevision = grid.Revision;
+        }
+        var radiusKey = (int)MathF.Round(agentRadius * 100f);
+        if (!cellCenterAdmission.TryGetValue(radiusKey, out var memo))
+        {
+            cellCenterAdmission[radiusKey] = memo = new byte[grid.Width * grid.Height];
+        }
+
+        var index = grid.Transform.Index(cell);
+        if (memo[index] != 0) return memo[index] == 1;
+        var center = grid.CellCenter(cell);
+        var admitted = terrain.IsBodyTraversable(center, agentRadius) &&
+                       IsPositionFreeOfPlacement(center, agentRadius);
+        memo[index] = admitted ? (byte)1 : (byte)2;
+        return admitted;
+    }
+
     private bool CanTraverse(GridCell from, GridCell to, float agentRadius)
     {
-        var destinationCenter = grid.CellCenter(to);
-        if (!terrain.IsBodyTraversable(destinationCenter, agentRadius) ||
-            !IsPositionFreeOfPlacement(destinationCenter, agentRadius))
-        {
-            return false;
-        }
+        if (!CellCenterAdmitsBody(to, agentRadius)) return false;
         if (terrain.Revision == 0)
         {
             if (!grid.IsWalkable(to, agentRadius)) return false;
@@ -959,7 +1295,7 @@ internal sealed class PathService
         var distance = Vector2.Distance(grid.CellCenter(cell), congestionCenter);
         if (distance >= CongestionAvoidanceRadius) return 0f;
         var proximity = 1f - distance / CongestionAvoidanceRadius;
-        return proximity * proximity * CongestionPenalty;
+        return proximity * proximity * DetourAvoidanceSeconds;
     }
 
     private static bool SegmentAvoidsCongestion(Vector2 start, Vector2 end, Vector2? center)
@@ -1017,6 +1353,17 @@ internal sealed class PathService
         minimumTime = MathF.Max(minimumTime, first);
         maximumTime = MathF.Min(maximumTime, second);
         return minimumTime <= maximumTime;
+    }
+
+    /// <summary>Index of the step direction opposite the given one.</summary>
+    private static int OppositeDirection(int directionIndex)
+    {
+        var offset = NeighborOffsets[directionIndex];
+        for (var i = 0; i < NeighborOffsets.Length; i++)
+        {
+            if (NeighborOffsets[i].X == -offset.X && NeighborOffsets[i].Z == -offset.Z) return i;
+        }
+        return directionIndex;
     }
 
     private static float Heuristic(GridCell from, GridCell to)

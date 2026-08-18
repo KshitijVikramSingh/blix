@@ -47,6 +47,11 @@ public static class Program
             Environment.Exit(SimulationSelfTests.RunTerrainCornerDiagnostic());
         }
 
+        if (args.Contains("--doorwaytest"))
+        {
+            Environment.Exit(SimulationSelfTests.RunDoorwayContentionDiagnostic());
+        }
+
         if (args.Contains("--gatetest"))
         {
             Environment.Exit(SimulationSelfTests.RunSingleCellGateDiagnostic());
