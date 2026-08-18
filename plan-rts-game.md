@@ -72,6 +72,9 @@ one converts into the other. This is the thesis stated as economics rather than 
 also the reason harvest failure is graded rather than binary: you bring in what your standing
 arrangement can carry, and idling costs you growth rather than your career.
 
+The identity has a **second domain**: in combat, attention and *material* are substitutes in exactly
+the same way, which is what keeps the low-attention mode alive during a war. See §7.
+
 ### Rule 1 — rates, not gates
 
 **Express every mechanic as a rate or a cost, never as a prerequisite.** Continuous output in
@@ -436,27 +439,130 @@ AoE2's distance-scaled trade gestures at without justifying. It is also trade's 
 
 ---
 
-## 7. Offence, defence, and alarms
+## 7. Combat, offence, defence and alarms
 
-### Offence is the same ladder read from the other side
+### Micro is a multiplier, not a replacement for force
+
+Settled 2026-08-18, after being assumed wrong for most of the design pass:
+
+> **Effective combat power = material x micro.** Micro is a multiplier, so its value is highest at
+> parity and irrelevant at the extremes.
+
+Offence is therefore **not** an idle verb. You can click an army onto an opponent and go and make
+coffee knowing they will be dust — but only if you are disproportionately stronger. Or you can
+tactfully micro two soldiers onto two villagers and steal a season's food with a force that could
+never win a battle. Both are correct play; the difference is where you spent your attention.
+
+The earlier assumption — that combat should be decided by position, formation and attrition rather
+than by reflex — protects the low-attention mode by **nerfing micro**. The multiplier model protects
+it without nerfing anything, because material superiority is exactly what the economic ladder
+produces:
+
+> **The economy buys you the right to not pay attention.**
+
+That is the delegation thesis in a second domain, and it is §2's identity again: attention and
+material are substitutes in combat exactly as labour and attention are substitutes on the farm.
+
+It also means **no mechanic needs forbidding.** You may order anything; whether it succeeds
+unattended is governed by the force ratio. Rates, not gates.
+
+### What the multiplier must be worth, and how to measure it
+
+The single number that decides whether both halves of the design survive. Too high and material
+never matters, so the economy is decoration. Too low and micro does not pay, so the high-attention
+mode dies.
+
+One counterintuitive piece of arithmetic, recorded because it will otherwise be mis-set: under
+Lanchester's square law, fighting strength goes as *quality x N squared* — quality enters linearly,
+numbers quadratically. **A micro edge worth 2x in quality is only sqrt(2) ~ 1.4x in numbers.** So
+state the target the way a player perceives it:
+
+> **Micro should be worth roughly 1.5-2x in numbers.** Ten well-handled soldiers beat fifteen to
+> twenty on auto. That puts "disproportionately stronger" at about **2x to walk away, 3x to be
+> certain** — which is also how it should feel.
+
+**This is measurable, not arguable.** Build a **competent-combat bot** alongside the plain auto
+layer — focus fire, pull wounded bodies out, kite on the speed differential, choose targets by value
+— and run the two against each other at varying force ratios. The ratio at which the competent bot
+draws against auto **is** the multiplier, in the units a player perceives. Tune to 1.5-2.0.
+
+That bot has a second job, which is why it is worth building properly rather than as a test fixture:
+it is what a hard AI spends its attention on.
+
+### AI difficulty is an attention budget, not a cheat
+
+If the AI is a player running the same delegation layer (§4), the honest difficulty dial is **how
+many simultaneous engagements it micros.** An easy neighbour never spends attention; a hard one
+handles three fights at once. No resource cheats, no vision cheats — nothing that would break the
+"the AI can play the player's settlement" acceptance test.
+
+It is diegetically consistent, since the AI's attention is scarce exactly like yours, and it yields a
+strategic layer for free: **you can bait the AI's attention.** Feint in one place to pull its micro
+there, and strike where it has fallen back to auto.
+
+### Combat resolves by physical contact, never by abstract resolution
+
+A pure square law punishes splitting forces quadratically, which means doom-stacking and no
+distributed defence — and that would fight everything about multiple cores and territory. Two things
+already in the design defeat it, and neither needs a rule:
+
+1. **Frontage is physical, not modelled.** At a 1.5 m gate only two bodies can engage at once,
+   because ORCA and the geometry say so. Concentration stops paying at a chokepoint, and the square
+   law degrades toward the **linear** law, emergently, exactly as real fortifications work. Fifty
+   attackers against ten defenders at a gate is a series of 2v2 fights, and the defender wins them.
+2. **Walls multiply defence**, which is what makes a small garrison viable against a larger field
+   force — rungs 3 through 6 doing precisely the job they are listed for.
+
+So **units fight who they can physically reach.** The physicality is what buys the frontage limit,
+the frontage limit is what makes the defence ladder mean anything, and combat cost is bounded by
+geometry rather than by army size.
+
+### Micro's arena is the window between alarm and response
+
+Two soldiers against two villagers is the whole game in miniature: penetrate, catch the fleeing
+villagers, **load the food**, and leave before the response lands. A timing puzzle against a clock
+this document already derives:
+
+> The raider's window is (R − A) minus the defender's response time A, for a threat spotted at radius
+> **R** against an asset at radius **A**. **Every rung of the defence ladder shortens that window** —
+> an outpost pushes R outward, a stationed garrison collapses A to zero. **Every point of micro skill
+> stretches what can be done inside it.**
+
+The defence ladder and combat micro are the same axis measured from opposite ends. And because loot
+must be carried, the escape is where the defender gets their shot.
+
+### Taking control is an interrupt, not a mode switch
+
+A manual order is an **interrupt** in the three-layer jobs model: it overrides the current *activity*
+and expires, leaving the *assignment* untouched. So you grab units mid-auto-fight, handle it, release
+them, and they return to what they were doing.
+
+You never toggle a unit into "manual mode", so there is no state to manage and no way to strand units
+in it — a classic RTS failure designed out for free by a structure adopted for other reasons. This is
+what makes "alarms, so you can micro if you want to" actually work.
+
+### Offence: delegate the maintenance of pressure, never the act of aggression
 
 The worry was that offence is maximally high-attention and silently deletes the low-attention mode.
 That is true of *standard* offence, where the army is your whole economy converted into one fragile
-bundle with no state between "at home" and "invading". The missing middle state is **pressure**, and
-it is delegable:
+bundle with no state between "at home" and "invading". The missing middle state is **pressure** — and
+pressure is a *standing state*, which is exactly what makes it delegable where an assault is not.
 
-| rung | what changes |
-|---|---|
-| none | I only react |
-| scouts / patrols | I know where their things are, continuously |
-| "raid their lumber camp" as an order | a strike happens without me choreographing it |
-| forward outpost | pressure is *maintained* in their ground |
-| route denial | their logistics degrade while I am away |
-| siege camp | their arrangement is ground down without me |
-| annexation | their territory produces for me |
+| rung | what is delegated | standing, or act? |
+|---|---|---|
+| none | nothing — I only react | — |
+| scouts / patrols | observation and denial; they fight what comes to them | standing |
+| forward outpost | presence maintained in their ground | standing |
+| route denial | interdiction of their traffic | standing |
+| siege camp | attrition against a fixed arrangement | standing |
+| raid order | a strike, unattended | **act** — succeeds only at the ratios above |
+| annexation | their territory produces for me | standing, once taken |
 
-Note what it attacks: their **logistics**, not their army. The commitment that makes defence
-meaningful ("logistics must be attackable") is the same one that makes offence delegable.
+That line — **maintenance of pressure yes, act of aggression no** — is sharper than the original
+ladder and it needs no exception for the raid order, because the force ratio already governs it.
+
+Note what all of it attacks: their **logistics**, not their army. The commitment that makes defence
+meaningful ("logistics must be attackable") is the same one that makes pressure delegable.
 
 ### Raiding is hauling with a hostile source
 
@@ -708,19 +814,31 @@ time climbs monotonically with the structures built**.
    field. Assignment-level graph, locomotion-level paths.
 7. **Strategic layer + soak harness together**, with "the AI can play the player's settlement" as the
    acceptance test.
-8. **Combat, the defence ladder, and alarms.**
+8. **Combat, the defence ladder, and alarms.** Health, damage/rate/range, target acquisition and an
+   attack activity — most of it landing on seams that are declared but unproven:
+   `AgentLocomotionState` already has Chase and Flee, `ColliderRole.Damageable | Interactable` is
+   assigned at spawn and read by nothing, `AgentStore.Despawn` has tombstones for death. Build the
+   **competent-combat bot alongside the auto layer, not after it**, and measure the micro multiplier
+   as soon as both exist — the number decides whether the two modes of play are actually balanced.
 9. **Trade carts, docks, and seasonal markets.**
 
 ---
 
 ## 13. Open questions
 
-- **Combat resolution model.** Assumed throughout but never settled: that combat is decided by
-  position, formation and attrition rather than by ability micro. The whole "offence is delegable"
-  argument depends on it — if micro dominates, attention beats arrangement and the low-attention mode
-  dies during any war. This is now the most load-bearing unsettled question.
-- **The offence rungs have never been pressured.** They were sketched twice and both times looked
-  right, which is exactly the condition under which §11-style refusals get discovered late.
+- **The micro multiplier is a target, not a measurement.** 1.5-2x in numbers is reasoned from
+  Lanchester and from how "disproportionately stronger" ought to feel; nothing has measured it. Until
+  the competent-combat bot exists and the ratio is run, the balance between the two modes of play is
+  a hypothesis. **This is the highest-value measurement in the game layer.**
+- **Which micro affordances ship.** Focus fire, pulling wounded bodies out, kiting on the speed
+  differential, target selection by value. Each one raises the multiplier and together they may push
+  it past the band, so the set is a tuning decision rather than a feature list.
+- **The offence rungs have been restated but not pressured.** Maintenance-of-pressure versus
+  act-of-aggression (§7) is a sharper line than the original ladder and it looked right immediately,
+  which is exactly the condition under which §11-style refusals get discovered late.
+- **What auto-combat does when it is losing.** Retreat preserves material and concedes ground;
+  standing preserves ground and loses material. Unattended, one of them has to be the default, and it
+  interacts directly with whether an absent player can be ground down without ever being alarmed.
 - **AI dispositions and the world-generation mix.** How many producers, traders and raiders; whether
   disposition is fixed or drifts with circumstance.
 - **Catchment radius** (~90 s proposed) is a tuning dial that decides how dense settlements must be
@@ -737,7 +855,7 @@ time climbs monotonically with the structures built**.
 
 ## 14. Next session — where to start
 
-**State:** branch `rts-locomotion`, clean tree, four commits ahead of `main`, `--selftest` 37/37.
+**State:** branch `rts-locomotion`, clean tree, five commits ahead of `main`, `--selftest` 37/37.
 
 **First commit — the measurement, not a fix.** `SimulationWorld()` hardcodes the world at
 `SimulationWorld.cs:152` (`GridTransform(60, 60, 0.5f)`), the placement grid at `:154`
