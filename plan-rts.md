@@ -754,10 +754,32 @@ corridor for steering. Wiring `CostAt` straight into `SampleFlowGradient` skippe
 suite caught it in one run. The rectangle field's numbers stand — mean 1.0014, worst 1.187, no
 searches — and what is missing is the layer between it and the body.
 
-**Next, and it is the last piece: a dense local field seeded from corner costs.** A tile around
-where the body is, filled from the rectangle field's corner values rather than by a region
-search, so the gradient is continuous again and the routing underneath it is still arithmetic.
-That is the design as agreed; this attempt simply left it out.
+### The tile layer, and the switch — **done, 42/42, 2026-08-19**
+
+A region in the middle of a large rectangle contains no crossings at all, so a tile cannot be
+seeded from crossings. Its *edge* is where the answer arrives from, and the corner graph can price
+any cell — so the perimeter is seeded analytically and the interior filled by the same bounded
+search the fine layer has always used. Inside the tile every term is exact and the gradient is
+continuous; outside it, routing is arithmetic over corners.
+
+With that in place the switch passes **42/42**, and the numbers it was for:
+
+| | portal router | **rectangles + tiles** |
+|---|---|---|
+| move order on the ridge map | 5–161 ms | **8–27 ms** |
+| searches per order | up to 190 | **3–4** |
+| 600 m tick, 2,000 agents | 10.1 ms | **6.0 ms** |
+| 1200 m tick, 2,000 agents | 11.6 ms | **5.8 ms** |
+| resident at 1200 m | 237 MB | **177 MB** |
+| route quality (mean / worst) | 1.0056 / 1.679 | 1.0014 / 1.187 |
+
+**The tick stopped caring about extent** — 6.0 ms at 600 m against 5.8 at 1200 — which is the
+property the whole argument was about, arriving as a measurement rather than a claim. `astar 1`
+and `region-searches 90` on a map that used to need hundreds.
+
+Portals, region tiles, ingress costs, the goal-directed abstract search and its horizon are all
+unreferenced now. They are left in place for one more pass so the diff that removes them is a
+deletion and nothing else.
 
 **What still blocks the switch is behaviour, not geometry.** The pen scenario is the test that
 matters — thirty units, four exits, and the crowd has to split across more than one of them — and

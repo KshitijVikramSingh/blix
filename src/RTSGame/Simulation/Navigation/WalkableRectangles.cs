@@ -71,6 +71,9 @@ internal sealed class WalkableRectangles
     private int[] crossingStart = Array.Empty<int>();
     private int[] rectangleCrossings = Array.Empty<int>();
 
+    /// <summary>The fixed partition the steering tiles are stored on.</summary>
+    public RegionPartition Partition { get; private set; } = null!;
+
     public IReadOnlyList<Rectangle> All => rectangles;
     public int Count => rectangles.Count;
     public IReadOnlyList<Crossing> Crossings => crossings;
@@ -230,6 +233,7 @@ internal sealed class WalkableRectangles
                 openHeight[open]));
         }
 
+        result.Partition = new RegionPartition(grid.Transform);
         result.FindCrossings(grid, agentRadius);
         return result;
     }

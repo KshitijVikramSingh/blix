@@ -119,6 +119,42 @@ internal sealed partial class PathService
         return built;
     }
 
+    /// <summary>
+    /// Fills one region's tile from the rectangle field, by seeding its edge and searching in.
+    /// </summary>
+    /// <remarks>
+    /// A region in the middle of a large rectangle contains no crossings at all, so seeding from
+    /// crossings would leave it empty. Its edge is where the answer arrives from, and the
+    /// analytic field can price any cell — so the perimeter is seeded with what the corner graph
+    /// says and the interior is filled by the same bounded search the fine layer has always used.
+    /// Inside the tile every term is exact and the gradient is continuous; outside it, routing is
+    /// still arithmetic over corners.
+    /// </remarks>
+    internal float[] FillRectangleTile(RectangleFlowField field, int region)
+    {
+        partition.Bounds(region, out var minimumX, out var minimumZ, out var maximumX, out var maximumZ);
+        var seeds = new List<(GridCell Cell, float Cost)>();
+        if (partition.RegionOf(field.Goal) == region) seeds.Add((field.Goal, 0f));
+
+        for (var z = minimumZ; z <= maximumZ; z++)
+        for (var x = minimumX; x <= maximumX; x++)
+        {
+            if (x != minimumX && x != maximumX && z != minimumZ && z != maximumZ) continue;
+            var cell = new GridCell(x, z);
+            var cost = field.AnalyticCostAt(cell);
+            if (!float.IsFinite(cost)) continue;
+            seeds.Add((cell, cost));
+        }
+
+        TileRefinements++;
+        return SearchRegion(
+            region,
+            field.AgentRadius,
+            field.ChargeTurns,
+            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(seeds),
+            retained: true);
+    }
+
     /// <summary>Seconds a body loses to the single bend an octile leg contains.</summary>
     internal float BendSeconds(GridCell near, float agentRadius, bool chargeTurns) =>
         chargeTurns ? TurnCost(0, 4, near, agentRadius) : 0f;
@@ -783,7 +819,10 @@ internal sealed partial class PathService
             SecondsPerCell,
             bend,
             congestion,
-            CongestionSecondsPerPressure);
+            CongestionSecondsPerPressure,
+            this,
+            agentRadius,
+            chargeTurns: true);
 
         var reachable = 0;
         var lost = 0;
@@ -798,7 +837,7 @@ internal sealed partial class PathService
             var flat = reference[grid.Transform.Index(cell)];
             if (!float.IsFinite(flat) || flat <= 0f) continue;
             reachable++;
-            var estimate = field.CostAt(cell);
+            var estimate = field.AnalyticCostAt(cell);
             if (!float.IsFinite(estimate))
             {
                 lost++;

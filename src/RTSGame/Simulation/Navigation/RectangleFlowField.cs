@@ -35,12 +35,22 @@ internal sealed class RectangleFlowField
     // clear ground is not sampled, which is nearly every leg on nearly every map.
     private readonly bool[] pressured;
     private readonly bool anyPressure;
+    private readonly PathService owner;
+    private readonly Dictionary<int, float[]> tiles = new();
+
+    public float AgentRadius { get; }
+    public bool ChargeTurns { get; }
+    /// <summary>Tiles filled so far, which is what steering has cost this field.</summary>
+    public int RefinedTiles => tiles.Count;
     // Two nodes per crossing, at the ends of the shared border and on the line between the two
     // rectangles — so a half cell out from either, which is where the border actually is.
     private readonly float[] cornerX;
     private readonly float[] cornerZ;
     private readonly float[] cornerCost;
     private readonly GridCell goal;
+
+    /// <summary>The cell this field routes to.</summary>
+    public GridCell Goal => goal;
     private readonly int goalRectangle;
 
     /// <summary>Corners the search settled, which is what this field cost to build.</summary>
@@ -53,8 +63,14 @@ internal sealed class RectangleFlowField
         float secondsPerCell,
         float bendSeconds,
         CongestionField congestion,
-        float congestionSecondsPerPressure)
+        float congestionSecondsPerPressure,
+        PathService owner,
+        float agentRadius,
+        bool chargeTurns)
     {
+        this.owner = owner;
+        AgentRadius = agentRadius;
+        ChargeTurns = chargeTurns;
         this.mesh = mesh;
         this.index = index;
         this.secondsPerCell = secondsPerCell;
@@ -181,7 +197,39 @@ internal sealed class RectangleFlowField
     }
 
     /// <summary>Seconds from this cell to the goal, or infinity if it cannot get there.</summary>
+    /// <remarks>
+    /// Read from a dense tile rather than computed, and that is not an optimisation — it is the
+    /// difference between a field a body can follow and one it cannot. <see cref="AnalyticCostAt"/>
+    /// is the minimum over a rectangle's corners, so its gradient points at a corner instead of
+    /// smoothly towards the goal, and a body descending it walks to a corner and then turns.
+    /// Corners are materialised waypoints, which is the failure §1 of <c>plan-rts.md</c> records
+    /// and the reason a continuous field exists at all. Wiring the analytic version straight into
+    /// the steering layer was tried and took the suite from 42 passing to 37, every failure in
+    /// constricted ground.
+    /// <para>
+    /// So the mesh answers what routing searches and a tile answers what steering reads, which
+    /// is what the design said all along. The tile is seeded from the analytic field around the
+    /// region's edge and filled inwards by the same local search the fine layer has always used,
+    /// so within it every term is exact — congestion, turns, elevation — and the gradient is
+    /// continuous. The saving stands regardless: the tiles are a handful per order, where the
+    /// portal router needed one region search per crossing it settled.
+    /// </para>
+    /// </remarks>
     public float CostAt(GridCell cell)
+    {
+        var partition = mesh.Partition;
+        var region = partition.RegionOf(cell);
+        if (!tiles.TryGetValue(region, out var tile))
+        {
+            tile = owner.FillRectangleTile(this, region);
+            tiles[region] = tile;
+        }
+
+        return tile[partition.TileIndex(cell)];
+    }
+
+    /// <summary>The corner-graph answer, exact in cost and unusable as a gradient.</summary>
+    public float AnalyticCostAt(GridCell cell)
     {
         var rectangle = index.RectangleAt(cell);
         if (rectangle < 0) return float.PositiveInfinity;

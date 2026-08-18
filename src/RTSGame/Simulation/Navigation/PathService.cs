@@ -237,11 +237,11 @@ internal sealed partial class PathService
     private readonly PlacementGrid placement;
     private readonly NavigationGrid grid;
     private readonly CongestionField congestion;
-    private readonly Dictionary<(int Goal, int Radius, int Nav, int Congestion, bool Turns), FlowField> flowFields = new();
+    private readonly Dictionary<(int Goal, int Radius, int Nav, int Congestion, bool Turns), RectangleFlowField> flowFields = new();
     // Newest field per goal, regardless of congestion revision, so the next revision can
     // adopt whatever of it is still valid. Separate from the retention table above, which
     // exists for a different reason entirely — see GetFlowField.
-    private readonly Dictionary<(int Goal, int Radius, int Nav, bool Turns), FlowField> latestFields = new();
+    private readonly Dictionary<(int Goal, int Radius, int Nav, bool Turns), RectangleFlowField> latestFields = new();
     /// <summary>
     /// Per-cell memo of whether a body of a given radius fits at the cell centre,
     /// as 0 unknown / 1 admitted / 2 refused, keyed by radius in centimetres.
@@ -981,7 +981,7 @@ internal sealed partial class PathService
         return FlowDirection(position, requestedGoal, agentRadius);
     }
 
-    private float SampleFlowCost(FlowField costs, Vector2 position, float blockedCost)
+    private float SampleFlowCost(RectangleFlowField costs, Vector2 position, float blockedCost)
     {
         var local = (position - grid.Transform.Origin) / grid.Transform.CellSize -
                     new Vector2(0.5f);
@@ -997,7 +997,7 @@ internal sealed partial class PathService
         return float.Lerp(float.Lerp(c00, c10, tx), float.Lerp(c01, c11, tx), tz);
     }
 
-    private float FlowCostAt(FlowField costs, int x, int z, float blockedCost)
+    private float FlowCostAt(RectangleFlowField costs, int x, int z, float blockedCost)
     {
         var cell = new GridCell(
             Math.Clamp(x, 0, grid.Width - 1),
@@ -1017,7 +1017,7 @@ internal sealed partial class PathService
     /// reads as indecision even when each decision is correct. A caller that asks
     /// for a revision no longer held simply gets the current one.
     /// </remarks>
-    private FlowField GetFlowField(
+    private RectangleFlowField GetFlowField(
         GridCell goal,
         float agentRadius,
         int congestionRevision,
@@ -1049,19 +1049,22 @@ internal sealed partial class PathService
         {
             latestFields.Remove(existing);
         }
-        // The previous field for this goal is what the new one inherits from: congestion is
-        // published as one whole-map revision, so without this every revision rebuilds every
-        // tile a crowd has walked across because pressure moved somewhere on the map.
+        // Corners for the route, a tile for the body. The abstract layer is a Dijkstra over
+        // portal corners with no cell-level search behind it; the tiles are filled only where
+        // something asks, and are what keeps the gradient continuous.
         var lineage = (goalIndex, radiusKey, grid.Revision, chargeTurns);
-        latestFields.TryGetValue(lineage, out var predecessor);
-        costs = new FlowField(
-            this,
-            Portals(agentRadius),
+        var (mesh, meshIndex) = Mesh(agentRadius);
+        costs = new RectangleFlowField(
+            mesh,
+            meshIndex,
             goal,
+            SecondsPerCell,
+            BendSeconds(goal, agentRadius, chargeTurns),
+            congestion,
+            CongestionSecondsPerPressure,
+            this,
             agentRadius,
-            chargeTurns,
-            GoalRegionTile(goal, agentRadius, chargeTurns, predecessor),
-            predecessor);
+            chargeTurns);
         FlowFieldBuilds++;
         flowFields[key] = costs;
         latestFields[lineage] = costs;
