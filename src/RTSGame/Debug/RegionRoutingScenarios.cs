@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Numerics;
 using RTSGame.Simulation;
@@ -62,6 +63,22 @@ internal static class RegionRoutingScenarios
         }
 
         PathService.HeuristicWeight = original;
+
+        // The same map, the same goal, the same flat reference — so the two partitions are
+        // directly comparable rather than merely both plausible.
+        var rectangleWorld = Build();
+        var rectangleWatch = Stopwatch.StartNew();
+        var rectangles = rectangleWorld.MeasureRectangleFidelity(
+            new Vector2(ExtentMeters * 0.42f, ExtentMeters * 0.42f),
+            AgentDefaults.Radius);
+        Console.WriteLine();
+        Console.WriteLine(
+            $"  rectangles   | mean {rectangles.MeanRatio:F4} | " +
+            $"p99 {rectangles.NinetyNinthRatio:F4} | worst {rectangles.WorstRatio:F3} " +
+            $"at {rectangles.WorstCell.X},{rectangles.WorstCell.Z} | " +
+            $"lost {rectangles.UnreachableCells}/{rectangles.ReachableCells} | " +
+            $"{rectangles.RefinedRegions:N0} rectangles, {rectangles.SettledNodes:N0} crossings settled | " +
+            $"whole comparison in {rectangleWatch.ElapsedMilliseconds} ms");
         return 0;
     }
 

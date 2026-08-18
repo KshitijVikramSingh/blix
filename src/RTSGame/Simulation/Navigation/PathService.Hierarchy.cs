@@ -729,6 +729,66 @@ internal sealed partial class PathService
     }
 
     /// <summary>
+    /// How far the rectangle decomposition's answers sit above the flat optimum.
+    /// </summary>
+    /// <remarks>
+    /// Measured on exactly the same yardstick the portal router was, so the two are directly
+    /// comparable: same map, same goal, same flat reference, same ratio. Congestion is absent
+    /// from both — the comparison runs on a static map with no bodies — so what this reports is
+    /// whether a partition that follows the ground routes as well as one that searches cells.
+    /// </remarks>
+    internal RoutingFidelity MeasureRectangleFidelity(GridCell goal, float agentRadius)
+    {
+        var reference = BuildFlowField(goal, agentRadius);
+        var mesh = WalkableRectangles.Build(grid, agentRadius);
+        var rectangleIndex = new RectangleIndex(mesh, grid.Width, grid.Height);
+        var field = new RectangleFlowField(mesh, rectangleIndex, goal, SecondsPerCell);
+
+        var reachable = 0;
+        var lost = 0;
+        var ratioSum = 0.0;
+        var worst = 1f;
+        var worstCell = goal;
+        var ratios = new List<float>();
+        for (var z = 0; z < grid.Height; z++)
+        for (var x = 0; x < grid.Width; x++)
+        {
+            var cell = new GridCell(x, z);
+            var flat = reference[grid.Transform.Index(cell)];
+            if (!float.IsFinite(flat) || flat <= 0f) continue;
+            reachable++;
+            var estimate = field.CostAt(cell);
+            if (!float.IsFinite(estimate))
+            {
+                lost++;
+                continue;
+            }
+
+            var ratio = estimate / flat;
+            ratioSum += ratio;
+            ratios.Add(ratio);
+            if (ratio <= worst) continue;
+            worst = ratio;
+            worstCell = cell;
+        }
+
+        ratios.Sort();
+        var measured = Math.Max(1, ratios.Count);
+        return new RoutingFidelity(
+            reachable,
+            lost,
+            (float)(ratioSum / measured),
+            ratios.Count > 0 ? ratios[Math.Min((int)(ratios.Count * 0.99f), ratios.Count - 1)] : 1f,
+            worst,
+            worstCell,
+            field.SettledCrossings,
+            mesh.Count,
+            0,
+            0,
+            0);
+    }
+
+    /// <summary>
     /// The flat whole-map field, kept only so the hierarchy can be measured against it.
     /// </summary>
     /// <remarks>

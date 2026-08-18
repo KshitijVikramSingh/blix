@@ -167,6 +167,17 @@ internal sealed class SimulationWorld
 
         return pathService.MeasureFidelity(goal, agentRadius);
     }
+
+    /// <summary>How far the rectangle decomposition sits above the flat optimum.</summary>
+    internal RoutingFidelity MeasureRectangleFidelity(Vector2 goalPosition, float agentRadius)
+    {
+        if (!Navigation.TryWorldToCell(Terrain.ClampPosition(goalPosition), out var goal))
+        {
+            throw new ArgumentOutOfRangeException(nameof(goalPosition));
+        }
+
+        return pathService.MeasureRectangleFidelity(goal, agentRadius);
+    }
     public long PathQueries => pathService.PathQueries;
     public long AvoidanceSolves => steeringSystem.Solver.Solves;
     public long AvoidanceInfeasible => steeringSystem.Solver.InfeasibleSolves;

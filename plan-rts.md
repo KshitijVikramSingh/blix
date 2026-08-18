@@ -647,6 +647,38 @@ horizon pruning crossings that cannot win, or falling back to a cached dense til
 high-degree rectangles only. **Median four says the fast path is the common path; the tail is a
 separate decision and should be made against a measurement rather than in advance.**
 
+### The field, built beside the portal router and measured against the same reference
+
+Cost-to-goal for a cell is the cheapest of *(octile distance to a crossing) + (cost-to-goal at
+that crossing)*, with the crossing costs from a Dijkstra over crossings. No tiles, no cell-level
+search. On the walled 201 m test map that is **13 rectangles and 12 settled crossings** against
+49 regions, 324 portals and 481 region searches.
+
+| partition | mean | p99 | worst | lost |
+|---|---|---|---|---|
+| regions and portals | 1.0056 | 1.0612 | 1.680 | 0 |
+| **rectangles** | **0.9097** | 0.9999 | 1.000 | 0 |
+
+**It loses no cells and it is wrong in the interesting direction: every answer is at or below the
+flat optimum, and 9% below on average.** A route cannot cost less than the shortest one, so this
+is not a good score — it is a lower bound rather than an estimate, and two things make it one:
+
+1. **Turns are not charged.** The flat field prices the time a body spends changing heading and
+   this does not, which is most of the gap on a map with corners in it.
+2. **Crossing to crossing is measured nearest-point to nearest-point.** A route actually enters a
+   rectangle where it entered and leaves where it leaves; taking the closest pair of points on
+   the two borders is optimistic, and the optimism compounds along a route. This is the funnel
+   problem, arriving exactly where it was predicted to.
+
+An underestimate that is *uniform* would be harmless for steering, since the gradient still points
+downhill — but it is not harmless for everything that reads the field in absolute seconds:
+`TryOptimalTravelTime` is the denominator of `walked/optimal`, `IsSlotReachable` compares against
+a straight-line time, and congestion is priced in seconds against travel. **So this cannot replace
+the portal field until the two terms above are answered**, and the cheap answer to the first — a
+route through a rectangle bends at most once between entry and exit, so charge one turn — should
+be tried before the expensive answer to the second, which is carrying the entry point in the
+search state.
+
 ### The original criterion, for the record
 
 **After stages 0 and 1, re-run `--ordertest --terrain` and the memory arithmetic.** If a 600 m
