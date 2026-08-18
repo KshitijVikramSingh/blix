@@ -1,30 +1,43 @@
 # RTSGame — Thread A: the game layer
 
-Written at the close of the locomotion arc (Thread B), before any game-layer code exists.
-Thread B's state and its hard-won invariants live in `plan-rts.md`; read that first if you
-are about to touch movement, because most of what looks tunable there is load-bearing twice.
+Status as of 2026-08-18. Design settled across one long session; **no game-layer code exists yet**.
+
+Thread B (locomotion) is closed and green: `--selftest` 37/37 on branch `rts-locomotion`, ~11.3k lines
+in `src/RTSGame`. Its state, its 16 invariants and its five measured refusals live in `plan-rts.md`.
+Read that first if you are about to touch movement, because most of what looks tunable there is
+load-bearing twice.
+
+**This document records decisions together with their derivations.** Nearly every number below was
+derived from other numbers rather than chosen, and they move as a set — changing unit speed changes
+the map, changing the map changes the career length, changing the year changes what a catchment is
+worth. A derivation left unrecorded is a constant somebody will "clean up" later.
 
 ---
 
 ## 1. What the game is
 
-A real-time strategy game about a settlement that becomes a territory. Players on the map,
-allies and enemies, trade carts and docks. **200–300 units per player, up to 500**, several
-players. Roughly 50–60 units on screen at a time.
+A real-time strategy game about a settlement that becomes a territory. Several players — human or
+AI — with allies and enemies, trade carts and docks. **200–300 units per player, up to 500**,
+roughly 50–60 on screen at a time.
 
 Two modes of play, and **both are first-class**:
 
 - **High attention** — "harvest / raid / move these people / finish this construction."
 - **Low attention** — "I have arranged a little society; let me see what it does without me."
 
-The second is not a fallback for when there is nothing to do. Leaving the game running and
-coming back to watch consequences propagate is *the point*, and it is evidence the autonomous
-layer is working rather than evidence the game is empty. Every engineering decision below is
-downstream of taking that literally.
+The second is not a fallback for when there is nothing to do. Leaving the game running and coming
+back to watch consequences propagate is *the point*.
 
-## 2. The design thesis: structures buy back attention
+**The world never stops.** Idle means idle, not quit: the game sits in a background window and keeps
+ticking, AI neighbours keep playing, and your arrangement is being tested whether you are looking or
+not. The world ticks whenever any participant has the game open — not 24/7, or a weekend would burn
+three careers before anyone sat down.
 
-The defence progression states the whole design once:
+---
+
+## 2. The thesis, and the two rules that follow from it
+
+### Structures buy back attention
 
 | rung | what changes for the player |
 |---|---|
@@ -36,152 +49,718 @@ The defence progression states the whole design once:
 | stone wall | that arrangement is much harder to overwhelm |
 | manned watchtower | the arrangement begins responding intelligently without me |
 
-That is not a tech tree. It is a **progression from attention to delegation**, and it is the
-same axis as the two modes of play.
+Not a tech tree — a **progression from attention to delegation**, and the same axis as the two modes
+of play. The rungs are four distinct mechanisms (information, constraint, standing commitment,
+autonomy), which is why four different systems are needed to express one ladder.
 
-**Physical hauling is the economic form of the identical ladder.** In the prototype
-`totalSecured()` sums every building's stock into one global number, so resources teleport
-and logistics is free. Make it physical — hauling points built with labour, haulers assigned
-to routes — and the rungs are: no hauling point → I carry every load · hauling point → a
-route exists · assigned hauler → the route runs without me · linked points → a network runs
-without me.
+The rungs are also **forced by each other**, which is worth knowing before anyone tries to reorder
+them. See §7 for the derivation that rung 5 (guards) exists precisely because rung 2's geometry runs
+out of room as your territory grows.
 
-**Use this as the scope test.** A mechanic earns its place if it sits on that ladder. Trade
-carts do; a trade route is delegated income. Docks do. A global resource counter fights it.
+### The economic identity
 
-Two consequences worth holding onto:
+A farm's output is continuous in the hands assigned to it, with diminishing returns. A single farmer
+brings in a fraction of the harvest; a second one — disguised unemployment, marginal product near
+zero — brings in more and eats. From that one rule:
 
-- **Logistics must be attackable.** What stops a hauling point being busywork is that its
-  placement is a real trade-off — near the forest is fast and exposed, near the core is safe
-  and slow. That requires raidable infrastructure, which is what makes both ladders
-  load-bearing at once. It is also the mechanism behind the story this design came from: the
-  settlement stopped meaning a cluster of buildings and started meaning territory worth
-  holding, and an L-shaped palisade appeared.
-- **The settlement core should be the root of the hauling graph, not a spawn point.** Placed
-  at the start, and foundable again later, so expansion becomes "establish a new root and
-  connect it" rather than "occupy more space".
+> **Labour and attention are substitutes. Structures improve the exchange rate.**
 
----
+Lean staffing is efficient and demands your presence at every season boundary to redistribute.
+Overstaffing is inefficient and *autonomous* — the same hands cover prep, maintenance and the
+harvest spike with no reassignment at all. Every structure on the ladder improves the rate at which
+one converts into the other. This is the thesis stated as economics rather than metaphor, and it is
+also the reason harvest failure is graded rather than binary: you bring in what your standing
+arrangement can carry, and idling costs you growth rather than your career.
 
-## 3. The hardest engineering problem is map size, not unit count
+### Rule 1 — rates, not gates
 
-Agent-side we are in reasonable shape: 2.3 ms/tick at 500 agents, and the quadratic costs are
-mostly gone. Map-side there is an algorithm that does not survive the target.
+**Express every mechanic as a rate or a cost, never as a prerequisite.** Continuous output in
+labour; cost in seconds; capture rather than unlock. Strategies nobody thought of survive a
+substrate made of rates and die on gates. Explicitly to be preserved: raiding-only economies
+sustaining a small population, partial raiding to regrow a dwindling one or to supply a distant
+frontier, and economic-muscle overstaffing. None of these should need a special case; all of them
+should fall out of the rates.
 
-The Thread B test world is **30 m × 30 m — `GridTransform(60, 60, 0.5f)`, 3600 nav cells**.
-A real map with resource regions deliberately far apart is plausibly **40,000–160,000 cells**.
-Against that:
+### Rule 2 — everything is denominated in time
 
-- **`BuildFlowField` is a full-grid Dijkstra with no early termination**, and every group move
-  order builds one. At 3600 cells the 30-agent command frame is 6.3 ms. At 160k cells the work
-  is roughly 44× — an *estimate from cell counts, not a measurement*, which is exactly why the
-  first task is to measure it. The right-click hitch was fought from 82 ms to 4.3 ms once; at
-  real map scale it returns far worse.
-- `FindNearestWalkable` allocates `bool[W*H]` and a queue **per call**, and sits on the
-  per-agent-per-tick path whenever an ordered goal cell is unwalkable.
-- Flow-field cache memory is ~640 KB per field at 160k cells, multiplied by distinct goals and
-  retained congestion revisions.
-- `CongestionField.Update` sweeps W*H twice per tick — cheap per cell, but it stops being free.
+Route cost is seconds. Congestion is expected delay. Threat is expected delay plus expected loss. A
+catchment is a travel-time radius. Storage is seasons-of-draw. An outpost's value is lead time.
+Autonomy is how long it runs without you. The career itself is years survived.
 
-The likely answer is hierarchical or portal-based routing, or flow fields bounded to a region
-rather than the whole map. **This is the largest single piece of engine work Thread A needs and
-it should be measured before anything is built on top of it.**
-
-### No simulation LOD
-
-The usual escape hatch — freeze or coarsen distant units — is **foreclosed by the design**.
-50–60 units rendering while 2000 simulate is a deliberate inversion of the normal budget, and
-"I came back to watch what happened" requires that what happened was actually simulated. This
-is a design commitment with a large engineering bill; it was taken knowingly.
-
-### Soak tests
-
-The lone-orbiter defect only appeared *after* 29 of 30 units had settled, and a human watching
-found it — two headless tests written specifically to reproduce it both passed with the defect
-fully present. Every one of the 37 self-tests is short-horizon.
-
-A game whose selling point is "leave it running" needs **soak tests**: ten-plus minutes of game
-time asserting no unit ever permanently stops making progress, no counter drifts, no route
-churns forever. That entire class of bug is currently invisible to us.
+This is not a coincidence, it is the design's signature, and it means **the HUD has exactly one
+verb: *how long*.** How long until this arrives, until this runs out, until they get here, until I
+am needed. A strikingly small interface for a game this large, and the thing that makes the
+low-attention mode legible at a glance.
 
 ---
 
-## 4. What Thread B bought, and where it pays off here
+## 3. Time, distance and the map
 
-- **Routing cost is time.** `TerrainSurfaceRules.PathCost` is derived as `1/SpeedMultiplier`
-  so router and physics agree, and congestion is expected delay in seconds. That means a
-  hauling assignment can be priced in the same currency as everything else: how long this haul
-  will *actually* take given terrain and the traffic already on the route. A jammed route makes
-  a different hauler cheaper, automatically. This is what makes hauling strategic rather than a
-  chore, and it is the payoff of the cost-is-time decision.
-- **The congestion field** is more valuable for many independent haulers sharing routes than it
-  ever was for squad moves.
-- **Static ORCA lines, turn cost and manoeuvre amplification** matter because the game has
-  gates in palisades — the exact geometry they were built for.
+### Fixing the scale against AoE2
+
+Target was 1–4× an AoE2 (1999) Large map, which is 220×220 tiles. Converting tiles to metres has two
+self-consistent readings that differ by 2.5×:
+
+- **Unit-scaled.** Villager collision radius ≈ 0.2 tiles against Blix's 0.37 m body → tile ≈ 1.85 m.
+  A 2×2-tile house is then 3.7 m across, a one-room dwelling. Independent cross-check: villager
+  speed 0.8 tiles/s → **1.48 m/s**, a brisk walk.
+- **Building-art-scaled.** A castle *looks* about 20 m → tile ≈ 4.5 m, villager 3.6 m/s (a sustained
+  run), Large map ≈ 1 km.
+
+Isometric sprite art draws buildings oversized relative to their footprint, which is why both
+survive in AoE2. **In 3D neither can hide** — a 1.45 m body beside a modelled granary settles it. So
+the unit-scaled reading is the one that survives the medium, and it agrees with walking pace.
+
+**Tile ≈ 1.8 m → AoE2 Large ≈ 400 m**, ~4.4 minutes to walk across. Matches how a Large map feels.
+
+### Body constants — and why the current ones are test artefacts
+
+`AgentDefaults.MaximumSpeed = 4.5f` is a hard run, near world-record marathon pace, sustained, by
+everybody. It was chosen so locomotion tests resolve quickly across a 30 m world — the same category
+of decision as `Acceleration = 16f`, which the file itself admits is "not a person starting to walk,
+it is a body teleporting to its target velocity."
+
+**Unit speed and map size are a single decision**, because the map is sized by response time:
+
+| top speed | periphery reachable in 40 s | implied map | cells at 0.5 m |
+|---|---|---|---|
+| 4.5 m/s (current) | 180 m | 400–500 m | 640k – 1M |
+| 1.5 m/s (walking) | 60 m | 150–200 m | 90k – 160k |
+
+Proposed, to be settled on the feel slider and *then* used to re-base the self-test thresholds — not
+the reverse:
+
+```
+Walk (worker)         1.5 m/s     was 4.5
+Soldier               1.7 m/s
+Loaded cart           1.1 m/s
+Scout / mounted       3.5 m/s
+Acceleration          2.0 m/s²    was 16;  loaded cart 0.8
+Deceleration          3.0 m/s²    was 16
+Body radius           0.37 m      UNCHANGED
+Nav fine cell         0.5 m       UNCHANGED — this is what preserves Thread B's tuning
+Road SpeedMultiplier  x1.8        -> PathCost 0.56, derived, no new constant
+```
+
+The road multiplier needs no new machinery: `TerrainSurfaceRules.PathCost = 1/SpeedMultiplier`
+already exists, so a road is a surface type the router prices correctly for free.
+
+### Map sizes
+
+Small / medium / large at **800 / 1000 / 1200 m**. **Design and tune at large (1200 m).**
+
+| | Small | Medium | **Large** |
+|---|---|---|---|
+| extent | 800 m | 1000 m | **1200 m** |
+| AoE2 Large multiples (area) | 4x | 6.3x | **9x** |
+| walk across, sim | 8.9 min | 11.1 min | **13.3 min** |
+| walk across, wall @1.5x | 5.9 min | 7.4 min | **8.9 min** |
+| fine cells @ 0.5 m | 2.56M | 4.00M | **5.76M** |
+| regions @ 32 m | 625 | 1,024 | **1,444** |
+| settlement-core capacity | ~9 | ~14 | **~20** |
+| one *flat* flow field | 10.2 MB | 16 MB | **23 MB** |
+| agent-index buckets @1.5 m | 284k | 445k | **640k** |
+
+### Three independent derivations of the size, all landing at 800–1200 m
+
+1. **Response time must exceed raid time at the periphery.** A raid takes ~20–40 s to destroy a
+   hauling point. At 1200 m with four players, a territory is ~600 m and its periphery ~300 m from
+   the core — 176 s at soldier speed. Response >> raid, so delegation is forced rather than optional.
+2. **Tenure — the argument that actually decides it.** Every rung is capital spent on a *place*,
+   recovered over the time you hold it. Contest frequency is the rate at which that capital is
+   destroyed; when the contest interval falls below the payback period, the ladder is not merely
+   harder to climb, it is **dominated** — the lowest-capital-exposure strategy wins, which is
+   raiding. Reach R is set by speed and tolerable absence and **does not depend on map size**, so
+   contested area is roughly P·πR² of overlap against L² and the *held* fraction grows as L².
+   Doubling extent quarters the contested fraction. A small map does not make growth difficult, it
+   makes growth wrong, and the low-attention mode dies — not because the player lacks patience but
+   because building is a losing move.
+3. **Cores × tenure radius.** A core's defensible/servable radius is ~150 m; a player holding 3–4 of
+   them occupies ~500 m of frontage; four players in a 2×2 with a contested margin needs
+   ~1,000–1,200 m.
+
+### The clock
+
+Compression is a **tick-rate** multiplier, never a speed multiplier. See §11 for why they are not
+interchangeable. Default **1.5×**; implemented at `RtsGameLoop.cs:425` by scaling `time.Delta`
+before it enters `simulationAccumulator`. `FixedDeltaSeconds` stays 1/30, so **not one constant
+Thread B tuned is touched**, and the spiral guard (currently `Math.Clamp(..., 0.0, 0.25)`) scales
+with it or accepts a 1.5× catch-up burst.
+
+| | wall clock | sim seconds | day units |
+|---|---|---|---|
+| year | 1 hour | 5,400 | 270 |
+| Spring (sow) | 13.3 min | 1,200 | 0–60 |
+| Summer (build/cut) | 20 min | 1,800 | 60–150 |
+| Harvest (crunch) | 11.1 min | 1,000 | 150–200 |
+| Winter (drain/raid) | 15.6 min | 1,400 | 200–270 |
+| day unit | 13.3 s | 20 | |
+
+**Seasons are canonical and crop windows are derived from them**, the same way `PathCost` is derived
+from `SpeedMultiplier`. The prototype had three disagreeing windows — `farmPressure` following the
+season names, `cropCycleAt` following a crop model under which *nothing is harvested during the
+season called Harvest*, and `summerRetention`'s comment following a third. They drifted because
+nothing forced them to agree. Derive, don't duplicate.
+
+**No day/night cycle.** Three reasons: half your check-ins would land in the dark, which taxes
+exactly the mode whose premise is looking at things; a fixed sun means **static geometry's shadow
+map only rebuilds when buildings change**, buying back render budget the simulation needs; and you
+keep the visual variety anyway by changing sun angle and colour grade **per season**, four
+transitions a year, still effectively static. That last point matters more than it sounds — **the
+season must be readable from the screen in one second**, before any number is read, and a seasonal
+sun is the cheapest and most important HUD element in the game.
+
+---
+
+## 4. The persistent world
+
+### Idle is cheap exactly when it is needed
+
+The no-LOD commitment looked like a straight cost. It is not, because the mode that demands it is
+the mode that has stopped paying for rendering: idle is sim-only, no draw calls, no cascades, no
+ImGui. Extrapolating Thread B's measured 2.3 ms/tick at 500 agents to ~9 ms at 2,000:
+
+| | 30 Hz (1x) | 45 Hz (1.5x) | 60 Hz (2x) |
+|---|---|---|---|
+| sim work per wall-second | 270 ms (27%) | 405 ms (40%) | 540 ms (54%) |
+
+Compression is a straight multiplier on the simulation budget, and 2× halves the headroom. It also
+promotes the two area-scaling costs in §10 from hygiene to **product requirement**: a background
+window quietly eating a full core is something people close.
+
+### Idle is a strategy, not a penalty
+
+Threat scales with **reach, not the clock** — escalation is driven by your expansion, not a timer.
+Follow it through: attending buys expansion, expansion raises your threat tier, idling forgoes
+expansion and therefore draws no additional pressure.
+
+> **Presence buys growth and costs safety. Absence costs growth and buys safety.**
+
+The skill rewarded is knowing when to spend attention and building the thing that holds without you.
+Big maps and walking speed supply the rest of the margin: conquest is slow, and slowness is what
+gives an absent player time to come back.
+
+### The AI opponent is the player's delegation layer
+
+Policy is **local and attached to buildings**, never a global slider (see §6). Given that, an AI
+neighbour needs no decision system for most of its behaviour — it needs the same structure-level
+policies the player uses, plus a thin strategic layer choosing what to build and where. Therefore:
+
+- A player's settlement while idle runs **the identical code** to an AI settlement.
+- Testing the AI *is* testing the idle mode. One autonomous layer, two consumers.
+
+> **Acceptance test: the AI strategic layer should be able to play the player's settlement.** If
+> handing it over produces something sensible, the delegation layer is good. If the AI needs special
+> powers — teleported resources, omniscience, free labour — the delegation layer is too weak for the
+> *player* to use either, and the low-attention mode was never going to work.
+
+**Consequence for the build order:** soak tests and the AI are the same artefact. A soak test needs a
+world doing economically meaningful things for a long time, and the strategic layer is what supplies
+it. The original plan listed soak tests as a separate item; they merge.
+
+**Consequence for world generation:** AI needs *dispositions* — producers, traders, raiders — and the
+mix is a world parameter. If every neighbour plays raider the world eats itself and there is nothing
+to raid. This is what will make one map feel different from another.
+
+### The chronicle
+
+"Come back and watch consequences propagate" only works if the consequences are *readable*, or you
+return to find your things gone with no account of why. The persistent world needs a history:
+*"the north granary was raided in spring; haulers rerouted through the south pass; the pass has been
+congested since."* This is the exception-reporting HUD extended over time, and in LAN it becomes a
+social object — what happened while you were away includes what other people did.
+
+### LAN specifics, and three traps
+
+Lockstep is right: only commands travel, and determinism is already an asserted property
+(`identical simulations stay deterministic`).
+
+1. **Compression is a world property, not a preference.** All clients tick at the same rate.
+2. **The live tuning sliders are a desync bomb.** `plan-rts.md` already notes those values are now
+   mutable process-wide state. Under lockstep one person nudging *turn rate* desyncs everybody. They
+   must be dev-only or synchronised before any netcode exists.
+3. **Late join needs snapshots.** Deterministic replay from a command log works, but replaying hours
+   does not. Periodic state snapshots are the answer — and §5 promotes this from a nicety to a
+   core-loop requirement anyway.
+
+---
+
+## 5. The career
+
+**An average ruling career is 20 years; 30 is great; 40–45 is exceptional.** Beyond that it should be
+practically impossible not to step on each other's toes and be destroyed many times over.
+
+### The terminus is the large map becoming a small map
+
+Run §3's tenure argument forward in time. Tenure is high because free space is abundant and reach
+does not overlap. Everyone grows. Reach overlaps. The contested fraction climbs toward 1, tenure
+collapses, and the ladder becomes unclimbable — at which point the dominant strategy reverts to
+raiding, exactly as it does on a small map.
+
+**The map size never changes. The free space does.** A terminus with no timer, no tech ceiling and no
+victory screen: the world closes because it filled up, and how long you last in the closing world is
+the score.
+
+There is a **second, independent closing force** (see §6): your own arrangement's upkeep grows with
+its height, so consumption at rest climbs toward production. The map closes from outside; the
+settlement closes from inside. A 45-year career is exceptional because you have to hold off both.
+
+### Does the map produce those numbers?
+
+| | |
+|---|---|
+| core capacity at 1200 m | ~20 map-wide, ~5 per player at four players |
+| founding rate to saturate by year 12–15 | one core per ~3 years |
+| contested endgame begins | ~year 12–15 |
+| careers end | 20 avg / 30 great / 45 exceptional |
+| 20-year career in wall clock | ~20 hours of open-game time |
+
+It lands, and it hands the economy its anchor for free: **founding a settlement core should cost
+roughly three years of a mature settlement's surplus.** Not a guess — derived jointly from map
+capacity and career length, and everything from storage capacities to production rates tunes
+against it.
+
+### Succession: fresh start on a marked map
+
+The world outlives the ruler. A career ends — usually violently — and a new one begins on the same
+map, which has not reset.
+
+**Ruins must be mechanically live, not decorative.** Old roads still carry the speed multiplier;
+cleared land is still cleared; foundations are re-usable; a burnt palisade line is still a line the
+enemy must route around. That gives a map an **age**: a young world is wild and free, an old one is
+dense with roads, ruins and cleared ground — *better infrastructure and less free space at once*, so
+each successive career starts richer and closer to the closing.
+
+**Consequence: serialization is a core-loop requirement, not a save feature.** The discipline is
+cheap applied continuously and expensive retrofitted. Prefer stable ids over references — the
+codebase already does this well (`AgentId` with tombstones, ids never reused).
+
+---
+
+## 6. The economy
+
+### Storage shifts time. Hauling shifts space. Trade shifts both, across ownership.
+
+That taxonomy is the whole economic layer, and it says what each mechanic is *for*.
+
+### Consumption is the demand side of the hauling problem
+
+Resources sink **by population type, year round, from the nearest source**. Everyone eats. Soldiers
+eat more and sink other resources slightly. Repairs and construction sink stone and wood. **Season
+affects consumption**: wood burns much faster in winter because every house needs heating.
+
+The prototype papered this over with a generous distance limit, exactly as `totalSecured()` papered
+over the supply side. Making it physical means consumption is spatial: a house pulls food from a
+granary, a hearth pulls wood, and *reach* decides whether a building is supplied at all. Settlement
+layout starts to matter with no new rule — you cannot sprawl past your distribution. Which is the
+ladder in economic form: no store → consume where and when you produce · granary → houses cluster
+around it · haulers → the granary can be fed from further out · second granary + link → a district
+runs without me.
+
+### The flow calendar — two commodities on offset cycles, two crunches
+
+| season | food | wood | labour |
+|---|---|---|---|
+| Spring | drawing down | moderate | sowing crunch |
+| Summer | drawing down | stockpiling **for winter** | free — build *or* cut |
+| Harvest | **+++ spike** | moderate | harvest crunch |
+| Winter | drawing down, no production | **+++ drain** (heating) | free — military, raids |
+
+Food stores peak at the end of harvest and bottom just *before* the next one; wood peaks in autumn
+and bottoms in late winter. Storage is needed for both, on different clocks, and summer's free
+labour is a real allocation decision with a deadline — build now, or cut wood so you do not freeze.
+
+**Winter is the combat season**, and it falls out rather than being designed: farm labour is free for
+everyone, food is scarce so raiding is motivated, and granaries are full from harvest so there is
+something worth taking. So the economic and military ladders **alternate in prominence across the
+year instead of competing for attention simultaneously** — which is what you want in a game where
+attention is the scarce resource. The year is: prepare → build → crunch → fight.
+
+### Catchments are bounded flow fields
+
+"Nearest source" asked per-consumer per-tick would be hot. Invert it: **sources own catchments.** A
+granary runs one bounded Dijkstra out to a cost limit; consumers inside are bound to it; recomputed
+only when the network changes. That is `BuildFlowField` with an economic reading and a bound —
+which is exactly the *"flow fields bounded to a region rather than the whole map"* option the
+routing work floated as an optimisation. **The economy independently wants the structure the router
+needs.**
+
+- **Catchments are measured in seconds, so they follow terrain and roads.** A catchment stretches
+  along a road and stops at a ridge. Roads literally grow usable territory, and settlements form
+  ribbons along them — nobody has to author that.
+- **One granary per core, with a number.** ~90 s catchment at 1.5 m/s is ~135 m, essentially the core
+  tenure radius derived from response time. The natural economic unit and the natural defensive unit
+  are the same size. Expanding past it requires a second granary plus a hauling link — which is the
+  *"the core is the root of the hauling graph"* idea with a radius attached.
+
+### Scoping: hauling is node-to-node only
+
+**Granary ↔ farm ↔ trade post ↔ forward depot.** Households draw from their catchment directly. A
+person walking to the store daily is real, but a hauler per household puts hauler count in
+proportion to *population* (hundreds) instead of *buildings* (tens), and every interesting decision
+lives at the node level. This is the difference between a hauling network you play and a traffic
+simulation you watch.
+
+### Every resource needs a standing sink
+
+A surplus should never be a chore; it should be a **signal**. The fundamental sink is **grain →
+people**: drowning in food should grow your population on its own. Wood and stone sink into
+construction and repair; food plus equipment sinks into soldiers. So a persistent surplus means *a
+sink is blocked*, and the game says which:
+
+> *"Grain surplus rising — population capped by housing."*
+
+That converts "I must manually rebalance" into "one blocked sink, named, with the fix implied".
+
+### Trade is a smoother, not an income source
+
+The honest motivation: seasons create fiddly work where you drown in one resource and run a stupid
+surplus on another. A trade route is a **standing conversion of surplus into deficit that runs
+without you** — the economic equivalent of a standing garrison, and it sits on the ladder like one.
+
+The trap, and the interesting part: **the season synchronises everybody's surplus.** After harvest
+*nobody* wants grain — your neighbours are drowning in it too — so the price of what you have most of
+collapses precisely when you have the most. Economically true, and mechanically essential, because it
+stops trade trivially deleting the lever the seasons were built to be.
+
+What breaks the synchronisation is **difference**, and difference grows with distance: other terrain,
+other crops, other specialisations, other wars.
+
+> **trade value ≈ price differential × throughput** — the differential grows with distance
+> (decorrelation), throughput falls with it (round-trip time). There is an optimum, it is spatial,
+> and the player solves it by placing trade posts and docks.
+
+That makes distant partners and water routes valuable *for a reason*, rather than by the fiat that
+AoE2's distance-scaled trade gestures at without justifying. It is also trade's third framing:
+**time-shifting through somebody else's storage.**
+
+---
+
+## 7. Offence, defence, and alarms
+
+### Offence is the same ladder read from the other side
+
+The worry was that offence is maximally high-attention and silently deletes the low-attention mode.
+That is true of *standard* offence, where the army is your whole economy converted into one fragile
+bundle with no state between "at home" and "invading". The missing middle state is **pressure**, and
+it is delegable:
+
+| rung | what changes |
+|---|---|
+| none | I only react |
+| scouts / patrols | I know where their things are, continuously |
+| "raid their lumber camp" as an order | a strike happens without me choreographing it |
+| forward outpost | pressure is *maintained* in their ground |
+| route denial | their logistics degrade while I am away |
+| siege camp | their arrangement is ground down without me |
+| annexation | their territory produces for me |
+
+Note what it attacks: their **logistics**, not their army. The commitment that makes defence
+meaningful ("logistics must be attackable") is the same one that makes offence delegable.
+
+### Raiding is hauling with a hostile source
+
+Loot must be **carried home**. A raid is therefore a hauling operation whose source is somebody
+else's granary — same routes, same congestion, same seconds, plus a threat term. Which gives, for
+free:
+
+- **Distance prices raids honestly.** A forward outpost near an enemy granary can be genuinely
+  cheaper than hauling from home, so "supply a distant frontier partly by raiding" is a real
+  calculation in the existing currency rather than a special case.
+- **The return trip is the defender's window.** Loaded raiders are slow, so interception is emergent
+  rather than scripted.
+- **It is self-limiting.** A raider's income is bounded by somebody else's surplus. Parasitism needs
+  hosts, so raiding cannot dominate a world — but it can absolutely sustain a small population.
+
+### Threat is a cost term, not a barrier
+
+Add threat to the route cost as an honest expected-seconds number:
+`p(intercept) × (time to replace cargo + time to replace hauler)`. Then haulers avoid dangerous
+ground because it is expensive; a raid succeeds when it makes a route expensive enough that the
+network reroutes, which the player experiences as the economy quietly slowing; and guards, towers and
+patrols are expenditure that *lowers* the threat term on routes you chose to care about.
+
+**Two warnings, both already paid for once in this codebase.** Threat must be an honest number of
+seconds, not a large one meaning "do not go here" — that is the barrier-as-cost mistake in a third
+costume, and `plan-rts.md` §1 records it costing two attempts. And threat needs a **fade matched to
+how fast danger actually clears**; invariant 15 is `DecaySeconds = 4.5` making every other term bid
+against a jam that had already drained, and a threat field outliving its raiders reproduces it
+exactly one layer up.
+
+### Alarms are the interface between the two modes
+
+Without them the low-attention mode is not passive, it is **blind**. Attacks and sightings ring; the
+player reacts if they want to.
+
+The important part is that the threshold is tunable, because **alarm policy is delegation of
+attention itself** — and like all policy it attaches to *places*. Early career, ring for everything.
+Late career, "ring only if the garrison is losing."
+
+This finally gives the outpost rung a computable value, in seconds like everything else:
+
+> Threat spotted at radius **R**, asset at radius **A**, both sides at soldier speed. The enemy needs
+> (R−A) to reach the asset; you need A to get there from the core. You arrive in time only if
+> **R > 2A**.
+
+At a core tenure radius of A = 150 m the watch line must sit beyond **300 m**. And as territory
+grows, A grows and the required R grows *twice as fast*, until it walks off the edge of your
+holdings — **which is why rung 5 (guards stationed at the convergence) exists.** Each rung of the
+ladder is forced by the previous one failing at scale, rather than being a list someone wrote down.
+It is also a placement rule the AI can evaluate directly.
+
+Two practical requirements: alarms in a background window need to be **OS-level** (window flash,
+sound, notification); and they need **aggregation and escalation**, or the contested endgame — where
+everything is under pressure all the time — becomes a continuous klaxon and the player learns to
+ignore it. "Three raids in progress, north" is one bell.
+
+---
+
+## 8. Autonomy time — the score, the win condition and the soak assertion are one number
+
+With continuous consumption there is no stall, there is **decline**:
+
+> **Autonomy time = how long your stores last at current net flow, without you.**
+
+Good delegation means production covers consumption and stores hold through the deficit seasons; poor
+delegation means the settlement shrinks, gradually and legibly. It is computable every tick and
+directly displayable — *"granary: 2.4 seasons at current draw"* — which is the one-verb HUD again.
+
+The calendar gives it structure, so the unit is not minutes but **stress points survived**:
+
+1. survives a quiet season
+2. survives **harvest** unattended (the labour spike)
+3. survives **winter** unattended (the drain, and the raids)
+4. survives a **full year** unattended
+5. survives several
+
+Monotone in how well you built, legible to the player, a win condition that does not end the game
+("it ran a full year without me"), and directly assertable as a soak test. It also fixes the
+arbitrariness of "N minutes" — a settlement that runs 40 minutes but skips harvest has proved
+nothing.
+
+---
+
+## 9. What Thread B bought, and the debts that go live
+
+- **Routing cost is time.** `TerrainSurfaceRules.PathCost` is derived as `1/SpeedMultiplier` so
+  router and physics agree, and congestion is expected delay in seconds. A hauling assignment can be
+  priced in the same currency as everything else, and a jammed route makes a different hauler cheaper
+  automatically. This is the decision the entire economy rests on.
+- **The congestion field** is worth far more to many independent haulers sharing routes than it ever
+  was to squad moves.
+- **Static ORCA lines, turn cost and manoeuvre amplification** matter because the game has gates in
+  palisades — the exact geometry they were built for.
 - **`ColliderRole.Interactable` / `Damageable` and `FactionRelations`** finally get consumers.
-- **Formations and cohort transit are core, not incidental.** An earlier reading of this design
-  as a settlement sim concluded squad movement barely mattered. That was wrong: real combat,
-  allies and enemies, and armies to stabilise all need it.
+- **Formations and cohort transit are core.** Real combat, allies and enemies, and armies to
+  stabilise all need them.
 
-### Debts that go live immediately
+### Debts that go live the moment there is more than one body type
 
 - **One body model.** `AgentDefaults` assumes a single radius, speed and turn rate. Workers,
-  soldiers, carts and raider types break that at once, and the logged "congestion delay does
-  not scale with unit speed" item goes live the moment speeds differ.
+  soldiers, carts and raiders break that at once, and the logged "congestion delay does not scale
+  with unit speed" item goes live the moment speeds differ.
 - **Carts want a turning circle.** The speed-scaled turn rate tried and reverted in Thread B
-  (`ω = a/v`) was wrong for people because it lifted the anti-spin limit exactly where crowds
-  need it — but it is *correct* for a loaded cart. Per-type turn models resolve the conflict.
-- **Acceleration is 16 m/s²**, over one and a half g, and every self-test threshold is
-  calibrated against a body that reaches its speed instantly. Settle the feel on the slider,
-  then re-base the tests.
+  (`ω = a/v`) was wrong for people because it lifted the anti-spin limit exactly where crowds need
+  it — but it is *correct* for a loaded cart. Per-type turn models resolve the conflict.
+- **Acceleration is 16 m/s²** and every self-test threshold is calibrated against a body that reaches
+  its speed instantly. Settle the feel on the slider, then re-base the tests.
+- **The flow-field cache keys on `(goal, radius, navRevision, congestionRevision, chargeTurns)`**, so
+  unit types multiply retained fields by radius. Harmless at 16 KB per *regional* field; fatal at
+  23 MB per global one. §10 retires this as a side effect.
 
 ---
 
-## 5. Build order
+## 10. Engineering consequences
 
-1. **Map-scale proof.** A realistically sized map (40k–160k cells) with 500–2000 agents. Find
-   where the tick budget goes and what a group order actually costs. Design everything else
-   against real numbers. *This is the agreed opening task.*
-2. **Unit types.** Per-type body, speed, turn model and carry capacity off `AgentDefaults`.
-   Unblocks everything; pays a logged debt; gives carts vehicle turning and people person
-   acceleration.
-3. **Jobs layer.** Port the prototype's three-layer worker model — *assignment* (persistent
-   commitment) / *activity* (what it is doing now) / *interrupt* (temporary local defence that
-   never rewrites assignment) — onto the `AgentCommand` and `AgentLocomotionState` seams. This
-   is the biggest new subsystem and the whole autonomous layer rests on it. Do **not** carry
-   across `w.task`, which in the prototype is a `defineProperty` alias for `activity` kept for
-   legacy readers.
-4. **Stock and the hauling network.** Physical local storage, hauling points as graph nodes,
-   assignment priced in seconds through the congestion field. Assignment-level graph,
-   locomotion-level paths.
-5. **Soak tests**, alongside 3 and 4 rather than after them.
-6. Combat and the defence ladder; then trade carts and docks.
+### Flat global fields are dead at every candidate size — on memory, not on timing
+
+One field is 10–23 MB, multiplied by distinct goal × body radius × retained congestion revision, and
+discarded wholesale on every nav edit. That is arithmetic, not a performance guess, so **the
+architecture decision does not wait on the scale proof and does not depend on which map size wins.**
+What still needs measuring is the *constants* — region size, portal density, cache depth, and whether
+the hauling workload behaves. Architecture from arithmetic; constants from measurement.
+
+### Portal routing over 32 m regions
+
+64×64 fine cells per region = 4,096, deliberately comparable to the 3,600-cell world where every
+Thread B constant was measured, so they all keep their meaning. **The fine layer stays at 0.5 m and
+is not touched.**
+
+| | Small | Medium | **Large** |
+|---|---|---|---|
+| regions | 625 | 1,024 | **1,444** |
+| portal nodes, open terrain | ~7.5k | ~12k | **~17k** |
+| …with ~50% impassable | ~3.5k | ~6k | **~8.5k** |
+| one local flow field | 16 KB | 16 KB | **16 KB** |
+
+Global search becomes a Dijkstra over ≤~17k portal nodes at ~6 edges each. Today's 3,600-cell field
+is 8 neighbours ≈ 28,800 edges. **At the large map the global route problem is single-digit
+multiples of the one already solved on a 30 m map, and every local problem is smaller than it.**
+
+### Jungle is an optimisation, not filler
+
+A region of solid jungle has **no portals**: it contributes nothing to the abstract graph but the
+fact that you cannot cross it. A map that is ~50% dense growth with rivers, ridges and passes has a
+portal graph roughly half the size of an open map at the same extent, and better conditioned, because
+real chokepoints are what portals are for. It bounds the agent problem the same way — bodies can only
+be on walkable ground, so the congestion field's active set and the spatial index's occupied buckets
+both shrink. **Filling a large map with jungle makes it cheaper than a small open one of the same
+walkable area, and gives structure for free.** It also feeds four rungs at once: slow ground (a real
+`SpeedMultiplier`), channelled routes, concealment that makes the outpost rung mean something, and
+diffuse wood that turns clearing into labour.
+
+### Seasonal terrain, and the second argument for portals
+
+Rivers freeze (a dock closes; the ice becomes walkable), mud season slows roads, snow shuts a pass.
+All of it is seasonal `SpeedMultiplier`, priced for free. But it bumps `grid.Revision`, and the
+current cache treats a nav edit as invalidating **everything** — *"A navigation edit makes every
+older field unreachable, so those go immediately."* Four times a year the whole route cache would
+evaporate at once, on a schedule.
+
+So: seasonal transitions want to be **staged over a few in-game days** rather than flipped in a
+single tick — which is also how weather behaves. And region-scoped revisions rebuild only the
+regions a freezing river touches. **Hierarchical routing is what makes seasons affordable**, not just
+what makes scale affordable.
+
+### Two area-scaling costs that no routing hierarchy touches
+
+Both verified in source, both invisible at 30 m, both scale with map **area** per tick:
+
+1. **`CongestionField.Update`** (`CongestionField.cs:129-137`) decays *every* cell of three arrays
+   every tick — `pressure`, `flowX`, `flowZ`. At 1200 m that is 5.76M cells × 3 × 4 B ≈ **69 MB of
+   memory traffic per tick**, before any agent deposits anything. Must become sparse or
+   region-scoped. Carefully: invariant 15 makes the decay *rate* the highest-leverage constant in
+   routing, so a sparse rewrite must reproduce the exact decay semantics or it silently invalidates
+   every reservation tuned against it.
+2. **`AgentSpatialIndex`** is `List<int>[width*height]`, dense over the whole terrain at 1.5 m, and
+   `Rebuild` runs `foreach (var bucket in buckets) bucket.Clear();` every tick. Its own doc comment
+   names the assumption the game breaks: *"The map is bounded and small, so the whole grid is a few
+   hundred lists."* At 1200 m that is **640,000 Lists cleared per tick** to index 2,000 agents. The
+   structure is right; only its sizing premise is wrong — fit it to the agent bounding box, or bucket
+   per region.
+
+### Determinism must be extended, or it quietly stops meaning anything
+
+The existing determinism self-test covers movement only. Every new system — jobs, hauling,
+construction, AI — must extend it, or the test keeps passing while the game layer becomes
+non-deterministic through an unordered dictionary iteration nobody noticed. Lockstep LAN and
+career-to-career persistence both depend on it.
+
+### Soak testing is tractable headless
+
+At ~9 ms/tick with 2,000 agents, headless uncapped ticking runs ~3.7× real time; early-career loads
+(~300 agents, ~1.4 ms/tick) run ~24×.
+
+| | soak duration |
+|---|---|
+| early-career, 10 years, ~300 agents | ~40 min — a CI gate |
+| full 20-year career to saturation | ~6–8 h — an overnight job |
+
+Assertions: nothing permanently stalls, no counter drifts, no route churns forever, and **autonomy
+time climbs monotonically with the structures built**.
 
 ---
 
-## 6. Open design questions
+## 11. Corrections made this pass — kept because each looked right
 
-- **Is offence on the ladder?** Defence has seven rungs to delegation. Offence as standard RTS
-  fare is maximally high-attention, so the low-attention mode dies whenever you are at war.
-  Attacking needs delegable equivalents — standing patrols, a rally line that holds, "raid
-  their lumber camp" as an order rather than a micro sequence — or the game has two modes and
-  combat silently deletes one.
-- **Physical local storage kills the global resource HUD.** `Food 45.0 secured` cannot survive
-  distributed stock and multi-minute hauls. The UI has to express *where* things are and
-  *whether they will arrive in time*. This is probably what makes the game feel different more
-  than any single mechanic.
-- **Which agricultural model is canonical?** The prototype has two that disagree. Seasons run
-  Spring 0–60, Summer 60–150, Harvest 150–200, Winter 200–270. Crops run A prep 0–45, A maint
-  45–90, A harvest 90–135, B prep 135–175, B maint 175–215, B harvest 215–255. So A harvest
-  falls entirely in Summer, B harvest entirely in Winter, and **nothing is harvested during the
-  season called Harvest**. `farmPressure`'s anchors follow the season names, `cropCycleAt`
-  follows the crop model, and `summerRetention`'s comment follows a third window (60–150 versus
-  45–90). Pick one before porting either.
-- **Win condition.** The prototype has none: raids tier up forever and the year counter climbs,
-  so structurally it is a slow loss with no terminus. Survive N years, reach a population,
-  escape, endless with a score — this decides whether progression systems are needed at all.
-- **Priority sliders.** In the prototype `state.priorities` carries farm/build/wood/stone;
-  `priorityScore` is called once, for `build`, and only `pBuild` exists in the DOM. If
-  policy-level control is the intended verb at 100+ workers it needs building properly; if
-  direct assignment is the verb, population has to be deliberately capped. These are different
-  games and they need different engine work.
+- **Speed and tick rate are not the same dial.** Both make a large map feel less sluggish and are
+  indistinguishable from the player's chair on day one. Raising *speed* grows reach R in metres,
+  which grows the contested fraction and hands back exactly the tenure the large map bought — a 2×
+  speed bump on an 800 m map gives the contest geometry of a 400 m map. Raising *tick rate* preserves
+  every in-game ratio and only shrinks wall-clock waiting. Compression also degrades micro without
+  touching strategy, because human reaction time is fixed in wall clock — so it is a
+  delegation-forcing dial and belongs on the ladder.
+- **"The longest haul must fit inside a season" was the wrong constraint** and is dropped. A long
+  year makes the map feel small under that rule. Distance actually binds through two mechanisms with
+  different clocks: **response time** (~60–180 s, independent of year length) for military distance,
+  and the **harvest window** (a genuine cliff — crops rot, winter comes) for economic distance. Both
+  survive a one-hour year.
+- **"Absence buys safety" was half right.** With year-round consumption, absence is safe from
+  *enemies* — threat scales with reach and you are not expanding — but never from *entropy*. Idling
+  still burns stores, and the cost scales with how much ladder you are carrying. Better balance than
+  the original claim.
+- **Carts are payload; roads are speed.** A loaded cart alone (1.1 m/s) is *slower* than a walker.
+  Extending the economic radius needs both: a walker on a road reaches ~270 m, a cart on a road
+  reaches ~200 m but with 4–5× the throughput.
+- **The "44× at 160k cells" estimate is superseded.** It was arithmetic from cell counts, correctly
+  flagged as not a measurement. The real map is larger still, and the architecture question is now
+  settled by memory arithmetic rather than by timing — but see §10 on which constants still need
+  measuring.
+
+---
+
+## 12. Build order
+
+1. **Parameterised extent + the two area-scaling costs measured** at 800/1000/1200 m. Small commit,
+   and it is the background-citizen requirement.
+2. **Body re-base** — speed 1.5, acceleration 2.0, deceleration 3.0, compression 1.5× — settled on
+   the feel slider, then re-base the self-test thresholds against the answer, not the reverse.
+3. **Portal routing** over 32 m regions, tuned at 1200 m, fine layer untouched at 0.5 m.
+4. **Unit types** off `AgentDefaults` — per-type body, speed, turn model, carry capacity. Pays a
+   logged debt; gives carts vehicle turning and people person acceleration.
+5. **Jobs layer** — the prototype's three-layer worker model, *assignment* (persistent commitment) /
+   *activity* (what it is doing now) / *interrupt* (temporary local defence that never rewrites
+   assignment), onto the `AgentCommand` and `AgentLocomotionState` seams. Now understood as **the
+   autonomous layer**, shared by idle players and AI alike. Do **not** carry across `w.task`, which
+   in the prototype is a `defineProperty` alias for `activity` kept for legacy readers.
+6. **Stock, catchments and the hauling network.** Physical local storage, granary catchments as
+   bounded fields, hauling points as graph nodes, assignment priced in seconds through the congestion
+   field. Assignment-level graph, locomotion-level paths.
+7. **Strategic layer + soak harness together**, with "the AI can play the player's settlement" as the
+   acceptance test.
+8. **Combat, the defence ladder, and alarms.**
+9. **Trade carts, docks, and seasonal markets.**
+
+---
+
+## 13. Open questions
+
+- **Combat resolution model.** Assumed throughout but never settled: that combat is decided by
+  position, formation and attrition rather than by ability micro. The whole "offence is delegable"
+  argument depends on it — if micro dominates, attention beats arrangement and the low-attention mode
+  dies during any war. This is now the most load-bearing unsettled question.
+- **The offence rungs have never been pressured.** They were sketched twice and both times looked
+  right, which is exactly the condition under which §11-style refusals get discovered late.
+- **AI dispositions and the world-generation mix.** How many producers, traders and raiders; whether
+  disposition is fixed or drifts with circumstance.
+- **Catchment radius** (~90 s proposed) is a tuning dial that decides how dense settlements must be
+  and how early a second granary is forced. Wants measuring against actual settlement layouts.
+- **What a "marked map" records**, and at what granularity — roads and cleared ground certainly;
+  foundations, place names, graves, and how ruins decay over careers are open.
+- **Population growth model.** Grain → people is the proposed fundamental sink, gated by housing.
+  Whether everyone works, and whether there is any dependency ratio beyond soldiers, is unspecified.
+- **Alarm aggregation and escalation.** The requirement is clear; the design is not.
+- **Are trade partners AI-run settlements or abstract markets?** Affects whether trade prices emerge
+  from neighbours' actual stores or are generated.
+
+---
+
+## 14. Next session — where to start
+
+**State:** branch `rts-locomotion`, clean tree, four commits ahead of `main`, `--selftest` 37/37.
+
+**First commit — the measurement, not a fix.** `SimulationWorld()` hardcodes the world at
+`SimulationWorld.cs:152` (`GridTransform(60, 60, 0.5f)`), the placement grid at `:154`
+(`20×20×1.5`), and the agent index at `:158` (cell 1.5 m, spanning `Terrain.Minimum/Maximum`). Make
+extent injectable **without moving the default**, which all 37 tests and every tuned constant are
+calibrated against. Then add a scale scenario reporting the existing per-phase breakdown at
+800/1000/1200 m with 500/1000/2000 agents.
+
+**Write the predictions down first, so the measurement can falsify something.** At 1200 m:
+
+| | prediction |
+|---|---|
+| `CongestionField.Update` | ~69 MB of traffic per tick → **≥3.5 ms/tick**, agent-count independent |
+| `AgentSpatialIndex.Rebuild` | 640k `List.Clear()` per tick → **1.3–3.2 ms/tick**, agent-count independent |
+| together | **5–7 ms/tick**, comparable to the *entire* current movement cost |
+
+If those two dominate as predicted, they are the first work and they are both structural
+(sparse/region-scoped congestion; agent index fitted to the agent bounding box). If they do not, the
+prediction was wrong and the reason is worth knowing before anything is built on top of it.
+
+**Then, and only then:** the body re-base (2), because it prices everything else, and the portal
+router (3), because the fine layer must stay untouched while it lands.
+
+**Do not** start the jobs layer before the router. The autonomous layer is the biggest new subsystem
+and the whole design rests on it; building it against a router that is about to change shape is how
+the tuning gets calibrated twice.
