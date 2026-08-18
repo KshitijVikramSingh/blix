@@ -92,6 +92,37 @@ internal sealed partial class PathService
 
     private static int RadiusKey(float agentRadius) => (int)MathF.Round(agentRadius * 100f);
 
+    private readonly Dictionary<(int Nav, int Radius), (WalkableRectangles Mesh, RectangleIndex Index)>
+        meshes = new();
+
+    /// <summary>
+    /// The rectangle decomposition for a body of this radius, built once per terrain edit.
+    /// </summary>
+    /// <remarks>
+    /// Ten to seventeen milliseconds to build on a 600 m map, so it is cached against the
+    /// terrain revision exactly as the portal graph was. Radius is part of the key because
+    /// walkability is: a wider body has fewer rectangles and different crossings.
+    /// </remarks>
+    internal (WalkableRectangles Mesh, RectangleIndex Index) Mesh(float agentRadius)
+    {
+        var key = (grid.Revision, RadiusKey(agentRadius));
+        if (meshes.TryGetValue(key, out var existing)) return existing;
+
+        foreach (var stale in meshes.Keys.Where(k => k.Nav != grid.Revision).ToArray())
+        {
+            meshes.Remove(stale);
+        }
+
+        var mesh = WalkableRectangles.Build(grid, agentRadius);
+        var built = (mesh, new RectangleIndex(mesh, grid.Width, grid.Height));
+        meshes[key] = built;
+        return built;
+    }
+
+    /// <summary>Seconds a body loses to the single bend an octile leg contains.</summary>
+    internal float BendSeconds(GridCell near, float agentRadius, bool chargeTurns) =>
+        chargeTurns ? TurnCost(0, 4, near, agentRadius) : 0f;
+
     /// <summary>
     /// Loosest bound on what crossing one region can cost, used as the horizon the
     /// abstract search is allowed to stop at.

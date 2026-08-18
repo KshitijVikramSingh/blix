@@ -727,6 +727,38 @@ slightly the other way. **That is the right direction but it is weak evidence**,
 only the cells whose route passes through the jam, and it is worth building before the switch
 rather than after.
 
+### The switch was attempted, and it failed exactly where this document said it would
+
+**Tried 2026-08-19, reverted the same hour.** `GetFlowField` was pointed at the rectangle field
+and the suite went from 42/42 to 37/42. The five failures are all constricted geometry, which is
+the tell:
+
+| test | what it said |
+|---|---|
+| pen escape, seed 17 | `exits=[0,0,0,30]` — the crowd stopped splitting across exits |
+| 50 agents, one-cell gate | 49 of 50 crossed; one body left with no path and its intent pointing away |
+| allies file through a chokepoint | peak separation 0.730 against a bar of 0.690 |
+| crowd crosses a ramp | longest red 5.87 s against 3.0 |
+| congestion sweeps every cell | 34 cells still live after the drain window, because bodies were still stuck |
+
+**The route costs were never the problem — the gradient was.** `CostAt` on this field is the
+minimum over a rectangle's *corners*, so its gradient points at a corner rather than smoothly
+towards the goal, and a body descending it walks to a corner and then turns. Corners are
+materialised waypoints, which is the failure §1 records and the reason the continuous field
+exists at all. It was predicted in this section before the work started and it arrived in the
+form predicted.
+
+**And it was self-inflicted**: the design settled at the top of this section says *the mesh
+replaces what routing searches, not what steering reads*, with a dense local field over the
+corridor for steering. Wiring `CostAt` straight into `SampleFlowGradient` skipped that, and the
+suite caught it in one run. The rectangle field's numbers stand — mean 1.0014, worst 1.187, no
+searches — and what is missing is the layer between it and the body.
+
+**Next, and it is the last piece: a dense local field seeded from corner costs.** A tile around
+where the body is, filled from the rectangle field's corner values rather than by a region
+search, so the gradient is continuous again and the routing underneath it is still arithmetic.
+That is the design as agreed; this attempt simply left it out.
+
 **What still blocks the switch is behaviour, not geometry.** The pen scenario is the test that
 matters — thirty units, four exits, and the crowd has to split across more than one of them — and
 it exercises congestion, route commitment, detour grants and the recovery path together. Nothing
