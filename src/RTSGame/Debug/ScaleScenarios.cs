@@ -89,6 +89,12 @@ internal static class ScaleScenarios
             $"congestion traffic {congestionMegabytes:F1} MB/tick | " +
             $"build {constructionMilliseconds:F0} ms | " +
             $"managed {GC.GetTotalMemory(false) / (1024.0 * 1024.0):F0} MB");
+        var portalStart = Stopwatch.GetTimestamp();
+        var portals = world.PortalCount;
+        Console.WriteLine(
+            $"    graph  | {world.RegionCount:N0} regions | {portals:N0} portals | " +
+            $"{portals * 2:N0} nodes | built in " +
+            $"{Stopwatch.GetElapsedTime(portalStart).TotalMilliseconds:F0} ms");
 
         // Idle: no destinations, so no routing and no deposits. Only the area floor.
         var idle = Populate(world, agentCount, issueGroupMove: false);
@@ -104,6 +110,8 @@ internal static class ScaleScenarios
             $"    idle   | {Breakdown(world)} | wall {idleWall:F2} ms/tick | " +
             $"rebuilds {world.AgentIndexRebuildsPerTick}/tick | " +
             $"live cells {world.Congestion.LiveCellCount:N0}");
+        var idleSearches = world.RegionSearches;
+        var idleTiles = world.TileRefinements;
 
         // Moving: the same crowd, under one group move, which is the honest tick.
         world.QueueMove(idle, MoveTarget(world));
@@ -112,9 +120,13 @@ internal static class ScaleScenarios
         // Timed apart from the steady state because on a large map it is the single
         // largest number in the run and it would otherwise be smeared over 120 ticks.
         var routeStart = Stopwatch.GetTimestamp();
+        var routeSearches = world.RegionSearches;
+        var routeTiles = world.TileRefinements;
         world.Tick((float)SimulationWorld.FixedDeltaSeconds);
         world.Tick((float)SimulationWorld.FixedDeltaSeconds);
         var firstRouteMilliseconds = Stopwatch.GetElapsedTime(routeStart).TotalMilliseconds;
+        routeSearches = world.RegionSearches - routeSearches;
+        routeTiles = world.TileRefinements - routeTiles;
         world.Timings.Reset();
         var movingStart = Stopwatch.GetTimestamp();
         for (var tick = 0; tick < MovingTicks; tick++)
@@ -124,9 +136,12 @@ internal static class ScaleScenarios
         var movingWall = Stopwatch.GetElapsedTime(movingStart).TotalMilliseconds / MovingTicks;
         Console.WriteLine(
             $"    moving | {Breakdown(world)} | wall {movingWall:F2} ms/tick | " +
-            $"first-route tick {firstRouteMilliseconds:F0} ms | " +
+            $"first-route tick {firstRouteMilliseconds:F0} ms " +
+            $"({routeSearches:N0} searches, {routeTiles:N0} tiles) | " +
             $"flowFields {world.FlowFieldBuilds} | astar {world.PathQueries} | " +
-            $"live cells {world.Congestion.LiveCellCount:N0}");
+            $"live cells {world.Congestion.LiveCellCount:N0} | " +
+            $"region-searches {world.RegionSearches - idleSearches:N0} | " +
+            $"tiles {world.TileRefinements - idleTiles:N0}");
         Console.WriteLine();
     }
 

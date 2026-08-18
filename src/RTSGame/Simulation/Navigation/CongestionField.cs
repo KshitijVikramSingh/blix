@@ -121,6 +121,17 @@ internal sealed class CongestionField
     private const float SpentPressure = 1e-8f;
 
     private readonly GridTransform transform;
+    private readonly RegionPartition regions;
+    // Per-region version of this field, so the routing hierarchy can cache what a region
+    // costs to cross and be told when that specific region changed. A single global
+    // revision would throw away every region's cached crossing costs because one corner
+    // of the map jammed, which at map scale is most of the saving the hierarchy exists for.
+    private readonly int[] regionStamp;
+    private readonly bool[] regionMarked;
+    private int[] pressuredRegions;
+    private int pressuredRegionCount;
+    private int[] previouslyPressuredRegions;
+    private int previouslyPressuredRegionCount;
     private readonly float[] pressure;
     // Mean travel direction of whatever is depositing here, scaled by how much it
     // deposited. Kept as an unnormalised sum so that opposing contributions
@@ -158,7 +169,18 @@ internal sealed class CongestionField
         flowX = new float[pressure.Length];
         flowZ = new float[pressure.Length];
         isLive = new bool[pressure.Length];
+        regions = new RegionPartition(transform);
+        regionStamp = new int[regions.Count];
+        regionMarked = new bool[regions.Count];
+        pressuredRegions = new int[Math.Min(64, regions.Count)];
+        previouslyPressuredRegions = new int[pressuredRegions.Length];
     }
+
+    /// <summary>
+    /// Version of one region's pressure, bumped only when that region's own contribution
+    /// changed at a published revision.
+    /// </summary>
+    public int RegionStamp(int region) => regionStamp[region];
 
     /// <summary>Cells in the field.</summary>
     public int CellCount => pressure.Length;
@@ -267,6 +289,53 @@ internal sealed class CongestionField
         publishedTotal = currentTotal;
         ticksSinceRebuild = 0;
         Revision++;
+        StampChangedRegions();
+    }
+
+    /// <summary>
+    /// Marks every region whose pressure is part of this revision — and every region that
+    /// was part of the last one and is not part of this.
+    /// </summary>
+    /// <remarks>
+    /// Both halves are needed. A region that has just jammed obviously changed; a region
+    /// that has just <em>cleared</em> changed by exactly as much and would otherwise keep
+    /// serving cached crossing costs that still price the jam, which is the same
+    /// stale-detour failure invariant 15 was written about, one level up.
+    /// </remarks>
+    private void StampChangedRegions()
+    {
+        pressuredRegionCount = 0;
+        for (var slot = 0; slot < liveCount; slot++)
+        {
+            var region = regions.RegionOf(transform.Cell(live[slot]));
+            if (regionMarked[region]) continue;
+            regionMarked[region] = true;
+            if (pressuredRegionCount == pressuredRegions.Length)
+            {
+                Array.Resize(ref pressuredRegions, pressuredRegions.Length * 2);
+            }
+
+            pressuredRegions[pressuredRegionCount++] = region;
+        }
+
+        for (var i = 0; i < previouslyPressuredRegionCount; i++)
+        {
+            regionStamp[previouslyPressuredRegions[i]] = Revision;
+        }
+
+        for (var i = 0; i < pressuredRegionCount; i++)
+        {
+            regionStamp[pressuredRegions[i]] = Revision;
+            regionMarked[pressuredRegions[i]] = false;
+        }
+
+        if (previouslyPressuredRegions.Length < pressuredRegionCount)
+        {
+            previouslyPressuredRegions = new int[pressuredRegions.Length];
+        }
+
+        Array.Copy(pressuredRegions, previouslyPressuredRegions, pressuredRegionCount);
+        previouslyPressuredRegionCount = pressuredRegionCount;
     }
 
     /// <summary>

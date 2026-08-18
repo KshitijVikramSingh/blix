@@ -35,6 +35,22 @@ internal static class TerrainSurfaceRules
         return speed <= 0f ? float.PositiveInfinity : 1f / speed;
     }
 
+    /// <summary>
+    /// Cheapest per-cell cost any ground can have, which is the fastest ground there is.
+    /// </summary>
+    /// <remarks>
+    /// Derived rather than written down, so it cannot drift from the table below. The
+    /// routing hierarchy's heuristic multiplies distance by this and would stop being
+    /// admissible — and its answers stop being exact — the moment somebody added a
+    /// surface faster than road without noticing this existed.
+    /// </remarks>
+    public static float FastestPathCost { get; } = Enum.GetValues<TerrainSurface>()
+        .Where(IsPassable)
+        .Select(PathCost)
+        .Where(float.IsFinite)
+        .DefaultIfEmpty(1f)
+        .Min();
+
     public static float SpeedMultiplier(TerrainSurface surface) => surface switch
     {
         TerrainSurface.Road => 1.10f,

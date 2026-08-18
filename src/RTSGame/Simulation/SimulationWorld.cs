@@ -133,6 +133,25 @@ internal sealed class SimulationWorld
     /// <summary>Stored routes re-planned because the ground they cross became congested.</summary>
     public int CongestionRerouteCount { get; private set; }
     public int FlowFieldBuilds => pathService.FlowFieldBuilds;
+    /// <summary>Regions the routing hierarchy divides this map into.</summary>
+    public int RegionCount => pathService.RegionCount;
+    /// <summary>Border crossings in the portal graph for a standard body.</summary>
+    public int PortalCount => pathService.PortalCountFor(AgentDefaults.Radius);
+    /// <summary>Region-bounded searches run so far, the unit of hierarchical work.</summary>
+    public long RegionSearches => pathService.RegionSearches;
+    /// <summary>Region tiles refined so far.</summary>
+    public long TileRefinements => pathService.TileRefinements;
+
+    /// <summary>How far hierarchical routing sits above the flat optimum on this map.</summary>
+    internal RoutingFidelity MeasureRoutingFidelity(Vector2 goalPosition, float agentRadius)
+    {
+        if (!Navigation.TryWorldToCell(Terrain.ClampPosition(goalPosition), out var goal))
+        {
+            throw new ArgumentOutOfRangeException(nameof(goalPosition));
+        }
+
+        return pathService.MeasureFidelity(goal, agentRadius);
+    }
     public long PathQueries => pathService.PathQueries;
     public long AvoidanceSolves => steeringSystem.Solver.Solves;
     public long AvoidanceInfeasible => steeringSystem.Solver.InfeasibleSolves;

@@ -1,6 +1,6 @@
 # RTSGame — locomotion layer: state, seams, and what not to break
 
-Status as of 2026-08-18. `--selftest` **40/40 passing**. ~10k lines in `src/RTSGame`.
+Status as of 2026-08-18. `--selftest` **42/42 passing**. ~10k lines in `src/RTSGame`.
 Branch `rts-locomotion`.
 
 Run it: `tools/run-rts-game.sh [--debug-all]`
@@ -16,7 +16,7 @@ One fixed 30 Hz tick, in this order:
 
 | # | Step | Owns |
 |---|---|---|
-| 1 | `Congestion.Update` | decaying per-cell backpressure map |
+| 1 | `Congestion.Update` | decaying per-cell backpressure map (sparse: only cells holding pressure) |
 | 2 | `ApplyCommands` | move / stop / follow / patrol / chase / flee, group creation |
 | 3 | `UpdateBehaviors` + `UpdateGroupFormations` | locomotion states; cohort centroid; slot hand-off |
 | 4 | `RefreshInvalidPaths` (+ `ReconsiderCongestedRoute`) | route validity and congestion re-evaluation |
@@ -279,6 +279,10 @@ which is what a correct memo looks like:
   *subset* of `steering` and `collision` — the broad phase is rebuilt inside both — rather than a
   column beside them. It also reports `live cells`, the congestion cells actually being swept, and
   `first-route tick`, which is what one move order costs before anything moves.
+- `--routingtest` compares hierarchical cost-to-goal against the flat whole-map search it replaced,
+  cell by cell, on a 200 m map of staggered walls, at several settings of the abstract search's
+  horizon (`--spans`). `lost` is the column that matters — a cell the hierarchy cannot price is a
+  body that believes it has no route and stops.
 - **Live tuning overlay** (backtick to toggle). `RtsGameLoop` implements `IDebuggable`, so
   the shared Blix diagnostics overlay appears with a Controls tab of `[Tune]` sliders
   (`BodyFeelSettings`: top speed, acceleration, deceleration, turn rate, free-turn speed)

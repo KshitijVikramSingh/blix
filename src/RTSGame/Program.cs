@@ -24,6 +24,11 @@ public static class Program
             Environment.Exit(ScaleScenarios.Run(extents, counts));
         }
 
+        if (args.Contains("--routingtest"))
+        {
+            Environment.Exit(RegionRoutingScenarios.Run(ParseFloats(args, "--spans")));
+        }
+
         if (args.Contains("--arrivaltest"))
         {
             Environment.Exit(SimulationSelfTests.RunSharedDestinationRegression());

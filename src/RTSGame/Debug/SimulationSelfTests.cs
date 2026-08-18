@@ -69,6 +69,8 @@ internal static class SimulationSelfTests
         Check("no unit stands under orders without intent", NoUnitStandsIntentless());
         Check("congestion sweeps every cell holding pressure", CongestionSweepTracksPressure());
         Check("a larger world leaves the tuned one untouched", WorldExtentIsParameterised());
+        Check("portal routing stays close to the flat optimum", PortalRoutingIsFaithful());
+        Check("a group crosses region borders without swinging", GroupCrossesRegionBorders());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
 
@@ -1508,6 +1510,141 @@ internal static class SimulationSelfTests
         }
 
         return passed;
+    }
+
+    /// <summary>
+    /// Hierarchical cost-to-goal against the flat whole-map search it replaces, on a map
+    /// big enough to have region borders at all.
+    /// </summary>
+    /// <remarks>
+    /// The tuned world is one region, so every other test in this file passes through the
+    /// hierarchy without exercising it. Thresholds are read off <c>--routingtest</c> rather
+    /// than chosen: the measured figures are a mean of 1.006 and a worst cell of 1.68, and
+    /// these sit far enough above to survive a tuning change and far enough below to catch
+    /// the failure that matters.
+    /// <para>
+    /// <c>lost</c> is the one that must be zero. A cell the hierarchy cannot price is a cell
+    /// where a body believes it has no route and simply stops, which is not a slightly
+    /// longer walk — it is a unit that never arrives.
+    /// </para>
+    /// </remarks>
+    private static bool PortalRoutingIsFaithful()
+    {
+        var world = RegionRoutingScenarios.Build();
+        var fidelity = world.MeasureRoutingFidelity(
+            new Vector2(world.ExtentMeters * 0.42f, world.ExtentMeters * 0.42f),
+            AgentDefaults.Radius);
+
+        var manyRegions = world.RegionCount >= 25 && world.PortalCount >= 100;
+        var passed = manyRegions &&
+                     fidelity.UnreachableCells == 0 &&
+                     fidelity.MeanRatio < 1.02f &&
+                     fidelity.NinetyNinthRatio < 1.12f &&
+                     fidelity.WorstRatio < 2.0f;
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    fidelity: {world.RegionCount} regions, {world.PortalCount} portals, " +
+                $"mean={fidelity.MeanRatio:F4}, p99={fidelity.NinetyNinthRatio:F4}, " +
+                $"worst={fidelity.WorstRatio:F3} at {fidelity.WorstCell.X},{fidelity.WorstCell.Z}, " +
+                $"lost={fidelity.UnreachableCells}/{fidelity.ReachableCells}");
+        }
+
+        return passed;
+    }
+
+    /// <summary>
+    /// A group walking a route that crosses several region borders, watched for the classic
+    /// hierarchical failure: a body reaching a border, adopting the next region's field,
+    /// and swinging because the two disagree about which way is downhill.
+    /// </summary>
+    /// <remarks>
+    /// Measured as reversals — a heading flipping by more than a right angle in one tick —
+    /// counted separately for bodies standing within two cells of a border and bodies well
+    /// inside a region. The absolute rate is not the point and would only measure the
+    /// steering layer; the <em>ratio</em> is, because a seam in the cost field shows up as
+    /// bodies changing their minds at borders and nowhere else.
+    /// </remarks>
+    private static bool GroupCrossesRegionBorders()
+    {
+        var world = RegionRoutingScenarios.Build();
+        var half = world.ExtentMeters * 0.5f;
+        var ids = new List<AgentId>();
+        for (var row = 0; row < 4; row++)
+        for (var column = 0; column < 5; column++)
+        {
+            ids.Add(world.SpawnAgent(new Vector2(
+                -half + 6f + column * 0.9f,
+                -half + 6f + row * 0.9f)));
+        }
+
+        var target = new Vector2(half - 6f, half - 6f);
+        world.QueueMove(ids, target);
+
+        var heading = new Dictionary<int, Vector2>();
+        var borderReversals = 0;
+        var borderSamples = 0;
+        var interiorReversals = 0;
+        var interiorSamples = 0;
+        var arrived = 0;
+        var ticks = 0;
+        for (; ticks < 6000 && arrived < ids.Count; ticks++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            arrived = ids.Count(id => Vector2.Distance(world.Agents.Get(id).Position, target) < 6f);
+            foreach (var id in ids)
+            {
+                ref readonly var agent = ref world.Agents.Get(id);
+                if (!agent.IsAlive) continue;
+                var velocity = agent.Velocity;
+                if (velocity.LengthSquared() < 0.25f) continue;
+                var now = Vector2.Normalize(velocity);
+                var nearBorder = world.Navigation.TryWorldToCell(agent.Position, out var cell) &&
+                                 NearRegionBorder(cell);
+                if (heading.TryGetValue(id.Value, out var before))
+                {
+                    var reversed = Vector2.Dot(before, now) < 0f;
+                    if (nearBorder)
+                    {
+                        borderSamples++;
+                        if (reversed) borderReversals++;
+                    }
+                    else
+                    {
+                        interiorSamples++;
+                        if (reversed) interiorReversals++;
+                    }
+                }
+
+                heading[id.Value] = now;
+            }
+        }
+
+        var borderRate = borderReversals / (float)Math.Max(1, borderSamples);
+        var interiorRate = interiorReversals / (float)Math.Max(1, interiorSamples);
+        // A border is allowed to be busier than open ground — it is usually a gap in a wall
+        // as well as a seam in the field — but not several times busier, which is what an
+        // inconsistent handover looks like.
+        var everyoneArrived = arrived == ids.Count;
+        var noSeam = borderRate <= MathF.Max(0.02f, interiorRate * 3f);
+        var passed = everyoneArrived && noSeam && borderSamples > 500;
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    border crossing: arrived={arrived}/{ids.Count} in {ticks / 30f:F1}s, " +
+                $"border-reversals={borderReversals}/{borderSamples} ({borderRate:P2}), " +
+                $"interior={interiorReversals}/{interiorSamples} ({interiorRate:P2})");
+        }
+
+        return passed;
+    }
+
+    private static bool NearRegionBorder(GridCell cell)
+    {
+        const int span = RTSGame.Simulation.Navigation.RegionPartition.CellsPerSide;
+        var x = cell.X % span;
+        var z = cell.Z % span;
+        return x <= 1 || x >= span - 2 || z <= 1 || z >= span - 2;
     }
 
     private static bool LocomotionBehaviorsDriveMovement()

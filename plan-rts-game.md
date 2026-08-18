@@ -12,12 +12,12 @@
 - **This document** is Thread A: the game that goes on top, settled across two long design sessions
   in August 2026. §1–§11 are decided, not speculative — the numbers are derived and the derivations
   are recorded beside them, because they move as a set. **§12 is what is genuinely still open.**
-- **Session 1 is done** (2026-08-18) and its record is in §13 — read it, because it moved the
-  roadmap. The two area-scaled costs it went after were real, were removed, and were never the
-  problem: at 1200 m the tick is ~400 ms and almost all of it is full-grid flow-field rebuilds.
-  **Session 3 (portal routing) is now what the large map waits on**, and Session 2's stated
-  precondition — a 1200 m map that runs smoothly — does not hold until it lands. **Start there, or
-  take Session 2 on the 30 m world with that limitation stated.**
+- **Sessions 1 and 3 are done** (2026-08-18) and their records are in §13. Between them the 1200 m
+  map went from a 549 ms tick and a 4.1 s move order to a **16.6 ms tick at 2,000 agents and a
+  42-93 ms move order**, with route quality measured at 1.006x the flat optimum and the tuned 30 m
+  world bit-identical throughout. **Start at Session 2** — its precondition, a large map that runs
+  well enough to judge the body on, now holds. Session 3's leftover is named at the end of its
+  record and is a lever, not a defect.
 
 Four things that will bite you if you skip them:
 
@@ -706,13 +706,17 @@ nothing.
 
 ## 10. Engineering consequences
 
-### Flat global fields are dead at every candidate size — on memory, not on timing
+### Flat global fields are dead at every candidate size — on memory, and, it turned out, on timing
 
 One field is 10–23 MB, multiplied by distinct goal × body radius × retained congestion revision, and
 discarded wholesale on every nav edit. That is arithmetic, not a performance guess, so **the
 architecture decision does not wait on the scale proof and does not depend on which map size wins.**
 What still needs measuring is the *constants* — region size, portal density, cache depth, and whether
 the hauling workload behaves. Architecture from arithmetic; constants from measurement.
+
+**Measured, Session 1:** they were dead on timing too, and by more than the memory argument suggested
+— 4.1 s for the first route on a 1200 m map and ~390 ms of every tick after it. The arithmetic was
+right about the conclusion and understated the case.
 
 ### Portal routing over 32 m regions
 
@@ -932,10 +936,9 @@ Two guards were added rather than assumed, both covering failures no movement me
 and it wants the 1200 m map running smoothly so the body can be judged on the real thing rather than
 extrapolated from 30 m.
 
-> **That precondition is not met by Session 1 and was expected to be.** The area costs are gone but
-> routing is not: a 1200 m map ticks at ~400 ms because every route is a Dijkstra over 5.76M cells.
-> Either take this session **after Session 3**, or take it on the 30 m world now and re-judge the
-> body on the large map afterwards — which is the same extrapolation this session exists to avoid.
+> **That precondition now holds.** It did not after Session 1 — the area costs were gone but routing
+> was not — and Session 3 was taken first for exactly this reason. A 1200 m map with 2,000 bodies
+> ticks at 16.6 ms, so the body can be judged on the real thing.
 
 Settle top speed, acceleration, deceleration and time compression on the live overlay — §3 has the
 proposed starting points and the reasoning for each. **Then** re-base the self-test thresholds
@@ -947,29 +950,86 @@ metrics are speed-invariant, so only the **time-based** thresholds move.
 **Gate:** 37/37 with the new body, and every moved threshold recorded with its old value and the
 reason it moved — otherwise the next reader cannot tell a deliberate re-base from a regression.
 
-### Session 3 — Portal routing
+### Session 3 — Portal routing — **done, 2026-08-18**
 
-Region partition at 32 m (64x64 fine cells, deliberately comparable to the 3,600-cell world every
-Thread B constant was measured on), portal identification along region borders, an abstract graph
-with edge costs from local searches, refinement into per-region local fields, and region-scoped
-revisions. **The fine layer stays at 0.5 m and is not touched.**
+Built as specified: region partition at 32 m (64x64 fine cells), portals along region borders, a
+graph over portal *sides*, region-local searches for edge costs, refinement into per-region tiles,
+and per-region congestion stamps. **The fine layer is at 0.5 m and was not touched.**
 
-Two risks, both of the kind that gets discovered late unless planned for:
+Four decisions made inside the implementation, three of them load-bearing:
 
-1. **Congestion has to reach the abstract graph.** It currently feeds `BuildFlowField` directly. If
-   abstract edge costs do not carry it, routes stop responding to jams at map scale and the
-   congestion layer is silently deleted for any route longer than one region. This is a design
-   question inside the implementation, not a detail of it.
-2. **Region-boundary artefacts** are the classic HPA* failure mode. The pen and gate tests should be
-   unaffected because the fine layer is untouched — but the *handoff* from abstract path to local
-   flow is new. Wants a purpose-built test that routes a group across several boundaries and
-   measures direction stability at each crossing.
+1. **Nodes are portal sides, not portals.** One node per crossing would make the crossing itself
+   free; on a route over forty regions that is four seconds of cost that is not there, in a layer
+   whose whole discipline is that cost means seconds. Twice the nodes, and worth it.
+2. **Nothing is eager.** The graph is structural and built in 2-3 ms; edge costs are computed the
+   first time a crossing is expanded and cached against *that region's* congestion stamp; a tile is
+   refined the first time something asks what a cell in it costs. Route cost is therefore
+   proportional to how far the asking bodies are from their goal rather than to the size of the map.
+3. **The abstract search is goal-directed, and that is the whole ballgame.** A plain Dijkstra from
+   the goal settles every crossing nearer than the one it wants — a disc, where a route needs a
+   corridor — and since settling a crossing costs a region-local search, the disc measured **759
+   searches and 1.1 s for one 60 m move order**. With an octile-distance heuristic over the fastest
+   ground the game has (admissible, so settled costs stay exact) the same order is 37 searches.
+4. **A tile is seeded from every crossing the search has *priced*, not only those it has settled.**
+   An unsettled price is an upper bound, which only ever makes a crossing look dearer than it is. That
+   is what lets the search stop the moment the best way out of a region is certain — see the measured
+   horizon below.
 
-**Gate:** 37/37; new long-route tests at 1200 m; group-order cost inside the tick budget at 1200 m.
+**The horizon was a guess, then it was measured.** The search originally kept looking a region and a
+half past the cheapest crossing, on the reasoning that a better alternative might still turn up.
+`--routingtest` compares hierarchical cost against the flat whole-map search, cell by cell, on a
+200 m map of staggered walls:
 
-**This is the session most likely to cost a second one.** Sessions 1, 2 and 4 are contained; 5 and 6
-are large but well understood; this is the one where a decision inside the implementation can send
-you back.
+| horizon | mean ratio | p99 | worst | cells lost | searches |
+|---|---|---|---|---|---|
+| 0 cells | 1.0064 | 1.0621 | 1.678 | **0** | 643 |
+| 32 cells | 1.0051 | 1.0621 | 1.678 | **0** | 685 |
+| 96 cells | 1.0051 | 1.0621 | 1.678 | **0** | 693 |
+
+It buys thirteen ten-thousandths of mean route cost, changes neither the tail nor the worst case, and
+costs 4.5x the work at 1200 m — a move order at 460 ms against 102 ms. **So it is zero.** The dial is
+left in the code with those numbers beside it rather than deleted, because the next person to wonder
+whether the search stops too early should re-run the measurement rather than re-reason it.
+
+**What it cost and what it bought,** at 1200 m, the whole tick:
+
+| | before | after |
+|---|---|---|
+| one move order (500 / 2000 agents) | 4,108 / 4,022 ms | **42 / 93 ms** |
+| moving tick, 500 agents | 549 ms | **2.9 ms** |
+| moving tick, 1000 agents | 536 ms | **8.8 ms** |
+| moving tick, 2000 agents | 571 ms | **16.6 ms** |
+| graph | — | 1,444 regions, 11,100 portals, 22,200 nodes, built in 2-3 ms |
+
+§10's portal arithmetic predicted ~17k nodes for the large map against 22.2k measured, and one local
+field at 16 KB, which is what a tile is. The route quality that buys: **mean 1.006x the flat optimum,
+p99 1.06x, worst cell 1.68x, and not one cell lost.**
+
+**Gate: met, with one qualification.** `--selftest` **42/42**, and every metric on the tuned 30 m
+world is **bit-identical** to before this session — that world is a single region with no borders, so
+the hierarchy provably has nothing to say about it, which is why it could land without re-tuning a
+constant. Two new tests cover what the old suite structurally cannot. The qualification: a move order
+at 1200 m costs 42-93 ms against a 33 ms tick, so it is one to three frames rather than inside one.
+It was 124 ticks.
+
+**Both named risks were real and both are handled.** Congestion reaches the graph because the
+region-local searches charge `CongestionCost` exactly as the fine layer does, and the per-region
+stamps mean a jam in one corner of the map does not invalidate every region's cached crossing costs.
+Boundary artefacts are measured rather than hoped for: `a group crosses region borders without
+swinging` counts heading reversals for bodies within two cells of a border against bodies well inside
+a region, because a seam in the cost field shows up as bodies changing their minds at borders and
+nowhere else.
+
+**What is left, and it is the next lever rather than a defect.** The moving tick at 1200 m is still
+two thirds `preferred` + `recovery`: 27 whole fields rebuilt per 120 ticks because a congestion
+revision invalidates the field wholesale. The stamps needed to invalidate *per region* already exist
+and are already used for crossing costs — spending them on the field cache too is the obvious next
+step, and it is what would take a move order inside one tick.
+
+> **Testing note.** The fidelity test runs on a 200 m map, not 1200 m, because it compares against
+> the flat search it replaces and building that reference costs seconds at 1200 m. The 200 m map is
+> 49 regions and 324 portals, which exercises every path the big map does; 1200 m behaviour is
+> measured by `--scale` instead.
 
 ### Session 4 — Unit types
 

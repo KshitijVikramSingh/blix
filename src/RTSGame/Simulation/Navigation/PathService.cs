@@ -13,7 +13,7 @@ internal readonly record struct PathResult(
     Vector2 Destination,
     GridCell[] RouteCells);
 
-internal sealed class PathService
+internal sealed partial class PathService
 {
     public bool HasTerrainVariation => terrain.Revision > 0;
     private const float DiagonalCost = 1.41421356f;
@@ -196,7 +196,7 @@ internal sealed class PathService
     private readonly PlacementGrid placement;
     private readonly NavigationGrid grid;
     private readonly CongestionField congestion;
-    private readonly Dictionary<(int Goal, int Radius, int Nav, int Congestion, bool Turns), float[]> flowFields = new();
+    private readonly Dictionary<(int Goal, int Radius, int Nav, int Congestion, bool Turns), FlowField> flowFields = new();
     /// <summary>
     /// Per-cell memo of whether a body of a given radius fits at the cell centre,
     /// as 0 unknown / 1 admitted / 2 refused, keyed by radius in centimetres.
@@ -240,6 +240,7 @@ internal sealed class PathService
         this.placement = placement;
         this.grid = grid;
         this.congestion = congestion;
+        partition = new RegionPartition(grid.Transform);
     }
 
     /// <summary>
@@ -254,10 +255,20 @@ internal sealed class PathService
     /// </remarks>
     private float CongestionCost(GridCell from, GridCell to, float turnSeconds)
     {
+        // Almost every edge of almost every search crosses ground nobody is stuck on, and
+        // on that ground this whole function is a multiplication by zero — two square
+        // roots for the directional factors, a normalise, and a clearance ramp, to arrive
+        // at nothing. Since Session 1 the field knows exactly which cells hold pressure,
+        // so the common case can be two array reads. Not an approximation: zero pressure
+        // gives zero cost through every branch below.
+        var here = congestion.At(from);
+        var there = congestion.At(to);
+        if (here <= 0f && there <= 0f) return 0f;
+
         var travel = grid.CellCenter(to) - grid.CellCenter(from);
         if (travel.LengthSquared() > 0.0001f) travel = Vector2.Normalize(travel);
-        var pressure = congestion.At(from) * congestion.DirectionalFactor(from, travel) +
-                       congestion.At(to) * congestion.DirectionalFactor(to, travel);
+        var pressure = here * congestion.DirectionalFactor(from, travel) +
+                       there * congestion.DirectionalFactor(to, travel);
         return pressure * 0.5f * CongestionSecondsPerPressure * ManoeuvreAmplification(turnSeconds);
     }
 
@@ -333,7 +344,7 @@ internal sealed class PathService
             : FindNearestWalkable(goalCell, agentRadius);
         if (resolved is not { } goal) return false;
         var costs = GetFlowField(goal, agentRadius, congestion.Revision, chargeTurns: false);
-        var cost = costs[grid.Transform.Index(fromCell)];
+        var cost = costs.CostAt(fromCell);
         if (!float.IsFinite(cost)) return false;
         seconds = cost;
         return true;
@@ -349,7 +360,7 @@ internal sealed class PathService
         if (resolved is not { } goal) return false;
 
         var costs = GetFlowField(goal, agentRadius, congestion.Revision);
-        var cost = costs[grid.Transform.Index(slotCell)];
+        var cost = costs.CostAt(slotCell);
         if (!float.IsFinite(cost)) return false;
         var direct = Vector2.Distance(slot, target) / ReferenceSpeed;
         return cost <= direct * SlotDetourTolerance + SlotDetourSlack;
@@ -823,14 +834,14 @@ internal sealed class PathService
 
         var costs = GetFlowField(resolvedGoal, agentRadius, congestion.Revision);
 
-        var currentCost = costs[grid.Transform.Index(current)];
+        var currentCost = costs.CostAt(current);
         var best = current;
         var bestCost = currentCost;
         foreach (var offset in NeighborOffsets)
         {
             var next = new GridCell(current.X + offset.X, current.Z + offset.Z);
             if (!CanTraverse(current, next, agentRadius)) continue;
-            var nextCost = costs[grid.Transform.Index(next)];
+            var nextCost = costs.CostAt(next);
             if (nextCost >= bestCost - 0.0001f) continue;
             best = next;
             bestCost = nextCost;
@@ -876,7 +887,7 @@ internal sealed class PathService
         if (goal is not { } resolvedGoal) return Vector2.Zero;
 
         var costs = GetFlowField(resolvedGoal, agentRadius, congestionRevision);
-        var centerCost = costs[grid.Transform.Index(current)];
+        var centerCost = costs.CostAt(current);
         if (!float.IsFinite(centerCost)) return Vector2.Zero;
 
         var blockedCost = centerCost + BlockedFlowSeconds;
@@ -923,7 +934,7 @@ internal sealed class PathService
         return FlowDirection(position, requestedGoal, agentRadius);
     }
 
-    private float SampleFlowCost(float[] costs, Vector2 position, float blockedCost)
+    private float SampleFlowCost(FlowField costs, Vector2 position, float blockedCost)
     {
         var local = (position - grid.Transform.Origin) / grid.Transform.CellSize -
                     new Vector2(0.5f);
@@ -939,12 +950,12 @@ internal sealed class PathService
         return float.Lerp(float.Lerp(c00, c10, tx), float.Lerp(c01, c11, tx), tz);
     }
 
-    private float FlowCostAt(float[] costs, int x, int z, float blockedCost)
+    private float FlowCostAt(FlowField costs, int x, int z, float blockedCost)
     {
         var cell = new GridCell(
             Math.Clamp(x, 0, grid.Width - 1),
             Math.Clamp(z, 0, grid.Height - 1));
-        var cost = costs[grid.Transform.Index(cell)];
+        var cost = costs.CostAt(cell);
         return float.IsFinite(cost) ? cost : blockedCost;
     }
 
@@ -959,7 +970,7 @@ internal sealed class PathService
     /// reads as indecision even when each decision is correct. A caller that asks
     /// for a revision no longer held simply gets the current one.
     /// </remarks>
-    private float[] GetFlowField(
+    private FlowField GetFlowField(
         GridCell goal,
         float agentRadius,
         int congestionRevision,
@@ -986,10 +997,59 @@ internal sealed class PathService
         {
             flowFields.Remove(existing);
         }
-        costs = BuildFlowField(goal, agentRadius, chargeTurns);
+        costs = new FlowField(
+            this,
+            Portals(agentRadius),
+            goal,
+            agentRadius,
+            chargeTurns,
+            GoalRegionTile(goal, agentRadius, chargeTurns));
         FlowFieldBuilds++;
         flowFields[key] = costs;
         return costs;
+    }
+
+    /// <summary>
+    /// Seconds charged for the one backward step from <paramref name="current"/> to
+    /// <paramref name="previous"/> while building a cost-to-goal field.
+    /// </summary>
+    /// <remarks>
+    /// Extracted so the region-local searches underneath the portal graph charge exactly
+    /// this and not something that merely resembles it. Two costs quoted in seconds that
+    /// disagree by a rounding are two different maps, and the abstract layer's whole
+    /// claim is that its numbers are comparable with the fine layer's.
+    /// </remarks>
+    private float FlowStepCost(
+        float costAtCurrent,
+        GridCell current,
+        GridCell previous,
+        int directionIndex,
+        int arrivalAtCurrent,
+        float agentRadius,
+        bool chargeTurns,
+        out int travelDirection)
+    {
+        var offset = NeighborOffsets[directionIndex];
+        var stepCost = offset.X != 0 && offset.Z != 0 ? DiagonalCost : 1f;
+        var surfaceCost = (grid.TraversalCost(current) + grid.TraversalCost(previous)) * 0.5f;
+        var elevationCost = MathF.Abs(grid.HeightAt(previous) - grid.HeightAt(current)) *
+                            ClimbSecondsPerMetre;
+        // Built backwards from the goal, so a body travelling this edge moves from
+        // `previous` to `current` and the heading it carries into `current` is the
+        // reverse of the offset being explored.
+        travelDirection = OppositeDirection(directionIndex);
+        var turnSeconds = chargeTurns
+            ? TurnCost(travelDirection, arrivalAtCurrent, current, agentRadius)
+            : 0f;
+        // The running total is summed in here rather than by the caller, and the terms
+        // stay in this order, because float addition does not associate: adding the four
+        // components together first and the total afterwards is a different number in the
+        // last bit, and a different number in the last bit is a different route out of a
+        // Dijkstra. Keeping the arithmetic identical is what lets the region-bounded
+        // search below be compared against the flat one and any difference be attributed
+        // to the hierarchy rather than to having moved an expression.
+        return costAtCurrent + stepCost * SecondsPerCell * surfaceCost + elevationCost +
+               CongestionCost(current, previous, turnSeconds) + turnSeconds;
     }
 
     private float[] BuildFlowField(GridCell goal, float agentRadius, bool chargeTurns = true)
@@ -1022,20 +1082,15 @@ internal sealed class PathService
                 if (!CanTraverseFlow(previous, current, agentRadius)) continue;
                 var previousIndex = grid.Transform.Index(previous);
                 if (closed[previousIndex]) continue;
-                var stepCost = offset.X != 0 && offset.Z != 0 ? DiagonalCost : 1f;
-                var surfaceCost = (grid.TraversalCost(current) + grid.TraversalCost(previous)) * 0.5f;
-                var elevationCost = MathF.Abs(grid.HeightAt(previous) - grid.HeightAt(current)) *
-                                    ClimbSecondsPerMetre;
-                // Built backwards from the goal, so a body travelling this edge moves from
-                // `previous` to `current` and the heading it carries into `current` is the
-                // reverse of the offset being explored.
-                var travelDirection = OppositeDirection(directionIndex);
-                var turnSeconds = chargeTurns
-                    ? TurnCost(travelDirection, arrival[currentIndex], current, agentRadius)
-                    : 0f;
-                var nextCost = costs[currentIndex] + stepCost * SecondsPerCell * surfaceCost +
-                               elevationCost + CongestionCost(current, previous, turnSeconds) +
-                               turnSeconds;
+                var nextCost = FlowStepCost(
+                    costs[currentIndex],
+                    current,
+                    previous,
+                    directionIndex,
+                    arrival[currentIndex],
+                    agentRadius,
+                    chargeTurns,
+                    out var travelDirection);
                 if (nextCost >= costs[previousIndex]) continue;
                 costs[previousIndex] = nextCost;
                 arrival[previousIndex] = travelDirection;
