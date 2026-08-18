@@ -199,7 +199,7 @@ internal static class ScaleScenarios
     /// it settles on the way costs a region-local search. Reported here rather than assumed
     /// to be the same.
     /// </remarks>
-    public static int RunOrderDistance(float extentMeters, int agentCount)
+    public static int RunOrderDistance(float extentMeters, int agentCount, bool sculpted = false)
     {
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         var warmup = new SimulationWorld();
@@ -261,8 +261,12 @@ internal static class ScaleScenarios
         // what a player does, and not what "every click hitches" meant.
         Console.WriteLine("  successive orders in one world, scattered targets");
         var repeated = new SimulationWorld(extentMeters);
+        if (sculpted) WorldTerrainScenarios.Populate(repeated, issueGroupMove: false);
         var crowd = Populate(repeated, agentCount, issueGroupMove: false);
         repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        Console.WriteLine(
+            $"  regions {repeated.RegionCount:N0} | portals {repeated.PortalCount:N0} | " +
+            $"terrain {(sculpted ? "ridge, lake and road" : "empty")}");
         for (var order = 0; order < 8; order++)
         {
             // Eight points around the map, each well away from the last.

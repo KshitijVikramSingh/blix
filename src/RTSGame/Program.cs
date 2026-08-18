@@ -82,7 +82,10 @@ public static class Program
         {
             var orderExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 1200f;
             var orderAgents = Value(args, "--agents") is { } count ? int.Parse(count) : 30;
-            Environment.Exit(ScaleScenarios.RunOrderDistance(orderExtent, orderAgents));
+            Environment.Exit(ScaleScenarios.RunOrderDistance(
+                orderExtent,
+                orderAgents,
+                args.Contains("--terrain")));
         }
 
         if (args.Contains("--routingtest"))

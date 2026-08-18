@@ -28,6 +28,18 @@ namespace RTSGame.Simulation.Navigation;
 internal sealed class RegionPartition
 {
     /// <summary>Fine cells along one side of a region.</summary>
+    /// <remarks>
+    /// Measured against 32 cells — 16 m regions — on a map with a ridge across it, where the
+    /// analytic fast path does not apply and tiles are genuinely searched. Halving the region
+    /// is roughly twice as fast there: four times as many searches, each a quarter the size,
+    /// and the worst order goes from 186 ms to 90 ms. It is still refused, for two reasons.
+    /// Route quality drops — mean 1.0056 to 1.0091, p99 1.061 to 1.094 — because more borders
+    /// means more places the "cannot leave a region and come back" approximation bites. And,
+    /// decisively, 60 fine cells no longer fit in one region, so the tuned 30 m world stops
+    /// being a single region and the hierarchy starts having opinions about it. The terrain
+    /// ramp test fails immediately. That property is what has kept every locomotion constant
+    /// valid through the whole of this work.
+    /// </remarks>
     public const int CellsPerSide = 64;
     /// <summary>Fine cells in a full region, which is also a tile's length.</summary>
     public const int CellsPerRegion = CellsPerSide * CellsPerSide;
