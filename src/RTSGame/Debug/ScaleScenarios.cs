@@ -186,4 +186,98 @@ internal static class ScaleScenarios
         var reach = MathF.Min(world.ExtentMeters * 0.25f, 60f);
         return new Vector2(reach, 0f);
     }
+
+    /// <summary>
+    /// What a move order costs as a function of how far it is, which is the measurement
+    /// the rest of this file quietly avoided.
+    /// </summary>
+    /// <remarks>
+    /// Every case above orders a sixty-metre move, because that is what keeps a crowd in
+    /// transit for a hundred and twenty ticks. It is also, on a kilometre map, a short walk
+    /// — and a player who clicks the far edge is asking a different question of the router
+    /// entirely: the abstract search has to reach across the whole map, and every crossing
+    /// it settles on the way costs a region-local search. Reported here rather than assumed
+    /// to be the same.
+    /// </remarks>
+    public static int RunOrderDistance(float extentMeters, int agentCount)
+    {
+        CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
+        var warmup = new SimulationWorld();
+        Populate(warmup, 200, issueGroupMove: true);
+        for (var i = 0; i < 30; i++) warmup.Tick((float)SimulationWorld.FixedDeltaSeconds);
+
+        Console.WriteLine(
+            $"RTSGame move-order cost by distance | {extentMeters:F0} m map | {agentCount} agents");
+        Console.WriteLine("  the order tick, and the ten ticks after it, as a player would feel them");
+        Console.WriteLine();
+
+        var half = extentMeters * 0.5f;
+        foreach (var weight in new[] { 1f, 1.5f, 2f, 3f })
+        {
+        RTSGame.Simulation.Navigation.PathService.HeuristicWeight = weight;
+        Console.WriteLine($"  heuristic weight {weight:F1}");
+        foreach (var fraction in new[] { 0.05f, 0.25f, 0.5f, 0.95f })
+        {
+            var world = new SimulationWorld(extentMeters);
+            var ids = Populate(world, agentCount, issueGroupMove: false);
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+
+            var distance = (half * 2f - 12f) * fraction;
+            var target = new Vector2(-half + 6f + distance, 0f);
+            var searchesBefore = world.RegionSearches;
+            world.QueueMove(ids, target);
+            var orderStart = Stopwatch.GetTimestamp();
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            var orderMilliseconds = Stopwatch.GetElapsedTime(orderStart).TotalMilliseconds;
+
+            var followStart = Stopwatch.GetTimestamp();
+            for (var tick = 0; tick < 10; tick++)
+            {
+                world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            }
+
+            var followMilliseconds = Stopwatch.GetElapsedTime(followStart).TotalMilliseconds / 10.0;
+            Console.WriteLine(
+                $"  {distance,7:F0} m | order {orderMilliseconds,8:F1} ms | " +
+                $"next ticks {followMilliseconds,7:F2} ms | " +
+                $"searches {world.RegionSearches - searchesBefore,6:N0} | " +
+                $"tiles {world.TileRefinements:N0}");
+        }
+
+        Console.WriteLine();
+        }
+
+        RTSGame.Simulation.Navigation.PathService.HeuristicWeight = 1f;
+
+        // What a player actually does: click somewhere else, in the same world, again and
+        // again. Crossing costs are cached against terrain and congestion, not against the
+        // goal, so the question is how much of the first order's price the second one
+        // inherits — and every case above answered a different question by building a fresh
+        // world each time.
+        Console.WriteLine("  successive orders in one world, alternating ends");
+        var repeated = new SimulationWorld(extentMeters);
+        var crowd = Populate(repeated, agentCount, issueGroupMove: false);
+        repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        for (var order = 0; order < 8; order++)
+        {
+            var side = order % 2 == 0 ? 1f : -1f;
+            var drift = 1f - order * 0.07f;
+            var searchesBefore = repeated.RegionSearches;
+            repeated.QueueMove(crowd, new Vector2((half - 20f) * side * drift, (half - 20f) * side * 0.3f));
+            var start = Stopwatch.GetTimestamp();
+            repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            Console.WriteLine(
+                $"  order {order + 1} | {Stopwatch.GetElapsedTime(start).TotalMilliseconds,8:F1} ms | " +
+                $"searches {repeated.RegionSearches - searchesBefore,6:N0} | " +
+                $"cached ingress {repeated.CachedIngressCount:N0}");
+            for (var tick = 0; tick < 20; tick++)
+            {
+                repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            }
+        }
+
+        return 0;
+    }
 }

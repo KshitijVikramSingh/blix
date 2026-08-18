@@ -77,6 +77,7 @@ internal sealed class FlowField
     private readonly PriorityQueue<int, float> open = new();
     private readonly int[] goalSeeds;
     private readonly float[] goalSeedCosts;
+    private float runWeight = 1f;
     private int targetMinimumX;
     private int targetMinimumZ;
     private int targetMaximumX;
@@ -204,17 +205,18 @@ internal sealed class FlowField
     /// corridor found for the first instead of paying for it twice.
     /// </para>
     /// </remarks>
-    public void SettleRegion(int region, float regionSpanSeconds)
+    public bool SettleRegion(int region, float regionSpanSeconds, float heuristicWeight)
     {
         var nodes = Portals.NodesIn(region);
-        if (nodes.Length == 0) return;
+        if (nodes.Length == 0) return true;
+        runWeight = heuristicWeight;
         var pending = 0;
         foreach (var node in nodes)
         {
             if (!settled[node]) pending++;
         }
 
-        if (pending == 0) return;
+        if (pending == 0) return true;
 
         run++;
         open.Clear();
@@ -248,13 +250,33 @@ internal sealed class FlowField
             if (Portals.RegionOfNode(current) != region) continue;
             pending--;
             bestInRegion = MathF.Min(bestInRegion, cost);
-            if (regionSpanSeconds <= 0f) break;
-            // Everything still queued is at least this far out, and a crossing further
-            // from the goal than the cheapest one here — plus what crossing this region
-            // could cost — cannot give any cell in it a better route. PathService says why
-            // that bound is geometric and therefore optimistic on slow ground.
-            if (estimate > bestInRegion + regionSpanSeconds) break;
+            // Stopping here needs every crossing out of this region to at least have a
+            // price, not just the cheapest one to be certain. Expanding one crossing offers
+            // all the others it can reach without leaving the region, so in a region that is
+            // simply connected this is true immediately and the search stops at once. A
+            // region cut in two by a wall is the case that matters: its far crossings are a
+            // separate component, reachable only the long way round, and leaving them
+            // unpriced leaves every cell behind that wall with no route at all. Measured on
+            // the walled map, that was six point seven per cent of the ground gone — bodies
+            // standing on perfectly good terrain believing they were trapped.
+            // Everything still queued is at least this far out, and a crossing further from
+            // the goal than the cheapest one here — plus what crossing this region could
+            // cost — cannot give any cell in it a better route. PathService says why that
+            // bound is geometric and therefore optimistic on slow ground.
+            if (estimate > bestInRegion + regionSpanSeconds && EveryNodePriced(nodes)) break;
         }
+
+        return EveryNodePriced(nodes);
+    }
+
+    private bool EveryNodePriced(ReadOnlySpan<int> nodes)
+    {
+        foreach (var node in nodes)
+        {
+            if (!float.IsFinite(bestKnownCost[node])) return false;
+        }
+
+        return true;
     }
 
     /// <summary>Offers a crossing to the current run's frontier at a known cost.</summary>
@@ -263,12 +285,18 @@ internal sealed class FlowField
     private void Offer(int node, float cost)
     {
         if (!float.IsFinite(cost)) return;
-        if (runStamp[node] == -run) return;
-        if (runStamp[node] == run && cost >= runCost[node]) return;
+        // Reopening. With an exact heuristic a crossing is settled correctly the first time
+        // it is expanded and can be closed forever; with an inflated one it can be expanded
+        // on a bad estimate, and refusing it a second look means every crossing reachable
+        // only through it is never priced at all. That is not a longer route, it is a region
+        // whose far side has no route — measured as four regions and 3.5% of the ground on
+        // the walled map before this line existed.
+        var touched = runStamp[node] == run || runStamp[node] == -run;
+        if (touched && cost >= runCost[node]) return;
         runStamp[node] = run;
         runCost[node] = cost;
         if (cost < bestKnownCost[node]) bestKnownCost[node] = cost;
-        open.Enqueue(node, cost + owner.RegionApproachSeconds(
+        open.Enqueue(node, cost + runWeight * owner.RegionApproachSeconds(
             Portals.CellOfNode(node),
             targetMinimumX,
             targetMinimumZ,

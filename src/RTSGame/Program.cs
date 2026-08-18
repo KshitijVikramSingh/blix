@@ -24,6 +24,13 @@ public static class Program
             Environment.Exit(ScaleScenarios.Run(extents, counts));
         }
 
+        if (args.Contains("--ordertest"))
+        {
+            var orderExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 1200f;
+            var orderAgents = Value(args, "--agents") is { } count ? int.Parse(count) : 30;
+            Environment.Exit(ScaleScenarios.RunOrderDistance(orderExtent, orderAgents));
+        }
+
         if (args.Contains("--routingtest"))
         {
             Environment.Exit(RegionRoutingScenarios.Run(ParseFloats(args, "--spans")));

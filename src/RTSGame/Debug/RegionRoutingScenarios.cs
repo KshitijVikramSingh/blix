@@ -42,24 +42,25 @@ internal static class RegionRoutingScenarios
             $"extent {probe.ExtentMeters:F1} m");
         Console.WriteLine();
 
-        var original = PathService.RegionSpanCells;
-        foreach (var span in spans ?? new[] { 0f, 16f, 32f, 64f, 96f })
+        var original = PathService.HeuristicWeight;
+        foreach (var span in spans ?? new[] { 1f, 1.25f, 1.5f, 2f, 3f })
         {
-            PathService.RegionSpanCells = span;
+            PathService.HeuristicWeight = span;
             var world = Build();
             var fidelity = world.MeasureRoutingFidelity(
                 new Vector2(ExtentMeters * 0.42f, ExtentMeters * 0.42f),
                 AgentDefaults.Radius);
             Console.WriteLine(
-                $"  span {span,3:F0} cells | mean {fidelity.MeanRatio:F4} | " +
+                $"  weight {span,4:F2} | mean {fidelity.MeanRatio:F4} | " +
                 $"p99 {fidelity.NinetyNinthRatio:F4} | worst {fidelity.WorstRatio:F3} " +
                 $"at {fidelity.WorstCell.X},{fidelity.WorstCell.Z} | " +
                 $"lost {fidelity.UnreachableCells}/{fidelity.ReachableCells} | " +
                 $"settled {fidelity.SettledNodes} | tiles {fidelity.RefinedRegions} | " +
-                $"searches {fidelity.RegionSearches}");
+                $"searches {fidelity.RegionSearches} | " +
+                $"seedless {fidelity.SeedlessRegions} | partial {fidelity.UnpricedSeedRegions}");
         }
 
-        PathService.RegionSpanCells = original;
+        PathService.HeuristicWeight = original;
         return 0;
     }
 

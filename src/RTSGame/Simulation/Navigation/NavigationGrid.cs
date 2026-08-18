@@ -40,10 +40,18 @@ internal sealed class NavigationGrid
     public bool CanTraverse(GridCell from, GridCell to, float agentRadius)
     {
         if (!IsWalkable(from, agentRadius) || !IsWalkable(to, agentRadius)) return false;
-        var horizontalDistance = Vector2.Distance(CellCenter(from), CellCenter(to));
         var heightDelta = MathF.Abs(HeightAt(to) - HeightAt(from));
-        return heightDelta <= Terrain.TerrainMap.MaximumStepHeight &&
-               heightDelta / MathF.Max(horizontalDistance, 0.0001f) <= Terrain.TerrainMap.MaximumTraversableGrade;
+        if (heightDelta > Terrain.TerrainMap.MaximumStepHeight) return false;
+        // Level ground has no grade, so there is nothing for the distance to divide into.
+        // Not an approximation — zero over any positive number is zero, and the grade limit
+        // is positive — and it matters because this is the hottest predicate under the
+        // routing searches: up to five calls per diagonal edge, eight edges per cell, each
+        // otherwise paying two cell-centre reconstructions and a square root to arrive at
+        // that same answer. Most of a map is flat, and all of an unsculpted one is.
+        if (heightDelta <= 0f) return true;
+        var horizontalDistance = Vector2.Distance(CellCenter(from), CellCenter(to));
+        return heightDelta / MathF.Max(horizontalDistance, 0.0001f) <=
+               Terrain.TerrainMap.MaximumTraversableGrade;
     }
 
     internal void ReplaceRaster(
