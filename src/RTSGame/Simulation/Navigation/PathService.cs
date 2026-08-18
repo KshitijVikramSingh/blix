@@ -58,7 +58,7 @@ internal sealed partial class PathService
     /// navigation layer does not need to know what an agent is; if the two ever disagree,
     /// route cost stops being seconds and starts being a number.
     /// </remarks>
-    private const float ReferenceSpeed = 1.5f;
+    private const float ReferenceSpeed = 1.79f;
     /// <summary>Seconds of delay represented by one unit of measured backpressure.</summary>
     /// <remarks>
     /// Deliberately large. It looks like it should send units on absurd detours,
@@ -81,7 +81,7 @@ internal sealed partial class PathService
     /// is too far: it breaks the narrow-chokepoint test, where the crowd starts detouring
     /// around a queue it should simply join.
     /// </remarks>
-    internal static float CongestionCellsPerPressure = 5.4f;
+    internal static float CongestionCellsPerPressure = 8.06f;
 
     /// <summary>Seconds of delay represented by one unit of measured backpressure.</summary>
     /// <remarks>
@@ -103,7 +103,7 @@ internal sealed partial class PathService
     /// </remarks>
     private float CongestionSecondsPerPressure => CongestionCellsPerPressure * SecondsPerCell;
     /// <summary>Extra seconds charged per metre of climb.</summary>
-    internal static float ClimbSecondsPerMetre = 0.60f * Agents.AgentDefaults.PaceScale;
+    internal static float ClimbSecondsPerMetre = 1.68f;
     /// <summary>
     /// Nominal turn rate, in radians per second, that route cost prices turning at.
     /// </summary>
@@ -114,7 +114,7 @@ internal sealed partial class PathService
     /// the navigation layer does not need to know what an agent is; if the two ever
     /// diverge, routes will be planned for a body that does not exist.
     /// </remarks>
-    internal static float ReferenceTurnSpeed = 4.0f;
+    internal static float ReferenceTurnSpeed = 3.03f;
     /// <summary>Seconds to cross one cell of open ground at the reference speed.</summary>
     private float SecondsPerCell => grid.Transform.CellSize / ReferenceSpeed;
     /// <summary>Travel time an unreachable cell reports when sampling the flow field.</summary>

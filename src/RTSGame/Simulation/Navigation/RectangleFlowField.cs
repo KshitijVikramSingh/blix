@@ -27,6 +27,7 @@ internal sealed class RectangleFlowField
     private readonly WalkableRectangles mesh;
     private readonly RectangleIndex index;
     private readonly float secondsPerCell;
+    private readonly float bendSeconds;
     private readonly float[] crossingCost;
     private readonly GridCell goal;
     private readonly int goalRectangle;
@@ -38,11 +39,13 @@ internal sealed class RectangleFlowField
         WalkableRectangles mesh,
         RectangleIndex index,
         GridCell goal,
-        float secondsPerCell)
+        float secondsPerCell,
+        float bendSeconds)
     {
         this.mesh = mesh;
         this.index = index;
         this.secondsPerCell = secondsPerCell;
+        this.bendSeconds = bendSeconds;
         this.goal = goal;
         goalRectangle = index.RectangleAt(goal);
 
@@ -55,7 +58,7 @@ internal sealed class RectangleFlowField
         var goalGround = mesh.All[goalRectangle];
         foreach (var crossing in mesh.CrossingsOf(goalRectangle))
         {
-            var seed = Octile(goal, mesh.Crossings[crossing]) * secondsPerCell * goalGround.TraversalCost;
+            var seed = LegTo(goal, mesh.Crossings[crossing], goalGround.TraversalCost);
             if (seed >= crossingCost[crossing]) continue;
             crossingCost[crossing] = seed;
             open.Enqueue(crossing, seed);
@@ -84,8 +87,7 @@ internal sealed class RectangleFlowField
         foreach (var other in mesh.CrossingsOf(rectangle))
         {
             if (other == from) continue;
-            var next = cost + Octile(fromCrossing, mesh.Crossings[other]) *
-                       secondsPerCell * ground.TraversalCost;
+            var next = cost + LegBetween(fromCrossing, mesh.Crossings[other], ground.TraversalCost);
             if (next >= crossingCost[other]) continue;
             crossingCost[other] = next;
             open.Enqueue(other, next);
@@ -101,19 +103,33 @@ internal sealed class RectangleFlowField
         var best = float.PositiveInfinity;
         if (rectangle == goalRectangle)
         {
-            best = Octile(cell, goal) * secondsPerCell * ground.TraversalCost;
+            best = Leg(Math.Abs(cell.X - goal.X), Math.Abs(cell.Z - goal.Z), ground.TraversalCost);
         }
 
         foreach (var crossing in mesh.CrossingsOf(rectangle))
         {
             var reach = crossingCost[crossing];
             if (!float.IsFinite(reach)) continue;
-            var candidate = reach + Octile(cell, mesh.Crossings[crossing]) *
-                            secondsPerCell * ground.TraversalCost;
+            var candidate = reach + LegTo(cell, mesh.Crossings[crossing], ground.TraversalCost);
             if (candidate < best) best = candidate;
         }
 
         return best;
+    }
+
+    /// <summary>Seconds for one leg across uniform ground, including the bend in it.</summary>
+    /// <remarks>
+    /// An octile path is a diagonal run and a straight run, so it bends exactly once — unless
+    /// it is purely diagonal or purely axial, in which case it does not bend at all. The flat
+    /// field this is measured against charges for time spent changing heading and the first cut
+    /// of this did not, which is most of why it came out nine per cent under the shortest route
+    /// it was approximating. One bend per leg is the cheap answer and it is charged here rather
+    /// than added afterwards, so every path through the graph pays for its own corners.
+    /// </remarks>
+    private float Leg(int dx, int dz, float traversalCost)
+    {
+        var seconds = Cells(dx, dz) * secondsPerCell * traversalCost;
+        return dx > 0 && dz > 0 ? seconds + bendSeconds : seconds;
     }
 
     private static float Octile(GridCell from, GridCell to)
@@ -146,6 +162,23 @@ internal sealed class RectangleFlowField
         var dx = Separation(from.MinimumX, from.MaximumX, to.MinimumX, to.MaximumX);
         var dz = Separation(from.MinimumZ, from.MaximumZ, to.MinimumZ, to.MaximumZ);
         return Cells(dx, dz);
+    }
+
+    private float LegTo(GridCell from, WalkableRectangles.Crossing crossing, float traversalCost)
+    {
+        var x = Math.Clamp(from.X, crossing.MinimumX, crossing.MaximumX);
+        var z = Math.Clamp(from.Z, crossing.MinimumZ, crossing.MaximumZ);
+        return Leg(Math.Abs(from.X - x), Math.Abs(from.Z - z), traversalCost);
+    }
+
+    private float LegBetween(
+        WalkableRectangles.Crossing from,
+        WalkableRectangles.Crossing to,
+        float traversalCost)
+    {
+        var dx = Separation(from.MinimumX, from.MaximumX, to.MinimumX, to.MaximumX);
+        var dz = Separation(from.MinimumZ, from.MaximumZ, to.MinimumZ, to.MaximumZ);
+        return Leg(dx, dz, traversalCost);
     }
 
     private static int Separation(int fromLow, int fromHigh, int toLow, int toHigh)

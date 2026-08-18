@@ -162,9 +162,11 @@ it is a body teleporting to its target velocity."
 used to re-base the self-test thresholds — in that order, never the reverse:
 
 ```
-Walk (worker)         1.5 m/s     was 4.5      SHIPPED
+Walk (worker)         1.79 m/s    was 4.5      SHIPPED — settled on the slider, above the
+                                               proposed 1.5 and just above soldier pace
 Acceleration          2.0 m/s²    was 16       SHIPPED
 Deceleration          3.0 m/s²    was 16       SHIPPED
+Turn rate             3.03 rad/s  was 4.0      SHIPPED
 Soldier               1.7 m/s                  awaits unit types (Session 4)
 Loaded cart           1.1 m/s                  awaits unit types
 Scout / mounted       3.5 m/s                  awaits unit types

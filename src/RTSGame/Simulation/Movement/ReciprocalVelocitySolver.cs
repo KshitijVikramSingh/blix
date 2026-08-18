@@ -13,7 +13,7 @@ namespace RTSGame.Simulation.Movement;
 /// </summary>
 internal sealed class ReciprocalVelocitySolver
 {
-    internal static float NeighborDistance = 3f;
+    internal static float NeighborDistance = 1.52f;
     // Reusing a fraction of last tick's answer as the optimisation target gives
     // the solve a memory. Without it an agent re-derives which side to pass on
     // from scratch every tick and flips between symmetric solutions, which is
@@ -57,7 +57,13 @@ internal sealed class ReciprocalVelocitySolver
     /// route length in neither.
     /// </para>
     /// </remarks>
-    internal static float StaticTimeHorizon = 0.25f * Agents.AgentDefaults.PaceScale;
+    // Tuned on the slider to 0.34 s and left as a plain number, which is the correction that
+    // tuning surfaced. Look-ahead against a wall is geometry, not duration: what matters is how
+    // close a body gets before it reacts, and scaling it with pace made a walking body start
+    // veering away from a wall two-thirds of a metre out — visible as a crowd that will not
+    // pass close to anything. The durations PaceScale is for describe how long a condition
+    // lasts; this one describes a distance wearing a second's clothing.
+    internal static float StaticTimeHorizon = 0.34f;
     /// <summary>
     /// Clearance a body defends off a wall, beyond its own radius.
     /// </summary>

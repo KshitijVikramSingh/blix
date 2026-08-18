@@ -742,7 +742,10 @@ internal sealed partial class PathService
         var reference = BuildFlowField(goal, agentRadius);
         var mesh = WalkableRectangles.Build(grid, agentRadius);
         var rectangleIndex = new RectangleIndex(mesh, grid.Width, grid.Height);
-        var field = new RectangleFlowField(mesh, rectangleIndex, goal, SecondsPerCell);
+        // One bend, on open ground, at the router's own turn rate — the same TurnCost the flat
+        // field charges, evaluated where a rectangle's clearance always puts it: in the open.
+        var bend = TurnCost(0, 4, goal, agentRadius);
+        var field = new RectangleFlowField(mesh, rectangleIndex, goal, SecondsPerCell, bend);
 
         var reachable = 0;
         var lost = 0;

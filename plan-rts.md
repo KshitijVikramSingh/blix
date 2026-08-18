@@ -458,6 +458,16 @@ at once, and a change justified by one of their jobs breaks the other.
   is now a separate rate (steering used one for both, so a body shed speed as gently as it
   built it, which is why a crowd coasts into things rather than stopping short of them),
   defaulted equal so shipped behaviour is unchanged until somebody moves it.
+- **Look-ahead is geometry, not duration — and the slider found it.** Session 2 scaled every
+  second-denominated constant by `PaceScale`, on the reasoning that a body walking takes three
+  times as long to do the same thing. That is right for how long a jam lasts and wrong for how
+  far ahead a body watches a wall: what matters there is how close it gets before it reacts.
+  Scaled, the wall horizon put a walking body's reaction two-thirds of a metre out, which reads
+  as a crowd that will not pass close to anything. Tuned back to 0.34 s by hand — almost exactly
+  the pre-scaling 0.25 — and it is a plain constant now. **Neighbour range went the same way**,
+  halved from 3 m to 1.52. The theme in both is less anticipation: at walking pace with modest
+  acceleration, long look-ahead makes a crowd look nervous. Worth checking the remaining
+  `PaceScale` users against that distinction rather than assuming Session 2 got them all right.
 - **No unit types, combat, resources, or production** — that is the next session.
 
 ---
@@ -669,6 +679,12 @@ is not a good score — it is a lower bound rather than an estimate, and two thi
    rectangle where it entered and leaves where it leaves; taking the closest pair of points on
    the two borders is optimistic, and the optimism compounds along a route. This is the funnel
    problem, arriving exactly where it was predicted to.
+
+**One bend per leg was charged and it moved the mean from 0.9097 to 0.9098** — which settles
+which of the two causes it is. Turns are a rounding error here; **the funnel term is the whole
+nine per cent**, and the expensive fix is the only fix. Carrying the entry point in the search
+state makes it (crossing × entry point) rather than (crossing), which is a real cost increase and
+should be taken only when the partition is otherwise ready to switch.
 
 An underestimate that is *uniform* would be harmless for steering, since the gradient still points
 downhill — but it is not harmless for everything that reads the field in absolute seconds:

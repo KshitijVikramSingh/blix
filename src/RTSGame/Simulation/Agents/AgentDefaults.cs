@@ -38,7 +38,7 @@ internal static class AgentDefaults
     /// <c>plan-rts-game.md</c> §3.
     /// </para>
     /// </remarks>
-    public const float MaximumSpeed = 1.5f;
+    public const float MaximumSpeed = 1.79f;
 
     /// <summary>How hard a body picks up speed, in metres per second squared.</summary>
     /// <remarks>
@@ -89,7 +89,7 @@ internal static class AgentDefaults
     /// cannot take part in that, and the limit doubles as a low-pass filter on
     /// the solver without pretending to be one.
     /// </remarks>
-    public static float MaximumTurnSpeed = 4.0f;
+    public static float MaximumTurnSpeed = 3.03f;
 
     /// <summary>Speed below which a body may turn freely, as it would on the spot.</summary>
     /// <remarks>

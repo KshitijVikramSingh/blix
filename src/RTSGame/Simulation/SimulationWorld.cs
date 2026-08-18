@@ -28,7 +28,7 @@ internal sealed class SimulationWorld
     /// <summary>How much of the next leg's heading is adopted at the corner.</summary>
     internal static float CornerBlendStrength = 0.70f;
     /// <summary>How hard a travelling member pulls back toward its station.</summary>
-    internal static float FormationKeepingGain = 1.6f;
+    internal static float FormationKeepingGain = 1.08f;
     /// <summary>Cap on station-keeping speed, as a fraction of travel speed.</summary>
     internal static float FormationLateralSpeedFraction = 0.45f;
     /// <summary>Per-tick blend of the newly sampled flow direction into the smoothed one.</summary>
