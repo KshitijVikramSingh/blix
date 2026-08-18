@@ -707,12 +707,33 @@ a graph rather than as a sweep.
 safe direction: an over-estimate never claims a route is cheaper than it is, and the residue is a
 path forced through a corner it could have cut.
 
-**What still blocks the switch is congestion, not geometry.** Nothing in this field responds to a
-jam, and route cost that ignores jams deletes the behaviour invariant 15 exists to protect — the
-crowd would stop splitting across exits. Congestion is priced per cell in seconds and a rectangle
-is uniform ground with no notion of it, so it has to arrive either as a surcharge sampled along a
-leg or as a reason to subdivide a rectangle temporarily. That is the next decision and it is a
-design question, not an implementation one.
+### Congestion, sampled along the leg
+
+**Built, 2026-08-19.** A rectangle is uniform ground and has no notion of a jam, so congestion
+arrives by sampling the field along the line a leg actually takes — a sample every four cells,
+capped at 24, with the same directional factor the fine layer uses. A leg is only sampled if its
+rectangle holds pressure at all, which is established once from the live set when the field is
+built, so a leg across clear ground costs what it did before.
+
+| | mean | p99 | worst | lost |
+|---|---|---|---|---|
+| rectangles, clear | 1.0014 | 1.0977 | 1.187 | 0 |
+| rectangles, with a 184-cell jam on the map | **1.0019** | 1.0977 | 1.187 | 0 |
+
+The flat reference charges congestion too, so a field that ignored jams would drift *below* one
+here — a route the reference thinks is dear and this one thinks is cheap. It does not; it moves
+slightly the other way. **That is the right direction but it is weak evidence**, because a
+22 m jam barely moves a mean taken over 154,000 cells. The sharp version of this test compares
+only the cells whose route passes through the jam, and it is worth building before the switch
+rather than after.
+
+**What still blocks the switch is behaviour, not geometry.** The pen scenario is the test that
+matters — thirty units, four exits, and the crowd has to split across more than one of them — and
+it exercises congestion, route commitment, detour grants and the recovery path together. Nothing
+short of running the live suite against this field will say whether the sampled surcharge
+reproduces it, and that means switching, which means the field also has to serve
+`TryOptimalTravelTime`, `IsSlotReachable` and the steering gradient. **That is the next piece of
+work and it is an integration rather than a design question.**
 
 An underestimate that is *uniform* would be harmless for steering, since the gradient still points
 downhill — but it is not harmless for everything that reads the field in absolute seconds:

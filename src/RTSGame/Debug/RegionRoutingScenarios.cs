@@ -79,6 +79,33 @@ internal static class RegionRoutingScenarios
             $"lost {rectangles.UnreachableCells}/{rectangles.ReachableCells} | " +
             $"{rectangles.RefinedRegions:N0} rectangles, {rectangles.SettledNodes:N0} crossings settled | " +
             $"whole comparison in {rectangleWatch.ElapsedMilliseconds} ms");
+
+        // Does a jam reach the rectangle field at all? The flat reference charges congestion
+        // too, so if this field ignored it the ratio would fall away below one — a route the
+        // reference thinks is dear and this one thinks is cheap. Immovable bodies are the
+        // quickest way to make pressure without waiting for a crowd to develop one.
+        var jammed = Build();
+        var wall = new List<AgentId>();
+        for (var i = 0; i < 40; i++)
+        {
+            wall.Add(jammed.SpawnAgent(
+                new Vector2(ExtentMeters * 0.10f, -ExtentMeters * 0.20f + i * 0.55f),
+                maximumSpeed: 0f));
+        }
+
+        for (var tick = 0; tick < 40; tick++)
+        {
+            jammed.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        }
+
+        var jammedFidelity = jammed.MeasureRectangleFidelity(
+            new Vector2(ExtentMeters * 0.42f, ExtentMeters * 0.42f),
+            AgentDefaults.Radius);
+        Console.WriteLine(
+            $"  with a jam   | mean {jammedFidelity.MeanRatio:F4} | " +
+            $"p99 {jammedFidelity.NinetyNinthRatio:F4} | worst {jammedFidelity.WorstRatio:F3} | " +
+            $"lost {jammedFidelity.UnreachableCells}/{jammedFidelity.ReachableCells} | " +
+            $"live cells {jammed.Congestion.LiveCellCount:N0}");
         return 0;
     }
 

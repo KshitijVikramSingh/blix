@@ -1,3 +1,4 @@
+using System.Numerics;
 using RTSGame.Simulation.Spatial;
 
 namespace RTSGame.Simulation.Navigation;
@@ -28,6 +29,12 @@ internal sealed class RectangleFlowField
     private readonly RectangleIndex index;
     private readonly float secondsPerCell;
     private readonly float bendSeconds;
+    private readonly CongestionField congestion;
+    private readonly float congestionSecondsPerPressure;
+    // Which rectangles hold any pressure at all, walked once from the live set. A leg across
+    // clear ground is not sampled, which is nearly every leg on nearly every map.
+    private readonly bool[] pressured;
+    private readonly bool anyPressure;
     // Two nodes per crossing, at the ends of the shared border and on the line between the two
     // rectangles — so a half cell out from either, which is where the border actually is.
     private readonly float[] cornerX;
@@ -44,12 +51,29 @@ internal sealed class RectangleFlowField
         RectangleIndex index,
         GridCell goal,
         float secondsPerCell,
-        float bendSeconds)
+        float bendSeconds,
+        CongestionField congestion,
+        float congestionSecondsPerPressure)
     {
         this.mesh = mesh;
         this.index = index;
         this.secondsPerCell = secondsPerCell;
         this.bendSeconds = bendSeconds;
+        this.congestion = congestion;
+        this.congestionSecondsPerPressure = congestionSecondsPerPressure;
+        pressured = new bool[mesh.Count];
+        foreach (var entry in congestion.LiveCells)
+        {
+            var rectangle = index.RectangleAt(congestion.CellOf(entry));
+            if (rectangle >= 0) pressured[rectangle] = true;
+        }
+
+        foreach (var flag in pressured)
+        {
+            if (!flag) continue;
+            anyPressure = true;
+            break;
+        }
         this.goal = goal;
         goalRectangle = index.RectangleAt(goal);
 
@@ -89,9 +113,12 @@ internal sealed class RectangleFlowField
             for (var end = 0; end < 2; end++)
             {
                 var corner = crossing * 2 + end;
-                var seed = Leg(
-                    MathF.Abs(goal.X - cornerX[corner]),
-                    MathF.Abs(goal.Z - cornerZ[corner]),
+                var seed = LegBetween(
+                    goal.X,
+                    goal.Z,
+                    cornerX[corner],
+                    cornerZ[corner],
+                    goalRectangle,
                     goalGround.TraversalCost);
                 if (seed >= cornerCost[corner]) continue;
                 cornerCost[corner] = seed;
@@ -139,9 +166,12 @@ internal sealed class RectangleFlowField
             {
                 var corner = other * 2 + end;
                 if (corner == from) continue;
-                var next = cost + Leg(
-                    MathF.Abs(cornerX[from] - cornerX[corner]),
-                    MathF.Abs(cornerZ[from] - cornerZ[corner]),
+                var next = cost + LegBetween(
+                    cornerX[from],
+                    cornerZ[from],
+                    cornerX[corner],
+                    cornerZ[corner],
+                    rectangle,
                     ground.TraversalCost);
                 if (next >= cornerCost[corner]) continue;
                 cornerCost[corner] = next;
@@ -159,10 +189,7 @@ internal sealed class RectangleFlowField
         var best = float.PositiveInfinity;
         if (rectangle == goalRectangle)
         {
-            best = Leg(
-                MathF.Abs(cell.X - goal.X),
-                MathF.Abs(cell.Z - goal.Z),
-                ground.TraversalCost);
+            best = LegBetween(cell.X, cell.Z, goal.X, goal.Z, rectangle, ground.TraversalCost);
         }
 
         foreach (var crossing in mesh.CrossingsOf(rectangle))
@@ -172,9 +199,12 @@ internal sealed class RectangleFlowField
                 var corner = crossing * 2 + end;
                 var reach = cornerCost[corner];
                 if (!float.IsFinite(reach)) continue;
-                var candidate = reach + Leg(
-                    MathF.Abs(cell.X - cornerX[corner]),
-                    MathF.Abs(cell.Z - cornerZ[corner]),
+                var candidate = reach + LegBetween(
+                    cell.X,
+                    cell.Z,
+                    cornerX[corner],
+                    cornerZ[corner],
+                    rectangle,
                     ground.TraversalCost);
                 if (candidate < best) best = candidate;
             }
@@ -197,6 +227,59 @@ internal sealed class RectangleFlowField
         var seconds = Cells(dx, dz) * secondsPerCell * traversalCost;
         return dx > 0f && dz > 0f ? seconds + bendSeconds : seconds;
     }
+
+    /// <summary>Seconds for a straight leg across a rectangle, jams included.</summary>
+    /// <remarks>
+    /// A rectangle is uniform ground and has no notion of a jam, so congestion arrives by
+    /// sampling the field along the line the leg actually takes. The fine layer charges mean
+    /// pressure times the cells crossed; so does this, at a sample every few metres, with the
+    /// same directional factor — joining a queue going your way costs the queue's speed, pushing
+    /// into one coming the other way is dear.
+    /// <para>
+    /// Without it the route cost would ignore jams entirely, which is not a small inaccuracy: it
+    /// deletes the behaviour invariant 15 exists to protect, and a crowd would stop splitting
+    /// across exits. It is an approximation in one way — the true path might dodge a jam inside
+    /// the rectangle where this charges for crossing it — and that errs toward routing around,
+    /// which is the direction this coefficient was tuned to encourage anyway.
+    /// </para>
+    /// </remarks>
+    private float LegBetween(
+        float fromX,
+        float fromZ,
+        float toX,
+        float toZ,
+        int rectangle,
+        float traversalCost)
+    {
+        var dx = MathF.Abs(fromX - toX);
+        var dz = MathF.Abs(fromZ - toZ);
+        var seconds = Leg(dx, dz, traversalCost);
+        if (!anyPressure || !pressured[rectangle]) return seconds;
+
+        var cells = Cells(dx, dz);
+        if (cells <= 0f) return seconds;
+        var samples = Math.Clamp((int)MathF.Ceiling(cells / CellsPerSample), 1, MaximumSamples);
+        var travel = new Vector2(toX - fromX, toZ - fromZ);
+        if (travel.LengthSquared() > 0.0001f) travel = Vector2.Normalize(travel);
+
+        var pressure = 0f;
+        for (var i = 0; i < samples; i++)
+        {
+            var t = (i + 0.5f) / samples;
+            var cell = new GridCell(
+                (int)MathF.Floor(fromX + (toX - fromX) * t),
+                (int)MathF.Floor(fromZ + (toZ - fromZ) * t));
+            var here = congestion.At(cell);
+            if (here <= 0f) continue;
+            pressure += here * congestion.DirectionalFactor(cell, travel);
+        }
+
+        return seconds + pressure / samples * cells * congestionSecondsPerPressure;
+    }
+
+    /// <summary>Cells between samples along a leg, and the ceiling on how many.</summary>
+    private const float CellsPerSample = 4f;
+    private const int MaximumSamples = 24;
 
 
 

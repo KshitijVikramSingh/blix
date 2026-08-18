@@ -214,6 +214,12 @@ internal sealed class CongestionField
     /// <summary>Cells actually holding pressure, which is what a tick costs.</summary>
     public int LiveCellCount => liveCount;
 
+    /// <summary>The cells holding pressure, in ascending cell index.</summary>
+    public ReadOnlySpan<int> LiveCells => live.AsSpan(0, liveCount);
+
+    /// <summary>The cell a live-set entry refers to.</summary>
+    public GridCell CellOf(int index) => CellAt(index);
+
     /// <summary>Bytes of per-cell storage currently held, which is what a jam costs.</summary>
     public long ResidentBytes
     {
