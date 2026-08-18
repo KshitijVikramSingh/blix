@@ -624,6 +624,29 @@ over it is free, and the per-node region searches that cost 5–161 ms have noth
 The obstacle no longer condemns the region around it: it gets its own thin rectangles and the
 plain beside it stays one.
 
+**Adjacency, and the number that decides how the cost field is evaluated.** Crossings are shared
+border *runs* rather than points, because a portal reduced to its midpoint makes every route
+through a wide opening detour to the middle of it; a run is broken wherever the neighbour changes
+or the step is not traversable, so a rectangle sitting against a ridge does not get a crossing
+nobody can cross.
+
+| map | crossings | per rectangle: median | p99 | worst |
+|---|---|---|---|---|
+| empty, 600 m | 0 | 0 | 0 | 0 |
+| ridge, lake and road | 1,682 | **4** | 6 | **150** |
+
+A rectangle is uniform, so cost-to-goal for a cell inside one is the cheapest of *(octile
+distance to a crossing) + (cost-to-goal at that crossing)*. At a median of four crossings that is
+four clamps and four distances — **evaluated per query, with no tile and no search at all**,
+which is what removes both `IngressCosts` and the region tiles in one move.
+
+The worst case is 150, and it is the obvious one: the 484,513-cell plain touches every small
+rectangle along the ridge. Sixteen gradient probes per body against 150 crossings is not
+affordable, so that tail needs one of — a spatial index over a rectangle's own border, a cost
+horizon pruning crossings that cannot win, or falling back to a cached dense tile for
+high-degree rectangles only. **Median four says the fast path is the common path; the tail is a
+separate decision and should be made against a measurement rather than in advance.**
+
 ### The original criterion, for the record
 
 **After stages 0 and 1, re-run `--ordertest --terrain` and the memory arithmetic.** If a 600 m

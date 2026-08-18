@@ -50,10 +50,35 @@ internal sealed class WalkableRectangles
         public int Area => Width * Depth;
     }
 
+    /// <summary>
+    /// A shared border between two rectangles: the whole run of it, not a point on it.
+    /// </summary>
+    /// <remarks>
+    /// Kept as a segment because a portal reduced to its midpoint is an approximation that
+    /// costs real route quality — every route through a wide opening detours to the middle of
+    /// it. Segments are axis-aligned and integer, so the nearest point on one is a clamp.
+    /// </remarks>
+    public readonly record struct Crossing(
+        int RectangleA,
+        int RectangleB,
+        int MinimumX,
+        int MinimumZ,
+        int MaximumX,
+        int MaximumZ);
+
     private readonly List<Rectangle> rectangles = new();
+    private readonly List<Crossing> crossings = new();
+    private int[] crossingStart = Array.Empty<int>();
+    private int[] rectangleCrossings = Array.Empty<int>();
 
     public IReadOnlyList<Rectangle> All => rectangles;
     public int Count => rectangles.Count;
+    public IReadOnlyList<Crossing> Crossings => crossings;
+
+    /// <summary>Crossings on the border of one rectangle, in ascending crossing order.</summary>
+    public ReadOnlySpan<int> CrossingsOf(int rectangle) => rectangleCrossings.AsSpan(
+        crossingStart[rectangle],
+        crossingStart[rectangle + 1] - crossingStart[rectangle]);
     /// <summary>Walkable cells the decomposition covers, which must be all of them.</summary>
     public int CoveredCells { get; private set; }
     /// <summary>Body radius this decomposition is valid for.</summary>
@@ -205,6 +230,109 @@ internal sealed class WalkableRectangles
                 openHeight[open]));
         }
 
+        result.FindCrossings(grid, agentRadius);
         return result;
+    }
+
+    /// <summary>
+    /// Finds every run of border two rectangles share and a body can step across.
+    /// </summary>
+    /// <remarks>
+    /// Built from an owner map — cell to rectangle — walked along each rectangle's four
+    /// borders, so it costs the total perimeter rather than anything quadratic in the number
+    /// of rectangles. The owner map is a build-time structure and goes when the build ends.
+    /// <para>
+    /// A run is broken wherever the neighbour changes or the step is not traversable, which
+    /// matters: a rectangle above a ridge shares a border with the ridge's rectangles, but the
+    /// height difference means a body cannot use it, and a crossing nobody can cross is worse
+    /// than no crossing at all.
+    /// </para>
+    /// </remarks>
+    private void FindCrossings(NavigationGrid grid, float agentRadius)
+    {
+        var owner = new int[grid.Width * grid.Height];
+        Array.Fill(owner, -1);
+        for (var index = 0; index < rectangles.Count; index++)
+        {
+            var rectangle = rectangles[index];
+            for (var z = rectangle.MinimumZ; z <= rectangle.MaximumZ; z++)
+            for (var x = rectangle.MinimumX; x <= rectangle.MaximumX; x++)
+            {
+                owner[z * grid.Width + x] = index;
+            }
+        }
+
+        // Only two of the four sides are walked, because a border shared by two rectangles is
+        // one crossing and would otherwise be found twice.
+        for (var index = 0; index < rectangles.Count; index++)
+        {
+            var rectangle = rectangles[index];
+            EmitSide(grid, agentRadius, owner, index, rectangle, horizontal: false);
+            EmitSide(grid, agentRadius, owner, index, rectangle, horizontal: true);
+        }
+
+        var counts = new int[rectangles.Count + 1];
+        foreach (var crossing in crossings)
+        {
+            counts[crossing.RectangleA + 1]++;
+            counts[crossing.RectangleB + 1]++;
+        }
+
+        for (var i = 0; i < rectangles.Count; i++) counts[i + 1] += counts[i];
+        crossingStart = counts;
+        rectangleCrossings = new int[crossings.Count * 2];
+        var cursor = new int[rectangles.Count];
+        for (var i = 0; i < crossings.Count; i++)
+        {
+            var a = crossings[i].RectangleA;
+            var b = crossings[i].RectangleB;
+            rectangleCrossings[crossingStart[a] + cursor[a]++] = i;
+            rectangleCrossings[crossingStart[b] + cursor[b]++] = i;
+        }
+    }
+
+    private void EmitSide(
+        NavigationGrid grid,
+        float agentRadius,
+        int[] owner,
+        int index,
+        Rectangle rectangle,
+        bool horizontal)
+    {
+        // The right-hand side, or the lower one: each border is walked from one of its two
+        // rectangles only.
+        var alongStart = horizontal ? rectangle.MinimumX : rectangle.MinimumZ;
+        var alongEnd = horizontal ? rectangle.MaximumX : rectangle.MaximumZ;
+        var fixedLine = horizontal ? rectangle.MaximumZ : rectangle.MaximumX;
+        var runNeighbour = -1;
+        var runStart = 0;
+
+        for (var along = alongStart; along <= alongEnd + 1; along++)
+        {
+            var neighbour = -1;
+            if (along <= alongEnd)
+            {
+                var here = horizontal ? new GridCell(along, fixedLine) : new GridCell(fixedLine, along);
+                var there = horizontal
+                    ? new GridCell(along, fixedLine + 1)
+                    : new GridCell(fixedLine + 1, along);
+                if (grid.Contains(there) && grid.CanTraverse(here, there, agentRadius))
+                {
+                    var candidate = owner[there.Z * grid.Width + there.X];
+                    if (candidate != index) neighbour = candidate;
+                }
+            }
+
+            if (neighbour == runNeighbour) continue;
+            if (runNeighbour >= 0)
+            {
+                crossings.Add(horizontal
+                    ? new Crossing(index, runNeighbour, runStart, fixedLine, along - 1, fixedLine + 1)
+                    : new Crossing(index, runNeighbour, fixedLine, runStart, fixedLine + 1, along - 1));
+            }
+
+            runNeighbour = neighbour;
+            runStart = along;
+        }
     }
 }

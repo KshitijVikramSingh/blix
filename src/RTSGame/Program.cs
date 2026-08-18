@@ -66,6 +66,17 @@ public static class Program
             Console.WriteLine(
                 $"  against the fixed partition: {rectWorld.RegionCount:N0} regions of " +
                 $"{Simulation.Navigation.RegionPartition.CellsPerRegion:N0} cells");
+
+            var degrees = new int[decomposition.Count];
+            var widest = 0;
+            for (var r = 0; r < decomposition.Count; r++) degrees[r] = decomposition.CrossingsOf(r).Length;
+            foreach (var degree in degrees) widest = Math.Max(widest, degree);
+            Array.Sort(degrees);
+            var median = degrees.Length == 0 ? 0 : degrees[degrees.Length / 2];
+            var ninetyNinth = degrees.Length == 0 ? 0 : degrees[(int)(degrees.Length * 0.99f)];
+            Console.WriteLine(
+                $"  crossings {decomposition.Crossings.Count:N0} | per rectangle: median {median}, " +
+                $"p99 {ninetyNinth}, worst {widest}");
             Environment.Exit(0);
         }
 
