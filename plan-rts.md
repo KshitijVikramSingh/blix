@@ -9,6 +9,8 @@ Run it: `tools/run-rts-game.sh [--debug-all] [--extent <metres>]`
 Verify it: `dotnet run --project src/RTSGame/RTSGame.csproj -c Release -- --selftest`
 Measure it: same with `--benchmark`, and `--doorwaytest` for two-way gap contention
 Measure it at size: same with `--scale` — see §5, and `plan-rts-game.md` §13 for what it found
+Substrate question open: **§8** argues whether this layer should be a navmesh, and names the
+measurement that decides it
 
 ---
 
@@ -457,3 +459,100 @@ at once, and a change justified by one of their jobs breaks the other.
   built it, which is why a crowd coasts into things rather than stopping short of them),
   defaulted equal so shipped behaviour is unchanged until somebody moves it.
 - **No unit types, combat, resources, or production** — that is the next session.
+
+---
+
+## 8. The substrate question: should this be a navmesh?
+
+Raised 2026-08-18, from a sharper version of the rule that has driven most of this session:
+**spend the budget where navigation and velocity decisions happen, not uniformly over a
+square.** Written down before anyone starts, because it is a substrate change and the
+substrate is what every constant in this document is calibrated against.
+
+### What uniform storage actually costs
+
+At 600 m the map is 1,440,000 fine cells. Its content is a ridge, a lake and a road.
+
+| structure | bytes/cell | at 600 m | how much of it says anything |
+|---|---|---|---|
+| navigation raster — blocked, clearance, height, cost, speed | 17 | **24.5 MB** | ~1% is near an obstacle |
+| congestion field — pressure, flowX, flowZ, live flag | 13 | **18.7 MB** | **1.2k–4.2k live cells: 0.3%** |
+
+The congestion field is the cleanest illustration in the codebase. Session 1 made its *sweep*
+proportional to the number of jams and left its *storage* proportional to the area of the map,
+so 18.7 MB is allocated to hold, at peak, four thousand cells' worth of "somebody is stuck
+here". Nothing about that is a navmesh argument — it is just an unfinished one.
+
+### The argument that actually bites
+
+**Portal routing is an adaptive decomposition bolted onto a uniform grid.** Regions, portals,
+region-local searches, tiles, and the analytic path for plain regions all exist to recover
+information the grid threw away by storing open ground at the same resolution as a doorway. A
+navmesh has that structure natively: convex polygons whose vertices are obstacle corners, so an
+empty map is a handful of polygons and detail exists exactly where geometry demands it. Map
+extent stops being a cost driver at all, which matters because §3 of `plan-rts-game.md` has
+already moved the map size twice.
+
+Measured, on the ridge map: a move order costs 6–190 ms and the searches are region tiles at
+4,096 cells each. A navmesh does not have that number.
+
+### The argument against, which is not sentiment
+
+Every one of these reads the 0.5 m grid, and each is a separate problem:
+
+1. **Clearance** — per cell, and consumed by five different things (radius filtering, the
+   turn-cost confinement ramp, `CongestionField.Constriction`, aperture detection,
+   `RegionIsPlain`). On a mesh it becomes distance-to-nearest-edge, which is computable and
+   wants its own acceleration structure.
+2. **The congestion field.** A jam is a metres-wide phenomenon that can happen anywhere. It
+   cannot live on polygons — they are tens of metres across where the ground is open, which is
+   exactly where a crowd is free to jam in the middle of nothing. **This layer wants uniform
+   resolution independently of the mesh.**
+3. **The steering gradient.** `SampleFlowGradient` rings sixteen probes around a body and
+   bilinearly samples a dense scalar field, and §1 records why: materialised waypoints produced
+   jerky, snapping motion and the continuous field is what fixed it. A corridor from a funnel
+   algorithm is a sequence of portals — which is materialised waypoints wearing a hat. **This
+   is the largest risk in the whole change and it is a behavioural one, not a performance one.**
+4. **Surfaces and slope** become polygon attributes, so the mesh must be split along every
+   surface and grade boundary. §10 of `plan-rts-game.md` wants rivers that freeze and mud that
+   comes and goes with the season; a grid repaints, a mesh re-partitions.
+5. **Dynamic edits.** Placing a building is a local re-rasterise today. Tile-based mesh rebuild
+   is well-trodden (Recast does it) but it is machinery.
+6. **Determinism.** Lockstep LAN and career persistence both depend on bit-identical
+   simulation, and triangulation is precisely where floating-point tie-breaks live.
+7. **42 tests and every constant here** are calibrated against the grid.
+
+### What that adds up to
+
+**The navmesh is right for route topology and insufficient for fields.** Congestion and the
+steering gradient want a uniform resolution that has nothing to do with polygon size, so a pure
+mesh does not remove the second structure — it renames the question. The realistic end state is
+a hybrid: a mesh for topology, and a *sparse* uniform field for the metres-scale phenomena, held
+only where bodies actually are.
+
+Which reframes the question usefully. It is not "navmesh or grid". It is: **which layers need
+uniform resolution, and can their storage be made proportional to occupancy without changing
+their semantics?**
+
+### Staged, so each step pays for itself and none of them is a leap
+
+| stage | change | wins | risk |
+|---|---|---|---|
+| **0** | congestion storage sparse — hash the live set that is already tracked | 18.7 MB → ~100 KB, cost tracks jams not extent | none: nothing outside the field touches those arrays |
+| **1** | nav raster sparse per region — plain regions keep five numbers, not 4,096 cells | ~24.5 MB → ~5 MB on the ridge map | every `Clearance` caller goes through an accessor |
+| **2** | mesh replaces the portal graph as the abstract layer; fine grid stays as the local sampling structure | route cost stops scaling with extent; portals/tiles/region profiles all go | mesh generation, determinism, seasonal re-partition |
+| **3** | remove the fine grid entirely | the honest end of the argument | congestion and the steering gradient need a new home first — see (2) and (3) above |
+
+Stages 0 and 1 are worth doing whatever is decided about the mesh, because they are the same
+rule applied to storage and neither can break calibration.
+
+### The measurement that decides it
+
+**After stages 0 and 1, re-run `--ordertest --terrain` and the memory arithmetic.** If a 600 m
+map is ~5 MB and a move order on obstacle-rich ground is inside a 33 ms tick, then the mesh buys
+elegance rather than performance, and elegance is not worth re-deriving every constant in this
+document. If order cost is still hundreds of milliseconds, the mesh is the answer and stage 2
+should start.
+
+Written down in advance so that the decision is made by the number rather than by whoever is
+holding the keyboard when it comes up.
