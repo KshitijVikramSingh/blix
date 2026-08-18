@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix;
 using Blix.Core;
+using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Primitives;
@@ -17,8 +18,14 @@ using RTSGame.Simulation.Terrain;
 
 namespace RTSGame;
 
-internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDisposable
+internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisposable
 {
+    // Body feel is judged by eye, not by the benchmark: a crowd can score well on route
+    // length and stall time and still look wrong. Sliders, with the crowd metrics beside
+    // them so a change can be judged against something.
+    private readonly BodyFeelSettings bodyFeel = new();
+    private readonly CrowdMetrics crowdMetrics = new();
+    private readonly ObjectTunables tunables;
     private static readonly Vector4 GrassLight = new(0.42f, 0.52f, 0.35f, 1f);
     private static readonly Vector4 GrassDark = new(0.36f, 0.45f, 0.30f, 1f);
     private static readonly Vector4 UnitColor = new(0.86f, 0.47f, 0.20f, 1f);
@@ -115,6 +122,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDisposable
         bool startTerrainLab = false,
         bool debugAll = false)
     {
+        tunables = new ObjectTunables(
+            bodyFeel,
+            new AvoidanceSettings(),
+            new ContactSettings(),
+            new CongestionSettings(),
+            new RoutingSettings(),
+            new GroupSettings(),
+            new RecoverySettings());
         this.exitAfterFrames = exitAfterFrames;
         movementTrace = traceMovement || debugAll ? new LiveMovementTrace() : null;
         if (debugAll)
@@ -375,8 +390,38 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDisposable
         if (height > 0) aspect = width / (float)height;
     }
 
+    public string DebugName => "rts-movement";
+
+    public void Debug(DebugContext debug)
+    {
+        // Always on for this testbed — it exists to be watched. The backtick key still
+        // hides the panels, and freezing them does not stop a slider taking effect.
+        debug.State.Enabled = true;
+        tunables.BuildControls(debug);
+        crowdMetrics.Report(debug);
+        using (debug.Scope("sim"))
+        {
+            debug.Values.Value("agents", simulation.Agents.Count);
+            debug.Values.Value("tick", simulation.TickNumber);
+            debug.Values.Value("contacts", simulation.LastContactCount);
+            debug.Values.Value("flow-fields", simulation.FlowFieldBuilds);
+            debug.Values.Value("astar", simulation.PathQueries);
+            debug.Values.Value("detours", simulation.CongestionRepathCount);
+            debug.Values.Value("congestion-peak", MathF.Round(simulation.Congestion.Peak, 1));
+            var solves = Math.Max(1L, simulation.AvoidanceSolves);
+            debug.Values.Value(
+                "infeasible-%",
+                MathF.Round(simulation.AvoidanceInfeasible * 100f / solves, 2));
+            debug.Values.Value("dead-stops", simulation.AvoidanceTerrainDeadStops);
+            debug.Stats.Gauge("contacts", simulation.LastContactCount);
+            debug.Stats.Gauge("congestion-peak", simulation.Congestion.Peak);
+        }
+    }
+
     public void OnUpdate(Time time)
     {
+        // Before stepping, so a slider moved this frame is felt this frame.
+        bodyFeel.Apply(simulation);
         simulationAccumulator += Math.Clamp(time.Delta, 0.0, 0.25);
         while (simulationAccumulator >= SimulationWorld.FixedDeltaSeconds)
         {
@@ -384,6 +429,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDisposable
             movementTrace?.Observe(simulation, (float)SimulationWorld.FixedDeltaSeconds);
             simulationAccumulator -= SimulationWorld.FixedDeltaSeconds;
         }
+        crowdMetrics.Sample(simulation);
 
         if (timingDebug && time.Total >= nextTimingReport)
         {

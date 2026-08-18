@@ -24,23 +24,21 @@ internal sealed class SimulationWorld
     private const int CrowdedArrivalContactFramesPerAttempt = 4;
     private const float HoldPositionTolerance = 0.02f;
     /// <summary>Range over which a body starts turning into the next route leg.</summary>
-    private const float CornerBlendDistance = 1.10f;
+    internal static float CornerBlendDistance = 1.10f;
     /// <summary>How much of the next leg's heading is adopted at the corner.</summary>
-    private const float CornerBlendStrength = 0.70f;
+    internal static float CornerBlendStrength = 0.70f;
     /// <summary>How hard a travelling member pulls back toward its station.</summary>
-    private const float FormationKeepingGain = 1.6f;
-    /// <summary>How hard station-keeping brakes against its own closing speed.</summary>
-    private const float FormationKeepingDamping = 0.45f;
+    internal static float FormationKeepingGain = 1.6f;
     /// <summary>Cap on station-keeping speed, as a fraction of travel speed.</summary>
-    private const float FormationLateralSpeedFraction = 0.45f;
+    internal static float FormationLateralSpeedFraction = 0.45f;
     /// <summary>Per-tick blend of the newly sampled flow direction into the smoothed one.</summary>
-    private const float FlowSmoothing = 0.16f;
+    internal static float FlowSmoothing = 0.16f;
     /// <summary>Longest a member may lag behind newly published routing.</summary>
-    private const float MaximumRouteAdoptionDelay = 0.90f;
+    internal static float MaximumRouteAdoptionDelay = 0.90f;
     /// <summary>How long a member holds a route before it will reconsider.</summary>
-    private const float RouteCommitmentSeconds = 3.0f;
+    internal static float RouteCommitmentSeconds = 3.0f;
     /// <summary>Stall that releases a commitment early.</summary>
-    private const float RouteReconsiderStallSeconds = 1.2f;
+    internal static float RouteReconsiderStallSeconds = 1.2f;
     /// <summary>Congestion re-plans allowed per tick, map-wide.</summary>
     private const int MaxRoutePlansPerTick = 2;
     /// <summary>Rejected shared-field steps before a body demands a real route.</summary>
@@ -60,15 +58,29 @@ internal sealed class SimulationWorld
     private const float NoIntentSettleSeconds = 1.30f;
     /// <summary>How often a unit under orders with no route retries pathfinding.</summary>
     private const float RoutelessRepathInterval = 0.35f;
+    /// <summary>Stall after which a body stops believing in the gap it is leaning on.</summary>
+    /// <remarks>
+    /// Longer than the detour-grant threshold, because this is a stronger claim: not "try
+    /// another way" but "that way is not going to work". A person wedged in a doorway for
+    /// nearly two seconds with nothing moving has learnt something.
+    /// </remarks>
+    internal static float ApertureAbandonSeconds = 1.8f;
+    /// <summary>How long that refusal is held before the gap is reconsidered.</summary>
+    /// <remarks>
+    /// Held rather than re-derived, which is the difference between a decision and a
+    /// twitch. Long enough to walk out of the queue it was standing in and commit to going
+    /// round; short enough that a gap which genuinely clears is not written off for good.
+    /// </remarks>
+    internal static float ApertureAbandonHoldSeconds = 4f;
     /// <summary>Stall a unit must accumulate before it is offered a detour.</summary>
     /// <remarks>
     /// A jammed body creeps rather than stopping, so a high bar here almost never
     /// trips: at 1.5s the pen granted one detour in ten seconds, which is not a
     /// deadlock breaker, it is a coin flip.
     /// </remarks>
-    private const float CongestionRecoveryStallSeconds = 0.9f;
+    internal static float CongestionRecoveryStallSeconds = 0.9f;
     /// <summary>Minimum gap between detour grants, map-wide.</summary>
-    private const float CongestionRecoveryInterval = 0.5f;
+    internal static float CongestionRecoveryInterval = 0.5f;
     /// <summary>How many bodies may be offered a detour at once.</summary>
     private const int CongestionRecoveryBatch = 4;
     /// <summary>
@@ -231,6 +243,21 @@ internal sealed class SimulationWorld
         return pathService.TryOptimalTravelTime(goal, agent.Position, agent.Radius, out seconds);
     }
 
+    /// <summary>
+    /// Angle in degrees between a body's travel and the axis of the constriction it is in,
+    /// or -1 where the ground is open. Diagnostics: see PathService.TryFindPassageAxis.
+    /// </summary>
+    public float ApertureApproachDegrees(AgentId id)
+    {
+        ref readonly var agent = ref Agents.Get(id);
+        if (agent.Velocity.LengthSquared() < 0.25f) return -1f;
+        if (!pathService.TryFindPassageAxis(agent.Position, agent.Radius, out var axis)) return -1f;
+        var heading = Vector2.Normalize(agent.Velocity);
+        // The axis is undirected, so measure to whichever end the body is heading for.
+        var alignment = MathF.Abs(Vector2.Dot(heading, axis));
+        return MathF.Acos(Math.Clamp(alignment, 0f, 1f)) * 180f / MathF.PI;
+    }
+
     public bool IsAgentGeometryValid(AgentId id)
     {
         if (!Agents.Contains(id)) return false;
@@ -308,6 +335,9 @@ internal sealed class SimulationWorld
             recoveryAgents[i].CrowdPressureSeconds = MathF.Max(
                 0f,
                 recoveryAgents[i].CrowdPressureSeconds - deltaSeconds);
+            recoveryAgents[i].AbandonedApertureSeconds = MathF.Max(
+                0f,
+                recoveryAgents[i].AbandonedApertureSeconds - deltaSeconds);
             recoveryAgents[i].HadAgentContactThisTick = false;
             recoveryAgents[i].CrowdedArrivalBlockedThisTick = false;
             recoveryAgents[i].ArrivedThisTick = false;
@@ -479,7 +509,11 @@ internal sealed class SimulationWorld
         agent.HasDestination = Vector2.DistanceSquared(agent.Position, target) >
                                ArrivalDistance * ArrivalDistance;
         agent.NavigationRevision = Navigation.Revision;
-        agent.LastDestinationDistance = Vector2.Distance(agent.Position, target);
+        // Route distance, not straight-line. Progress is judged against this figure, and
+        // seeding it with the straight line understates the journey by however far round
+        // the route actually goes — so a member's first second of travel scored as a large
+        // gain it had not made, and later as no gain at all.
+        agent.LastDestinationDistance = RemainingRouteDistance(agent);
         agent.ProgressSampleSeconds = 0f;
         agent.ProgressSampleWaypointIndex = 0;
         agent.ProgressSampleDistance = agent.LastDestinationDistance;
@@ -523,7 +557,10 @@ internal sealed class SimulationWorld
             {
                 group.TransitCentroid = transitCentroid / transitMembers;
                 group.TransitFlow = transitFlow / transitMembers;
-                group.HasTransitCentroid = true;
+                // Station-keeping needs somebody else to keep station with. One member left
+                // in transit has only itself to average, and a formation of one is not a
+                // formation.
+                group.HasTransitCentroid = transitMembers > 1;
             }
             else
             {
@@ -883,6 +920,12 @@ internal sealed class SimulationWorld
         float[]? additionalNavigationCosts = null,
         float groupReservationExclusionRadius = 0f)
     {
+        // A held refusal outlives the single replan that created it: without this the body
+        // is handed a route round the gap, the flag it was given expires with that one
+        // call, and the very next replan routes it straight back in.
+        congestionAvoidanceCenter ??= agent.AbandonedApertureSeconds > 0f
+            ? agent.AbandonedAperture
+            : null;
         var pathfindingStart = Stopwatch.GetTimestamp();
         var result = pathService.FindPath(
             agent.Position,
@@ -1206,11 +1249,31 @@ internal sealed class SimulationWorld
             : Vector2.Normalize(Vector2.Lerp(agent.SmoothedFlow, flow, FlowSmoothing));
         flow = agent.SmoothedFlow;
 
+        // A gap ahead is aimed at along its axis, not at its mouth. This replaces the
+        // gradient rather than competing with it — still one intent vector — and is what
+        // turns a fan converging on an opening into a file lining up for it.
+        var liningUpForGap = false;
+        if (pathService.TryFindApertureApproach(agent.Position, flow, agent.Radius, out var aim))
+        {
+            var toAim = aim - agent.Position;
+            if (toAim.LengthSquared() > 0.0001f)
+            {
+                flow = Vector2.Normalize(toAim);
+                liningUpForGap = true;
+            }
+        }
+
         var terrainSpeed = Terrain.SpeedMultiplier(agent.Position);
         var speed = agent.MaximumSpeed * terrainSpeed;
         var desired = flow * speed;
 
-        if (agent.MoveGroupId != 0 &&
+        // No station-keeping into a gap. A formation cannot be held through an opening one
+        // body wide, and the correction that tries to hold it is a sideways push applied
+        // exactly where there is no sideways to go — so the body shuffles across the mouth
+        // instead of going through it, and undoes the lining-up above on the way. Formation
+        // is for open ground; a gap is single file.
+        if (!liningUpForGap &&
+            agent.MoveGroupId != 0 &&
             moveGroups.TryGetValue(agent.MoveGroupId, out var group) &&
             group.HasTransitCentroid)
         {
@@ -1610,6 +1673,32 @@ internal sealed class SimulationWorld
                 agent.StuckSeconds = MathF.Max(0f, agent.StuckSeconds - deltaSeconds * 2f);
             }
 
+            // Long enough at the same gap with nothing moving, and the body stops
+            // believing in it. This is deliberately available to bodies buried in a
+            // queue, unlike the detour grant, which picks the least congested and so by
+            // design never reaches the ones actually wedged. They cannot act on it
+            // immediately — that is what being wedged means — but the decision is held,
+            // so when the press eases they walk out of the queue instead of back into it.
+            if (agent.StuckSeconds >= ApertureAbandonSeconds &&
+                agent.AbandonedApertureSeconds <= 0f)
+            {
+                var intent = agent.PreferredVelocity.LengthSquared() > 0.0001f
+                    ? agent.PreferredVelocity
+                    : agent.RequestedDestination - agent.Position;
+                if (pathService.TryFindObstructingAperture(
+                        agent.Position, intent, agent.Radius, out var abandoned))
+                {
+                    agent.AbandonedAperture = abandoned;
+                    agent.AbandonedApertureSeconds = ApertureAbandonHoldSeconds;
+                    agent.RepathRequested = true;
+                    agent.HasRepathAvoidance = true;
+                    agent.RepathAvoidanceCenter = abandoned;
+                    agent.StuckSeconds = 0f;
+                    agent.RouteCommitSeconds = 0f;
+                    continue;
+                }
+            }
+
             // Throttling a failed scan was tried here and cost five tests: the
             // cooldown it would have to set is the same one the immediate route
             // repair, the detour picker and the congestion re-plan all gate on, so
@@ -1833,7 +1922,16 @@ internal sealed class SimulationWorld
                 : Vector2.Normalize(stalled.Destination - stalled.Position);
             stalled.RepathRequested = true;
             stalled.HasRepathAvoidance = true;
-            stalled.RepathAvoidanceCenter = stalled.Position + blockedDirection * 1.25f;
+            // Exclude the gap it is failing at, not a point just in front of it. A fixed
+            // offset lands inside the queue rather than on the thing the queue is waiting
+            // for, so the replan comes back with a route through the same gap.
+            stalled.RepathAvoidanceCenter = pathService.TryFindObstructingAperture(
+                stalled.Position,
+                blockedDirection,
+                stalled.Radius,
+                out var aperture)
+                ? aperture
+                : stalled.Position + blockedDirection * 1.25f;
             stalled.RepathCooldown = 3f;
             stalled.StuckSeconds = 0f;
             stalled.RouteCommitSeconds = 0f;

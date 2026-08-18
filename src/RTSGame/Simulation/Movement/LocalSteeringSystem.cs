@@ -65,7 +65,7 @@ internal sealed class LocalSteeringSystem
                 steeredVelocities[i] = MoveTowards(
                     agent.Velocity,
                     Vector2.Zero,
-                    agent.Acceleration * deltaSeconds);
+                    RateToward(agent, Vector2.Zero) * deltaSeconds);
                 crowdPressured[i] = false;
                 continue;
             }
@@ -93,7 +93,7 @@ internal sealed class LocalSteeringSystem
             steeredVelocities[i] = MoveTowards(
                 agent.Velocity,
                 desired,
-                agent.Acceleration * deltaSeconds);
+                RateToward(agent, desired) * deltaSeconds);
             var resolvedForwardSpeed = heading == Vector2.Zero
                 ? desired.Length()
                 : MathF.Max(0f, Vector2.Dot(desired, heading));
@@ -184,6 +184,20 @@ internal sealed class LocalSteeringSystem
     }
 
     private static float Cross(Vector2 first, Vector2 second) => first.X * second.Y - first.Y * second.X;
+
+    /// <summary>
+    /// Which of the body's two rates applies to a given change of velocity.
+    /// </summary>
+    /// <remarks>
+    /// Speeding up and slowing down are different acts and a body is better at the second.
+    /// One shared rate meant a unit coasted to a halt as gently as it set off, which reads
+    /// as sliding rather than stopping — and at a chokepoint it is the difference between
+    /// stopping short of the queue and arriving in it.
+    /// </remarks>
+    private static float RateToward(in AgentState agent, Vector2 desired) =>
+        desired.LengthSquared() < agent.Velocity.LengthSquared()
+            ? agent.Deceleration
+            : agent.Acceleration;
 
     private static Vector2 NormalizedOrZero(Vector2 value) =>
         value.LengthSquared() > 0.0001f ? Vector2.Normalize(value) : Vector2.Zero;

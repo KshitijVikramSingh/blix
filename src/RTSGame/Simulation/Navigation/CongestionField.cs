@@ -43,7 +43,7 @@ internal sealed class CongestionField
     /// routes at 1.06x optimal against 1.19x.
     /// </para>
     /// </remarks>
-    private const float DecaySeconds = 2.2f;
+    internal static float DecaySeconds = 2.2f;
     /// <summary>Multiplier on the deposit rate, so build stays fast despite slow decay.</summary>
     /// <remarks>
     /// Sized so a fully committed jam settles near sixteen, which at the current
@@ -52,7 +52,7 @@ internal sealed class CongestionField
     /// half-metre cell — which is not a claim about time, it is just a very large
     /// number, and it made every route through a crowd equally unthinkable.
     /// </remarks>
-    private const float DepositGain = 1.2f;
+    internal static float DepositGain = 1.2f;
     // No ceiling on accumulated pressure. It is bounded naturally by the decay
     // time constant (weight * gain * decay) so it settles rather than diverging,
     // and an artificial cap became actively wrong once cost was denominated in
@@ -79,7 +79,7 @@ internal sealed class CongestionField
     // enough to deflect a route also re-creates the saturated blob that leaves a
     // jam with no internal gradient. Route commitment is what actually stops a
     // unit setting off through a crowd and changing its mind halfway.
-    private const float OpenGroundShare = 0.22f;
+    internal static float OpenGroundShare = 0.22f;
     /// <summary>Cost scale for travelling with the local flow.</summary>
     /// <remarks>
     /// Barely a discount, and deliberately so. A generous one (0.35 was tried)
@@ -92,9 +92,9 @@ internal sealed class CongestionField
     /// The directional term exists to penalise opposing traffic, not to reward
     /// following.
     /// </remarks>
-    private const float FollowingFactor = 0.90f;
+    internal static float FollowingFactor = 0.90f;
     /// <summary>Cost scale for travelling against it.</summary>
-    private const float OpposingFactor = 1.8f;
+    internal static float OpposingFactor = 1.8f;
 
     private readonly GridTransform transform;
     private readonly float[] pressure;

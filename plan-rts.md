@@ -264,6 +264,32 @@ which is what a correct memo looks like:
   `flow` / `flowRejects` / `noIntent`
 - `--benchmark` adds constricted scenarios with `walked/optimal`, `mean-turn`,
   `infeasible%`, `terrain-fallback%`, `dead-stops`, `detour-grants`, `congestion-reroutes`
+- `--benchmark`'s constricted scenarios also report a `stuck` line: `red` agent-seconds,
+  the `worst-red-run`, and `deepest-pile` / `mean-pile` — the largest cluster of red bodies
+  connected within 1.2 m. Red is `StuckSeconds > 0.35` exactly as the renderer draws it, so
+  these describe what is on screen. `deepest-pile` is the one that corresponds to the
+  complaint "they bunch against a gap instead of going round": thirty units spread over four
+  exits and ten wedged in one corner are the same headcount and very different pictures.
+- **Live tuning overlay** (backtick to toggle). `RtsGameLoop` implements `IDebuggable`, so
+  the shared Blix diagnostics overlay appears with a Controls tab of `[Tune]` sliders
+  (`BodyFeelSettings`: top speed, acceleration, deceleration, turn rate, free-turn speed)
+  applied to every live body each frame, and Values/Stats showing `red`, `deepest-pile`,
+  `mean-speed`, `worst-stuck`, `contacts`, `infeasible-%`, `dead-stops`, `congestion-peak`.
+  Feel cannot be settled headlessly — a crowd can score well on route length and stall time
+  and still look wrong — so these are sliders rather than constants under test.
+  <br>**43 sliders across 7 groups**: Body, Avoidance, Contact, Congestion, Routing, Group,
+  Recovery. The tuned values themselves stay `internal static` in their own classes, with
+  their measured rationale beside them; the settings classes in `MovementTuning.cs` are
+  proxy properties onto those, so a slider moves the real value rather than a copy.
+  <br>Two things to know before changing this. Those values are now **mutable process-wide
+  state** rather than compile-time constants — nothing headless writes them, so tests are
+  unaffected, but a future parallel-worlds harness would see them shared. And the turn-cost
+  tables are stored in **radians**, divided by the live turn rate at use: baked in seconds at
+  static init, as they originally were, the routed-turn-rate slider would silently do nothing.
+  <br>`Routing → routed turn rate` and `Body → turn rate` are meant to track each other.
+  Moving one alone reproduces exactly the mismatch that made tightening turning fail to
+  divert traffic — the router plans for a body that does not exist. An experiment, not a
+  setting.
 - `--doorwaytest` drives two files through one gap in opposite directions and reports
   clearing time, frozen ticks, gap reversals and dead stops. This is the case with no
   good answer historically, so it is a diagnostic rather than an assertion — the numbers
@@ -342,11 +368,61 @@ at once, and a change justified by one of their jobs breaks the other.
   will feel it. The shared-destination count can be tallied once per tick, and the packing
   loop wants `agentIndex` rather than a scan of every agent for neighbours within 0.82 m.
   It is load-bearing (805 firings per 120 ticks at 500 agents), so make it cheap, not gone.
+- **Bodies meet gaps oblique, then reorient inside them.** Measured: mean approach angle to
+  a constriction is 26 degrees in the pen and **33.5 at a one-cell gate, with 46% of samples
+  past thirty** (`gaps` line in `--benchmark`; `SimulationWorld.ApertureApproachDegrees`
+  against `PathService.TryFindPassageAxis`). A 0.74 m body at 33 degrees presents 0.88 m into
+  a 1.5 m opening and has to reorient in the one place with no room — this is what the
+  shuffling at a chokepoint is.
+  <br>`Routing → gap line-up standoff` addresses it and is **defaulted off (0)**. At 1.2 it
+  aims the intent at a staging point on the gap's axis instead of at its mouth, and suppresses
+  station-keeping while lining up (a formation cannot be held through a one-body gap; the
+  correction that tries is a sideways shove where there is no sideways). Gate approach falls
+  33.5 → 27.6 degrees, oblique 46 → 32%, pen route length 1.10x → 1.00x — and pen red time
+  rises 37 → 62 agent-s, gate dead stops 29 → 74, mean turn 4.8 → 5.8. A trade between how a
+  crowd looks entering a gap and how fast it gets through; no headless measure settles it, so
+  it is a slider rather than a decision.
+  <br>Two other routes to the same problem measured worse and were dropped: refusing to let
+  `SmoothPath` straighten across a constriction (barely moved the angle — most bodies here are
+  cohort members on the shared field, not on smoothed paths), and charging flow-probe
+  reversals scaled by a progress-derived commitment.
+- **At least two distinct causes of orbiting, one still open.** The cohort-of-one degeneracy
+  is fixed (station-keeping needs somebody to keep station with). The trace has since caught a
+  second: `group=0 flow=False stuck=0.00`, an *ungrouped* body on a stored path circling near a
+  dense arrival at half speed, walking ten times its net displacement with the stall detector
+  reading zero. `CrowdedArrivalAttempts` exists for that shape; whether this is a defect or
+  just the rim of a 500-body convergence is not yet established.
 - **Bodies bunch against an exit rather than backing off and going round.** The most
-  visible remaining flaw, and the one a player notices: a unit pressed against a full gap
-  keeps pressing when a person would turn round and walk to the next one. Everything tried
-  so far has attacked it as a steering or a cost problem and none of it worked (see the
-  refusals above). What has not been tried is giving a body the option to *abandon* a
-  contested aperture — a decision, taken once, held, and taken by the body at the back of
-  the queue rather than the one wedged at the front.
+  visible remaining flaw and the one a player notices. Two things have been done about it
+  and both are cures rather than preventions:
+  - Granted detours now exclude *the constriction the body is failing at*
+    (`TryFindObstructingAperture`) instead of a point 1.25 m in front of its nose, which
+    against a queue several deep just routed it back into the same queue.
+  - A body stalled 1.8 s at the same gap **abandons** it for 4 s and re-plans around it, a
+    decision held rather than re-derived, and deliberately available to bodies buried in a
+    queue — the detour grant picks the least congested and so by design never reaches the
+    ones actually wedged.
+
+  Together: pen red time 45.7 → 36.6 agent-s, worst run 2.7 → 2.4 s, pile duration 7.3 →
+  5.6 s; gate red 117.0 → 104.1, worst run 4.4 → 2.9 s. But **`deepest-pile` barely moved**
+  (11 → 10, 22 → 22) and gate dead stops went 5 → 29. The pile still forms exactly as deep;
+  it drains sooner.
+
+  What remains untried is prevention: hold an approaching body back short of a saturated
+  aperture so the pile never forms and the front stays mobile. `CongestionYieldSeconds`
+  already exists for this — it is decremented every tick, zeroed in six places, and read by
+  `LocalSteeringSystem` to zero a body's desired velocity, and **nothing ever sets it
+  positive**. A complete hold-and-wait mechanism, wired in and dead. It is also the closest
+  thing to the explicit queue this project removed once, so it wants measuring hard against
+  `deepest-pile` before it is believed.
+- **Acceleration is 16 m/s² and should not be.** Over one and a half g: whatever the
+  velocity solve asks for is granted within a tick, so the solve's answer and the body's
+  motion are the same thing and there is no momentum to read on screen. A walking person
+  manages perhaps 1 to 3. It is left alone because every threshold in the self-tests was
+  tuned against a body that reaches its speed instantly, and moving it to 8 with a
+  deceleration of 14 breaks two of them immediately. The order of work is: settle the feel
+  on the slider, then re-base the tests against the answer — not the reverse. Deceleration
+  is now a separate rate (steering used one for both, so a body shed speed as gently as it
+  built it, which is why a crowd coasts into things rather than stopping short of them),
+  defaulted equal so shipped behaviour is unchanged until somebody moves it.
 - **No unit types, combat, resources, or production** — that is the next session.

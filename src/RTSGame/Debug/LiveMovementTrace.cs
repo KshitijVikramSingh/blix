@@ -46,6 +46,9 @@ internal sealed class LiveMovementTrace
         var blockedImmediateSteps = 0;
         var visiblyYielding = 0;
         var orbiting = 0;
+        var worstOrbitRatio = 0f;
+        var worstOrbiter = new AgentId(-1);
+        var worstOrbitDetail = string.Empty;
         var inTransit = 0;
         var atSlot = 0;
         var maximumCrowdedArrivalAttempts = 0;
@@ -119,12 +122,32 @@ internal sealed class LiveMovementTrace
                 blockedImmediateSteps++;
             }
             if (agent.IsVisiblyYielding) visiblyYielding++;
-                var netMoved = Vector2.Distance(agent.Position, sample.WindowStartPosition);
+            var netMoved = Vector2.Distance(agent.Position, sample.WindowStartPosition);
             if (wantsProgress &&
                 sample.DistanceTravelledInWindow > OrbitTravelFloor &&
                 sample.DistanceTravelledInWindow > netMoved * OrbitRatio)
             {
                 orbiting++;
+                // Name the worst offender. A count told us one body was going in circles
+                // and nothing about why, which cost two failed attempts to reproduce it
+                // headlessly. What settles it is whether the body is still on the shared
+                // field, how far it is from the envelope it needs to reach to leave it, and
+                // how many others are still travelling with it — station-keeping against a
+                // cohort of one is self-referential and sends a body round in circles.
+                var ratio = sample.DistanceTravelledInWindow / MathF.Max(netMoved, 0.0001f);
+                if (ratio > worstOrbitRatio)
+                {
+                    worstOrbitRatio = ratio;
+                    worstOrbiter = agent.Id;
+                    worstOrbitDetail =
+                        $"pos={Format(agent.Position)} walked={sample.DistanceTravelledInWindow:F2} " +
+                        $"net={netMoved:F2} speed={agent.Velocity.Length():F2} " +
+                        $"stuck={agent.StuckSeconds:F2} flow={agent.UsesFlowTransit} " +
+                        $"approachingSlot={agent.ApproachingSlot} group={agent.MoveGroupId} " +
+                        $"cohortSize={CohortSize(world, agent.MoveGroupId)} " +
+                        $"toTarget={Vector2.Distance(agent.Position, agent.RequestedDestination):F2} " +
+                        $"toSlot={Vector2.Distance(agent.Position, agent.GroupSlot):F2}";
+                }
             }
             if (agent.MoveGroupId != 0)
             {
@@ -151,6 +174,10 @@ internal sealed class LiveMovementTrace
             $"routeRepairs=+{world.ImmediateRouteRepairCount - previousImmediateRepairCount} " +
             $"replans=+{world.CongestionRepathCount - previousRepathCount} " +
             $"reroutes=+{world.CongestionRerouteCount - previousRerouteCount}");
+        if (worstOrbiter.Value >= 0)
+        {
+            Console.WriteLine($"  orbiter {worstOrbiter.Value}: ratio={worstOrbitRatio:F1} {worstOrbitDetail}");
+        }
         previousRepathCount = world.CongestionRepathCount;
         previousImmediateRepairCount = world.ImmediateRouteRepairCount;
         previousRerouteCount = world.CongestionRerouteCount;
@@ -234,6 +261,18 @@ internal sealed class LiveMovementTrace
         previousRepathCount = world.CongestionRepathCount;
         previousImmediateRepairCount = world.ImmediateRouteRepairCount;
         Console.WriteLine($"TRACE WORLD agents={world.Agents.Count} navRevision={world.Navigation.Revision}");
+    }
+
+    /// <summary>How many members of a group are still travelling as a cohort.</summary>
+    private static int CohortSize(SimulationWorld world, int moveGroupId)
+    {
+        if (moveGroupId == 0) return 0;
+        var count = 0;
+        foreach (ref readonly var other in world.Agents.All)
+        {
+            if (other.IsAlive && other.MoveGroupId == moveGroupId && other.UsesFlowTransit) count++;
+        }
+        return count;
     }
 
     private static bool ImmediateStepIsGeometryValid(

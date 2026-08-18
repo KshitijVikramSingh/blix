@@ -13,29 +13,29 @@ namespace RTSGame.Simulation.Movement;
 /// </summary>
 internal sealed class ReciprocalVelocitySolver
 {
-    private const float NeighborDistance = 3f;
+    internal static float NeighborDistance = 3f;
     // Reusing a fraction of last tick's answer as the optimisation target gives
     // the solve a memory. Without it an agent re-derives which side to pass on
     // from scratch every tick and flips between symmetric solutions, which is
     // what a crowd of continuously re-negotiating bodies looks like.
-    private const float VelocityCommitment = 0.25f;
+    internal static float VelocityCommitment = 0.25f;
     // This is local collision avoidance, not route reservation. A long horizon
     // makes a dense merge reserve several body widths of hypothetical future
     // space and can reduce an otherwise valid crowd to a near-zero velocity.
-    private const float TimeHorizon = 0.75f;
+    internal static float TimeHorizon = 0.75f;
     // A body that is standing still is not going to walk into anybody, so there
     // is nothing to predict: reserving three quarters of a second of space around
     // it just makes passers-by swerve from a distance. A late, tight horizon
     // reads as walking past someone rather than avoiding them, and lets contact
     // resolution do the last centimetre of the job.
-    private const float StationaryTimeHorizon = 0.30f;
+    internal static float StationaryTimeHorizon = 0.30f;
     // Ceiling on how fast an agent with no destination may be steered.
-    private const float IdleYieldSpeed = 1.10f;
+    internal static float IdleYieldSpeed = 1.10f;
     // Overlap is bled off over several ticks rather than in one, so a contact
     // cannot translate into an unsatisfiable single-tick velocity demand.
-    private const float OverlapRecoverySeconds = 0.25f;
+    internal static float OverlapRecoverySeconds = 0.25f;
     /// <summary>Extra separation aimed for by bodies already in contact.</summary>
-    private const float ContactSeparationMargin = 0.015f;
+    internal static float ContactSeparationMargin = 0.015f;
     /// <summary>
     /// Horizon over which a body must be able to stop short of static geometry.
     /// </summary>
@@ -57,7 +57,7 @@ internal sealed class ReciprocalVelocitySolver
     /// route length in neither.
     /// </para>
     /// </remarks>
-    private const float StaticTimeHorizon = 0.25f;
+    internal static float StaticTimeHorizon = 0.25f;
     /// <summary>
     /// Clearance a body defends off a wall, beyond its own radius.
     /// </summary>
@@ -68,7 +68,7 @@ internal sealed class ReciprocalVelocitySolver
     /// the residual overlap it was meant to relieve turned out to be a contact-solver
     /// matter at a crowded destination rather than anything to do with walls.
     /// </remarks>
-    private const float StaticSeparationMargin = 0.01f;
+    internal static float StaticSeparationMargin = 0.01f;
     /// <summary>
     /// Most static constraints admitted per solve, worst clearance first.
     /// </summary>

@@ -97,12 +97,42 @@ internal static class MovementBenchmarks
             var reversals = 0;
             var headingSamples = 0;
             var totalTurnDegrees = 0.0;
+            // What a player actually complains about is a knot of red units leaning on a
+            // gap. Red is StuckSeconds > 0.35, exactly as the renderer draws it, so these
+            // numbers describe the thing on screen rather than a proxy for it: how much
+            // time is spent failing, the worst single episode, and how deep the pile gets.
+            var redTicks = 0L;
+            var redRunTicks = new int[world.Agents.Count];
+            var worstRedRun = 0;
+            var deepestPile = 0;
+            var pileTickSum = 0L;
+            var pileTicks = 0;
+            var redPositions = new List<System.Numerics.Vector2>();
+            // How square bodies are to the gap they are going through. Zero is dead-on;
+            // ninety is sideways. A body that reaches a one-body gap oblique has to reorient
+            // in the one place there is no room to, and that is what the shuffling at a
+            // chokepoint looks like from outside.
+            var approachSum = 0.0;
+            var approachSamples = 0L;
+            var obliqueSamples = 0L;
             for (var tick = 0; tick < 300; tick++)
             {
                 world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+                redPositions.Clear();
                 foreach (ref readonly var agent in world.Agents.All)
                 {
                     if (!agent.IsAlive || !agent.HasDestination) continue;
+                    if (agent.StuckSeconds > 0.35f)
+                    {
+                        redTicks++;
+                        redRunTicks[agent.Id.Value]++;
+                        worstRedRun = Math.Max(worstRedRun, redRunTicks[agent.Id.Value]);
+                        redPositions.Add(agent.Position);
+                    }
+                    else
+                    {
+                        redRunTicks[agent.Id.Value] = 0;
+                    }
                     // The resolved velocity, not the intent: intent is what the unit
                     // means to do, resolved is what the body actually does, and it
                     // is the second one the player watches.
@@ -112,6 +142,13 @@ internal static class MovementBenchmarks
                     {
                         clearanceSum += world.Navigation.Clearance(here);
                         clearanceSamples++;
+                    }
+                    var approach = world.ApertureApproachDegrees(agent.Id);
+                    if (approach >= 0f)
+                    {
+                        approachSum += approach;
+                        approachSamples++;
+                        if (approach > 30f) obliqueSamples++;
                     }
                     if (agent.Velocity.LengthSquared() < 0.25f) continue;
                     var heading = System.Numerics.Vector2.Normalize(agent.Velocity);
@@ -124,6 +161,14 @@ internal static class MovementBenchmarks
                         totalTurnDegrees += MathF.Acos(Math.Clamp(turn, -1f, 1f)) * 180f / MathF.PI;
                     }
                     previousHeading[agent.Id.Value] = heading;
+                }
+
+                var pile = LargestCluster(redPositions, radius: 1.2f);
+                deepestPile = Math.Max(deepestPile, pile);
+                if (pile > 1)
+                {
+                    pileTickSum += pile;
+                    pileTicks++;
                 }
             }
             var efficiency = 0.0;
@@ -146,8 +191,59 @@ internal static class MovementBenchmarks
                 $"dead-stops {world.AvoidanceTerrainDeadStops} | " +
                 $"detour-grants {world.CongestionRepathCount} | " +
                 $"congestion-reroutes {world.CongestionRerouteCount} in 10s");
+            Console.WriteLine(
+                $"    gaps | approach {approachSum / Math.Max(1, approachSamples):F1}deg mean | " +
+                $"oblique>30deg {obliqueSamples * 100.0 / Math.Max(1, approachSamples):F1}% | " +
+                $"samples {approachSamples}");
+            Console.WriteLine(
+                $"    stuck | red {redTicks * SimulationWorld.FixedDeltaSeconds:F1} agent-s | " +
+                $"worst-red-run {worstRedRun * SimulationWorld.FixedDeltaSeconds:F1}s | " +
+                $"deepest-pile {deepestPile} | " +
+                $"mean-pile {(pileTicks == 0 ? 0.0 : pileTickSum / (double)pileTicks):F1} " +
+                $"over {pileTicks * SimulationWorld.FixedDeltaSeconds:F1}s");
         }
         return 0;
+    }
+
+    /// <summary>
+    /// Size of the largest group of positions connected within <paramref name="radius"/>.
+    /// </summary>
+    /// <remarks>
+    /// A pile is not a count of failing units, it is a count of failing units leaning on
+    /// each other — thirty spread over four exits and ten wedged in one corner are very
+    /// different pictures and the same total. Connectivity, not headcount.
+    /// </remarks>
+    private static int LargestCluster(List<System.Numerics.Vector2> positions, float radius)
+    {
+        if (positions.Count == 0) return 0;
+        var visited = new bool[positions.Count];
+        var frontier = new Stack<int>();
+        var largest = 0;
+        var radiusSquared = radius * radius;
+        for (var seed = 0; seed < positions.Count; seed++)
+        {
+            if (visited[seed]) continue;
+            visited[seed] = true;
+            frontier.Push(seed);
+            var size = 0;
+            while (frontier.TryPop(out var current))
+            {
+                size++;
+                for (var other = 0; other < positions.Count; other++)
+                {
+                    if (visited[other]) continue;
+                    if (System.Numerics.Vector2.DistanceSquared(
+                            positions[current], positions[other]) > radiusSquared)
+                    {
+                        continue;
+                    }
+                    visited[other] = true;
+                    frontier.Push(other);
+                }
+            }
+            largest = Math.Max(largest, size);
+        }
+        return largest;
     }
 
     private static void Tick(SimulationWorld world, int count)

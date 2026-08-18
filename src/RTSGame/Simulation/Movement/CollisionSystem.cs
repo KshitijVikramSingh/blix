@@ -16,21 +16,21 @@ internal sealed class CollisionSystem
     // still: both break the terrain-ramp crossing, so this is a genuine optimum and
     // not a floor. The loop exits early once nothing is touching, so open ground
     // pays almost nothing for it.
-    private const int RelaxationPasses = 5;
+    internal static int RelaxationPasses = 5;
     // Still under-relaxed, so a dense pack cannot pump energy back into itself.
     // 0.80. Raising it is not a substitute for more passes: 0.90 and 0.95 both
     // left more overlap than 0.80 does (0.683 and 0.706 against 0.728 at equal
     // pass count), because over-correcting a body with several neighbours sums
     // into an overshoot the next pass has to undo.
-    private const float RelaxationFactor = 0.80f;
+    internal static float RelaxationFactor = 0.80f;
     /// <summary>Overlap ignored as a single tick's contact, in metres.</summary>
     private const float ContactSlop = 0.00035f;
     // How much of a mover/idle contact the yielding body absorbs.
-    private const float YieldShare = 0.85f;
+    internal static float YieldShare = 0.85f;
     // How far the separation is rotated from the contact normal toward the
     // mover's lateral axis. Fully lateral would let bodies pass through each
     // other head-on; this keeps enough normal component to guarantee separation.
-    private const float YieldLateralBias = 0.75f;
+    internal static float YieldLateralBias = 0.75f;
     /// <summary>Overlap at which the sidestep gives way to separating outright.</summary>
     /// <remarks>
     /// Rotating a correction toward the mover's flank is what turns a shove into a
@@ -43,7 +43,7 @@ internal sealed class CollisionSystem
     /// bias is a function of how bad the overlap is: a sidestep for a touch, and the
     /// shortest way apart for anything deep enough to see.
     /// </remarks>
-    private const float YieldLateralOverlapLimit = 0.015f;
+    internal static float YieldLateralOverlapLimit = 0.015f;
 
     private readonly List<ColliderId> contacts = new();
     private readonly List<int> neighbors = new();

@@ -24,6 +24,38 @@ internal static class AgentDefaults
 
     public const float MaximumSpeed = 4.5f;
 
+    /// <summary>How hard a body picks up speed, in metres per second squared.</summary>
+    /// <remarks>
+    /// Mutable so the tuning overlay can move it; the constant is the shipped default.
+    /// Sixteen is over one and a half g. That is not a person starting to walk, it is a
+    /// body teleporting to its target velocity: whatever the velocity solve asked for was
+    /// granted inside a tick, so the solve's answer and the body's motion were the same
+    /// thing and there was no momentum to read on screen. A walking person manages perhaps
+    /// 1 to 3.
+    /// <para>
+    /// It stays at sixteen regardless, because every threshold in the self-tests was tuned
+    /// against a body that reaches its speed instantly, and moving it breaks two of them.
+    /// What it should be is a question about how the game feels, which is what the slider
+    /// is for — and once that question is answered the tests want re-basing against the
+    /// answer, not the other way round.
+    /// </para>
+    /// </remarks>
+    public static float Acceleration = 16f;
+
+    /// <summary>How hard a body sheds speed, in metres per second squared.</summary>
+    /// <remarks>
+    /// Separate from <see cref="Acceleration"/>, and larger, because stopping and starting
+    /// are not the same act — a person can plant a foot and halt far quicker than they can
+    /// get going. Steering used one rate for both, so a body being told to slow down eased
+    /// off exactly as gently as it had built up, which is what makes a crowd look like it
+    /// is coasting into things rather than stopping short of them.
+    /// <para>
+    /// Defaulted equal to <see cref="Acceleration"/> so the shipped behaviour is unchanged
+    /// and the distinction only exists once somebody moves the slider.
+    /// </para>
+    /// </remarks>
+    public static float Deceleration = 16f;
+
     /// <summary>
     /// How fast a body may swing its direction of travel, in radians per second.
     /// </summary>
@@ -37,10 +69,10 @@ internal static class AgentDefaults
     /// cannot take part in that, and the limit doubles as a low-pass filter on
     /// the solver without pretending to be one.
     /// </remarks>
-    public const float MaximumTurnSpeed = 4.0f;
+    public static float MaximumTurnSpeed = 4.0f;
 
     /// <summary>Speed below which a body may turn freely, as it would on the spot.</summary>
-    public const float FreeTurnSpeed = 0.55f;
+    public static float FreeTurnSpeed = 0.55f;
 
     /// <summary>
     /// Smallest centre distance two bodies of the given radii may sit at and still

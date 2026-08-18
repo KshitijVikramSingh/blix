@@ -18,6 +18,10 @@ internal struct AgentState
     public Vector2 Destination;
     public Vector2 RequestedDestination;
     public Vector2 RepathAvoidanceCenter;
+    /// <summary>Constriction this body has given up on, while <see cref="AbandonedApertureSeconds"/> lasts.</summary>
+    public Vector2 AbandonedAperture;
+    /// <summary>Seconds left of refusing to route through <see cref="AbandonedAperture"/>.</summary>
+    public float AbandonedApertureSeconds;
     public Vector2 PatrolStart;
     public Vector2 PatrolEnd;
     public Vector2 HoldPosition;
@@ -25,6 +29,8 @@ internal struct AgentState
     public float Radius;
     public float MaximumSpeed;
     public float Acceleration;
+    /// <summary>Rate this body sheds speed at; see AgentDefaults.Deceleration.</summary>
+    public float Deceleration;
     public float MaximumTurnSpeed;
     public PathHandle Path;
     public int WaypointIndex;

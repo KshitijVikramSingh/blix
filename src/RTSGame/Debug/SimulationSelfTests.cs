@@ -51,6 +51,7 @@ internal static class SimulationSelfTests
         Check("placement uses purpose-specific colliders", PlacementUsesColliderQuery());
         Check("collider queries separate self, ally and enemy", ColliderRelationsAreFiltered());
         Check("head-on allies steer past without overlap", HeadOnAgentsPass());
+        Check("every group member eventually settles", EveryGroupMemberEventuallySettles());
         Check("allies file through a narrow chokepoint", AlliesQueueThroughChokepoint());
         Check("stalled unit is offered a detour", StalledUnitIsOfferedADetour());
         Check("50 agents clear a single-cell gate", FiftyAgentsClearSingleCellGate());
@@ -1041,6 +1042,92 @@ internal static class SimulationSelfTests
     /// body to have passed through another, which is the thing worth failing over.
     /// </remarks>
     private const float MaximumTransientOverlap = 0.05f;
+
+    /// <summary>
+    /// Every member of a group order must eventually stop, including the last one.
+    /// </summary>
+    /// <remarks>
+    /// Station-keeping steers a travelling member toward the cohort centroid plus its own
+    /// formation offset, and the centroid used to include the member reading it. Harmless
+    /// at thirty; with one member left in transit the centroid <em>is</em> that member's
+    /// position, so its station sat a fixed offset from wherever it currently was and it
+    /// circled after that offset indefinitely — visibly looping outside the walls long
+    /// after everyone else had settled. Nothing caught it: it was moving, so the stall
+    /// detector decayed its counter below every recovery threshold, and it wanted to move,
+    /// so the no-intent watchdog never looked at it.
+    /// <para>
+    /// Asserted as an outcome — everybody stops — because the mechanism is a detail and the
+    /// failure is a unit that never arrives. Run long past settling so the tail is included;
+    /// the whole point is that the bug only appears once the cohort has drained.
+    /// </para>
+    /// </remarks>
+    private static bool EveryGroupMemberEventuallySettles()
+    {
+        // The destination is walled in with one gap, and the group starts outside. That is
+        // what keeps a member in cohort transit indefinitely: a body only leaves the shared
+        // field once it is within the formation envelope of the command point, and a body
+        // that cannot get in there never does. In open ground everyone arrives within
+        // seconds and the state this is about barely exists — measured, an open-field
+        // version of this test passes with the defect fully present.
+        var world = new SimulationWorld();
+        var transform = world.Placement.Transform;
+        for (var x = 8; x <= 13; x++)
+        {
+            world.QueueToggleObstacle(transform.CellCenter(new GridCell(x, 8)));
+            world.QueueToggleObstacle(transform.CellCenter(new GridCell(x, 13)));
+        }
+        for (var z = 8; z <= 13; z++)
+        {
+            world.QueueToggleObstacle(transform.CellCenter(new GridCell(8, z)));
+            // One gap, at z == 11.
+            if (z != 11) world.QueueToggleObstacle(transform.CellCenter(new GridCell(13, z)));
+        }
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+
+        var ids = new List<AgentId>();
+        for (var row = 0; row < 6; row++)
+        for (var column = 0; column < 5; column++)
+        {
+            ids.Add(world.SpawnAgent(new Vector2(9f + column * 0.95f, -6f + row * 0.95f)));
+        }
+        world.QueueMove(ids, transform.CellCenter(new GridCell(10, 10)));
+
+        var settledTick = -1;
+        for (var tick = 0; tick < 3600; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            if (ids.All(id => !world.Agents.Get(id).HasDestination))
+            {
+                settledTick = tick;
+                break;
+            }
+        }
+
+        var stillMoving = ids.Where(id => world.Agents.Get(id).HasDestination).ToArray();
+        var passed = stillMoving.Length == 0;
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    group settle: {stillMoving.Length}/{ids.Count} never stopped after " +
+                $"{3600 * SimulationWorld.FixedDeltaSeconds:F0}s");
+            foreach (var id in stillMoving.Take(4))
+            {
+                ref readonly var agent = ref world.Agents.Get(id);
+                Console.WriteLine(
+                    $"      {id.Value}: pos=({agent.Position.X:F2},{agent.Position.Y:F2}) " +
+                    $"slot=({agent.GroupSlot.X:F2},{agent.GroupSlot.Y:F2}) " +
+                    $"speed={agent.Velocity.Length():F2} stuck={agent.StuckSeconds:F2} " +
+                    $"flow={agent.UsesFlowTransit} approaching={agent.ApproachingSlot}");
+            }
+        }
+        else
+        {
+            Console.WriteLine(
+                $"    group settle: all {ids.Count} stopped by " +
+                $"{settledTick * SimulationWorld.FixedDeltaSeconds:F1}s");
+        }
+        return passed;
+    }
 
     private static bool AlliesQueueThroughChokepoint()
     {

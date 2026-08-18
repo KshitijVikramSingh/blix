@@ -18,6 +18,8 @@ internal sealed class PathService
     public bool HasTerrainVariation => terrain.Revision > 0;
     private const float DiagonalCost = 1.41421356f;
     private const float CongestionAvoidanceRadius = 3f;
+    /// <summary>How far ahead a stalled body looks for the constriction blocking it.</summary>
+    internal static float ApertureSearchDistance = 4.5f;
     /// <summary>
     /// Peak delay charged at the centre of a granted detour's avoidance bubble.
     /// </summary>
@@ -41,7 +43,7 @@ internal sealed class PathService
     /// instead of 19.2 s. Two symptoms, one cause.
     /// </para>
     /// </remarks>
-    private const float DetourAvoidanceSeconds = 0.5f;
+    internal static float DetourAvoidanceSeconds = 0.5f;
     /// <summary>
     /// Nominal unit speed used to express route cost as travel time.
     /// </summary>
@@ -65,9 +67,9 @@ internal sealed class PathService
     /// two-gap wall still sent 29 of 30 units through one gap; at this value they
     /// split, and every scenario's completion time improved rather than regressed.
     /// </remarks>
-    private const float CongestionSecondsPerPressure = 0.40f;
+    internal static float CongestionSecondsPerPressure = 0.40f;
     /// <summary>Extra seconds charged per metre of climb.</summary>
-    private const float ClimbSecondsPerMetre = 0.60f;
+    internal static float ClimbSecondsPerMetre = 0.60f;
     /// <summary>
     /// Nominal turn rate, in radians per second, that route cost prices turning at.
     /// </summary>
@@ -78,7 +80,7 @@ internal sealed class PathService
     /// the navigation layer does not need to know what an agent is; if the two ever
     /// diverge, routes will be planned for a body that does not exist.
     /// </remarks>
-    private const float ReferenceTurnSpeed = 4.0f;
+    internal static float ReferenceTurnSpeed = 4.0f;
     /// <summary>Seconds to cross one cell of open ground at the reference speed.</summary>
     private float SecondsPerCell => grid.Transform.CellSize / ReferenceSpeed;
     /// <summary>Travel time an unreachable cell reports when sampling the flow field.</summary>
@@ -100,7 +102,7 @@ internal sealed class PathService
     private float BlockedFlowSeconds => BlockedFlowCells * SecondsPerCell;
 
     /// <summary>Cells of open ground the blocked-cell boundary value is worth.</summary>
-    private const float BlockedFlowCells = 108f;
+    internal static float BlockedFlowCells = 108f;
     /// <summary>How many past congestion revisions stay resident for staggered adoption.</summary>
     private const int RetainedCongestionRevisions = 3;
     /// <summary>Directions probed when reading the cost field's downhill.</summary>
@@ -110,7 +112,7 @@ internal sealed class PathService
     /// Delay charged for taking a bottleneck another member of the same group has
     /// already reserved — what waiting a turn there is expected to cost.
     /// </summary>
-    private const float BottleneckReservationSeconds = 0.5f;
+    internal static float BottleneckReservationSeconds = 0.5f;
     private const float SlotDetourTolerance = 2.0f;
     private const float SlotDetourSlack = 0.45f;
     private const float Epsilon = 0.00001f;
@@ -142,8 +144,10 @@ internal sealed class PathService
     /// property of the ground, so the cost is interpolated by local clearance.
     /// </para>
     /// </remarks>
-    private static readonly float[,] ArcTurnSeconds = BuildTurnTable(pivot: false);
-    private static readonly float[,] PivotTurnSeconds = BuildTurnTable(pivot: true);
+    // Radians, not seconds: the turn rate they are divided by is live-tunable, and baking
+    // it in made the tables silently stale the moment somebody moved the slider.
+    private static readonly float[,] ArcTurnRadians = BuildTurnTable(pivot: false);
+    private static readonly float[,] PivotTurnRadians = BuildTurnTable(pivot: true);
 
     private static float[,] BuildTurnTable(bool pivot)
     {
@@ -154,8 +158,7 @@ internal sealed class PathService
             var a = Vector2.Normalize(new Vector2(NeighborOffsets[from].X, NeighborOffsets[from].Z));
             var b = Vector2.Normalize(new Vector2(NeighborOffsets[to].X, NeighborOffsets[to].Z));
             var theta = MathF.Acos(Math.Clamp(Vector2.Dot(a, b), -1f, 1f));
-            table[from, to] = (pivot ? theta : theta - 2f * MathF.Sin(theta * 0.5f)) /
-                              ReferenceTurnSpeed;
+            table[from, to] = pivot ? theta : theta - 2f * MathF.Sin(theta * 0.5f);
         }
         return table;
     }
@@ -169,8 +172,9 @@ internal sealed class PathService
         // Either heading unrecorded means there is no turn to charge: the route either
         // starts here and is free to face anywhere, or ends here and turns no further.
         if (fromDirection < 0 || toDirection < 0 || fromDirection == toDirection) return 0f;
-        var arc = ArcTurnSeconds[fromDirection, toDirection];
-        var pivot = PivotTurnSeconds[fromDirection, toDirection];
+        var turnRate = MathF.Max(0.05f, ReferenceTurnSpeed);
+        var arc = ArcTurnRadians[fromDirection, toDirection] / turnRate;
+        var pivot = PivotTurnRadians[fromDirection, toDirection] / turnRate;
         if (pivot <= arc) return arc;
 
         // Whether the body can carry its speed through the turn depends on whether its
@@ -208,6 +212,8 @@ internal sealed class PathService
     /// </remarks>
     private readonly Dictionary<int, byte[]> cellCenterAdmission = new();
     private int cellCenterAdmissionRevision = -1;
+    private readonly Dictionary<(int Cell, int Radius), Vector2> passageAxes = new();
+    private int passageAxisRevision = -1;
     private int[] searchCameFrom = Array.Empty<int>();
     private float[] searchCost = Array.Empty<float>();
     private bool[] searchClosed = Array.Empty<bool>();
@@ -620,6 +626,178 @@ internal sealed class PathService
             }
         }
         return count;
+    }
+
+    /// <summary>
+    /// Finds the constriction a body is leaning on: the tightest ground ahead of it, along
+    /// the way it is trying to go. False if there is nothing narrow enough to blame.
+    /// </summary>
+    /// <remarks>
+    /// A granted detour is only as good as the region it is told to avoid, and that region
+    /// used to be a fixed distance in front of the body's nose. Against a queue several
+    /// bodies deep wedged in a corner that is useless — the replan simply routes round the
+    /// bubble and back into the same queue a metre later, which is why the unit that was
+    /// offered a way out visibly fails to take one. What has to be excluded is the gap
+    /// itself, wherever along the route it happens to be.
+    /// <para>
+    /// Searched along the body's own intent rather than along its stored route, because a
+    /// body in this state frequently has no usable route left and its intent is the more
+    /// honest statement of where it keeps trying to go. Straight-line, so a constriction
+    /// round a bend is missed; the fallback then behaves as before.
+    /// </para>
+    /// </remarks>
+    public bool TryFindObstructingAperture(
+        Vector2 position,
+        Vector2 direction,
+        float agentRadius,
+        out Vector2 aperture)
+    {
+        aperture = default;
+        if (direction.LengthSquared() <= Epsilon) return false;
+        direction = Vector2.Normalize(direction);
+
+        var step = grid.Transform.CellSize * 0.5f;
+        var steps = Math.Max(1, (int)MathF.Ceiling(ApertureSearchDistance / step));
+        // Only ground tight enough to serialise a crowd counts as an aperture; a merely
+        // crowded patch of open field is not something to route around.
+        var constrictionLimit = agentRadius * 3f;
+        var tightest = float.PositiveInfinity;
+        var found = false;
+        for (var i = 1; i <= steps; i++)
+        {
+            var sample = position + direction * (i * step);
+            if (!grid.TryWorldToCell(sample, out var cell)) break;
+            var clearance = grid.Clearance(cell);
+            if (clearance >= constrictionLimit || clearance >= tightest) continue;
+            tightest = clearance;
+            aperture = grid.CellCenter(cell);
+            found = true;
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// The axis a constriction actually lets a body through on, or false in open ground.
+    /// </summary>
+    /// <remarks>
+    /// Found by asking, in each of eight directions, how far a body could travel before the
+    /// ground stops taking it, and keeping the opposed pair with the longest shorter run —
+    /// which for a gap in a wall is the way through it. Used to judge whether bodies are
+    /// arriving at gaps square or oblique; a body that reaches a one-body-wide gap at forty
+    /// degrees has to reorient inside the one place there is no room to.
+    /// </remarks>
+    public bool TryFindPassageAxis(Vector2 position, float agentRadius, out Vector2 axis)
+    {
+        axis = default;
+        if (!grid.TryWorldToCell(position, out var cell)) return false;
+        if (grid.Clearance(cell) >= agentRadius * 3f) return false;
+
+        // Memoized: which way a gap lets a body through is a property of the cell and the
+        // raster, not of the body standing in it, and probing eight directions per body per
+        // tick would not be affordable otherwise.
+        if (passageAxisRevision != grid.Revision)
+        {
+            passageAxes.Clear();
+            passageAxisRevision = grid.Revision;
+        }
+        var key = (grid.Transform.Index(cell), (int)MathF.Round(agentRadius * 100f));
+        if (passageAxes.TryGetValue(key, out var cached))
+        {
+            axis = cached;
+            return cached != Vector2.Zero;
+        }
+        var found = ComputePassageAxis(position, agentRadius, out axis);
+        passageAxes[key] = found ? axis : Vector2.Zero;
+        return found;
+    }
+
+    private bool ComputePassageAxis(Vector2 position, float agentRadius, out Vector2 axis)
+    {
+        axis = default;
+        var step = grid.Transform.CellSize * 0.5f;
+        var reach = grid.Transform.CellSize * 8f;
+        var bestRun = 0f;
+        for (var i = 0; i < 4; i++)
+        {
+            var angle = i * MathF.PI / 4f;
+            var direction = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
+            var forward = FreeRun(position, direction, agentRadius, step, reach);
+            var backward = FreeRun(position, -direction, agentRadius, step, reach);
+            var run = MathF.Min(forward, backward);
+            if (run <= bestRun) continue;
+            bestRun = run;
+            axis = direction;
+        }
+        return bestRun > 0f;
+    }
+
+    private float FreeRun(Vector2 from, Vector2 direction, float agentRadius, float step, float reach)
+    {
+        var travelled = 0f;
+        while (travelled < reach)
+        {
+            travelled += step;
+            var sample = from + direction * travelled;
+            if (!grid.TryWorldToCell(sample, out var cell) || !grid.IsWalkable(cell, agentRadius))
+            {
+                return travelled - step;
+            }
+        }
+        return reach;
+    }
+
+    /// <summary>
+    /// Standoff, in metres, at which a body lines up on a gap's axis. Zero disables it.
+    /// </summary>
+    /// <remarks>
+    /// Off by default, and deliberately: it does what it says — the gate's mean approach
+    /// angle falls from 33 to 28 degrees and route length in the pen from 1.10x to 1.00x —
+    /// and it costs stall time and direction stability to get there (pen red 37 to 62
+    /// agent-seconds, gate dead stops 29 to 74, mean turn 4.8 to 5.8 degrees a tick).
+    /// <para>
+    /// That is a trade between how a crowd looks going into a gap and how long it takes to
+    /// get through, and no headless measurement settles it. It ships as a slider rather than
+    /// as a decision, because whoever is watching can weigh it and the benchmark cannot.
+    /// </para>
+    /// </remarks>
+    internal static float ApertureApproachStandoff;
+
+    /// <summary>
+    /// Where a body should aim when a constriction lies ahead: a point on the gap's axis,
+    /// rather than the gap's mouth.
+    /// </summary>
+    /// <remarks>
+    /// Descending a cost field aims a body at the cheapest ground next to it, and next to a
+    /// gap that is the gap's opening — so bodies converge on the mouth from every angle and
+    /// arrive oblique. Measured at 33 degrees mean at a one-cell gate with 44% of samples
+    /// past thirty, and a body at that angle presents nearly a fifth more width than it has
+    /// and must reorient inside the one place there is no room to.
+    /// <para>
+    /// Aiming instead at a staging point on the axis, one standoff short of the gap, makes
+    /// the body line up before it commits and then go straight through. It also stabilises
+    /// the intent: a fixed geometric target does not flip between near-tied probe directions
+    /// the way the cheapest-of-sixteen answer does, which is what made bodies cast about at a
+    /// chokepoint instead of committing.
+    /// </para>
+    /// </remarks>
+    public bool TryFindApertureApproach(
+        Vector2 position,
+        Vector2 heading,
+        float agentRadius,
+        out Vector2 aimPoint)
+    {
+        aimPoint = default;
+        if (ApertureApproachStandoff <= 0f) return false;
+        if (!TryFindObstructingAperture(position, heading, agentRadius, out var aperture)) return false;
+        if (!TryFindPassageAxis(aperture, agentRadius, out var axis)) return false;
+        // The axis is undirected; take the end the body is actually travelling toward.
+        if (Vector2.Dot(axis, heading) < 0f) axis = -axis;
+        var along = Vector2.Dot(aperture - position, axis);
+        // Short of the gap, line up on its axis. At or inside it, aim through and out.
+        aimPoint = along > ApertureApproachStandoff
+            ? aperture - axis * ApertureApproachStandoff
+            : aperture + axis * ApertureApproachStandoff;
+        return true;
     }
 
     public bool IsPositionNavigable(Vector2 position, float agentRadius)
