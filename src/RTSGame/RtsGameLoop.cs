@@ -119,6 +119,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     // detail exists to draw.
     private InstancedBatch detailBatch = null!;
     private InstanceBuffer detailBuffer = null!;
+    // The ground does not change between frames and was being rebuilt from scratch on every
+    // one of them: fourteen thousand blocks, each with a bilinear surface and height sample.
+    // That is 18 ms of a 16 ms frame spent redrawing a field that had not moved.
+    private readonly List<InstanceData> groundInstances = new();
+    private readonly List<InstanceData> detailInstances = new();
+    private int groundTerrainRevision = -1;
+    private Vector2 groundFocusBlock = new(float.NaN);
     private InstancedBatch unitBatch = null!;
     private readonly List<TerrainSurfaceLayer> terrainSurfaceLayers = new();
     private VulkanGraphicsDevice vk = null!;
@@ -679,9 +686,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             layer.Batch.Begin(viewProjectionBytes);
             layer.Batch.Add(Matrix4x4.Identity, layer.Color);
         }
+        RebuildGroundInstancesIfStale();
         groundBatch.Begin(viewProjectionBytes);
+        groundBatch.SetInstances(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(groundInstances));
         detailBatch.Begin(viewProjectionBytes);
-        BuildCoarseGround();
+        detailBatch.SetInstances(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(detailInstances));
         terrainBatch.Begin(viewProjectionBytes);
         BuildObstacleInstances();
         BuildNavigationOverlay();
@@ -713,11 +722,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         {
             var center = grid.Origin + new Vector2((x + 0.5f) * block, (z + 0.5f) * block);
             if (!terrain.Contains(center)) continue;
-            // Ground is drawn at one resolution per patch, never two. A block whose cells do
-            // not all agree is left to the detail pass below; drawing both meant a five-metre
-            // block took the surface of whatever happened to be at its centre and painted a
-            // blocky halo around every pond and ramp, with the true shape drawn on top of it.
-            if (!BlockIsUniform(terrain, grid, center, block)) continue;
+            // The coarse pass always draws. An earlier version skipped blocks whose cells did
+            // not all agree, on the theory that the detail pass would cover them — true only
+            // where the detail pass reaches. On terrain that rolls, no block agrees with itself
+            // to the centimetre, so nothing was drawn beyond the detail radius and the map
+            // became a few islands floating in the sky.
             var color = TerrainColor(terrain.SampleSurface(center), (x + z) % 2 == 0);
             // Sized exactly to its spacing. An earlier version grew each block by a hair to
             // close sub-pixel cracks and bought a far worse artefact: neighbours then overlap
@@ -725,29 +734,47 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // long bright seams running the width of the map.
             var model = Matrix4x4.CreateScale(block, 0.02f, block) *
                         Matrix4x4.CreateTranslation(center.X, terrain.SampleHeight(center) - 0.01f, center.Y);
-            groundBatch.Add(model, color);
+            groundInstances.Add(new InstanceData(model, color));
         }
 
         BuildDetailedGround();
     }
 
-    /// <summary>Whether every cell under a coarse block shares its surface and height.</summary>
-    private static bool BlockIsUniform(TerrainMap terrain, GridTransform grid, Vector2 center, float block)
+    /// <summary>
+    /// Rebuilds the ground instance lists, but only when something they depend on has moved.
+    /// </summary>
+    /// <remarks>
+    /// The coarse blocks depend on the terrain alone. The detail window also depends on where
+    /// the camera is looking, but only to the nearest block — so panning across a map rebuilds
+    /// a handful of times rather than sixty times a second.
+    /// </remarks>
+    private void RebuildGroundInstancesIfStale()
     {
-        var half = block * 0.5f - grid.CellSize * 0.5f;
-        var surface = terrain.SampleSurface(center);
-        var height = terrain.SampleHeight(center);
-        for (var z = -1; z <= 1; z++)
-        for (var x = -1; x <= 1; x++)
+        var block = CoarseGroundBlockSize;
+        var focusBlock = new Vector2(
+            MathF.Floor(cameraFocus.X / block),
+            MathF.Floor(cameraFocus.Y / block));
+        if (groundTerrainRevision == simulation.Terrain.Revision && focusBlock == groundFocusBlock)
         {
-            var probe = center + new Vector2(x * half, z * half);
-            if (terrain.SampleSurface(probe) != surface) return false;
-            if (MathF.Abs(terrain.SampleHeight(probe) - height) > 0.01f) return false;
+            return;
         }
 
-        return true;
+        groundTerrainRevision = simulation.Terrain.Revision;
+        groundFocusBlock = focusBlock;
+        groundInstances.Clear();
+        detailInstances.Clear();
+        BuildCoarseGround();
     }
 
+    /// <summary>How far a cell may sit from its block's height before it is drawn itself.</summary>
+    /// <remarks>
+    /// Generous on purpose. Ground that rolls gently is described perfectly well by a flat
+    /// plate every five metres, and demanding agreement to the centimetre means every block on
+    /// a natural landscape counts as disputed — which is how the map became a few islands
+    /// floating in the sky. What this is for is catching a step: a bank, a ridge, the lip of a
+    /// basin, where a flat plate stops being an answer at all.
+    /// </remarks>
+    private const float BlockHeightTolerance = 0.35f;
     /// <summary>
     /// Per-cell ground for the parts of the map that actually have something on them.
     /// </summary>
@@ -775,7 +802,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var minimumZ = Math.Clamp((int)MathF.Floor(low.Y), 0, grid.Height - 1);
         var maximumX = Math.Clamp((int)MathF.Ceiling(high.X), 0, grid.Width - 1);
         var maximumZ = Math.Clamp((int)MathF.Ceiling(high.Y), 0, grid.Height - 1);
-        var detailCells = 0;
         var block = CoarseGroundBlockSize;
 
         for (var z = minimumZ; z <= maximumZ; z++)
@@ -783,16 +809,24 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         {
             var cell = new GridCell(x, z);
             var center = grid.CellCenter(cell);
-            // Exactly the cells the coarse pass declined, so the two never overlap.
-            if (BlockIsUniform(terrain, grid, BlockCentre(grid, center, block), block)) continue;
+            // Only where the cell disagrees with the coarse block covering it: a different
+            // surface, or a height the flat plate cannot stand in for.
+            var blockCentre = BlockCentre(grid, center, block);
             var surface = terrain.Surface(cell);
             var height = terrain.SampleHeight(center);
+            if (surface == terrain.SampleSurface(blockCentre) &&
+                MathF.Abs(height - terrain.SampleHeight(blockCentre)) < BlockHeightTolerance)
+            {
+                continue;
+            }
+
             var color = TerrainColor(surface, (x + z) % 2 == 0);
-            if (detailCells == MaximumDetailCells) return;
-            detailCells++;
-            var model = Matrix4x4.CreateScale(cellSize * 1.02f, 0.02f, cellSize * 1.02f) *
-                        Matrix4x4.CreateTranslation(center.X, height, center.Y);
-            detailBatch.Add(model, color);
+            if (detailInstances.Count == MaximumDetailCells) return;
+            // Sits just above the coarse plate rather than in it, so the finer answer wins
+            // outright instead of z-fighting with the blunt one.
+            var model = Matrix4x4.CreateScale(cellSize, 0.02f, cellSize) *
+                        Matrix4x4.CreateTranslation(center.X, height + 0.012f, center.Y);
+            detailInstances.Add(new InstanceData(model, color));
         }
     }
 

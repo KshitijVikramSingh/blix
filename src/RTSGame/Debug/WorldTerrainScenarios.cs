@@ -11,26 +11,42 @@ namespace RTSGame.Debug;
 /// </summary>
 /// <remarks>
 /// <see cref="TerrainStressScenarios"/> is a laboratory: a ramp, two hills and a pond inside
-/// thirty metres, drawn so that two self-tests could assert on a body crossing them. It is
-/// still exactly that, and it is still what those tests run against. What it is not is a map.
-/// Stretched onto six hundred metres it read as a few chunky rectangles adrift in an empty
-/// plain, because every feature in it is about as wide as four bodies standing abreast.
+/// thirty metres, drawn so two self-tests could assert on a body crossing them. It is still
+/// exactly that. What it is not is a map — stretched onto six hundred metres it read as a few
+/// chunky rectangles adrift in an empty plain, because every feature in it is about as wide as
+/// four bodies standing abreast.
 /// <para>
-/// This is drawn to the scale the design argues in. A catchment is about a hundred metres of
-/// walking, a player's territory a few of those, so terrain has to be legible at that size to
-/// mean anything: a ridge is something you route a hauling line around, not something you
-/// step over. Everything here is expressed as a fraction of the extent, so it is the same map
-/// at any size.
+/// This is built out of pieces you can point at: a wall of hills across the middle with one
+/// gap in it, a road through that gap, and a lake. The first attempt was smooth field
+/// arithmetic — a Gaussian ridge multiplied by a Gaussian pass, a bending road, rolling swells
+/// — and it produced something nobody could reason about and the renderer could not draw: a
+/// diagonal smear where the ridge should be, a road that came out as a chevron, and ground that
+/// disagreed with itself everywhere, so the coarse pass had nothing flat to stand on. Legible
+/// beats clever, and on a greybox map legible is also the point.
 /// </para>
 /// <para>
-/// It is also the first thing in this project that gives the routing hierarchy real work.
-/// Portal routing was measured on open ground, where a region's crossing cost is arithmetic
-/// and the search never runs. Ridges, a lake and a river put obstacles in perhaps a fifth of
-/// the regions, which is the case the fast path deliberately does not cover.
+/// It is the first thing here that gives portal routing real work. Everything measured so far
+/// was on open ground, where a region's crossing cost is arithmetic and the search never runs.
+/// A ridge with a single pass is the case the fast path deliberately does not cover, and it is
+/// the case the whole hierarchy exists for: getting from one side to the other means finding
+/// the gap.
 /// </para>
 /// </remarks>
 internal static class WorldTerrainScenarios
 {
+    // Everything is a fraction of the extent, so this is the same map at any size.
+    private const float RidgeCentre = 0.15f;
+    private const float RidgeHalfWidth = 0.025f;
+    private const float RidgeFlankHalfWidth = 0.038f;
+    private const float RidgeHeight = 20f;
+    private const float PassCentre = -0.06f;
+    private const float PassHalfWidth = 0.030f;
+    private const float RoadHalfWidth = 0.008f;
+    private const float LakeCentreX = -0.28f;
+    private const float LakeCentreY = -0.26f;
+    private const float LakeRadius = 0.070f;
+    private const float ShoreRadius = 0.092f;
+
     public static AgentId[] Populate(SimulationWorld world, bool issueGroupMove = true)
     {
         var terrain = world.Terrain;
@@ -53,46 +69,52 @@ internal static class WorldTerrainScenarios
 
         world.RebuildTerrainNavigation();
 
-        // On the road, west of the pass, with somewhere worth walking to on the far side.
+        // On the road, south of the ridge, with the pass between them and their destination.
         var ids = new List<AgentId>();
-        var start = new Vector2(-extent * 0.30f, extent * 0.02f);
+        var start = new Vector2(PassCentre * extent - 2.5f, -0.05f * extent);
         for (var row = 0; row < 5; row++)
         for (var column = 0; column < 6; column++)
         {
             ids.Add(world.SpawnAgent(start + new Vector2(column * 0.9f, row * 0.9f)));
         }
 
-        if (issueGroupMove) world.QueueMove(ids, new Vector2(extent * 0.32f, extent * 0.06f));
+        if (issueGroupMove)
+        {
+            world.QueueMove(ids, new Vector2(PassCentre * extent, 0.32f * extent));
+        }
+
         return ids.ToArray();
     }
 
     /// <summary>
-    /// A ridge across the map with one pass through it, a shallow basin, and rolling ground.
+    /// Flat ground everywhere, and one wall of hills across the middle with a gap in it.
     /// </summary>
     /// <remarks>
-    /// The ridge is the point of the map. It runs most of the way across, it is too steep to
-    /// climb, and there is exactly one gap in it — so a route from one side to the other has
-    /// to find that gap, which is the whole reason a portal graph exists. The rest is gentle
-    /// enough to walk anywhere, because a map where every metre is a decision is not a map
-    /// either.
+    /// Flat is deliberate. Ground that rolls gently looks better and costs a great deal: the
+    /// renderer describes open ground with one flat plate every few metres, and terrain that
+    /// disagrees with itself everywhere means no plate is ever right. Height belongs where it
+    /// says something — here, in the one feature a route has to solve.
     /// </remarks>
     private static float Height(Vector2 position, float extent)
     {
         var u = position.X / extent;
         var v = position.Y / extent;
 
-        // Long ridge on a slight diagonal, with a saddle a fifth of the way north of centre.
-        var alongRidge = v - 0.18f + u * 0.10f;
-        var ridge = 26f * Falloff(alongRidge / 0.035f);
-        var pass = Falloff((u + 0.06f) / 0.045f);
-        ridge *= 1f - 0.97f * pass;
+        var acrossRidge = MathF.Abs(v - RidgeCentre);
+        if (acrossRidge >= RidgeHalfWidth) return 0f;
 
-        // A broad basin in the south-west that the river drains into, and long rolling swells
-        // so that open ground is not literally a plane.
-        var basin = -6f * Falloff((u + 0.30f) / 0.16f) * Falloff((v + 0.28f) / 0.16f);
-        var swell = 1.6f * MathF.Sin(u * 7.5f) * MathF.Cos(v * 6.1f);
+        // Straight sides, flat top: a slope of about one and a third, comfortably past what a
+        // body will climb, so the ridge is a wall rather than a hill that merely looks like one.
+        var rise = RidgeHeight * (1f - acrossRidge / RidgeHalfWidth);
 
-        return ridge + basin + swell;
+        // The gap. Cut square, because a defile with soft edges is not a defile.
+        var acrossPass = MathF.Abs(u - PassCentre);
+        if (acrossPass <= PassHalfWidth) return 0f;
+
+        // A few metres of taper at the mouth so bodies are not walking into an invisible wall
+        // exactly at the boundary of a cell.
+        var mouth = MathF.Min(1f, (acrossPass - PassHalfWidth) / 0.012f);
+        return rise * mouth;
     }
 
     private static TerrainSurface Surface(Vector2 position, float extent)
@@ -100,27 +122,19 @@ internal static class WorldTerrainScenarios
         var u = position.X / extent;
         var v = position.Y / extent;
 
-        // The lake sits in the basin and cannot be entered.
-        var lake = MathF.Sqrt(Square((u + 0.30f) / 0.085f) + Square((v + 0.28f) / 0.070f));
-        if (lake < 1f) return TerrainSurface.Impassable;
-        if (lake < 1.35f) return TerrainSurface.Mud;
+        var lake = MathF.Sqrt(Square(u - LakeCentreX) + Square(v - LakeCentreY));
+        if (lake < LakeRadius) return TerrainSurface.Impassable;
+        if (lake < ShoreRadius) return TerrainSurface.Mud;
 
-        // A road running west to east through the pass — the reason the pass matters.
-        var road = MathF.Abs(v - RoadCentre(u));
-        if (road < 0.006f) return TerrainSurface.Road;
+        // The road runs north to south straight through the pass, which is the reason the pass
+        // is worth anything.
+        if (MathF.Abs(u - PassCentre) < RoadHalfWidth) return TerrainSurface.Road;
 
-        // Rough ground on the ridge's flanks, so going over is slow as well as steep.
-        var alongRidge = MathF.Abs(v - 0.18f + u * 0.10f);
-        if (alongRidge < 0.055f) return TerrainSurface.Rough;
+        // Broken ground on the ridge and its skirts: slow as well as steep.
+        if (MathF.Abs(v - RidgeCentre) < RidgeFlankHalfWidth) return TerrainSurface.Rough;
 
         return TerrainSurface.Grass;
     }
-
-    /// <summary>The road bends north to meet the pass, then straightens again.</summary>
-    private static float RoadCentre(float u) => 0.02f + 0.16f * Falloff((u + 0.06f) / 0.22f);
-
-    /// <summary>Smooth bump, one at the centre and effectively nothing past about two.</summary>
-    private static float Falloff(float t) => MathF.Exp(-t * t);
 
     private static float Square(float value) => value * value;
 }

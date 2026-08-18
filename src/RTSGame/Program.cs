@@ -24,6 +24,60 @@ public static class Program
             Environment.Exit(ScaleScenarios.Run(extents, counts));
         }
 
+        if (args.Contains("--worldgen"))
+        {
+            var genExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var world = new Simulation.SimulationWorld(genExtent);
+            Console.WriteLine($"  construct {watch.ElapsedMilliseconds} ms");
+            watch.Restart();
+            WorldTerrainScenarios.Populate(world, issueGroupMove: false);
+            Console.WriteLine($"  populate  {watch.ElapsedMilliseconds} ms");
+            watch.Restart();
+            world.Tick((float)Simulation.SimulationWorld.FixedDeltaSeconds);
+            Console.WriteLine($"  first tick {watch.ElapsedMilliseconds} ms");
+            Environment.Exit(0);
+        }
+
+        if (args.Contains("--mapdump"))
+        {
+            var dumpExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var dump = new Simulation.SimulationWorld(dumpExtent);
+            WorldTerrainScenarios.Populate(dump, issueGroupMove: false);
+            Console.WriteLine($"  {dump.ExtentMeters:F0} m map, '.'=grass '='=road ':'=rough '~'=mud '#'=impassable");
+            Console.WriteLine("  'X' = a standard body cannot stand there");
+            const int rows = 46;
+            for (var row = 0; row < rows; row++)
+            {
+                var line = new System.Text.StringBuilder("  ");
+                for (var column = 0; column < rows * 2; column++)
+                {
+                    var world = new System.Numerics.Vector2(
+                        (column / (float)(rows * 2 - 1) - 0.5f) * dump.ExtentMeters * 0.99f,
+                        (row / (float)(rows - 1) - 0.5f) * dump.ExtentMeters * 0.99f);
+                    var glyph = dump.Terrain.SampleSurface(world) switch
+                    {
+                        Simulation.Terrain.TerrainSurface.Road => '=',
+                        Simulation.Terrain.TerrainSurface.Rough => ':',
+                        Simulation.Terrain.TerrainSurface.Mud => '~',
+                        Simulation.Terrain.TerrainSurface.Impassable => '#',
+                        _ => '.',
+                    };
+                    if (dump.Navigation.TryWorldToCell(world, out var navCell) &&
+                        !dump.Navigation.IsWalkable(navCell, Simulation.Agents.AgentDefaults.Radius))
+                    {
+                        glyph = 'X';
+                    }
+
+                    line.Append(glyph);
+                }
+
+                Console.WriteLine(line.ToString());
+            }
+
+            Environment.Exit(0);
+        }
+
         if (args.Contains("--ordertest"))
         {
             var orderExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 1200f;
