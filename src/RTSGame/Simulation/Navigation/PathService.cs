@@ -70,7 +70,18 @@ internal sealed partial class PathService
     /// two-gap wall still sent 29 of 30 units through one gap; at this value they
     /// split, and every scenario's completion time improved rather than regressed.
     /// </remarks>
-    internal static float CongestionCellsPerPressure = 3.6f;
+    /// <summary>Cells of delay one unit of measured backpressure stands for.</summary>
+    /// <remarks>
+    /// 3.6 was the balance 0.40 s struck at the old run, and it held until the avoidance
+    /// horizons were re-based to the walk as well. Those two mechanisms compete for the same
+    /// job: a body that sees a jam coming early enough gets out of its way, and one that does
+    /// not stalls and deposits pressure. Lengthening the look-ahead therefore meant less
+    /// pressure for the same crowd, and the pen stopped splitting across its exits — the exact
+    /// behaviour this coefficient exists to produce. 5.4 restores it. 7.2 was also measured and
+    /// is too far: it breaks the narrow-chokepoint test, where the crowd starts detouring
+    /// around a queue it should simply join.
+    /// </remarks>
+    internal static float CongestionCellsPerPressure = 5.4f;
 
     /// <summary>Seconds of delay represented by one unit of measured backpressure.</summary>
     /// <remarks>

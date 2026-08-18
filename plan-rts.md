@@ -293,7 +293,15 @@ which is what a correct memo looks like:
   cell by cell, on a 200 m map of staggered walls, at several settings of the abstract search's
   horizon (`--spans`). `lost` is the column that matters — a cell the hierarchy cannot price is a
   body that believes it has no route and stops.
-- **Live tuning overlay** (backtick to toggle). `RtsGameLoop` implements `IDebuggable`, so
+- **Live tuning overlay** (backtick to toggle). **Eight dials, down from forty-five.** What is on
+  it is what is still a question: the body (top speed, acceleration, deceleration, turn rate), the
+  clock, the two route-cost terms that are game design rather than solver tuning (congestion
+  cells/pressure, climb s/m), and formation station-keeping. Everything the locomotion work settled
+  is now a constant with its measurements beside it, and everything that is a fixed proportion of
+  another number is written as that proportion — free-turn speed is an eighth of top speed, the
+  router's turn rate follows the body's, and every duration describing how long a physical condition
+  lasts carries `AgentDefaults.PaceScale`. A slider that silently re-tunes itself when you move the
+  one above it is not a dial, it is a trap. `RtsGameLoop` implements `IDebuggable`, so
   the shared Blix diagnostics overlay appears with a Controls tab of `[Tune]` sliders
   (`BodyFeelSettings`: top speed, acceleration, deceleration, turn rate, free-turn speed)
   applied to every live body each frame, and Values/Stats showing `red`, `deepest-pile`,

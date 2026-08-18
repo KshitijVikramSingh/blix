@@ -22,18 +22,18 @@ internal sealed class ReciprocalVelocitySolver
     // This is local collision avoidance, not route reservation. A long horizon
     // makes a dense merge reserve several body widths of hypothetical future
     // space and can reduce an otherwise valid crowd to a near-zero velocity.
-    internal static float TimeHorizon = 0.75f;
+    internal static float TimeHorizon = 0.75f * Agents.AgentDefaults.PaceScale;
     // A body that is standing still is not going to walk into anybody, so there
     // is nothing to predict: reserving three quarters of a second of space around
     // it just makes passers-by swerve from a distance. A late, tight horizon
     // reads as walking past someone rather than avoiding them, and lets contact
     // resolution do the last centimetre of the job.
-    internal static float StationaryTimeHorizon = 0.30f;
+    internal static float StationaryTimeHorizon = 0.30f * Agents.AgentDefaults.PaceScale;
     // Ceiling on how fast an agent with no destination may be steered.
-    internal static float IdleYieldSpeed = 1.10f;
+    internal static float IdleYieldSpeed = 1.10f / Agents.AgentDefaults.PaceScale;
     // Overlap is bled off over several ticks rather than in one, so a contact
     // cannot translate into an unsatisfiable single-tick velocity demand.
-    internal static float OverlapRecoverySeconds = 0.25f;
+    internal static float OverlapRecoverySeconds = 0.25f * Agents.AgentDefaults.PaceScale;
     /// <summary>Extra separation aimed for by bodies already in contact.</summary>
     internal static float ContactSeparationMargin = 0.015f;
     /// <summary>
@@ -57,7 +57,7 @@ internal sealed class ReciprocalVelocitySolver
     /// route length in neither.
     /// </para>
     /// </remarks>
-    internal static float StaticTimeHorizon = 0.25f;
+    internal static float StaticTimeHorizon = 0.25f * Agents.AgentDefaults.PaceScale;
     /// <summary>
     /// Clearance a body defends off a wall, beyond its own radius.
     /// </summary>

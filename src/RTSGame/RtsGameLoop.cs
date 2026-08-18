@@ -112,6 +112,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     // per-cell overlay past the batch's instance ceiling — which it did, immediately.
     private InstancedBatch groundBatch = null!;
     private InstanceBuffer groundBuffer = null!;
+    // Per-cell detail gets its own batch: the coarse ground alone is fourteen thousand
+    // instances and the ceiling is sixteen, so sharing one leaves no room for the thing the
+    // detail exists to draw.
+    private InstancedBatch detailBatch = null!;
+    private InstanceBuffer detailBuffer = null!;
     private InstancedBatch unitBatch = null!;
     private readonly List<TerrainSurfaceLayer> terrainSurfaceLayers = new();
     private VulkanGraphicsDevice vk = null!;
@@ -168,15 +173,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         cameraMaximumDistance = MathF.Max(46f, extentMeters * 1.35f);
         cameraDistance = MathF.Min(46f, cameraMaximumDistance);
         camera.FarPlane = MathF.Max(150f, extentMeters * 3f);
+        // What is left on the panel is what is still a question. Everything the locomotion
+        // work settled — solver relaxation, congestion decay, contact yielding, the recovery
+        // timings — is a constant in the code with its measurements beside it, and everything
+        // that is a fixed proportion of another number is now written as that proportion.
+        // What is left on the panel is what is still a question. Everything the locomotion
+        // work settled — solver relaxation, congestion decay, contact yielding, the recovery
+        // timings — is a constant in the code with its measurements beside it, and everything
+        // that is a fixed proportion of another number is now written as that proportion.
+        // Forty-five sliders to eight, and none of the eight is derivable from another.
         tunables = new ObjectTunables(
             bodyFeel,
             clock,
-            new AvoidanceSettings(),
-            new ContactSettings(),
-            new CongestionSettings(),
             new RoutingSettings(),
-            new GroupSettings(),
-            new RecoverySettings());
+            new GroupSettings());
         this.exitAfterFrames = exitAfterFrames;
         movementTrace = traceMovement || debugAll ? new LiveMovementTrace() : null;
         if (debugAll)
@@ -291,6 +301,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         terrainBatch = new InstancedBatch(cubeMesh, worldPipeline, terrainBuffer);
         groundBuffer = new InstanceBuffer(vk, worldShader, "rts-coarse-ground");
         groundBatch = new InstancedBatch(cubeMesh, worldPipeline, groundBuffer);
+        detailBuffer = new InstanceBuffer(vk, worldShader, "rts-ground-detail");
+        detailBatch = new InstancedBatch(cubeMesh, worldPipeline, detailBuffer);
         unitBatch = new InstancedBatch(cylinderMesh, worldPipeline, unitBuffer);
         RebuildTerrainSurfaceLayers();
         selectionUi = new SpriteBatch(vk);
@@ -627,6 +639,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             {
                 foreach (var layer in terrainSurfaceLayers) layer.Batch.End(pass);
                 groundBatch.End(pass);
+                detailBatch.End(pass);
                 terrainBatch.End(pass);
                 unitBatch.End(pass);
                 DrawSelectionMarquee(pass);
@@ -650,6 +663,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             layer.Batch.Add(Matrix4x4.Identity, layer.Color);
         }
         groundBatch.Begin(viewProjectionBytes);
+        detailBatch.Begin(viewProjectionBytes);
         BuildCoarseGround();
         terrainBatch.Begin(viewProjectionBytes);
         BuildObstacleInstances();
@@ -683,11 +697,67 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var center = grid.Origin + new Vector2((x + 0.5f) * block, (z + 0.5f) * block);
             if (!terrain.Contains(center)) continue;
             var color = TerrainColor(terrain.SampleSurface(center), (x + z) % 2 == 0);
-            var model = Matrix4x4.CreateScale(block, 0.02f, block) *
+            // A hair of overlap. Blocks sized exactly to their spacing leave sub-pixel cracks
+            // at grazing angles, which read as a grid of bright seams across the ground.
+            var model = Matrix4x4.CreateScale(block * 1.01f, 0.02f, block * 1.01f) *
                         Matrix4x4.CreateTranslation(center.X, terrain.SampleHeight(center) - 0.01f, center.Y);
             groundBatch.Add(model, color);
         }
+
+        BuildDetailedGround();
     }
+
+    /// <summary>
+    /// Per-cell ground for the parts of the map that actually have something on them.
+    /// </summary>
+    /// <remarks>
+    /// The coarse blocks are five or ten metres across, which is the right scale for reading
+    /// speed off open ground and far too blunt for a three-metre pond or a ramp: sculpted
+    /// features came out as chunky rectangles that did not line up with the terrain underneath
+    /// them, because a whole block took the surface of whatever happened to be at its centre.
+    /// <para>
+    /// Same rule as the router uses one layer down — resolve to the resolution where the detail
+    /// exists, stay broad everywhere else. A cell is drawn finely only where it disagrees with
+    /// the plain ground beneath it: a surface other than grass, or ground that is not level.
+    /// On an empty map that is nothing at all, and around a sculpted feature it is a few
+    /// thousand cells.
+    /// </remarks>
+    private void BuildDetailedGround()
+    {
+        if (UsesFineGround) return;
+        var terrain = simulation.Terrain;
+        var grid = simulation.Navigation.Transform;
+        var cellSize = grid.CellSize;
+        var low = (cameraFocus - new Vector2(DetailedGroundRadius) - grid.Origin) / cellSize;
+        var high = (cameraFocus + new Vector2(DetailedGroundRadius) - grid.Origin) / cellSize;
+        var minimumX = Math.Clamp((int)MathF.Floor(low.X), 0, grid.Width - 1);
+        var minimumZ = Math.Clamp((int)MathF.Floor(low.Y), 0, grid.Height - 1);
+        var maximumX = Math.Clamp((int)MathF.Ceiling(high.X), 0, grid.Width - 1);
+        var maximumZ = Math.Clamp((int)MathF.Ceiling(high.Y), 0, grid.Height - 1);
+        var detailCells = 0;
+
+        for (var z = minimumZ; z <= maximumZ; z++)
+        for (var x = minimumX; x <= maximumX; x++)
+        {
+            var cell = new GridCell(x, z);
+            var surface = terrain.Surface(cell);
+            var center = grid.CellCenter(cell);
+            var height = terrain.SampleHeight(center);
+            if (surface == TerrainSurface.Grass && MathF.Abs(height) < 0.02f) continue;
+            var color = TerrainColor(surface, (x + z) % 2 == 0);
+            if (detailCells == MaximumDetailCells) return;
+            detailCells++;
+            var model = Matrix4x4.CreateScale(cellSize * 1.02f, 0.02f, cellSize * 1.02f) *
+                        Matrix4x4.CreateTranslation(center.X, height, center.Y);
+            detailBatch.Add(model, color);
+        }
+    }
+
+    /// <summary>How far from the camera per-cell ground detail is drawn, in metres.</summary>
+    private const float DetailedGroundRadius = 40f;
+
+    /// <summary>Detail cells one batch can carry, minus room to spare.</summary>
+    private const int MaximumDetailCells = 16_000;
 
     /// <summary>Checker squares across the map, bounded by what one batch can hold.</summary>
     /// <remarks>
@@ -1153,6 +1223,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (selectionPixel.Id >= 0) graphicsDevice?.DestroyTexture(selectionPixel);
         terrainBuffer?.Dispose();
         groundBuffer?.Dispose();
+        detailBuffer?.Dispose();
         unitBuffer?.Dispose();
         if (vk is not null) DisposeTerrainSurfaceLayers();
     }

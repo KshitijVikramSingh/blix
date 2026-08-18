@@ -61,16 +61,21 @@ internal sealed class BodyFeelSettings
     [Tune(0.5, 12.0, Label = "turn rate (rad/s)")]
     public float MaximumTurnSpeed = AgentDefaults.MaximumTurnSpeed;
 
-    [Tune(0.0, 2.5, Label = "free-turn speed (m/s)")]
-    public float FreeTurnSpeed = AgentDefaults.FreeTurnSpeed;
-
     /// <summary>Pushes the current values onto the defaults and every live body.</summary>
+    /// <remarks>
+    /// Free-turn speed used to be a slider beside these and is now an eighth of top speed,
+    /// because that is what it always was — written as 0.55 m/s against a body doing 4.5, it
+    /// would have become a third of a walk if left alone. The routing layer's turn rate
+    /// follows this one for the same reason: two numbers that are required to agree are not
+    /// two decisions.
+    /// </remarks>
     public void Apply(SimulationWorld world)
     {
         AgentDefaults.Acceleration = Acceleration;
         AgentDefaults.Deceleration = Deceleration;
         AgentDefaults.MaximumTurnSpeed = MaximumTurnSpeed;
-        AgentDefaults.FreeTurnSpeed = FreeTurnSpeed;
+        AgentDefaults.FreeTurnSpeed = MaximumSpeed * 0.1222f;
+        PathService.ReferenceTurnSpeed = MaximumTurnSpeed;
 
         var agents = world.Agents.MutableSpan();
         for (var i = 0; i < agents.Length; i++)
@@ -85,6 +90,7 @@ internal sealed class BodyFeelSettings
             agent.MaximumTurnSpeed = MaximumTurnSpeed;
         }
     }
+
 }
 
 /// <summary>
@@ -179,154 +185,6 @@ internal sealed class CrowdMetrics
     }
 }
 
-/// <summary>
-/// Reciprocal-velocity avoidance, live. See <see cref="ReciprocalVelocitySolver"/> for what
-/// each value is for and what it cost to arrive at — the documentation stays with the value
-/// rather than moving here, and these are proxies onto it.
-/// </summary>
-internal sealed class AvoidanceSettings
-{
-    [Tune(0.5, 8.0, Label = "neighbour range (m)", Group = "Avoidance")]
-    public float NeighborDistance
-    {
-        get => ReciprocalVelocitySolver.NeighborDistance;
-        set => ReciprocalVelocitySolver.NeighborDistance = value;
-    }
-
-    [Tune(0.0, 0.9, Label = "velocity commitment", Group = "Avoidance")]
-    public float VelocityCommitment
-    {
-        get => ReciprocalVelocitySolver.VelocityCommitment;
-        set => ReciprocalVelocitySolver.VelocityCommitment = value;
-    }
-
-    [Tune(0.1, 3.0, Label = "horizon: movers (s)", Group = "Avoidance")]
-    public float TimeHorizon
-    {
-        get => ReciprocalVelocitySolver.TimeHorizon;
-        set => ReciprocalVelocitySolver.TimeHorizon = value;
-    }
-
-    [Tune(0.05, 2.0, Label = "horizon: standing (s)", Group = "Avoidance")]
-    public float StationaryTimeHorizon
-    {
-        get => ReciprocalVelocitySolver.StationaryTimeHorizon;
-        set => ReciprocalVelocitySolver.StationaryTimeHorizon = value;
-    }
-
-    [Tune(0.05, 1.5, Label = "horizon: walls (s)", Group = "Avoidance")]
-    public float StaticTimeHorizon
-    {
-        get => ReciprocalVelocitySolver.StaticTimeHorizon;
-        set => ReciprocalVelocitySolver.StaticTimeHorizon = value;
-    }
-
-    [Tune(-0.10, 0.20, Label = "wall clearance (m)", Group = "Avoidance")]
-    public float StaticSeparationMargin
-    {
-        get => ReciprocalVelocitySolver.StaticSeparationMargin;
-        set => ReciprocalVelocitySolver.StaticSeparationMargin = value;
-    }
-
-    [Tune(0.0, 4.5, Label = "idle yield speed (m/s)", Group = "Avoidance")]
-    public float IdleYieldSpeed
-    {
-        get => ReciprocalVelocitySolver.IdleYieldSpeed;
-        set => ReciprocalVelocitySolver.IdleYieldSpeed = value;
-    }
-
-    [Tune(0.033, 1.0, Label = "overlap recovery (s)", Group = "Avoidance")]
-    public float OverlapRecoverySeconds
-    {
-        get => ReciprocalVelocitySolver.OverlapRecoverySeconds;
-        set => ReciprocalVelocitySolver.OverlapRecoverySeconds = value;
-    }
-
-    [Tune(0.0, 0.15, Label = "contact margin (m)", Group = "Avoidance")]
-    public float ContactSeparationMargin
-    {
-        get => ReciprocalVelocitySolver.ContactSeparationMargin;
-        set => ReciprocalVelocitySolver.ContactSeparationMargin = value;
-    }
-}
-
-/// <summary>Positional depenetration, live. See <see cref="CollisionSystem"/>.</summary>
-internal sealed class ContactSettings
-{
-    [Tune(1, 10, Label = "relaxation passes", Group = "Contact")]
-    public int RelaxationPasses
-    {
-        get => CollisionSystem.RelaxationPasses;
-        set => CollisionSystem.RelaxationPasses = value;
-    }
-
-    [Tune(0.2, 1.0, Label = "relaxation factor", Group = "Contact")]
-    public float RelaxationFactor
-    {
-        get => CollisionSystem.RelaxationFactor;
-        set => CollisionSystem.RelaxationFactor = value;
-    }
-
-    [Tune(0.5, 1.0, Label = "yield share", Group = "Contact")]
-    public float YieldShare
-    {
-        get => CollisionSystem.YieldShare;
-        set => CollisionSystem.YieldShare = value;
-    }
-
-    [Tune(0.0, 1.0, Label = "sidestep bias", Group = "Contact")]
-    public float YieldLateralBias
-    {
-        get => CollisionSystem.YieldLateralBias;
-        set => CollisionSystem.YieldLateralBias = value;
-    }
-
-    [Tune(0.001, 0.10, Label = "sidestep cutoff (m)", Group = "Contact")]
-    public float YieldLateralOverlapLimit
-    {
-        get => CollisionSystem.YieldLateralOverlapLimit;
-        set => CollisionSystem.YieldLateralOverlapLimit = value;
-    }
-}
-
-/// <summary>Backpressure field, live. See <see cref="CongestionField"/>.</summary>
-internal sealed class CongestionSettings
-{
-    [Tune(0.3, 10.0, Label = "fade (s)", Group = "Congestion")]
-    public float DecaySeconds
-    {
-        get => CongestionField.DecaySeconds;
-        set => CongestionField.DecaySeconds = value;
-    }
-
-    [Tune(0.1, 5.0, Label = "deposit gain", Group = "Congestion")]
-    public float DepositGain
-    {
-        get => CongestionField.DepositGain;
-        set => CongestionField.DepositGain = value;
-    }
-
-    [Tune(0.0, 1.0, Label = "open-ground share", Group = "Congestion")]
-    public float OpenGroundShare
-    {
-        get => CongestionField.OpenGroundShare;
-        set => CongestionField.OpenGroundShare = value;
-    }
-
-    [Tune(0.1, 1.5, Label = "with-flow factor", Group = "Congestion")]
-    public float FollowingFactor
-    {
-        get => CongestionField.FollowingFactor;
-        set => CongestionField.FollowingFactor = value;
-    }
-
-    [Tune(1.0, 4.0, Label = "against-flow factor", Group = "Congestion")]
-    public float OpposingFactor
-    {
-        get => CongestionField.OpposingFactor;
-        set => CongestionField.OpposingFactor = value;
-    }
-}
 
 /// <summary>Route cost, live. All in seconds unless named otherwise. See PathService.</summary>
 internal sealed class RoutingSettings
@@ -342,19 +200,6 @@ internal sealed class RoutingSettings
         set => PathService.CongestionCellsPerPressure = value;
     }
 
-    [Tune(0.0, 12.0, Label = "detour bubble (s)", Group = "Routing")]
-    public float DetourAvoidanceSeconds
-    {
-        get => PathService.DetourAvoidanceSeconds;
-        set => PathService.DetourAvoidanceSeconds = value;
-    }
-
-    [Tune(0.0, 4.0, Label = "bottleneck reservation (s)", Group = "Routing")]
-    public float BottleneckReservationSeconds
-    {
-        get => PathService.BottleneckReservationSeconds;
-        set => PathService.BottleneckReservationSeconds = value;
-    }
 
     [Tune(0.0, 3.0, Label = "climb (s/m)", Group = "Routing")]
     public float ClimbSecondsPerMetre
@@ -363,33 +208,6 @@ internal sealed class RoutingSettings
         set => PathService.ClimbSecondsPerMetre = value;
     }
 
-    [Tune(0.5, 12.0, Label = "routed turn rate (rad/s)", Group = "Routing")]
-    public float ReferenceTurnSpeed
-    {
-        get => PathService.ReferenceTurnSpeed;
-        set => PathService.ReferenceTurnSpeed = value;
-    }
-
-    [Tune(4.0, 200.0, Label = "blocked-cell barrier (cells)", Group = "Routing")]
-    public float BlockedFlowCells
-    {
-        get => PathService.BlockedFlowCells;
-        set => PathService.BlockedFlowCells = value;
-    }
-
-    [Tune(0.0, 4.0, Label = "gap line-up standoff (m)", Group = "Routing")]
-    public float ApertureApproachStandoff
-    {
-        get => PathService.ApertureApproachStandoff;
-        set => PathService.ApertureApproachStandoff = value;
-    }
-
-    [Tune(1.0, 12.0, Label = "aperture search (m)", Group = "Routing")]
-    public float ApertureSearchDistance
-    {
-        get => PathService.ApertureSearchDistance;
-        set => PathService.ApertureSearchDistance = value;
-    }
 }
 
 /// <summary>Group transit and recovery, live. See <see cref="SimulationWorld"/>.</summary>
@@ -402,84 +220,5 @@ internal sealed class GroupSettings
         set => SimulationWorld.FormationKeepingGain = value;
     }
 
-    [Tune(0.0, 1.0, Label = "station-keeping speed cap", Group = "Group")]
-    public float FormationLateralSpeedFraction
-    {
-        get => SimulationWorld.FormationLateralSpeedFraction;
-        set => SimulationWorld.FormationLateralSpeedFraction = value;
-    }
-
-    [Tune(0.02, 1.0, Label = "flow smoothing", Group = "Group")]
-    public float FlowSmoothing
-    {
-        get => SimulationWorld.FlowSmoothing;
-        set => SimulationWorld.FlowSmoothing = value;
-    }
-
-    [Tune(0.0, 4.0, Label = "corner blend range (m)", Group = "Group")]
-    public float CornerBlendDistance
-    {
-        get => SimulationWorld.CornerBlendDistance;
-        set => SimulationWorld.CornerBlendDistance = value;
-    }
-
-    [Tune(0.0, 1.0, Label = "corner blend strength", Group = "Group")]
-    public float CornerBlendStrength
-    {
-        get => SimulationWorld.CornerBlendStrength;
-        set => SimulationWorld.CornerBlendStrength = value;
-    }
-
-    [Tune(0.0, 3.0, Label = "route adoption stagger (s)", Group = "Group")]
-    public float MaximumRouteAdoptionDelay
-    {
-        get => SimulationWorld.MaximumRouteAdoptionDelay;
-        set => SimulationWorld.MaximumRouteAdoptionDelay = value;
-    }
-
-    [Tune(0.0, 10.0, Label = "route commitment (s)", Group = "Group")]
-    public float RouteCommitmentSeconds
-    {
-        get => SimulationWorld.RouteCommitmentSeconds;
-        set => SimulationWorld.RouteCommitmentSeconds = value;
-    }
-
-    [Tune(0.1, 5.0, Label = "commitment release stall (s)", Group = "Group")]
-    public float RouteReconsiderStallSeconds
-    {
-        get => SimulationWorld.RouteReconsiderStallSeconds;
-        set => SimulationWorld.RouteReconsiderStallSeconds = value;
-    }
 }
 
-/// <summary>Stuck-body recovery, live. See <see cref="SimulationWorld"/>.</summary>
-internal sealed class RecoverySettings
-{
-    [Tune(0.1, 6.0, Label = "detour stall threshold (s)", Group = "Recovery")]
-    public float CongestionRecoveryStallSeconds
-    {
-        get => SimulationWorld.CongestionRecoveryStallSeconds;
-        set => SimulationWorld.CongestionRecoveryStallSeconds = value;
-    }
-
-    [Tune(0.033, 3.0, Label = "detour interval (s)", Group = "Recovery")]
-    public float CongestionRecoveryInterval
-    {
-        get => SimulationWorld.CongestionRecoveryInterval;
-        set => SimulationWorld.CongestionRecoveryInterval = value;
-    }
-
-    [Tune(0.2, 8.0, Label = "abandon gap after (s)", Group = "Recovery")]
-    public float ApertureAbandonSeconds
-    {
-        get => SimulationWorld.ApertureAbandonSeconds;
-        set => SimulationWorld.ApertureAbandonSeconds = value;
-    }
-
-    [Tune(0.5, 15.0, Label = "abandon held for (s)", Group = "Recovery")]
-    public float ApertureAbandonHoldSeconds
-    {
-        get => SimulationWorld.ApertureAbandonHoldSeconds;
-        set => SimulationWorld.ApertureAbandonHoldSeconds = value;
-    }
-}
