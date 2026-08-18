@@ -143,6 +143,10 @@ internal sealed class SimulationWorld
     public long TileRefinements => pathService.TileRefinements;
     /// <summary>Region tiles adopted whole from the previous field for the same goal.</summary>
     public long InheritedTiles => pathService.InheritedTiles;
+    /// <summary>Walkable ground decomposed into uniform rectangles, for the adaptive partition.</summary>
+    internal WalkableRectangles DecomposeWalkable(float agentRadius) =>
+        WalkableRectangles.Build(Navigation, agentRadius);
+
     /// <summary>Bytes of navigation raster currently held.</summary>
     public long NavigationBytes => Navigation.ResidentBytes;
     /// <summary>Regions holding a full-resolution raster rather than five numbers.</summary>

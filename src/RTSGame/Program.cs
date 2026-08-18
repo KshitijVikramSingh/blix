@@ -39,6 +39,36 @@ public static class Program
             Environment.Exit(0);
         }
 
+        if (args.Contains("--rectangles"))
+        {
+            var rectExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var rectWorld = new Simulation.SimulationWorld(rectExtent);
+            if (args.Contains("--terrain")) WorldTerrainScenarios.Populate(rectWorld, issueGroupMove: false);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var decomposition = rectWorld.DecomposeWalkable(Simulation.Agents.AgentDefaults.Radius);
+            var elapsed = watch.Elapsed.TotalMilliseconds;
+            var cells = rectWorld.Navigation.Width * rectWorld.Navigation.Height;
+            var largest = 0;
+            long areaSum = 0;
+            foreach (var rectangle in decomposition.All)
+            {
+                largest = Math.Max(largest, rectangle.Area);
+                areaSum += rectangle.Area;
+            }
+
+            Console.WriteLine(
+                $"  {rectWorld.ExtentMeters:F0} m | {(args.Contains("--terrain") ? "ridge, lake and road" : "empty")} | " +
+                $"{cells:N0} cells");
+            Console.WriteLine(
+                $"  rectangles {decomposition.Count:N0} | covering {decomposition.CoveredCells:N0} walkable cells | " +
+                $"mean {(decomposition.Count == 0 ? 0 : areaSum / decomposition.Count):N0} cells | " +
+                $"largest {largest:N0} | built in {elapsed:F0} ms");
+            Console.WriteLine(
+                $"  against the fixed partition: {rectWorld.RegionCount:N0} regions of " +
+                $"{Simulation.Navigation.RegionPartition.CellsPerRegion:N0} cells");
+            Environment.Exit(0);
+        }
+
         if (args.Contains("--mapdump"))
         {
             var dumpExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;

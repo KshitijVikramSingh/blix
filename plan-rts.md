@@ -589,6 +589,41 @@ The caveats in "the argument against" are unchanged and are what stage 2 has to 
 **congestion and the steering gradient still need a uniform-resolution home**, and stage 0 is
 now the model for it — chunked, allocated where something is happening, released when it is not.
 
+### Stage 2, settled 2026-08-19
+
+Six questions, six answers, and the shape they add up to is narrower than "replace the
+substrate" — which is the point. **The mesh replaces what routing searches, not what steering
+reads.**
+
+| question | settled | why |
+|---|---|---|
+| rectangles or triangles | **rectangles** | every coordinate is an integer cell index, so there are no floating-point tie-breaks to make deterministic — and lockstep and career persistence both rest on bit-identity |
+| how steering follows a route | **a dense local field over the corridor** | §1 records that materialised waypoints are exactly what the continuous field was introduced to fix; a funnel corridor is waypoints wearing a hat |
+| does the 0.5 m raster survive | **yes, as the sampling layer** | clearance, surface, height and congestion all want uniform resolution, and stage 1 already made it cost content rather than area |
+| surfaces as polygon attributes | **no — a sampled layer route cost integrates** | §10 wants rivers that freeze and mud that comes and goes; as an attribute every season re-partitions the mesh, as a layer a season is a repaint |
+| radius | **clearance test at query time** | one decomposition serves every body, as one grid does today; per-radius erosion only if Session 4's carts prove it necessary |
+| rebuild granularity | **deferred** | it interacts with the tile cache, and there is no point designing it before the decomposition has been lived with |
+
+### The decomposition, measured before it is wired to anything
+
+Maximal rectangles of uniform ground — same walkability for the radius, same traversal cost,
+height within 5 cm — by greedy row runs merged downwards. Deterministic by construction: integer
+arithmetic in a fixed order.
+
+| map | rectangles | mean | largest | built in |
+|---|---|---|---|---|
+| empty, 600 m | **1** | 1,435,204 cells | — | 8 ms |
+| ridge, lake and road, 600 m | **754** | 1,783 cells | 484,513 | 10 ms |
+
+Against a fixed partition of 361 regions of 4,096 cells, of which more than half fail the
+uniformity test and are therefore searched cell by cell. **A rectangle is uniform by
+construction, so crossing one is always the arithmetic case.** An empty map is one rectangle;
+a map with a ridge, a lake and a road is 754 — a graph small enough that the abstract search
+over it is free, and the per-node region searches that cost 5–161 ms have nothing left to do.
+
+The obstacle no longer condemns the region around it: it gets its own thin rectangles and the
+plain beside it stays one.
+
 ### The original criterion, for the record
 
 **After stages 0 and 1, re-run `--ordertest --terrain` and the memory arithmetic.** If a 600 m
