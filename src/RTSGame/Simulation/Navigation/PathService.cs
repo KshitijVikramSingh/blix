@@ -43,7 +43,7 @@ internal sealed partial class PathService
     /// instead of 19.2 s. Two symptoms, one cause.
     /// </para>
     /// </remarks>
-    internal static float DetourAvoidanceSeconds = 0.5f;
+    internal static float DetourAvoidanceSeconds = 0.5f * Agents.AgentDefaults.PaceScale;
     /// <summary>
     /// Nominal unit speed used to express route cost as travel time.
     /// </summary>
@@ -53,9 +53,12 @@ internal sealed partial class PathService
     /// correct for all of them. Congestion delay is the exception — a jam costs
     /// every unit the same wall-clock seconds regardless of how fast it runs — so
     /// once units genuinely differ in speed, the fastest ones will slightly
-    /// under-value detours. Noted rather than solved; every unit is 4.5 m/s today.
+    /// under-value detours. Noted rather than solved; every unit walks at the same pace
+    /// today. Mirrors <c>AgentDefaults.MaximumSpeed</c> rather than referencing it, so the
+    /// navigation layer does not need to know what an agent is; if the two ever disagree,
+    /// route cost stops being seconds and starts being a number.
     /// </remarks>
-    private const float ReferenceSpeed = 4.5f;
+    private const float ReferenceSpeed = 1.5f;
     /// <summary>Seconds of delay represented by one unit of measured backpressure.</summary>
     /// <remarks>
     /// Deliberately large. It looks like it should send units on absurd detours,
@@ -67,9 +70,29 @@ internal sealed partial class PathService
     /// two-gap wall still sent 29 of 30 units through one gap; at this value they
     /// split, and every scenario's completion time improved rather than regressed.
     /// </remarks>
-    internal static float CongestionSecondsPerPressure = 0.40f;
+    internal static float CongestionCellsPerPressure = 3.6f;
+
+    /// <summary>Seconds of delay represented by one unit of measured backpressure.</summary>
+    /// <remarks>
+    /// Derived from the cell crossing time rather than written down, because what a queue
+    /// costs you is the number of bodies ahead times how long each takes to clear the cell —
+    /// and how long one takes to clear a cell is exactly <see cref="SecondsPerCell"/>. Held
+    /// as a flat 0.40 s, it silently became a different number the moment the body slowed
+    /// down: travel got three times dearer in seconds while jams stayed the same price, and
+    /// the crowd stopped going round them. The pen scenario funnelled all thirty units
+    /// through one exit, which is the failure this coefficient was tuned to prevent in the
+    /// first place.
+    /// <para>
+    /// 3.6 cells is the same balance 0.40 s struck at 4.5 m/s. The tuning underneath it is
+    /// unchanged and its history stands: it looks like it should send units on absurd
+    /// detours, and would if the input were crowd density — but the field only accumulates
+    /// where bodies want to move and are not moving, so a crowd flowing normally through a
+    /// gap deposits almost nothing and costs almost nothing.
+    /// </para>
+    /// </remarks>
+    private float CongestionSecondsPerPressure => CongestionCellsPerPressure * SecondsPerCell;
     /// <summary>Extra seconds charged per metre of climb.</summary>
-    internal static float ClimbSecondsPerMetre = 0.60f;
+    internal static float ClimbSecondsPerMetre = 0.60f * Agents.AgentDefaults.PaceScale;
     /// <summary>
     /// Nominal turn rate, in radians per second, that route cost prices turning at.
     /// </summary>
@@ -112,7 +135,7 @@ internal sealed partial class PathService
     /// Delay charged for taking a bottleneck another member of the same group has
     /// already reserved — what waiting a turn there is expected to cost.
     /// </summary>
-    internal static float BottleneckReservationSeconds = 0.5f;
+    internal static float BottleneckReservationSeconds = 0.5f * Agents.AgentDefaults.PaceScale;
     private const float SlotDetourTolerance = 2.0f;
     private const float SlotDetourSlack = 0.45f;
     private const float Epsilon = 0.00001f;

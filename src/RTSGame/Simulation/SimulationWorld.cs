@@ -34,11 +34,11 @@ internal sealed class SimulationWorld
     /// <summary>Per-tick blend of the newly sampled flow direction into the smoothed one.</summary>
     internal static float FlowSmoothing = 0.16f;
     /// <summary>Longest a member may lag behind newly published routing.</summary>
-    internal static float MaximumRouteAdoptionDelay = 0.90f;
+    internal static float MaximumRouteAdoptionDelay = 0.90f * AgentDefaults.PaceScale;
     /// <summary>How long a member holds a route before it will reconsider.</summary>
-    internal static float RouteCommitmentSeconds = 3.0f;
+    internal static float RouteCommitmentSeconds = 3.0f * AgentDefaults.PaceScale;
     /// <summary>Stall that releases a commitment early.</summary>
-    internal static float RouteReconsiderStallSeconds = 1.2f;
+    internal static float RouteReconsiderStallSeconds = 1.2f * AgentDefaults.PaceScale;
     /// <summary>Congestion re-plans allowed per tick, map-wide.</summary>
     private const int MaxRoutePlansPerTick = 2;
     /// <summary>Rejected shared-field steps before a body demands a real route.</summary>
@@ -64,23 +64,23 @@ internal sealed class SimulationWorld
     /// another way" but "that way is not going to work". A person wedged in a doorway for
     /// nearly two seconds with nothing moving has learnt something.
     /// </remarks>
-    internal static float ApertureAbandonSeconds = 1.8f;
+    internal static float ApertureAbandonSeconds = 1.8f * AgentDefaults.PaceScale;
     /// <summary>How long that refusal is held before the gap is reconsidered.</summary>
     /// <remarks>
     /// Held rather than re-derived, which is the difference between a decision and a
     /// twitch. Long enough to walk out of the queue it was standing in and commit to going
     /// round; short enough that a gap which genuinely clears is not written off for good.
     /// </remarks>
-    internal static float ApertureAbandonHoldSeconds = 4f;
+    internal static float ApertureAbandonHoldSeconds = 4f * AgentDefaults.PaceScale;
     /// <summary>Stall a unit must accumulate before it is offered a detour.</summary>
     /// <remarks>
     /// A jammed body creeps rather than stopping, so a high bar here almost never
     /// trips: at 1.5s the pen granted one detour in ten seconds, which is not a
     /// deadlock breaker, it is a coin flip.
     /// </remarks>
-    internal static float CongestionRecoveryStallSeconds = 0.9f;
+    internal static float CongestionRecoveryStallSeconds = 0.9f * AgentDefaults.PaceScale;
     /// <summary>Minimum gap between detour grants, map-wide.</summary>
-    internal static float CongestionRecoveryInterval = 0.5f;
+    internal static float CongestionRecoveryInterval = 0.5f * AgentDefaults.PaceScale;
     /// <summary>How many bodies may be offered a detour at once.</summary>
     private const int CongestionRecoveryBatch = 4;
     /// <summary>
@@ -99,10 +99,10 @@ internal sealed class SimulationWorld
     /// only once the congestion field stopped remembering jams for 4.5 s.
     /// </para>
     /// </remarks>
-    private const float SettledBodyDelaySeconds = 1.2f;
-    private const float StalledBodyDelaySeconds = 0.8f;
-    private const float MovingBodyDelaySeconds = 0.27f;
-    private const float MaximumBodyDelaySeconds = 3.19f;
+    private static readonly float SettledBodyDelaySeconds = 1.2f * AgentDefaults.PaceScale;
+    private static readonly float StalledBodyDelaySeconds = 0.8f * AgentDefaults.PaceScale;
+    private static readonly float MovingBodyDelaySeconds = 0.27f * AgentDefaults.PaceScale;
+    private static readonly float MaximumBodyDelaySeconds = 3.19f * AgentDefaults.PaceScale;
 
     private readonly Queue<AgentCommand> commands = new();
     private readonly PathPool paths = new();
@@ -311,7 +311,8 @@ internal sealed class SimulationWorld
     public float ApertureApproachDegrees(AgentId id)
     {
         ref readonly var agent = ref Agents.Get(id);
-        if (agent.Velocity.LengthSquared() < 0.25f) return -1f;
+        var travelling = AgentDefaults.TravellingSpeed;
+        if (agent.Velocity.LengthSquared() < travelling * travelling) return -1f;
         if (!pathService.TryFindPassageAxis(agent.Position, agent.Radius, out var axis)) return -1f;
         var heading = Vector2.Normalize(agent.Velocity);
         // The axis is undirected, so measure to whichever end the body is heading for.
@@ -1681,7 +1682,8 @@ internal sealed class SimulationWorld
                 // forever without generating a physical contact. Consecutive
                 // zero-progress probes are still this agent's failed arrival
                 // attempts and spend only its own budget.
-                if (agent.AvoidanceBlockedThisTick || progress < 0.002f)
+                if (agent.AvoidanceBlockedThisTick ||
+                    progress < agent.MaximumSpeed * deltaSeconds * AgentDefaults.ProgressShareOfStep)
                 {
                     agent.CrowdedArrivalContactFrames++;
                     if (agent.CrowdedArrivalContactFrames >= CrowdedArrivalContactFramesPerAttempt)
@@ -1707,13 +1709,15 @@ internal sealed class SimulationWorld
             // express it in. Judging intent purely by preferred velocity made that
             // failure invisible to every recovery path here.
             var routeless = !agent.Path.IsValid && !agent.UsesFlowTransit;
-            var wantsMovement = routeless || agent.PreferredVelocity.LengthSquared() > 0.25f;
+            var travellingSpeed = agent.MaximumSpeed * 0.1111f;
+            var wantsMovement = routeless ||
+                                agent.PreferredVelocity.LengthSquared() > travellingSpeed * travellingSpeed;
             var displacement = agent.Position - agent.PreviousPosition;
             var preferredDirection = wantsMovement
                 ? Vector2.Normalize(agent.PreferredVelocity)
                 : Vector2.Zero;
             var forwardProgress = Vector2.Dot(displacement, preferredDirection);
-            var barelyMoving = progress < 0.002f &&
+            var barelyMoving = progress < agent.MaximumSpeed * deltaSeconds * AgentDefaults.ProgressShareOfStep &&
                                forwardProgress < agent.MaximumSpeed * deltaSeconds * 0.08f;
             var yieldingWithoutProgress = wantsMovement && barelyMoving &&
                                           (agent.CrowdPressureSeconds > 0f ||

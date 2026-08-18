@@ -1,6 +1,8 @@
 # RTSGame — locomotion layer: state, seams, and what not to break
 
-Status as of 2026-08-18. `--selftest` **42/42 passing**. ~10k lines in `src/RTSGame`.
+Status as of 2026-08-18. `--selftest` **42/42 passing**, on a body that walks at 1.5 m/s — see
+`plan-rts-game.md` §13 Session 2 for what the re-base moved and why. Durations in the tests carry a
+`WalkingPace` factor recording that they were tuned against a body running at 4.5. ~10k lines in `src/RTSGame`.
 Branch `rts-locomotion`.
 
 Run it: `tools/run-rts-game.sh [--debug-all] [--extent <metres>]`

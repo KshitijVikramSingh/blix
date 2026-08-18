@@ -10,6 +10,27 @@ namespace RTSGame.Debug;
 
 internal static class SimulationSelfTests
 {
+    /// <summary>
+    /// Multiplier on every time budget in this file, from the body coming down from a run
+    /// to a walk.
+    /// </summary>
+    /// <remarks>
+    /// Top speed went from 4.5 m/s to 1.5, so everything measured in seconds — how long a
+    /// crossing takes, how long a queue at a gap lasts, how long a body may be stalled
+    /// before it counts as stuck — takes three times as long in wall clock while describing
+    /// exactly the same behaviour. Written as a factor rather than folded into the numbers
+    /// so that every budget below still shows what it was when it was tuned, and so that a
+    /// threshold which moved for a *reason* is visibly different from one that moved because
+    /// the body did.
+    /// <para>
+    /// Deliberately not applied to anything that is not a duration. Distances, separations,
+    /// ratios like <c>walked/optimal</c>, exit counts and body radii are all speed-invariant
+    /// and every one of them held unchanged through the re-base — which is the evidence that
+    /// this is a change of pace and not a change of behaviour.
+    /// </para>
+    /// </remarks>
+    private const int WalkingPace = 3;
+
     private readonly record struct RedEpisode(
         AgentId Agent,
         float VisibleSeconds,
@@ -663,7 +684,8 @@ internal static class SimulationSelfTests
         var redStarts = Enumerable.Repeat(-1, world.Agents.Count).ToArray();
         var longestVisibleRed = 0f;
         var completionTick = -1;
-        for (var tick = 0; tick < 6000; tick++)
+        const int rampBudget = 6000 * WalkingPace;
+        for (var tick = 0; tick < rampBudget; tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             foreach (var id in ids)
@@ -689,7 +711,7 @@ internal static class SimulationSelfTests
             if (redStarts[i] < 0) continue;
             longestVisibleRed = MathF.Max(
                 longestVisibleRed,
-                (6000 - redStarts[i]) * (float)SimulationWorld.FixedDeltaSeconds);
+                (rampBudget - redStarts[i]) * (float)SimulationWorld.FixedDeltaSeconds);
         }
         var unresolved = ids.Where(id =>
         {
@@ -711,11 +733,16 @@ internal static class SimulationSelfTests
         var completionSeconds = completionTick < 0
             ? 200f
             : completionTick * (float)SimulationWorld.FixedDeltaSeconds;
-        if (completionTick < 0 || longestVisibleRed > 1f)
+        // Red is wall-clock seconds spent failing to move, so the same hesitation at a ramp
+        // reads three times longer at walking pace. Was 1 s.
+        if (completionTick < 0 || longestVisibleRed > 1f * WalkingPace)
         {
             Console.WriteLine($"    terrain ramp completion={completionSeconds:F1}s, longest-red={longestVisibleRed:F2}s");
         }
-        return unresolved.Length == 0 && completionSeconds <= 90f && longestVisibleRed <= 1f;
+        // Both durations, both re-based. Were 90 s and 1 s.
+        return unresolved.Length == 0 &&
+               completionSeconds <= 90f * WalkingPace &&
+               longestVisibleRed <= 1f * WalkingPace;
     }
 
     private static bool CrowdRoundsTerrainCorner()
@@ -904,7 +931,8 @@ internal static class SimulationSelfTests
         var large = world.SpawnAgent(new Vector2(-10f, 0.75f), radius: 0.80f);
         world.QueueMove(new[] { small }, new Vector2(10f, 0.75f));
         world.QueueMove(new[] { large }, new Vector2(10f, 0.75f));
-        Tick(world, 300);
+        // 20 m of walking, which is 13.3 s rather than the 4.4 s it was at a run.
+        Tick(world, 300 * WalkingPace);
 
         ref var smallAgent = ref world.Agents.Get(small);
         ref var largeAgent = ref world.Agents.Get(large);
@@ -973,7 +1001,7 @@ internal static class SimulationSelfTests
 
         var minimumDistance = float.PositiveInfinity;
         var maximumLateral = 0f;
-        for (var i = 0; i < 300; i++)
+        for (var i = 0; i < 300 * WalkingPace; i++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             var firstPosition = world.Agents.Get(first).Position;
@@ -1447,8 +1475,10 @@ internal static class SimulationSelfTests
         }
 
         // And it has to come back down: a set that only ever grows is the same bug
-        // wearing a different face, and it would still pass the audit above.
-        for (var tick = 0; tick < 3000 && fault.Length == 0; tick++)
+        // wearing a different face, and it would still pass the audit above. The budget is
+        // a duration and moves with the pace — the field's decay constant does too, so a
+        // jam takes three times as long to fade to nothing at a walk. Was 3000 ticks.
+        for (var tick = 0; tick < 3000 * WalkingPace && fault.Length == 0; tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             fault = world.Congestion.DescribeSweepFault() ?? string.Empty;
@@ -1588,7 +1618,7 @@ internal static class SimulationSelfTests
         var interiorSamples = 0;
         var arrived = 0;
         var ticks = 0;
-        for (; ticks < 6000 && arrived < ids.Count; ticks++)
+        for (; ticks < 6000 * WalkingPace && arrived < ids.Count; ticks++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             arrived = ids.Count(id => Vector2.Distance(world.Agents.Get(id).Position, target) < 6f);
@@ -1896,7 +1926,7 @@ internal static class SimulationSelfTests
             var redPeaks = new RedEpisode[world.Agents.Count];
             var redEpisodes = new List<RedEpisode>();
 
-            for (var tick = 0; tick < 6000; tick++)
+            for (var tick = 0; tick < 6000 * WalkingPace; tick++)
             {
                 world.Tick((float)SimulationWorld.FixedDeltaSeconds);
                 var queued = 0;
@@ -2049,7 +2079,9 @@ internal static class SimulationSelfTests
                       exited.Count == scenario.Agents.Length &&
                       finalStuck == 0 &&
                       alternateExitsUsed >= 2 &&
-                      completionSeconds <= 30f;
+                      // Was 30 s. The pen is the same pen and the queue is the same queue;
+                      // walking it takes three times as long to drain.
+                      completionSeconds <= 30f * WalkingPace;
         }
         return passed;
     }
@@ -2187,7 +2219,7 @@ internal static class SimulationSelfTests
         foreach (var corner in corners)
         {
             world.QueueMove(ids, corner);
-            for (var tick = 0; tick < 900; tick++)
+            for (var tick = 0; tick < 900 * WalkingPace; tick++)
             {
                 world.Tick((float)SimulationWorld.FixedDeltaSeconds);
                 foreach (var id in ids)
@@ -2210,7 +2242,9 @@ internal static class SimulationSelfTests
             return agent.UsesFlowTransit && agent.Path.IsValid;
         });
 
-        var passed = stranded.Length == 0 && inconsistent == 0 && worstStall < 5f;
+        // Stall seconds are wall clock, and a body waiting its turn at walking pace waits
+        // three times as long for the same queue. Was 5 s.
+        var passed = stranded.Length == 0 && inconsistent == 0 && worstStall < 5f * WalkingPace;
         if (!passed)
         {
             Console.WriteLine(

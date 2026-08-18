@@ -43,7 +43,7 @@ internal sealed class CongestionField
     /// routes at 1.06x optimal against 1.19x.
     /// </para>
     /// </remarks>
-    internal static float DecaySeconds = 2.2f;
+    internal static float DecaySeconds = 2.2f * Agents.AgentDefaults.PaceScale;
     /// <summary>Multiplier on the deposit rate, so build stays fast despite slow decay.</summary>
     /// <remarks>
     /// Sized so a fully committed jam settles near sixteen, which at the current
@@ -490,7 +490,8 @@ internal sealed class CongestionField
 
         if (!agent.HasDestination) return 0f;
         // A body with no intent to move is not congestion.
-        if (agent.PreferredVelocity.LengthSquared() <= 0.0625f) return 0f;
+        var intent = agent.MaximumSpeed * 0.0556f;
+        if (agent.PreferredVelocity.LengthSquared() <= intent * intent) return 0f;
         var weight = 0f;
         if (agent.StuckSeconds > 0f) weight += MathF.Min(2f, agent.StuckSeconds * 2f);
         if (agent.AvoidanceBlockedThisTick) weight += 1.25f;

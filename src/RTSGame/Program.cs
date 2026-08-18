@@ -95,8 +95,17 @@ public static class Program
         var debugAll = args.Contains("--debug-all");
         var extent = Value(args, "--extent") is { } raw
             ? float.Parse(raw)
-            : Simulation.SimulationWorld.DefaultExtentMeters;
-        var game = new RtsGameLoop(exitAfterFrames, traceMovement, startTerrainLab, debugAll, extent);
+            : RtsGameLoop.DefaultWorldExtentMeters;
+        var compression = Value(args, "--compression") is { } rate
+            ? float.Parse(rate)
+            : RtsGameLoop.DefaultCompression;
+        var game = new RtsGameLoop(
+            exitAfterFrames,
+            traceMovement,
+            startTerrainLab,
+            debugAll,
+            extent,
+            compression);
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
     }

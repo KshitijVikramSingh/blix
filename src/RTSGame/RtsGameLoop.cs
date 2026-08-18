@@ -23,6 +23,25 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     // Body feel is judged by eye, not by the benchmark: a crowd can score well on route
     // length and stall time and still look wrong. Sliders, with the crowd metrics beside
     // them so a change can be judged against something.
+    /// <summary>Side of the world the game runs on, in metres.</summary>
+    /// <remarks>
+    /// Not <c>SimulationWorld.DefaultExtentMeters</c>, which is the 30 m square every
+    /// locomotion threshold was calibrated against and must not move. This is the world the
+    /// <em>game</em> is played on, and it is 600 m for reasons argued in
+    /// <c>plan-rts-game.md</c> §3: at walking pace that is a map crossed in about six
+    /// minutes, a sixteen per cent contested fraction, and roughly one and a half times the
+    /// area of an AoE2 Large map per unit — where 1200 m was seven times emptier than one.
+    /// </remarks>
+    public const float DefaultWorldExtentMeters = 600f;
+
+    /// <summary>Sim seconds per wall-clock second the game starts at.</summary>
+    /// <remarks>
+    /// One. Compression is the dial for wall-clock impatience and it is left alone until
+    /// there is something to be impatient about — starting it above one would mean judging
+    /// how the body moves through a clock that is not the one the design reasons in.
+    /// </remarks>
+    public const float DefaultCompression = 1f;
+
     private readonly BodyFeelSettings bodyFeel = new();
     private readonly ClockSettings clock = new();
     // The world this session is judging the body on. Session 2 exists because a body cannot
@@ -137,9 +156,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         bool traceMovement = false,
         bool startTerrainLab = false,
         bool debugAll = false,
-        float extentMeters = SimulationWorld.DefaultExtentMeters)
+        float extentMeters = DefaultWorldExtentMeters,
+        float compression = DefaultCompression)
     {
         worldExtentMeters = extentMeters;
+        clock.Compression = compression;
         // A camera sized for a thirty-metre square shows a kilometre map as a patch of
         // ground, which is the one thing this session must not do — the body has to be
         // watched crossing real distances as well as stepping round a doorway.

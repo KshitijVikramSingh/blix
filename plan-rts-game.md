@@ -158,27 +158,59 @@ it is a body teleporting to its target velocity."
 | 4.5 m/s (current) | 180 m | 400–500 m | 640k – 1M |
 | 1.5 m/s (walking) | 60 m | 150–200 m | 90k – 160k |
 
-Proposed, to be settled on the feel slider and *then* used to re-base the self-test thresholds — not
-the reverse:
+**Settled and shipped, 2026-08-18.** The values were proposed here, taken to the slider, and then
+used to re-base the self-test thresholds — in that order, never the reverse:
 
 ```
-Walk (worker)         1.5 m/s     was 4.5
-Soldier               1.7 m/s
-Loaded cart           1.1 m/s
-Scout / mounted       3.5 m/s
-Acceleration          2.0 m/s²    was 16;  loaded cart 0.8
-Deceleration          3.0 m/s²    was 16
+Walk (worker)         1.5 m/s     was 4.5      SHIPPED
+Acceleration          2.0 m/s²    was 16       SHIPPED
+Deceleration          3.0 m/s²    was 16       SHIPPED
+Soldier               1.7 m/s                  awaits unit types (Session 4)
+Loaded cart           1.1 m/s                  awaits unit types
+Scout / mounted       3.5 m/s                  awaits unit types
 Body radius           0.37 m      UNCHANGED
 Nav fine cell         0.5 m       UNCHANGED — this is what preserves Thread B's tuning
 Road SpeedMultiplier  x1.8        -> PathCost 0.56, derived, no new constant
 ```
 
+**Speed is not a preference, it is what the medium fixes**, and four independent readings agree: a
+person walks 1.3–1.5 m/s, a marching column makes about 1.4, a loaded handcart 1.0–1.2, and an AoE2
+villager converted through the unit-scaled tile above is 1.48.
+
 The road multiplier needs no new machinery: `TerrainSurfaceRules.PathCost = 1/SpeedMultiplier`
 already exists, so a road is a surface type the router prices correctly for free.
 
-### Map sizes
+### Map sizes — **corrected, 2026-08-18: the game is 600 m**
 
-Small / medium / large at **800 / 1000 / 1200 m**. **Design and tune at large (1200 m).**
+Small / medium / large at 800 / 1000 / 1200 m was the answer, and it was wrong, for a reason worth
+recording because the arithmetic was never the problem.
+
+**The three derivations below all bound the map from *below*.** Response-must-exceed-raid says
+bigger. Cores-times-catchment says bigger. And tenure — the one this document says actually decides
+it — is monotonic in extent with no upper bound at all, so it says bigger without limit. Three
+arguments that can only ever say "bigger", and the answer came out big. That is a ratchet, not a
+derivation.
+
+**The missing bound is density**, and nothing here represented it. At four players of 250 units:
+
+| extent | m² per unit | vs AoE2 Large (4p) | contested | cross map (soldier) | response/raid | first move order |
+|---|---|---|---|---|---|---|
+| 400 m | 160 | 0.8x | 36% | 3.9 min | 1.5–2.9x | 0.43 s |
+| **600 m** | **360** | **1.7x** | **16%** | **5.9 min** | **2.2–4.4x** | **0.81 s** |
+| 800 m | 640 | 3.1x | 9.1% | 7.8 min | 2.9–5.9x | 1.6 s |
+| 1200 m | 1,440 | **7.0x** | 4.0% | 11.8 min | 4.4–8.8x | 5.5 s |
+
+A 1200 m map is **seven times emptier than an AoE2 Large game** — a unit every 38 m. That is what
+playing it feels like, and it was never computed.
+
+**600 m.** The only figure where nothing is badly wrong. The one thing it costs is the
+response-to-raid ratio, 4.4–8.8x down to 2.2–4.4x — and what that ratio has to do is make central
+response impossible against a 30 s raid. At 600 m a raid takes 30 s and your response takes 88 s.
+**You still cannot get there in time, so the structures still have to answer and delegation is still
+forced.** The thesis survives; the emptiness does not.
+
+The old table stands as the *engineering* reference, because extent is a parameter and the routing
+layer is measured across all of it:
 
 | | Small | Medium | **Large** |
 |---|---|---|---|
@@ -192,7 +224,10 @@ Small / medium / large at **800 / 1000 / 1200 m**. **Design and tune at large (1
 | one *flat* flow field | 10.2 MB | 16 MB | **23 MB** |
 | agent-index buckets @1.5 m | 284k | 445k | **640k** |
 
-### Three independent derivations of the size, all landing at 800–1200 m
+### Three derivations of the size — kept, with the correction above
+
+All three land at 800–1200 m and **all three bound the map only from below**, which is the flaw. They
+are correct about direction and silent about the limit; §3's density table is what supplies it.
 
 1. **Response time must exceed raid time at the periphery.** A raid takes ~20–40 s to destroy a
    hauling point. At 1200 m with four players, a territory is ~600 m and its periphery ~300 m from
@@ -947,8 +982,40 @@ against the answer, never the reverse.
 Tractable because the blast radius is smaller than it looks: `walked/optimal` and the other ratio
 metrics are speed-invariant, so only the **time-based** thresholds move.
 
-**Gate:** 37/37 with the new body, and every moved threshold recorded with its old value and the
-reason it moved — otherwise the next reader cannot tell a deliberate re-base from a regression.
+**Gate: met, 2026-08-18.** `--selftest` **42/42** with the new body, and every moved threshold is
+recorded with its old value beside it — a single `WalkingPace` factor of 3 applied at each site, so a
+threshold that moved because the body slowed is visibly distinct from one that moved for a reason.
+
+**What actually had to change, and it was not only the timeouts.** Six tests failed on the new body
+and they fell into three kinds:
+
+1. **Durations** — how long a crossing takes, how long a queue drains, how long a body may stall.
+   Multiplied by three. The uninteresting ones.
+2. **Thresholds that were secretly speeds.** `0.5 m/s` to count as travelling, `0.25 m/s` to count as
+   wanting to move, `2 mm` of progress per tick. Each was written as an absolute and each was really
+   a *fraction* of the body they were tuned on — 0.5 m/s is a ninth of a run and a third of a walk, so
+   a body picking its way at a third of walking pace would have been declared stationary. They are
+   fractions now, and mean the same thing at any speed.
+3. **Constants denominated in seconds that compete with travel time.** This is the one that bit. What
+   a queue costs is the number of bodies ahead times how long one takes to clear a cell — and the
+   second half of that is a property of how fast the body walks. Held as a flat 0.40 s, congestion
+   silently became three times cheaper relative to detours, and **the pen scenario funnelled all
+   thirty units through one exit**, which is precisely the failure that coefficient was tuned to
+   prevent. It is `CongestionCellsPerPressure` now, derived from the cell crossing time. The same
+   applies to every duration describing how long a physical condition lasts — jam decay, route
+   commitment, aperture abandonment, body-in-the-way delays — all now scaled by
+   `AgentDefaults.PaceScale`, which records that they were measured at 4.5 m/s.
+
+**What the body bought, measured:** `mean-turn` **4.8 → 1.4 deg/tick**, `turns>60deg` **1.01% →
+0.34%**, `infeasible` **1.3% → 0.1%**. The bodies have momentum and stopped snapping. `walked/optimal`
+held at 1.10 → 1.12 (pen) and 1.36 → 1.42 (gate), which is the evidence that route quality survived.
+
+**One measured regression, recorded rather than buried:** `dead-stops` **1 → 19** in the pen and
+**29 → 43** at the one-cell gate. A dead stop is the avoidance solver finding no feasible velocity and
+falling back to zero for a tick. Deceleration went from 16 m/s² to 3, so manoeuvres that used to be
+rescued by braking hard now cannot be. Nothing fails on it — every body still arrives — but it is the
+first thing to look at if crowds start reading as hesitant, and the deceleration slider is where to
+look.
 
 ### Session 3 — Portal routing — **done, 2026-08-18**
 

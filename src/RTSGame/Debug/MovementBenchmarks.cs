@@ -1,17 +1,32 @@
 using System.Diagnostics;
 using RTSGame.Simulation;
+using RTSGame.Simulation.Agents;
 
 namespace RTSGame.Debug;
 
 internal static class MovementBenchmarks
 {
+    /// <summary>
+    /// Multiplier on every tick budget here, from the body coming down from a run to a walk.
+    /// </summary>
+    /// <remarks>
+    /// Same re-basing as the self-tests, and needed for the same reason: these windows were
+    /// sized so a scenario finishes inside them at 4.5 m/s. Left alone at 1.5 they measure a
+    /// half-finished walk, which is not a milder version of the right answer — it corrupts
+    /// the metrics outright. <c>walked/optimal</c> reported 0.40x, a body apparently walking
+    /// less far than the shortest route exists, because the numerator was distance travelled
+    /// so far and the denominator the whole journey.
+    /// </remarks>
+    private const int WalkingPace = 3;
+
     public static int Run()
     {
         var warmup = new SimulationWorld();
         MovementStressScenarios.Populate(warmup, 30, issueGroupMove: true);
-        Tick(warmup, 30);
+        Tick(warmup, 30 * WalkingPace);
 
-        Console.WriteLine("RTSGame movement timing benchmark (120 fixed ticks per scenario)");
+        Console.WriteLine(
+            $"RTSGame movement timing benchmark ({120 * WalkingPace} fixed ticks per scenario)");
         var terrainCommandWorld = new SimulationWorld();
         var terrainCommandAgents = TerrainStressScenarios.Populate(
             terrainCommandWorld,
@@ -28,7 +43,7 @@ internal static class MovementBenchmarks
             MovementStressScenarios.Populate(world, count, issueGroupMove: true);
             world.Timings.Reset();
             var start = Stopwatch.GetTimestamp();
-            Tick(world, 120);
+            Tick(world, 120 * WalkingPace);
             var elapsedMilliseconds = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
             Console.WriteLine($"  {world.Timings.Format(count, world.TickNumber)} | wall {elapsedMilliseconds:F1} ms | flowFields {world.FlowFieldBuilds} | astar {world.PathQueries} | contestedArrivals {world.CrowdedArrivalBlockCount}");
             Console.WriteLine(
@@ -37,7 +52,8 @@ internal static class MovementBenchmarks
                 $"terrain-fallback {world.AvoidanceTerrainFallbacks * 100.0 / Math.Max(1, world.AvoidanceSolves):F1}% | " +
                 $"dead-stops {world.AvoidanceTerrainDeadStops} | " +
                 $"detour-grants {world.CongestionRepathCount} | " +
-                $"congestion-reroutes {world.CongestionRerouteCount} in 10s");
+                $"congestion-reroutes {world.CongestionRerouteCount} " +
+                $"in {120 * WalkingPace / 30}s");
         }
         // Constricted geometry is where avoidance is actually hard; the open-field
         // scenarios above never exercise a wall.
@@ -90,7 +106,7 @@ internal static class MovementBenchmarks
                 startPosition[agent.Id.Value] = agent.Position;
                 optimalDistance[agent.Id.Value] =
                     world.TryOptimalTravelTime(agent.Id, agent.RequestedDestination, out var best)
-                        ? best * 4.5f
+                        ? best * AgentDefaults.MaximumSpeed
                         : 0f;
             }
             var previousHeading = new System.Numerics.Vector2[world.Agents.Count];
@@ -115,7 +131,7 @@ internal static class MovementBenchmarks
             var approachSum = 0.0;
             var approachSamples = 0L;
             var obliqueSamples = 0L;
-            for (var tick = 0; tick < 300; tick++)
+            for (var tick = 0; tick < 300 * WalkingPace; tick++)
             {
                 world.Tick((float)SimulationWorld.FixedDeltaSeconds);
                 redPositions.Clear();
@@ -190,7 +206,8 @@ internal static class MovementBenchmarks
                 $"terrain-fallback {world.AvoidanceTerrainFallbacks * 100.0 / Math.Max(1, world.AvoidanceSolves):F1}% | " +
                 $"dead-stops {world.AvoidanceTerrainDeadStops} | " +
                 $"detour-grants {world.CongestionRepathCount} | " +
-                $"congestion-reroutes {world.CongestionRerouteCount} in 10s");
+                $"congestion-reroutes {world.CongestionRerouteCount} " +
+                $"in {300 * WalkingPace / 30}s");
             Console.WriteLine(
                 $"    gaps | approach {approachSum / Math.Max(1, approachSamples):F1}deg mean | " +
                 $"oblique>30deg {obliqueSamples * 100.0 / Math.Max(1, approachSamples):F1}% | " +

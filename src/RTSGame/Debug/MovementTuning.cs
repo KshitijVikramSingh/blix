@@ -331,11 +331,15 @@ internal sealed class CongestionSettings
 /// <summary>Route cost, live. All in seconds unless named otherwise. See PathService.</summary>
 internal sealed class RoutingSettings
 {
-    [Tune(0.0, 2.0, Label = "congestion s/pressure", Group = "Routing")]
-    public float CongestionSecondsPerPressure
+    // In cells rather than seconds now: what a queue costs is how many bodies are ahead
+    // times how long one takes to clear a cell, and the second half of that is a property of
+    // how fast the body walks. A slider in seconds meant this quietly re-tuned itself every
+    // time anybody touched the speed slider above it.
+    [Tune(0.0, 12.0, Label = "congestion cells/pressure", Group = "Routing")]
+    public float CongestionCellsPerPressure
     {
-        get => PathService.CongestionSecondsPerPressure;
-        set => PathService.CongestionSecondsPerPressure = value;
+        get => PathService.CongestionCellsPerPressure;
+        set => PathService.CongestionCellsPerPressure = value;
     }
 
     [Tune(0.0, 12.0, Label = "detour bubble (s)", Group = "Routing")]
