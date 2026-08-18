@@ -1,11 +1,33 @@
 # RTSGame — Thread A: the game layer
 
-Status as of 2026-08-18. Design settled across one long session; **no game-layer code exists yet**.
+## Handoff — read this first
 
-Thread B (locomotion) is closed and green: `--selftest` 37/37 on branch `rts-locomotion`, ~11.3k lines
-in `src/RTSGame`. Its state, its 16 invariants and its five measured refusals live in `plan-rts.md`.
-Read that first if you are about to touch movement, because most of what looks tunable there is
-load-bearing twice.
+**You are picking up a design that is fully specified and a codebase that has none of it yet.**
+
+- **The code** is Thread B: a greybox locomotion lab, ~11.3k lines in `src/RTSGame`. One fixed 30 Hz
+  tick, ORCA velocity control that sees walls, flow-field group movement, congestion routing in
+  seconds. `--selftest` **37/37** on branch `rts-locomotion`. Its tick order, its 16 invariants and
+  its five measured refusals live in **`plan-rts.md`** — read that before touching movement, because
+  most of what looks tunable there is load-bearing in two ways at once.
+- **This document** is Thread A: the game that goes on top, settled across two long design sessions
+  in August 2026. §1–§11 are decided, not speculative — the numbers are derived and the derivations
+  are recorded beside them, because they move as a set. **§12 is what is genuinely still open.**
+- **Start at §13, Session 1.** It is a measurement with its predictions written down in advance, and
+  it is deliberately small.
+
+Four things that will bite you if you skip them:
+
+1. **Do not move the default world size.** All 37 self-tests and every tuned constant in
+   `plan-rts.md` are calibrated against `GridTransform(60, 60, 0.5f)`. Extent becomes a *parameter*;
+   the default stays exactly where it is.
+2. **Any new term in the route cost is honest seconds, with a fade matched to how fast the real
+   condition actually clears.** This project has paid for that lesson twice — `plan-rts.md` §1 on
+   barriers-as-cost, and invariant 15 on the decay tail. Threat will be the third opportunity.
+3. **The determinism self-test covers movement only.** Extend it as each system lands, or it keeps
+   passing while the game layer quietly goes non-deterministic through an unordered iteration nobody
+   noticed. Lockstep LAN and career-to-career persistence both depend on it.
+4. **Do not start the jobs layer before the router.** It is the biggest new subsystem and the whole
+   design rests on it; calibrating it against a router about to change shape means tuning it twice.
 
 **This document records decisions together with their derivations.** Nearly every number below was
 derived from other numbers rather than chosen, and they move as a set — changing unit speed changes
@@ -795,36 +817,7 @@ time climbs monotonically with the structures built**.
 
 ---
 
-## 12. Build order
-
-1. **Parameterised extent + the two area-scaling costs measured** at 800/1000/1200 m. Small commit,
-   and it is the background-citizen requirement.
-2. **Body re-base** — speed 1.5, acceleration 2.0, deceleration 3.0, compression 1.5× — settled on
-   the feel slider, then re-base the self-test thresholds against the answer, not the reverse.
-3. **Portal routing** over 32 m regions, tuned at 1200 m, fine layer untouched at 0.5 m.
-4. **Unit types** off `AgentDefaults` — per-type body, speed, turn model, carry capacity. Pays a
-   logged debt; gives carts vehicle turning and people person acceleration.
-5. **Jobs layer** — the prototype's three-layer worker model, *assignment* (persistent commitment) /
-   *activity* (what it is doing now) / *interrupt* (temporary local defence that never rewrites
-   assignment), onto the `AgentCommand` and `AgentLocomotionState` seams. Now understood as **the
-   autonomous layer**, shared by idle players and AI alike. Do **not** carry across `w.task`, which
-   in the prototype is a `defineProperty` alias for `activity` kept for legacy readers.
-6. **Stock, catchments and the hauling network.** Physical local storage, granary catchments as
-   bounded fields, hauling points as graph nodes, assignment priced in seconds through the congestion
-   field. Assignment-level graph, locomotion-level paths.
-7. **Strategic layer + soak harness together**, with "the AI can play the player's settlement" as the
-   acceptance test.
-8. **Combat, the defence ladder, and alarms.** Health, damage/rate/range, target acquisition and an
-   attack activity — most of it landing on seams that are declared but unproven:
-   `AgentLocomotionState` already has Chase and Flee, `ColliderRole.Damageable | Interactable` is
-   assigned at spawn and read by nothing, `AgentStore.Despawn` has tombstones for death. Build the
-   **competent-combat bot alongside the auto layer, not after it**, and measure the micro multiplier
-   as soon as both exist — the number decides whether the two modes of play are actually balanced.
-9. **Trade carts, docks, and seasonal markets.**
-
----
-
-## 13. Open questions
+## 12. Open questions
 
 - **The micro multiplier is a target, not a measurement.** 1.5-2x in numbers is reasoned from
   Lanchester and from how "disproportionately stronger" ought to feel; nothing has measured it. Until
@@ -853,32 +846,164 @@ time climbs monotonically with the structures built**.
 
 ---
 
-## 14. Next session — where to start
+## 13. Roadmap
 
-**State:** branch `rts-locomotion`, clean tree, five commits ahead of `main`, `--selftest` 37/37.
+Nine sessions. Each has a deliverable and a **gate** — the thing that says it is done — because
+"it works" has never been a state this codebase accepts as an answer.
 
-**First commit — the measurement, not a fix.** `SimulationWorld()` hardcodes the world at
-`SimulationWorld.cs:152` (`GridTransform(60, 60, 0.5f)`), the placement grid at `:154`
-(`20×20×1.5`), and the agent index at `:158` (cell 1.5 m, spanning `Terrain.Minimum/Maximum`). Make
-extent injectable **without moving the default**, which all 37 tests and every tuned constant are
-calibrated against. Then add a scale scenario reporting the existing per-phase breakdown at
-800/1000/1200 m with 500/1000/2000 agents.
+Session 4 is the elastic one: it is the smallest of the nine and the natural place to absorb
+overflow from either side.
 
-**Write the predictions down first, so the measurement can falsify something.** At 1200 m:
+### Session 1 — Make the large map affordable
+
+**State at start:** branch `rts-locomotion`, clean tree, `--selftest` 37/37.
+
+Parameterise the world extent **without moving the default**. `SimulationWorld()` hardcodes it at
+`SimulationWorld.cs:152` (`GridTransform(60, 60, 0.5f)`), the placement grid at `:154` (`20x20x1.5`)
+and the agent index at `:158` (cell 1.5 m, spanning `Terrain.Minimum/Maximum`). Then add a scale
+scenario reporting the existing per-phase breakdown at 800/1000/1200 m with 500/1000/2000 agents.
+
+**Write the predictions down before running, so the measurement can falsify something.** At 1200 m:
 
 | | prediction |
 |---|---|
 | `CongestionField.Update` | ~69 MB of traffic per tick → **≥3.5 ms/tick**, agent-count independent |
-| `AgentSpatialIndex.Rebuild` | 640k `List.Clear()` per tick → **1.3–3.2 ms/tick**, agent-count independent |
-| together | **5–7 ms/tick**, comparable to the *entire* current movement cost |
+| `AgentSpatialIndex.Rebuild` | 640k `List.Clear()` per tick → **1.3-3.2 ms/tick**, agent-count independent |
+| together | **5-7 ms/tick**, comparable to the *entire* current movement cost |
 
-If those two dominate as predicted, they are the first work and they are both structural
-(sparse/region-scoped congestion; agent index fitted to the agent bounding box). If they do not, the
-prediction was wrong and the reason is worth knowing before anything is built on top of it.
+Then fix what it finds — expected to be sparse or region-scoped congestion, and the agent index
+fitted to the agent bounding box rather than the terrain. If the predictions are wrong, the reason
+is worth knowing before anything is built on top of it.
 
-**Then, and only then:** the body re-base (2), because it prices everything else, and the portal
-router (3), because the fine layer must stay untouched while it lands.
+**Gate:** 37/37 unchanged; large-map per-tick cost inside budget; and **every quality metric
+bit-identical** across the congestion rewrite — the same standard Thread B's memoisation pass met,
+and the only evidence that the decay semantics survived.
 
-**Do not** start the jobs layer before the router. The autonomous layer is the biggest new subsystem
-and the whole design rests on it; building it against a router that is about to change shape is how
-the tuning gets calibrated twice.
+**Risk:** the congestion rewrite. Invariant 15 makes the decay *rate* the highest-leverage constant
+in the routing layer, so a sparse version that changes when or by how much a cell fades invalidates
+the tuning of every reservation that bids against it.
+
+> **Do not add threat to the route cost until this lands.** It is a new term over the same
+> machinery, and adding it first means writing it twice.
+
+### Session 2 — The body, at the slider
+
+**Different in kind: a feel session, not a headless one.** It wants a human at the tuning overlay,
+and it wants Session 1 finished so the 1200 m map runs smoothly and the body can be judged on the
+real thing rather than extrapolated from 30 m.
+
+Settle top speed, acceleration, deceleration and time compression on the live overlay — §3 has the
+proposed starting points and the reasoning for each. **Then** re-base the self-test thresholds
+against the answer, never the reverse.
+
+Tractable because the blast radius is smaller than it looks: `walked/optimal` and the other ratio
+metrics are speed-invariant, so only the **time-based** thresholds move.
+
+**Gate:** 37/37 with the new body, and every moved threshold recorded with its old value and the
+reason it moved — otherwise the next reader cannot tell a deliberate re-base from a regression.
+
+### Session 3 — Portal routing
+
+Region partition at 32 m (64x64 fine cells, deliberately comparable to the 3,600-cell world every
+Thread B constant was measured on), portal identification along region borders, an abstract graph
+with edge costs from local searches, refinement into per-region local fields, and region-scoped
+revisions. **The fine layer stays at 0.5 m and is not touched.**
+
+Two risks, both of the kind that gets discovered late unless planned for:
+
+1. **Congestion has to reach the abstract graph.** It currently feeds `BuildFlowField` directly. If
+   abstract edge costs do not carry it, routes stop responding to jams at map scale and the
+   congestion layer is silently deleted for any route longer than one region. This is a design
+   question inside the implementation, not a detail of it.
+2. **Region-boundary artefacts** are the classic HPA* failure mode. The pen and gate tests should be
+   unaffected because the fine layer is untouched — but the *handoff* from abstract path to local
+   flow is new. Wants a purpose-built test that routes a group across several boundaries and
+   measures direction stability at each crossing.
+
+**Gate:** 37/37; new long-route tests at 1200 m; group-order cost inside the tick budget at 1200 m.
+
+**This is the session most likely to cost a second one.** Sessions 1, 2 and 4 are contained; 5 and 6
+are large but well understood; this is the one where a decision inside the implementation can send
+you back.
+
+### Session 4 — Unit types
+
+Per-type body radius, speed, turn model and carry capacity off `AgentDefaults`, rather than
+re-littering literals — which `AgentDefaults`' own remarks record as a real bug source.
+
+Landing it **activates two logged debts**: congestion delay does not scale with unit speed, which
+goes live the moment speeds differ; and carts want the speed-scaled turn model (`ω = a/v`) that was
+measured badly wrong for people and is correct for a loaded vehicle.
+
+**Gate:** existing tests pass on the default type; new tests for a cart's turning circle and a
+scout's speed differential.
+
+**The elastic session** — smallest of the nine, and the natural place to absorb overflow, either
+tail-ending Session 3 or heading Session 5.
+
+### Session 5 — The jobs layer
+
+*Assignment* (persistent commitment) / *activity* (what it is doing now) / *interrupt* (temporary,
+never rewrites assignment), onto the `AgentCommand` and `AgentLocomotionState` seams. Do **not**
+carry across `w.task`, which in the prototype is a `defineProperty` alias for `activity` kept for
+legacy readers.
+
+Testable before any economy exists, with trivial activities: walk here, wait, walk back, be
+interrupted, resume. This is also where §7's "taking control is an interrupt, not a mode switch"
+becomes real, and it is the layer an idle player and an AI neighbour both run.
+
+**Gate:** a unit with a standing assignment survives an interrupt and resumes it; and **the
+determinism self-test is extended to cover the new state**.
+
+### Session 6 — Stock, catchments and hauling
+
+Physical local storage; granary catchments as bounded fields; node-to-node hauling only
+(granary ↔ farm ↔ trade post ↔ forward depot, never per-household); consumption by population type,
+including the seasonal wood swing. Hauling assignment is **priced in seconds through the congestion
+field**, which is what makes a jammed route pick a different hauler on its own. Assignment-level
+graph, locomotion-level paths — the two must not be confused.
+
+**The first milestone of the design rather than the engine** — autonomy time becomes measurable
+here for the first time.
+
+**Gate:** a settlement that produces, stores, hauls and consumes runs headless through a full year
+with no counter drifting and no unit permanently stalled.
+
+### Session 7 — The strategic layer and the soak harness
+
+They are the same artefact. A soak test needs a world doing economically meaningful things for
+hours, and the strategic layer is what supplies the activity; the strategic layer needs long
+headless runs to be validated at all.
+
+**Gate:** §4's acceptance test — **the AI strategic layer can play the player's settlement** without
+special powers. Plus the early-career soak (10 years, ~300 agents, ~40 min) wired as a CI gate, and
+the full-career soak as an overnight job.
+
+### Session 8 — Combat, the bot, and the multiplier
+
+Health, damage / rate / range, target acquisition and an attack activity — most of it landing on
+seams that are declared but unproven: `AgentLocomotionState` already has Chase and Flee,
+`ColliderRole.Damageable | Interactable` is assigned at spawn and read by nothing, and
+`AgentStore.Despawn` has tombstones for death.
+
+Build the **competent-combat bot alongside the auto layer, not after it**.
+
+**Gate:** the micro multiplier measured, in numbers, against a target of **1.5-2.0**. Until that
+number exists, the balance between the two modes of play is a hypothesis (§12).
+
+### Session 9 — Trade, docks and seasonal markets
+
+Last, because it depends on everything beneath it being real: physical stock, catchments, hauling,
+and neighbours with their own surpluses to be out of phase with.
+
+**Gate:** a standing trade route survives a season change and re-prices itself; and a settlement
+drowning in one resource while short of another is smoothed without intervention — which is the
+complaint the whole trade layer exists to answer.
+
+### Held every session
+
+1. **37/37 stays green**, or a threshold moves deliberately and is recorded with its old value.
+2. **The determinism test grows with each system.** It covers movement only today.
+3. **Serialization discipline** — stable ids over references. Fresh-start succession (§5) makes this
+   core-loop rather than a save feature; it is cheap continuously and expensive retrofitted.
+4. **Every new cost term is honest seconds with a matched fade.**
