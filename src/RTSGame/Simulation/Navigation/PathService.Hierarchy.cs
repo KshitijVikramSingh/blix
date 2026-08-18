@@ -307,39 +307,84 @@ internal sealed partial class PathService
     }
 
     /// <summary>Builds the goal-region tile that seeds an abstract search.</summary>
-    private float[] GoalRegionTile(GridCell goal, float agentRadius, bool chargeTurns)
+    private RegionTile GoalRegionTile(
+        GridCell goal,
+        float agentRadius,
+        bool chargeTurns,
+        FlowField? predecessor)
     {
+        var region = partition.RegionOf(goal);
+        var stamp = congestion.RegionStamp(region);
+        // Seeded by the goal alone, so its only inputs are the region and its congestion.
+        if (predecessor is not null && predecessor.TryProvideTile(
+                region,
+                stamp,
+                ReadOnlySpan<int>.Empty,
+                ReadOnlySpan<float>.Empty,
+                out var inherited))
+        {
+            InheritedTiles++;
+            return inherited;
+        }
+
         Span<(GridCell, float)> seed = stackalloc (GridCell, float)[1];
         seed[0] = (goal, 0f);
         TileRefinements++;
-        return SearchRegion(partition.RegionOf(goal), agentRadius, chargeTurns, seed, retained: true);
+        return new RegionTile
+        {
+            Costs = SearchRegion(region, agentRadius, chargeTurns, seed, retained: true),
+            Stamp = stamp,
+            SeedNodes = Array.Empty<int>(),
+            SeedCosts = Array.Empty<float>(),
+        };
     }
 
     /// <summary>
     /// Refines one region of <paramref name="field"/>: settles the abstract cost of every
     /// crossing that stands in it, then runs one bounded local search seeded from them.
     /// </summary>
-    internal float[] RefineTile(FlowField field, int region)
+    internal RegionTile RefineTile(FlowField field, int region)
     {
         var portals = field.Portals;
         var nodes = portals.NodesIn(region);
         field.SettleRegion(region, RegionSpanSeconds);
+
         var seeds = new List<(GridCell Cell, float Cost)>(nodes.Length + 1);
+        var seedNodes = new List<int>(nodes.Length);
+        var seedCosts = new List<float>(nodes.Length);
         if (partition.RegionOf(field.Goal) == region) seeds.Add((field.Goal, 0f));
         foreach (var node in nodes)
         {
             var cost = field.KnownCostOf(node);
             if (!float.IsFinite(cost)) continue;
             seeds.Add((portals.CellOfNode(node), cost));
+            seedNodes.Add(node);
+            seedCosts.Add(cost);
+        }
+
+        var stamp = congestion.RegionStamp(region);
+        var nodeSignature = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(seedNodes);
+        var costSignature = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(seedCosts);
+        if (field.Predecessor is not null &&
+            field.Predecessor.TryProvideTile(region, stamp, nodeSignature, costSignature, out var inherited))
+        {
+            InheritedTiles++;
+            return inherited;
         }
 
         TileRefinements++;
-        return SearchRegion(
-            region,
-            field.AgentRadius,
-            field.ChargeTurns,
-            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(seeds),
-            retained: true);
+        return new RegionTile
+        {
+            Costs = SearchRegion(
+                region,
+                field.AgentRadius,
+                field.ChargeTurns,
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(seeds),
+                retained: true),
+            Stamp = stamp,
+            SeedNodes = seedNodes.ToArray(),
+            SeedCosts = seedCosts.ToArray(),
+        };
     }
 
     /// <summary>Expands one node of an abstract search, relaxing everything that reaches it.</summary>
@@ -382,7 +427,8 @@ internal sealed partial class PathService
             goal,
             agentRadius,
             chargeTurns: true,
-            GoalRegionTile(goal, agentRadius, chargeTurns: true));
+            GoalRegionTile(goal, agentRadius, chargeTurns: true, predecessor: null),
+            predecessor: null);
 
         var reachable = 0;
         var lost = 0;

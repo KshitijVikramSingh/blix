@@ -1020,11 +1020,36 @@ swinging` counts heading reversals for bodies within two cells of a border again
 a region, because a seam in the cost field shows up as bodies changing their minds at borders and
 nowhere else.
 
-**What is left, and it is the next lever rather than a defect.** The moving tick at 1200 m is still
-two thirds `preferred` + `recovery`: 27 whole fields rebuilt per 120 ticks because a congestion
-revision invalidates the field wholesale. The stamps needed to invalidate *per region* already exist
-and are already used for crossing costs — spending them on the field cache too is the obvious next
-step, and it is what would take a move order inside one tick.
+**Then the field cache, same session.** The moving tick was still two thirds `preferred` +
+`recovery`, because congestion is published as one whole-map revision and every revision therefore
+rebuilt every tile a crowd had walked across — for pressure that had moved somewhere else entirely.
+Two changes, both leaning on the per-region stamps that already existed:
+
+1. **A region is only declared changed when it has changed by enough to matter.** Its stamp now moves
+   when its own pressure total shifts by the same quantum the field already uses to decide a revision
+   is worth publishing at all. Without it, a crowd walking across a map re-stamps its own region on
+   every revision and every crossing cost in that region is recomputed for a change too small to move
+   a route.
+2. **A tile is inherited when its inputs are unchanged.** A tile is a pure function of its region, that
+   region's congestion, and the prices of the crossings that seeded it, so it records all three and the
+   next field for the same goal adopts it outright. Identical inputs, identical answer, and the array is
+   never written after it is built.
+
+| 1200 m, moving tick | before Session 3 | portal routing | + field cache |
+|---|---|---|---|
+| 500 agents | 549 ms | 2.9 ms | **2.3 ms** |
+| 1000 agents | 536 ms | 8.8 ms | **3.7 ms** |
+| 2000 agents | 571 ms | 16.6 ms | **11.2 ms** |
+| region searches (1000 agents) | — | 588 | **131** |
+
+**Every candidate size at every agent count is now inside the 33 ms tick**, and fidelity is unchanged
+at 1.006x mean with no cell lost — the cache changes what is recomputed, not what is computed. A move
+order is 41-92 ms, so the hitch is one to three frames; it was 124 ticks.
+
+**What is left.** The remaining per-tick cost is crossing costs being re-priced for regions whose
+pressure genuinely moved, which is the congestion layer working rather than a defect. If a move order
+has to fit inside a single tick, the next lever is spreading one order's refinement across ticks
+rather than making it cheaper.
 
 > **Testing note.** The fidelity test runs on a 200 m map, not 1200 m, because it compares against
 > the flat search it replaces and building that reference costs seconds at 1200 m. The 200 m map is

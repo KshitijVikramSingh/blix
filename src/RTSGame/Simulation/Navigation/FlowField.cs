@@ -22,10 +22,40 @@ namespace RTSGame.Simulation.Navigation;
 /// bargain and is measured rather than assumed, in the boundary self-test.
 /// </para>
 /// </remarks>
+/// <summary>
+/// One region's costs, with everything they were computed from.
+/// </summary>
+/// <remarks>
+/// A tile is a pure function of its region, the congestion in that region, and the prices
+/// of the crossings that seeded it. Recording those alongside the costs is what lets the
+/// next field for the same goal adopt it instead of searching again: identical inputs,
+/// identical answer, and the array is never written after it is built so sharing it is
+/// safe.
+/// </remarks>
+internal sealed class RegionTile
+{
+    public required float[] Costs { get; init; }
+    public required int Stamp { get; init; }
+    public required int[] SeedNodes { get; init; }
+    public required float[] SeedCosts { get; init; }
+
+    public bool Matches(int stamp, ReadOnlySpan<int> nodes, ReadOnlySpan<float> costs)
+    {
+        if (Stamp != stamp || SeedNodes.Length != nodes.Length) return false;
+        for (var i = 0; i < nodes.Length; i++)
+        {
+            if (SeedNodes[i] != nodes[i] || SeedCosts[i] != costs[i]) return false;
+        }
+
+        return true;
+    }
+}
+
 internal sealed class FlowField
 {
     private readonly PathService owner;
-    private readonly Dictionary<int, float[]> tiles = new();
+    private readonly Dictionary<int, RegionTile> tiles = new();
+    private readonly FlowField? predecessor;
     // Exact seconds to the goal for crossings the search has settled. Kept across runs: a
     // settled crossing's cost does not depend on which region was being refined when it
     // was found, so the next refinement resumes from it rather than rediscovering it.
@@ -62,15 +92,20 @@ internal sealed class FlowField
     /// <summary>Portal sides whose distance to the goal has been settled.</summary>
     public int SettledNodes => settledOrder.Count;
 
+    /// <summary>The field for this goal at the previous congestion revision, if held.</summary>
+    internal FlowField? Predecessor => predecessor;
+
     public FlowField(
         PathService owner,
         PortalGraph portals,
         GridCell goal,
         float agentRadius,
         bool chargeTurns,
-        float[] goalRegionTile)
+        RegionTile goalRegionTile,
+        FlowField? predecessor)
     {
         this.owner = owner;
+        this.predecessor = predecessor;
         Portals = portals;
         Goal = goal;
         AgentRadius = agentRadius;
@@ -97,7 +132,7 @@ internal sealed class FlowField
         var seedCosts = new List<float>();
         foreach (var node in portals.NodesIn(goalRegion))
         {
-            var seconds = goalRegionTile[partition.TileIndex(portals.CellOfNode(node))];
+            var seconds = goalRegionTile.Costs[partition.TileIndex(portals.CellOfNode(node))];
             if (!float.IsFinite(seconds)) continue;
             seeds.Add(node);
             seedCosts.Add(seconds);
@@ -117,7 +152,31 @@ internal sealed class FlowField
             tiles[region] = tile;
         }
 
-        return tile[Portals.Partition.TileIndex(cell)];
+        return tile.Costs[Portals.Partition.TileIndex(cell)];
+    }
+
+    /// <summary>
+    /// The previous field's tile for this region, when it was built from exactly the same
+    /// inputs this one would use.
+    /// </summary>
+    /// <remarks>
+    /// Congestion is published as a whole-map revision, so every revision used to mean a
+    /// whole new field: goal tile, every tile a crowd had walked across, all of it searched
+    /// again because pressure had moved somewhere. Most of the map has not changed, and a
+    /// tile records enough about itself to prove it.
+    /// </remarks>
+    internal bool TryProvideTile(
+        int region,
+        int stamp,
+        ReadOnlySpan<int> seedNodes,
+        ReadOnlySpan<float> seedCosts,
+        out RegionTile tile)
+    {
+        tile = null!;
+        if (!tiles.TryGetValue(region, out var previous)) return false;
+        if (!previous.Matches(stamp, seedNodes, seedCosts)) return false;
+        tile = previous;
+        return true;
     }
 
     /// <summary>

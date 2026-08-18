@@ -112,6 +112,7 @@ internal static class ScaleScenarios
             $"live cells {world.Congestion.LiveCellCount:N0}");
         var idleSearches = world.RegionSearches;
         var idleTiles = world.TileRefinements;
+        var idleInherited = world.InheritedTiles;
 
         // Moving: the same crowd, under one group move, which is the honest tick.
         world.QueueMove(idle, MoveTarget(world));
@@ -141,7 +142,8 @@ internal static class ScaleScenarios
             $"flowFields {world.FlowFieldBuilds} | astar {world.PathQueries} | " +
             $"live cells {world.Congestion.LiveCellCount:N0} | " +
             $"region-searches {world.RegionSearches - idleSearches:N0} | " +
-            $"tiles {world.TileRefinements - idleTiles:N0}");
+            $"tiles {world.TileRefinements - idleTiles:N0} built, " +
+            $"{world.InheritedTiles - idleInherited:N0} inherited");
         Console.WriteLine();
     }
 

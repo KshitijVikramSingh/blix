@@ -197,6 +197,10 @@ internal sealed partial class PathService
     private readonly NavigationGrid grid;
     private readonly CongestionField congestion;
     private readonly Dictionary<(int Goal, int Radius, int Nav, int Congestion, bool Turns), FlowField> flowFields = new();
+    // Newest field per goal, regardless of congestion revision, so the next revision can
+    // adopt whatever of it is still valid. Separate from the retention table above, which
+    // exists for a different reason entirely — see GetFlowField.
+    private readonly Dictionary<(int Goal, int Radius, int Nav, bool Turns), FlowField> latestFields = new();
     /// <summary>
     /// Per-cell memo of whether a body of a given radius fits at the cell centre,
     /// as 0 unknown / 1 admitted / 2 refused, keyed by radius in centimetres.
@@ -224,6 +228,8 @@ internal sealed partial class PathService
     /// if this climbs steeply the congestion field is invalidating routes faster
     /// than the crowd can act on them.</summary>
     public int FlowFieldBuilds { get; private set; }
+    /// <summary>Tiles adopted whole from the previous field for the same goal.</summary>
+    public long InheritedTiles { get; private set; }
     /// <summary>A* queries served, for attributing pathfinding cost.</summary>
     public long PathQueries { get; private set; }
 
@@ -997,15 +1003,27 @@ internal sealed partial class PathService
         {
             flowFields.Remove(existing);
         }
+
+        foreach (var existing in latestFields.Keys.Where(k => k.Nav != grid.Revision).ToArray())
+        {
+            latestFields.Remove(existing);
+        }
+        // The previous field for this goal is what the new one inherits from: congestion is
+        // published as one whole-map revision, so without this every revision rebuilds every
+        // tile a crowd has walked across because pressure moved somewhere on the map.
+        var lineage = (goalIndex, radiusKey, grid.Revision, chargeTurns);
+        latestFields.TryGetValue(lineage, out var predecessor);
         costs = new FlowField(
             this,
             Portals(agentRadius),
             goal,
             agentRadius,
             chargeTurns,
-            GoalRegionTile(goal, agentRadius, chargeTurns));
+            GoalRegionTile(goal, agentRadius, chargeTurns, predecessor),
+            predecessor);
         FlowFieldBuilds++;
         flowFields[key] = costs;
+        latestFields[lineage] = costs;
         return costs;
     }
 

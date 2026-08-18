@@ -127,6 +127,10 @@ internal sealed class CongestionField
     // revision would throw away every region's cached crossing costs because one corner
     // of the map jammed, which at map scale is most of the saving the hierarchy exists for.
     private readonly int[] regionStamp;
+    // Pressure total each region held when it was last stamped, so a region is only
+    // declared changed when it has changed by enough to be worth re-pricing.
+    private readonly float[] stampedRegionTotal;
+    private readonly float[] currentRegionTotal;
     private readonly bool[] regionMarked;
     private int[] pressuredRegions;
     private int pressuredRegionCount;
@@ -171,6 +175,8 @@ internal sealed class CongestionField
         isLive = new bool[pressure.Length];
         regions = new RegionPartition(transform);
         regionStamp = new int[regions.Count];
+        stampedRegionTotal = new float[regions.Count];
+        currentRegionTotal = new float[regions.Count];
         regionMarked = new bool[regions.Count];
         pressuredRegions = new int[Math.Min(64, regions.Count)];
         previouslyPressuredRegions = new int[pressuredRegions.Length];
@@ -308,8 +314,31 @@ internal sealed class CongestionField
         for (var slot = 0; slot < liveCount; slot++)
         {
             var region = regions.RegionOf(transform.Cell(live[slot]));
+            if (!regionMarked[region])
+            {
+                regionMarked[region] = true;
+                currentRegionTotal[region] = 0f;
+                if (pressuredRegionCount == pressuredRegions.Length)
+                {
+                    Array.Resize(ref pressuredRegions, pressuredRegions.Length * 2);
+                }
+
+                pressuredRegions[pressuredRegionCount++] = region;
+            }
+
+            currentRegionTotal[region] += pressure[live[slot]];
+        }
+
+        // A region that held pressure at the last stamp and holds none now has changed by
+        // its whole previous total, so it is considered alongside the pressured ones. Left
+        // out, a jam that cleared would go on being priced from the cached crossing costs
+        // that still describe it.
+        for (var i = 0; i < previouslyPressuredRegionCount; i++)
+        {
+            var region = previouslyPressuredRegions[i];
             if (regionMarked[region]) continue;
             regionMarked[region] = true;
+            currentRegionTotal[region] = 0f;
             if (pressuredRegionCount == pressuredRegions.Length)
             {
                 Array.Resize(ref pressuredRegions, pressuredRegions.Length * 2);
@@ -318,24 +347,34 @@ internal sealed class CongestionField
             pressuredRegions[pressuredRegionCount++] = region;
         }
 
-        for (var i = 0; i < previouslyPressuredRegionCount; i++)
-        {
-            regionStamp[previouslyPressuredRegions[i]] = Revision;
-        }
-
+        var stillPressured = 0;
         for (var i = 0; i < pressuredRegionCount; i++)
         {
-            regionStamp[pressuredRegions[i]] = Revision;
-            regionMarked[pressuredRegions[i]] = false;
+            var region = pressuredRegions[i];
+            regionMarked[region] = false;
+            var total = currentRegionTotal[region];
+            // Same quantum the field already uses to decide a revision is worth
+            // publishing at all, applied per region. Without it a crowd walking across a
+            // map re-stamps its own region on every revision, and everything keyed on that
+            // stamp — the crossing costs of every portal in it — is recomputed for a
+            // change too small to move a route.
+            if (MathF.Abs(total - stampedRegionTotal[region]) >= RebuildThreshold)
+            {
+                stampedRegionTotal[region] = total;
+                regionStamp[region] = Revision;
+            }
+
+            if (total > 0f) pressuredRegions[stillPressured++] = region;
         }
 
-        if (previouslyPressuredRegions.Length < pressuredRegionCount)
+        if (previouslyPressuredRegions.Length < stillPressured)
         {
             previouslyPressuredRegions = new int[pressuredRegions.Length];
         }
 
-        Array.Copy(pressuredRegions, previouslyPressuredRegions, pressuredRegionCount);
-        previouslyPressuredRegionCount = pressuredRegionCount;
+        Array.Copy(pressuredRegions, previouslyPressuredRegions, stillPressured);
+        previouslyPressuredRegionCount = stillPressured;
+        pressuredRegionCount = stillPressured;
     }
 
     /// <summary>

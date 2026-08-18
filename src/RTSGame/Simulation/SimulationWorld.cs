@@ -141,6 +141,8 @@ internal sealed class SimulationWorld
     public long RegionSearches => pathService.RegionSearches;
     /// <summary>Region tiles refined so far.</summary>
     public long TileRefinements => pathService.TileRefinements;
+    /// <summary>Region tiles adopted whole from the previous field for the same goal.</summary>
+    public long InheritedTiles => pathService.InheritedTiles;
 
     /// <summary>How far hierarchical routing sits above the flat optimum on this map.</summary>
     internal RoutingFidelity MeasureRoutingFidelity(Vector2 goalPosition, float agentRadius)
