@@ -90,6 +90,8 @@ internal static class ScaleScenarios
             $"nav {cells:N0} cells | index {buckets:N0} buckets | " +
             $"dense-equivalent traffic {congestionMegabytes:F1} MB/tick | " +
             $"build {constructionMilliseconds:F0} ms | " +
+            $"raster {world.NavigationBytes / 1024.0 / 1024.0:F2} MB " +
+            $"({world.ChunkedRegions}/{world.RegionCount} regions chunked) | " +
             $"managed {GC.GetTotalMemory(false) / (1024.0 * 1024.0):F0} MB");
         var portalStart = Stopwatch.GetTimestamp();
         var portals = world.PortalCount;
@@ -265,6 +267,9 @@ internal static class ScaleScenarios
         Console.WriteLine("  successive orders in one world, scattered targets");
         var repeated = new SimulationWorld(extentMeters);
         if (sculpted) WorldTerrainScenarios.Populate(repeated, issueGroupMove: false);
+        Console.WriteLine(
+            $"  raster {repeated.NavigationBytes / 1024.0 / 1024.0:F2} MB " +
+            $"({repeated.ChunkedRegions}/{repeated.RegionCount} regions chunked)");
         var crowd = Populate(repeated, agentCount, issueGroupMove: false);
         repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);
         Console.WriteLine(

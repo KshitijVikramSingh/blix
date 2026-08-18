@@ -143,6 +143,11 @@ internal sealed class SimulationWorld
     public long TileRefinements => pathService.TileRefinements;
     /// <summary>Region tiles adopted whole from the previous field for the same goal.</summary>
     public long InheritedTiles => pathService.InheritedTiles;
+    /// <summary>Bytes of navigation raster currently held.</summary>
+    public long NavigationBytes => Navigation.ResidentBytes;
+    /// <summary>Regions holding a full-resolution raster rather than five numbers.</summary>
+    public int ChunkedRegions => Navigation.ChunkedRegions;
+
     /// <summary>Cached region-crossing cost sets held by the router.</summary>
     public int CachedIngressCount => pathService.CachedIngressCount;
     /// <summary>Tiles built while some crossing out of their region had no price.</summary>

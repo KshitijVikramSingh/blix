@@ -539,7 +539,7 @@ their semantics?**
 | stage | change | wins | risk |
 |---|---|---|---|
 | **0** | congestion storage chunked by region, allocated on demand — **DONE 2026-08-18** | **18.7 MB → 271 KB at 600 m, 74.9 MB → 253 KB at 1200 m**, and it no longer scales with extent at all | none, as expected: `--selftest` output bit-identical |
-| **1** | nav raster sparse per region — plain regions keep five numbers, not 4,096 cells | ~24.5 MB → ~5 MB on the ridge map | every `Clearance` caller goes through an accessor |
+| **1** | nav raster chunked per region, uniform regions keeping five numbers — **DONE 2026-08-19** | **24.5 → 8.2 MB at 600 m, 98 → 17.2 MB at 1200 m**, and routing got ~15% *faster* | none realised: `--selftest` output bit-identical |
 | **2** | mesh replaces the portal graph as the abstract layer; fine grid stays as the local sampling structure | route cost stops scaling with extent; portals/tiles/region profiles all go | mesh generation, determinism, seasonal re-partition |
 | **3** | remove the fine grid entirely | the honest end of the argument | congestion and the steering gradient need a new home first — see (2) and (3) above |
 
@@ -554,7 +554,42 @@ now tracks how much of the map is jammed, and a map four times the area jams no 
 figure stopped depending on extent — which is the property the whole substrate argument is
 about. Self-test output is bit-identical, which is what "no semantic change" has to mean.
 
-### The measurement that decides it
+**Stage 1, measured, including the part that went wrong.** Uniform regions keep five numbers;
+the rest keep a chunk. On an empty 600 m map 105 of 361 regions need a chunk and the raster is
+8.2 MB against 24.5 dense; at 1200 m it is 219 of 1,444 and 17.2 MB against 98. The chunked
+*fraction* falls as the map grows — the ring of regions near the map edge, where clearance varies
+because the edge is the nearest thing to it, is a smaller share of a bigger map. On the sculpted
+ridge map it is 57% and 16.0 MB, because clearance varies within
+`ObstacleIndex.Reach` of every obstacle and the ridge crosses the whole map. That halo is the
+limit on this stage, and shrinking `Reach` would shrink it at the cost of changing a reported
+metric.
+
+The part worth recording: **five parallel chunk arrays made routing 1.7x slower than the dense
+grid they replaced.** Everything that reads this grid wants several of the five about the same
+cell — `CanTraverse` alone wants blocked, clearance and height for two of them — so five arrays
+is five chunk lookups and five cache lines to answer one question. Interleaving them into one
+struct array per region took a move order on the ridge map from 305 ms back to 161, which is
+**15% faster than the dense grid was**. Chunking a hot structure is a cache-layout change wearing
+a memory-saving costume, and it can go either way.
+
+### The measurement that decides it — **run 2026-08-19**
+
+| criterion written in advance | result |
+|---|---|
+| a 600 m map is ~5 MB | **no**: 8.2 MB open, 16.0 MB sculpted, plus 0.27 MB congestion |
+| an order on obstacle-rich ground fits inside a 33 ms tick | **no**: 5–161 ms, and the expensive ones are region tiles |
+
+**So the mesh case stands, and on performance rather than elegance.** Stages 0 and 1 took the
+memory argument largely off the table — 1200 m went from 315 MB resident to 85 — and left the
+routing argument exactly where it was. What costs is searching 4,096-cell tiles in regions that
+contain an obstacle, which is precisely the work a mesh does not have to do. Stage 2 is
+justified by the number that was written down before it was measured.
+
+The caveats in "the argument against" are unchanged and are what stage 2 has to answer first:
+**congestion and the steering gradient still need a uniform-resolution home**, and stage 0 is
+now the model for it — chunked, allocated where something is happening, released when it is not.
+
+### The original criterion, for the record
 
 **After stages 0 and 1, re-run `--ordertest --terrain` and the memory arithmetic.** If a 600 m
 map is ~5 MB and a move order on obstacle-rich ground is inside a 33 ms tick, then the mesh buys
