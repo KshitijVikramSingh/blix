@@ -86,7 +86,10 @@ public static class Program
         var traceMovement = args.Contains("--trace-movement");
         var startTerrainLab = args.Contains("--terrain-lab");
         var debugAll = args.Contains("--debug-all");
-        var game = new RtsGameLoop(exitAfterFrames, traceMovement, startTerrainLab, debugAll);
+        var extent = Value(args, "--extent") is { } raw
+            ? float.Parse(raw)
+            : Simulation.SimulationWorld.DefaultExtentMeters;
+        var game = new RtsGameLoop(exitAfterFrames, traceMovement, startTerrainLab, debugAll, extent);
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
     }

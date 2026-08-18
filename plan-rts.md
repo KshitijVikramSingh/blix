@@ -3,7 +3,7 @@
 Status as of 2026-08-18. `--selftest` **42/42 passing**. ~10k lines in `src/RTSGame`.
 Branch `rts-locomotion`.
 
-Run it: `tools/run-rts-game.sh [--debug-all]`
+Run it: `tools/run-rts-game.sh [--debug-all] [--extent <metres>]`
 Verify it: `dotnet run --project src/RTSGame/RTSGame.csproj -c Release -- --selftest`
 Measure it: same with `--benchmark`, and `--doorwaytest` for two-way gap contention
 Measure it at size: same with `--scale` — see §5, and `plan-rts-game.md` §13 for what it found
@@ -260,7 +260,12 @@ which is what a correct memo looks like:
 
 - `--debug-all` — trace + timings + congestion overlay + colliders + velocity + paths + states
 - In-game: `M` trace, `T` timings, `N` overlays (nav / surface / slope / **congestion**),
-  `C` colliders, `V` velocity, `K` paths, `I` states, `Backspace` despawn selection
+  `C` colliders, `V` velocity, `K` paths, `I` states, `Backspace` despawn selection,
+  `Z` camera-follows-selection, `R` recentre camera
+- `--extent <metres>` runs the lab on a world of any size (default 30 m, the tuned one). Above
+  ~70 m the ground is drawn as a coarse checker rather than per cell — the surface meshes index
+  with `ushort` — and the per-cell debug overlay is windowed to the camera, because at 1200 m it
+  is 5.76M instances. The camera's zoom range, far plane and focus all scale with the extent.
 - Trace reports `orbiting`, `overlap`, `pressure/rev`, `cohort/slot`, and per-stall
   `flow` / `flowRejects` / `noIntent`
 - `--benchmark` adds constricted scenarios with `walked/optimal`, `mean-turn`,

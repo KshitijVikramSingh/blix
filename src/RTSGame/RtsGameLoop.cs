@@ -24,6 +24,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     // length and stall time and still look wrong. Sliders, with the crowd metrics beside
     // them so a change can be judged against something.
     private readonly BodyFeelSettings bodyFeel = new();
+    private readonly ClockSettings clock = new();
+    // The world this session is judging the body on. Session 2 exists because a body cannot
+    // be judged on a 30 m square and then assumed to feel the same crossing a kilometre.
+    private readonly float worldExtentMeters;
     private readonly CrowdMetrics crowdMetrics = new();
     private readonly ObjectTunables tunables;
     private static readonly Vector4 GrassLight = new(0.42f, 0.52f, 0.35f, 1f);
@@ -72,6 +76,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         NearPlane = 0.25f,
         FarPlane = 150f,
     };
+    // What the camera is looking at. It used to be the origin, full stop, which is fine on
+    // a thirty-metre square and useless on a kilometre one: the body has to be watched
+    // covering distance, and that means going with it.
+    private Vector2 cameraFocus;
+    private bool cameraFollowsSelection = true;
     private readonly byte[] viewProjectionBytes = new byte[64];
 
     private IRenderHost host = null!;
@@ -79,6 +88,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private InstanceBuffer terrainBuffer = null!;
     private InstanceBuffer unitBuffer = null!;
     private InstancedBatch terrainBatch = null!;
+    // The coarse ground gets its own batch rather than sharing the debug one. They have
+    // different sizes and different lifetimes, and a shared batch means the ground can run a
+    // per-cell overlay past the batch's instance ceiling — which it did, immediately.
+    private InstancedBatch groundBatch = null!;
+    private InstanceBuffer groundBuffer = null!;
     private InstancedBatch unitBatch = null!;
     private readonly List<TerrainSurfaceLayer> terrainSurfaceLayers = new();
     private VulkanGraphicsDevice vk = null!;
@@ -93,6 +107,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private float aspect = 16f / 9f;
     private float cameraYaw = MathF.PI * 0.25f;
     private float cameraDistance = 31f;
+    private float cameraMinimumDistance = 19f;
+    private float cameraMaximumDistance = 46f;
     private float mouseX;
     private float mouseY;
     private Vector2 pointerWorld;
@@ -120,10 +136,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         int exitAfterFrames,
         bool traceMovement = false,
         bool startTerrainLab = false,
-        bool debugAll = false)
+        bool debugAll = false,
+        float extentMeters = SimulationWorld.DefaultExtentMeters)
     {
+        worldExtentMeters = extentMeters;
+        // A camera sized for a thirty-metre square shows a kilometre map as a patch of
+        // ground, which is the one thing this session must not do — the body has to be
+        // watched crossing real distances as well as stepping round a doorway.
+        cameraMinimumDistance = 19f;
+        cameraMaximumDistance = MathF.Max(46f, extentMeters * 1.35f);
+        cameraDistance = MathF.Min(46f, cameraMaximumDistance);
+        camera.FarPlane = MathF.Max(150f, extentMeters * 3f);
         tunables = new ObjectTunables(
             bodyFeel,
+            clock,
             new AvoidanceSettings(),
             new ContactSettings(),
             new CongestionSettings(),
@@ -141,7 +167,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             stateDebug = true;
             navigationDebugMode = 4;
         }
-        simulation = new SimulationWorld();
+        simulation = new SimulationWorld(worldExtentMeters);
+        cameraFocus = Vector2.Zero;
         if (startTerrainLab)
         {
             LoadTerrainScenario();
@@ -161,7 +188,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private void LoadStressScenario(int count)
     {
-        simulation = new SimulationWorld();
+        simulation = new SimulationWorld(worldExtentMeters);
+        cameraFocus = Vector2.Zero;
         selection.Clear();
         simulationAccumulator = 0;
         MovementStressScenarios.Populate(simulation, count, issueGroupMove: count != 30);
@@ -171,7 +199,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private void LoadPenEscapeScenario()
     {
-        simulation = new SimulationWorld();
+        simulation = new SimulationWorld(worldExtentMeters);
+        cameraFocus = Vector2.Zero;
         simulationAccumulator = 0;
         stressScenarioIndex = -1;
         var seeds = new[] { 17, 73, 211, 419 };
@@ -190,7 +219,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private void LoadTerrainScenario()
     {
-        simulation = new SimulationWorld();
+        simulation = new SimulationWorld(worldExtentMeters);
+        cameraFocus = Vector2.Zero;
         simulationAccumulator = 0;
         stressScenarioIndex = -1;
         var ids = TerrainStressScenarios.Populate(simulation);
@@ -238,6 +268,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         terrainBuffer = new InstanceBuffer(vk, worldShader, "rts-terrain-debug");
         unitBuffer = new InstanceBuffer(vk, worldShader, "rts-agents");
         terrainBatch = new InstancedBatch(cubeMesh, worldPipeline, terrainBuffer);
+        groundBuffer = new InstanceBuffer(vk, worldShader, "rts-coarse-ground");
+        groundBatch = new InstancedBatch(cubeMesh, worldPipeline, groundBuffer);
         unitBatch = new InstancedBatch(cylinderMesh, worldPipeline, unitBuffer);
         RebuildTerrainSurfaceLayers();
         selectionUi = new SpriteBatch(vk);
@@ -298,6 +330,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (vk is not null) RebuildTerrainSurfaceLayers();
     }
 
+    /// <summary>
+    /// Largest cell count the one-mesh-per-surface ground can carry.
+    /// </summary>
+    /// <remarks>
+    /// The surface meshes index with <c>ushort</c>, and the worst case is a map that is all
+    /// one surface: half its cells land in each parity layer, six vertices each, so the
+    /// ceiling is 65,535/3 cells. Beyond that the ground is drawn coarsely instead — which is
+    /// also the right greybox affordance at that size, since a half-metre checkerboard over a
+    /// kilometre is not a scale reference, it is noise.
+    /// </remarks>
+    private const int FineGroundCellLimit = 21_000;
+
+    private bool UsesFineGround =>
+        simulation.Navigation.Width * simulation.Navigation.Height <= FineGroundCellLimit;
+
     private void RebuildTerrainSurfaceLayers()
     {
         if (vk is null) return;
@@ -306,6 +353,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             vk.WaitIdle();
             DisposeTerrainSurfaceLayers();
         }
+
+        renderedTerrain = simulation.Terrain;
+        renderedTerrainRevision = simulation.Terrain.Revision;
+        if (!UsesFineGround) return;
 
         foreach (var surface in Enum.GetValues<TerrainSurface>())
         for (var parity = 0; parity < 2; parity++)
@@ -399,6 +450,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         debug.State.Enabled = true;
         tunables.BuildControls(debug);
         crowdMetrics.Report(debug);
+        ReportBodyScale(debug);
         using (debug.Scope("sim"))
         {
             debug.Values.Value("agents", simulation.Agents.Count);
@@ -418,11 +470,52 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
     }
 
+    /// <summary>
+    /// What the body sliders mean in the units the design argues in: distance, minutes, and
+    /// how much map a player can answer for.
+    /// </summary>
+    /// <remarks>
+    /// The point of this session is a decision, not a preference, and the decision is
+    /// coupled: top speed sets reach, reach sets the contested fraction of the map, and the
+    /// contested fraction is what the map size was chosen for. A slider that only shows
+    /// "1.5" invites tuning it until the crowd looks nice and discovering afterwards that the
+    /// map is now the wrong size. These are the same quantities §3 of the plan derives the
+    /// map from, computed live from whatever the sliders currently say.
+    /// </remarks>
+    private void ReportBodyScale(DebugContext debug)
+    {
+        using var scope = debug.Scope("body scale");
+        var speed = MathF.Max(0.01f, bodyFeel.MaximumSpeed);
+        var compression = MathF.Max(0.01f, clock.Compression);
+        var crossSeconds = simulation.ExtentMeters / speed;
+        debug.Values.Value("map (m)", MathF.Round(simulation.ExtentMeters));
+        debug.Values.Value("cross map (sim min)", MathF.Round(crossSeconds / 60f, 1));
+        debug.Values.Value("cross map (wall min)", MathF.Round(crossSeconds / 60f / compression, 1));
+        // How far a body gets in the time a player is willing to be away from one place.
+        // This is "reach", and it is what decides how much of a map is contested.
+        debug.Values.Value("reach in 40s (m)", MathF.Round(speed * 40f));
+        debug.Values.Value(
+            "spin-up (s)",
+            MathF.Round(speed / MathF.Max(0.01f, bodyFeel.Acceleration), 2));
+        debug.Values.Value(
+            "stopping (m)",
+            MathF.Round(speed * speed / (2f * MathF.Max(0.01f, bodyFeel.Deceleration)), 2));
+        // A body that cannot complete a right-angle turn inside its own body length is
+        // steering a vehicle, whatever the model looks like.
+        debug.Values.Value(
+            "quarter-turn (m)",
+            MathF.Round(speed * (MathF.PI * 0.5f / MathF.Max(0.01f, bodyFeel.MaximumTurnSpeed)), 2));
+    }
+
     public void OnUpdate(Time time)
     {
         // Before stepping, so a slider moved this frame is felt this frame.
         bodyFeel.Apply(simulation);
-        simulationAccumulator += Math.Clamp(time.Delta, 0.0, 0.25);
+        // Compression scales wall-clock time on the way in, never the bodies. The spiral
+        // guard scales with it too: a quarter-second of catch-up at 1x is a quarter-second
+        // of catch-up at 3x only if the ceiling moves as well.
+        var compression = Math.Clamp(clock.Compression, 0.25f, 6f);
+        simulationAccumulator += Math.Clamp(time.Delta * compression, 0.0, 0.25 * compression);
         while (simulationAccumulator >= SimulationWorld.FixedDeltaSeconds)
         {
             simulation.Tick((float)SimulationWorld.FixedDeltaSeconds);
@@ -437,6 +530,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             nextTimingReport = time.Total + 1.0;
         }
 
+        UpdateCameraFocus((float)Math.Clamp(time.Delta, 0.0, 0.25));
         UpdateCamera();
         UpdatePointerWorld();
     }
@@ -445,12 +539,39 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     {
         const float elevation = 0.82f;
         var horizontal = MathF.Cos(elevation) * cameraDistance;
-        var eye = new Vector3(
+        var focus = new Vector3(cameraFocus.X, 0f, cameraFocus.Y);
+        var eye = focus + new Vector3(
             MathF.Sin(cameraYaw) * horizontal,
             MathF.Sin(elevation) * cameraDistance,
             MathF.Cos(cameraYaw) * horizontal);
         camera.Transform.Position = eye;
-        camera.Transform.LookAt(Vector3.Zero, Vector3.UnitY);
+        camera.Transform.LookAt(focus, Vector3.UnitY);
+    }
+
+    /// <summary>
+    /// Keeps the camera over whatever is selected, so a long walk can be watched rather than
+    /// inferred from the moment it leaves the screen.
+    /// </summary>
+    private void UpdateCameraFocus(float deltaSeconds)
+    {
+        if (!cameraFollowsSelection) return;
+        var centroid = Vector2.Zero;
+        var counted = 0;
+        foreach (var id in selection.Snapshot())
+        {
+            ref readonly var agent = ref simulation.Agents.Get(id);
+            if (!agent.IsAlive) continue;
+            centroid += agent.Position;
+            counted++;
+        }
+
+        if (counted == 0) return;
+        centroid /= counted;
+        // Eased rather than snapped: a camera that tracks a crowd exactly makes the crowd
+        // look stationary, which is the opposite of what a session about how movement feels
+        // wants to show.
+        var follow = 1f - MathF.Exp(-deltaSeconds * 2.2f);
+        cameraFocus += (centroid - cameraFocus) * follow;
     }
 
     private void UpdatePointerWorld()
@@ -484,6 +605,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             pass =>
             {
                 foreach (var layer in terrainSurfaceLayers) layer.Batch.End(pass);
+                groundBatch.End(pass);
                 terrainBatch.End(pass);
                 unitBatch.End(pass);
                 DrawSelectionMarquee(pass);
@@ -506,6 +628,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             layer.Batch.Begin(viewProjectionBytes);
             layer.Batch.Add(Matrix4x4.Identity, layer.Color);
         }
+        groundBatch.Begin(viewProjectionBytes);
+        BuildCoarseGround();
         terrainBatch.Begin(viewProjectionBytes);
         BuildObstacleInstances();
         BuildNavigationOverlay();
@@ -513,13 +637,87 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         BuildVelocityDebug();
     }
 
+    /// <summary>
+    /// Ground for maps too large to mesh cell by cell: one flat block per checker square,
+    /// coloured by the surface under its centre.
+    /// </summary>
+    /// <remarks>
+    /// Block size scales with the map so the pattern stays a scale reference rather than
+    /// becoming either a blur or a single flat colour — about a hundred and twenty squares
+    /// across at any extent, which is 10 m squares on a 1200 m map. That matters more than it
+    /// sounds for a session about how movement feels: perceived speed on an untextured plane
+    /// comes almost entirely from crossing edges, so the ground is what makes a 1.5 m/s body
+    /// look like it is walking rather than sliding.
+    /// </remarks>
+    private void BuildCoarseGround()
+    {
+        if (UsesFineGround) return;
+        var terrain = simulation.Terrain;
+        var grid = simulation.Navigation.Transform;
+        var block = CoarseGroundBlockSize;
+        var blocks = (int)MathF.Ceiling(simulation.ExtentMeters / block);
+        for (var z = 0; z < blocks; z++)
+        for (var x = 0; x < blocks; x++)
+        {
+            var center = grid.Origin + new Vector2((x + 0.5f) * block, (z + 0.5f) * block);
+            if (!terrain.Contains(center)) continue;
+            var color = TerrainColor(terrain.SampleSurface(center), (x + z) % 2 == 0);
+            var model = Matrix4x4.CreateScale(block, 0.02f, block) *
+                        Matrix4x4.CreateTranslation(center.X, terrain.SampleHeight(center) - 0.01f, center.Y);
+            groundBatch.Add(model, color);
+        }
+    }
+
+    /// <summary>Checker squares across the map, bounded by what one batch can hold.</summary>
+    /// <remarks>
+    /// A hundred and twenty is what makes the pattern read as ground rather than as a blur or
+    /// a flat colour. The clamp is the instanced batch's ceiling — 16,384 instances in one
+    /// Begin/End — which a square grid hits at 128 a side, so the constant is not free to grow.
+    /// </remarks>
+    private const int CoarseGroundBlocksPerSide = 120;
+
+    private float CoarseGroundBlockSize
+    {
+        get
+        {
+            var cell = simulation.Navigation.Transform.CellSize;
+            var target = simulation.ExtentMeters / CoarseGroundBlocksPerSide;
+            return MathF.Max(cell, MathF.Round(target / cell) * cell);
+        }
+    }
+
+    /// <summary>How far from the camera the per-cell debug overlay is drawn, in metres.</summary>
+    /// <remarks>
+    /// The overlay is one instance per navigation cell, which is 3,600 on the tuned world and
+    /// 5.76M on a 1200 m one. A window is not an optimisation here, it is the difference
+    /// between a debug view and a hang — and since the overlay exists to be read, drawing it
+    /// where nobody is looking was never worth anything.
+    /// </remarks>
+    private const float NavigationOverlayRadius = 26f;
+
     private void BuildNavigationOverlay()
     {
         if (navigationDebugMode == 0) return;
         var grid = simulation.Navigation;
         var cellScale = grid.Transform.CellSize * 0.82f;
-        for (var z = 0; z < grid.Height; z++)
-        for (var x = 0; x < grid.Width; x++)
+        var windowed = !UsesFineGround;
+        var minimumX = 0;
+        var minimumZ = 0;
+        var maximumX = grid.Width - 1;
+        var maximumZ = grid.Height - 1;
+        if (windowed)
+        {
+            var cellSize = grid.Transform.CellSize;
+            var low = (cameraFocus - new Vector2(NavigationOverlayRadius) - grid.Transform.Origin) / cellSize;
+            var high = (cameraFocus + new Vector2(NavigationOverlayRadius) - grid.Transform.Origin) / cellSize;
+            minimumX = Math.Clamp((int)MathF.Floor(low.X), 0, grid.Width - 1);
+            minimumZ = Math.Clamp((int)MathF.Floor(low.Y), 0, grid.Height - 1);
+            maximumX = Math.Clamp((int)MathF.Ceiling(high.X), 0, grid.Width - 1);
+            maximumZ = Math.Clamp((int)MathF.Ceiling(high.Y), 0, grid.Height - 1);
+        }
+
+        for (var z = minimumZ; z <= maximumZ; z++)
+        for (var x = minimumX; x <= maximumX; x++)
         {
             var cell = new GridCell(x, z);
             var center = grid.CellCenter(cell);
@@ -546,11 +744,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var grid = simulation.Placement;
         var blockWidth = grid.Transform.CellSize * 0.78f;
         const float blockHeight = 1.45f;
-        for (var z = 0; z < grid.Transform.Height; z++)
-        for (var x = 0; x < grid.Transform.Width; x++)
+        foreach (var cell in grid.OccupiedCells)
         {
-            var cell = new GridCell(x, z);
-            if (!grid.IsOccupied(cell)) continue;
             var center = grid.Transform.CellCenter(cell);
             var terrainHeight = simulation.Terrain.SampleHeight(center);
             var model = Matrix4x4.CreateScale(blockWidth, blockHeight, blockWidth) *
@@ -784,7 +979,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void OnMouseWheel(float offsetX, float offsetY)
     {
-        cameraDistance = Math.Clamp(cameraDistance - offsetY * 2f, 19f, 46f);
+        // Zoom steps proportionally, so pulling back over a kilometre does not take a
+        // hundred notches of wheel that were sized for a thirty-metre square.
+        var step = MathF.Max(2f, cameraDistance * 0.12f);
+        cameraDistance = Math.Clamp(
+            cameraDistance - offsetY * step,
+            cameraMinimumDistance,
+            cameraMaximumDistance);
     }
 
     private AgentId? FindNearestUnselectedTarget()
@@ -876,6 +1077,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             case Key.L:
                 LoadTerrainScenario();
                 break;
+            case Key.Z:
+                cameraFollowsSelection = !cameraFollowsSelection;
+                Console.WriteLine(
+                    $"  camera follows selection: {(cameraFollowsSelection ? "ON" : "OFF")}");
+                break;
+            case Key.R:
+                cameraFocus = Vector2.Zero;
+                Console.WriteLine("  camera recentred");
+                break;
             case Key.S:
                 simulation.QueueStop(selection.Snapshot());
                 break;
@@ -921,6 +1131,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         selectionUi?.Dispose();
         if (selectionPixel.Id >= 0) graphicsDevice?.DestroyTexture(selectionPixel);
         terrainBuffer?.Dispose();
+        groundBuffer?.Dispose();
         unitBuffer?.Dispose();
         if (vk is not null) DisposeTerrainSurfaceLayers();
     }

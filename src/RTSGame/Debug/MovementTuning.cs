@@ -19,6 +19,34 @@ namespace RTSGame.Debug;
 /// changes what is already on the map instead of only what is created next.
 /// </para>
 /// </remarks>
+/// <summary>
+/// How fast the world runs, as a multiplier on wall-clock time entering the fixed step.
+/// </summary>
+/// <remarks>
+/// Compression is a <em>tick-rate</em> multiplier and never a speed multiplier, and the two
+/// are not interchangeable however alike they feel from the chair. Raising speed grows a
+/// player's reach in metres, which grows the contested fraction of the map and hands back
+/// exactly the tenure a large map was chosen to buy — a 2x speed bump on an 800 m map gives
+/// the contest geometry of a 400 m one. Raising the tick rate preserves every in-game ratio
+/// and only shortens the waiting.
+/// <para>
+/// <c>FixedDeltaSeconds</c> stays at 1/30 whatever this says, so not one constant the
+/// locomotion layer was tuned against is touched. The spiral guard scales with it, because a
+/// guard fixed in wall-clock seconds becomes a different guard the moment time is
+/// compressed.
+/// </remarks>
+internal sealed class ClockSettings
+{
+    /// <summary>Sim seconds per wall-clock second.</summary>
+    /// <remarks>
+    /// 1.5x is the proposed default: an hour of wall clock is a year of ten-minute seasons.
+    /// Left on a slider because it is the one dial that changes how much of the game a
+    /// player sees per sitting without changing the game.
+    /// </remarks>
+    [Tune(0.25, 6.0, Label = "time compression (x)")]
+    public float Compression = 1f;
+}
+
 internal sealed class BodyFeelSettings
 {
     [Tune(0.5, 12.0, Label = "top speed (m/s)")]
