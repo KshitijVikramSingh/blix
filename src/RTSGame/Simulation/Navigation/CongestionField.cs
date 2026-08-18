@@ -132,6 +132,7 @@ internal sealed class CongestionField
     private readonly float[] stampedRegionTotal;
     private readonly float[] currentRegionTotal;
     private readonly bool[] regionMarked;
+    private readonly bool[] regionPressured;
     private int[] pressuredRegions;
     private int pressuredRegionCount;
     private int[] previouslyPressuredRegions;
@@ -178,6 +179,7 @@ internal sealed class CongestionField
         stampedRegionTotal = new float[regions.Count];
         currentRegionTotal = new float[regions.Count];
         regionMarked = new bool[regions.Count];
+        regionPressured = new bool[regions.Count];
         pressuredRegions = new int[Math.Min(64, regions.Count)];
         previouslyPressuredRegions = new int[pressuredRegions.Length];
     }
@@ -187,6 +189,14 @@ internal sealed class CongestionField
     /// changed at a published revision.
     /// </summary>
     public int RegionStamp(int region) => regionStamp[region];
+
+    /// <summary>Whether any body was reporting failure in this region at the last revision.</summary>
+    /// <remarks>
+    /// Stable across a revision, like the stamp, so anything cached against the stamp can rely
+    /// on it. It is what lets a router skip congestion entirely for the overwhelming majority
+    /// of the map, where nobody is stuck and the answer is zero.
+    /// </remarks>
+    public bool RegionHasPressure(int region) => regionPressured[region];
 
     /// <summary>Cells in the field.</summary>
     public int CellCount => pressure.Length;
@@ -353,6 +363,7 @@ internal sealed class CongestionField
             var region = pressuredRegions[i];
             regionMarked[region] = false;
             var total = currentRegionTotal[region];
+            regionPressured[region] = total > 0f;
             // Same quantum the field already uses to decide a revision is worth
             // publishing at all, applied per region. Without it a crowd walking across a
             // map re-stamps its own region on every revision, and everything keyed on that

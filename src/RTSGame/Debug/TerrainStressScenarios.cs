@@ -33,7 +33,7 @@ internal static class TerrainStressScenarios
         for (var x = 0; x <= grid.Width; x++)
         {
             var position = grid.Origin + new Vector2(x * grid.CellSize, z * grid.CellSize);
-            terrain.SetVertexHeight(x, z, Height(position));
+            terrain.SetVertexHeight(x, z, Height(position) * LabWindow(position));
         }
 
         for (var z = 0; z < grid.Height; z++)
@@ -42,6 +42,12 @@ internal static class TerrainStressScenarios
             var cell = new GridCell(x, z);
             var center = grid.CellCenter(cell);
             var surface = TerrainSurface.Grass;
+            if (!InsideLab(center))
+            {
+                terrain.SetSurface(cell, surface);
+                continue;
+            }
+
             if (MathF.Abs(center.Y) < 1.15f) surface = TerrainSurface.Road;
             else if (center.Y < -3.5f && center.X > -8f && center.X < 10f) surface = TerrainSurface.Mud;
             else if (center.Y > 4f) surface = TerrainSurface.Rough;
@@ -59,6 +65,38 @@ internal static class TerrainStressScenarios
         }
         if (issueGroupMove) world.QueueMove(ids, new Vector2(10f, 0f));
         return ids.ToArray();
+    }
+
+    /// <summary>Half-width of the laboratory, which is the tuned world it was drawn for.</summary>
+    /// <remarks>
+    /// Every rule below is written in absolute world coordinates against a 30 m square:
+    /// "road where |y| &lt; 1.15", "rough where y &gt; 4", a ramp that smoothsteps between
+    /// x = -6 and x = 4 and is flat either side of that. On the world it was drawn for those
+    /// describe a compact set of features. On a 600 m one they describe a landscape — rough
+    /// ground over half the map, a road running the full width, and a plateau covering
+    /// everything east of the ramp — because none of them has a far edge.
+    /// <para>
+    /// So the lab is bounded to the square it was drawn for. Inside <see cref="LabHalfWidth"/>
+    /// nothing changes at all, which is what keeps the two terrain self-tests measuring the
+    /// scenario they were calibrated against; beyond it the ground is plain grass, and the
+    /// heights fade out over <see cref="LabFade"/> rather than ending in a cliff nobody meant
+    /// to build.
+    /// </para>
+    /// </remarks>
+    private const float LabHalfWidth = 15f;
+
+    /// <summary>Distance beyond the lab over which its heights return to zero.</summary>
+    private const float LabFade = 10f;
+
+    private static bool InsideLab(Vector2 position) =>
+        MathF.Abs(position.X) <= LabHalfWidth && MathF.Abs(position.Y) <= LabHalfWidth;
+
+    private static float LabWindow(Vector2 position)
+    {
+        var reach = MathF.Max(MathF.Abs(position.X), MathF.Abs(position.Y));
+        if (reach <= LabHalfWidth) return 1f;
+        if (reach >= LabHalfWidth + LabFade) return 0f;
+        return 1f - SmoothStep(LabHalfWidth, LabHalfWidth + LabFade, reach);
     }
 
     private static float Height(Vector2 position)

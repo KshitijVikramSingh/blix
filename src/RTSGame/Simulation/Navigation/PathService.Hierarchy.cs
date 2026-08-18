@@ -47,6 +47,30 @@ internal sealed partial class PathService
     private readonly Dictionary<(int Node, int Nav, int Radius, int Stamp, bool Turns), float[]>
         nodeIngress = new();
     private readonly PriorityQueue<GridCell, float> regionQueue = new();
+    private RegionProfile[] regionProfiles = Array.Empty<RegionProfile>();
+    private int profiledRevision = -1;
+
+    /// <summary>What a region's ground is made of, summarised once per terrain edit.</summary>
+    /// <remarks>
+    /// Enough to answer one question: is this region completely plain? Open everywhere, level
+    /// everywhere, one surface throughout. That is not an exotic special case, it is most of
+    /// a map most of the time, and on plain ground the cost of crossing a region is arithmetic
+    /// — the octile distance between two border cells — rather than something a search has to
+    /// discover.
+    /// </remarks>
+    private struct RegionProfile
+    {
+        public float MinimumClearance;
+        public float MinimumHeight;
+        public float MaximumHeight;
+        public float MinimumCost;
+        public float MaximumCost;
+        public bool AnyBlocked;
+    }
+
+    /// <summary>Region-crossing costs answered by arithmetic instead of a search.</summary>
+    public long AnalyticIngress { get; private set; }
+
     // One region's working set, reused. Every search allocated its own and the searches
     // are the unit of work here, so this was three 16 KB arrays per crossing considered.
     private readonly bool[] regionClosed = new bool[RegionPartition.CellsPerRegion];
@@ -205,6 +229,57 @@ internal sealed partial class PathService
     /// partition is a single region with no borders, so this <em>is</em> the flat search
     /// and every number the existing suite asserts on is arrived at the same way.
     /// </remarks>
+    /// <summary>
+    /// A region's cost field written straight down, for ground with nothing in it.
+    /// </summary>
+    /// <remarks>
+    /// The rule this and <see cref="PlainCrossingSeconds"/> both come from: resolve to the
+    /// resolution where the expensive check actually decides something, and stay broad
+    /// everywhere else. A Dijkstra over four thousand cells exists to discover which way round
+    /// obstacles the cheapest path goes. Where there are no obstacles it discovers that the
+    /// cheapest path is a straight line, at four thousand cells of expense, and the straight
+    /// line has a closed form.
+    /// <para>
+    /// Every term the search charges is constant or absent on plain ground: one surface, no
+    /// climb, no congestion, and a single bend on an octile path. So a cell's cost to the goal
+    /// is the cheapest crossing out of the region plus the octile distance to it, and that is
+    /// a formula per cell rather than a frontier.
+    /// </para>
+    /// </remarks>
+    private float[] FillPlainTile(
+        int region,
+        ReadOnlySpan<(GridCell Cell, float Cost)> seeds,
+        float surfaceCost,
+        float agentRadius,
+        bool chargeTurns)
+    {
+        var costs = new float[RegionPartition.CellsPerRegion];
+        Array.Fill(costs, float.PositiveInfinity);
+        if (seeds.Length == 0) return costs;
+
+        partition.Bounds(region, out var minimumX, out var minimumZ, out var maximumX, out var maximumZ);
+        for (var z = minimumZ; z <= maximumZ; z++)
+        for (var x = minimumX; x <= maximumX; x++)
+        {
+            var cell = new GridCell(x, z);
+            var best = float.PositiveInfinity;
+            foreach (var (seedCell, seedCost) in seeds)
+            {
+                var candidate = seedCost + PlainCrossingSeconds(
+                    cell,
+                    seedCell,
+                    surfaceCost,
+                    agentRadius,
+                    chargeTurns);
+                if (candidate < best) best = candidate;
+            }
+
+            costs[partition.TileIndex(cell)] = best;
+        }
+
+        return costs;
+    }
+
     private float[] SearchRegion(
         int region,
         float agentRadius,
@@ -308,11 +383,112 @@ internal sealed partial class PathService
     /// silently deleted for every route longer than one region — the failure this session
     /// was most likely to ship without noticing, because nothing on a 30 m map can show it.
     /// </remarks>
+    /// <summary>Builds, once per terrain edit, the summary that says which regions are plain.</summary>
+    private void ProfileRegions()
+    {
+        if (profiledRevision == grid.Revision && regionProfiles.Length == partition.Count) return;
+        if (regionProfiles.Length != partition.Count) regionProfiles = new RegionProfile[partition.Count];
+        for (var region = 0; region < regionProfiles.Length; region++)
+        {
+            regionProfiles[region] = new RegionProfile
+            {
+                MinimumClearance = float.PositiveInfinity,
+                MinimumHeight = float.PositiveInfinity,
+                MaximumHeight = float.NegativeInfinity,
+                MinimumCost = float.PositiveInfinity,
+                MaximumCost = float.NegativeInfinity,
+            };
+        }
+
+        for (var z = 0; z < grid.Height; z++)
+        for (var x = 0; x < grid.Width; x++)
+        {
+            var cell = new GridCell(x, z);
+            ref var profile = ref regionProfiles[partition.RegionOf(cell)];
+            if (grid.IsBlocked(cell)) profile.AnyBlocked = true;
+            profile.MinimumClearance = MathF.Min(profile.MinimumClearance, grid.Clearance(cell));
+            var height = grid.HeightAt(cell);
+            profile.MinimumHeight = MathF.Min(profile.MinimumHeight, height);
+            profile.MaximumHeight = MathF.Max(profile.MaximumHeight, height);
+            var cost = grid.TraversalCost(cell);
+            profile.MinimumCost = MathF.Min(profile.MinimumCost, cost);
+            profile.MaximumCost = MathF.Max(profile.MaximumCost, cost);
+        }
+
+        profiledRevision = grid.Revision;
+    }
+
+    /// <summary>
+    /// Whether crossing this region is a straight line for a body of this radius.
+    /// </summary>
+    /// <remarks>
+    /// Open, level, one surface, and nobody stuck in it. Under those conditions every term the
+    /// region-local search charges is either constant or zero, and the cheapest route between
+    /// two cells is the octile path — which is a formula. Pathfinding across empty ground
+    /// should not cost anything, and until this existed it cost a four-thousand-cell Dijkstra
+    /// per crossing considered, several hundred of them per move order, to rediscover that
+    /// the shortest way across an empty square is a straight line.
+    /// </remarks>
+    private bool RegionIsPlain(int region, float agentRadius)
+    {
+        ProfileRegions();
+        ref readonly var profile = ref regionProfiles[region];
+        return !profile.AnyBlocked &&
+               profile.MinimumClearance >= agentRadius + 0.035f &&
+               profile.MaximumHeight - profile.MinimumHeight <= 0f &&
+               profile.MaximumCost - profile.MinimumCost <= 0f &&
+               !congestion.RegionHasPressure(region);
+    }
+
+    /// <summary>Seconds along the octile path between two cells of a plain region.</summary>
+    private float PlainCrossingSeconds(
+        GridCell from,
+        GridCell to,
+        float surfaceCost,
+        float agentRadius,
+        bool chargeTurns)
+    {
+        var dx = Math.Abs(from.X - to.X);
+        var dz = Math.Abs(from.Z - to.Z);
+        var diagonal = Math.Min(dx, dz);
+        var straight = Math.Max(dx, dz) - diagonal;
+        var seconds = (straight + diagonal * DiagonalCost) * SecondsPerCell * surfaceCost;
+        // A path that is part diagonal and part axis bends once, and the search would charge
+        // for that bend. Indices 0 and 4 are (1,0) and (1,1) — one eighth of a turn apart.
+        if (chargeTurns && straight > 0 && diagonal > 0)
+        {
+            seconds += TurnCost(0, 4, to, agentRadius);
+        }
+
+        return seconds;
+    }
+
     private float[] IngressCosts(PortalGraph portals, int node, float agentRadius, bool chargeTurns)
     {
         var region = portals.RegionOfNode(node);
         var key = (node, grid.Revision, RadiusKey(agentRadius), congestion.RegionStamp(region), chargeTurns);
         if (nodeIngress.TryGetValue(key, out var cached)) return cached;
+
+        if (RegionIsPlain(region, agentRadius))
+        {
+            var plainNodes = portals.NodesIn(region);
+            var plain = new float[plainNodes.Length];
+            var surfaceCost = regionProfiles[region].MinimumCost;
+            var target = portals.CellOfNode(node);
+            for (var i = 0; i < plainNodes.Length; i++)
+            {
+                plain[i] = PlainCrossingSeconds(
+                    portals.CellOfNode(plainNodes[i]),
+                    target,
+                    surfaceCost,
+                    agentRadius,
+                    chargeTurns);
+            }
+
+            AnalyticIngress++;
+            nodeIngress[key] = plain;
+            return plain;
+        }
 
         Span<(GridCell, float)> seed = stackalloc (GridCell, float)[1];
         seed[0] = (portals.CellOfNode(node), 0f);
@@ -367,7 +543,9 @@ internal sealed partial class PathService
         TileRefinements++;
         return new RegionTile
         {
-            Costs = SearchRegion(region, agentRadius, chargeTurns, seed, retained: true),
+            Costs = RegionIsPlain(region, agentRadius)
+                ? FillPlainTile(region, seed, regionProfiles[region].MinimumCost, agentRadius, chargeTurns)
+                : SearchRegion(region, agentRadius, chargeTurns, seed, retained: true),
             Stamp = stamp,
             SeedNodes = Array.Empty<int>(),
             SeedCosts = Array.Empty<float>(),
@@ -424,14 +602,22 @@ internal sealed partial class PathService
         }
 
         TileRefinements++;
+        var seedSpan = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(seeds);
         return new RegionTile
         {
-            Costs = SearchRegion(
-                region,
-                field.AgentRadius,
-                field.ChargeTurns,
-                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(seeds),
-                retained: true),
+            Costs = RegionIsPlain(region, field.AgentRadius)
+                ? FillPlainTile(
+                    region,
+                    seedSpan,
+                    regionProfiles[region].MinimumCost,
+                    field.AgentRadius,
+                    field.ChargeTurns)
+                : SearchRegion(
+                    region,
+                    field.AgentRadius,
+                    field.ChargeTurns,
+                    seedSpan,
+                    retained: true),
             Stamp = stamp,
             SeedNodes = seedNodes.ToArray(),
             SeedCosts = seedCosts.ToArray(),

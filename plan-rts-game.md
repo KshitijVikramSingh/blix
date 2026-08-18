@@ -1113,10 +1113,31 @@ Two changes, both leaning on the per-region stamps that already existed:
 at 1.006x mean with no cell lost — the cache changes what is recomputed, not what is computed. A move
 order is 41-92 ms, so the hitch is one to three frames; it was 124 ticks.
 
-**What is left.** The remaining per-tick cost is crossing costs being re-priced for regions whose
-pressure genuinely moved, which is the congestion layer working rather than a defect. If a move order
-has to fit inside a single tick, the next lever is spreading one order's refinement across ticks
-rather than making it cheaper.
+**Then the rule that made all of it cheap.** *Resolve to the resolution where the expensive check
+actually decides something, and stay broad everywhere else.* A Dijkstra over a region's four thousand
+cells exists to discover which way round the obstacles the cheapest path goes. Where there are no
+obstacles it discovers, at four thousand cells of expense, that the cheapest path between two points
+is a straight line — and the straight line has a closed form.
+
+A region is *plain* when it is open everywhere, level everywhere, one surface throughout, and nobody
+in it is stuck. That is not an exotic case, it is most of a map most of the time. On plain ground
+every term the search charges is constant or absent, so both things the search was being asked for
+become arithmetic: the cost of crossing the region is the octile distance between two border cells,
+and a cell's cost to the goal is the cheapest crossing out plus the octile distance to it.
+
+Measured on a 600 m map, eight scattered move orders — which is what a player actually does, and what
+the previous back-and-forth measurement had been quietly flattering:
+
+| | before | after |
+|---|---|---|
+| cost per order | 160–515 ms | **0.8–14 ms** |
+| region searches per order | 165–452 | **0–12** |
+| route quality (mean / p99 / worst) | 1.0056 / 1.061 / 1.680 | **unchanged** |
+| cells lost | 0 | **0** |
+
+The searches that remain are in regions that genuinely hold congestion — which is precisely where the
+fine check earns its cost. Route quality is not approximately preserved, it is identical: the closed
+form computes what the search computed, without walking the frontier to get there.
 
 > **Testing note.** The fidelity test runs on a 200 m map, not 1200 m, because it compares against
 > the flat search it replaces and building that reference costs seconds at 1200 m. The 200 m map is

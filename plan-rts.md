@@ -286,6 +286,9 @@ which is what a correct memo looks like:
   *subset* of `steering` and `collision` — the broad phase is rebuilt inside both — rather than a
   column beside them. It also reports `live cells`, the congestion cells actually being swept, and
   `first-route tick`, which is what one move order costs before anything moves.
+- `--ordertest` reports what a move order costs as a function of distance, and what eight
+  *scattered* successive orders cost in one world. Scattered matters: alternating between two ends
+  re-uses the corridor the first order paid for and reports a cache that never existed.
 - `--routingtest` compares hierarchical cost-to-goal against the flat whole-map search it replaced,
   cell by cell, on a 200 m map of staggered walls, at several settings of the abstract search's
   horizon (`--spans`). `lost` is the column that matters — a cell the hierarchy cannot price is a
