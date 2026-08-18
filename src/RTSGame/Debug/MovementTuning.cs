@@ -187,6 +187,40 @@ internal sealed class CrowdMetrics
 
 
 /// <summary>Route cost, live. All in seconds unless named otherwise. See PathService.</summary>
+/// <summary>
+/// How bodies treat walls. Back on the panel after the audit took it off.
+/// </summary>
+/// <remarks>
+/// The audit judged these settled, on the grounds that the locomotion work had measured them
+/// and recorded why. The first session of real play on a real map disagreed: wall-hugging came
+/// back, and the reason none of the dials touched it was that the dials that govern it were
+/// no longer there. Settled by measurement on a 30 m fixture is not the same as settled, and
+/// this is the correction.
+/// </remarks>
+internal sealed class WallSettings
+{
+    [Tune(0.05, 4.0, Label = "horizon: walls (s)", Group = "Walls")]
+    public float StaticTimeHorizon
+    {
+        get => ReciprocalVelocitySolver.StaticTimeHorizon;
+        set => ReciprocalVelocitySolver.StaticTimeHorizon = value;
+    }
+
+    [Tune(-0.10, 0.40, Label = "wall standoff (m)", Group = "Walls")]
+    public float StaticSeparationMargin
+    {
+        get => ReciprocalVelocitySolver.StaticSeparationMargin;
+        set => ReciprocalVelocitySolver.StaticSeparationMargin = value;
+    }
+
+    [Tune(0.5, 8.0, Label = "neighbour range (m)", Group = "Walls")]
+    public float NeighborDistance
+    {
+        get => ReciprocalVelocitySolver.NeighborDistance;
+        set => ReciprocalVelocitySolver.NeighborDistance = value;
+    }
+}
+
 internal sealed class RoutingSettings
 {
     // In cells rather than seconds now: what a queue costs is how many bodies are ahead

@@ -215,6 +215,13 @@ internal sealed partial class PathService
         // turning circle fits. Same clearance ramp the congestion field uses to decide
         // whether a stalled body is an obstruction or a nuisance.
         var clearance = grid.Clearance(cell);
+        // Tried and refused: flooring this at a body diameter, on the reasoning that a body
+        // needs room to turn whatever its speed and the ramp had collapsed from two metres of
+        // clearance at a run to ninety centimetres at a walk. It reads well and measures
+        // badly — the pen went from zero dead stops to fifteen and the one-cell gate from
+        // twenty to fifty-three, while mean clearance in the pen actually *fell*. Charging
+        // more for turning in tight ground makes routes avoid the gaps rather than prefer
+        // room, and bodies pile up at the ones that are left.
         var turningRadius = ReferenceSpeed / ReferenceTurnSpeed;
         var tight = agentRadius + turningRadius * 0.5f;
         var open = agentRadius + turningRadius * 1.5f;

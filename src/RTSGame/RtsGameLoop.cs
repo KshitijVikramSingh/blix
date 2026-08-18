@@ -36,11 +36,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     /// <summary>Sim seconds per wall-clock second the game starts at.</summary>
     /// <remarks>
-    /// One. Compression is the dial for wall-clock impatience and it is left alone until
-    /// there is something to be impatient about — starting it above one would mean judging
-    /// how the body moves through a clock that is not the one the design reasons in.
+    /// 1.5, which is what §3 proposed and what judging it on the slider settled on: 1x is
+    /// unbearably slow to sit through, 2x reads as agitated, and 1.5 is the one that felt like
+    /// the world running at its own pace rather than at the player's. It is a tick-rate
+    /// multiplier and not a speed multiplier, so nothing about the body or the geometry moves
+    /// with it — only how long the waiting takes in the chair.
     /// </remarks>
-    public const float DefaultCompression = 1f;
+    public const float DefaultCompression = 1.5f;
 
     private readonly BodyFeelSettings bodyFeel = new();
     private readonly ClockSettings clock = new();
@@ -185,6 +187,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         tunables = new ObjectTunables(
             bodyFeel,
             clock,
+            new WallSettings(),
             new RoutingSettings(),
             new GroupSettings());
         this.exitAfterFrames = exitAfterFrames;
@@ -248,16 +251,30 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                           $"{scenario.ExitCenters.Length - 1} alternate exits");
     }
 
+    /// <summary>
+    /// Terrain to move over: the laboratory on the tuned world, a real map on a larger one.
+    /// </summary>
+    /// <remarks>
+    /// The laboratory is a fixture — thirty metres of ramp, hills and pond that two self-tests
+    /// assert against — and it stays exactly that. It is not a map, and stretching it over six
+    /// hundred metres produced a few chunky rectangles adrift in a plain. Anything bigger than
+    /// the world it was drawn for gets terrain drawn to its own scale instead.
+    /// </remarks>
     private void LoadTerrainScenario()
     {
         simulation = new SimulationWorld(worldExtentMeters);
         cameraFocus = Vector2.Zero;
         simulationAccumulator = 0;
         stressScenarioIndex = -1;
-        var ids = TerrainStressScenarios.Populate(simulation);
+        var laboratory = worldExtentMeters <= SimulationWorld.DefaultExtentMeters * 1.5f;
+        var ids = laboratory
+            ? TerrainStressScenarios.Populate(simulation)
+            : WorldTerrainScenarios.Populate(simulation);
         RebuildTerrainSurfaceLayersIfReady();
         selection.ReplaceWith(ids);
-        Console.WriteLine("  terrain laboratory: road, mud, rough ground, cliff, ramp, and impassable pond");
+        Console.WriteLine(laboratory
+            ? "  terrain laboratory: road, mud, rough ground, cliff, ramp, and impassable pond"
+            : "  world terrain: a ridge with one pass, a lake in a basin, a road through it");
     }
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
@@ -696,15 +713,39 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         {
             var center = grid.Origin + new Vector2((x + 0.5f) * block, (z + 0.5f) * block);
             if (!terrain.Contains(center)) continue;
+            // Ground is drawn at one resolution per patch, never two. A block whose cells do
+            // not all agree is left to the detail pass below; drawing both meant a five-metre
+            // block took the surface of whatever happened to be at its centre and painted a
+            // blocky halo around every pond and ramp, with the true shape drawn on top of it.
+            if (!BlockIsUniform(terrain, grid, center, block)) continue;
             var color = TerrainColor(terrain.SampleSurface(center), (x + z) % 2 == 0);
-            // A hair of overlap. Blocks sized exactly to their spacing leave sub-pixel cracks
-            // at grazing angles, which read as a grid of bright seams across the ground.
-            var model = Matrix4x4.CreateScale(block * 1.01f, 0.02f, block * 1.01f) *
+            // Sized exactly to its spacing. An earlier version grew each block by a hair to
+            // close sub-pixel cracks and bought a far worse artefact: neighbours then overlap
+            // in a five-centimetre band of coplanar surface, which z-fights into speckle and
+            // long bright seams running the width of the map.
+            var model = Matrix4x4.CreateScale(block, 0.02f, block) *
                         Matrix4x4.CreateTranslation(center.X, terrain.SampleHeight(center) - 0.01f, center.Y);
             groundBatch.Add(model, color);
         }
 
         BuildDetailedGround();
+    }
+
+    /// <summary>Whether every cell under a coarse block shares its surface and height.</summary>
+    private static bool BlockIsUniform(TerrainMap terrain, GridTransform grid, Vector2 center, float block)
+    {
+        var half = block * 0.5f - grid.CellSize * 0.5f;
+        var surface = terrain.SampleSurface(center);
+        var height = terrain.SampleHeight(center);
+        for (var z = -1; z <= 1; z++)
+        for (var x = -1; x <= 1; x++)
+        {
+            var probe = center + new Vector2(x * half, z * half);
+            if (terrain.SampleSurface(probe) != surface) return false;
+            if (MathF.Abs(terrain.SampleHeight(probe) - height) > 0.01f) return false;
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -735,15 +776,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var maximumX = Math.Clamp((int)MathF.Ceiling(high.X), 0, grid.Width - 1);
         var maximumZ = Math.Clamp((int)MathF.Ceiling(high.Y), 0, grid.Height - 1);
         var detailCells = 0;
+        var block = CoarseGroundBlockSize;
 
         for (var z = minimumZ; z <= maximumZ; z++)
         for (var x = minimumX; x <= maximumX; x++)
         {
             var cell = new GridCell(x, z);
-            var surface = terrain.Surface(cell);
             var center = grid.CellCenter(cell);
+            // Exactly the cells the coarse pass declined, so the two never overlap.
+            if (BlockIsUniform(terrain, grid, BlockCentre(grid, center, block), block)) continue;
+            var surface = terrain.Surface(cell);
             var height = terrain.SampleHeight(center);
-            if (surface == TerrainSurface.Grass && MathF.Abs(height) < 0.02f) continue;
             var color = TerrainColor(surface, (x + z) % 2 == 0);
             if (detailCells == MaximumDetailCells) return;
             detailCells++;
@@ -751,6 +794,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                         Matrix4x4.CreateTranslation(center.X, height, center.Y);
             detailBatch.Add(model, color);
         }
+    }
+
+    /// <summary>Centre of the coarse block a point falls in.</summary>
+    private static Vector2 BlockCentre(GridTransform grid, Vector2 point, float block)
+    {
+        var local = point - grid.Origin;
+        return grid.Origin + new Vector2(
+            (MathF.Floor(local.X / block) + 0.5f) * block,
+            (MathF.Floor(local.Y / block) + 0.5f) * block);
     }
 
     /// <summary>How far from the camera per-cell ground detail is drawn, in metres.</summary>
