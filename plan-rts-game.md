@@ -4,28 +4,34 @@
 
 **You are picking up a design that is fully specified and a codebase that has none of it yet.**
 
-- **The code** is Thread B: a greybox locomotion lab, ~11.3k lines in `src/RTSGame`. One fixed 30 Hz
-  tick, ORCA velocity control that sees walls, flow-field group movement, congestion routing in
-  seconds. `--selftest` **37/37** on branch `rts-locomotion`. Its tick order, its 16 invariants and
-  its five measured refusals live in **`plan-rts.md`** — read that before touching movement, because
-  most of what looks tunable there is load-bearing in two ways at once.
+- **The code** is Thread B: a greybox locomotion lab in `src/RTSGame`. One fixed 30 Hz tick, ORCA
+  velocity control that sees walls, flow-field group movement, congestion routing in seconds.
+  `--selftest` **40/40** on branch `rts-locomotion`. Its tick order, its 16 invariants and its five
+  measured refusals live in **`plan-rts.md`** — read that before touching movement, because most of
+  what looks tunable there is load-bearing in two ways at once.
 - **This document** is Thread A: the game that goes on top, settled across two long design sessions
   in August 2026. §1–§11 are decided, not speculative — the numbers are derived and the derivations
   are recorded beside them, because they move as a set. **§12 is what is genuinely still open.**
-- **Start at §13, Session 1.** It is a measurement with its predictions written down in advance, and
-  it is deliberately small.
+- **Session 1 is done** (2026-08-18) and its record is in §13 — read it, because it moved the
+  roadmap. The two area-scaled costs it went after were real, were removed, and were never the
+  problem: at 1200 m the tick is ~400 ms and almost all of it is full-grid flow-field rebuilds.
+  **Session 3 (portal routing) is now what the large map waits on**, and Session 2's stated
+  precondition — a 1200 m map that runs smoothly — does not hold until it lands. **Start there, or
+  take Session 2 on the 30 m world with that limitation stated.**
 
 Four things that will bite you if you skip them:
 
-1. **Do not move the default world size.** All 37 self-tests and every tuned constant in
-   `plan-rts.md` are calibrated against `GridTransform(60, 60, 0.5f)`. Extent becomes a *parameter*;
-   the default stays exactly where it is.
+1. **Do not move the default world size.** Every self-test and every tuned constant in `plan-rts.md`
+   is calibrated against `GridTransform(60, 60, 0.5f)`. Extent is now a *parameter* and the default
+   stays exactly where it is — asserted by `a larger world leaves the tuned one untouched`, so this
+   is one of the four you can no longer break silently.
 2. **Any new term in the route cost is honest seconds, with a fade matched to how fast the real
    condition actually clears.** This project has paid for that lesson twice — `plan-rts.md` §1 on
    barriers-as-cost, and invariant 15 on the decay tail. Threat will be the third opportunity.
 3. **The determinism self-test covers movement only.** Extend it as each system lands, or it keeps
    passing while the game layer quietly goes non-deterministic through an unordered iteration nobody
-   noticed. Lockstep LAN and career-to-career persistence both depend on it.
+   noticed. Lockstep LAN and career-to-career persistence both depend on it. Session 1's rule of
+   thumb for what to add: assert the invariant a *behaviour* metric cannot see.
 4. **Do not start the jobs layer before the router.** It is the biggest new subsystem and the whole
    design rests on it; calibrating it against a router about to change shape means tuning it twice.
 
@@ -750,22 +756,33 @@ single tick — which is also how weather behaves. And region-scoped revisions r
 regions a freezing river touches. **Hierarchical routing is what makes seasons affordable**, not just
 what makes scale affordable.
 
-### Two area-scaling costs that no routing hierarchy touches
+### Two area-scaling costs that no routing hierarchy touches — measured, then removed
 
-Both verified in source, both invisible at 30 m, both scale with map **area** per tick:
+Both were verified in source, both invisible at 30 m, both scaled with map **area** per tick. Session
+1 measured them against predictions written in advance and then removed both; the numbers and the
+falsification are in §13. What each one was, and what it is now:
 
-1. **`CongestionField.Update`** (`CongestionField.cs:129-137`) decays *every* cell of three arrays
-   every tick — `pressure`, `flowX`, `flowZ`. At 1200 m that is 5.76M cells × 3 × 4 B ≈ **69 MB of
-   memory traffic per tick**, before any agent deposits anything. Must become sparse or
-   region-scoped. Carefully: invariant 15 makes the decay *rate* the highest-leverage constant in
-   routing, so a sparse rewrite must reproduce the exact decay semantics or it silently invalidates
-   every reservation tuned against it.
-2. **`AgentSpatialIndex`** is `List<int>[width*height]`, dense over the whole terrain at 1.5 m, and
-   `Rebuild` runs `foreach (var bucket in buckets) bucket.Clear();` every tick. Its own doc comment
-   names the assumption the game breaks: *"The map is bounded and small, so the whole grid is a few
-   hundred lists."* At 1200 m that is **640,000 Lists cleared per tick** to index 2,000 agents. The
-   structure is right; only its sizing premise is wrong — fit it to the agent bounding box, or bucket
-   per region.
+1. **`CongestionField.Update`** decayed *every* cell of three arrays every tick — `pressure`,
+   `flowX`, `flowZ`. At 1200 m that is 5.76M cells, ~132 MB of memory traffic per tick read and
+   written, before any agent deposits anything. **Measured at 10.9–12.3 ms/tick and flat in agent
+   count, as predicted in direction and 3× under in magnitude.** Now sweeps an ordered set of the
+   cells actually holding pressure, which — because pressure comes only from bodies that want to move
+   and cannot — is the ground where movement has recently failed rather than the ground anyone has
+   walked over: **1.2k–4.2k cells under a full crowd, and zero when nothing is stuck.** The decay
+   semantics invariant 15 depends on are untouched, which is not an argument, it is the diffed
+   output: every metric in `--selftest` and `--benchmark` is bit-identical across the rewrite.
+2. **`AgentSpatialIndex`** was `List<int>[width*height]`, dense over the whole terrain at 1.5 m, with
+   `Rebuild` running `foreach (var bucket in buckets) bucket.Clear();` — six times per tick, once in
+   the velocity solve and once per relaxation pass of the contact solve. At 1200 m that is 640,000
+   Lists cleared six times over to index 2,000 agents. **Measured at 2.4 ms/tick under load, inside
+   the predicted band.** Now clears only the buckets the previous rebuild wrote, which is bounded by
+   the crowd. Deliberately *not* the bounding-box fit proposed here: the box is only small while the
+   army is in one place, and units spread across their own territory is this game's normal state.
+   Bucket assignment, sweep order and query results are unchanged — it stops visiting cells that were
+   already empty, and nothing else.
+
+**What the measurement found that this section did not predict** is in §13 under Session 1, and it is
+larger than either of these by two orders of magnitude.
 
 ### Determinism must be extended, or it quietly stops meaning anything
 
@@ -854,43 +871,71 @@ Nine sessions. Each has a deliverable and a **gate** — the thing that says it 
 Session 4 is the elastic one: it is the smallest of the nine and the natural place to absorb
 overflow from either side.
 
-### Session 1 — Make the large map affordable
+### Session 1 — Make the large map affordable — **done, 2026-08-18**
 
-**State at start:** branch `rts-locomotion`, clean tree, `--selftest` 37/37.
+**Delivered.** Extent is a parameter (`new SimulationWorld(extentMeters)`), snapped up to a whole
+placement cell so the navigation and placement grids describe one square — 800 → 801 m, 1000 →
+1000.5 m, 1200 → 1200 m exactly. **The default is untouched and now asserted:** a self-test pins it
+at 30 m, 60×60 nav, 20×20 placement, origin (−15, −15), because a default that drifted to 32 m would
+leave every threshold in the suite passing while quietly measuring a different world.
 
-Parameterise the world extent **without moving the default**. `SimulationWorld()` hardcodes it at
-`SimulationWorld.cs:152` (`GridTransform(60, 60, 0.5f)`), the placement grid at `:154` (`20x20x1.5`)
-and the agent index at `:158` (cell 1.5 m, spanning `Terrain.Minimum/Maximum`). Then add a scale
-scenario reporting the existing per-phase breakdown at 800/1000/1200 m with 500/1000/2000 agents.
+`--scale` runs the matrix. Each case reports two passes: **idle** (no destinations, so nothing routes
+and nothing deposits — the area-scaled floor on its own) and **moving** (the same crowd under one
+group move — the honest tick). Two new phases were added to the breakdown to make the predictions
+falsifiable at all: `congestion`, which was outside every phase, and `index`, which is a *subset* of
+steering and collision rather than a column beside them.
 
-**Write the predictions down before running, so the measurement can falsify something.** At 1200 m:
+**The predictions, and what happened.** At 1200 m, idle unless stated:
 
-| | prediction |
-|---|---|
-| `CongestionField.Update` | ~69 MB of traffic per tick → **≥3.5 ms/tick**, agent-count independent |
-| `AgentSpatialIndex.Rebuild` | 640k `List.Clear()` per tick → **1.3-3.2 ms/tick**, agent-count independent |
-| together | **5-7 ms/tick**, comparable to the *entire* current movement cost |
+| | predicted | measured | verdict |
+|---|---|---|---|
+| `CongestionField.Update` | ≥3.5 ms, flat in agent count | **10.9–12.3 ms**, 500→2000 agents within 3% | right in kind, **3× under in size** |
+| `AgentSpatialIndex.Rebuild` | 1.3–3.2 ms, flat in agent count | **0.8–1.0 ms** idle (2 rebuilds), **2.4 ms** moving (6) | **in band** under load |
+| together | 5–7 ms/tick | **~14 ms/tick** | under by 2× |
 
-Then fix what it finds — expected to be sparse or region-scoped congestion, and the agent index
-fitted to the agent bounding box rather than the terrain. If the predictions are wrong, the reason
-is worth knowing before anything is built on top of it.
+Agent-count independence held exactly: congestion measured 4.86 / 4.88 / 4.79 ms at 801 m for 500 /
+1000 / 2000 agents. Cost is linear in cells at **~1.9 ms per million** — 2.57M cells → 4.8 ms, 4.0M →
+7.5 ms, 5.76M → 11 ms.
 
-**Gate:** 37/37 unchanged; large-map per-tick cost inside budget; and **every quality metric
-bit-identical** across the congestion rewrite — the same standard Thread B's memoisation pass met,
-and the only evidence that the decay semantics survived.
+**After the two fixes**, at 1200 m with 2000 agents: congestion **11.7 → 0.098 ms**, index **2.39 →
+0.068 ms**, the whole idle tick **13.3 → 1.4 ms**. The live congestion set holds 1.2k–4.2k cells
+under a moving crowd and **zero** when nothing is stalled. World construction is 107–189 ms and a
+1200 m world costs ~310 MB resident, which is arithmetic and unchanged — the sweep got cheaper, the
+allocation did not.
 
-**Risk:** the congestion rewrite. Invariant 15 makes the decay *rate* the highest-leverage constant
-in the routing layer, so a sparse version that changes when or by how much a cell fades invalidates
-the tuning of every reservation that bids against it.
+**What the measurement found that nobody predicted, and it is the real answer.** The area costs were
+never the problem. At 1200 m the tick runs at **~400 ms** and ~390 ms of it is `preferred` +
+`recovery` — **full-grid flow-field rebuilds**, 22–26 of them per 120 ticks, plus **4.1 s for the
+first route after a single move order**. §10 argued flat global fields were dead on memory rather
+than timing. They are dead on timing too, by two orders of magnitude more than both area costs
+combined, and the scale scenario now measures it every run. **This is Session 3's, and Session 3 is
+now the session the large map waits on.** Nothing else should be built against a 1200 m world first.
+
+**Gate: met.** `--selftest` **40/40** (38 before, plus the two new guards); every quality metric in
+`--selftest` and `--benchmark` **bit-identical** against `HEAD` before the session — diffed line for
+line, with only wall-clock figures moving. The area-scaled per-tick cost is inside budget at every
+candidate size. The tick as a whole is not, for the reason above.
+
+Two guards were added rather than assumed, both covering failures no movement metric would catch:
+
+- **`congestion sweeps every cell holding pressure`** — the sweep now visits a tracked set, so a cell
+  that takes pressure without being admitted is never decayed again and a jam that cleared goes on
+  charging routes for the rest of the game. Asserted directly, at a jam and after it drains.
+- **`a larger world leaves the tuned one untouched`** — the handoff's first rule, made mechanical.
 
 > **Do not add threat to the route cost until this lands.** It is a new term over the same
-> machinery, and adding it first means writing it twice.
+> machinery, and adding it first means writing it twice. — *Landed. Threat is unblocked.*
 
 ### Session 2 — The body, at the slider
 
 **Different in kind: a feel session, not a headless one.** It wants a human at the tuning overlay,
-and it wants Session 1 finished so the 1200 m map runs smoothly and the body can be judged on the
-real thing rather than extrapolated from 30 m.
+and it wants the 1200 m map running smoothly so the body can be judged on the real thing rather than
+extrapolated from 30 m.
+
+> **That precondition is not met by Session 1 and was expected to be.** The area costs are gone but
+> routing is not: a 1200 m map ticks at ~400 ms because every route is a Dijkstra over 5.76M cells.
+> Either take this session **after Session 3**, or take it on the 30 m world now and re-judge the
+> body on the large map afterwards — which is the same extrapolation this session exists to avoid.
 
 Settle top speed, acceleration, deceleration and time compression on the live overlay — §3 has the
 proposed starting points and the reasoning for each. **Then** re-base the self-test thresholds

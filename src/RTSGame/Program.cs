@@ -17,6 +17,13 @@ public static class Program
             Environment.Exit(MovementBenchmarks.Run());
         }
 
+        if (args.Contains("--scale"))
+        {
+            var extents = ParseFloats(args, "--extents");
+            var counts = ParseInts(args, "--agents");
+            Environment.Exit(ScaleScenarios.Run(extents, counts));
+        }
+
         if (args.Contains("--arrivaltest"))
         {
             Environment.Exit(SimulationSelfTests.RunSharedDestinationRegression());
@@ -77,5 +84,28 @@ public static class Program
         var game = new RtsGameLoop(exitAfterFrames, traceMovement, startTerrainLab, debugAll);
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
+    }
+
+    /// <summary>Reads a comma-separated list following <paramref name="flag"/>.</summary>
+    private static float[]? ParseFloats(string[] args, string flag)
+    {
+        var raw = Value(args, flag);
+        return raw is null ? null : raw.Split(',').Select(float.Parse).ToArray();
+    }
+
+    private static int[]? ParseInts(string[] args, string flag)
+    {
+        var raw = Value(args, flag);
+        return raw is null ? null : raw.Split(',').Select(int.Parse).ToArray();
+    }
+
+    private static string? Value(string[] args, string flag)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == flag) return args[i + 1];
+        }
+
+        return null;
     }
 }

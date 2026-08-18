@@ -4,6 +4,8 @@ namespace RTSGame.Debug;
 
 internal enum SimulationPhase
 {
+    Congestion,
+    AgentIndex,
     Commands,
     Behaviors,
     NavigationRefresh,
@@ -40,6 +42,8 @@ internal sealed class SimulationTimings
 
     private static string Label(SimulationPhase phase) => phase switch
     {
+        SimulationPhase.Congestion => "congestion",
+        SimulationPhase.AgentIndex => "index",
         SimulationPhase.NavigationRefresh => "nav",
         SimulationPhase.Pathfinding => "paths",
         SimulationPhase.PreferredVelocity => "preferred",

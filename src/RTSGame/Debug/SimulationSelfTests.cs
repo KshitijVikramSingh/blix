@@ -67,6 +67,8 @@ internal static class SimulationSelfTests
         Check("despawned units leave the simulation entirely", DespawnRemovesUnitsCleanly());
         Check("no unit deadlocks against sculpted terrain", TerrainDoesNotDeadlockFlowTransit());
         Check("no unit stands under orders without intent", NoUnitStandsIntentless());
+        Check("congestion sweeps every cell holding pressure", CongestionSweepTracksPressure());
+        Check("a larger world leaves the tuned one untouched", WorldExtentIsParameterised());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
 
@@ -1399,6 +1401,112 @@ internal static class SimulationSelfTests
                                                   $"blocked={agent.AvoidanceBlockedThisTick}/" +
                                                   $"reject={agent.SteeringStepRejectedThisTick}/path={path.Length}";
                                        }))}]");
+        return passed;
+    }
+
+    /// <summary>
+    /// The congestion field decays a tracked set of cells rather than the whole map, so
+    /// the set has to contain every cell that holds pressure — at a jam, while it builds,
+    /// and after it has drained.
+    /// </summary>
+    private static bool CongestionSweepTracksPressure()
+    {
+        // A single-cell gate with fifty bodies behind it is the scenario that actually
+        // deposits: pressure comes from bodies that want to move and cannot, so an open
+        // field would leave the set empty and prove nothing.
+        var world = new SimulationWorld();
+        for (var z = 0; z < world.Placement.Transform.Height; z++)
+        {
+            if (z == 10) continue;
+            world.QueueToggleObstacle(world.Placement.Transform.CellCenter(new GridCell(10, z)));
+        }
+
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+
+        var ids = new List<AgentId>();
+        for (var row = 0; row < 10; row++)
+        for (var column = 0; column < 5; column++)
+        {
+            ids.Add(world.SpawnAgent(new Vector2(
+                -8f + (column - 2f) * 0.95f,
+                0.75f + (row - 4.5f) * 0.95f)));
+        }
+
+        world.QueueMove(ids, new Vector2(8f, 0.75f));
+        var fault = string.Empty;
+        var peakLive = 0;
+        var sawPressure = false;
+        for (var tick = 0; tick < 1200 && fault.Length == 0; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            peakLive = Math.Max(peakLive, world.Congestion.LiveCellCount);
+            if (world.Congestion.Peak > 0f) sawPressure = true;
+            fault = world.Congestion.DescribeSweepFault() ?? string.Empty;
+        }
+
+        // And it has to come back down: a set that only ever grows is the same bug
+        // wearing a different face, and it would still pass the audit above.
+        for (var tick = 0; tick < 3000 && fault.Length == 0; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            fault = world.Congestion.DescribeSweepFault() ?? string.Empty;
+        }
+
+        var drained = world.Congestion.LiveCellCount == 0;
+        var passed = fault.Length == 0 && sawPressure && peakLive > 0 && drained;
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    congestion sweep: fault=[{fault}], deposited={sawPressure}, " +
+                $"peak-live={peakLive}, live-after-drain={world.Congestion.LiveCellCount}");
+        }
+
+        return passed;
+    }
+
+    /// <summary>
+    /// The world extent is a parameter, and the default is exactly the square every
+    /// threshold in this file was tuned against.
+    /// </summary>
+    /// <remarks>
+    /// Guarded rather than trusted because moving it costs nothing and breaks
+    /// everything: a default that drifted to 32 m would leave every test here passing
+    /// while quietly measuring a different world.
+    /// </remarks>
+    private static bool WorldExtentIsParameterised()
+    {
+        var tuned = new SimulationWorld();
+        var tunedIsUnmoved = tuned.ExtentMeters == 30f &&
+                             tuned.Navigation.Width == 60 &&
+                             tuned.Navigation.Height == 60 &&
+                             tuned.Placement.Transform.Width == 20 &&
+                             tuned.Placement.Transform.Height == 20 &&
+                             tuned.Terrain.Minimum == new Vector2(-15f) &&
+                             tuned.Terrain.Maximum == new Vector2(15f);
+
+        // Snapped up to a whole placement cell, so the two grids describe one square.
+        var large = new SimulationWorld(800f);
+        var largeIsConsistent = large.ExtentMeters == 801f &&
+                                large.Navigation.Width == 1602 &&
+                                large.Placement.Transform.Width == 534 &&
+                                large.Terrain.Minimum == new Vector2(-400.5f) &&
+                                large.Congestion.CellCount == 1602 * 1602;
+
+        // A body still cannot leave the map, and the map is the bigger one.
+        var edge = large.SpawnAgent(new Vector2(600f, -600f));
+        var clamped = large.Terrain.Contains(large.Agents.Get(edge).Position);
+
+        var passed = tunedIsUnmoved && largeIsConsistent && clamped;
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    extent: tuned={tuned.ExtentMeters:F1}m {tuned.Navigation.Width}x" +
+                $"{tuned.Navigation.Height} nav / {tuned.Placement.Transform.Width}x" +
+                $"{tuned.Placement.Transform.Height} placement, " +
+                $"large={large.ExtentMeters:F1}m {large.Navigation.Width} nav / " +
+                $"{large.Placement.Transform.Width} placement, clamped={clamped}");
+        }
+
         return passed;
     }
 

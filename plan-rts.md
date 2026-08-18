@@ -1,11 +1,12 @@
 # RTSGame — locomotion layer: state, seams, and what not to break
 
-Status as of 2026-08-18. `--selftest` **37/37 passing**. ~10k lines in `src/RTSGame`.
+Status as of 2026-08-18. `--selftest` **40/40 passing**. ~10k lines in `src/RTSGame`.
 Branch `rts-locomotion`.
 
 Run it: `tools/run-rts-game.sh [--debug-all]`
 Verify it: `dotnet run --project src/RTSGame/RTSGame.csproj -c Release -- --selftest`
 Measure it: same with `--benchmark`, and `--doorwaytest` for two-way gap contention
+Measure it at size: same with `--scale` — see §5, and `plan-rts-game.md` §13 for what it found
 
 ---
 
@@ -270,6 +271,14 @@ which is what a correct memo looks like:
   these describe what is on screen. `deepest-pile` is the one that corresponds to the
   complaint "they bunch against a gap instead of going round": thirty units spread over four
   exits and ten wedged in one corner are the same headcount and very different pictures.
+- `--scale` reports the per-phase breakdown on a world the size the game wants rather than the 30 m
+  square everything here was tuned on: 800 / 1000 / 1200 m at 500 / 1000 / 2000 agents, each in an
+  **idle** pass (no destinations, so the area-scaled floor alone) and a **moving** pass (one group
+  move, the honest tick). `--extents` and `--agents` take comma-separated overrides. Two of its
+  columns are new and one is a trap: `congestion` used to be outside every phase, and `index` is a
+  *subset* of `steering` and `collision` — the broad phase is rebuilt inside both — rather than a
+  column beside them. It also reports `live cells`, the congestion cells actually being swept, and
+  `first-route tick`, which is what one move order costs before anything moves.
 - **Live tuning overlay** (backtick to toggle). `RtsGameLoop` implements `IDebuggable`, so
   the shared Blix diagnostics overlay appears with a Controls tab of `[Tune]` sliders
   (`BodyFeelSettings`: top speed, acceleration, deceleration, turn rate, free-turn speed)

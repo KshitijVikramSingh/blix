@@ -142,21 +142,59 @@ internal sealed class SimulationWorld
     public int CrowdedArrivalBlockCount { get; private set; }
     public float CongestionRecoveryCooldown => congestionRecoveryCooldown;
     public SimulationTimings Timings { get; } = new();
+    /// <summary>Buckets in the agent broad phase — swept in full by every rebuild.</summary>
+    public int AgentIndexBuckets => agentIndex.BucketCount;
+    /// <summary>Index rebuilds performed during the last tick.</summary>
+    public int AgentIndexRebuildsPerTick => agentIndex.Rebuilds;
     public AgentId LastCongestionRoot { get; private set; } = new(-1);
     public AgentId LastCongestionRepathAgent { get; private set; } = new(-1);
 
-    public SimulationWorld()
+    /// <summary>Side length in metres of the world every tuned constant was measured on.</summary>
+    /// <remarks>
+    /// Not a suggestion. Every threshold in <c>--selftest</c> and every constant in
+    /// <c>plan-rts.md</c> is calibrated against a 30 m square at 0.5 m cells, so the
+    /// default has to stay exactly here even as the extent becomes a parameter. Larger
+    /// worlds are something a caller asks for explicitly, and they are measured
+    /// separately.
+    /// </remarks>
+    internal const float DefaultExtentMeters = 30f;
+    /// <summary>Fine navigation/congestion cell size, in metres.</summary>
+    internal const float NavigationCellSize = 0.5f;
+    /// <summary>Building-placement cell size, in metres.</summary>
+    internal const float PlacementCellSize = 1.5f;
+    /// <summary>Bucket size of the agent broad phase, in metres.</summary>
+    internal const float AgentIndexCellSize = 1.5f;
+
+    /// <summary>Side length of this world in metres, after snapping.</summary>
+    public float ExtentMeters { get; }
+
+    public SimulationWorld(float extentMeters = DefaultExtentMeters)
     {
-        const float halfExtent = 15f;
-        var origin = new Vector2(-halfExtent);
-        var navigationTransform = new GridTransform(60, 60, 0.5f, origin);
+        if (!(extentMeters >= PlacementCellSize))
+        {
+            throw new ArgumentOutOfRangeException(nameof(extentMeters));
+        }
+        // The two grids have to describe the same square, so the extent is snapped up
+        // to a whole placement cell — which is also a whole navigation cell, 1.5 being
+        // three of them. The default is already exact, so snapping is a no-op there and
+        // the calibrated world is bit-for-bit the one it always was.
+        var placementCells = (int)MathF.Ceiling(extentMeters / PlacementCellSize);
+        var extent = placementCells * PlacementCellSize;
+        var navigationCells = (int)MathF.Round(extent / NavigationCellSize);
+        ExtentMeters = extent;
+
+        var origin = new Vector2(-extent * 0.5f);
+        var navigationTransform =
+            new GridTransform(navigationCells, navigationCells, NavigationCellSize, origin);
         Terrain = new TerrainMap(navigationTransform);
-        Placement = new PlacementGrid(new GridTransform(20, 20, 1.5f, origin));
+        Placement = new PlacementGrid(
+            new GridTransform(placementCells, placementCells, PlacementCellSize, origin));
         Navigation = new NavigationGrid(navigationTransform);
         Congestion = new CongestionField(navigationTransform);
         RebuildTerrainNavigation();
         pathService = new PathService(Terrain, Placement, Navigation, Congestion);
-        agentIndex = new AgentSpatialIndex(cellSize: 1.5f, Terrain.Minimum, Terrain.Maximum);
+        agentIndex = new AgentSpatialIndex(
+            AgentIndexCellSize, Terrain.Minimum, Terrain.Maximum);
     }
 
     public AgentId SpawnAgent(
@@ -345,7 +383,10 @@ internal sealed class SimulationWorld
             recoveryAgents[i].PreferredStepRejectedThisTick = false;
             recoveryAgents[i].AvoidanceBlockedThisTick = false;
         }
+        agentIndex.ResetRebuildCounters();
+        var congestionStart = Stopwatch.GetTimestamp();
         Congestion.Update(Navigation, Agents.All, deltaSeconds);
+        Timings.Record(SimulationPhase.Congestion, Stopwatch.GetTimestamp() - congestionStart);
         routePlansThisTick = 0;
         pathfindingTicksThisTick = 0;
 
@@ -399,6 +440,10 @@ internal sealed class SimulationWorld
         // and 2.9ms at five hundred, which is nonsense as a tick cost and exactly
         // what you would expect of a per-call one.
         Timings.Record(SimulationPhase.Pathfinding, pathfindingTicksThisTick);
+        // A subset of steering and collision, not a phase alongside them: the index is
+        // rebuilt inside both, so this column double-counts against them by design and
+        // exists to say how much of them is bucket sweeping rather than avoidance.
+        Timings.Record(SimulationPhase.AgentIndex, agentIndex.RebuildTicks);
         TickNumber++;
         Timings.Record(SimulationPhase.TotalTick, Stopwatch.GetTimestamp() - totalStart);
     }

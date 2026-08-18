@@ -96,6 +96,30 @@ internal sealed class CongestionField
     /// <summary>Cost scale for travelling against it.</summary>
     internal static float OpposingFactor = 1.8f;
 
+    /// <summary>Pressure below which a cell is rounded to nothing and stops being visited.</summary>
+    /// <remarks>
+    /// Decay is exponential, so a cell that stops receiving deposits never reaches zero
+    /// on its own — it would take a quarter of an hour of multiplications to underflow,
+    /// and until it did, every tick would go on visiting it. Something has to declare a
+    /// value spent.
+    /// <para>
+    /// The threshold is set by what the number is <em>for</em> rather than by what looks
+    /// small. One unit of pressure is <c>PathService.CongestionSecondsPerPressure</c> —
+    /// 0.4 s — of routing delay, charged at half rate per cell, so 1e-8 of pressure is
+    /// 2e-9 s on an edge that costs about 0.11 s to walk. That is eight orders of
+    /// magnitude below the edge and well under the last bit of a float carrying it, so
+    /// adding it to a route cost cannot change the route cost. It is discarded because
+    /// it provably cannot be read, not because it is nearly zero.
+    /// </para>
+    /// <para>
+    /// The tail is long even so: a fully committed jam at sixteen takes some 47 s to
+    /// fade this far. That is affordable only because pressure comes from stalled bodies
+    /// and nothing else, so the live set is the ground where movement has recently
+    /// failed, not the ground anyone has walked over.
+    /// </para>
+    /// </remarks>
+    private const float SpentPressure = 1e-8f;
+
     private readonly GridTransform transform;
     private readonly float[] pressure;
     // Mean travel direction of whatever is depositing here, scaled by how much it
@@ -104,6 +128,20 @@ internal sealed class CongestionField
     // is the correct reading of a genuinely contested space.
     private readonly float[] flowX;
     private readonly float[] flowZ;
+    // Cells holding pressure, in ascending cell index. Everything outside this is
+    // exactly zero and is skipped: decaying a zero yields a zero, adding it to the
+    // total changes nothing, and it can never be the peak. Kept ordered so the decay
+    // sweep visits cells in the same order a full sweep did, which is what makes the
+    // accumulated total bit-for-bit the number the dense version produced.
+    private int[] live = Array.Empty<int>();
+    private int liveCount;
+    private readonly bool[] isLive;
+    // Cells that took a deposit this tick and were not already live. Sorted and merged
+    // in after the deposit pass, because deposits arrive in agent order and the live
+    // set has to stay in cell order.
+    private int[] admitted = Array.Empty<int>();
+    private int admittedCount;
+    private int[] merged = Array.Empty<int>();
     private float publishedTotal;
     private float currentTotal;
     private int ticksSinceRebuild;
@@ -119,7 +157,13 @@ internal sealed class CongestionField
         pressure = new float[transform.Width * transform.Height];
         flowX = new float[pressure.Length];
         flowZ = new float[pressure.Length];
+        isLive = new bool[pressure.Length];
     }
+
+    /// <summary>Cells in the field.</summary>
+    public int CellCount => pressure.Length;
+    /// <summary>Cells actually holding pressure, which is what a tick costs.</summary>
+    public int LiveCellCount => liveCount;
 
     public float At(GridCell cell) =>
         transform.Contains(cell) ? pressure[transform.Index(cell)] : 0f;
@@ -128,13 +172,29 @@ internal sealed class CongestionField
     {
         var decay = MathF.Exp(-deltaSeconds / DecaySeconds);
         var total = 0f;
-        for (var i = 0; i < pressure.Length; i++)
+        var kept = 0;
+        for (var slot = 0; slot < liveCount; slot++)
         {
-            pressure[i] *= decay;
+            var i = live[slot];
+            var value = pressure[i] * decay;
+            if (value < SpentPressure)
+            {
+                pressure[i] = 0f;
+                flowX[i] = 0f;
+                flowZ[i] = 0f;
+                isLive[i] = false;
+                continue;
+            }
+
+            pressure[i] = value;
             flowX[i] *= decay;
             flowZ[i] *= decay;
-            total += pressure[i];
+            total += value;
+            live[kept++] = i;
         }
+
+        liveCount = kept;
+        admittedCount = 0;
 
         foreach (ref readonly var agent in agents)
         {
@@ -163,16 +223,39 @@ internal sealed class CongestionField
                 var index = transform.Index(cell);
                 var before = pressure[index];
                 var deposit = weight * DepositGain * falloff * falloff * deltaSeconds;
-                pressure[index] = before + deposit;
-                var applied = pressure[index] - before;
+                var after = before + deposit;
+                // A deposit too faint to be worth decaying is dropped outright rather
+                // than left on the cell. Anything the sweep does not carry is never
+                // decayed again, so a residue below the admission threshold would sit
+                // there for the rest of the game — invisible in the cost, and a
+                // permanent disagreement between the field and the set that sweeps it.
+                if (after < SpentPressure) continue;
+                pressure[index] = after;
+                var applied = after - before;
                 flowX[index] += intent.X * applied;
                 flowZ[index] += intent.Y * applied;
                 total += applied;
+                if (!isLive[index])
+                {
+                    isLive[index] = true;
+                    if (admittedCount == admitted.Length)
+                    {
+                        Array.Resize(ref admitted, Math.Max(64, admitted.Length * 2));
+                    }
+
+                    admitted[admittedCount++] = index;
+                }
             }
         }
 
+        MergeAdmitted();
+
         var peak = 0f;
-        foreach (var value in pressure) peak = MathF.Max(peak, value);
+        for (var slot = 0; slot < liveCount; slot++)
+        {
+            peak = MathF.Max(peak, pressure[live[slot]]);
+        }
+
         Peak = peak;
         currentTotal = total;
         ticksSinceRebuild++;
@@ -211,6 +294,76 @@ internal sealed class CongestionField
         var alignment = (flowX[index] * direction.X + flowZ[index] * direction.Y) / magnitude;
         var directional = float.Lerp(OpposingFactor, FollowingFactor, (alignment + 1f) * 0.5f);
         return float.Lerp(1f, directional, coherence);
+    }
+
+    /// <summary>
+    /// Why the swept set and the field disagree, or null when they agree.
+    /// </summary>
+    /// <remarks>
+    /// The sweep visits a tracked set rather than the whole field, so a cell that takes
+    /// pressure without being admitted is never decayed again: a jam that has cleared
+    /// goes on charging routes for the rest of the game, and nothing on screen says why.
+    /// It is the one failure this rewrite can have that no movement metric would catch,
+    /// because it needs a specific cell to be deposited on in a specific way — so it is
+    /// asserted directly rather than inferred from behaviour.
+    /// </remarks>
+    internal string? DescribeSweepFault()
+    {
+        for (var slot = 1; slot < liveCount; slot++)
+        {
+            if (live[slot] > live[slot - 1]) continue;
+            return $"swept set out of order at {slot}: cell {live[slot - 1]} then {live[slot]}";
+        }
+
+        var pressured = 0;
+        for (var i = 0; i < pressure.Length; i++)
+        {
+            if (pressure[i] == 0f && flowX[i] == 0f && flowZ[i] == 0f)
+            {
+                if (isLive[i]) return $"cell {i} is swept but holds nothing";
+                continue;
+            }
+
+            pressured++;
+            if (!isLive[i]) return $"cell {i} holds {pressure[i]} and is never decayed";
+        }
+
+        return pressured == liveCount
+            ? null
+            : $"{pressured} cells hold pressure and {liveCount} are swept";
+    }
+
+    /// <summary>
+    /// Folds this tick's newly pressured cells into the live set, keeping it ordered.
+    /// </summary>
+    /// <remarks>
+    /// A sort of the whole set every tick would cost more than the sweep it is there to
+    /// avoid. Only the admissions need sorting — a few cells around each stalled body —
+    /// and merging two ordered runs is linear in the set, which is the same order as the
+    /// sweep itself.
+    /// </remarks>
+    private void MergeAdmitted()
+    {
+        if (admittedCount == 0) return;
+        Array.Sort(admitted, 0, admittedCount);
+
+        var required = liveCount + admittedCount;
+        if (merged.Length < required) merged = new int[Math.Max(64, required * 2)];
+
+        var read = 0;
+        var add = 0;
+        var write = 0;
+        while (read < liveCount && add < admittedCount)
+        {
+            merged[write++] = live[read] < admitted[add] ? live[read++] : admitted[add++];
+        }
+
+        while (read < liveCount) merged[write++] = live[read++];
+        while (add < admittedCount) merged[write++] = admitted[add++];
+
+        (live, merged) = (merged, live);
+        liveCount = write;
+        admittedCount = 0;
     }
 
     /// <summary>
