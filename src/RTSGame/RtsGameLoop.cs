@@ -732,9 +732,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // close sub-pixel cracks and bought a far worse artefact: neighbours then overlap
             // in a five-centimetre band of coplanar surface, which z-fights into speckle and
             // long bright seams running the width of the map.
-            var model = Matrix4x4.CreateScale(block, 0.02f, block) *
-                        Matrix4x4.CreateTranslation(center.X, terrain.SampleHeight(center) - 0.01f, center.Y);
-            groundInstances.Add(new InstanceData(model, color));
+            groundInstances.Add(new InstanceData(
+                GroundColumn(center, terrain.SampleHeight(center), block),
+                color));
         }
 
         BuildDetailedGround();
@@ -822,12 +822,32 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
             var color = TerrainColor(surface, (x + z) % 2 == 0);
             if (detailInstances.Count == MaximumDetailCells) return;
-            // Sits just above the coarse plate rather than in it, so the finer answer wins
+            // Sits a hair above the coarse column rather than in it, so the finer answer wins
             // outright instead of z-fighting with the blunt one.
-            var model = Matrix4x4.CreateScale(cellSize, 0.02f, cellSize) *
-                        Matrix4x4.CreateTranslation(center.X, height + 0.012f, center.Y);
-            detailInstances.Add(new InstanceData(model, color));
+            detailInstances.Add(new InstanceData(
+                GroundColumn(center, height + 0.012f, cellSize),
+                color));
         }
+    }
+
+    /// <summary>
+    /// A patch of ground as a column standing on a floor, rather than a plate floating at its
+    /// own height.
+    /// </summary>
+    /// <remarks>
+    /// Flat plates cannot describe a slope. On level ground nobody notices, and every version
+    /// of this before now was only ever tested on level ground; put a twenty-metre ridge in
+    /// front of it and the ground becomes a staircase of disconnected tiles with the sky
+    /// visible between them, which is what those bright stripes along the ridge were. A column
+    /// from a floor below the map up to the ground's own height has no gaps between neighbours
+    /// at all, whatever the step between them.
+    /// </remarks>
+    private static Matrix4x4 GroundColumn(Vector2 centre, float height, float width)
+    {
+        const float floor = -1.5f;
+        var thickness = MathF.Max(0.02f, height - floor);
+        return Matrix4x4.CreateScale(width, thickness, width) *
+               Matrix4x4.CreateTranslation(centre.X, height - thickness * 0.5f, centre.Y);
     }
 
     /// <summary>Centre of the coarse block a point falls in.</summary>
