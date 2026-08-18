@@ -137,13 +137,20 @@ internal sealed class CongestionField
     private int pressuredRegionCount;
     private int[] previouslyPressuredRegions;
     private int previouslyPressuredRegionCount;
-    private readonly float[] pressure;
+    // Storage is chunked by region and allocated on demand, so it costs what the jams cost
+    // rather than what the map covers. The sweep has been proportional to the live set since
+    // it was made sparse; the arrays behind it were still one entry per cell of the whole
+    // world, which at 600 m is 18.7 MB holding — at its very worst — four thousand cells'
+    // worth of "somebody is stuck here". A chunk is one region: 4,096 entries, allocated the
+    // first time anything in that region deposits and released when the last of it fades.
+    // The read path is a null check and two array reads, which is what it was before.
+    private readonly float[]?[] pressureChunks;
     // Mean travel direction of whatever is depositing here, scaled by how much it
     // deposited. Kept as an unnormalised sum so that opposing contributions
     // cancel: a cell with equal traffic both ways ends up omnidirectional, which
     // is the correct reading of a genuinely contested space.
-    private readonly float[] flowX;
-    private readonly float[] flowZ;
+    private readonly float[]?[] flowXChunks;
+    private readonly float[]?[] flowZChunks;
     // Cells holding pressure, in ascending cell index. Everything outside this is
     // exactly zero and is skipped: decaying a zero yields a zero, adding it to the
     // total changes nothing, and it can never be the peak. Kept ordered so the decay
@@ -151,7 +158,9 @@ internal sealed class CongestionField
     // accumulated total bit-for-bit the number the dense version produced.
     private int[] live = Array.Empty<int>();
     private int liveCount;
-    private readonly bool[] isLive;
+    private readonly bool[]?[] liveChunks;
+    private readonly int[] chunkOccupancy;
+    private readonly int cellCount;
     // Cells that took a deposit this tick and were not already live. Sorted and merged
     // in after the deposit pass, because deposits arrive in agent order and the live
     // set has to stay in cell order.
@@ -170,11 +179,13 @@ internal sealed class CongestionField
     public CongestionField(GridTransform transform)
     {
         this.transform = transform;
-        pressure = new float[transform.Width * transform.Height];
-        flowX = new float[pressure.Length];
-        flowZ = new float[pressure.Length];
-        isLive = new bool[pressure.Length];
+        cellCount = transform.Width * transform.Height;
         regions = new RegionPartition(transform);
+        pressureChunks = new float[regions.Count][];
+        flowXChunks = new float[regions.Count][];
+        flowZChunks = new float[regions.Count][];
+        liveChunks = new bool[regions.Count][];
+        chunkOccupancy = new int[regions.Count];
         regionStamp = new int[regions.Count];
         stampedRegionTotal = new float[regions.Count];
         currentRegionTotal = new float[regions.Count];
@@ -199,12 +210,63 @@ internal sealed class CongestionField
     public bool RegionHasPressure(int region) => regionPressured[region];
 
     /// <summary>Cells in the field.</summary>
-    public int CellCount => pressure.Length;
+    public int CellCount => cellCount;
     /// <summary>Cells actually holding pressure, which is what a tick costs.</summary>
     public int LiveCellCount => liveCount;
 
-    public float At(GridCell cell) =>
-        transform.Contains(cell) ? pressure[transform.Index(cell)] : 0f;
+    /// <summary>Bytes of per-cell storage currently held, which is what a jam costs.</summary>
+    public long ResidentBytes
+    {
+        get
+        {
+            var chunks = 0;
+            foreach (var chunk in pressureChunks)
+            {
+                if (chunk is not null) chunks++;
+            }
+
+            // Three floats and a flag per cell of an allocated region, plus the chunk tables.
+            return chunks * (long)RegionPartition.CellsPerRegion * 13L +
+                   pressureChunks.LongLength * 4L * 8L;
+        }
+    }
+
+    /// <summary>Region a cell's chunk lives in. Both halves are shifts: a region is 64 cells.</summary>
+    private int ChunkOf(GridCell cell) =>
+        (cell.Z >> 6) * regions.Columns + (cell.X >> 6);
+
+    private static int SlotOf(GridCell cell) =>
+        (cell.Z & (RegionPartition.CellsPerSide - 1)) * RegionPartition.CellsPerSide +
+        (cell.X & (RegionPartition.CellsPerSide - 1));
+
+    private GridCell CellAt(int index) => new(index % transform.Width, index / transform.Width);
+
+    /// <summary>Allocates this region's storage the first time anything in it deposits.</summary>
+    private void EnsureChunk(int chunk)
+    {
+        if (pressureChunks[chunk] is not null) return;
+        pressureChunks[chunk] = new float[RegionPartition.CellsPerRegion];
+        flowXChunks[chunk] = new float[RegionPartition.CellsPerRegion];
+        flowZChunks[chunk] = new float[RegionPartition.CellsPerRegion];
+        liveChunks[chunk] = new bool[RegionPartition.CellsPerRegion];
+    }
+
+    /// <summary>Releases a region's storage once nothing in it holds pressure any more.</summary>
+    private void ReleaseChunkIfEmpty(int chunk)
+    {
+        if (chunkOccupancy[chunk] > 0) return;
+        pressureChunks[chunk] = null;
+        flowXChunks[chunk] = null;
+        flowZChunks[chunk] = null;
+        liveChunks[chunk] = null;
+    }
+
+    public float At(GridCell cell)
+    {
+        if (!transform.Contains(cell)) return 0f;
+        var chunk = pressureChunks[ChunkOf(cell)];
+        return chunk is null ? 0f : chunk[SlotOf(cell)];
+    }
 
     public void Update(NavigationGrid navigation, ReadOnlySpan<AgentState> agents, float deltaSeconds)
     {
@@ -214,24 +276,30 @@ internal sealed class CongestionField
         for (var slot = 0; slot < liveCount; slot++)
         {
             var i = live[slot];
-            var value = pressure[i] * decay;
+            var cell = CellAt(i);
+            var chunk = ChunkOf(cell);
+            var offset = SlotOf(cell);
+            var pressure = pressureChunks[chunk]!;
+            var value = pressure[offset] * decay;
             if (value < SpentPressure)
             {
-                pressure[i] = 0f;
-                flowX[i] = 0f;
-                flowZ[i] = 0f;
-                isLive[i] = false;
+                pressure[offset] = 0f;
+                flowXChunks[chunk]![offset] = 0f;
+                flowZChunks[chunk]![offset] = 0f;
+                liveChunks[chunk]![offset] = false;
+                chunkOccupancy[chunk]--;
                 continue;
             }
 
-            pressure[i] = value;
-            flowX[i] *= decay;
-            flowZ[i] *= decay;
+            pressure[offset] = value;
+            flowXChunks[chunk]![offset] *= decay;
+            flowZChunks[chunk]![offset] *= decay;
             total += value;
             live[kept++] = i;
         }
 
         liveCount = kept;
+        for (var chunk = 0; chunk < chunkOccupancy.Length; chunk++) ReleaseChunkIfEmpty(chunk);
         admittedCount = 0;
 
         foreach (ref readonly var agent in agents)
@@ -259,7 +327,11 @@ internal sealed class CongestionField
                 if (distance >= influence) continue;
                 var falloff = 1f - distance / influence;
                 var index = transform.Index(cell);
-                var before = pressure[index];
+                var chunk = ChunkOf(cell);
+                EnsureChunk(chunk);
+                var offset = SlotOf(cell);
+                var pressure = pressureChunks[chunk]!;
+                var before = pressure[offset];
                 var deposit = weight * DepositGain * falloff * falloff * deltaSeconds;
                 var after = before + deposit;
                 // A deposit too faint to be worth decaying is dropped outright rather
@@ -268,14 +340,15 @@ internal sealed class CongestionField
                 // there for the rest of the game — invisible in the cost, and a
                 // permanent disagreement between the field and the set that sweeps it.
                 if (after < SpentPressure) continue;
-                pressure[index] = after;
+                pressure[offset] = after;
                 var applied = after - before;
-                flowX[index] += intent.X * applied;
-                flowZ[index] += intent.Y * applied;
+                flowXChunks[chunk]![offset] += intent.X * applied;
+                flowZChunks[chunk]![offset] += intent.Y * applied;
                 total += applied;
-                if (!isLive[index])
+                if (!liveChunks[chunk]![offset])
                 {
-                    isLive[index] = true;
+                    liveChunks[chunk]![offset] = true;
+                    chunkOccupancy[chunk]++;
                     if (admittedCount == admitted.Length)
                     {
                         Array.Resize(ref admitted, Math.Max(64, admitted.Length * 2));
@@ -291,7 +364,7 @@ internal sealed class CongestionField
         var peak = 0f;
         for (var slot = 0; slot < liveCount; slot++)
         {
-            peak = MathF.Max(peak, pressure[live[slot]]);
+            peak = MathF.Max(peak, At(CellAt(live[slot])));
         }
 
         Peak = peak;
@@ -336,7 +409,7 @@ internal sealed class CongestionField
                 pressuredRegions[pressuredRegionCount++] = region;
             }
 
-            currentRegionTotal[region] += pressure[live[slot]];
+            currentRegionTotal[region] += At(CellAt(live[slot]));
         }
 
         // A region that held pressure at the last stamp and holds none now has changed by
@@ -404,13 +477,20 @@ internal sealed class CongestionField
     {
         if (!transform.Contains(cell)) return 1f;
         var index = transform.Index(cell);
-        var magnitude = MathF.Sqrt(flowX[index] * flowX[index] + flowZ[index] * flowZ[index]);
-        var strength = pressure[index];
+        var chunk = ChunkOf(cell);
+        var flowXChunk = flowXChunks[chunk];
+        if (flowXChunk is null) return 1f;
+        var offset = SlotOf(cell);
+        var flowZChunk = flowZChunks[chunk]!;
+        var magnitude = MathF.Sqrt(
+            flowXChunk[offset] * flowXChunk[offset] + flowZChunk[offset] * flowZChunk[offset]);
+        var strength = pressureChunks[chunk]![offset];
         if (magnitude <= 0.0001f || strength <= 0.0001f) return 1f;
 
         // How one-directional this cell's traffic actually is.
         var coherence = MathF.Min(1f, magnitude / strength);
-        var alignment = (flowX[index] * direction.X + flowZ[index] * direction.Y) / magnitude;
+        var alignment =
+            (flowXChunk[offset] * direction.X + flowZChunk[offset] * direction.Y) / magnitude;
         var directional = float.Lerp(OpposingFactor, FollowingFactor, (alignment + 1f) * 0.5f);
         return float.Lerp(1f, directional, coherence);
     }
@@ -434,17 +514,47 @@ internal sealed class CongestionField
             return $"swept set out of order at {slot}: cell {live[slot - 1]} then {live[slot]}";
         }
 
+        // Only allocated regions can hold anything, and an unallocated one is provably empty,
+        // so the audit costs what the jams cost rather than the area of the map — the same
+        // property the storage it is auditing now has.
         var pressured = 0;
-        for (var i = 0; i < pressure.Length; i++)
+        for (var chunk = 0; chunk < pressureChunks.Length; chunk++)
         {
-            if (pressure[i] == 0f && flowX[i] == 0f && flowZ[i] == 0f)
+            var chunkPressure = pressureChunks[chunk];
+            if (chunkPressure is null)
             {
-                if (isLive[i]) return $"cell {i} is swept but holds nothing";
+                if (chunkOccupancy[chunk] != 0)
+                {
+                    return $"region {chunk} is released but claims {chunkOccupancy[chunk]} live cells";
+                }
+
                 continue;
             }
 
-            pressured++;
-            if (!isLive[i]) return $"cell {i} holds {pressure[i]} and is never decayed";
+            var chunkFlowX = flowXChunks[chunk]!;
+            var chunkFlowZ = flowZChunks[chunk]!;
+            var chunkLive = liveChunks[chunk]!;
+            var occupied = 0;
+            for (var offset = 0; offset < chunkPressure.Length; offset++)
+            {
+                if (chunkPressure[offset] == 0f && chunkFlowX[offset] == 0f && chunkFlowZ[offset] == 0f)
+                {
+                    if (chunkLive[offset]) return $"region {chunk} slot {offset} is swept but holds nothing";
+                    continue;
+                }
+
+                pressured++;
+                occupied++;
+                if (!chunkLive[offset])
+                {
+                    return $"region {chunk} slot {offset} holds {chunkPressure[offset]} and is never decayed";
+                }
+            }
+
+            if (occupied != chunkOccupancy[chunk])
+            {
+                return $"region {chunk} holds {occupied} live cells and claims {chunkOccupancy[chunk]}";
+            }
         }
 
         return pressured == liveCount

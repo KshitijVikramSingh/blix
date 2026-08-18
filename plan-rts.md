@@ -538,13 +538,21 @@ their semantics?**
 
 | stage | change | wins | risk |
 |---|---|---|---|
-| **0** | congestion storage sparse — hash the live set that is already tracked | 18.7 MB → ~100 KB, cost tracks jams not extent | none: nothing outside the field touches those arrays |
+| **0** | congestion storage chunked by region, allocated on demand — **DONE 2026-08-18** | **18.7 MB → 271 KB at 600 m, 74.9 MB → 253 KB at 1200 m**, and it no longer scales with extent at all | none, as expected: `--selftest` output bit-identical |
 | **1** | nav raster sparse per region — plain regions keep five numbers, not 4,096 cells | ~24.5 MB → ~5 MB on the ridge map | every `Clearance` caller goes through an accessor |
 | **2** | mesh replaces the portal graph as the abstract layer; fine grid stays as the local sampling structure | route cost stops scaling with extent; portals/tiles/region profiles all go | mesh generation, determinism, seasonal re-partition |
 | **3** | remove the fine grid entirely | the honest end of the argument | congestion and the steering gradient need a new home first — see (2) and (3) above |
 
 Stages 0 and 1 are worth doing whatever is decided about the mesh, because they are the same
 rule applied to storage and neither can break calibration.
+
+**Stage 0, measured.** Chunked by region — 4,096 entries allocated the first time anything in a
+region deposits, released when the last of it fades — rather than hashed, because a chunk keeps
+the read path to a null check and two array reads, which is what it was before. With 2,000
+agents moving: **271 KB at 600 m and 253 KB at 1200 m**. The second number is the point. Storage
+now tracks how much of the map is jammed, and a map four times the area jams no harder, so the
+figure stopped depending on extent — which is the property the whole substrate argument is
+about. Self-test output is bit-identical, which is what "no semantic change" has to mean.
 
 ### The measurement that decides it
 

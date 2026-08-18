@@ -80,13 +80,15 @@ internal static class ScaleScenarios
 
         var cells = world.Congestion.CellCount;
         var buckets = world.AgentIndexBuckets;
-        // Three float arrays, read and written once each per tick.
+        // What a dense field would read and write every tick. Kept as the figure the sparse
+        // one is measured against: the field allocates and sweeps by jam now, not by area, so
+        // this is the bill that is no longer being paid rather than one that is.
         var congestionMegabytes = cells * 3L * sizeof(float) * 2 / (1024.0 * 1024.0);
 
         Console.WriteLine(
             $"  {world.ExtentMeters:F1} m | {agentCount} agents | " +
             $"nav {cells:N0} cells | index {buckets:N0} buckets | " +
-            $"congestion traffic {congestionMegabytes:F1} MB/tick | " +
+            $"dense-equivalent traffic {congestionMegabytes:F1} MB/tick | " +
             $"build {constructionMilliseconds:F0} ms | " +
             $"managed {GC.GetTotalMemory(false) / (1024.0 * 1024.0):F0} MB");
         var portalStart = Stopwatch.GetTimestamp();
@@ -141,6 +143,7 @@ internal static class ScaleScenarios
             $"({routeSearches:N0} searches, {routeTiles:N0} tiles) | " +
             $"flowFields {world.FlowFieldBuilds} | astar {world.PathQueries} | " +
             $"live cells {world.Congestion.LiveCellCount:N0} | " +
+            $"congestion {world.Congestion.ResidentBytes / 1024.0:N0} KB | " +
             $"region-searches {world.RegionSearches - idleSearches:N0} | " +
             $"tiles {world.TileRefinements - idleTiles:N0} built, " +
             $"{world.InheritedTiles - idleInherited:N0} inherited");
