@@ -681,10 +681,38 @@ is not a good score — it is a lower bound rather than an estimate, and two thi
    problem, arriving exactly where it was predicted to.
 
 **One bend per leg was charged and it moved the mean from 0.9097 to 0.9098** — which settles
-which of the two causes it is. Turns are a rounding error here; **the funnel term is the whole
-nine per cent**, and the expensive fix is the only fix. Carrying the entry point in the search
-state makes it (crossing × entry point) rather than (crossing), which is a real cost increase and
-should be taken only when the partition is otherwise ready to switch.
+which of the two causes it is. Turns are a rounding error here; the funnel term was the whole
+nine per cent.
+
+### The funnel, done properly
+
+The fix turns out not to need continuous entry points at all, because of what a taut path is: the
+shortest route through a corridor of convex cells is a polyline that **bends only where a portal
+ends**. Anywhere else it could be straightened, and so was not shortest. Corners are therefore the
+only places a path needs to be able to turn, and a straight leg between two corners inside one
+open rectangle is a real path with a real length.
+
+So the graph is two nodes per crossing, at the ends of the shared border and on the line between
+the rectangles, with an edge between every pair of corners of a rectangle. The funnel expressed as
+a graph rather than as a sweep.
+
+| partition | mean | p99 | worst | lost | structure |
+|---|---|---|---|---|---|
+| regions and portals | 1.0056 | 1.0614 | 1.679 | 0 | 49 regions, 324 portals, **482 searches** |
+| rectangles, nearest point | 0.9097 | 0.9999 | 1.000 | 0 | *below the shortest route: unusable* |
+| **rectangles, corners** | **1.0014** | 1.0977 | **1.187** | 0 | 13 rectangles, **24 corners, no searches** |
+
+**Better than the portal router on the mean and far better on the worst cell** — 1.187 against
+1.679 — for a quarter of the structure and none of the searching. It errs upward now, which is the
+safe direction: an over-estimate never claims a route is cheaper than it is, and the residue is a
+path forced through a corner it could have cut.
+
+**What still blocks the switch is congestion, not geometry.** Nothing in this field responds to a
+jam, and route cost that ignores jams deletes the behaviour invariant 15 exists to protect — the
+crowd would stop splitting across exits. Congestion is priced per cell in seconds and a rectangle
+is uniform ground with no notion of it, so it has to arrive either as a surcharge sampled along a
+leg or as a reason to subdivide a rectangle temporarily. That is the next decision and it is a
+design question, not an implementation one.
 
 An underestimate that is *uniform* would be harmless for steering, since the gradient still points
 downhill — but it is not harmless for everything that reads the field in absolute seconds:
