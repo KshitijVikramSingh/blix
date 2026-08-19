@@ -903,7 +903,7 @@ internal sealed class SimulationWorld
         phaseStart = Stopwatch.GetTimestamp();
         // Before jobs, so a hauler handed a job this tick starts walking on it this tick, and so
         // production reflects who was standing where at the end of the last one.
-        economy.Update(Nodes, Agents, Date.Season, deltaSeconds, TryTravelSeconds);
+        economy.Update(Nodes, Agents, Date, deltaSeconds, TryTravelSeconds);
         Timings.Record(SimulationPhase.Economy, Stopwatch.GetTimestamp() - phaseStart);
 
         phaseStart = Stopwatch.GetTimestamp();
@@ -1139,6 +1139,12 @@ internal sealed class SimulationWorld
     /// </remarks>
     private void Handover(ref AgentState agent, int leg)
     {
+        if (agent.Jobs.Assignment.Kind == AssignmentKind.Work)
+        {
+            WorkHandover(ref agent, leg);
+            return;
+        }
+
         ref var jobs = ref agent.Jobs;
         if (jobs.Assignment.Kind != AssignmentKind.Haul) return;
         var nodeId = jobs.Assignment.NodeOfLeg(leg);
@@ -1291,6 +1297,79 @@ internal sealed class SimulationWorld
 
     /// <summary>Whether a body of this size could stand anywhere it needs to be.</summary>
     private bool IsPlaceApproachable(in AgentState agent) => TryApproachPoint(in agent, out _);
+
+    /// <summary>
+    /// Sends a producer home with what it is holding, and back to work when its hands are empty.
+    /// </summary>
+    /// <remarks>
+    /// The producer's loop, closed here because only the world knows where the stores are. A shift at the
+    /// field ends with something in hand, so the body is pointed at the nearest store that will take it; a
+    /// shift at the store ends with it empty, so the body is pointed back at its field. Nothing is created
+    /// or destroyed on either leg — the grain was already counted as produced when it was reaped into the
+    /// reaper's hands, which is why <b>a settlement's food total does not move when a farmer walks in</b>.
+    /// <para>
+    /// A body holding grain nobody has room for keeps holding it. That is not a stall: it is a full
+    /// granary, and the answer is another granary.
+    /// </para>
+    /// </remarks>
+    private void WorkHandover(ref AgentState agent, int leg)
+    {
+        ref var jobs = ref agent.Jobs;
+        var assignment = jobs.Assignment;
+        if (!Nodes.Contains(assignment.Source))
+        {
+            JobSystem.Assign(ref agent, Assignment.None);
+            return;
+        }
+
+        ref readonly var field = ref Nodes.Get(assignment.Source);
+
+        // Coming off the field with a load: find somewhere to put it and walk there.
+        if (leg % 2 == 0)
+        {
+            var store = jobs.CarriedUnits > 0
+                ? EconomySystem.NearestStoreWithRoom(Nodes, jobs.Carrying, agent.Faction, agent.Position)
+                : NodeId.None;
+            if (!Nodes.Contains(store))
+            {
+                // Empty-handed, or nowhere to put it: stay where the work is. Falling through to the
+                // delivery leg sent a farmer with nothing to carry walking to the granary and back all
+                // summer, which cost it its own field — the settlement lost a third of a harvest to
+                // twelve people commuting to deliver nothing.
+                JobSystem.Retarget(
+                    ref agent,
+                    assignment with { Anchor = field.Position, PlaceExtent = field.FootprintRadius },
+                    leg: 0);
+                return;
+            }
+
+            ref readonly var target = ref Nodes.Get(store);
+            JobSystem.Retarget(
+                ref agent,
+                assignment with
+                {
+                    Sink = store,
+                    FarAnchor = target.Position,
+                    FarPlaceExtent = target.FootprintRadius,
+                },
+                leg: 1);
+            return;
+        }
+
+        // At the store: put it down, then go back to the field.
+        if (Nodes.Contains(assignment.Sink) && jobs.CarriedUnits > 0)
+        {
+            ref var store = ref Nodes.Get(assignment.Sink);
+            var delivered = Math.Min(jobs.CarriedUnits, store.RoomFor(jobs.Carrying));
+            store.Stock.Add(jobs.Carrying, delivered);
+            jobs.CarriedUnits -= delivered;
+        }
+
+        JobSystem.Retarget(
+            ref agent,
+            assignment with { Anchor = field.Position, PlaceExtent = field.FootprintRadius },
+            leg: 0);
+    }
 
     /// <summary>What the ground where a unit's work is looks like, for the jobs layer.</summary>
     /// <remarks>

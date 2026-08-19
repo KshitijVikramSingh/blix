@@ -1489,7 +1489,7 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 
 | | |
 |---|---|
-| suite | `--selftest` **71/71** (was 53/53 through Session 4; one retired with the Heavy class) |
+| suite | `--selftest` **73/73** (was 53/53 through Session 4) |
 | determinism coverage | **102 values a body**, 184 a tick, 25,580 at a checkpoint — every one probed |
 | catchment, measured | **12,320 m² on open ground**, effective radius 62.6 m against a nominal 66 — §15 |
 | soak, early career | **1.44 ms a tick at 300 agents, 23x real time**; a year is 4 min, ten years 39 — §15 |
@@ -2337,3 +2337,81 @@ than in the prototype, which uses floats and a `shortageDebt`.
    villagers who find their own work. That *is* the low-attention mode.
 7. **No timeline.** The player cannot see the year coming, which is most of how the prototype makes a
    season legible before any number is read.
+
+---
+
+## 20. Session 6.5, stage A — a field is three windows of labour
+
+The MVP slice, first stage. §19 named the gap and this closes it: a field no longer produces at a rate
+with a seasonal multiplier on it. It is **prepared, kept and reaped**, each inside its own window, and
+missing a window costs something a later window cannot give back.
+
+### The windows are the seasons, and the numbers came from them
+
+| phase | season | labour | window | occupied | verb |
+|---|---|---|---|---|---|
+| **Prepare** | Spring | 900 s | 1,200 s | 75% | **commit** |
+| **Maintain** | Summer | 300 s | 1,800 s | 17% | **exploit** |
+| **Reap** | Harvest | 800 s | 1,000 s | **80% + 26% walking** | **scramble** |
+| — | Winter | 0 | 1,400 s | 0% | **survive** |
+
+One cycle a year, and it *is* the year — which is the correction §6 asked for. The prototype ran a crop
+model on its own calendar and season names on another, so its second harvest fell in the season called
+Winter and three functions disagreed about when anything happened. Here spring prepares, summer keeps,
+harvest reaps, winter rests, and there is nothing to disagree with.
+
+**Reaping deliberately does not fit.** One pair of hands spends 80% of the harvest window reaping and
+another 26% carrying the crop in — 106% of a window that does not stretch. A single farmer cannot quite
+bring in a whole field, so something has to come and help it. That is the scramble, and it is a
+consequence of the numbers rather than a number chosen to feel tight.
+
+**Prepare sets a ceiling nothing later raises.** A field never broken yields *nothing*, whatever happens
+in summer or harvest — and it says so: `unbroken`, then `failed`. Tending only retains, from 76% of the
+ceiling to all of it. Reaping earns the crop second by second, and grain still standing when the window
+shuts is grain the settlement never had.
+
+### The reaper carries its own crop, and that is why fields cluster
+
+Grain goes **straight into the hands of whoever reaped it** and is walked to the nearest store. It never
+sits in the field: grain a body is holding is grain the settlement has not got, which is what makes the
+walk a cost instead of a decoration.
+
+Which produces the layout rule without anybody writing one down. Measured, fields on a 36 m ring — the
+layout that suited the old cart-hauling model — **lost half the crop to commuting**: twenty seconds out
+and twenty back for every thirty units, inside a window that only just holds the reaping. Tiled next to
+the granary the same fields bring in **97% of nominal**. A settlement clusters its fields because the
+arithmetic makes it, and the far resource is wood.
+
+`HandsEffect`, the square root that made a second farmer worth 0.41 of the first, is **retired**. The
+deadline does that work and does it better: a field asks for 900 labour-seconds inside a 1,200-second
+spring, so one pair of hands just manages and four finish early with nothing to do. Lean staffing is
+efficient because it fills each window exactly; overstaffing is wasteful because the window closes, not
+because output is taxed. §2's identity with no invented curve in it.
+
+### Three bugs, and two of them announced themselves as suspiciously round numbers
+
+**A villager carried eight units.** Which is 88 trips to bring in one field — more walking than the
+harvest window contains. The settlement starved with twelve healthy fields standing in front of it. A
+carry is derived now, not chosen: 30 units is 34 seconds of reaping and 23 trips, a quarter of the window
+on the road.
+
+**Both ends of a two-legged job used the same dwell.** A farmer stood at the granary for the full 45-second
+work shift to put down a sack. The two ends of a job are not the same job; the far end has its own duration
+now, and the near end ends early when the worker's hands are full.
+
+**Two years of production came to exactly one year's nominal — 8,400 against 8,400.** A field starts its
+year over when it finds itself in a year it has not worked, which is pulled rather than pushed because
+nothing is notified when a season turns. It asked `WorldCalendar` what year it was *without giving it a
+time*, which is always the first one, so no field ever reset and the second harvest reaped a crop the
+first had already taken. The roundness of the number is what gave it away.
+
+**And a farmer with nothing to carry walked to the granary and back all summer**, because the empty-handed
+case fell through into the delivery leg. Twelve people commuting to deliver nothing cost a third of a
+harvest. A farmer with no work to do belongs at its field.
+
+| | |
+|---|---|
+| suite | `--selftest` **73/73** |
+| two-year settlement | 16,314 grain against a nominal 16,800 — **97%**, drift 0, short 0 |
+| hauling in a compact settlement | **zero journeys**, which is the point rather than an omission |
+| stores year on year | 6,974 → 8,199 at winter; autonomy climbing |

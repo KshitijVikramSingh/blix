@@ -168,6 +168,26 @@ internal struct EconomyNode
     /// <summary>Catchment budget in seconds at hauler pace, for a node that owns one.</summary>
     public float CatchmentSeconds;
 
+    /// <summary>Labour-seconds of ground broken on this field this year. Sets its ceiling.</summary>
+    public float PrepareWork;
+
+    /// <summary>Labour-seconds of tending. Keeps the ceiling; cannot raise it.</summary>
+    public float MaintainWork;
+
+    /// <summary>Labour-seconds of reaping. Earns the crop as it goes.</summary>
+    public float ReapWork;
+
+    /// <summary>
+    /// Year this field's three figures belong to, so a new spring starts from nothing.
+    /// </summary>
+    /// <remarks>
+    /// Stored rather than cleared on a season boundary, because a season boundary is not an event anything
+    /// subscribes to — the calendar is derived from the tick and nothing is notified. A field that finds
+    /// itself in a year it has not worked yet resets itself, which needs no notification and survives a
+    /// save landing mid-spring.
+    /// </remarks>
+    public int CycleYear;
+
     /// <summary>People this house has room for.</summary>
     public int Occupancy;
 
@@ -293,6 +313,9 @@ internal sealed class NodeStore
         node.Hands = 0;
         node.Occupants = 0;
         node.AppetiteSum = 0f;
+        node.PrepareWork = 0f;
+        node.MaintainWork = 0f;
+        node.ReapWork = 0f;
         LiveCount--;
         if (fed) Revision++;
         return true;

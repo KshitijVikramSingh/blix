@@ -27,6 +27,21 @@ internal enum AssignmentKind
     /// walking to.
     /// </remarks>
     Haul,
+
+    /// <summary>
+    /// Work a place, and carry what it yields to the nearest store.
+    /// </summary>
+    /// <remarks>
+    /// The producer's own loop, and the one the whole economy rests on: work until your hands are full,
+    /// walk it in, come back. It is not hauling — a haul is one round trip between two stores and ends —
+    /// and it is not a hold, because a hold is standing somewhere for a while and this alternates. What it
+    /// shares with a haul is the shape: two legs, cargo, a handover at each end.
+    /// <para>
+    /// The store is chosen when there is something to carry rather than when the job is given, because
+    /// which store is nearest depends on where the body is and what has been built since.
+    /// </para>
+    /// </remarks>
+    Work,
 }
 
 /// <summary>What a unit is doing at this instant, in service of its assignment.</summary>
@@ -82,6 +97,15 @@ internal enum InterruptKind
 /// Radius of the thing at <see cref="Anchor"/>, so that <em>touching</em> it counts as arriving.
 /// </param>
 /// <param name="FarPlaceExtent">Radius of the thing at <see cref="FarAnchor"/>.</param>
+/// <param name="FarDwellSeconds">
+/// How long the far end takes, when it is not the same as the near end. Negative means "the same".
+/// </param>
+/// <remarks>
+/// The two ends of a two-legged job are usually not the same job. A shift working a field is measured in
+/// tens of seconds and ends early when the worker's hands fill; putting the load down at the other end is
+/// a handover and takes a few. One number for both made a farmer stand at the granary for as long as it
+/// had just spent in the field, and a settlement starved with full fields.
+/// </remarks>
 /// <remarks>
 /// <see cref="PlaceExtent"/> is zero for a bare point on the ground, which is what a hand-given post is,
 /// and the radius of the building for anything attached to a node. Without it a body has to reach the
@@ -98,7 +122,8 @@ internal readonly record struct Assignment(
     NodeId Sink = default,
     Resource Cargo = default,
     float PlaceExtent = 0f,
-    float FarPlaceExtent = 0f)
+    float FarPlaceExtent = 0f,
+    float FarDwellSeconds = -1f)
 {
     public static Assignment None => default;
 
@@ -116,8 +141,25 @@ internal readonly record struct Assignment(
             AssignmentKind.Haul, sourcePosition, sinkPosition, handoverSeconds, source, sink, cargo,
             sourceExtent, sinkExtent);
 
-    /// <summary>Which node a leg of a haul is served at.</summary>
+    /// <summary>Which node a leg of a haul or a shift of work is served at.</summary>
     public NodeId NodeOfLeg(int leg) => leg % 2 != 0 ? Sink : Source;
+
+    /// <summary>Work <paramref name="site"/> and carry what it yields to a store.</summary>
+    public static Assignment Work(
+        NodeId site,
+        Vector2 sitePosition,
+        float siteExtent,
+        Resource output,
+        float shiftSeconds,
+        float handoverSeconds) =>
+        new(
+            AssignmentKind.Work, sitePosition, sitePosition, shiftSeconds, site, NodeId.None, output,
+            siteExtent, siteExtent, handoverSeconds);
+
+    /// <summary>How long the work at a given leg takes.</summary>
+    public float DwellOfLeg(int leg) => HasTwoEnds && leg % 2 != 0 && FarDwellSeconds >= 0f
+        ? FarDwellSeconds
+        : DwellSeconds;
 
     /// <summary>How much ground the thing at a given leg stands on.</summary>
     /// <remarks>
@@ -136,11 +178,11 @@ internal readonly record struct Assignment(
         new(AssignmentKind.Shuttle, first, second, dwellSeconds);
 
     /// <summary>Where the given leg of this assignment is served.</summary>
-    public Vector2 PlaceOfLeg(int leg) =>
-        Kind is AssignmentKind.Shuttle or AssignmentKind.Haul && leg % 2 != 0 ? FarAnchor : Anchor;
+    public Vector2 PlaceOfLeg(int leg) => HasTwoEnds && leg % 2 != 0 ? FarAnchor : Anchor;
 
     /// <summary>Whether this assignment alternates between two places.</summary>
-    public bool HasTwoEnds => Kind is AssignmentKind.Shuttle or AssignmentKind.Haul;
+    public bool HasTwoEnds =>
+        Kind is AssignmentKind.Shuttle or AssignmentKind.Haul or AssignmentKind.Work;
 
     /// <summary>
     /// Whether the assignment goes on indefinitely, or ends when its last leg does.
@@ -151,7 +193,8 @@ internal readonly record struct Assignment(
     /// was hired, and the promise that a jammed lane makes a different hauler cheaper would be a
     /// promise about a decision nobody ever revisits. Collect, deliver, and go back on the board.
     /// </remarks>
-    public bool RepeatsForever => Kind is AssignmentKind.Hold or AssignmentKind.Shuttle;
+    public bool RepeatsForever =>
+        Kind is AssignmentKind.Hold or AssignmentKind.Shuttle or AssignmentKind.Work;
 }
 
 /// <summary>

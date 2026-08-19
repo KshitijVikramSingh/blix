@@ -86,8 +86,8 @@ internal static class SettlementScenarios
             $"{Wagons} wagons, one granary of {world.Nodes.Get(granary).Capacity:N0}, " +
             $"housing for {Occupancy} per household");
         Console.WriteLine(
-            "        date        | grain | wood  | hands | hauls | carrying | grain-left | wood-left | " +
-            "short | unhoused | stalled | jam | ms/tick");
+            "        date        | grain | wood  | hands | fields             | hauls | carrying | " +
+            "grain-left | wood-left | short | unhoused | stalled | ms/tick");
 
         var reported = Season.Winter;
         for (var tick = 1; tick <= totalTicks; tick++)
@@ -151,12 +151,14 @@ internal static class SettlementScenarios
         float ringRadius,
         Vector2 centre = default)
     {
-        var granary = world.AddNode(NodeKind.Granary, centre, capacity: 4000);
+        var granary = world.AddNode(NodeKind.Granary, centre, capacity: 9000);
 
-        // Spring harvests nothing, so a settlement that starts in spring starts on its stores: 22
-        // mouths eat about 1,320 grain before the first crop is tended. Seeded rather than conjured —
-        // the ledger records it, so conservation still balances.
-        world.SeedStock(granary, Resource.Grain, 2000);
+        // There is one harvest a year, so a settlement founded in spring lives on its stores until the
+        // fiftieth day of the harvest season — 3,000 of the year's 5,400 seconds, better than half of it.
+        // At 270 grain a head that is about 3,900 for this population, and a founding cache has to cover
+        // it or the settlement starves through a summer with twelve healthy fields standing in front of
+        // it. Seeded rather than conjured: the ledger records it, so conservation still balances.
+        world.SeedStock(granary, Resource.Grain, 4200);
         world.SeedStock(granary, Resource.Wood, 1000);
 
         // Houses ring the granary well inside its catchment, because a household outside every catchment
@@ -181,23 +183,38 @@ internal static class SettlementScenarios
         }
 
         var producers = new List<(NodeId Node, Vector2 At)>();
-        var count = farms + woodcutters;
-        // Same rule for the producers: whatever the caller asked for, or far enough out that the ring has
-        // two building widths of gap between neighbours, whichever is larger.
-        var yardWidth = NodeFootprint.HalfExtentOf(NodeKind.Farm) * 2f;
-        var producerRing = MathF.Max(ringRadius, count * yardWidth * 2f / MathF.Tau);
-        for (var i = 0; i < count; i++)
+
+        // Fields are packed around the granary, because the reaper carries its own crop in and every metre
+        // of that walk is a metre not spent reaping. Measured: fields on a 36 m ring lost <b>half the
+        // crop</b> to commuting — 20 seconds out and 20 back for every thirty units, inside a harvest window
+        // that only just holds the reaping. Tiled next to the store the same fields bring in nearly all of
+        // it. That is why a settlement clusters its fields and does not need telling to.
+        var slot = NodeFootprint.HalfExtentOf(NodeKind.Farm) * 2f + 0.5f;
+        var forbidden = NodeFootprint.HalfExtentOf(NodeKind.Granary) + NodeFootprint.HalfExtentOf(NodeKind.Farm);
+        var tiles = new List<Vector2>();
+        for (var ring = 1; tiles.Count < farms && ring < 12; ring++)
+        for (var dz = -ring; dz <= ring && tiles.Count < farms; dz++)
+        for (var dx = -ring; dx <= ring && tiles.Count < farms; dx++)
         {
-            var angle = i / (float)count * MathF.Tau;
-            var at = centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * producerRing;
-            var farm = i < farms;
-            producers.Add((
-                world.AddNode(
-                    farm ? NodeKind.Farm : NodeKind.Woodcutter,
-                    at,
-                    YardCapacity,
-                    farm ? Resource.Grain : Resource.Wood),
-                at));
+            if (Math.Max(Math.Abs(dx), Math.Abs(dz)) != ring) continue;
+            var at = centre + new Vector2(dx * slot, dz * slot);
+            if (MathF.Abs(at.X - centre.X) < forbidden && MathF.Abs(at.Y - centre.Y) < forbidden) continue;
+            tiles.Add(at);
+        }
+
+        foreach (var at in tiles)
+        {
+            producers.Add((world.AddNode(NodeKind.Farm, at, YardCapacity, Resource.Grain), at));
+        }
+
+        // Wood is the far resource: a woodcutter stands where the trees are, and the trees are not next to
+        // the granary. Stage B replaces this ring with an actual tree line.
+        var woodRing = MathF.Max(ringRadius, woodcutters * slot * 2f / MathF.Tau);
+        for (var i = 0; i < woodcutters; i++)
+        {
+            var angle = i / (float)woodcutters * MathF.Tau;
+            var at = centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * woodRing;
+            producers.Add((world.AddNode(NodeKind.Woodcutter, at, YardCapacity, Resource.Wood), at));
         }
 
         // One hand per producer, posted. Staggered dwell, so the settlement does not breathe in unison
@@ -220,9 +237,16 @@ internal static class SettlementScenarios
             var hand = world.SpawnAgent(
                 placed + outward * (world.Nodes.Get(node).HalfExtent + UnitType.Villager.Radius + 0.9f),
                 UnitType.Villager);
+            ref readonly var site = ref world.Nodes.Get(node);
             world.QueueAssign(
                 new[] { hand },
-                Assignment.Hold(placed, Stagger(20f, i, producers.Count), extent));
+                site.Kind == NodeKind.Farm
+                    // A field is worked, not stood at: prepared in spring, kept in summer, reaped in
+                    // harvest, and the crop carried in by whoever reaped it.
+                    ? Assignment.Work(
+                        node, placed, extent, Resource.Grain,
+                        EconomySystem.WorkShiftSeconds, EconomySystem.HandoverSeconds)
+                    : Assignment.Hold(placed, Stagger(20f, i, producers.Count), extent));
         }
 
         for (var i = 0; i < carts + wagons; i++)
@@ -316,13 +340,51 @@ internal static class SettlementScenarios
         ReportGaps(world);
         Console.WriteLine(
             $"  {world.Date,-18} | {grain.Stored,5:N0} | {wood.Stored,5:N0} | {hands,5} | " +
-            $"{world.Economy.HaulsAssigned,5:N0} | {carried.Total,8:N0} | " +
+            $"{Fields(world),-18} | {world.Economy.HaulsAssigned,5:N0} | {carried.Total,8:N0} | " +
             $"{Seasons(grain.Seasons),10} | {Seasons(wood.Seasons),9} | " +
             $"{world.Economy.Unmet.Grain + world.Economy.Unmet.Wood,5:N0} | " +
             $"{world.UnhousedCount,8} | {stalled,7} | " +
-            $"{world.Congestion.Peak,3:F0} | " +
             $"{world.Timings.Format(world.Agents.Count, world.TickNumber).Split("total ")[1].Split(" ms")[0]}");
     }
+
+    /// <summary>
+    /// What the fields say about themselves, which is the only place the crop cycle is visible.
+    /// </summary>
+    /// <remarks>
+    /// A field's trouble is always in the past — a ceiling not set in spring cannot be diagnosed at
+    /// harvest from anything a body is doing — so the field has to say so at the time. Reported as the
+    /// worst thing any field is saying plus how many agree with it, because twelve identical strings tell
+    /// you less than one string and a count.
+    /// </remarks>
+    private static string Fields(SimulationWorld world)
+    {
+        var says = new Dictionary<string, int>();
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (!node.IsAlive || node.Kind != NodeKind.Farm) continue;
+            var state = CropCycle.StateOf(in node, world.Date.Season);
+            says[state] = says.GetValueOrDefault(state) + 1;
+        }
+
+        if (says.Count == 0) return "none";
+        var worst = says.OrderBy(entry => Rank(entry.Key)).First();
+        return says.Count == 1
+            ? $"{worst.Value} {worst.Key}"
+            : $"{worst.Value} {worst.Key} +{says.Count - 1} more";
+    }
+
+    /// <summary>Worst first: a failure outranks a warning outranks everything being fine.</summary>
+    private static int Rank(string state) => state switch
+    {
+        "failed" => 0,
+        "unbroken" => 1,
+        "neglected" => 2,
+        "standing" => 3,
+        _ when state.StartsWith("preparing", StringComparison.Ordinal) => 4,
+        _ when state.StartsWith("reaping", StringComparison.Ordinal) => 5,
+        _ when state.StartsWith("tending", StringComparison.Ordinal) => 6,
+        _ => 7,
+    };
 
     /// <summary>§8's autonomy time, rendered as the one thing the HUD says: how long.</summary>
     private static string Seasons(float seasons) => float.IsPositiveInfinity(seasons)

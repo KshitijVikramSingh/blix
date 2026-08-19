@@ -125,6 +125,8 @@ internal static class SimulationSelfTests
         Check("a settlement feeds itself without losing a grain", ASettlementFeedsItself());
         Check("a working settlement runs identically twice", TheEconomyRunsIdenticallyTwice());
         Check("dropped cargo stays in the world and is recovered", DroppedCargoStaysInTheWorld());
+        Check("a crop is three windows of labour", ACropIsThreeWindowsOfLabour());
+        Check("a field yields what its labour earned it", AFieldYieldsWhatItsLabourEarned());
         Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
@@ -3155,10 +3157,18 @@ internal static class SimulationSelfTests
         var granary = world.AddNode(NodeKind.Granary, new Vector2(-4f, 4f), capacity: 200);
         world.SeedStock(granary, Resource.Grain, 25);
         world.AddNode(NodeKind.House, new Vector2(-1f, 3f), capacity: 0, occupancy: 24);
-        var farm = new Vector2(8f, -6f);
-        world.AddNode(NodeKind.Farm, farm, capacity: 60);
-        var hand = world.SpawnAgent(farm + new Vector2(1.2f, 0f), UnitType.Villager);
-        world.QueueAssign(new[] { hand }, Assignment.Hold(farm, dwellSeconds: 5f));
+        var farmId = world.AddNode(NodeKind.Farm, new Vector2(8f, -6f), capacity: 60);
+        var farm = world.Nodes.Get(farmId).Position;
+        var farmExtent = world.Nodes.Get(farmId).FootprintRadius;
+        // Mid-cycle, so the save has a field with a year of labour on it and a reaper carrying part of it.
+        world.Nodes.Get(farmId).PrepareWork = CropCycle.PrepareLabour * 0.8f;
+        world.Nodes.Get(farmId).MaintainWork = CropCycle.MaintainLabour * 0.5f;
+        var hand = world.SpawnAgent(farm + new Vector2(farmExtent + 1.3f, 0f), UnitType.Villager);
+        world.QueueAssign(
+            new[] { hand },
+            Assignment.Work(
+                farmId, farm, farmExtent, Resource.Grain,
+                EconomySystem.WorkShiftSeconds, EconomySystem.HandoverSeconds));
         world.SpawnAgent(new Vector2(2f, 0f), UnitType.HaulerCart);
     }
 
@@ -3195,25 +3205,48 @@ internal static class SimulationSelfTests
         var normalised = true;
         foreach (var resource in Resources.All)
         {
-            var produced = 0f;
             var drawn = 0f;
             for (var second = 0f; second < WorldCalendar.YearSeconds; second += 1f)
             {
-                var season = WorldCalendar.At(second).Season;
-                produced += EconomyRates.ProductionPerSecond(resource, season);
-                drawn += EconomyRates.DrawPerSecond(resource, season, appetite: 1f);
+                drawn += EconomyRates.DrawPerSecond(
+                    resource, WorldCalendar.At(second).Season, appetite: 1f);
             }
 
-            var nominalProduced = resource == Resource.Grain
-                ? EconomyRates.GrainPerHandPerYear
-                : EconomyRates.WoodPerHandPerYear;
             var nominalDrawn = resource == Resource.Grain
                 ? EconomyRates.GrainPerVillagerPerYear
                 : EconomyRates.WoodPerVillagerPerYear;
-            normalised &= MathF.Abs(produced - nominalProduced) < nominalProduced * 0.002f;
             normalised &= MathF.Abs(drawn - nominalDrawn) < nominalDrawn * 0.002f;
-            report.Add($"{resource}: {produced:F0}/{nominalProduced:F0} made, {drawn:F0}/{nominalDrawn:F0} drawn");
+            report.Add($"{resource} drawn {drawn:F0}/{nominalDrawn:F0}");
         }
+
+        // Wood is still a rate and its shape still has to integrate to its annual figure. Grain is not:
+        // a field yields what its three windows of labour earn, so the thing to check there is that the
+        // windows fit their seasons and that a full year of one pair of hands earns a full crop.
+        var wood = 0f;
+        for (var second = 0f; second < WorldCalendar.YearSeconds; second += 1f)
+        {
+            wood += EconomyRates.ProductionPerSecond(Resource.Wood, WorldCalendar.At(second).Season);
+        }
+
+        normalised &= MathF.Abs(wood - EconomyRates.WoodPerHandPerYear) <
+                      EconomyRates.WoodPerHandPerYear * 0.002f;
+        report.Add($"wood made {wood:F0}/{EconomyRates.WoodPerHandPerYear:F0}");
+
+        // Each window has to be answerable inside its own season, or the phase is a deadline nobody can
+        // meet. Reaping deliberately does not fit for one pair of hands — that is the scramble — so it is
+        // checked against the window rather than against one worker.
+        var fits = CropCycle.PrepareLabour < WorldCalendar.LengthOf(Season.Spring) &&
+                   CropCycle.MaintainLabour < WorldCalendar.LengthOf(Season.Summer) &&
+                   CropCycle.ReapLabour < WorldCalendar.LengthOf(Season.Harvest) &&
+                   CropCycle.PhaseOf(Season.Spring) == CropPhase.Prepare &&
+                   CropCycle.PhaseOf(Season.Summer) == CropPhase.Maintain &&
+                   CropCycle.PhaseOf(Season.Harvest) == CropPhase.Reap &&
+                   CropCycle.PhaseOf(Season.Winter) == CropPhase.Rest;
+        normalised &= fits;
+        report.Add(
+            $"windows {CropCycle.PrepareLabour:F0}/{WorldCalendar.LengthOf(Season.Spring):F0} " +
+            $"{CropCycle.MaintainLabour:F0}/{WorldCalendar.LengthOf(Season.Summer):F0} " +
+            $"{CropCycle.ReapLabour:F0}/{WorldCalendar.LengthOf(Season.Harvest):F0}");
 
         var passed = MathF.Abs(seasons - WorldCalendar.YearSeconds) < 0.001f && boundaries && normalised;
         Console.WriteLine(
@@ -3250,10 +3283,18 @@ internal static class SimulationSelfTests
             // its placement cell and can move by half a cell diagonal, and a hand spawned relative to
             // the original point ends up standing inside its own farm's wall.
             var placed = world.Nodes.Get(farm).Position;
-            var hand = world.SpawnAgent(
-                placed + new Vector2(world.Nodes.Get(farm).FootprintRadius + 1.3f, 0f),
-                UnitType.Villager);
-            world.QueueAssign(new[] { hand }, Assignment.Hold(placed, dwellSeconds: 6f));
+            var extent = world.Nodes.Get(farm).FootprintRadius;
+            // Prepared and tended already, because this test is about a settlement feeding itself in the
+            // window where food arrives, not about waiting two seasons for spring to finish.
+            world.Nodes.Get(farm).PrepareWork = CropCycle.PrepareLabour;
+            world.Nodes.Get(farm).MaintainWork = CropCycle.MaintainLabour;
+            world.Nodes.Get(farm).CycleYear = world.Date.Year;
+            var hand = world.SpawnAgent(placed + new Vector2(extent + 1.3f, 0f), UnitType.Villager);
+            world.QueueAssign(
+                new[] { hand },
+                Assignment.Work(
+                    farm, placed, extent, Resource.Grain,
+                    EconomySystem.WorkShiftSeconds, EconomySystem.HandoverSeconds));
         }
 
         for (var i = 0; i < 2; i++)
@@ -3284,16 +3325,25 @@ internal static class SimulationSelfTests
                 $"tolerance={JobDefaults.AtPlaceDistance(agent.Radius, agent.Jobs.PlaceExtent):F2}");
         }
 
-        var hands = 0;
-        foreach (ref readonly var node in world.Nodes.All) hands += node.Hands;
+        // Every field worked, rather than every field manned at the sampling instant: a reaper spends much
+        // of its time walking its crop in, so counting hands at one moment counts whoever happens to be
+        // home. What has to be true is that all three fields were reaped and the food arrived.
+        var worked = 0;
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (node.IsAlive && node.Kind == NodeKind.Farm && node.ReapWork > 0f) worked++;
+        }
+
         var stored = world.Nodes.Get(granary).Stock.Grain;
-        var passed = drift.Grain == 0 && drift.Wood == 0 && stalled == 0 && hands == 3 &&
+        // And no hauling at all, which is the point rather than an omission: the producer carries its own
+        // crop, the granary is next door, and a settlement this compact has nothing for a cart to do.
+        var passed = drift.Grain == 0 && drift.Wood == 0 && stalled == 0 && worked == 3 &&
                      world.Economy.Produced.Grain > 0 && world.Economy.Consumed.Grain > 0 &&
-                     world.Economy.HaulsAssigned > 0 && stored > 0;
+                     world.Economy.HaulsAssigned == 0 && stored > 0;
         Console.WriteLine(
-            $"    settlement: {hands} hands, produced {world.Economy.Produced.Grain}, ate " +
-            $"{world.Economy.Consumed.Grain}, {world.Economy.HaulsAssigned} hauls, {stored} in the " +
-            $"granary, drift {drift.Grain}/{drift.Wood}, stalled {stalled}");
+            $"    settlement: {worked}/3 fields reaped, produced {world.Economy.Produced.Grain}, ate " +
+            $"{world.Economy.Consumed.Grain}, {stored} in the granary, {world.Economy.HaulsAssigned} " +
+            $"hauls needed, drift {drift.Grain}/{drift.Wood}, stalled {stalled}");
         return passed;
     }
 
@@ -3332,8 +3382,17 @@ internal static class SimulationSelfTests
                 at,
                 capacity: 80,
                 i % 2 == 0 ? Resource.Grain : Resource.Wood);
-            var hand = world.SpawnAgent(at + new Vector2(1.2f, 0f), UnitType.Villager);
-            world.QueueAssign(new[] { hand }, Assignment.Hold(at, dwellSeconds: 5f + i));
+            var placed = world.Nodes.All[^1].Position;
+            var extent = world.Nodes.All[^1].FootprintRadius;
+            var hand = world.SpawnAgent(placed + new Vector2(extent + 1.3f, 0f), UnitType.Villager);
+            // Half the producers are worked and half are posted, so both assignment shapes are compared.
+            world.QueueAssign(
+                new[] { hand },
+                i % 2 == 0
+                    ? Assignment.Work(
+                        world.Nodes.All[^1].Id, placed, extent, Resource.Grain,
+                        EconomySystem.WorkShiftSeconds, EconomySystem.HandoverSeconds)
+                    : Assignment.Hold(placed, dwellSeconds: 5f + i, extent));
         }
 
         for (var i = 0; i < 3; i++)
@@ -3420,6 +3479,113 @@ internal static class SimulationSelfTests
         Console.WriteLine(
             $"    {carried} grain carried, {dropped} on the ground where it fell (matched position: " +
             $"{nearby}), recovered: {recovered}, worst drift: {worstDrift}");
+        return passed;
+    }
+
+    /// <summary>
+    /// A field's year is three windows of labour, and missing one costs what a later one cannot give back.
+    /// </summary>
+    /// <remarks>
+    /// The arithmetic first, because it is exact and because every claim the mechanic makes is in it: the
+    /// ceiling is set by breaking ground and nothing raises it afterwards; tending only retains; and what
+    /// is reaped is what is had. Then the same thing through a real settlement, which is where a field that
+    /// was never broken has to actually yield nothing rather than merely score zero.
+    /// </remarks>
+    private static bool ACropIsThreeWindowsOfLabour()
+    {
+        var field = new EconomyNode { Kind = NodeKind.Farm };
+        var report = new List<string>();
+        var passed = true;
+
+        // Never broken: no ceiling, and nothing later matters.
+        field.MaintainWork = CropCycle.MaintainLabour;
+        passed &= CropCycle.PotentialOf(in field) == 0f;
+        passed &= CropCycle.ReapTargetOf(in field) == 0f;
+        passed &= CropCycle.StateOf(in field, Season.Harvest) == "failed";
+        report.Add($"unbroken: potential {CropCycle.PotentialOf(in field):F2}, says " +
+                   $"'{CropCycle.StateOf(in field, Season.Harvest)}'");
+
+        // Broken and tended: all of it.
+        field.PrepareWork = CropCycle.PrepareLabour;
+        var full = CropCycle.PotentialOf(in field);
+        passed &= MathF.Abs(full - 1f) < 0.001f;
+
+        // Broken and neglected: the ceiling stands, a quarter of it does not.
+        field.MaintainWork = 0f;
+        var neglected = CropCycle.PotentialOf(in field);
+        passed &= MathF.Abs(neglected - CropCycle.NeglectedRetention) < 0.001f;
+        passed &= CropCycle.StateOf(in field, Season.Summer) == "neglected";
+
+        // Half broken and fully tended: half a crop. Tending cannot raise a ceiling.
+        field.PrepareWork = CropCycle.PrepareLabour * 0.5f;
+        field.MaintainWork = CropCycle.MaintainLabour;
+        var half = CropCycle.PotentialOf(in field);
+        passed &= MathF.Abs(half - 0.5f) < 0.001f;
+        report.Add($"full {full:F2}, neglected {neglected:F2}, half-broken {half:F2}");
+
+        // Each window belongs to its season, and only its season asks for work.
+        passed &= CropCycle.WantsWork(in field, CropPhase.Prepare) &&
+                  !CropCycle.WantsWork(in field, CropPhase.Rest);
+
+        Console.WriteLine($"    {string.Join(" | ", report)}");
+        return passed;
+    }
+
+    /// <summary>
+    /// Session 6.5's gate for stage A: a prepared field is reaped and carried in, an unbroken one is not.
+    /// </summary>
+    /// <remarks>
+    /// Both halves in one run, side by side, because the interesting claim is the <em>difference</em>: the
+    /// two fields are identical, worked by identical farmers for the same window, and one of them yields a
+    /// crop because somebody broke its ground in a season that has already passed. Nothing visible at
+    /// harvest distinguishes them except what the field says about itself.
+    /// </remarks>
+    private static bool AFieldYieldsWhatItsLabourEarned()
+    {
+        var world = new SimulationWorld();
+        // Start in the harvest, and hand-set what spring and summer did — which is the point: the
+        // difference between these two fields was settled before this test starts.
+        world.StartAtSeconds(3100f);
+        var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 4000);
+        var prepared = world.AddNode(NodeKind.Farm, new Vector2(9f, 0f), capacity: 400);
+        var unbroken = world.AddNode(NodeKind.Farm, new Vector2(-9f, 0f), capacity: 400);
+        world.Nodes.Get(prepared).PrepareWork = CropCycle.PrepareLabour;
+        world.Nodes.Get(prepared).MaintainWork = CropCycle.MaintainLabour;
+        world.Nodes.Get(prepared).CycleYear = world.Date.Year;
+        world.Nodes.Get(unbroken).CycleYear = world.Date.Year;
+
+        foreach (var farm in new[] { prepared, unbroken })
+        {
+            var at = world.Nodes.Get(farm).Position;
+            var extent = world.Nodes.Get(farm).FootprintRadius;
+            var hand = world.SpawnAgent(at + new Vector2(extent + 1.3f, 0f), UnitType.Villager);
+            world.QueueAssign(
+                new[] { hand },
+                Assignment.Work(
+                    farm, at, extent, Resource.Grain,
+                    EconomySystem.WorkShiftSeconds, EconomySystem.HandoverSeconds));
+        }
+
+        var drift = default(ResourceTotals);
+        for (var tick = 0; tick < 30 * 300; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (drift.Grain != 0 || drift.Wood != 0) break;
+        }
+
+        var stored = world.Nodes.Get(granary).Stock.Grain;
+        var reaped = world.Nodes.Get(prepared).ReapWork;
+        var barren = world.Nodes.Get(unbroken).ReapWork;
+        var says = CropCycle.StateOf(in world.Nodes.Get(unbroken), world.Date.Season);
+
+        // The prepared field is being reaped and its crop is arriving; the unbroken one is not touched at
+        // all, because there is nothing there to reap.
+        var passed = reaped > 0f && barren == 0f && stored > 0 &&
+                     says == "failed" && drift.Grain == 0 && drift.Wood == 0;
+        Console.WriteLine(
+            $"    prepared field reaped {reaped:F0} labour-s and delivered {stored} grain; " +
+            $"unbroken field reaped {barren:F0} and says '{says}'; drift {drift.Grain}");
         return passed;
     }
 

@@ -65,6 +65,16 @@ internal sealed class EconomySystem
     /// </remarks>
     internal static float BoardIntervalSeconds = 2f;
 
+    /// <summary>
+    /// Seconds a producer works before carrying in whatever it has, if its hands do not fill first.
+    /// </summary>
+    /// <remarks>
+    /// A fallback rather than the rule: a shift normally ends because the body is full. It exists so the
+    /// last few units of a finished phase get carried in rather than waiting for a window that has closed,
+    /// and so a body working a field that yields nothing still comes home occasionally.
+    /// </remarks>
+    internal static float WorkShiftSeconds = 45f;
+
     /// <summary>Seconds a hauler spends loading or unloading at a node.</summary>
     /// <remarks>
     /// Not zero, because a hauling network with instant transfer has no reason to want more haulers
@@ -150,6 +160,34 @@ internal sealed class EconomySystem
         Seeded = seeded;
     }
 
+    /// <summary>The nearest store of this faction with room for a resource, from a point.</summary>
+    /// <remarks>
+    /// Nearest in straight line rather than in route seconds, deliberately: a producer walking its own
+    /// output in is making a short trip a dozen times an hour, and paying for a routing query each time to
+    /// choose between two stores it can see would cost more than the walk. Hauling, which is the long leg
+    /// and the one worth thinking about, is priced properly.
+    /// </remarks>
+    public static NodeId NearestStoreWithRoom(
+        NodeStore nodes,
+        Resource resource,
+        FactionId faction,
+        Vector2 from)
+    {
+        var best = NodeId.None;
+        var bestDistance = float.PositiveInfinity;
+        foreach (ref readonly var node in nodes.All)
+        {
+            if (!node.IsAlive || !node.Stores || node.Faction != faction) continue;
+            if (node.RoomFor(resource) <= 0) continue;
+            var distance = Vector2.DistanceSquared(node.Position, from);
+            if (distance >= bestDistance) continue;
+            bestDistance = distance;
+            best = node.Id;
+        }
+
+        return best;
+    }
+
     /// <summary>The store of this faction with the most room for a resource, other than one.</summary>
     public static NodeId EmptiestStoreWithRoom(
         NodeStore nodes,
@@ -225,6 +263,19 @@ internal sealed class EconomySystem
         foreach (ref readonly var node in nodes.All)
         {
             if (!node.IsAlive || !node.Produces_ || node.Produces != resource) continue;
+            if (resource == Resource.Grain)
+            {
+                // A field's contribution is what it will still yield this year spread over what is left of
+                // it, which is the honest answer to "how long will the stores last": a field standing
+                // unreaped in harvest is income, and the same field in winter is not.
+                var remaining = EconomyRates.GrainPerFarmPerYear * CropCycle.PotentialOf(in node) *
+                                (1f - (CropCycle.ReapTargetOf(in node) <= 0f
+                                    ? 1f
+                                    : node.ReapWork / CropCycle.ReapTargetOf(in node)));
+                produced += remaining / MathF.Max(1f, WorldCalendar.YearSeconds);
+                continue;
+            }
+
             produced += EconomyRates.ProductionPerSecond(resource, season) *
                         EconomyRates.HandsEffect(node.Hands);
         }
@@ -245,11 +296,14 @@ internal sealed class EconomySystem
     public void Update(
         NodeStore nodes,
         AgentStore agents,
-        Season season,
+        CalendarDate date,
         float deltaSeconds,
         TravelPrice price)
     {
+        var season = date.Season;
         CountHands(nodes, agents);
+        RollCrops(nodes, date.Year);
+        WorkFields(nodes, agents, season, deltaSeconds);
         Produce(nodes, season, deltaSeconds);
         BindHomes(nodes, agents, deltaSeconds);
         BindCatchments(nodes, price);
@@ -282,7 +336,10 @@ internal sealed class EconomySystem
 
         foreach (ref readonly var agent in agents.All)
         {
-            if (!agent.IsAlive || agent.Jobs.Assignment.Kind != AssignmentKind.Hold) continue;
+            if (!agent.IsAlive) continue;
+            // Posted at a node or working one. Both are a pair of hands there; a hauler passing through is
+            // not, which is what counting anybody nearby produced.
+            if (agent.Jobs.Assignment.Kind is not (AssignmentKind.Hold or AssignmentKind.Work)) continue;
             if (agent.Jobs.Activity == ActivityKind.None || agent.Jobs.IsInterrupted) continue;
             // Posted here, not passing through. A hauler loading at a farm is standing in the yard and is
             // emphatically not a farmhand, which is what counting anybody nearby produced: seventeen pairs
@@ -296,6 +353,108 @@ internal sealed class EconomySystem
         }
     }
 
+    /// <summary>
+    /// Starts each field's year over when it finds itself in one it has not worked.
+    /// </summary>
+    /// <remarks>
+    /// Pulled rather than pushed. The calendar is derived from the tick and nothing is notified when a
+    /// season turns, so a field checks whether the year it last worked is the year it is in — which needs
+    /// no event, survives a save landing mid-spring, and cannot be missed by a tick that happened to be
+    /// spent elsewhere.
+    /// </remarks>
+    private static void RollCrops(NodeStore nodes, int year)
+    {
+        // The year is passed in rather than asked for. Asking WorldCalendar for it without a time is
+        // asking what year second zero was in, which is always the first one — so every field decided it
+        // had already worked the current year, never reset, and the second harvest reaped a crop the first
+        // one had already taken. Two years of production came to exactly one year's worth, which is the
+        // kind of number that gives itself away.
+        var fields = nodes.MutableSpan();
+        for (var i = 0; i < fields.Length; i++)
+        {
+            ref var field = ref fields[i];
+            if (!field.IsAlive || field.Kind != NodeKind.Farm) continue;
+            if (field.CycleYear == year) continue;
+            field.CycleYear = year;
+            field.PrepareWork = 0f;
+            field.MaintainWork = 0f;
+            field.ReapWork = 0f;
+        }
+    }
+
+    /// <summary>
+    /// Puts the hands standing in each field to work on whatever the season asks of it.
+    /// </summary>
+    /// <remarks>
+    /// Labour is accumulated per field rather than per body, because that is what the three windows are
+    /// counted in — a field wants 900 seconds of breaking, and it does not care whether that is one pair of
+    /// hands for the whole spring or three for a third of it. Reaping is the exception: the grain it earns
+    /// has to go somewhere, and where it goes is <em>into the hands of whoever is reaping</em>, to be walked
+    /// in. That is the only place in the economy where production and carrying are the same act.
+    /// </remarks>
+    private void WorkFields(NodeStore nodes, AgentStore agents, Season season, float deltaSeconds)
+    {
+        var phase = CropCycle.PhaseOf(season);
+        if (phase == CropPhase.Rest) return;
+
+        var produced = Produced;
+        var bodies = agents.MutableSpan();
+        for (var i = 0; i < bodies.Length; i++)
+        {
+            ref var body = ref bodies[i];
+            if (!body.IsAlive) continue;
+            if (body.Jobs.Assignment.Kind != AssignmentKind.Work || body.Jobs.IsInterrupted) continue;
+            if (body.Jobs.Leg % 2 != 0 || body.Jobs.Activity == ActivityKind.None) continue;
+
+            var siteId = body.Jobs.Assignment.Source;
+            if (!nodes.Contains(siteId)) continue;
+            ref var field = ref nodes.Get(siteId);
+            if (field.Kind != NodeKind.Farm) continue;
+            // Working means being there. A body still walking to the field is not breaking any ground.
+            if (!JobSystem.IsWorking(in body)) continue;
+            if (!CropCycle.WantsWork(in field, phase))
+            {
+                // The window is answered. Carry in whatever is in hand; if there is nothing, wait here —
+                // a farmer with no work to do belongs at its field, not commuting.
+                if (body.Jobs.CarriedUnits > 0) JobSystem.EndShift(ref body);
+                continue;
+            }
+
+            switch (phase)
+            {
+                case CropPhase.Prepare:
+                    field.PrepareWork = MathF.Min(
+                        CropCycle.PrepareLabour, field.PrepareWork + deltaSeconds);
+                    break;
+                case CropPhase.Maintain:
+                    field.MaintainWork = MathF.Min(
+                        CropCycle.MaintainLabour, field.MaintainWork + deltaSeconds);
+                    break;
+                case CropPhase.Reap:
+                    var target = CropCycle.ReapTargetOf(in field);
+                    var before = field.ReapWork;
+                    field.ReapWork = MathF.Min(target, field.ReapWork + deltaSeconds);
+                    var earned = field.Pending.Accrue(
+                        Resource.Grain,
+                        (field.ReapWork - before) * EconomyRates.ReapedPerSecond(in field));
+                    if (earned > 0)
+                    {
+                        // Straight into the reaper's hands. It never sits in the field: grain a body is
+                        // holding is grain the settlement has not got yet, which is the whole reason the
+                        // walk is a cost.
+                        body.Jobs.Carrying = Resource.Grain;
+                        body.Jobs.CarriedUnits += earned;
+                        produced.Add(Resource.Grain, earned);
+                    }
+
+                    if (body.Jobs.CarriedUnits >= body.CarryCapacity) JobSystem.EndShift(ref body);
+                    break;
+            }
+        }
+
+        Produced = produced;
+    }
+
     private void Produce(NodeStore nodes, Season season, float deltaSeconds)
     {
         var mutable = nodes.MutableSpan();
@@ -304,6 +463,9 @@ internal sealed class EconomySystem
         {
             ref var node = ref mutable[i];
             if (!node.IsAlive || !node.Produces_ || node.Hands == 0) continue;
+            // Fields are not on this path any more; their output is CropCycle's, earned by labour and
+            // carried in by the reaper. This is wood until Stage B gives trees a labour cost of their own.
+            if (node.Produces == Resource.Grain) continue;
             var rate = EconomyRates.ProductionPerSecond(node.Produces, season) *
                        EconomyRates.HandsEffect(node.Hands);
             if (rate <= 0f) continue;

@@ -141,6 +141,16 @@ internal static class JobSystem
         return agent.Jobs.SettledNearby && gap <= agent.Radius * JobDefaults.CrowdedTouchShare;
     }
 
+    /// <summary>Whether this body is standing at its place rather than still on its way there.</summary>
+    /// <remarks>
+    /// For the economy, which may only count labour from a body that has actually arrived. A hand walking
+    /// toward a field is not breaking its ground, and a hand walking its grain to a store is not either.
+    /// </remarks>
+    public static bool IsWorking(in AgentState agent) =>
+        agent.Jobs.Activity != ActivityKind.None &&
+        !agent.Jobs.IsInterrupted &&
+        IsAtPlace(in agent);
+
     /// <summary>How far this body is from the wall of its place, or zero if it is against it.</summary>
     public static float DistanceToPlace(in AgentState agent)
     {
@@ -148,6 +158,21 @@ internal static class JobSystem
         var nearest = Vector2.Clamp(
             agent.Position, agent.Jobs.Place - half, agent.Jobs.Place + half);
         return Vector2.Distance(agent.Position, nearest);
+    }
+
+    /// <summary>
+    /// Ends the current shift of work now, whatever time was left on it.
+    /// </summary>
+    /// <remarks>
+    /// For the one thing the jobs layer cannot know: a shift at a workplace is over when the body's hands
+    /// are full or the field has nothing left to give, and both of those are facts about the economy. The
+    /// dwell is a fallback rather than the rule — a body delivers at least once a shift even if it never
+    /// fills up, which is how a phase that completes mid-shift gets its last few units carried in.
+    /// </remarks>
+    public static void EndShift(ref AgentState agent)
+    {
+        if (agent.Jobs.Activity == ActivityKind.None) return;
+        agent.Jobs.DwellRemaining = 0f;
     }
 
     /// <summary>
@@ -298,7 +323,7 @@ internal static class JobSystem
         jobs.Activity = ActivityKind.Working;
         jobs.Place = jobs.Assignment.PlaceOfLeg(jobs.Leg);
         jobs.PlaceExtent = jobs.Assignment.ExtentOfLeg(jobs.Leg);
-        jobs.DwellRemaining = jobs.Assignment.DwellSeconds;
+        jobs.DwellRemaining = jobs.Assignment.DwellOfLeg(jobs.Leg);
         jobs.WalkIssued = false;
         jobs.Retries = 0;
         jobs.RetryCooldown = 0f;

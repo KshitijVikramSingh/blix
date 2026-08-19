@@ -49,8 +49,15 @@ internal sealed record UnitType(
     // sink other resources slightly; this is the first half of that, written where the roster is.
 
     /// <summary>The settlement's people. Everything else is measured against this one.</summary>
+    /// <remarks>
+    /// A carry of thirty is a sack, and it is derived rather than chosen. A field earns 0.88 grain a second
+    /// of reaping, so thirty units is thirty-four seconds of work; twenty-three trips bring in a whole
+    /// field's crop, and at ten metres to the store that is a quarter of the harvest window spent walking.
+    /// It was eight, which made it eighty-eight trips and more walking than the window contains — the
+    /// settlement starved with its fields full.
+    /// </remarks>
     public static readonly UnitType Villager =
-        new("villager", AgentDefaults.Radius, 1.79f, 0f, 8);
+        new("villager", AgentDefaults.Radius, 1.79f, 0f, 30);
 
     /// <summary>
     /// Slower than a villager, which is the intended ordering: kit costs pace.
