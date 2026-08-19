@@ -550,7 +550,21 @@ internal sealed partial class PathService
             : FindNearestWalkable(goalCell, agentRadius);
         if (resolved is not { } goal) return false;
         var costs = GetFlowField(goal, agentRadius, congestion.Revision, chargeTurns: false);
-        var cost = costs.CostAt(fromCell);
+        // Both ends, not just the goal. Once buildings occupy the cells they stand on, the natural way
+        // to ask "how far is my granary from that house" is between two points that are both inside
+        // walls — and a cost read at a blocked cell is infinite, so every catchment in the world would
+        // come back out of reach. A query from inside a building means from the ground beside it.
+        //
+        // Resolved *after* the field is obtained, and that ordering is load-bearing. Getting a field has
+        // a side effect — it builds and caches one — so resolving the start first meant this query
+        // built fields in cases where it used to give up, which changed what later route decisions found
+        // in the cache and moved the pen benchmark's clearance and reroute counts. A measurement that
+        // perturbs what it measures is worth one line of care to avoid.
+        var start = grid.IsWalkable(fromCell, agentRadius)
+            ? fromCell
+            : FindNearestWalkable(fromCell, agentRadius);
+        if (start is not { } standing) return false;
+        var cost = costs.CostAt(standing);
         if (!float.IsFinite(cost)) return false;
         seconds = cost;
         return true;

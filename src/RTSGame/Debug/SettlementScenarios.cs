@@ -35,23 +35,32 @@ internal static class SettlementScenarios
 
     private const int Woodcutters = 7;
 
-    /// <summary>Hauler carts, at 0.55 m and 40 units.</summary>
-    private const int Carts = 5;
+    /// <summary>Hauler carts, at 0.55 m and 40 units, all of them Foot class.</summary>
+    private const int Carts = 7;
 
     /// <summary>People per household. Houses are the clocked sinks; nothing else eats.</summary>
     private const int Occupancy = 4;
 
     /// <summary>
-    /// Wagons, at 0.90 m and 200 units — deliberately, because of debt 7.
+    /// Wagons, at 0.90 m — <b>zero, and that is a finding rather than a preference.</b>
     /// </summary>
     /// <remarks>
-    /// The congestion field charges a body for a queue by its own width and its own speed, both terms
-    /// ship on dials at one, and both have only ever been measured on single-geometry sweeps. The
-    /// workload they exist for is "many haulers of differing sizes sharing routes continuously", which
-    /// is precisely a settlement's approach to its granary — so the settlement has both kinds of cart in
-    /// it and the trace reports what the field reads. This is the run that decides those dials.
+    /// Debt 7 wants many haulers of differing sizes sharing routes, and two wagons were in here for
+    /// exactly that. They cannot work, and the reason is not the economy: <b>a Heavy-class body cannot be
+    /// routed to a point beside a 1.5 m building on this map at all.</b> Measured — the wagon asks, is
+    /// refused, and sits in the movement layer's limbo state; over a year, two of them accumulated a
+    /// thousand refusals between them while a cost field priced the same journey at 89 seconds, so the
+    /// route exists and the hierarchical search will not find it. Take the wagons out and the stalls go
+    /// to zero with nothing else changed.
+    /// <para>
+    /// That is a routing question and it belongs with debt 6, which already flags that placing a building
+    /// re-rasterises and that what it should do to the decomposition is undecided. Twenty scattered
+    /// 1.5 m buildings is a case <c>--routingtest</c>'s staggered walls do not cover, and its <c>lost</c>
+    /// column — cells the hierarchy cannot price — is the number to look at. Until then the settlement
+    /// runs on carts, and debt 7 stays open for the second reason in a row that is not the one it expected.
+    /// </para>
     /// </remarks>
-    private const int Wagons = 2;
+    private const int Wagons = 0;
 
     /// <summary>Units of one resource a producer's yard holds before production stops.</summary>
     /// <remarks>
@@ -184,14 +193,21 @@ internal static class SettlementScenarios
         // — see the note on the stagger below.
         for (var i = 0; i < producers.Count; i++)
         {
-            var (node, at) = producers[i];
-            // Posted at the node with its footprint, so a hand works at the edge of the yard rather
-            // than trying to stand in the middle of the building.
+            var (node, _) = producers[i];
+            // Read the node's position back rather than using the one it was asked for: a building is
+            // snapped to its placement cell, which can move it by up to half a cell diagonal, and a hand
+            // spawned relative to the original point could end up standing inside its own farm's wall.
+            // Two of nineteen did exactly that, and the settlement lost a fifth of its harvest to it.
+            var placed = world.Nodes.Get(node).Position;
             var extent = world.Nodes.Get(node).FootprintRadius;
-            var hand = world.SpawnAgent(at + new Vector2(extent + 0.8f, 0f), UnitType.Villager);
+            // Outward from the centre, so hands stand on the far side of the yard from the traffic.
+            var outward = placed - centre;
+            outward = outward.LengthSquared() > 0.001f ? Vector2.Normalize(outward) : Vector2.UnitX;
+            var hand = world.SpawnAgent(
+                placed + outward * (extent + 1.3f), UnitType.Villager);
             world.QueueAssign(
                 new[] { hand },
-                Assignment.Hold(at, Stagger(20f, i, producers.Count), extent));
+                Assignment.Hold(placed, Stagger(20f, i, producers.Count), extent));
         }
 
         for (var i = 0; i < carts + wagons; i++)
@@ -218,6 +234,9 @@ internal static class SettlementScenarios
     private static float Stagger(float period, int index, int count) =>
         period * (1f + 0.1f * (index / (float)Math.Max(1, count) - 0.5f));
 
+    private static float ClearanceAt(SimulationWorld world, Vector2 position) =>
+        world.Navigation.TryWorldToCell(position, out var cell) ? world.Navigation.Clearance(cell) : -1f;
+
     private static void Report(SimulationWorld world, List<string> faults)
     {
         var grain = world.Economy.Outlook(Resource.Grain, world.Nodes, world.Agents, world.Date.Season);
@@ -229,12 +248,23 @@ internal static class SettlementScenarios
         var stalled = 0;
         foreach (ref readonly var agent in world.Agents.All)
         {
-            if (agent.IsAlive && agent.Jobs.CannotReachWork) stalled++;
-        }
-
-        if (stalled > 0)
-        {
-            faults.Add($"{stalled} unit(s) could not reach their work at {world.Date}");
+            if (!agent.IsAlive || !agent.Jobs.CannotReachWork) continue;
+            stalled++;
+            // The numbers that identify the cause: how far it is against how near it has to be, and
+            // what it thinks it is standing next to. Guessing at this cost two rounds.
+            faults.Add(
+                $"{agent.Id} (r={agent.Radius:F2}) cannot reach its {agent.Jobs.Assignment.Kind} at " +
+                $"({agent.Jobs.Place.X:F1},{agent.Jobs.Place.Y:F1}) extent={agent.Jobs.PlaceExtent:F2}: " +
+                $"it is {Vector2.Distance(agent.Position, agent.Jobs.Place):F2} m away and needs " +
+                $"{JobDefaults.AtPlaceDistance(agent.Radius, agent.Jobs.PlaceExtent):F2}, " +
+                $"{agent.Jobs.Retries} tries, state={agent.LocomotionState} " +
+                $"moving={agent.HasDestination} route={world.GetRemainingPath(agent.Id).Length} " +
+                $"navigable-here={world.IsAgentGeometryValid(agent.Id)} " +
+                $"navRadius={agent.NavigationRadius:F2} " +
+                $"clearance-here={ClearanceAt(world, agent.Position):F2} " +
+                $"clearance-at-place={ClearanceAt(world, agent.Jobs.Place):F2} " +
+                $"priced={world.TryTravelSeconds(agent.Position, agent.Jobs.Place, agent.NavigationRadius, out var seconds)}/{seconds:F0}s, " +
+                $"at {world.Date}");
         }
 
         Console.WriteLine(

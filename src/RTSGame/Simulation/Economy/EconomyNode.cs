@@ -74,32 +74,47 @@ internal enum NodeKind
 }
 
 /// <summary>
-/// How much ground each kind of node stands on, in metres of radius.
+/// How much ground a node stands on, and how near a body has to get to have reached it.
 /// </summary>
 /// <remarks>
-/// One table, because three things need it and they were disagreeing: the collider called every node
-/// 1.2 m whatever it was, the renderer drew a granary at 1.7 and a house at 1.0, and the jobs layer
-/// ignored the building altogether and sent bodies at the centre point. That last one is what a player
-/// notices — a cart aiming for the middle of a farm has to get <em>inside</em> the farm to have arrived,
-/// so it shoulders through the building and through whoever is working there.
+/// <b>A building occupies exactly one placement cell.</b> Not a circle of whatever radius suited the
+/// renderer — the placement grid is what the game already describes built ground with, both the
+/// navigation raster and the static side of the velocity solve are derived from it, and a footprint
+/// that does not line up with it cannot be described exactly by either.
 /// <para>
-/// <b>Touching is arrival.</b> A cart that reaches the wall of a granary has reached the granary, and
-/// the handover timer covers the rest — it is already four seconds of loading, which is where the
-/// fidelity belongs rather than in the last metre of approach.
+/// The first attempt gave each kind its own radius and blocked every cell the circle touched, and the
+/// quantisation bit immediately: a 1.7 m granary blocked a plus-shape four and a half metres across,
+/// so the ring a cart was told to stand on — its radius plus the building's — was <em>inside the
+/// wall</em>. Every hand in the settlement stalled and nothing was ever delivered. One cell, exactly,
+/// removes the whole class of problem.
+/// </para>
+/// <para>
+/// A granary being the same size as a house is a greybox simplification and is fine: what matters at
+/// this stage is that the wall, the drawing and the arrival tolerance are the same wall. Real sizes
+/// arrive with real art and become a cell count.
 /// </para>
 /// </remarks>
 internal static class NodeFootprint
 {
-    public static float RadiusOf(NodeKind kind) => kind switch
-    {
-        NodeKind.Granary => 1.7f,
-        NodeKind.ForwardDepot => 1.5f,
-        NodeKind.Farm => 1.2f,
-        NodeKind.Woodcutter => 1.2f,
-        NodeKind.House => 1.0f,
-        // A heap is a heap. Small, and walked right up to.
-        _ => 0.5f,
-    };
+    /// <summary>Half the width of a building, which is half a placement cell.</summary>
+    public static float HalfExtent => SimulationWorld.PlacementCellSize * 0.5f;
+
+    /// <summary>
+    /// Radius of the circle that just contains a building, which is what arrival is measured against.
+    /// </summary>
+    /// <remarks>
+    /// The half-diagonal rather than the half-width, because a body approaching a corner is further from
+    /// the centre than one approaching a face, and a tolerance drawn at the face would be one a diagonal
+    /// approach could never satisfy — the body would be held off the corner by its own radius and go on
+    /// walking at a place it had already reached.
+    /// </remarks>
+    public static float ApproachRadiusOf(NodeKind kind) => kind == NodeKind.Pile
+        // A heap is not a wall. Walk right up to it.
+        ? 0.4f
+        : HalfExtent * 1.41421356f;
+
+    /// <summary>Whether this kind of node is built ground that bodies must go around.</summary>
+    public static bool Blocks(NodeKind kind) => kind != NodeKind.Pile;
 }
 
 /// <summary>
@@ -191,8 +206,8 @@ internal struct EconomyNode
     /// <summary>Room for another household member.</summary>
     public readonly int Housing => Math.Max(0, Occupancy - Occupants);
 
-    /// <summary>How much ground this node stands on.</summary>
-    public readonly float FootprintRadius => NodeFootprint.RadiusOf(Kind);
+    /// <summary>How near a body has to get to have reached this node.</summary>
+    public readonly float FootprintRadius => NodeFootprint.ApproachRadiusOf(Kind);
 
     /// <summary>Room left for more of this resource.</summary>
     public readonly int RoomFor(Resource resource) => Math.Max(0, Capacity - Stock[resource]);

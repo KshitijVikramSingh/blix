@@ -1991,6 +1991,62 @@ The test is §7's interception in miniature, with the combat left out because no
 cart, destroy it mid-journey, and require the grain to be on the ground *at the position it fell*, to be
 collected by another cart, to reach the granary, and for not one unit to have gone missing at any point.
 
+### Buildings became solid, and three things fell out of it
+
+Nodes were built with an `Interactable` collider and were never put in the **placement grid**, so bodies
+walked through farms and the router did not know they existed. The reasoning at the time — "a granary a
+hauler cannot walk up to is a granary nobody can use" — stopped being true the moment touching counted
+as arrival. Both the navigation raster and the static side of the velocity solve are derived from the
+placement grid, so occupying the cells buys routing *and* steering with no second description of the
+same wall to drift.
+
+**A building is exactly one placement cell.** The first attempt gave each kind its own radius and blocked
+every cell the circle touched, and the quantisation bit at once: a 1.7 m granary blocked a plus-shape
+4.5 m across, so the ring a cart was told to stand on was *inside the wall*. Every hand stalled and
+nothing was delivered. One cell removes the class of problem, and the node snaps to that cell's centre so
+the wall, the drawing and the arrival tolerance are the same square. A granary the size of a house is a
+greybox simplification; real sizes arrive with real art as a cell count.
+
+**Two predicates that disagree, and using the wrong one cost most of a session.**
+`IsPositionNavigable` asks whether a body, as a circle, overlaps anything — continuous, against terrain
+and placement boxes. `IsWalkable` asks whether the raster's clearance *at a cell centre* admits a body of
+some radius, quantised to the clearance rungs, and that is what every route search actually consults.
+They disagree most for the widest bodies: a 0.90 m wagon can stand half a metre from a wall in a cell
+whose clearance is 0.75 and is therefore unroutable at 0.90. Choosing an approach point with the body
+test and handing it to the router produced a wagon that asked for a legal position 228 times, was refused
+every time, and sat in the movement layer's limbo state — `Move` with no destination — while a cost field
+priced the same journey at 89 s. `plan-rts.md` already warns that cell clearance cannot bound where a
+body is; the converse is as true and this is where it bites.
+
+**A silent argument that was fatal.** A post given at a farm without the farm's extent gets a tolerance
+in body radii — 1.11 m for a villager — while the wall reaches 1.12 m. One centimetre short, forever,
+and nothing about the symptom points at the missing argument. The world fills it in now: any assignment
+whose place coincides with a node adopts that node's position and footprint, so every path into an
+assignment gets it right, including the ones written before nodes existed.
+
+### The pen benchmark moved, and it moved the right way
+
+Recorded because rule 1 requires it. Fixing the catchment query — a route priced from inside a building
+now prices from the ground beside it — also fixed a latent inaccuracy in the simulation:
+`RemainingRouteDistance` uses the same query for a body on flow transit, and when the body's own cell was
+unwalkable it had been falling back to a **straight line through the wall**. That underestimates the
+distance, so progress looked worse than it was and the crowd reacted to stalls that were not happening.
+
+| | was | now |
+|---|---|---|
+| red agent-seconds | 137.6 | **119.2** |
+| mean pile | 5.8 over 16.8 s | **5.1 over 15.9 s** |
+| congestion reroutes | 1 | **0** |
+| turns over 60° | 0.30% | **0.23%** |
+| `walked/optimal` | 1.30 | **1.33** |
+
+Every stall figure improved. `walked/optimal` rose and **is not comparable to the old number**: the ratio
+is only accumulated for bodies that have a measurable optimum, and bodies whose start cell was unwalkable
+previously had none. The metric now includes the ones starting in tight spots, which are exactly the ones
+that walk furthest relative to the straight line. 1.33 over a wider population, not 1.33 against 1.30.
+
+One-cell gate is unmoved at 1.78 with 33 dead stops.
+
 ### Debt 7 is still open, and now for a better reason
 
 The congestion width and speed terms were to be settled by "many haulers of differing sizes sharing
@@ -2000,10 +2056,21 @@ jam. The terms need a deliberately over-subscribed lane rather than a working on
 scenario and an honest thing to have learned: the workload that was supposed to settle them is the
 workload in which they never fire.
 
+**And then a second reason, worse than the first.** The wagons had to come out of the settlement
+altogether: **a Heavy-class body cannot be routed to a point beside a 1.5 m building on this map.** Two of
+them accumulated a thousand refusals over a year while a cost field priced the same journey at 89 s, so
+the route exists and the hierarchical search will not find it; remove the wagons and the stalls go to zero
+with nothing else changed. That is a routing question and it belongs with **debt 6** — placing a building
+re-rasterises, and what it should do to the decomposition is still undecided. Twenty scattered 1.5 m
+buildings is a case `--routingtest`'s staggered walls do not cover, and its `lost` column — cells the
+hierarchy cannot price — is the number to go and look at. **Until it is fixed, no wide body can work a
+building**, which also blocks the wagon from ever hauling and is a bigger hole than debt 7.
+
 | | |
 |---|---|
 | suite | `--selftest` **72/72** |
-| two-year settlement | 324,000 ticks, drift **0**, short **0**, **0 unhoused**, 980 hauls, 63 dropped |
+| two-year settlement | 324,000 ticks, drift **0**, short **0**, **0 unhoused**, on 7 carts and no wagons |
+| pen escape | **1.33x** over a wider population (was 1.30 over a narrower one), red 119.2 agent-s (was 137.6) |
 | economy phase | **0.01–0.03 ms** a tick headless; on the live 600 m map it warms up at 17 ms and settles to **0.48 ms by tick 78** |
 | grain produced against nominal | **99.7%** — the harvest crunch nearly absorbed at seven haulers |
 | new instrument | `--settlement [--years n]`, which is also §15's per-PR soak gate |

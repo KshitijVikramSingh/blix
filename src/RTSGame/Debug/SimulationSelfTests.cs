@@ -3242,18 +3242,17 @@ internal static class SimulationSelfTests
         // stores are, which is a different test.
         world.AddNode(NodeKind.House, new Vector2(3f, -3f), capacity: 0, occupancy: 8);
 
-        var farms = new List<Vector2>();
         for (var i = 0; i < 3; i++)
         {
-            var at = new Vector2(-8f + i * 8f, 8f);
-            farms.Add(at);
-            world.AddNode(NodeKind.Farm, at, capacity: 60);
-        }
-
-        foreach (var at in farms)
-        {
-            var hand = world.SpawnAgent(at + new Vector2(1.2f, 0f), UnitType.Villager);
-            world.QueueAssign(new[] { hand }, Assignment.Hold(at, dwellSeconds: 6f));
+            var farm = world.AddNode(NodeKind.Farm, new Vector2(-8f + i * 8f, 8f), capacity: 60);
+            // The node's position after it is placed, not the one it was asked for: a building snaps to
+            // its placement cell and can move by half a cell diagonal, and a hand spawned relative to
+            // the original point ends up standing inside its own farm's wall.
+            var placed = world.Nodes.Get(farm).Position;
+            var hand = world.SpawnAgent(
+                placed + new Vector2(world.Nodes.Get(farm).FootprintRadius + 1.3f, 0f),
+                UnitType.Villager);
+            world.QueueAssign(new[] { hand }, Assignment.Hold(placed, dwellSeconds: 6f));
         }
 
         for (var i = 0; i < 2; i++)
@@ -3272,7 +3271,16 @@ internal static class SimulationSelfTests
 
         foreach (ref readonly var agent in world.Agents.All)
         {
-            if (agent.IsAlive && agent.Jobs.CannotReachWork) stalled++;
+            if (!agent.IsAlive || !agent.Jobs.CannotReachWork) continue;
+            stalled++;
+            // Printed because a stall is silent otherwise: the interesting numbers are the distance
+            // against the tolerance, which is how the missing footprint on a post was found.
+            Console.WriteLine(
+                $"      stalled {agent.Id} r={agent.Radius:F2} at ({agent.Position.X:F1},{agent.Position.Y:F1}) " +
+                $"place=({agent.Jobs.Place.X:F1},{agent.Jobs.Place.Y:F1}) extent={agent.Jobs.PlaceExtent:F2} " +
+                $"kind={agent.Jobs.Assignment.Kind} retries={agent.Jobs.Retries} " +
+                $"dist={Vector2.Distance(agent.Position, agent.Jobs.Place):F2} " +
+                $"tolerance={JobDefaults.AtPlaceDistance(agent.Radius, agent.Jobs.PlaceExtent):F2}");
         }
 
         var hands = 0;

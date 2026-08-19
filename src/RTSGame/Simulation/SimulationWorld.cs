@@ -241,18 +241,97 @@ internal sealed class SimulationWorld
             CatchmentSeconds = catchmentSeconds,
             Occupancy = occupancy,
         });
-        // Interactable rather than solid: a granary a hauler cannot walk up to is a granary nobody can
-        // use, and the yard a crowd settles into is the jobs layer's business rather than the collider
-        // world's.
         Placement.Transform.TryWorldToCell(at, out var cell);
         Nodes.Get(id).Collider = Colliders.Add(
             ColliderOwner.Placement(cell, Placement.Transform),
             resolved,
             ColliderLayer.Structure,
             ColliderRole.Interactable,
-            ColliderShape.Circle(NodeFootprint.RadiusOf(kind)),
+            ColliderShape.Aabb(new Vector2(NodeFootprint.HalfExtent)),
             at);
+
+        // A building is ground nobody can walk over, and the way to say that is the placement grid:
+        // both the navigation raster and the static side of the velocity solve are derived from it, so
+        // occupying the cells buys routing around the building and steering around it at once, with no
+        // second description of the same wall to fall out of step. The node's own collider stays
+        // interactable — it is what a body queries to interact, not what stops it.
+        //
+        // Piles are deliberately excluded. Goods on the ground are not a wall, and re-rasterising the
+        // map every time a cart is destroyed would be both wrong and expensive.
+        if (NodeFootprint.Blocks(kind)) OccupyFootprint(id);
         return id;
+    }
+
+    /// <summary>
+    /// Fills in the footprint of any node an assignment's places happen to sit on.
+    /// </summary>
+    /// <remarks>
+    /// Because getting this wrong is silent and fatal, and it was: a post given at a farm without its
+    /// extent has a tolerance measured in body radii — 1.11 m for a villager — while the farm's wall,
+    /// once buildings occupy their cell, reaches 1.12 m. One centimetre short, forever, and the hand
+    /// walks at the farm forty-seven times and never arrives. Nothing about that failure points at the
+    /// missing argument.
+    /// <para>
+    /// So the world fills it in. A caller may still pass an extent explicitly — the hauling board does,
+    /// because it has the nodes in hand — and anything left at zero is looked up here, which means every
+    /// path into an assignment gets the right answer including the ones written before nodes existed.
+    /// </para>
+    /// </remarks>
+    private Assignment ResolveNodeExtents(Assignment assignment)
+    {
+        if (assignment.Kind == AssignmentKind.None) return assignment;
+        var reach = PlacementCellSize * 0.5f;
+        if (assignment.PlaceExtent <= 0f &&
+            EconomySystem.NodeAt(Nodes, assignment.Anchor, reach) is { IsValid: true } near)
+        {
+            ref readonly var node = ref Nodes.Get(near);
+            assignment = assignment with
+            {
+                Anchor = node.Position,
+                PlaceExtent = node.FootprintRadius,
+            };
+        }
+
+        if (!assignment.HasTwoEnds || assignment.FarPlaceExtent > 0f) return assignment;
+        if (EconomySystem.NodeAt(Nodes, assignment.FarAnchor, reach) is not { IsValid: true } far)
+        {
+            return assignment;
+        }
+
+        ref readonly var farNode = ref Nodes.Get(far);
+        return assignment with
+        {
+            FarAnchor = farNode.Position,
+            FarPlaceExtent = farNode.FootprintRadius,
+        };
+    }
+
+    /// <summary>
+    /// Marks the placement cells a building stands on, so bodies route and steer around it.
+    /// </summary>
+    /// <remarks>
+    /// One cell, the one the node's centre falls in, and the node is snapped to that cell's centre so
+    /// the wall, the drawing and the arrival tolerance describe the same square. See
+    /// <see cref="NodeFootprint"/> for why anything cleverer than one cell went badly.
+    /// </remarks>
+    private void OccupyFootprint(NodeId id)
+    {
+        var transform = Placement.Transform;
+        ref var node = ref Nodes.Get(id);
+        if (!transform.TryWorldToCell(node.Position, out var cell)) return;
+        node.Position = transform.CellCenter(cell);
+        if (Placement.IsOccupied(cell) || !Placement.SetOccupied(cell, true)) return;
+
+        var halfExtents = new Vector2(transform.CellSize * 0.5f - 0.025f);
+        blockColliders[cell] = Colliders.Add(
+            ColliderOwner.Placement(cell, transform),
+            node.Faction,
+            ColliderLayer.Structure,
+            ColliderRole.MovementSolid | ColliderRole.PlacementBlocker | ColliderRole.Interactable,
+            ColliderShape.Aabb(halfExtents),
+            transform.CellCenter(cell));
+        Colliders.Move(node.Collider, node.Position);
+        RebuildTerrainNavigation();
     }
 
     /// <summary>People with no house to live in, which §6 wants named as a blocked sink.</summary>
@@ -897,11 +976,12 @@ internal sealed class SimulationWorld
 
     private void ApplyAssignment(AssignGroupCommand assign)
     {
+        var resolved = ResolveNodeExtents(assign.Assignment);
         foreach (var id in assign.Agents)
         {
             if (!Agents.Contains(id)) continue;
             ref var agent = ref Agents.Get(id);
-            JobSystem.Assign(ref agent, assign.Assignment);
+            JobSystem.Assign(ref agent, resolved);
             // A unit taken off work stops where it stands rather than finishing the walk it
             // was on. Being given work, on the other hand, does not need a halt: the jobs
             // layer will send it where it is now needed on this same tick.
@@ -934,7 +1014,11 @@ internal sealed class SimulationWorld
             switch (request.Step)
             {
                 case JobStep.WalkTo:
-                    BeginSoloMove(ref agents[i], Terrain.ClampPosition(request.Target));
+                    if (TryApproachPoint(in agents[i], out var approach))
+                    {
+                        BeginSoloMove(ref agents[i], approach);
+                    }
+
                     break;
                 case JobStep.LegFinished:
                     Handover(ref agents[i], request.Leg);
@@ -1050,6 +1134,96 @@ internal sealed class SimulationWorld
             leg: 1);
     }
 
+    /// <summary>
+    /// Somewhere a body of this size can actually stand next to its place.
+    /// </summary>
+    /// <remarks>
+    /// Searched rather than computed, and that is the point. The first version put the body at
+    /// <c>extent + radius + slack</c> along its own bearing and trusted the arithmetic — which works for
+    /// a villager and fails for a wagon, because a 0.90 m body needs 1.96 m of clearance from the corner
+    /// of a building's cell and the navigation raster answers to the nearest half-metre cell centre on
+    /// top of that. The wagon asked for a route to a point inside a wall two hundred and twenty-eight
+    /// times and never went anywhere.
+    /// <para>
+    /// So the ring is walked outward from as near as touching allows, trying the body's own bearing
+    /// first at each radius and then to either side, and the first point the router says a body this size
+    /// can occupy wins. Nearest-first means it walks to the near side of the building; bearing-first
+    /// means it does not cross to the far side for a metre's advantage. It removes a tuned number
+    /// instead of adding one, and it is asked only on the tick a walk is issued.
+    /// </para>
+    /// </remarks>
+    private bool TryApproachPoint(in AgentState agent, out Vector2 point)
+    {
+        var place = agent.Jobs.Place;
+        var extent = agent.Jobs.PlaceExtent;
+        if (extent <= 0f)
+        {
+            point = Terrain.ClampPosition(place);
+            return CanRouteTo(point, in agent);
+        }
+
+        var toward = agent.Position - place;
+        var bearing = toward.LengthSquared() > 0.000001f
+            ? Vector2.Normalize(toward)
+            : Vector2.UnitX;
+        var nearest = extent + agent.Radius + JobDefaults.TouchSlack * 0.5f;
+        var step = NavigationCellSize;
+        // Far enough out to clear a heavy body's clearance plus the raster's own quantisation, and no
+        // further: past this the place is genuinely walled in and retrying politely is the right answer.
+        var furthest = nearest + agent.Radius * 2f + 2f;
+
+        for (var radius = nearest; radius <= furthest; radius += step)
+        for (var turn = 0; turn < ApproachBearings.Length; turn++)
+        {
+            var angle = ApproachBearings[turn];
+            var direction = new Vector2(
+                bearing.X * MathF.Cos(angle) - bearing.Y * MathF.Sin(angle),
+                bearing.X * MathF.Sin(angle) + bearing.Y * MathF.Cos(angle));
+            var candidate = Terrain.ClampPosition(place + direction * radius);
+            if (!CanRouteTo(candidate, in agent)) continue;
+            point = candidate;
+            return true;
+        }
+
+        point = Terrain.ClampPosition(place);
+        return false;
+    }
+
+    /// <summary>
+    /// Whether the router will accept this point as a destination for this body, and the body can
+    /// actually stand on it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Both tests, because they are different questions and using the wrong one cost a session.</b>
+    /// <c>IsPositionNavigable</c> asks whether this body, as a circle, overlaps anything — a continuous
+    /// test against terrain and placement boxes. <c>IsWalkable</c> asks whether the raster's clearance at
+    /// this <em>cell centre</em> admits a body of this radius, which is what every route search actually
+    /// consults and is quantised to the clearance rungs.
+    /// <para>
+    /// They disagree, and they disagree most for the widest bodies. A 0.90 m wagon can physically stand
+    /// half a metre from a building's wall while the cell it is standing in has a clearance of 0.75 and is
+    /// therefore not routable at 0.90. Choosing an approach point with the body test and then handing it
+    /// to the router produced a wagon that asked for a route to a legal position two hundred and
+    /// twenty-eight times and was refused every time, sitting thirty metres away in the movement layer's
+    /// limbo state — <c>Move</c> with no destination. <c>plan-rts.md</c> already warns that cell clearance
+    /// cannot bound where a body is; the converse is just as true, and this is where it bites.
+    /// </para>
+    /// </remarks>
+    private bool CanRouteTo(Vector2 point, in AgentState agent) =>
+        Navigation.TryWorldToCell(point, out var cell) &&
+        Navigation.IsWalkable(cell, agent.NavigationRadius) &&
+        pathService.IsPositionNavigable(point, agent.NavigationRadius);
+
+    /// <summary>Bearings tried around a place, the body's own first and then either side of it.</summary>
+    private static readonly float[] ApproachBearings =
+    {
+        0f, MathF.PI / 4f, -MathF.PI / 4f, MathF.PI / 2f, -MathF.PI / 2f,
+        3f * MathF.PI / 4f, -3f * MathF.PI / 4f, MathF.PI,
+    };
+
+    /// <summary>Whether a body of this size could stand anywhere it needs to be.</summary>
+    private bool IsPlaceApproachable(in AgentState agent) => TryApproachPoint(in agent, out _);
+
     /// <summary>What the ground where a unit's work is looks like, for the jobs layer.</summary>
     /// <remarks>
     /// The same two questions <see cref="TryReturnToHold"/> asks about a hold point, and asked
@@ -1061,7 +1235,10 @@ internal sealed class SimulationWorld
     private PlaceCondition ClassifyPlace(in AgentState agent)
     {
         var place = agent.Jobs.Place;
-        if (!pathService.IsPositionNavigable(place, agent.NavigationRadius))
+        // A building's own cells are built on, so asking whether its centre is navigable would call
+        // every farm in the world unreachable and leave every hand politely retrying forever. What
+        // matters for a place with an extent is whether there is ground to stand on around it.
+        if (!IsPlaceApproachable(in agent))
         {
             return PlaceCondition.Unreachable;
         }

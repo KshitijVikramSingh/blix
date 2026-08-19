@@ -1160,9 +1160,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var fullness = node.IsSink
                 ? node.Occupancy <= 0 ? 0f : MathF.Min(1f, node.Occupants / (float)node.Occupancy)
                 : node.Capacity <= 0 ? 0f : MathF.Min(1f, node.Stock.Total / (float)node.Capacity);
-            // The same footprint the collider uses and the jobs layer arrives at, so what is drawn is
-            // what a body actually walks up to.
-            var width = node.FootprintRadius * 2f;
+            // The cell the building occupies, so what is drawn is exactly the ground bodies route
+            // around. Height still reads how full it is.
+            var width = NodeFootprint.HalfExtent * 2f;
             var height = 0.9f + fullness * 1.6f;
             var ground = simulation.Terrain.SampleHeight(node.Position);
             terrainBatch.Add(
