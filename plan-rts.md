@@ -1,16 +1,27 @@
 # RTSGame — locomotion layer: state, seams, and what not to break
 
-Status as of 2026-08-19. `--selftest` **53/53 passing**, on a body that walks at 1.79 m/s and a
-router that partitions ground into rectangles rather than searching it. Durations in the tests
-carry a `WalkingPace` factor recording that they were tuned against a body running at 4.5 —
-see `plan-rts-game.md` §13 Session 2 for what the re-base moved, and **§8 below for the routing
-substrate**, which is answered rather than open. Branch `rts-locomotion`.
+Status as of 2026-08-19. `--selftest` **53/53 passing**, on a body that walks at 1.79 m/s, a router
+that partitions ground into rectangles rather than searching it, and — since Session 4 — **six unit
+types across two body classes**, which is what most of the recent findings here came out of.
+Durations in the tests carry a `WalkingPace` factor recording that they were tuned against a body
+running at 4.5 — see `plan-rts-game.md` §13 Session 2 for what the re-base moved, and **§8 below for
+the routing substrate**, which is answered rather than open. Branch `rts-locomotion`.
 
 Run it: `tools/run-rts-game.sh [--debug-all] [--extent <metres>]`
 Verify it: `dotnet run --project src/RTSGame/RTSGame.csproj -c Release -- --selftest`
 Measure it: same with `--benchmark`, and `--doorwaytest` for two-way gap contention
 Measure it at size: same with `--scale` — see §5, and `plan-rts-game.md` §13 for what it found
+More than one kind of body: `--mixedtest`, `--congestiontest`, `--radiisweep` — see §5
 Routing substrate: **§8** — answered, shipped, with both refusals kept
+
+**The one thing to take from this document if you take nothing else.** Every bug found while unit
+types landed was the same bug: *a distance about bodies written as a flat number*, tuned once
+against a 0.37 m body walking at 1.79 m/s and silently wrong for anything else. The neighbour
+horizon was too narrow for two wide bodies to ever see each other, and then too narrow in *time*
+for two fast ones. The crowded-arrival tolerance asked a wagon to stand on a point to a fifth of its
+own width. Free-turn speed was a fraction of the wrong body's pace. None of them failed a test,
+because until there was a second kind of body they could not. **Write distances in bodies and
+durations in paces**, or the next unit type finds the next one.
 
 ---
 

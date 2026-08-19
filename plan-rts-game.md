@@ -2,29 +2,42 @@
 
 ## Handoff — read this first
 
-**You are picking up a design that is fully specified and a codebase that has none of it yet.**
+**You are picking up a design that is fully specified, and a codebase that now implements the
+bottom third of it.**
 
-- **The code** is Thread B: a greybox locomotion lab in `src/RTSGame`. One fixed 30 Hz tick, ORCA
-  velocity control that sees walls, flow-field group movement, congestion routing in seconds.
-  `--selftest` **40/40** on branch `rts-locomotion`. Its tick order, its 16 invariants and its five
-  measured refusals live in **`plan-rts.md`** — read that before touching movement, because most of
-  what looks tunable there is load-bearing in two ways at once.
-- **This document** is Thread A: the game that goes on top, settled across two long design sessions
-  in August 2026. §1–§11 are decided, not speculative — the numbers are derived and the derivations
-  are recorded beside them, because they move as a set. **§12 is what is genuinely still open.**
-- **Sessions 1, 2 and 3 are done** (2026-08-18/19) and their records are in §13. The 1200 m map
-  went from a 549 ms tick and a 4.1 s move order to a **5.8 ms tick at 2,000 agents**, the body
-  came down from a 4.5 m/s run to a 1.79 m/s walk with every threshold re-based against it, and
-  the map came down from 1200 m to **600 m** — see §3, where the old derivation is kept beside
-  the correction, because it was a ratchet rather than a derivation and that is worth not
-  repeating. The routing layer was then rebuilt twice more; `plan-rts.md` §8 is the record and
-  is answered rather than open.
-- **Read §14 first** — it is the measured state, the debts this work is carrying, and what changed
-  underneath the rest of the roadmap.
-- **Start at Session 4, unit types.** It is the elastic session and the one the rest now waits on:
-  soldier, cart and scout speeds are numbers in §3 that nothing implements. The body-radius half of
-  it is **answered** — §3's radius classes, measured 2026-08-19 — so what is left there is per-type
-  speed, turn model and capacity, and keying the decomposition cache by rung rather than by radius.
+- **The code** is `src/RTSGame`: one fixed 30 Hz tick, ORCA velocity control that sees walls,
+  flow-field group movement, congestion routing priced in seconds, an adaptive rectangle partition
+  for routes, and — since Session 4 — six unit types across two body classes. `--selftest`
+  **53/53** on branch `rts-locomotion`. Its tick order, its invariants and its **five measured
+  refusals** live in **`plan-rts.md`** — read that before touching movement, because most of what
+  looks tunable there is load-bearing in two ways at once.
+- **This document** is the game that goes on top, settled across long design sessions in August
+  2026. §1–§11 are decided, not speculative — the numbers are derived and the derivations are
+  recorded beside them, because they move as a set. **§12 is what is genuinely still open**, and it
+  is shorter than it was.
+- **Sessions 1 through 4 are done** (2026-08-18/19); their records are in §13 and the measured state
+  is §14. In order: the 1200 m map went from a 549 ms tick and a 4.1 s move order to **5.8 ms at
+  2,000 agents**; the body came down from a 4.5 m/s run to a **1.79 m/s walk** with every threshold
+  re-based; the map came down to **600 m**; the routing layer was rebuilt twice more into rectangles
+  and tiles; and the roster landed — villager, soldier, hauler cart, light cavalry, heavy cavalry,
+  wagon.
+
+### Start at Session 5, the jobs layer
+
+Its blocking dependency — "do not start the jobs layer before the router" — is satisfied twice
+over, and the two numbers Sessions 5 and 6 rest on have both been re-derived against the map they
+will actually run on rather than left to be discovered mid-session:
+
+- **The catchment is 60 s at hauler pace, 66 m** (§6). The figure it replaced covered a player's
+  whole territory, so the second-granary mechanic never fired at all.
+- **The hauler exists and is 1.10 m/s at 0.55 m** (§3), which is what made that derivation possible.
+
+**What Session 5 must not assume.** Hauling is priced in seconds through the congestion field, and
+that field now charges a body by its own **width and speed** as well as by the jam — see
+`plan-rts.md` §7. Both are on dials at 1, both are unmeasured at scale, and **Session 6 is the run
+that settles them**: many haulers of differing sizes sharing routes continuously is the workload
+those terms exist for and nothing before it will decide the numbers. Do not tune them on a scenario;
+build the economy and read them off it.
 
 Four things that will bite you if you skip them:
 
@@ -1400,73 +1413,88 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 |---|---|
 | suite | `--selftest` **53/53** |
 | body | **1.79 m/s**, accel 2.0, decel 3.0, turn 3.03 rad/s, compression **1.5x** |
+| roster | **6 types, 2 body classes** — §3; radius 0.37 / 0.55 / 0.90 |
 | world | **600 m** for the game; 30 m calibration world untouched and asserted |
 | tick, 2,000 agents | **6.0 ms at 600 m, 5.8 ms at 1200 m** — extent no longer moves it |
 | move order, ridge map | **8–27 ms**, 3–4 searches |
 | route quality vs the flat optimum | mean **1.0014**, p99 1.098, worst 1.187, **no cell lost** |
 | resident at 1200 m | **177 MB** (was 315), congestion **253 KB** (was 74.9 MB) |
 | frame | 7.4 ms |
-| tuning dials on the panel | **11** (was 45) |
+| tuning dials on the panel | **14** |
+| catchment | **60 s at hauler pace, 66 m** — §6 |
 
-### Debts this session is carrying
+### Debts this work is carrying
 
-Named so the next reader does not have to rediscover them.
+Named so the next reader does not have to rediscover them. Struck-through entries were closed and
+are kept because the *reason* they closed is worth having.
 
-1. **`walked/optimal` moved with the router** — pen 1.19 → 1.30, gate 1.62 → 1.78. Bodies walk
-   further even though the field's *costs* are closer to optimal, most likely tiles seeded from a
-   corner-graph field steering slightly wide near borders. Nothing fails on it. It is the first
-   number to look at if crowds start reading as wandering.
+1. **`walked/optimal` moved with the router** — pen 1.19 → 1.30, gate 1.62 → 1.78, and unchanged by
+   everything since. Bodies walk further even though the field's *costs* are closer to optimal, most
+   likely tiles seeded from a corner-graph field steering slightly wide near borders. Nothing fails
+   on it. Still the first number to look at if crowds start reading as wandering.
 2. **The congestion test is weak.** It compares a mean over 154,000 cells, and a 22 m jam barely
    moves that. The sharp version compares only the cells whose route passes through the jam.
-3. **`PaceScale` was applied too broadly in Session 2.** The wall horizon turned out to be geometry
-   rather than duration and was tuned back by hand; the other users of it want the same question
-   asked, and none of them has been.
-4. **33 dead stops at the one-cell gate.** Zero in the pen. Both better than before the body
-   change, and the gate is the tighter case.
+3. **`PaceScale` was applied too broadly in Session 2.** *Half closed:* its input was wrong too and
+   is fixed — it keys off `AgentDefaults.WorldPace` rather than off whatever the default unit
+   happens to do, which stopped meaning anything at six speeds. The original question, whether each
+   *user* of it should scale, is still unasked.
+4. **33 dead stops at the one-cell gate.** Zero in the pen. Unmoved by any of this; the gate is the
+   tighter case.
 5. **Substrate stage 3 — dropping the fine grid — is still gated** on congestion and the steering
    gradient having a uniform-resolution home. `plan-rts.md` §8 has the argument.
-6. **Dynamic rebuild granularity was deliberately deferred** in §8's design. Placing a building
-   currently re-rasterises; what it should do to the decomposition is undecided.
+6. **Dynamic rebuild granularity was deliberately deferred.** Placing a building re-rasterises; what
+   it should do to the decomposition is undecided. Note this now costs **two** decompositions rather
+   than one, which is still nothing (9.2 ms + 4.4 ms at 600 m) but is no longer one.
+7. **Both congestion body terms are unmeasured at scale.** Width and speed both ship at 1 on dials.
+   The arithmetic is sound and the single-geometry sweeps are thin — **Session 6 decides them**.
+8. **`centroid-overshoot` moved 0.34 → 0.39 m** when arrival was taught to cross an order boundary.
+   Inside tolerance and the only benchmark number that moved. Watch it if group arrivals read loose.
+9. **A mixed group builds one flow field per distinct radius** — accepted as it stands, because the
+   cost is bounded by the number of body classes rather than the number of units.
 
-### What the roadmap looks like from here
+### What Sessions 5 to 9 now rest on
 
-Sessions 1, 2 and 3 are done and the substrate arc that grew out of Session 3 was not on the
-roadmap at all. Two things changed underneath the remaining sessions and both want acting on
-before, not during:
+Sessions 1 to 4 are done, and the substrate arc that grew out of Session 3 was not on the roadmap at
+all. Both things that had moved underneath the remaining sessions have been acted on rather than
+left to be discovered mid-session.
 
-- **The map is 600 m, not 1200.** §12's open catchment radius (~90 s proposed) was sized against
-  the larger map and a player's territory is now 300 m across. **Sessions 5 and 6 rest on it**, so
-  it should be re-derived first rather than discovered mid-session.
-- **Soak testing got cheaper.** §10 costed it at ~9 ms a tick and 3.7x real time; it is 6.0 ms and
-  about 5.5x. The early-career CI gate in §10 is comfortably affordable now.
+- **The catchment is re-derived** — §6, 60 s at hauler pace, **66 m**, against a nominal 135. The
+  old figure gave 1.10 catchments per territory: one granary covering everything a player holds, so
+  "expand past it and you need a second granary plus a hauling link" never fired. That was not a
+  value wanting tuning, it was a mechanic that had quietly stopped existing. It only became
+  derivable once the hauler had a speed, which is why it waited for Session 4 rather than for an
+  opinion.
+- **Soak testing is affordable** — 6.0 ms a tick and about 5.5x real time, against §10's estimate of
+  9 ms and 3.7x. The early-career CI gate can be wired whenever Session 7 builds the harness.
 
-**Session 4 is done, 2026-08-19** — the roster is in §3, the gate is met at 50/50, and the two
-things that changed underneath the rest of the roadmap have both been acted on rather than
-discovered mid-session:
+**Session 5, the jobs layer, is next.** Assignment / activity / interrupt onto the `AgentCommand` and
+`AgentLocomotionState` seams, testable with trivial activities before any economy exists. Its gate
+is unchanged: a standing assignment survives an interrupt and resumes, **and the determinism
+self-test grows to cover the new state** — which is now the third session in a row that rule has
+been owed something, since it still covers movement only.
 
-- **The catchment radius is re-derived**, §6. 60 s at hauler pace, 66 m, down from a nominal 135.
-  The old number gave 1.10 catchments per territory — one granary covering everything a player
-  holds, so the second-granary mechanic never fired at all. Sessions 5 and 6 now rest on a number
-  that was derived against the map they will actually run on, and against the unit that traverses
-  it. It only became derivable once the hauler had a speed, which is why it waited for this session
-  rather than for a decision.
-- **Soak testing is affordable** and the early-career CI gate in §10 can be wired when Session 7
-  builds the harness.
+**Three things to carry into it.**
 
-**Sessions 5 and 6 are next**, and the standing instruction in the handoff still holds: do not start
-the jobs layer before the router, which is now done twice over.
+1. **Radius belongs to the class, not the type.** A unit type names `BodyClass.Foot` or
+   `BodyClass.Heavy` and takes its navigation radius from that, which is what keeps six types on two
+   decompositions. A job that wants a new unit picks a class; it does not pick a number.
+2. **Everything about a body is written in bodies.** Four separate bugs this session were a distance
+   written as a flat number that had been tuned against a 0.37 m body walking at 1.79 m/s: the
+   neighbour horizon twice, the crowded-arrival tolerance, and the free-turn speed. If the jobs
+   layer adds a threshold about how near, how far or how long, write it against the body or the
+   pace it describes.
+3. **Do not tune the congestion body terms on a scenario.** Width and speed both ship at 1 on dials
+   and both are argued from arithmetic and one thin sweep. **Session 6 is the run that settles
+   them** — many haulers of differing sizes sharing routes continuously is the workload they exist
+   for.
 
-*Superseded, kept for the shape of it:* Session 4 was load-bearing in a way it was not when the
-roadmap was written: the first unit with a **different body radius** decides whether one rectangle decomposition
-serves every unit or whether it needs one per radius, and that sits under Sessions 5 through 9.
+**Session 6, stock and catchments and hauling, is the first milestone of the design rather than the
+engine**, and the first place autonomy time becomes measurable. It inherits the catchment number
+above and the two dials; its own gate — a settlement that produces, stores, hauls and consumes for a
+full year with no counter drifting and no unit permanently stalled — is also the soak that decides
+whether the congestion terms are right.
 
-**Answered early and cheaply, 2026-08-19, and written up in §3.** Two decompositions serve any number
-of unit types, split at a body radius of 0.715 m, because terrain cannot separate two radii inside
-half a navigation cell however it is shaped. The villager, the soldier, the scout and the hauler cart
-are one class and share a passage; large mounts and wagons are the other and need a gate. What
-remains of Session 4 is per-type speed, turn model and capacity — the elastic session it was
-originally described as.
-
-The instrument is `--radiisweep`, and it is worth re-running when terrain generation is real: if the
-rungs are still 0.250 / 0.750 / 1.250, everything in §3 holds unchanged, and if they are not, then
-something is putting obstacles off the lattice and that is the thing to go and look at.
+**The instrument for the radius argument is `--radiisweep`**, and it is worth re-running the moment
+terrain generation is real: if the clearance rungs are still 0.250 / 0.750 / 1.250 then everything
+in §3 holds unchanged, and if they are not, something has put an obstacle off the half-metre lattice
+and §3's two classes want re-deriving before anything else is built on them.
