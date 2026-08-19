@@ -28,8 +28,34 @@ internal enum NodeKind
     /// <summary>Produces, in the hands assigned to it, with a seasonal shape.</summary>
     Farm,
 
-    /// <summary>Cuts wood. Seasonal in labour rather than in yield.</summary>
-    Woodcutter,
+    /// <summary>
+    /// A tree: a finite stock of wood standing where it grew.
+    /// </summary>
+    /// <remarks>
+    /// A node because that is all a tree is — stock at a place, with a labour cost to release it — and
+    /// the same argument that made a heap a node applies twice over here. It saves by memory copy, it is
+    /// fingerprinted without being asked, an assignment can name it by a stable id, and felling it is
+    /// <c>Remove</c>.
+    /// <para>
+    /// <b>The woodcutter node it replaces is retired.</b> That building accrued wood at a rate times a
+    /// seasonal shape times the square root of the hands standing at it, whether or not there was a
+    /// tree within a hundred metres — an abstract producer you could put anywhere, in a design whose
+    /// premise is that distance is the terrain. It is exactly the mistake <see cref="CropCycle"/> was
+    /// written to undo for grain, and it goes the same way: the labour is spent at the thing itself, and
+    /// what a place is worth is a fact about the map. A lumber camp is now a
+    /// <see cref="ForwardDepot"/> you build at the tree line, which is a store, which means the wood
+    /// piling up in it is stock nobody eats — and that, not a rule about logging, is what puts carts on
+    /// the road.
+    /// </para>
+    /// <para>
+    /// A tree does not block. Hundreds of them do not re-rasterise the map, a body walks between the
+    /// trunks, and a forest is a distance to be crossed rather than a wall to be routed around. That is
+    /// deliberate and it is the cheap answer: the mechanic is <em>how far the wood is</em>, and making a
+    /// woodland impassable would buy nothing but a hundred small holes in the navigation raster and the
+    /// wide-body routing failure that is already a known debt.
+    /// </para>
+    /// </remarks>
+    Tree,
 
     /// <summary>Stores at the frontier, so a distant holding runs without a hauler each way.</summary>
     ForwardDepot,
@@ -106,14 +132,24 @@ internal static class NodeFootprint
         NodeKind.Granary => 5,
         NodeKind.ForwardDepot => 3,
         NodeKind.Farm => 3,
-        NodeKind.Woodcutter => 3,
         NodeKind.House => 3,
         _ => 0,
     };
 
-    /// <summary>Half the width of a building, in metres.</summary>
-    public static float HalfExtentOf(NodeKind kind) =>
-        CellsOf(kind) * SimulationWorld.PlacementCellSize * 0.5f;
+    /// <summary>Half the width of a tree, which is not a multiple of a placement cell.</summary>
+    /// <remarks>
+    /// A trunk is a trunk. It is not built ground and it is not described in the grid built ground is
+    /// described in, so it does not have to quantise to 1.5 m — and it must not, or a cutter would be
+    /// told to stand two metres back from the thing it is felling.
+    /// </remarks>
+    internal const float TreeHalfExtent = 0.45f;
+
+    /// <summary>Half the width of a node's own footprint, in metres.</summary>
+    public static float HalfExtentOf(NodeKind kind) => kind switch
+    {
+        NodeKind.Tree => TreeHalfExtent,
+        _ => CellsOf(kind) * SimulationWorld.PlacementCellSize * 0.5f,
+    };
 
     /// <summary>
     /// Radius of the circle that just contains a building, which is what arrival is measured against.
@@ -129,8 +165,25 @@ internal static class NodeFootprint
         ? 0.4f
         : HalfExtentOf(kind) * 1.41421356f;
 
-    /// <summary>Whether this kind of node is built ground that bodies must go around.</summary>
-    public static bool Blocks(NodeKind kind) => CellsOf(kind) > 0;
+    /// <summary>
+    /// Whether this kind of node is built ground that bodies must go around.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not the same question as how big it is,</b> which is why it is a separate list rather than
+    /// <c>CellsOf(kind) > 0</c>. A field has a footprint — it is 4.5 m across, its hands are counted
+    /// against its wall, and it is drawn at that size — and a field is <em>not a wall</em>. It is
+    /// tilled ground. You walk onto it to work it, a cart cuts across the corner of it, and a dozen
+    /// of them tile into one contiguous patchwork the way fields actually do.
+    /// <para>
+    /// Conflating the two made every farm a 4.5 m obstacle: twelve of them ringed round a granary
+    /// turned the middle of the settlement into a maze, every farmhand had to be routed to the
+    /// outside face of its own field, and the fields could not be laid edge to edge without sealing
+    /// the settlement in. It is also what the earlier complaint about bodies getting stuck in farms
+    /// was: they were not getting stuck, they were going round.
+    /// </para>
+    /// </remarks>
+    public static bool Blocks(NodeKind kind) =>
+        kind is NodeKind.Granary or NodeKind.ForwardDepot or NodeKind.House;
 }
 
 /// <summary>
@@ -226,7 +279,22 @@ internal struct EconomyNode
 
     public bool IsAlive;
 
-    public readonly bool Produces_ => Kind is NodeKind.Farm or NodeKind.Woodcutter;
+    /// <summary>A place worked for what it yields. Fields; nothing else, now that wood is trees.</summary>
+    public readonly bool Produces_ => Kind == NodeKind.Farm;
+
+    /// <summary>A place labour is spent at: a field to be worked or a tree to be cut.</summary>
+    public readonly bool IsWorkSite => Kind is NodeKind.Farm or NodeKind.Tree;
+
+    /// <summary>
+    /// Stock that is not yet a resource — timber still standing in a tree.
+    /// </summary>
+    /// <remarks>
+    /// Counted by conservation, because it is physically there and it will be somebody's wood, and
+    /// excluded from every question about what the settlement <em>has</em>. Without the distinction a
+    /// woodland in reach reads as twenty-five thousand wood in store and the autonomy figure — the one
+    /// number the HUD is for — becomes a statement about the forest rather than about the winter.
+    /// </remarks>
+    public readonly bool IsStanding => Kind == NodeKind.Tree;
 
     /// <summary>Somewhere goods can be delivered to. A pile is not: nobody delivers to a pile.</summary>
     public readonly bool Stores => Kind is NodeKind.Granary or NodeKind.ForwardDepot;
@@ -321,7 +389,13 @@ internal sealed class NodeStore
         return true;
     }
 
-    /// <summary>Everything stored anywhere, which conservation is checked against.</summary>
+    /// <summary>Everything physically anywhere, which conservation is checked against.</summary>
+    /// <remarks>
+    /// Timber still standing in a tree is included, and has to be: it was seeded into the world, so it
+    /// is on the left of the identity, and a cutter moving it from a trunk to its own hands must not
+    /// look like a unit appearing out of nothing. What a settlement <em>has</em> is a different question
+    /// — see <see cref="TotalHeld"/>.
+    /// </remarks>
     public NodeStock TotalStored()
     {
         var total = default(NodeStock);
@@ -333,6 +407,35 @@ internal sealed class NodeStore
         }
 
         return total;
+    }
+
+    /// <summary>Everything the settlement actually has: stores and heaps, not standing timber.</summary>
+    public NodeStock TotalHeld()
+    {
+        var total = default(NodeStock);
+        foreach (ref readonly var node in All)
+        {
+            if (!node.IsAlive || node.IsStanding) continue;
+            total.Grain += node.Stock.Grain;
+            total.Wood += node.Stock.Wood;
+        }
+
+        return total;
+    }
+
+    /// <summary>Timber left standing, and in how many trees.</summary>
+    public (int Wood, int Trees) StandingTimber()
+    {
+        var wood = 0;
+        var trees = 0;
+        foreach (ref readonly var node in All)
+        {
+            if (!node.IsAlive || !node.IsStanding) continue;
+            wood += node.Stock.Wood;
+            trees++;
+        }
+
+        return (wood, trees);
     }
 
     internal void Write(WorldWriter writer)

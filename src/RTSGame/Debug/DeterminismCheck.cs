@@ -109,6 +109,9 @@ internal static class DeterminismCheck
         ["EconomySystem.idleHaulers"] =
             "rebuilt from the bodies by every pass of the board; who is idle is a fact about the " +
             "bodies, and those are fingerprinted.",
+        ["EconomySystem.drawnOn"] =
+            "rebuilt at the head of every pass of the board from the supply bindings on the houses, " +
+            "which are on the nodes and are fingerprinted.",
     };
 
     /// <summary>

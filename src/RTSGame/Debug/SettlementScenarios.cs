@@ -86,8 +86,8 @@ internal static class SettlementScenarios
             $"{Wagons} wagons, one granary of {world.Nodes.Get(granary).Capacity:N0}, " +
             $"housing for {Occupancy} per household");
         Console.WriteLine(
-            "        date        | grain | wood  | hands | fields             | hauls | carrying | " +
-            "grain-left | wood-left | short | unhoused | stalled | ms/tick");
+            "        date        | grain | wood  | hands | fields             | forest         | " +
+            "hauls | carrying | grain-left | wood-left | short | unhoused | stalled | ms/tick");
 
         var reported = Season.Winter;
         for (var tick = 1; tick <= totalTicks; tick++)
@@ -161,49 +161,49 @@ internal static class SettlementScenarios
         world.SeedStock(granary, Resource.Grain, 4200);
         world.SeedStock(granary, Resource.Wood, 1000);
 
-        // Houses ring the granary well inside its catchment, because a household outside every catchment
-        // is a household that goes hungry however full the stores are. The ring is sized so the gaps
-        // between houses are at least a couple of building widths: buildings are 4.5 m across now, and a
-        // ring that fitted them when they were 1.5 m puts them shoulder to shoulder with no room for a
-        // cart to pass between.
+        // The village core: houses on an arc to one side of the granary, tucked as close to it as their
+        // own walls allow. A household outside every catchment goes hungry however full the stores are,
+        // so near is the safe direction, and the arc is sized to leave a cart's width between
+        // neighbours — buildings are 4.5 m across and a ring that fitted them at 1.5 m puts them
+        // shoulder to shoulder.
         var people = farms + woodcutters + carts + wagons;
         var households = (people + Occupancy - 1) / Occupancy;
         var houseWidth = NodeFootprint.HalfExtentOf(NodeKind.House) * 2f;
-        var houseRing = MathF.Max(
-            ringRadius * 0.4f,
-            households * houseWidth * 2f / MathF.Tau);
+        var houseArc = MathF.Max(
+            NodeFootprint.HalfExtentOf(NodeKind.Granary) + houseWidth * 0.5f + 1.5f,
+            households * houseWidth * 1.3f / MathF.PI);
         for (var i = 0; i < households; i++)
         {
-            var angle = (i + 0.5f) / households * MathF.Tau;
+            // Half a turn, centred on west, so the village sits on one side and the fields on the other.
+            var angle = MathF.PI * (0.5f + (i + 0.5f) / households);
             world.AddNode(
                 NodeKind.House,
-                centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * houseRing,
+                centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * houseArc,
                 capacity: 0,
                 occupancy: Occupancy);
         }
 
         var producers = new List<(NodeId Node, Vector2 At)>();
 
-        // Fields are packed around the granary, because the reaper carries its own crop in and every metre
-        // of that walk is a metre not spent reaping. Measured: fields on a 36 m ring lost <b>half the
-        // crop</b> to commuting — 20 seconds out and 20 back for every thirty units, inside a harvest window
-        // that only just holds the reaping. Tiled next to the store the same fields bring in nearly all of
-        // it. That is why a settlement clusters its fields and does not need telling to.
-        var slot = NodeFootprint.HalfExtentOf(NodeKind.Farm) * 2f + 0.5f;
-        var forbidden = NodeFootprint.HalfExtentOf(NodeKind.Granary) + NodeFootprint.HalfExtentOf(NodeKind.Farm);
-        var tiles = new List<Vector2>();
-        for (var ring = 1; tiles.Count < farms && ring < 12; ring++)
-        for (var dz = -ring; dz <= ring && tiles.Count < farms; dz++)
-        for (var dx = -ring; dx <= ring && tiles.Count < farms; dx++)
+        // <b>The fields are one contiguous block abutting the granary</b>, marching away from the village
+        // rather than ringed all round it. Three things settled that shape and none of them was taste.
+        // The reaper carries its own crop in, so every metre of the walk is a metre not spent reaping —
+        // measured, fields on a 36 m ring lost <em>half the crop</em> to commuting inside a harvest window
+        // that only just holds the reaping, and packed against the store the same fields brought in 97%.
+        // A field is not a wall any more (<c>NodeFootprint.Blocks</c>), so they can be laid edge to edge
+        // with no gap and no maze: a patchwork, which is what fields are, and what a dozen 4.5 m plots
+        // half a metre apart conspicuously was not. And putting them all on one side keeps the village
+        // out of the middle of them, so the traffic between store and field never crosses the housing.
+        var slot = NodeFootprint.HalfExtentOf(NodeKind.Farm) * 2f;
+        var across = (int)MathF.Ceiling(MathF.Sqrt(farms));
+        var firstColumn = NodeFootprint.HalfExtentOf(NodeKind.Granary) + slot * 0.5f;
+        for (var i = 0; i < farms; i++)
         {
-            if (Math.Max(Math.Abs(dx), Math.Abs(dz)) != ring) continue;
-            var at = centre + new Vector2(dx * slot, dz * slot);
-            if (MathF.Abs(at.X - centre.X) < forbidden && MathF.Abs(at.Y - centre.Y) < forbidden) continue;
-            tiles.Add(at);
-        }
-
-        foreach (var at in tiles)
-        {
+            var column = i / across;
+            var row = i % across;
+            var at = centre + new Vector2(
+                firstColumn + column * slot,
+                (row - (across - 1) * 0.5f) * slot);
             producers.Add((world.AddNode(NodeKind.Farm, at, YardCapacity, Resource.Grain), at));
         }
 
@@ -222,15 +222,9 @@ internal static class SettlementScenarios
             if (phase is CropPhase.Reap) field.MaintainWork = CropCycle.MaintainLabour;
         }
 
-        // Wood is the far resource: a woodcutter stands where the trees are, and the trees are not next to
-        // the granary. Stage B replaces this ring with an actual tree line.
-        var woodRing = MathF.Max(ringRadius, woodcutters * slot * 2f / MathF.Tau);
-        for (var i = 0; i < woodcutters; i++)
-        {
-            var angle = i / (float)woodcutters * MathF.Tau;
-            var at = centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * woodRing;
-            producers.Add((world.AddNode(NodeKind.Woodcutter, at, YardCapacity, Resource.Wood), at));
-        }
+        // The forest. Where it is, and how thin it has been cut, is the whole of the wood economy: there
+        // is no woodcutter building any more, only trees and the people sent to them.
+        ScatterWoodland(world, centre, ringRadius);
 
         // One hand per producer, posted. Staggered dwell, so the settlement does not breathe in unison
         // — see the note on the stagger below.
@@ -264,6 +258,28 @@ internal static class SettlementScenarios
                     : Assignment.Hold(placed, Stagger(20f, i, producers.Count), extent));
         }
 
+        // Cutters. Posted at a tree rather than at a building, because there is no longer a building to
+        // post them at: the settlement's wood comes out of the nearest trees to a store, and when those
+        // are gone the cutters go looking for a store that can still reach one. Each is dropped on a
+        // different tree so they do not all fell the same trunk.
+        var claimed = new HashSet<int>();
+        for (var i = 0; i < woodcutters; i++)
+        {
+            var tree = NextUnclaimedTree(world, granary, claimed);
+            if (!tree.IsValid) break;
+            ref readonly var trunk = ref world.Nodes.Get(tree);
+            var at = trunk.Position;
+            var extent = trunk.FootprintRadius;
+            var hand = world.SpawnAgent(
+                at + new Vector2(0f, extent + UnitType.Villager.Radius + 0.6f), UnitType.Villager);
+            world.QueueAssign(
+                new[] { hand },
+                Assignment.Work(
+                    tree, at, extent, Resource.Wood,
+                    Woodland.LoadSeconds(UnitType.Villager.CarryCapacity),
+                    EconomySystem.HandoverSeconds));
+        }
+
         for (var i = 0; i < carts + wagons; i++)
         {
             var angle = i / (float)(carts + wagons) * MathF.Tau;
@@ -272,6 +288,126 @@ internal static class SettlementScenarios
         }
 
         return granary;
+    }
+
+    /// <summary>The nearest tree to the store that no cutter has been sent to yet.</summary>
+    private static NodeId NextUnclaimedTree(SimulationWorld world, NodeId store, HashSet<int> claimed)
+    {
+        var from = world.Nodes.Get(store).Position;
+        var best = NodeId.None;
+        var bestDistance = Woodland.ReachMetres * Woodland.ReachMetres;
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (!node.IsAlive || !node.IsStanding || claimed.Contains(node.Id.Value)) continue;
+            var distance = Vector2.DistanceSquared(node.Position, from);
+            if (distance > bestDistance) continue;
+            bestDistance = distance;
+            best = node.Id;
+        }
+
+        if (best.IsValid) claimed.Add(best.Value);
+        return best;
+    }
+
+    /// <summary>
+    /// Trees, thinned near the settlement and continuous further out.
+    /// </summary>
+    /// <remarks>
+    /// <b>The gradient is the point, and it is not decoration — it is the record of past logging.</b>
+    /// Close in, where people have been cutting for years, there are stragglers: single trees with gaps
+    /// between them. Further out there are canopies, clumps that have been nibbled at. Past that it is
+    /// unbroken woodland nobody has reached yet. So the map already tells the player which direction the
+    /// wood ran out in, before the simulation has run a tick, and "distance is the terrain" is a fact
+    /// about the ground rather than a comment in a seed function.
+    /// <para>
+    /// It is also what makes the stage's two halves both true of one map. The stragglers inside
+    /// <see cref="Woodland.ReachMetres"/> of the granary are a compact settlement's whole wood supply and
+    /// they last about two years, so a year-long run needs no cart. Fell them and the nearest tree is
+    /// forty metres out, no store can reach it, and the only answer is a depot at the tree line — at
+    /// which point the wood is piling up somewhere nobody lives and the carts have work.
+    /// </para>
+    /// <para>
+    /// Deterministic, from a counter rather than a clock: two runs of this world must be the same world,
+    /// which the fingerprint checks and the save relies on. There is no <c>Random</c> anywhere in the
+    /// simulation and this is not the place to introduce one.
+    /// </para>
+    /// </remarks>
+    private static void ScatterWoodland(SimulationWorld world, Vector2 centre, float ringRadius)
+    {
+        var placed = new List<Vector2>();
+        var seed = 0x9E3779B9u;
+
+        float Next()
+        {
+            // splitmix32: one multiply-xor-shift chain, deterministic, and enough for a scatter.
+            seed += 0x9E3779B9u;
+            var z = seed;
+            z = (z ^ (z >> 16)) * 0x21F0AAADu;
+            z = (z ^ (z >> 15)) * 0x735A2D97u;
+            z ^= z >> 15;
+            return (z & 0xFFFFFFu) / (float)0x1000000u;
+        }
+
+        bool TryPlant(Vector2 at, float spacing)
+        {
+            // Never in the fields or under a building. A tree standing in a wheat field is not a
+            // collision — trees do not block — it is a lie about what that ground is being used for.
+            if (MathF.Abs(at.X - centre.X) < FieldKeepOut && MathF.Abs(at.Y - centre.Y) < FieldKeepOut)
+            {
+                return false;
+            }
+
+            foreach (var other in placed)
+            {
+                if (Vector2.DistanceSquared(other, at) < spacing * spacing) return false;
+            }
+
+            var node = world.AddNode(NodeKind.Tree, at, capacity: (int)Woodland.WoodPerTree);
+            world.SeedStock(node, Resource.Wood, (int)Woodland.WoodPerTree);
+            placed.Add(world.Nodes.Get(node).Position);
+            return true;
+        }
+
+        void Band(float inner, float outer, int trees, float spacing, int clump)
+        {
+            for (var i = 0; i < trees; i++)
+            {
+                // A clump is one draw for the centre and the rest scattered around it, which is what
+                // makes a canopy read as a canopy rather than as evenly spread noise.
+                var anchor = centre + Polar(Next(), inner, outer, Next());
+                for (var k = 0; k < clump; k++)
+                {
+                    var at = clump == 1
+                        ? anchor
+                        : anchor + new Vector2(Next() * 2f - 1f, Next() * 2f - 1f) * spacing * 2.2f;
+                    for (var attempt = 0; attempt < 6; attempt++)
+                    {
+                        if (TryPlant(world.Terrain.ClampPosition(at), spacing)) break;
+                        at = anchor + new Vector2(Next() * 2f - 1f, Next() * 2f - 1f) * spacing * 2.6f;
+                    }
+                }
+            }
+        }
+
+        // Thinned: what is left within a cutter's reach of the store after years of cutting. Sized to
+        // about two years of this settlement's burning, so a one-year gate never runs out and a two-year
+        // one only just does.
+        Band(FieldKeepOut + 3f, Woodland.ReachMetres, trees: 46, spacing: 3.4f, clump: 1);
+        // Canopies: clumps at the edge of reach, which is where the tree line currently sits.
+        Band(Woodland.ReachMetres, ringRadius * 1.4f, trees: 14, spacing: 3.0f, clump: 5);
+        // Woodland: continuous, and the reason a settlement expands rather than starves.
+        Band(ringRadius * 1.4f, ringRadius * 3f, trees: 30, spacing: 2.8f, clump: 8);
+    }
+
+    /// <summary>Half-width of the ground the fields and the village occupy, which stays clear.</summary>
+    private const float FieldKeepOut = 16f;
+
+    private static Vector2 Polar(float turn, float inner, float outer, float radial)
+    {
+        var angle = turn * MathF.Tau;
+        // Square-rooted so trees are spread evenly over the annulus rather than crowded at its inside.
+        var radius = MathF.Sqrt(inner * inner + radial * (outer * outer - inner * inner));
+        return new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * radius;
     }
 
     /// <summary>
@@ -335,6 +471,12 @@ internal static class SettlementScenarios
         {
             if (!agent.IsAlive || !agent.Jobs.CannotReachWork) continue;
             stalled++;
+            // One failed walk is the crowd at the granary door — nineteen producers deliver to one
+            // building and occasionally somebody is shouldered out of the spot it was aiming at, counts a
+            // retry, and walks back. Three is not the crowd. The column still shows every body that has
+            // fallen short so the number is visible; the fault is reserved for one that is not getting
+            // there.
+            if (agent.Jobs.Retries < 3) continue;
             // The numbers that identify the cause: how far it is against how near it has to be, and
             // what it thinks it is standing next to. Guessing at this cost two rounds.
             faults.Add(
@@ -355,11 +497,43 @@ internal static class SettlementScenarios
         ReportGaps(world);
         Console.WriteLine(
             $"  {world.Date,-18} | {grain.Stored,5:N0} | {wood.Stored,5:N0} | {hands,5} | " +
-            $"{Fields(world),-18} | {world.Economy.HaulsAssigned,5:N0} | {carried.Total,8:N0} | " +
+            $"{Fields(world),-18} | {Forest(world),-14} | " +
+            $"{world.Economy.HaulsAssigned,5:N0} | {carried.Total,8:N0} | " +
             $"{Seasons(grain.Seasons),10} | {Seasons(wood.Seasons),9} | " +
             $"{world.Economy.Unmet.Grain + world.Economy.Unmet.Wood,5:N0} | " +
             $"{world.UnhousedCount,8} | {stalled,7} | " +
             $"{world.Timings.Format(world.Agents.Count, world.TickNumber).Split("total ")[1].Split(" ms")[0]}");
+    }
+
+    /// <summary>
+    /// The wood line: how much timber is left, and whether any of it is still in reach of a store.
+    /// </summary>
+    /// <remarks>
+    /// <b>Trees in reach is the number Stage B is about.</b> Standing timber falling is the settlement
+    /// eating its forest, which is expected and is the whole clock of the game. Trees <em>in reach</em>
+    /// falling to zero is the settlement having outgrown its arrangement, and it is the moment a forward
+    /// depot at the tree line stops being optional — after which the wood piles up somewhere nobody lives
+    /// and the carts have work for the first time.
+    /// </remarks>
+    private static string Forest(SimulationWorld world)
+    {
+        var (standing, trees) = world.Nodes.StandingTimber();
+        var reachable = 0;
+        foreach (ref readonly var store in world.Nodes.All)
+        {
+            if (!store.IsAlive || !store.Stores) continue;
+            foreach (ref readonly var tree in world.Nodes.All)
+            {
+                if (!tree.IsAlive || !tree.IsStanding || tree.Stock.Wood <= 0) continue;
+                if (Vector2.Distance(tree.Position, store.Position) <= Woodland.ReachMetres) reachable++;
+            }
+        }
+
+        // Axes actually swinging, rather than people who call themselves woodcutters. A cutter whose
+        // trees run out loses its assignment altogether — it becomes spare labour, which is correct —
+        // so counting cutters would count nobody at exactly the moment the number mattered. This one
+        // goes to zero the season the wood line passes out of reach, which is the signal.
+        return $"{trees,3} tr {reachable,3} nr {EconomySystem.CuttersAtWork(world.Agents),2} cut";
     }
 
     /// <summary>
@@ -416,6 +590,10 @@ internal static class SettlementScenarios
         Console.WriteLine(
             $"  hauling: {economy.HaulsAssigned:N0} jobs given out, {economy.HaulsAbandoned:N0} dropped " +
             "when the source emptied or the sink filled");
+        var (standing, trees) = world.Nodes.StandingTimber();
+        Console.WriteLine(
+            $"  forest: {trees:N0} trees left holding {standing:N0} wood, felled " +
+            $"{economy.Seeded.Wood - standing:N0} — wood is never produced, only taken out of trees");
 
         // What the year cost per person, against what the rates say it should have. A settlement that
         // ate less than its appetite went short somewhere, and the shortfall column says where.

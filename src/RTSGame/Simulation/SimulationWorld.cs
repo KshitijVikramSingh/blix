@@ -309,6 +309,38 @@ internal sealed class SimulationWorld
     }
 
     /// <summary>
+    /// Turns a bare post that landed on a field or a tree into the job that belongs there.
+    /// </summary>
+    /// <remarks>
+    /// A convenience of the testbed and not a mechanic: posting a villager is one key, and a player who
+    /// drops one on a field means "farm this" rather than "stand here for six seconds indefinitely".
+    /// Applied per body rather than per order because the shift length depends on what the body can
+    /// carry — a tree is cut until the hands are full, and how long that takes is a fact about the hands.
+    /// <para>
+    /// It is also the only way a cutter gets its first tree. Everything after that is
+    /// <see cref="TrySendBackToWork"/>, which is what makes the arrangement follow the wood line without
+    /// the player re-posting anybody.
+    /// </para>
+    /// </remarks>
+    private Assignment PostedOnAWorkSite(in AgentState agent, Assignment assignment)
+    {
+        if (assignment.Kind != AssignmentKind.Hold || agent.CarryCapacity <= 0) return assignment;
+        var at = EconomySystem.NodeAt(Nodes, assignment.Anchor, PlacementCellSize);
+        if (!Nodes.Contains(at)) return assignment;
+        ref readonly var site = ref Nodes.Get(at);
+        return site.Kind switch
+        {
+            NodeKind.Farm => Assignment.Work(
+                at, site.Position, site.FootprintRadius, Resource.Grain,
+                EconomySystem.WorkShiftSeconds, EconomySystem.HandoverSeconds),
+            NodeKind.Tree => Assignment.Work(
+                at, site.Position, site.FootprintRadius, Resource.Wood,
+                Woodland.LoadSeconds(agent.CarryCapacity), EconomySystem.HandoverSeconds),
+            _ => assignment,
+        };
+    }
+
+    /// <summary>
     /// Moves a spawn position off built ground, if it landed on some.
     /// </summary>
     /// <remarks>
@@ -1029,7 +1061,7 @@ internal sealed class SimulationWorld
         {
             if (!Agents.Contains(id)) continue;
             ref var agent = ref Agents.Get(id);
-            JobSystem.Assign(ref agent, resolved);
+            JobSystem.Assign(ref agent, PostedOnAWorkSite(in agent, resolved));
             // A unit taken off work stops where it stands rather than finishing the walk it
             // was on. Being given work, on the other hand, does not need a halt: the jobs
             // layer will send it where it is now needed on this same tick.
@@ -1315,60 +1347,114 @@ internal sealed class SimulationWorld
     private void WorkHandover(ref AgentState agent, int leg)
     {
         ref var jobs = ref agent.Jobs;
-        var assignment = jobs.Assignment;
-        if (!Nodes.Contains(assignment.Source))
-        {
-            JobSystem.Assign(ref agent, Assignment.None);
-            return;
-        }
 
-        ref readonly var field = ref Nodes.Get(assignment.Source);
-
-        // Coming off the field with a load: find somewhere to put it and walk there.
+        // Coming off the work site with a load: find somewhere to put it and walk there.
         if (leg % 2 == 0)
         {
             var store = jobs.CarriedUnits > 0
                 ? EconomySystem.NearestStoreWithRoom(Nodes, jobs.Carrying, agent.Faction, agent.Position)
                 : NodeId.None;
-            if (!Nodes.Contains(store))
+            if (Nodes.Contains(store))
             {
-                // Empty-handed, or nowhere to put it: stay where the work is. Falling through to the
-                // delivery leg sent a farmer with nothing to carry walking to the granary and back all
-                // summer, which cost it its own field — the settlement lost a third of a harvest to
-                // twelve people commuting to deliver nothing.
+                ref readonly var target = ref Nodes.Get(store);
                 JobSystem.Retarget(
                     ref agent,
-                    assignment with { Anchor = field.Position, PlaceExtent = field.FootprintRadius },
-                    leg: 0);
+                    jobs.Assignment with
+                    {
+                        Sink = store,
+                        FarAnchor = target.Position,
+                        FarPlaceExtent = target.FootprintRadius,
+                    },
+                    leg: 1);
                 return;
             }
 
-            ref readonly var target = ref Nodes.Get(store);
-            JobSystem.Retarget(
-                ref agent,
-                assignment with
-                {
-                    Sink = store,
-                    FarAnchor = target.Position,
-                    FarPlaceExtent = target.FootprintRadius,
-                },
-                leg: 1);
+            // Empty-handed, or nowhere to put it: stay where the work is. Falling through to the
+            // delivery leg sent a farmer with nothing to carry walking to the granary and back all
+            // summer, which cost it its own field — the settlement lost a third of a harvest to twelve
+            // people commuting to deliver nothing.
+            if (!TrySendBackToWork(ref agent)) JobSystem.Assign(ref agent, Assignment.None);
             return;
         }
 
-        // At the store: put it down, then go back to the field.
-        if (Nodes.Contains(assignment.Sink) && jobs.CarriedUnits > 0)
+        // At the store: put it down, then go back out.
+        if (Nodes.Contains(jobs.Assignment.Sink) && jobs.CarriedUnits > 0)
         {
-            ref var store = ref Nodes.Get(assignment.Sink);
+            ref var store = ref Nodes.Get(jobs.Assignment.Sink);
             var delivered = Math.Min(jobs.CarriedUnits, store.RoomFor(jobs.Carrying));
             store.Stock.Add(jobs.Carrying, delivered);
             jobs.CarriedUnits -= delivered;
         }
 
+        if (!TrySendBackToWork(ref agent)) JobSystem.Assign(ref agent, Assignment.None);
+    }
+
+    /// <summary>
+    /// Points a producer back at something to work, and says so if there is nothing.
+    /// </summary>
+    /// <remarks>
+    /// A field is the same field every time, so this is nearly a no-op for a farmer: the field it was
+    /// assigned to is the field it goes back to, and the assignment only ends if somebody demolished it.
+    /// <para>
+    /// <b>A cutter is the interesting case, and it is where the wood line lives.</b> A tree is finite, so
+    /// the site changes several times a season, and the cutter picks the nearest one within
+    /// <see cref="Woodland.ReachMetres"/> <em>of the store it just delivered to</em> rather than of
+    /// itself. That one choice is the whole mechanic:
+    /// </para>
+    /// <list type="bullet">
+    /// <item>Trees near the granary, and a cutter based at the granary walks a few metres a load. No cart
+    /// is involved, because the producer carries its own output — the settlement completes a year with
+    /// zero hauling journeys.</item>
+    /// <item>Those trees felled, and no store can reach a tree any more. The cutters say so out loud
+    /// rather than quietly walking further and further, which is the settlement being told it has
+    /// outgrown its arrangement.</item>
+    /// <item>A forward depot built at the tree line, and the cutters re-base onto it by themselves — the
+    /// nearest store with a tree in reach. Their wood now piles up in a building no household draws from,
+    /// and the hauling board collects stranded stock, so carts appear <em>because of the geometry</em>
+    /// and not because anything was told about lumber camps.</item>
+    /// </list>
+    /// </remarks>
+    private bool TrySendBackToWork(ref AgentState agent)
+    {
+        var assignment = agent.Jobs.Assignment;
+        if (assignment.Cargo == Resource.Wood)
+        {
+            // Base the search on the store just delivered to, falling back to where the body is standing
+            // on the very first shift, when it has not delivered anything yet.
+            var from = Nodes.Contains(assignment.Sink)
+                ? Nodes.Get(assignment.Sink).Position
+                : agent.Position;
+            var tree = EconomySystem.NearestTree(
+                Nodes, Agents, from, Woodland.ReachMetres, agent.Id);
+            if (!tree.IsValid)
+            {
+                var (store, elsewhere) = EconomySystem.NearestBaseWithTrees(
+                    Nodes, Agents, agent.Faction, agent.Position, Woodland.ReachMetres, agent.Id);
+                if (!elsewhere.IsValid) return false;
+                tree = elsewhere;
+                assignment = assignment with { Sink = store };
+            }
+
+            ref readonly var trunk = ref Nodes.Get(tree);
+            JobSystem.Retarget(
+                ref agent,
+                assignment with
+                {
+                    Source = tree,
+                    Anchor = trunk.Position,
+                    PlaceExtent = trunk.FootprintRadius,
+                },
+                leg: 0);
+            return true;
+        }
+
+        if (!Nodes.Contains(assignment.Source)) return false;
+        ref readonly var field = ref Nodes.Get(assignment.Source);
         JobSystem.Retarget(
             ref agent,
             assignment with { Anchor = field.Position, PlaceExtent = field.FootprintRadius },
             leg: 0);
+        return true;
     }
 
     /// <summary>What the ground where a unit's work is looks like, for the jobs layer.</summary>

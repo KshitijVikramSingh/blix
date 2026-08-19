@@ -33,7 +33,14 @@ internal static class EconomyRates
     /// </remarks>
     internal static float GrainPerFarmPerYear = 700f;
 
-    /// <summary>Wood one pair of hands cuts over a year.</summary>
+    /// <summary>Wood one pair of hands cuts over a year, walking included.</summary>
+    /// <remarks>
+    /// Not a rate anything has any more — <see cref="Woodland"/> derives the cut rate, the load and the
+    /// reach from it, and the wood itself comes out of trees. It survives as the <em>annual figure</em>
+    /// the derivation is anchored to, which is where §2's "everything in time" wants it: a year is the
+    /// unit the calendar is built from, and this is the only place a number about wood is chosen rather
+    /// than computed. At 120 burnt per villager a year, four cutters keep seventeen people warm.
+    /// </remarks>
     internal static float WoodPerHandPerYear = 500f;
 
     /// <summary>Grain one villager eats a year. One unit a day unit, so the day is the ration.</summary>
@@ -42,15 +49,15 @@ internal static class EconomyRates
     /// <summary>Wood one household burns a year, before the winter swing.</summary>
     internal static float WoodPerVillagerPerYear = 120f;
 
-    // "Diminishing returns on hands at one place" stood here as a square root, and it is retired: the
+    // "Diminishing returns on hands at one place" stood here as a square root, and it is <b>gone</b>: the
     // deadline does that work and does it better. A field asks for 900 labour-seconds inside a 1,200-second
     // spring, so one pair of hands just manages it and four finish early and then have nothing to do. Lean
     // staffing is efficient because it fills each window exactly; overstaffing is wasteful because the
     // window closes, not because output is taxed. §2's identity, with no invented curve in it.
     //
-    // It is still here for the resources that have not been converted yet — wood, until Stage B gives
-    // trees a labour cost of their own — and should go with the last of them.
-    internal static float HandsEffect(int hands) => hands <= 0 ? 0f : MathF.Sqrt(hands);
+    // It survived one stage longer for wood, and Stage B took the last caller with it: a tree holds a
+    // finite amount of wood and two cutters at one trunk fell it in half the time, which is not
+    // diminishing returns, it is arithmetic.
 
     /// <summary>
     /// How much of a year's grain arrives per second of this season, as a multiple of the flat rate.
@@ -63,16 +70,11 @@ internal static class EconomyRates
     // GrainShape is retired with the grain rate: when a field yields is now a fact about which window the
     // year is in and how much labour went into the last one, not a curve.
 
-    /// <summary>
-    /// Wood arrives when labour is free, which is summer and winter. §6's other cycle.
-    /// </summary>
-    private static float WoodShape(Season season) => season switch
-    {
-        Season.Spring => 0.35f,
-        Season.Summer => 1f,
-        Season.Harvest => 0.2f,
-        _ => 0.8f,
-    };
+    // WoodShape is retired with the wood rate. "Wood arrives when labour is free, which is summer and
+    // winter" was a curve describing a decision — and it is a decision the player now actually makes,
+    // because spring and harvest belong to the fields and whoever is not in a field can be at a tree.
+    // A seasonal shape on wood would have been the game playing that allocation on the player's behalf
+    // and then charging them for it.
 
     /// <summary>Wood burns far faster in winter, because every house needs heating.</summary>
     private static float WoodBurnShape(Season season) => season switch
@@ -86,26 +88,12 @@ internal static class EconomyRates
     /// <summary>Grain is eaten at the same rate all year. Everyone eats.</summary>
     private static float GrainDrawShape(Season season) => 1f;
 
-    /// <summary>
-    /// Units per second this node produces right now, per unit of hands effect.
-    /// </summary>
-    /// <remarks>
-    /// Wood only. Grain is not a rate any more — a field is prepared, kept and reaped, and
-    /// <see cref="CropCycle"/> owns all three. Asking this for grain is a bug, and it says so rather than
-    /// returning a plausible number.
-    /// </remarks>
-    public static float ProductionPerSecond(Resource resource, Season season)
-    {
-        if (resource == Resource.Grain)
-        {
-            throw new InvalidOperationException(
-                "Grain has no production rate. A field yields what CropCycle's three windows of labour " +
-                "earn it, and asking for a rate is asking the question the crop cycle replaced.");
-        }
-
-        return WoodPerHandPerYear / WorldCalendar.YearSeconds *
-               Normalised(resource, season, production: true);
-    }
+    // ProductionPerSecond is retired. <b>Nothing in the economy produces at a rate.</b> A field is
+    // prepared, kept and reaped and CropCycle owns all three; wood is standing in trees and Woodland
+    // owns what it costs to fell one. Both were rates once, and both were the same bug in two costumes —
+    // an abstract producer you could put anywhere, in a design whose premise is that the map is the
+    // economy. The seasonal-shape machinery below survives for <em>draw</em>, which really is a curve:
+    // every house burns three times as much wood in winter and nobody decides that.
 
     /// <summary>Grain a second of reaping earns from this field, at its own potential.</summary>
     public static float ReapedPerSecond(in EconomyNode farm) =>
@@ -159,8 +147,10 @@ internal static class EconomyRates
     private static float Shape(Resource resource, Season season, bool production) =>
         (resource, production) switch
         {
-            (Resource.Grain, true) => throw new InvalidOperationException("Grain has no production shape."),
-            (Resource.Wood, true) => WoodShape(season),
+            (_, true) => throw new InvalidOperationException(
+                "Nothing has a production shape. A field's output is CropCycle's three windows of " +
+                "labour and wood is felled out of trees; asking when a resource arrives is asking the " +
+                "question those two replaced."),
             (Resource.Grain, false) => GrainDrawShape(season),
             _ => WoodBurnShape(season),
         };

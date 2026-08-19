@@ -62,24 +62,43 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private readonly float worldExtentMeters;
     private readonly CrowdMetrics crowdMetrics = new();
     private readonly ObjectTunables tunables;
-    private static readonly Vector4 GrassLight = new(0.42f, 0.52f, 0.35f, 1f);
-    private static readonly Vector4 GrassDark = new(0.36f, 0.45f, 0.30f, 1f);
-    private static readonly Vector4 UnitColor = new(0.86f, 0.47f, 0.20f, 1f);
-    private static readonly Vector4 SelectedUnitColor = new(1.00f, 0.68f, 0.22f, 1f);
+    // The palette is tuned for a tonemapped HDR frame, which is a different job from tuning it for
+    // the swapchain. Values here are albedos — what share of the light a surface throws back — so
+    // they sit in the 0.2 to 0.7 band and the sun does the work of making them bright. The old
+    // palette was written when a colour went to the screen more or less as typed, which is why
+    // everything read as pastel: it was already near white before any light hit it.
+    private static readonly Vector4 GrassLight = new(0.33f, 0.46f, 0.24f, 1f);
+    private static readonly Vector4 GrassDark = new(0.26f, 0.38f, 0.19f, 1f);
+    private static readonly Vector4 UnitColor = new(0.74f, 0.40f, 0.18f, 1f);
+    private static readonly Vector4 SelectedUnitColor = new(0.98f, 0.72f, 0.24f, 1f);
     private static readonly Vector4 SelectionColor = new(0.26f, 0.86f, 0.94f, 1f);
     private static readonly Vector4 DestinationColor = new(0.98f, 0.82f, 0.32f, 1f);
     private static readonly Vector4 ObstacleColor = new(0.33f, 0.35f, 0.37f, 1f);
     // A store, a field and a woodlot, told apart at a glance because the whole point of the
     // low-attention mode is that a settlement is legible without reading a number.
-    private static readonly Vector4 GranaryColor = new(0.82f, 0.66f, 0.30f, 1f);
-    private static readonly Vector4 FarmColor = new(0.55f, 0.68f, 0.28f, 1f);
-    private static readonly Vector4 WoodcutterColor = new(0.42f, 0.31f, 0.22f, 1f);
-    private static readonly Vector4 DepotColor = new(0.62f, 0.55f, 0.42f, 1f);
+    // Buildings: a wall colour and a darker, warmer roof over it. The pair is what makes the
+    // silhouette read; a single tint on a cube reads as a cube whatever the tint is.
+    private static readonly Vector4 GranaryColor = new(0.72f, 0.58f, 0.36f, 1f);
+    private static readonly Vector4 GranaryRoofColor = new(0.40f, 0.26f, 0.16f, 1f);
+    private static readonly Vector4 DepotColor = new(0.56f, 0.49f, 0.38f, 1f);
+    private static readonly Vector4 DepotRoofColor = new(0.31f, 0.25f, 0.19f, 1f);
+    // A field, as ground: dry earth, broken earth, the furrows cut into it, and the crop standing on
+    // it — young green through to ripe gold. The whole crop cycle is these five colours.
+    private static readonly Vector4 FallowSoilColor = new(0.47f, 0.40f, 0.28f, 1f);
+    private static readonly Vector4 TilledSoilColor = new(0.27f, 0.19f, 0.13f, 1f);
+    private static readonly Vector4 FurrowColor = new(0.20f, 0.14f, 0.10f, 1f);
+    private static readonly Vector4 YoungCropColor = new(0.38f, 0.55f, 0.20f, 1f);
+    private static readonly Vector4 RipeCropColor = new(0.78f, 0.63f, 0.20f, 1f);
+    // Trees. Two canopy greens, mixed per tree, because a forest of one colour reads as one object.
+    private static readonly Vector4 TrunkColor = new(0.33f, 0.24f, 0.17f, 1f);
+    private static readonly Vector4 CanopyDarkColor = new(0.14f, 0.29f, 0.15f, 1f);
+    private static readonly Vector4 CanopyLightColor = new(0.25f, 0.42f, 0.19f, 1f);
     // Goods, wherever they are: on a cart's back or lying in the road. The same two colours for both,
     // so a heap and a load read as the same substance in two places.
-    private static readonly Vector4 HouseColor = new(0.72f, 0.46f, 0.36f, 1f);
-    private static readonly Vector4 GrainColor = new(0.90f, 0.78f, 0.34f, 1f);
-    private static readonly Vector4 WoodColor = new(0.48f, 0.34f, 0.21f, 1f);
+    private static readonly Vector4 HouseColor = new(0.68f, 0.58f, 0.46f, 1f);
+    private static readonly Vector4 HouseRoofColor = new(0.44f, 0.22f, 0.16f, 1f);
+    private static readonly Vector4 GrainColor = new(0.82f, 0.68f, 0.26f, 1f);
+    private static readonly Vector4 WoodColor = new(0.40f, 0.27f, 0.16f, 1f);
     private static readonly Vector4 BuildValidColor = new(0.30f, 0.84f, 0.72f, 1f);
     private static readonly Vector4 BuildRemoveColor = new(0.96f, 0.53f, 0.28f, 1f);
     private static readonly Vector4 BuildInvalidColor = new(0.82f, 0.24f, 0.22f, 1f);
@@ -124,13 +143,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     // covering distance, and that means going with it.
     private Vector2 cameraFocus;
     private bool cameraFollowsSelection = true;
-    private readonly byte[] viewProjectionBytes = new byte[64];
 
     private IRenderHost host = null!;
     private IGraphicsDevice graphicsDevice = null!;
-    private InstanceBuffer terrainBuffer = null!;
+    private InstanceBuffer overlayBuffer = null!;
     private InstanceBuffer unitBuffer = null!;
-    private InstancedBatch terrainBatch = null!;
+    // Overlays only: the navigation raster, paths, velocities, collider discs, the build
+    // ghost, the tilled plots. Everything in here is flat, drawn a few centimetres off the
+    // ground, and has no business casting a shadow — which is why it is no longer the same
+    // batch as the buildings.
+    private InstancedBatch overlayBatch = null!;
     // The coarse ground gets its own batch rather than sharing the debug one. They have
     // different sizes and different lifetimes, and a shared batch means the ground can run a
     // per-cell overlay past the batch's instance ceiling — which it did, immediately.
@@ -152,6 +174,71 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private VulkanGraphicsDevice vk = null!;
     private ShaderProgramHandle worldShader;
     private PipelineHandle worldPipeline;
+
+    // Daylight: a RenderGraph — sun shadow depth pass → HDR scene pass (procedural sky,
+    // shadowed sun, aerial perspective) → present (expose, grade, tonemap). Lifted from
+    // TankArena and Bulwark, which already prove the seam; the mood is this game's.
+    //
+    // It is not decoration. A settlement is read from above as a plan, and a plan drawn in
+    // flat ambient with no cast shadows has no depth cue at all: every building is a
+    // coloured rectangle lying in the same plane as the ground it stands on, so its height,
+    // its footprint and its distance from its neighbour are all unreadable. Shadows are how
+    // a box becomes a building.
+    private RenderGraph graph = null!;
+    private GraphResourceHandle hdrHandle, sceneDepthHandle, sunShadowHandle;
+    private PassHandle shadowPassHandle, scenePassHandle;
+    private PipelineHandle casterPipeline, skyPipeline, presentPipeline;
+    private ShaderProgramHandle casterShader;
+    private FullscreenPass fullscreen = null!;
+
+    // Solid things: buildings, heaps, hand-built walls, trees. Held as a list rather than
+    // batched directly because each one is drawn twice — once lit into the scene and once
+    // depth-only into the shadow map — and the two draws must agree exactly or a building
+    // casts a shadow from somewhere it is not.
+    private readonly List<InstanceData> propInstances = new();
+    // Everything drawn as a cylinder: bodies, their loads, and tree trunks.
+    private readonly List<InstanceData> unitInstances = new();
+    // Canopies. Foliage is the one thing in the scene a box cannot stand in for — a woodland of drums
+    // reads as a machine yard — and it is also what makes the wood line legible from across the map,
+    // which is the whole of Stage B's interface.
+    private readonly List<InstanceData> canopyInstances = new();
+    private InstancedBatch propBatch = null!, propCaster = null!, unitCaster = null!;
+    private InstancedBatch canopyBatch = null!, canopyCaster = null!;
+    private InstanceBuffer propBuffer = null!, propCasterBuffer = null!, unitCasterBuffer = null!;
+    private InstanceBuffer canopyBuffer = null!, canopyCasterBuffer = null!;
+
+    private readonly byte[] worldPush = new byte[176];   // viewProj + camPos + sunDir + sunVP + fog
+    private readonly byte[] skyPush = new byte[96];      // invViewProj + camPos + sunDir
+    private readonly byte[] shadowPush = new byte[64];   // sun shadow VP
+    private readonly byte[] gradePush = new byte[16];    // exposure, tonemap mode, saturation, contrast
+
+    /// <summary>Side of the sun's shadow map, in texels.</summary>
+    private const int ShadowMapSize = 2048;
+
+    /// <summary>
+    /// Side of the box the sun's shadow map covers, in metres.
+    /// </summary>
+    /// <remarks>
+    /// Centred on what the camera is looking at rather than on the map, because the map is
+    /// 600 m and one 2048 map over that is 0.3 m a texel — every shadow edge a visible
+    /// staircase. 150 m is a little wider than the camera can see at full zoom-out and comes
+    /// to 13 texels a metre, which is crisp at the scale a body is judged at. The cost is that
+    /// the sun stops casting outside that box, which nobody can see anyway.
+    /// </remarks>
+    private const float SunOrthoExtent = 150f;
+
+    private const float SunDistance = 220f;
+
+    /// <summary>
+    /// Direction toward the sun.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately lower than the near-overhead light this started with: at 42° above the
+    /// horizon a building casts a shadow a little longer than it is tall, which is what makes
+    /// its height legible from a top-down camera. An overhead sun hides every shadow under the
+    /// thing that cast it and reads as no lighting at all.
+    /// </remarks>
+    private static readonly Vector3 SunDirection = Vector3.Normalize(new Vector3(0.55f, 0.62f, 0.42f));
     private TerrainMap? renderedTerrain;
     private int renderedTerrainRevision = -1;
     private SpriteBatch selectionUi = null!;
@@ -349,16 +436,60 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 new VertexAttribute(0, VertexAttributeFormat.Float3, 0),
                 new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
             });
+        // The world shader now reads the sun shadow map (set 0) and needs the camera, the sun, the
+        // sun's shadow view-projection and the fog range in both stages, which is 176 bytes rather
+        // than the bare view-projection it used to take.
         var shaderInterface = new ShaderInterface(
-            Slots: new[] { InstanceBuffer.Slot },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+            Slots: new[]
+            {
+                new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                InstanceBuffer.Slot,
+            },
+            PushConstants: new[]
+            {
+                new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 176),
+            });
 
         var shaderDirectory = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        byte[] Spv(string name) => File.ReadAllBytes(Path.Combine(shaderDirectory, name));
+
+        // The frame: sun shadow depth → HDR scene → present. The scene target is Rgba16F so
+        // the lighting can live above 1.0 and the tonemap has a range to work with; writing
+        // the same values straight at the swapchain is what made a sunlit wall and a sunlit
+        // roof the same shade of nothing.
+        graph = new RenderGraph(vk);
+        var fullSize = new MatchSwapchainGraphSize(1.0f);
+        sunShadowHandle = graph.DepthTarget("sun-shadow", new FixedGraphSize(ShadowMapSize, ShadowMapSize));
+        hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
+        sceneDepthHandle = graph.DepthTarget("scene-depth", fullSize);
+
+        var casterInterface = new ShaderInterface(
+            Slots: new[] { InstanceBuffer.Slot },
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+        var skyInterface = new ShaderInterface(
+            Slots: Array.Empty<DescriptorSetSlot>(),
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 96) });
+        var presentInterface = new ShaderInterface(
+            Slots: new[]
+            {
+                new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+            },
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 16) });
+
+        shadowPassHandle = graph.GraphicsPass("sun-shadow")
+            .Depth(sunShadowHandle, LoadOp.Clear, StoreOp.Store)
+            .Shader(casterInterface)
+            .Handle;
+        scenePassHandle = graph.GraphicsPass("scene")
+            .Target(hdrHandle, LoadOp.Clear, StoreOp.Store)
+            .Depth(sceneDepthHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(sunShadowHandle)
+            .Shader(skyInterface, shaderInterface)
+            .Handle;
+        graph.Compile();
+
         worldShader = vk.CreateShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDirectory, "world.vert.spv")),
-            File.ReadAllBytes(Path.Combine(shaderDirectory, "world.frag.spv")),
-            shaderInterface,
-            "rts-world");
+            Spv("world.vert.spv"), Spv("world.frag.spv"), shaderInterface, "rts-world");
         worldPipeline = vk.CreatePipeline(
             new PipelineDescription(
                 worldShader,
@@ -366,20 +497,73 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 PrimitiveTopology.Triangles,
                 DepthState.LessEqualWrite,
                 RasterizerState.BackFaceCulling,
-                new[] { BlendState.Disabled }),
+                new[] { BlendState.Disabled },
+                RenderTarget: graph.GetPassSurface(scenePassHandle)),
             "rts-world");
+        casterShader = vk.CreateShaderProgramFromSpv(
+            Spv("shadow_caster.vert.spv"), Spv("shadow_caster.frag.spv"), casterInterface, "rts-caster");
+        casterPipeline = vk.CreatePipeline(
+            new PipelineDescription(
+                casterShader,
+                meshLayout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualWrite,
+                // No culling: a shadow caster is a solid, and back-face culling on a depth-only
+                // pass throws away the faces nearest the light on anything the camera sees the
+                // inside of.
+                RasterizerState.NoCulling,
+                Array.Empty<BlendState>(),
+                RenderTarget: graph.GetPassSurface(shadowPassHandle)),
+            "rts-caster");
+        var skyShader = vk.CreateShaderProgramFromSpv(
+            Spv("sky.vert.spv"), Spv("sky.frag.spv"), skyInterface, "rts-sky");
+        skyPipeline = vk.CreatePipeline(
+            new PipelineDescription(
+                skyShader,
+                VertexPosition3NormalTexture.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.Disabled,
+                RasterizerState.NoCulling,
+                new[] { BlendState.Disabled },
+                RenderTarget: graph.GetPassSurface(scenePassHandle)),
+            "rts-sky");
+        var presentShader = vk.CreateShaderProgramFromSpv(
+            Spv("present.vert.spv"), Spv("present.frag.spv"), presentInterface, "rts-present");
+        presentPipeline = vk.CreatePipeline(
+            new PipelineDescription(
+                presentShader,
+                VertexPosition3NormalTexture.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.Disabled,
+                RasterizerState.NoCulling,
+                new[] { BlendState.Disabled }),
+            "rts-present");
+        fullscreen = new FullscreenPass(vk, "rts-fullscreen");
 
         var cubeMesh = CreateMesh(vk, "terrain-cube", Cube.Vertices, Cube.Indices);
         var cylinderMesh = CreateMesh(vk, "agent-cylinder", Cylinder.Vertices, Cylinder.Indices);
+        var canopyMesh = CreateMesh(vk, "tree-canopy", Icosphere.Vertices, Icosphere.Indices);
 
-        terrainBuffer = new InstanceBuffer(vk, worldShader, "rts-terrain-debug");
+        overlayBuffer = new InstanceBuffer(vk, worldShader, "rts-overlays");
         unitBuffer = new InstanceBuffer(vk, worldShader, "rts-agents");
-        terrainBatch = new InstancedBatch(cubeMesh, worldPipeline, terrainBuffer);
+        overlayBatch = new InstancedBatch(cubeMesh, worldPipeline, overlayBuffer);
         groundBuffer = new InstanceBuffer(vk, worldShader, "rts-coarse-ground");
         groundBatch = new InstancedBatch(cubeMesh, worldPipeline, groundBuffer);
         detailBuffer = new InstanceBuffer(vk, worldShader, "rts-ground-detail");
         detailBatch = new InstancedBatch(cubeMesh, worldPipeline, detailBuffer);
         unitBatch = new InstancedBatch(cylinderMesh, worldPipeline, unitBuffer);
+        propBuffer = new InstanceBuffer(vk, worldShader, "rts-props");
+        propBatch = new InstancedBatch(cubeMesh, worldPipeline, propBuffer);
+        // A caster batch needs its own instance buffer: the buffer's material is created
+        // against a shader, and the caster's shader is not the world's.
+        propCasterBuffer = new InstanceBuffer(vk, casterShader, "rts-props-caster");
+        propCaster = new InstancedBatch(cubeMesh, casterPipeline, propCasterBuffer);
+        unitCasterBuffer = new InstanceBuffer(vk, casterShader, "rts-agents-caster");
+        unitCaster = new InstancedBatch(cylinderMesh, casterPipeline, unitCasterBuffer);
+        canopyBuffer = new InstanceBuffer(vk, worldShader, "rts-canopies");
+        canopyBatch = new InstancedBatch(canopyMesh, worldPipeline, canopyBuffer);
+        canopyCasterBuffer = new InstanceBuffer(vk, casterShader, "rts-canopies-caster");
+        canopyCaster = new InstancedBatch(canopyMesh, casterPipeline, canopyCasterBuffer);
         RebuildTerrainSurfaceLayers();
         selectionUi = new SpriteBatch(vk);
         selectionPixel = graphicsDevice.CreateTexture2D(
@@ -407,8 +591,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Console.WriteLine("  B: toggle block-edit mode   left-click in block mode: add/remove block");
         Console.WriteLine("  S: stop   F: follow   P: patrol to pointer   H: chase   X: flee   Backspace: despawn selected");
         Console.WriteLine("  U: post selected at pointer   O: shuttle (press twice for both ends)   Y: off work");
-        Console.WriteLine("  D: granary at pointer   A: farm   Ctrl+A: house   W: woodcutter   U: post hands");
+        Console.WriteLine("  D: granary at pointer   A: farm   Ctrl+A: house   W: forward depot (lumber camp)");
+        Console.WriteLine("  U: post a villager — on a field it farms it, on a tree it cuts it");
         Console.WriteLine("  houses are the only things that eat: one outside every catchment goes hungry");
+        Console.WriteLine("  wood is finite and standing: when no store can reach a tree, build a depot at the line");
         Console.WriteLine("  --village starts a working settlement mid-harvest; --compression <x> sets the clock");
         Console.WriteLine("  a standing job survives an order: give one, let go, and they go back to it");
         Console.WriteLine("  N: nav / surface / slope / congestion overlays   C: colliders   V: velocity   K: paths   I: states");
@@ -863,28 +1049,110 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         return simulation.Terrain.TryRaycast(ray.Origin, ray.Direction, out world);
     }
 
+    /// <summary>
+    /// The sun's shadow view-projection for this frame, snapped to its own texel grid.
+    /// </summary>
+    /// <remarks>
+    /// Centred on what the camera is looking at, because the box is 150 m and the map is 600.
+    /// Snapped because a box that slides continuously slides in sub-texel steps, and every
+    /// shadow edge in the scene then crawls and shimmers as the camera pans — the artefact is
+    /// far more distracting than the low resolution it would otherwise be hiding.
+    /// </remarks>
+    private Matrix4x4 SunShadowViewProjection()
+    {
+        var texel = SunOrthoExtent / ShadowMapSize;
+        var focus = new Vector3(
+            MathF.Round(cameraFocus.X / texel) * texel,
+            simulation.Terrain.SampleHeight(cameraFocus),
+            MathF.Round(cameraFocus.Y / texel) * texel);
+        return GraphicsMatrices.SunShadowViewProjection(
+            SunDirection, focus, SunDistance, SunOrthoExtent, 20f, SunDistance + SunOrthoExtent);
+    }
+
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
         frameCount++;
         var viewProjection = camera.GetViewProjection(aspect);
-        MemoryMarshal.Write(viewProjectionBytes.AsSpan(), in viewProjection);
+        var sunViewProjection = SunShadowViewProjection();
+        var cameraPosition = new Vector4(camera.Transform.Position, 1f);
+        var sun = new Vector4(SunDirection, 0f);
+        // Aerial perspective sized to the camera rather than to the map: what it is for is
+        // separating the near ground from the far ground, and how far away the far ground is
+        // depends on how far back the camera is standing.
+        var fog = new Vector4(cameraDistance * 1.8f, cameraDistance * 7f, 0f, 0f);
+        Matrix4x4.Invert(viewProjection, out var inverseViewProjection);
+
+        MemoryMarshal.Write(worldPush.AsSpan(0, 64), in viewProjection);
+        MemoryMarshal.Write(worldPush.AsSpan(64, 16), in cameraPosition);
+        MemoryMarshal.Write(worldPush.AsSpan(80, 16), in sun);
+        MemoryMarshal.Write(worldPush.AsSpan(96, 64), in sunViewProjection);
+        MemoryMarshal.Write(worldPush.AsSpan(160, 16), in fog);
+        MemoryMarshal.Write(skyPush.AsSpan(0, 64), in inverseViewProjection);
+        MemoryMarshal.Write(skyPush.AsSpan(64, 16), in cameraPosition);
+        MemoryMarshal.Write(skyPush.AsSpan(80, 16), in sun);
+        MemoryMarshal.Write(shadowPush.AsSpan(0, 64), in sunViewProjection);
+        MemoryMarshal.Write(gradePush.AsSpan(0, 16), in Grade);
 
         BuildTerrainInstances();
         BuildAgentInstances((float)time.Total);
 
+        var props = CollectionsMarshal.AsSpan(propInstances);
+        var units = CollectionsMarshal.AsSpan(unitInstances);
+        var canopies = CollectionsMarshal.AsSpan(canopyInstances);
+        propBatch.Begin(worldPush);
+        propBatch.SetInstances(props);
+        unitBatch.Begin(worldPush);
+        unitBatch.SetInstances(units);
+        canopyBatch.Begin(worldPush);
+        canopyBatch.SetInstances(canopies);
+        propCaster.Begin(shadowPush);
+        propCaster.SetInstances(props);
+        unitCaster.Begin(shadowPush);
+        unitCaster.SetInstances(units);
+        canopyCaster.Begin(shadowPush);
+        canopyCaster.SetInstances(canopies);
+
+        // Shadow depth: only the solids. The ground is a receiver and not a caster — a large
+        // near-flat mesh shadowing itself is all acne and no shadow — and the overlays are
+        // annotations on top of the world rather than things in it.
+        graph.Pass(shadowPassHandle, scope =>
+        {
+            propCaster.End(scope);
+            unitCaster.End(scope);
+            canopyCaster.End(scope);
+        });
+
+        var shadowBinding = new[]
+        {
+            new ShaderTextureBinding("uSunShadowMap", graph.GetDepthTexture(sunShadowHandle), Slot: 0),
+        };
+        graph.Pass(scenePassHandle, scope =>
+        {
+            fullscreen.Draw(scope, skyPipeline, Array.Empty<ShaderTextureBinding>(), skyPush);
+            foreach (var layer in terrainSurfaceLayers) layer.Batch.End(scope, shadowBinding);
+            groundBatch.End(scope, shadowBinding);
+            detailBatch.End(scope, shadowBinding);
+            propBatch.End(scope, shadowBinding);
+            unitBatch.End(scope, shadowBinding);
+            canopyBatch.End(scope, shadowBinding);
+            overlayBatch.End(scope, shadowBinding);
+        });
+        graph.Execute(commandList);
+
+        var hdr = graph.GetColorTexture(hdrHandle);
         commandList.Pass(
-            "greybox-kingdom",
+            "present",
             new RenderPassDescription(
                 Target: RenderSurfaceHandle.Default,
-                ClearColors: new GraphicsColor?[] { new GraphicsColor(0.63f, 0.72f, 0.78f, 1f) },
+                ClearColors: new GraphicsColor?[] { new GraphicsColor(0f, 0f, 0f, 1f) },
                 ClearDepth: true),
             pass =>
             {
-                foreach (var layer in terrainSurfaceLayers) layer.Batch.End(pass);
-                groundBatch.End(pass);
-                detailBatch.End(pass);
-                terrainBatch.End(pass);
-                unitBatch.End(pass);
+                fullscreen.Draw(
+                    pass,
+                    presentPipeline,
+                    new[] { new ShaderTextureBinding("uHdr", hdr, Slot: 0) },
+                    gradePush);
                 DrawSelectionMarquee(pass);
             });
 
@@ -894,6 +1162,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
     }
 
+    /// <summary>Exposure, tonemap mode, saturation and contrast, applied at present.</summary>
+    /// <remarks>
+    /// ACES, at a little under unit exposure, with the saturation pushed up. A greybox scene has
+    /// no texture and no material variation, so every distinction it can make has to be carried
+    /// by hue and value alone — which is exactly the case where a filmic curve's tendency to
+    /// desaturate as it rolls off works against you, and a lift before the curve puts it back.
+    /// </remarks>
+    private static readonly Vector4 Grade = new(0.95f, 0f, 1.18f, 1.04f);
+
     private void BuildTerrainInstances()
     {
         if (renderedTerrain != simulation.Terrain || renderedTerrainRevision != simulation.Terrain.Revision)
@@ -902,15 +1179,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
         foreach (var layer in terrainSurfaceLayers)
         {
-            layer.Batch.Begin(viewProjectionBytes);
+            layer.Batch.Begin(worldPush);
             layer.Batch.Add(Matrix4x4.Identity, layer.Color);
         }
         RebuildGroundInstancesIfStale();
-        groundBatch.Begin(viewProjectionBytes);
-        groundBatch.SetInstances(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(groundInstances));
-        detailBatch.Begin(viewProjectionBytes);
-        detailBatch.SetInstances(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(detailInstances));
-        terrainBatch.Begin(viewProjectionBytes);
+        groundBatch.Begin(worldPush);
+        groundBatch.SetInstances(CollectionsMarshal.AsSpan(groundInstances));
+        detailBatch.Begin(worldPush);
+        detailBatch.SetInstances(CollectionsMarshal.AsSpan(detailInstances));
+        overlayBatch.Begin(worldPush);
+        propInstances.Clear();
+        unitInstances.Clear();
+        canopyInstances.Clear();
         BuildObstacleInstances();
         BuildNodeInstances();
         BuildNavigationOverlay();
@@ -1123,7 +1403,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var height = simulation.Terrain.SampleHeight(center);
             var model = Matrix4x4.CreateScale(cellScale, 0.018f, cellScale) *
                         Matrix4x4.CreateTranslation(center.X, height + 0.022f, center.Y);
-            terrainBatch.Add(model, color);
+            overlayBatch.Add(model, color);
         }
     }
 
@@ -1132,7 +1412,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     {
         foreach (ref readonly var node in simulation.Nodes.All)
         {
-            if (!node.IsAlive || node.HalfExtent <= 0f) continue;
+            if (!node.IsAlive || !NodeFootprint.Blocks(node.Kind)) continue;
             var half = node.HalfExtent + 0.01f;
             if (MathF.Abs(cellCentre.X - node.Position.X) <= half &&
                 MathF.Abs(cellCentre.Y - node.Position.Y) <= half)
@@ -1148,10 +1428,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// Draws the nodes, so a settlement is something you can see rather than infer.
     /// </summary>
     /// <remarks>
-    /// A block per node, coloured by kind and raised by how full it is: a granary at capacity stands a
-    /// metre taller than an empty one. It is a placeholder that happens to say the useful thing — the
-    /// stock level is readable across the map without selecting anything, which is what §2's
-    /// low-attention mode needs from a building before it needs a model.
+    /// Three silhouettes rather than one, because a greybox has nothing but silhouette to work with.
+    /// <list type="bullet">
+    /// <item><b>A store or a house is a building</b> — a body with a wider, darker roof slab over it.
+    /// The overhang is the whole trick: it puts a hard horizontal shadow line across the wall below, so
+    /// the thing reads as having a top and sides rather than being a coloured rectangle lying in the
+    /// same plane as the ground it stands on.</item>
+    /// <item><b>A field is ground</b> — a tilled plot with a crop standing on it, both a few
+    /// centimetres tall. See <see cref="DrawField"/>.</item>
+    /// <item><b>A heap is spillage</b> — low, wide, and the colour of what it is.</item>
+    /// </list>
+    /// <para>
+    /// A store's height still reads how full it is and a house's how many live in it, which is the one
+    /// number worth being legible from across the map without selecting anything.
+    /// </para>
     /// </remarks>
     private void BuildNodeInstances()
     {
@@ -1164,30 +1454,158 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 continue;
             }
 
-            var color = node.Kind switch
+            if (node.Kind == NodeKind.Farm)
             {
-                NodeKind.Granary => GranaryColor,
-                NodeKind.Farm => FarmColor,
-                NodeKind.Woodcutter => WoodcutterColor,
-                NodeKind.House => HouseColor,
-                _ => DepotColor,
+                DrawField(in node);
+                continue;
+            }
+
+            if (node.IsStanding)
+            {
+                DrawTree(in node);
+                continue;
+            }
+
+            var (wall, roof) = node.Kind switch
+            {
+                NodeKind.Granary => (GranaryColor, GranaryRoofColor),
+                NodeKind.House => (HouseColor, HouseRoofColor),
+                _ => (DepotColor, DepotRoofColor),
             };
-            // A store's height reads how full it is; a house's reads how full <em>it</em> is, which is
-            // people. Both are the same idea: the useful number legible from across the map.
             var fullness = node.IsSink
                 ? node.Occupancy <= 0 ? 0f : MathF.Min(1f, node.Occupants / (float)node.Occupancy)
                 : node.Capacity <= 0 ? 0f : MathF.Min(1f, node.Stock.Total / (float)node.Capacity);
-            // Exactly the ground bodies route around, so what is drawn is the wall. A building is taller
-            // than the people using it whatever is in it — a granary that reads as a doormat when empty is
-            // not a granary — so fullness raises it rather than deciding whether it exists at all.
+            // Exactly the ground bodies route around, so what is drawn is the wall.
             var width = node.HalfExtent * 2f;
-            var height = AgentDefaults.BodyHeight * (1.15f + fullness * 0.85f);
+            var height = AgentDefaults.BodyHeight * (1.35f + fullness * 0.75f);
             var ground = simulation.Terrain.SampleHeight(node.Position);
-            terrainBatch.Add(
+            propInstances.Add(new InstanceData(
                 Matrix4x4.CreateScale(width, height, width) *
                 Matrix4x4.CreateTranslation(node.Position.X, ground + height * 0.5f, node.Position.Y),
-                color);
+                wall));
+            // Eaves: a hand's breadth wider than the wall on every side. It is a lie about the
+            // footprint — the wall below is what blocks — and it is the difference between a building
+            // and a box, because the overhang is what casts the line.
+            var roofWidth = width + 0.55f;
+            const float roofThickness = 0.42f;
+            propInstances.Add(new InstanceData(
+                Matrix4x4.CreateScale(roofWidth, roofThickness, roofWidth) *
+                Matrix4x4.CreateTranslation(
+                    node.Position.X, ground + height + roofThickness * 0.35f, node.Position.Y),
+                roof));
         }
+    }
+
+    /// <summary>
+    /// A field: tilled ground with this year's crop standing on it.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the crop cycle made visible, and it is the only interface it has.</b> A field's
+    /// trouble is always in the past — a ceiling not set in spring cannot be diagnosed at harvest from
+    /// anything a body is doing — so <see cref="CropCycle.StateOf"/> exists to have the field say so
+    /// out loud. Saying it in a console table is not saying it to a player. Here the same fact is the
+    /// colour and the height of the ground: pale dry earth is a field nobody has broken, dark earth is
+    /// broken ground, low green is a crop being tended, tall gold is a crop standing unreaped, and bare
+    /// soil again is a field brought in. A player who never reads a number can see that one field in
+    /// twelve is the wrong colour.
+    /// <para>
+    /// It is also the answer to a field being drawn as a building. A farm is not a 1.7 m block of
+    /// geometry, it is 4.5 m of dirt — and now that a field is not a wall either
+    /// (<see cref="NodeFootprint.Blocks"/>), a dozen of them tile edge to edge into one patchwork
+    /// instead of standing about as separate crates.
+    /// </para>
+    /// </remarks>
+    private void DrawField(in EconomyNode field)
+    {
+        var ground = simulation.Terrain.SampleHeight(field.Position);
+        var width = field.HalfExtent * 2f;
+        var phase = CropCycle.PhaseOf(simulation.Date.Season);
+        var ceiling = CropCycle.CeilingOf(in field);
+
+        // The plot itself: dry earth until it is broken, dark earth once it is.
+        var soil = Vector4.Lerp(FallowSoilColor, TilledSoilColor, MathF.Min(1f, ceiling * 1.4f));
+        propInstances.Add(new InstanceData(
+            Matrix4x4.CreateScale(width, 0.09f, width) *
+            Matrix4x4.CreateTranslation(field.Position.X, ground + 0.045f, field.Position.Y),
+            soil));
+
+        // Furrows, so tilled ground reads as tilled from directly above — where a flat slab of any
+        // colour reads as a painted rectangle. They appear as the ground is broken.
+        if (ceiling > 0.05f)
+        {
+            const int furrows = 5;
+            var pitch = width / furrows;
+            for (var i = 0; i < furrows; i++)
+            {
+                var offset = (i + 0.5f) * pitch - width * 0.5f;
+                propInstances.Add(new InstanceData(
+                    Matrix4x4.CreateScale(width * 0.94f, 0.06f, pitch * 0.34f) *
+                    Matrix4x4.CreateTranslation(
+                        field.Position.X, ground + 0.10f, field.Position.Y + offset),
+                    FurrowColor));
+            }
+        }
+
+        // The crop: how much of it is standing, and what colour it has gone. Height is what carries it
+        // — a crop visible from the side of the camera is a crop whose absence you notice.
+        var reapTarget = CropCycle.ReapTargetOf(in field);
+        var standing = phase switch
+        {
+            CropPhase.Maintain => ceiling * CropCycle.RetentionOf(in field) * 0.5f,
+            CropPhase.Reap => reapTarget <= 0f
+                ? 0f
+                : CropCycle.PotentialOf(in field) * (1f - MathF.Min(1f, field.ReapWork / reapTarget)),
+            _ => 0f,
+        };
+        if (standing <= 0.01f) return;
+        var cropHeight = 0.14f + standing * 0.50f;
+        var cropColor = Vector4.Lerp(
+            YoungCropColor, RipeCropColor, phase == CropPhase.Reap ? 1f : 0.22f);
+        propInstances.Add(new InstanceData(
+            Matrix4x4.CreateScale(width * 0.9f, cropHeight, width * 0.9f) *
+            Matrix4x4.CreateTranslation(
+                field.Position.X, ground + 0.09f + cropHeight * 0.5f, field.Position.Y),
+            cropColor));
+    }
+
+    /// <summary>
+    /// A tree: a trunk and a canopy, both shrinking as it is cut.
+    /// </summary>
+    /// <remarks>
+    /// The canopy is the whole point. A forest of boxes is unreadable from a top-down camera and a forest
+    /// of drums reads as a machine yard, and this is the one thing in the scene whose silhouette a cube
+    /// genuinely cannot stand in for. It is also Stage B's only interface: <b>the wood line is a thing you
+    /// see</b> — thinned to stragglers where people have been cutting for years, closing up into unbroken
+    /// canopy further out — so a player knows which way to push before reading any number.
+    /// <para>
+    /// A part-cut tree is drawn smaller, so felling is visible while it happens rather than as a tree
+    /// that is suddenly not there. Trees do not block, and the drawing is honest about that: the trunk is
+    /// a trunk's width, not a building's.
+    /// </para>
+    /// </remarks>
+    private void DrawTree(in EconomyNode tree)
+    {
+        var ground = simulation.Terrain.SampleHeight(tree.Position);
+        var left = MathF.Max(0.12f, tree.Stock.Wood / MathF.Max(1f, Woodland.WoodPerTree));
+        // Varied by id rather than by a random draw, so the same tree is the same tree across a save and
+        // a woodland is not a row of identical models. The two constants are coprime with nothing in
+        // particular; they only have to decorrelate size from height.
+        var jitter = 0.82f + (tree.Id.Value * 37 % 13) / 13f * 0.36f;
+        var trunkHeight = (2.2f + jitter * 1.5f) * MathF.Sqrt(left);
+        var trunkWidth = NodeFootprint.TreeHalfExtent * 0.62f;
+        unitInstances.Add(new InstanceData(
+            Matrix4x4.CreateScale(trunkWidth, trunkHeight, trunkWidth) *
+            Matrix4x4.CreateTranslation(tree.Position.X, ground + trunkHeight * 0.5f, tree.Position.Y),
+            TrunkColor));
+
+        var canopyRadius = NodeFootprint.TreeHalfExtent * (2.4f + jitter * 0.9f) * MathF.Sqrt(left);
+        // Squashed, because a canopy is wider than it is tall and because a sphere reads as a ball.
+        var canopyHeight = canopyRadius * 1.35f;
+        canopyInstances.Add(new InstanceData(
+            Matrix4x4.CreateScale(canopyRadius * 2f, canopyHeight, canopyRadius * 2f) *
+            Matrix4x4.CreateTranslation(
+                tree.Position.X, ground + trunkHeight + canopyHeight * 0.28f, tree.Position.Y),
+            Vector4.Lerp(CanopyDarkColor, CanopyLightColor, (tree.Id.Value * 29 % 7) / 7f)));
     }
 
     /// <summary>
@@ -1209,10 +1627,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // rather than tower, because a pile of grain does.
             var spread = 0.7f + MathF.Sqrt(units / 40f) * 0.9f;
             var height = 0.22f + MathF.Min(0.5f, units / 200f);
-            terrainBatch.Add(
+            propInstances.Add(new InstanceData(
                 Matrix4x4.CreateScale(spread, height, spread) *
                 Matrix4x4.CreateTranslation(pile.Position.X, ground + height * 0.5f, pile.Position.Y),
-                resource == Resource.Grain ? GrainColor : WoodColor);
+                resource == Resource.Grain ? GrainColor : WoodColor));
         }
     }
 
@@ -1232,7 +1650,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var terrainHeight = simulation.Terrain.SampleHeight(center);
             var model = Matrix4x4.CreateScale(blockWidth, blockHeight, blockWidth) *
                         Matrix4x4.CreateTranslation(center.X, terrainHeight + blockHeight * 0.5f, center.Y);
-            terrainBatch.Add(model, ObstacleColor);
+            propInstances.Add(new InstanceData(model, ObstacleColor));
         }
 
         if (!obstacleEditMode || !pointerOnTerrain || !simulation.TryGetPlacementCell(pointerWorld, out var hoverCell)) return;
@@ -1243,7 +1661,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var hoverHeight = hoverTerrainHeight + (isRemoval ? blockHeight + 0.04f : 0.04f);
         var hoverModel = Matrix4x4.CreateScale(grid.Transform.CellSize * 0.88f, 0.065f, grid.Transform.CellSize * 0.88f) *
                          Matrix4x4.CreateTranslation(hoverCenter.X, hoverHeight, hoverCenter.Y);
-        terrainBatch.Add(hoverModel, !valid ? BuildInvalidColor : isRemoval ? BuildRemoveColor : BuildValidColor);
+        overlayBatch.Add(hoverModel, !valid ? BuildInvalidColor : isRemoval ? BuildRemoveColor : BuildValidColor);
     }
 
     private void DrawSelectionMarquee(RenderPassBuilder pass)
@@ -1311,7 +1729,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var model = Matrix4x4.CreateScale(length, 0.045f, 0.075f) *
                     Matrix4x4.CreateRotationY(yaw) *
                     Matrix4x4.CreateTranslation(midpoint.X, simulation.Terrain.SampleHeight(midpoint) + height, midpoint.Y);
-        terrainBatch.Add(model, color);
+        overlayBatch.Add(model, color);
     }
 
     private static Vector4 TerrainColor(TerrainSurface surface, bool light) => surface switch
@@ -1348,7 +1766,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private void BuildAgentInstances(float totalSeconds)
     {
-        unitBatch.Begin(viewProjectionBytes);
         var interpolation = (float)(simulationAccumulator / SimulationWorld.FixedDeltaSeconds);
 
         foreach (ref readonly var agent in simulation.Agents.All)
@@ -1370,7 +1787,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             {
                 var ringModel = Matrix4x4.CreateScale(bodyScale * 1.42f, 0.055f, bodyScale * 1.42f) *
                                 Matrix4x4.CreateTranslation(position.X, height + 0.035f, position.Y);
-                unitBatch.Add(ringModel, SelectionColor);
+                unitInstances.Add(new InstanceData(ringModel, SelectionColor));
             }
 
             // Width is the footprint; height is not. Height used to track radius one for one, which was
@@ -1389,11 +1806,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 var loadWidth = bodyScale * 0.72f;
                 var loadHeight = 0.18f + 0.34f * MathF.Min(1f, agent.Jobs.CarriedUnits /
                     MathF.Max(1f, agent.CarryCapacity));
-                unitBatch.Add(
+                unitInstances.Add(new InstanceData(
                     Matrix4x4.CreateScale(loadWidth, loadHeight, loadWidth) *
                     Matrix4x4.CreateTranslation(
                         position.X, height + bodyHeight + loadHeight * 0.5f, position.Y),
-                    agent.Jobs.Carrying == Resource.Grain ? GrainColor : WoodColor);
+                    agent.Jobs.Carrying == Resource.Grain ? GrainColor : WoodColor));
             }
 
             var crowdYielding = agent.IsVisiblyYielding;
@@ -1402,7 +1819,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 : agent.StuckSeconds > 0.35f ? StuckUnitColor
                 : stateDebug ? StateColor(agent.LocomotionState)
                 : selected ? SelectedUnitColor : UnitColor;
-            unitBatch.Add(unitModel, unitColor);
+            unitInstances.Add(new InstanceData(unitModel, unitColor));
 
             if (selected && agent.HasDestination)
             {
@@ -1410,7 +1827,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 var destinationHeight = simulation.Terrain.SampleHeight(agent.Destination);
                 var destinationModel = Matrix4x4.CreateScale(bodyScale * 0.82f * pulse, 0.045f, bodyScale * 0.82f * pulse) *
                                        Matrix4x4.CreateTranslation(agent.Destination.X, destinationHeight + 0.03f, agent.Destination.Y);
-                unitBatch.Add(destinationModel, DestinationColor);
+                unitInstances.Add(new InstanceData(destinationModel, DestinationColor));
             }
         }
     }
@@ -1433,7 +1850,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var bodyScale = collider.Shape.Radius / AgentDefaults.Radius;
         var model = Matrix4x4.CreateScale(bodyScale, 0.035f, bodyScale) *
                     Matrix4x4.CreateTranslation(position.X, height, position.Y);
-        unitBatch.Add(model, color);
+        unitInstances.Add(new InstanceData(model, color));
     }
 
     public void OnMouseMove(float x, float y, float deltaX, float deltaY)
@@ -1627,7 +2044,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 else Build(NodeKind.Farm, capacity: 150, Resource.Grain);
                 break;
             case Key.W:
-                Build(NodeKind.Woodcutter, capacity: 150, Resource.Wood);
+                // A lumber camp is a forward depot at the tree line. It is not a special building: it
+                // is a store, and the reason it works is that nobody lives near it — so the wood in it
+                // is stranded, and stranded stock is what the hauling board collects.
+                Build(NodeKind.ForwardDepot, capacity: 400, Resource.Wood);
                 break;
             case Key.LeftControl:
             case Key.RightControl:
@@ -1653,10 +2073,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     {
         selectionUi?.Dispose();
         if (selectionPixel.Id >= 0) graphicsDevice?.DestroyTexture(selectionPixel);
-        terrainBuffer?.Dispose();
+        overlayBuffer?.Dispose();
         groundBuffer?.Dispose();
         detailBuffer?.Dispose();
         unitBuffer?.Dispose();
+        propBuffer?.Dispose();
+        propCasterBuffer?.Dispose();
+        unitCasterBuffer?.Dispose();
+        canopyBuffer?.Dispose();
+        canopyCasterBuffer?.Dispose();
         if (vk is not null) DisposeTerrainSurfaceLayers();
+        // The graph owns render passes and offscreen images that are not in the device's auto-freed
+        // tables, and Dispose runs after WaitIdle, which is the only safe place to free them.
+        fullscreen?.Dispose();
+        graph?.Dispose();
     }
 }

@@ -119,6 +119,7 @@ internal sealed class EconomySystem
     private readonly List<HaulTask> tasks = new();
     private readonly List<AgentId> idleHaulers = new();
     private readonly HashSet<(NodeId Source, Resource Resource)> claimed = new();
+    private readonly HashSet<NodeId> drawnOn = new();
     private float boardCooldown;
 
     /// <summary>Everything ever produced, consumed, or seeded into the world by hand.</summary>
@@ -251,7 +252,10 @@ internal sealed class EconomySystem
         AgentStore agents,
         Season season)
     {
-        var stored = nodes.TotalStored()[resource];
+        // What the settlement has, not what is growing in front of it. A woodland in reach is
+        // twenty-five thousand units of standing timber, and counting it here would answer "how long
+        // will the stores last" with a statement about the forest.
+        var stored = nodes.TotalHeld()[resource];
         var draw = 0f;
         foreach (ref readonly var node in nodes.All)
         {
@@ -260,11 +264,11 @@ internal sealed class EconomySystem
         }
 
         var produced = 0f;
-        foreach (ref readonly var node in nodes.All)
+        if (resource == Resource.Grain)
         {
-            if (!node.IsAlive || !node.Produces_ || node.Produces != resource) continue;
-            if (resource == Resource.Grain)
+            foreach (ref readonly var node in nodes.All)
             {
+                if (!node.IsAlive || node.Kind != NodeKind.Farm) continue;
                 // A field's contribution is what it will still yield this year spread over what is left of
                 // it, which is the honest answer to "how long will the stores last": a field standing
                 // unreaped in harvest is income, and the same field in winter is not.
@@ -273,11 +277,14 @@ internal sealed class EconomySystem
                                     ? 1f
                                     : node.ReapWork / CropCycle.ReapTargetOf(in node)));
                 produced += remaining / MathF.Max(1f, WorldCalendar.YearSeconds);
-                continue;
             }
-
-            produced += EconomyRates.ProductionPerSecond(resource, season) *
-                        EconomyRates.HandsEffect(node.Hands);
+        }
+        else
+        {
+            // Wood income is however many axes are actually swinging. Not a rate a building has and not
+            // a headcount of people who call themselves woodcutters: a cutter walking a load in, or one
+            // whose trees have run out, is contributing nothing this second and the figure should say so.
+            produced += CuttersAtWork(agents) * Woodland.CutPerSecond;
         }
 
         var net = draw - produced;
@@ -303,8 +310,9 @@ internal sealed class EconomySystem
         var season = date.Season;
         CountHands(nodes, agents);
         RollCrops(nodes, date.Year);
-        WorkFields(nodes, agents, season, deltaSeconds);
-        Produce(nodes, season, deltaSeconds);
+        // Everything that is produced is produced by labour standing at the thing, now that wood is
+        // trees. There is no longer a pass in which a node accrues output on its own.
+        WorkSites(nodes, agents, season, deltaSeconds);
         BindHomes(nodes, agents, deltaSeconds);
         BindCatchments(nodes, price);
         Consume(nodes, season, deltaSeconds);
@@ -312,7 +320,7 @@ internal sealed class EconomySystem
         boardCooldown -= deltaSeconds;
         if (boardCooldown > 0f) return;
         boardCooldown = BoardIntervalSeconds;
-        SweepEmptyPiles(nodes);
+        SweepSpentNodes(nodes);
         RunBoard(nodes, agents, price);
     }
 
@@ -349,7 +357,9 @@ internal sealed class EconomySystem
             var nearest = WorkedNode(nodes, in agent);
             if (!nearest.IsValid) continue;
             ref var node = ref nodes.Get(nearest);
-            if (node.Produces_) node.Hands++;
+            // A field and a tree both count, because both are places labour is spent at. A store is
+            // not: a cutter putting a load down in a granary is not employed by the granary.
+            if (node.IsWorkSite) node.Hands++;
         }
     }
 
@@ -383,21 +393,24 @@ internal sealed class EconomySystem
     }
 
     /// <summary>
-    /// Puts the hands standing in each field to work on whatever the season asks of it.
+    /// Puts every pair of hands to work on whatever it is standing at.
     /// </summary>
     /// <remarks>
-    /// Labour is accumulated per field rather than per body, because that is what the three windows are
-    /// counted in — a field wants 900 seconds of breaking, and it does not care whether that is one pair of
-    /// hands for the whole spring or three for a third of it. Reaping is the exception: the grain it earns
-    /// has to go somewhere, and where it goes is <em>into the hands of whoever is reaping</em>, to be walked
-    /// in. That is the only place in the economy where production and carrying are the same act.
+    /// <b>The only place output comes from.</b> A field is worked on the season's window and a tree is
+    /// cut, and both are the same shape: labour is spent at a place, and what it yields goes straight
+    /// into the hands of whoever spent the labour, to be walked in. Nothing in the economy accrues on
+    /// its own any more.
+    /// <para>
+    /// A field's labour is accumulated <em>per field</em>, because that is what the three windows are
+    /// counted in — 900 seconds of breaking, and the field does not care whether that is one pair of
+    /// hands all spring or three for a third of it. A tree's is not accumulated at all: cutting takes
+    /// wood out of a finite standing stock, so the tree gets smaller instead of the counter getting
+    /// bigger, and when it is empty it is gone.
+    /// </para>
     /// </remarks>
-    private void WorkFields(NodeStore nodes, AgentStore agents, Season season, float deltaSeconds)
+    private void WorkSites(NodeStore nodes, AgentStore agents, Season season, float deltaSeconds)
     {
         var phase = CropCycle.PhaseOf(season);
-        if (phase == CropPhase.Rest) return;
-
-        var produced = Produced;
         var bodies = agents.MutableSpan();
         for (var i = 0; i < bodies.Length; i++)
         {
@@ -408,10 +421,19 @@ internal sealed class EconomySystem
 
             var siteId = body.Jobs.Assignment.Source;
             if (!nodes.Contains(siteId)) continue;
+            // Working means being there. A body still walking to the site is not breaking any ground
+            // and not cutting any wood.
+            if (!JobSystem.IsWorking(in body)) continue;
+            if (nodes.Get(siteId).Kind == NodeKind.Tree)
+            {
+                Cut(ref nodes.Get(siteId), ref body, deltaSeconds);
+                continue;
+            }
+
+            if (phase == CropPhase.Rest) continue;
+            var produced = Produced;
             ref var field = ref nodes.Get(siteId);
             if (field.Kind != NodeKind.Farm) continue;
-            // Working means being there. A body still walking to the field is not breaking any ground.
-            if (!JobSystem.IsWorking(in body)) continue;
             if (!CropCycle.WantsWork(in field, phase))
             {
                 // The window is answered. Carry in whatever is in hand; if there is nothing, wait here —
@@ -450,38 +472,54 @@ internal sealed class EconomySystem
                     if (body.Jobs.CarriedUnits >= body.CarryCapacity) JobSystem.EndShift(ref body);
                     break;
             }
-        }
 
-        Produced = produced;
+            Produced = produced;
+        }
     }
 
-    private void Produce(NodeStore nodes, Season season, float deltaSeconds)
+    /// <summary>
+    /// Takes wood out of a tree and puts it in the cutter's hands.
+    /// </summary>
+    /// <remarks>
+    /// <b>Nothing is produced here, and that is the whole of Stage B.</b> The wood was seeded into the
+    /// world standing in this tree; cutting moves it from the tree's stock onto the body's back, so
+    /// conservation sees one unit leave a store and arrive on a back and has no production term to
+    /// reconcile. A settlement's total wood is bounded by its forest, permanently, which is the pressure
+    /// the map is supposed to apply.
+    /// <para>
+    /// The labour accumulator lives on the tree, so two cutters on one trunk fell it in half the time,
+    /// and whatever will not fit in the hands is put back rather than dropped: a body with room for two
+    /// more units does not silently destroy the third.
+    /// </para>
+    /// </remarks>
+    private static void Cut(ref EconomyNode tree, ref AgentState body, float deltaSeconds)
     {
-        var mutable = nodes.MutableSpan();
-        var produced = Produced;
-        for (var i = 0; i < mutable.Length; i++)
+        var room = body.CarryCapacity - body.Jobs.CarriedUnits;
+        if (room <= 0 || tree.Stock.Wood <= 0)
         {
-            ref var node = ref mutable[i];
-            if (!node.IsAlive || !node.Produces_ || node.Hands == 0) continue;
-            // Fields are not on this path any more; their output is CropCycle's, earned by labour and
-            // carried in by the reaper. This is wood until Stage B gives trees a labour cost of their own.
-            if (node.Produces == Resource.Grain) continue;
-            var rate = EconomyRates.ProductionPerSecond(node.Produces, season) *
-                       EconomyRates.HandsEffect(node.Hands);
-            if (rate <= 0f) continue;
-
-            var whole = node.Pending.Accrue(node.Produces, rate * deltaSeconds);
-            if (whole <= 0) continue;
-            // Capped at what the place can hold, and the excess is simply never produced rather than
-            // produced and discarded. A full barn is a full barn; counting grain into a ledger and
-            // then dropping it on the floor would be a drift the gate is specifically looking for.
-            var room = node.RoomFor(node.Produces);
-            var accepted = Math.Min(whole, room);
-            node.Stock.Add(node.Produces, accepted);
-            produced.Add(node.Produces, accepted);
+            JobSystem.EndShift(ref body);
+            return;
         }
 
-        Produced = produced;
+        var whole = tree.Pending.Accrue(Resource.Wood, Woodland.CutPerSecond * deltaSeconds);
+        if (whole > 0)
+        {
+            var taken = Math.Min(whole, Math.Min(room, tree.Stock.Wood));
+            if (taken > 0)
+            {
+                tree.Stock.Wood -= taken;
+                body.Jobs.Carrying = Resource.Wood;
+                body.Jobs.CarriedUnits += taken;
+            }
+
+            // Cut but not carried: the axe swing still happened, so the labour stays on the tree.
+            if (whole > taken) tree.Pending.Wood += whole - taken;
+        }
+
+        if (tree.Stock.Wood <= 0 || body.Jobs.CarriedUnits >= body.CarryCapacity)
+        {
+            JobSystem.EndShift(ref body);
+        }
     }
 
     /// <summary>
@@ -659,6 +697,7 @@ internal sealed class EconomySystem
     private void RunBoard(NodeStore nodes, AgentStore agents, TravelPrice price)
     {
         ReleaseStaleHauls(nodes, agents);
+        MarkStoresSomebodyEatsFrom(nodes);
         CollectTasks(nodes, (int)(SmallestCapacity(agents) * WorthFetchingShare));
         if (tasks.Count == 0) return;
 
@@ -733,16 +772,169 @@ internal sealed class EconomySystem
         }
     }
 
-    /// <summary>Removes heaps that have been carried away, so an empty pile is not a permanent node.</summary>
-    private static void SweepEmptyPiles(NodeStore nodes)
+    /// <summary>Bodies currently standing at a tree with an axe in them.</summary>
+    public static int CuttersAtWork(AgentStore agents)
+    {
+        var cutting = 0;
+        foreach (ref readonly var agent in agents.All)
+        {
+            if (!agent.IsAlive || agent.Jobs.IsInterrupted) continue;
+            if (agent.Jobs.Assignment.Kind != AssignmentKind.Work) continue;
+            if (agent.Jobs.Assignment.Cargo != Resource.Wood) continue;
+            if (agent.Jobs.Leg % 2 != 0 || !JobSystem.IsWorking(in agent)) continue;
+            cutting++;
+        }
+
+        return cutting;
+    }
+
+    /// <summary>Bodies whose standing job is to cut wood, wherever they are in the round trip.</summary>
+    public static int Cutters(AgentStore agents)
+    {
+        var cutters = 0;
+        foreach (ref readonly var agent in agents.All)
+        {
+            if (!agent.IsAlive) continue;
+            if (agent.Jobs.Assignment.Kind != AssignmentKind.Work) continue;
+            if (agent.Jobs.Assignment.Cargo == Resource.Wood) cutters++;
+        }
+
+        return cutters;
+    }
+
+    /// <summary>
+    /// Removes what has been used up: heaps that have been carried away and trees that have been felled.
+    /// </summary>
+    /// <remarks>
+    /// Felling is a sweep rather than an event at the moment the last unit is cut, for the same reason a
+    /// field rolls its year over by noticing rather than by being told: no notification to miss, and it
+    /// survives a save landing on the tick the axe went in. A tree at zero is standing dead for at most
+    /// two seconds, which nobody can see and nothing depends on.
+    /// </remarks>
+    private static void SweepSpentNodes(NodeStore nodes)
     {
         for (var slot = 0; slot < nodes.Count; slot++)
         {
             var id = new NodeId(slot);
             if (!nodes.Contains(id)) continue;
             ref readonly var node = ref nodes.Get(id);
-            if (node.IsPile && node.Stock.Total <= 0) nodes.Remove(id);
+            if ((node.IsPile || node.IsStanding) && node.Stock.Total <= 0) nodes.Remove(id);
         }
+    }
+
+    /// <summary>
+    /// The nearest tree with wood still in it, within <paramref name="reachMetres"/> of a point.
+    /// </summary>
+    /// <remarks>
+    /// Straight-line, like every other question a body asks about its own next few steps, and for the
+    /// same reason: this is asked once per load per cutter, and paying a routing query to choose between
+    /// two trees a cutter can see would cost more than the walk between them.
+    /// </remarks>
+    public static NodeId NearestTree(
+        NodeStore nodes,
+        AgentStore agents,
+        Vector2 from,
+        float reachMetres,
+        AgentId self)
+    {
+        var best = NodeId.None;
+        var bestDistance = reachMetres * reachMetres;
+        foreach (ref readonly var node in nodes.All)
+        {
+            if (!node.IsAlive || !node.IsStanding || node.Stock.Wood <= 0) continue;
+            var distance = Vector2.DistanceSquared(node.Position, from);
+            if (distance > bestDistance) continue;
+            if (IsClaimed(agents, node.Id, self)) continue;
+            bestDistance = distance;
+            best = node.Id;
+        }
+
+        // Everything in reach already has somebody on it. Sharing a trunk is legitimate — two axes fell
+        // a tree in half the time — so the claim is a preference and not a lock; without the fallback a
+        // seventh cutter with six trees in reach would simply stop.
+        return best.IsValid ? best : NearestTree(nodes, from, reachMetres);
+    }
+
+    /// <summary>The nearest tree with wood in it, whoever else is already on it.</summary>
+    public static NodeId NearestTree(NodeStore nodes, Vector2 from, float reachMetres)
+    {
+        var best = NodeId.None;
+        var bestDistance = reachMetres * reachMetres;
+        foreach (ref readonly var node in nodes.All)
+        {
+            if (!node.IsAlive || !node.IsStanding || node.Stock.Wood <= 0) continue;
+            var distance = Vector2.DistanceSquared(node.Position, from);
+            if (distance > bestDistance) continue;
+            bestDistance = distance;
+            best = node.Id;
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// Whether some other body's standing job already names this tree.
+    /// </summary>
+    /// <remarks>
+    /// Because "the nearest tree" is the same tree for every cutter based at the same store, and without
+    /// this they all converge on one trunk: seven axes on one tree, felled in a seventh of the time, then
+    /// all seven walk to the next one together. Measured, that also quietly cost the settlement its hand
+    /// count — six of the seven were shoved off the trunk by the crowd and settled outside the reach that
+    /// counts as working it, so a woodland with thirteen trees in reach was being worked by one person.
+    /// <para>
+    /// Read off the assignments rather than kept as a reservation table, for the same reason the hauling
+    /// board reads which carts are already hauling: a second collection to keep in step with spawning,
+    /// despawning and tombstoned slots is a collection that is eventually wrong, and this one would have
+    /// to survive a save as well.
+    /// </para>
+    /// </remarks>
+    private static bool IsClaimed(AgentStore agents, NodeId tree, AgentId self)
+    {
+        foreach (ref readonly var agent in agents.All)
+        {
+            if (!agent.IsAlive || agent.Id == self) continue;
+            if (agent.Jobs.Assignment.Kind != AssignmentKind.Work) continue;
+            if (agent.Jobs.Assignment.Source == tree) return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// A store of this faction with a tree in reach of it, and that tree — the nearest such pair.
+    /// </summary>
+    /// <remarks>
+    /// How a cutter follows a receding wood line without being told to. When the trees near its own base
+    /// are gone it asks whether <em>any</em> of the settlement's stores can still reach one, and re-bases
+    /// itself on that store — so building a forward depot at the tree line is enough to put the axes back
+    /// to work, and no store anywhere having a tree in reach is the settlement being told, unambiguously,
+    /// that it has run out of forest.
+    /// </remarks>
+    public static (NodeId Store, NodeId Tree) NearestBaseWithTrees(
+        NodeStore nodes,
+        AgentStore agents,
+        FactionId faction,
+        Vector2 from,
+        float reachMetres,
+        AgentId self)
+    {
+        var bestStore = NodeId.None;
+        var bestTree = NodeId.None;
+        var bestDistance = float.PositiveInfinity;
+        foreach (ref readonly var store in nodes.All)
+        {
+            if (!store.IsAlive || !store.Stores || store.Faction != faction) continue;
+            if (store.RoomFor(Resource.Wood) <= 0) continue;
+            var tree = NearestTree(nodes, agents, store.Position, reachMetres, self);
+            if (!tree.IsValid) continue;
+            var distance = Vector2.DistanceSquared(store.Position, from);
+            if (distance >= bestDistance) continue;
+            bestDistance = distance;
+            bestStore = store.Id;
+            bestTree = tree;
+        }
+
+        return (bestStore, bestTree);
     }
 
     /// <summary>Drops a haul whose source has emptied or whose sink has filled.</summary>
@@ -773,33 +965,76 @@ internal sealed class EconomySystem
     }
 
     /// <summary>
+    /// Which stores something actually eats out of.
+    /// </summary>
+    /// <remarks>
+    /// A house draws from the store whose catchment reaches it, so a store no house names is a store
+    /// nothing draws on — and stock sitting in one is stock the settlement cannot use however full the
+    /// building is. Derived from the bindings <see cref="BindCatchments"/> already made rather than
+    /// stored, which costs one pass over the nodes every two seconds and cannot fall out of step with
+    /// the thing it describes.
+    /// </remarks>
+    private void MarkStoresSomebodyEatsFrom(NodeStore nodes)
+    {
+        drawnOn.Clear();
+        foreach (ref readonly var sink in nodes.All)
+        {
+            if (!sink.IsAlive || !sink.IsSink || sink.Occupants <= 0) continue;
+            if (sink.Supply.IsValid) drawnOn.Add(sink.Supply);
+        }
+    }
+
+    /// <summary>
     /// Every journey the settlement would benefit from, in node order.
     /// </summary>
     /// <remarks>
-    /// Two shapes, which are §6's whole network: a producer's output belongs in a store, and a store
-    /// that is running low should be topped up from one that is nearly full. The high and low water
-    /// marks are what stop the second shape shuffling stock back and forth forever.
+    /// Three shapes, and the middle one is Stage B's whole contribution to hauling:
+    /// <list type="bullet">
+    /// <item><b>A heap on the ground</b> is always worth collecting, however small — left alone it is
+    /// not stock in the wrong place, it is stock nobody has.</item>
+    /// <item><b>A store nothing draws on</b> is <em>stranded</em>. Its wood is real, it is in a
+    /// building, and no household can eat out of it, so a cart's round trip is the only thing that turns
+    /// it into supply. This is the trigger that makes a lumber camp work: you build a forward depot at
+    /// the tree line so your cutters stop walking a hundred metres a load, and the wood then piles up
+    /// somewhere nobody lives, and <em>that</em> is what puts carts on the road. Nothing knows what a
+    /// lumber camp is.</item>
+    /// <item><b>A store somebody does draw on, but which is nearly full</b>, can even things out toward
+    /// one that is nearly empty. The high and low water marks stop that shuffling stock back and forth
+    /// forever.</item>
+    /// </list>
+    /// <para>
+    /// The trigger it replaces was "any store above its high-water mark", which could not express the
+    /// distinction at all: a compact settlement's granary is the only store, sits below high water all
+    /// year, and would never be collected from — while a forward depot at 70% would not be collected
+    /// either, because it was not full enough, so a frontier holding simply filled up and stopped. The
+    /// question is not how full a store is. It is whether anybody can reach what is in it.
+    /// </para>
     /// </remarks>
     private void CollectTasks(NodeStore nodes, int worthLoad)
     {
         tasks.Clear();
         foreach (ref readonly var source in nodes.All)
         {
-            if (!source.IsAlive) continue;
+            // A tree is not a delivery. Standing timber is released by an axe, not collected by a cart,
+            // and a woodland is two orders of magnitude more numerous than the buildings — so it is
+            // skipped first, before the per-resource sweep, rather than falling through every test.
+            if (!source.IsAlive || source.IsStanding) continue;
+            var stranded = source.Stores && !drawnOn.Contains(source.Id);
             foreach (var resource in Resources.All)
             {
                 if (source.Stock[resource] <= 0) continue;
                 var worthFetching = source.Stock[resource] >= worthLoad ||
                                     source.Stock[resource] >= source.Capacity * HighWater;
-                // A heap on the ground is always worth collecting, however small: left alone it is not
-                // stock in the wrong place, it is stock nobody has. What stops a cart crossing the map
-                // for three units of grain is not a threshold, it is that the trip is priced and the
-                // heap's urgency is proportional to its size.
                 var giving = source.IsPile
+                    // What stops a cart crossing the map for three units of grain is not a threshold, it
+                    // is that the trip is priced and the heap's urgency is proportional to its size.
                     ? true
                     : source.Produces_
                         ? worthFetching
-                        : source.Stores && source.Stock[resource] >= source.Capacity * HighWater;
+                        : source.Stores &&
+                          (stranded
+                              ? worthFetching
+                              : source.Stock[resource] >= source.Capacity * HighWater);
                 if (!giving) continue;
 
                 var bestSink = NodeId.None;
@@ -813,7 +1048,15 @@ internal sealed class EconomySystem
                     if (!source.IsPile && sink.Faction != source.Faction) continue;
                     var room = sink.RoomFor(resource);
                     if (room <= 0) continue;
-                    if (source.Stores && sink.Stock[resource] > sink.Capacity * LowWater) continue;
+                    // Stranded stock only ever moves toward somewhere it can be eaten from; without
+                    // that, two depots at the tree line would pass the same wood between themselves
+                    // forever, both of them equally unreachable.
+                    if (stranded && !drawnOn.Contains(sink.Id)) continue;
+                    if (source.Stores && !stranded &&
+                        sink.Stock[resource] > sink.Capacity * LowWater)
+                    {
+                        continue;
+                    }
 
                     // Emptiest store wins, so the settlement spreads its stock rather than topping up
                     // whichever node happens to be first.
@@ -824,14 +1067,13 @@ internal sealed class EconomySystem
                 }
 
                 if (!bestSink.IsValid) continue;
-                // A producer's yard filling up is more urgent than a store being uneven, and a fuller
-                // yard is more urgent than an emptier one.
+                // Output accumulating where nobody can use it is the urgent case, because when the
+                // building fills the people feeding it stop working. A store merely being uneven is not.
                 var fullness = source.Stock[resource] / (float)Math.Max(1, source.Capacity);
                 var urgency = source.IsPile
-                    // Bigger heaps first, and all of them below a yard about to overflow: a farm that
-                    // stops producing costs more than grain sitting still costs.
+                    // Bigger heaps first, and all of them below a yard about to overflow.
                     ? 0.5f + 0.5f * MathF.Min(1f, source.Stock[resource] / MathF.Max(1f, worthLoad))
-                    : source.Produces_
+                    : source.Produces_ || stranded
                         ? 1f + fullness
                         : bestNeed;
                 tasks.Add(new HaulTask(source.Id, bestSink, resource, urgency));

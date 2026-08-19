@@ -127,6 +127,10 @@ internal static class SimulationSelfTests
         Check("dropped cargo stays in the world and is recovered", DroppedCargoStaysInTheWorld());
         Check("a crop is three windows of labour", ACropIsThreeWindowsOfLabour());
         Check("a field yields what its labour earned it", AFieldYieldsWhatItsLabourEarned());
+        Check("wood comes out of trees, and trees run out", WoodComesOutOfTreesAndTreesRunOut());
+        Check(
+            "a lumber camp is a store nobody eats from, and that is what makes haulers",
+            TheWoodLineDecidesWhetherHaulersAreNeeded());
         Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
@@ -3219,18 +3223,23 @@ internal static class SimulationSelfTests
             report.Add($"{resource} drawn {drawn:F0}/{nominalDrawn:F0}");
         }
 
-        // Wood is still a rate and its shape still has to integrate to its annual figure. Grain is not:
-        // a field yields what its three windows of labour earn, so the thing to check there is that the
-        // windows fit their seasons and that a full year of one pair of hands earns a full crop.
-        var wood = 0f;
-        for (var second = 0f; second < WorldCalendar.YearSeconds; second += 1f)
-        {
-            wood += EconomyRates.ProductionPerSecond(Resource.Wood, WorldCalendar.At(second).Season);
-        }
-
-        normalised &= MathF.Abs(wood - EconomyRates.WoodPerHandPerYear) <
+        // Neither resource is a rate any more, so what is checked on the production side is that the
+        // derivations still land on their annual figures. A cutter cuts for the share of the year it is
+        // not walking, and the reach is the distance that share of walking buys.
+        var cut = Woodland.CutPerSecond * WorldCalendar.YearSeconds *
+                  (1f - Woodland.CutterWalkShare);
+        normalised &= MathF.Abs(cut - EconomyRates.WoodPerHandPerYear) <
                       EconomyRates.WoodPerHandPerYear * 0.002f;
-        report.Add($"wood made {wood:F0}/{EconomyRates.WoodPerHandPerYear:F0}");
+        // And the walking it implies really is that share of the year: the reach has to be the distance a
+        // year's round trips fit into, or the two numbers are describing different woodcutters.
+        var trips = EconomyRates.WoodPerHandPerYear / UnitType.Villager.CarryCapacity;
+        var walking = trips * 2f * Woodland.ReachMetres / UnitType.Villager.MaximumSpeed;
+        normalised &= MathF.Abs(walking - Woodland.CutterWalkShare * WorldCalendar.YearSeconds) <
+                      WorldCalendar.YearSeconds * 0.002f;
+        report.Add(
+            $"wood cut {cut:F0}/{EconomyRates.WoodPerHandPerYear:F0} in " +
+            $"{100f - Woodland.CutterWalkShare * 100f:F0}% of a year, reach {Woodland.ReachMetres:F0} m " +
+            $"= {walking / WorldCalendar.YearSeconds * 100f:F0}% walking");
 
         // Each window has to be answerable inside its own season, or the phase is a deadline nobody can
         // meet. Reaping deliberately does not fit for one pair of hands — that is the scramble — so it is
@@ -3372,27 +3381,32 @@ internal static class SimulationSelfTests
         world.SeedStock(granary, Resource.Wood, 30);
         world.AddNode(NodeKind.House, new Vector2(3f, -4f), capacity: 0, occupancy: 8);
 
-        // Two producers of each resource sharing one granary, so the board has ties to break and two
-        // kinds of cargo to price.
+        // Fields and trees sharing one granary, so the board has ties to break and two kinds of cargo to
+        // price.
         for (var i = 0; i < 4; i++)
         {
             var at = new Vector2(-9f + i * 6f, 8f);
+            var farm = i % 2 == 0;
             world.AddNode(
-                i % 2 == 0 ? NodeKind.Farm : NodeKind.Woodcutter,
+                farm ? NodeKind.Farm : NodeKind.Tree,
                 at,
-                capacity: 80,
-                i % 2 == 0 ? Resource.Grain : Resource.Wood);
-            var placed = world.Nodes.All[^1].Position;
-            var extent = world.Nodes.All[^1].FootprintRadius;
+                capacity: farm ? 80 : (int)Woodland.WoodPerTree,
+                farm ? Resource.Grain : Resource.Wood);
+            var site = world.Nodes.All[^1].Id;
+            var placed = world.Nodes.Get(site).Position;
+            var extent = world.Nodes.Get(site).FootprintRadius;
+            if (!farm) world.SeedStock(site, Resource.Wood, (int)Woodland.WoodPerTree);
             var hand = world.SpawnAgent(placed + new Vector2(extent + 1.3f, 0f), UnitType.Villager);
-            // Half the producers are worked and half are posted, so both assignment shapes are compared.
             world.QueueAssign(
                 new[] { hand },
-                i % 2 == 0
+                farm
                     ? Assignment.Work(
-                        world.Nodes.All[^1].Id, placed, extent, Resource.Grain,
+                        site, placed, extent, Resource.Grain,
                         EconomySystem.WorkShiftSeconds, EconomySystem.HandoverSeconds)
-                    : Assignment.Hold(placed, dwellSeconds: 5f + i, extent));
+                    : Assignment.Work(
+                        site, placed, extent, Resource.Wood,
+                        Woodland.LoadSeconds(UnitType.Villager.CarryCapacity),
+                        EconomySystem.HandoverSeconds));
         }
 
         for (var i = 0; i < 3; i++)
@@ -3587,6 +3601,147 @@ internal static class SimulationSelfTests
             $"    prepared field reaped {reaped:F0} labour-s and delivered {stored} grain; " +
             $"unbroken field reaped {barren:F0} and says '{says}'; drift {drift.Grain}");
         return passed;
+    }
+
+    /// <summary>
+    /// Wood is felled out of a finite tree, not produced, and the tree goes away when it is gone.
+    /// </summary>
+    /// <remarks>
+    /// The claim worth asserting is the <em>ledger</em> one: over the whole run, nothing is added to the
+    /// world's wood. <c>Produced.Wood</c> stays at zero while wood moves out of a trunk, onto a back and
+    /// into a granary, and conservation holds every tick — which is only possible because a tree's
+    /// standing timber is stock like any other's. If wood were ever produced, this would be the test that
+    /// noticed, and it would notice on the tick it happened.
+    /// </remarks>
+    private static bool WoodComesOutOfTreesAndTreesRunOut()
+    {
+        var world = new SimulationWorld();
+        var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 4000);
+        world.AddNode(NodeKind.House, new Vector2(0f, 7f), capacity: 0, occupancy: 4);
+        var tree = world.AddNode(NodeKind.Tree, new Vector2(9f, 0f), capacity: (int)Woodland.WoodPerTree);
+        world.SeedStock(tree, Resource.Wood, (int)Woodland.WoodPerTree);
+        var seeded = world.Economy.Seeded.Wood;
+
+        var at = world.Nodes.Get(tree).Position;
+        var extent = world.Nodes.Get(tree).FootprintRadius;
+        var cutter = world.SpawnAgent(at + new Vector2(1.4f, 0f), UnitType.Villager);
+        world.QueueAssign(
+            new[] { cutter },
+            Assignment.Work(
+                tree, at, extent, Resource.Wood,
+                Woodland.LoadSeconds(UnitType.Villager.CarryCapacity), EconomySystem.HandoverSeconds));
+
+        // Long enough to fell the whole tree three loads over, plus the walking.
+        var drift = default(ResourceTotals);
+        var felled = false;
+        for (var tick = 0; tick < 30 * 1400; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (drift.Grain != 0 || drift.Wood != 0) break;
+            if (!world.Nodes.Contains(tree)) felled = true;
+        }
+
+        var stored = world.Nodes.Get(granary).Stock.Wood;
+        var (standing, trees) = world.Nodes.StandingTimber();
+        // Everything the tree held is now in the granary, in somebody's hands, or burnt by the household.
+        var accounted = stored + EconomySystem.CarriedTotal(world.Agents).Wood +
+                        (int)world.Economy.Consumed.Wood + standing;
+        var passed = felled && trees == 0 && world.Economy.Produced.Wood == 0 &&
+                     stored > 0 && accounted == seeded &&
+                     drift.Grain == 0 && drift.Wood == 0;
+        Console.WriteLine(
+            $"    one tree of {seeded} wood: felled={felled}, {trees} left standing, " +
+            $"{stored} in the granary, produced {world.Economy.Produced.Wood} (must be 0), " +
+            $"{accounted}/{seeded} accounted for, drift {drift.Wood}");
+        return passed;
+    }
+
+    /// <summary>
+    /// The second half of Stage B's gate, both directions, on one map.
+    /// </summary>
+    /// <remarks>
+    /// <b>The trigger is stranded stock, and this is what that buys.</b> Two settlements, identical
+    /// except for one building:
+    /// <list type="bullet">
+    /// <item>Trees near the granary: the cutter walks its own wood in and <em>no cart moves at all</em>.
+    /// Hauling in a compact settlement is not a small number, it is zero, because the producer carrying
+    /// its own output is the whole design and a cart between a tree and a granary forty metres away is
+    /// pure overhead.</item>
+    /// <item>Trees a long way out with a forward depot beside them: the cutter delivers to the depot
+    /// because it is nearer, the depot is a store no household draws from, and the board collects
+    /// stranded stock — so carts appear, and wood reaches the granary having been carried by two
+    /// different pairs of legs.</item>
+    /// </list>
+    /// Nothing in either half knows what a lumber camp is. The difference is entirely geometric.
+    /// </remarks>
+    private static bool TheWoodLineDecidesWhetherHaulersAreNeeded()
+    {
+        var (nearHauls, nearStored, nearDrift) = RunWoodLine(farTrees: false, withDepot: false);
+        var (farHauls, farStored, farDrift) = RunWoodLine(farTrees: true, withDepot: true);
+        var passed = nearHauls == 0 && nearStored > 0 && nearDrift == 0 &&
+                     farHauls > 0 && farStored > 0 && farDrift == 0;
+        Console.WriteLine(
+            $"    trees at hand: {nearHauls} hauls, {nearStored} wood in the granary | " +
+            $"wood line pushed out with a depot on it: {farHauls} hauls, {farStored} in the granary | " +
+            $"drift {nearDrift}/{farDrift}");
+        return passed;
+    }
+
+    private static (long Hauls, int Stored, long Drift) RunWoodLine(bool farTrees, bool withDepot)
+    {
+        var world = new SimulationWorld(240f);
+        var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 4000);
+        // A house, so the granary is a store somebody eats out of. Without one nothing draws on it, the
+        // granary itself counts as stranded, and the test would measure the opposite of what it means to.
+        world.AddNode(NodeKind.House, new Vector2(0f, 9f), capacity: 0, occupancy: 4);
+
+        var line = farTrees ? 70f : 12f;
+        var trees = new List<NodeId>();
+        for (var i = 0; i < 6; i++)
+        {
+            var at = new Vector2(line + (i % 3) * 4f, (i / 3) * 4f - 2f);
+            var tree = world.AddNode(NodeKind.Tree, at, capacity: (int)Woodland.WoodPerTree);
+            world.SeedStock(tree, Resource.Wood, (int)Woodland.WoodPerTree);
+            trees.Add(tree);
+        }
+
+        if (withDepot)
+        {
+            // The lumber camp. A store, at the tree line, that nobody lives near.
+            world.AddNode(NodeKind.ForwardDepot, new Vector2(line - 6f, 0f), capacity: 400);
+        }
+
+        for (var i = 0; i < 2; i++)
+        {
+            var tree = trees[i];
+            var at = world.Nodes.Get(tree).Position;
+            var extent = world.Nodes.Get(tree).FootprintRadius;
+            var cutter = world.SpawnAgent(at + new Vector2(1.4f, 0f), UnitType.Villager);
+            world.QueueAssign(
+                new[] { cutter },
+                Assignment.Work(
+                    tree, at, extent, Resource.Wood,
+                    Woodland.LoadSeconds(UnitType.Villager.CarryCapacity),
+                    EconomySystem.HandoverSeconds));
+        }
+
+        // Carts, standing at the granary with nothing to do until the geometry gives them something.
+        for (var i = 0; i < 2; i++)
+        {
+            world.SpawnAgent(new Vector2(-6f, i * 2f - 1f), UnitType.HaulerCart);
+        }
+
+        var drift = 0L;
+        for (var tick = 0; tick < 30 * 1600; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            var discrepancy = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            drift = discrepancy.Grain + discrepancy.Wood;
+            if (drift != 0) break;
+        }
+
+        return (world.Economy.HaulsAssigned, world.Nodes.Get(granary).Stock.Wood, drift);
     }
 
     private static void Tick(SimulationWorld world, int count)

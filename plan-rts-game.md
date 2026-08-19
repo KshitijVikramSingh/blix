@@ -2415,3 +2415,209 @@ harvest. A farmer with no work to do belongs at its field.
 | two-year settlement | 16,314 grain against a nominal 16,800 — **97%**, drift 0, short 0 |
 | hauling in a compact settlement | **zero journeys**, which is the point rather than an omission |
 | stores year on year | 6,974 → 8,199 at winter; autonomy climbing |
+
+---
+
+## 21. The scene got a sun, and a field stopped being a building
+
+Watched rather than measured, and the complaint was the right one: *the lack of lighting, shadows and the
+dull colouring on what's clearly primitives makes the whole thing hard to read.* It is not a cosmetic
+problem. A settlement is read from above as a plan, and a plan drawn in flat ambient with no cast shadow
+has **no depth cue at all** — every building is a coloured rectangle lying in the same plane as the ground
+it stands on, so its height, its footprint and its distance from its neighbour are equally unreadable.
+Calibrating an economy you cannot see is guessing.
+
+### The frame is now a graph, lifted rather than invented
+
+Sun shadow depth pass → HDR scene (procedural sky, shadowed sun, aerial perspective) → present (expose,
+grade, ACES). Taken from TankArena and Bulwark, which already prove the seam; only the mood is this
+game's. Four things earned their place:
+
+- **The sun sits at 42° above the horizon**, not overhead. A building then casts a shadow a little longer
+  than it is tall, which is the entire reason its height is legible from a top-down camera. The
+  near-vertical light this started with hides every shadow underneath the thing that cast it and reads as
+  no lighting at all.
+- **The shadow map is 150 m around the camera focus, not the map.** One 2048 map over 600 m is 0.3 m a
+  texel and every shadow edge is a visible staircase; 150 m is a little wider than the camera can see and
+  comes to 13 texels a metre. The box is **snapped to its own texel grid**, because a box that slides
+  continuously slides in sub-texel steps and every shadow edge in the scene then crawls as you pan — an
+  artefact far more distracting than the resolution it would be hiding.
+- **Buildings have eaves.** A wall box plus a roof slab a hand's breadth wider on every side. The
+  overhang throws a hard horizontal line down the wall, and that line is the difference between a
+  building and a box. It is a lie about the footprint — the wall below is what blocks — and it is worth it.
+- **The palette was re-authored as albedos.** The old colours were written when a value went to the screen
+  more or less as typed, so they sat near white before any light hit them, which is exactly why everything
+  read pastel. Now they are in the 0.2–0.7 band and the sun does the brightening.
+
+### A field is ground, and that fixed three things at once
+
+*Farms should be more like terrain than anything else.* Correct, and following it through was the largest
+single improvement in the scene — but the interesting part is that it was **not only a drawing problem**.
+
+`NodeFootprint.Blocks` is now a separate list from `CellsOf`, because *how big a thing is* and *whether you
+can walk on it* are different questions. A field has a 4.5 m footprint — its hands are counted against its
+wall, it is drawn at that size — and a field is **not a wall**. It is tilled ground.
+
+Conflating the two had made every farm a 4.5 m obstacle. Twelve of them ringed round a granary turned the
+middle of the settlement into a maze, every farmhand was routed to the outside face of its own field, and
+the fields could not be laid edge to edge without sealing the settlement in. It is also, belatedly, what
+the earlier complaint about bodies *getting stuck in farms* actually was: they were never stuck. They were
+going round.
+
+So the fields are now **one contiguous block abutting the granary**, marching away from the village rather
+than ringed all round it, with the houses on an arc on the other side. Three things settled that shape and
+none of them was taste: the reaper carries its own crop so every metre of the walk is a metre not spent
+reaping (§20); a field is not a wall, so plots tile edge to edge into a patchwork the way fields do; and
+putting them all on one side keeps the traffic between store and field from crossing the housing. The
+one-year yield came out at **8,104 of a nominal 8,400 — 96.5%**, so the shape cost nothing.
+
+### The crop cycle is now visible, which it was not before
+
+A field's trouble is always in the past — a ceiling not set in spring cannot be diagnosed at harvest from
+anything a body is doing — which is why §20 built `CropCycle.StateOf` to have the field say so out loud.
+**Saying it in a console table is not saying it to a player.** The same fact is now the colour and the
+height of the ground:
+
+| the field says | the ground is |
+|---|---|
+| `unbroken` / `failed` | pale dry earth, flat |
+| `preparing` / `prepared` | dark broken earth, furrowed |
+| `tending` / `tended` | low green |
+| `standing` | tall gold |
+| `reaping` | gold, shrinking as it comes in |
+| `reaped` / `resting` | bare soil |
+
+Someone who never reads a number can see that one field in twelve is the wrong colour. That is what the
+mechanic was for.
+
+---
+
+## 22. Session 6.5, stage B — wood is standing on the map, and that is why carts exist
+
+### The one decision: wood is never produced
+
+It is standing in trees when the world begins, and cutting moves it out of a trunk into a cutter's hands.
+There is **no production term for wood at all** — `Produced.Wood` is permanently zero, and
+`Seeded + Produced − Consumed = Stored + Carried` still holds exactly. The conservation identity got
+*shorter* again, which by now is a reliable sign the correction was the right one.
+
+The consequence is the point: **a settlement's total wood is bounded by the forest it can reach**,
+permanently. Stores cannot grow their way out of it. The only answer to running out is to go further,
+which is the pressure the whole game is supposed to run on.
+
+It also retires the last rate in the economy. The woodcutter *building* is gone — it accrued
+`WoodPerHandPerYear × seasonalShape × sqrt(hands)` whether or not a tree stood within a hundred metres,
+which is the same mistake §20 undid for grain wearing a different hat: an abstract producer you can put
+anywhere, in a design whose premise is that the map *is* the economy. `HandsEffect`, `ProductionPerSecond`
+and `WoodShape` all went with it. Nothing in the economy produces at a rate any more.
+
+`WoodShape` deserves its own note. "Wood arrives when labour is free, which is summer and winter" was a
+curve describing **a decision the player now actually makes** — spring and harvest belong to the fields,
+and whoever is not in a field can be at a tree. Keeping the curve would have been the game playing that
+allocation on the player's behalf and then charging them for it.
+
+### The numbers, derived from one dial
+
+The dial is `CutterWalkShare = 0.10` — the share of its year one pair of hands may spend walking wood in.
+It is a dial about *waste*, not about distance, and everything else falls out of it:
+
+| | | |
+|---|---|---|
+| cut rate | `WoodPerHandPerYear / (year × (1 − walkShare))` | 0.103 wood/s |
+| a load | villager carry | 30 units ≈ 4.9 min of chopping |
+| **reach** | `walkShare × year / trips / 2 × pace` | **29 m** |
+| a tree | chosen, not derived | 90 wood = 3 loads ≈ 16 min |
+
+The reach came out at 29 m against a design intuition of 10–20 m guessed from the other end, which is
+close enough to trust both. A tree being three loads is the one number chosen rather than derived, and the
+reason is legibility: a settlement burns twenty-odd trees a year, so at three loads a tree the wood line
+visibly recedes within a season and the player can watch their own logging happen. One load a tree needs
+the forest packed at three-metre spacing to last a year; ten makes a tree an hour of work and nothing ever
+changes on screen.
+
+The shift length is `carry / cutRate`, not the 45-second `WorkShiftSeconds` a field uses. That figure is a
+*fallback* for a body whose hands fill in seconds; applied to cutting it would send a woodcutter home with
+four units and turn the job into nothing but walking.
+
+### The reach is measured from the store, and that is the whole mechanic
+
+A cutter picks the nearest tree within reach **of the store it last delivered to** — not of itself. One
+choice, and the entire stage falls out of it:
+
+1. **Trees near the granary.** The cutter walks a few metres a load and carries its own wood in. No cart
+   is involved. A compact settlement completes a year with **zero hauling journeys**, which is the point
+   rather than an omission — a cart shuttling between a tree and a granary forty metres away is pure
+   overhead, and the producer carrying its own output is the design.
+2. **Those trees felled.** No store can reach a tree. The cutters lose their assignment and become spare
+   labour — they say so, instead of quietly walking further and further, which is the settlement being
+   told it has outgrown its arrangement.
+3. **A forward depot built at the tree line.** The cutters re-base onto it by themselves: the nearest
+   store with a tree in reach. Their wood now piles up in a building no household draws from.
+
+**A lumber camp is not a building.** It is a forward depot — a store — and the only thing that makes it
+one is that nobody lives near it.
+
+### The hauling trigger became "stock nothing can reach"
+
+Which is what step 3 needs, and the old trigger could not express it. It was *any store above its
+high-water mark*, and that fails in both directions: a compact settlement's granary is the only store,
+sits below high water all year, and would never be collected from — while a forward depot at 70% would not
+be collected either, because it was not full enough, so a frontier holding simply filled up and stopped.
+
+A store is **stranded** if no house names it as its supply. Stranded stock is worth fetching at a cart's
+load, and moves only toward a store something actually eats from — without that last clause two depots at
+the tree line would pass the same wood between themselves forever, both equally unreachable. The urgency
+is a producer's-yard urgency, because that is what it is: output accumulating where nobody can use it,
+and when the building fills the people feeding it stop working.
+
+The question is not how full a store is. **It is whether anybody can reach what is in it.** Nothing in
+either half of the gate knows what a lumber camp is; the difference is entirely geometric.
+
+### The gradient of the forest is the record of past logging
+
+Stragglers within reach of the store, canopies at the edge of it, unbroken woodland beyond. That is not
+decoration — it is what a settlement that has been cutting for years looks like from above, so **the map
+tells the player which direction the wood ran out in before the simulation has run a tick.** "Distance is
+the terrain" is now a fact about the ground rather than a comment in a seed function.
+
+Deterministic, from a splitmix counter rather than a clock, because two runs of this world must be the
+same world — the fingerprint checks it and the save relies on it. There is no `Random` in the simulation
+and this was not the place to introduce one.
+
+### Two bugs, and the second one was invisible in every column
+
+**Seven cutters felled one tree.** "The nearest tree" is the same tree for every cutter based at the same
+store, so all seven converged on one trunk, felled it in a seventh of the time, and walked to the next one
+together. A tree is claimed if another body's standing job already names it — read off the assignments
+rather than kept as a reservation table, for the same reason the board reads which carts are already
+hauling: a second collection to keep in step with spawning, despawning and tombstoned slots is a
+collection that is eventually wrong, and this one would have to survive a save too. The claim is a
+*preference* and not a lock, because two axes on one tree really do fell it in half the time.
+
+**And it was silently costing the hand count.** Six of the seven were shoved off the trunk by the crowd
+and settled outside the reach that counts as working it, so a woodland with thirteen trees in reach was
+being worked by one person. Nothing in any column said so — the wood arrived, just slowly — and it was
+only visible as `hands` reading 12 instead of 19 in one seasonal sample.
+
+### What the year does
+
+| | |
+|---|---|
+| suite | `--selftest` **75/75** |
+| one year, compact | 8,104 grain of a nominal 8,400 (96.5%), wood short **0**, drift **0**, **0 hauls** |
+| trees in reach | 38 → 31 → 17 → 10 over year one, **0 by summer of year two** |
+| when reach runs out | axes swinging drops to 0, stores drain, and 303 trees holding **27,270 wood** stand out of reach |
+| the depot, in the self-test | trees at hand → **0 hauls**; wood line pushed out with a depot on it → **9 hauls**, both drift 0 |
+| benchmarks | pen 1.33x, gate 1.78x, 33 dead stops, red 119.2 agent-s — unmoved |
+
+The second year is not a failure, it is the mechanic arriving on schedule: a settlement that does nothing
+runs its own woodland out inside two years and is told so a season in advance. The answer is a depot at the
+tree line, and the carts that appear when you build one are Stage B working.
+
+### What remains of the slice
+
+- **C — Population.** Houses with their own caps, a villager appearing at a house with room inside a
+  feeding centre's reach, growth on food-days + housing + warmth, privation spending itself as emigration
+  before death. The spare labour a receding wood line produces is the thing population growth wants.
+- **D — Construction as labour.** Which is what makes the depot in step 3 cost something.
+- **E — The raid, and civilian self-defence as an interrupt.**
