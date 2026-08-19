@@ -247,7 +247,7 @@ internal sealed class SimulationWorld
             resolved,
             ColliderLayer.Structure,
             ColliderRole.Interactable,
-            ColliderShape.Aabb(new Vector2(NodeFootprint.HalfExtent)),
+            ColliderShape.Aabb(new Vector2(MathF.Max(0.5f, NodeFootprint.HalfExtentOf(kind)))),
             at);
 
         // A building is ground nobody can walk over, and the way to say that is the placement grid:
@@ -307,31 +307,72 @@ internal sealed class SimulationWorld
     }
 
     /// <summary>
+    /// Moves a spawn position off built ground, if it landed on some.
+    /// </summary>
+    /// <remarks>
+    /// Because a scenario that places a body relative to a building has to know how big the building is,
+    /// and it did not: buildings went from 1.5 m across to 4.5 and 7.5, and carts that used to muster
+    /// beside the granary were suddenly inside it — standing on ground with zero clearance, unable to
+    /// route anywhere, for a whole simulated year. Every caller would have to be found and fixed, or this
+    /// can be true once: <b>a body spawned inside a building appears beside it instead.</b> The search
+    /// spirals outward by half a metre at a time and gives up rather than looping, because a body with
+    /// nowhere legal to go is a scenario worth failing loudly.
+    /// </remarks>
+    private Vector2 NudgeOutOfBuildings(Vector2 position, float radius)
+    {
+        if (pathService.IsPositionFreeOfPlacement(position, radius)) return position;
+        for (var ring = 1; ring <= 24; ring++)
+        {
+            var distance = ring * NavigationCellSize;
+            for (var bearing = 0; bearing < 12; bearing++)
+            {
+                var angle = bearing / 12f * MathF.Tau;
+                var candidate = Terrain.ClampPosition(
+                    position + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * distance,
+                    radius + BodyFootprint.NavigationMargin);
+                if (pathService.IsPositionFreeOfPlacement(candidate, radius)) return candidate;
+            }
+        }
+
+        return position;
+    }
+
+    /// <summary>
     /// Marks the placement cells a building stands on, so bodies route and steer around it.
     /// </summary>
     /// <remarks>
-    /// One cell, the one the node's centre falls in, and the node is snapped to that cell's centre so
-    /// the wall, the drawing and the arrival tolerance describe the same square. See
-    /// <see cref="NodeFootprint"/> for why anything cleverer than one cell went badly.
+    /// An odd block of cells centred on the one the node's position falls in, and the node is snapped to
+    /// that cell's centre so the wall, the drawing and the arrival tolerance describe the same square.
+    /// The raster is rebuilt once for the whole building rather than once per cell.
     /// </remarks>
     private void OccupyFootprint(NodeId id)
     {
         var transform = Placement.Transform;
         ref var node = ref Nodes.Get(id);
-        if (!transform.TryWorldToCell(node.Position, out var cell)) return;
-        node.Position = transform.CellCenter(cell);
-        if (Placement.IsOccupied(cell) || !Placement.SetOccupied(cell, true)) return;
-
-        var halfExtents = new Vector2(transform.CellSize * 0.5f - 0.025f);
-        blockColliders[cell] = Colliders.Add(
-            ColliderOwner.Placement(cell, transform),
-            node.Faction,
-            ColliderLayer.Structure,
-            ColliderRole.MovementSolid | ColliderRole.PlacementBlocker | ColliderRole.Interactable,
-            ColliderShape.Aabb(halfExtents),
-            transform.CellCenter(cell));
+        if (!transform.TryWorldToCell(node.Position, out var origin)) return;
+        node.Position = transform.CellCenter(origin);
         Colliders.Move(node.Collider, node.Position);
-        RebuildTerrainNavigation();
+
+        var span = NodeFootprint.CellsOf(node.Kind) / 2;
+        var halfExtents = new Vector2(transform.CellSize * 0.5f - 0.025f);
+        var changed = false;
+        for (var dz = -span; dz <= span; dz++)
+        for (var dx = -span; dx <= span; dx++)
+        {
+            var cell = new GridCell(origin.X + dx, origin.Z + dz);
+            if (!transform.Contains(cell) || Placement.IsOccupied(cell)) continue;
+            if (!Placement.SetOccupied(cell, true)) continue;
+            changed = true;
+            blockColliders[cell] = Colliders.Add(
+                ColliderOwner.Placement(cell, transform),
+                node.Faction,
+                ColliderLayer.Structure,
+                ColliderRole.MovementSolid | ColliderRole.PlacementBlocker | ColliderRole.Interactable,
+                ColliderShape.Aabb(halfExtents),
+                transform.CellCenter(cell));
+        }
+
+        if (changed) RebuildTerrainNavigation();
     }
 
     /// <summary>People with no house to live in, which §6 wants named as a blocked sink.</summary>
@@ -493,9 +534,14 @@ internal sealed class SimulationWorld
         float navigationRadius = 0f,
         float turningRadius = 0f,
         int carryCapacity = 0,
-        float appetite = 1f)
+        float appetite = 1f,
+        bool allowEmbedded = false)
     {
         position = Terrain.ClampPosition(position, radius + BodyFootprint.NavigationMargin);
+        // Off built ground unless the caller is deliberately testing what happens on it. Two self-tests
+        // are: expelling an embedded body is a feature, and clearance is asserted by putting a body where
+        // its own radius does not fit.
+        if (!allowEmbedded) position = NudgeOutOfBuildings(position, radius);
         var resolvedFaction = faction ?? new FactionId(0);
         var id = Agents.Spawn(
             position, resolvedFaction, radius, maximumSpeed, navigationRadius, turningRadius,

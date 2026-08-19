@@ -99,10 +99,9 @@ internal static class SimulationSelfTests
         Check("a group crosses region borders without swinging", GroupCrossesRegionBorders());
         Check("large bodies avoid each other before touching", LargeBodiesAvoidBeforeContact());
         Check("a mixed-size crowd files through a gate without overlap", MixedSizeCrowdIsSafe());
-        Check("body radii inside one rung share a decomposition", RadiusRungsShareADecomposition());
-        Check("a heavy body takes the gate a villager can skip", HeavyBodyRoutesAroundAFootPassage());
-        Check("every unit type routes at its class, not its own radius", UnitTypesRouteByClass());
-        Check("a wagon cannot come about like a person", WagonComesAboutSlowly());
+        Check("every roster radius is inside one clearance rung", RadiusRungsShareADecomposition());
+        Check("every unit type routes on one decomposition", UnitTypesRouteByClass());
+        Check("a body with a turning circle cannot come about like a person", WagonComesAboutSlowly());
         Check("a scout outpaces a villager in proportion to its speed", ScoutOutpacesVillager());
         Check("warning does not shrink as bodies get faster", WarningHoldsAcrossSpeeds());
         Check("a queue is worth more to a body that would otherwise be quick", CongestionIsPricedBySpeed());
@@ -1094,8 +1093,9 @@ internal static class SimulationSelfTests
         }
         world.Tick((float)SimulationWorld.FixedDeltaSeconds);
 
-        var small = world.SpawnAgent(new Vector2(-10f, 0.75f), radius: AgentDefaults.Radius);
-        var large = world.SpawnAgent(new Vector2(-10f, 0.75f), radius: 0.80f);
+        var small = world.SpawnAgent(
+            new Vector2(-10f, 0.75f), radius: AgentDefaults.Radius, allowEmbedded: true);
+        var large = world.SpawnAgent(new Vector2(-10f, 0.75f), radius: 0.80f, allowEmbedded: true);
         world.QueueMove(new[] { small }, new Vector2(10f, 0.75f));
         world.QueueMove(new[] { large }, new Vector2(10f, 0.75f));
         // 20 m of walking, which is 13.3 s rather than the 4.4 s it was at a run.
@@ -1189,7 +1189,8 @@ internal static class SimulationSelfTests
         var world = new SimulationWorld();
         world.QueueToggleObstacle(Vector2.Zero);
         world.Tick((float)SimulationWorld.FixedDeltaSeconds);
-        var id = world.SpawnAgent(new Vector2(0.75f, 0.75f));
+        // Deliberately inside the block: expelling an embedded body is the thing under test.
+        var id = world.SpawnAgent(new Vector2(0.75f, 0.75f), allowEmbedded: true);
         world.Tick((float)SimulationWorld.FixedDeltaSeconds);
 
         ref var agent = ref world.Agents.Get(id);
@@ -2666,7 +2667,7 @@ internal static class SimulationSelfTests
     {
         var report = new List<string>();
         var passed = true;
-        foreach (var type in new[] { UnitType.Villager, UnitType.Wagon })
+        foreach (var type in new[] { UnitType.Villager, UnitType.HaulerCart })
         {
             var world = new SimulationWorld();
             var id = world.SpawnAgent(new Vector2(-7f, -7f), type);
@@ -2871,7 +2872,7 @@ internal static class SimulationSelfTests
         foreach (var (chaser, quarry) in new[]
                  {
                      (UnitType.LightCavalry, UnitType.Villager),
-                     (UnitType.LightCavalry, UnitType.Wagon),
+                     (UnitType.LightCavalry, UnitType.HaulerCart),
                      (UnitType.Villager, UnitType.LightCavalry),
                  })
         {
@@ -3455,10 +3456,10 @@ internal static class SimulationSelfTests
     private static bool LargeBodiesAvoidBeforeContact()
     {
         var world = new SimulationWorld();
-        var combined = AgentDefaults.HeavyRadius * 2f;
+        var combined = UnitType.HaulerCart.Radius * 2f;
         var offset = combined * 0.33f;
-        var left = world.SpawnAgent(new Vector2(-6f, offset * 0.5f), radius: AgentDefaults.HeavyRadius);
-        var right = world.SpawnAgent(new Vector2(6f, -offset * 0.5f), radius: AgentDefaults.HeavyRadius);
+        var left = world.SpawnAgent(new Vector2(-6f, offset * 0.5f), radius: UnitType.HaulerCart.Radius);
+        var right = world.SpawnAgent(new Vector2(6f, -offset * 0.5f), radius: UnitType.HaulerCart.Radius);
         world.QueueMove(new[] { left }, new Vector2(6f, offset * 0.5f));
         world.QueueMove(new[] { right }, new Vector2(-6f, -offset * 0.5f));
 
@@ -3525,7 +3526,7 @@ internal static class SimulationSelfTests
                 var heavy = heavyFirst ? i < heavies : i >= 12 - heavies;
                 ids.Add(world.SpawnAgent(
                     new Vector2(gate.X - 5f - i % 3 * 2.2f, gate.Y + (i / 3 - 1.5f) * 2.2f),
-                    radius: AgentDefaults.RadiusOf(heavy ? BodyClass.Heavy : BodyClass.Foot)));
+                    radius: heavy ? UnitType.HaulerCart.Radius : AgentDefaults.Radius));
             }
 
             world.QueueMove(ids, new Vector2(gate.X + 5f, gate.Y));
@@ -3583,53 +3584,37 @@ internal static class SimulationSelfTests
         var world = BuildTwoGapWall(out _, out _, out _);
 
         var villager = world.DecomposeWalkable(AgentDefaults.Radius);
+        var cart = world.DecomposeWalkable(UnitType.HaulerCart.Radius);
         var withinRung = world.DecomposeWalkable(0.65f);
-        var heavy = world.DecomposeWalkable(AgentDefaults.HeavyRadius);
-
+        // Everything in the roster is inside one rung, so all of it has to share one decomposition —
+        // which is the whole reason the router keeps one mesh for the whole world. The 0.65 probe is
+        // there to pin the top of the rung rather than the top of the roster: a unit added at any width
+        // up to it is still free, and one added above it is not.
         var shared = villager.CoveredCells == withinRung.CoveredCells &&
                      villager.Count == withinRung.Count &&
-                     villager.Crossings.Count == withinRung.Crossings.Count;
-        var separated = heavy.CoveredCells < villager.CoveredCells;
+                     villager.Crossings.Count == withinRung.Crossings.Count &&
+                     villager.CoveredCells == cart.CoveredCells &&
+                     villager.Count == cart.Count;
+        var beyondRung = world.DecomposeWalkable(0.80f).CoveredCells < villager.CoveredCells;
 
-        if (!shared || !separated)
+        if (!shared || !beyondRung)
         {
             Console.WriteLine(
                 $"    rungs: villager {villager.CoveredCells} cells / {villager.Count} rects, " +
-                $"0.65 {withinRung.CoveredCells} / {withinRung.Count} (must match), " +
-                $"heavy {heavy.CoveredCells} (must be fewer)");
+                $"cart {cart.CoveredCells} / {cart.Count}, 0.65 {withinRung.CoveredCells} / " +
+                $"{withinRung.Count} (all three must match), 0.80 must be fewer");
         }
 
-        return shared && separated;
+        return shared && beyondRung;
     }
 
-    /// <summary>
-    /// A villager takes the narrow clearing; a heavy body goes round to the gate.
-    /// </summary>
-    /// <remarks>
-    /// §3's radius classes end to end, and the reason terrain is allowed to discriminate at all: a
-    /// tree line or a wall gap a foot unit slips through is not a route for a wagon, which has to
-    /// use the gate. Asserted as where each body crosses the wall rather than as how far it walked,
-    /// because the distance is a consequence and the crossing is the claim.
-    /// </remarks>
-    private static bool HeavyBodyRoutesAroundAFootPassage()
-    {
-        var footCrossing = WallCrossingOf(AgentDefaults.Radius);
-        var heavyCrossing = WallCrossingOf(AgentDefaults.HeavyRadius);
-
-        // Which side of the wall each one used: the narrow clearing sits on the centre line, the
-        // gate several metres along it.
-        var passed = footCrossing is { } foot && MathF.Abs(foot) < 2f &&
-                     heavyCrossing is { } heavyZ && heavyZ > 4f;
-        if (!passed)
-        {
-            Console.WriteLine(
-                $"    crossings: villager at z={(footCrossing?.ToString("F2") ?? "never crossed")} " +
-                $"(needs |z|<2, the clearing), heavy at " +
-                $"z={(heavyCrossing?.ToString("F2") ?? "never crossed")} (needs z>4, the gate)");
-        }
-
-        return passed;
-    }
+    // "a heavy body takes the gate a villager can skip" stood here and is retired with the second body
+    // class. It asserted §3's end-to-end claim — that a clearing a foot unit slips through is not a route
+    // for a 0.90 m body, which has to use the gate — and there is no 0.90 m body any more. What retired
+    // the class is worth keeping: once buildings occupied the ground they stand on, a body that wide could
+    // not be routed to a point beside one, because the clearance beside a wall is 0.75. The two-gap wall
+    // it was built on is still here and still used by the rung test above, so re-deriving a second class
+    // has somewhere to start if a finer navigation cell ever makes one affordable.
 
     /// <summary>Walks one body across the two-gap wall and reports where it got through.</summary>
     private static float? WallCrossingOf(float radius)
@@ -3723,7 +3708,7 @@ internal static class SimulationSelfTests
     private static bool WagonComesAboutSlowly()
     {
         var villager = SecondsToComeAbout(UnitType.Villager);
-        var wagon = SecondsToComeAbout(UnitType.Wagon);
+        var wagon = SecondsToComeAbout(UnitType.HeavyCavalry);
         var passed = villager > 0f && wagon > 0f && wagon > villager * 3f;
         if (!passed)
         {
@@ -3981,19 +3966,21 @@ internal static class SimulationSelfTests
     {
         var villager = PathService.CongestionSizeScale(UnitType.Villager.Radius);
         var cart = PathService.CongestionSizeScale(UnitType.HaulerCart.Radius);
-        var heavy = PathService.CongestionSizeScale(UnitType.Wagon.Radius);
-
-        var ordered = villager < cart && cart < heavy;
+        // Two widths in the roster now that the second body class is retired, so this is asserted as the
+        // relation rather than as an ordering over three: the reference body prices a queue at exactly
+        // one, and anything wider prices it in proportion to how much of the aperture it takes.
+        var wider = cart > villager;
         var referenceIsOne = MathF.Abs(villager - 1f) < 0.001f;
-        // Linear in width: twice as wide, twice the share of an aperture, twice the wait.
-        var proportionate = MathF.Abs(heavy - UnitType.Wagon.Radius / AgentDefaults.Radius) < 0.001f;
+        var proportionate =
+            MathF.Abs(cart - UnitType.HaulerCart.Radius / AgentDefaults.Radius) < 0.001f;
 
-        var passed = ordered && referenceIsOne && proportionate;
+        var passed = wider && referenceIsOne && proportionate;
         if (!passed)
         {
             Console.WriteLine(
-                $"    congestion by width: villager {villager:F3}, cart {cart:F3}, " +
-                $"heavy {heavy:F3} — must ascend, villager exactly 1, heavy proportionate");
+                $"    congestion by width: villager {villager:F3} (must be exactly 1), cart " +
+                $"{cart:F3} (must be wider and proportionate at " +
+                $"{UnitType.HaulerCart.Radius / AgentDefaults.Radius:F3})");
         }
 
         return passed;

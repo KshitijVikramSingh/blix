@@ -196,6 +196,18 @@ internal struct AgentJobs
     /// </remarks>
     public float PlaceExtent;
 
+    /// <summary>
+    /// Half the width of the square at <see cref="Place"/>, which is what its walls actually are.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="PlaceExtent"/> is the half-diagonal — the radius of the circle that just contains the
+    /// building — because that is the safe figure for a circular tolerance. But a circle around a square
+    /// is a poor description of where the square is: a body approaching a <em>face</em> would stop
+    /// 2.3 metres short of a granary, which reads as hesitation rather than arrival. Anything that wants
+    /// to know where the wall is uses this and measures to the box.
+    /// </remarks>
+    public readonly float PlaceHalfWidth => PlaceExtent * 0.70710678f;
+
     /// <summary>Seconds of work left once the unit is at <see cref="Place"/>.</summary>
     public float DwellRemaining;
 

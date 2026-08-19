@@ -20,14 +20,21 @@ namespace RTSGame.Debug;
 /// <para>
 /// Measured in body-relative units throughout: separation as a fraction of the pair's combined
 /// radius, and the approach geometry scaled so that the same scenario at two sizes is the same
-/// scenario. An overlap of 10 cm means something quite different to a villager than to a wagon, and
-/// comparing the raw figures would say the large bodies behave worse when they are merely larger.
+/// scenario. An overlap of 10 cm means something quite different to a villager than to a cart, and
+/// comparing the raw figures would say the wider bodies behave worse when they are merely wider.
 /// </para>
 /// </remarks>
 internal static class MixedBodyScenarios
 {
     private const float Villager = AgentDefaults.Radius;
-    private const float Heavy = AgentDefaults.HeavyRadius;
+    /// <summary>The widest body in the roster, which is the cart.</summary>
+    /// <remarks>
+    /// It was a 0.90 m heavy class, which is retired — a body that wide cannot be routed to a point
+    /// beside a building. The widest thing in the world is now the hauler cart at 0.55, and these
+    /// scenarios are about mixing sizes rather than about any particular size, so they hold with the
+    /// narrower spread and simply have less of it to work with.
+    /// </remarks>
+    private const float Heavy = 0.55f;
     private static readonly float Step = (float)SimulationWorld.FixedDeltaSeconds;
 
     private readonly record struct Crossing(
@@ -412,7 +419,10 @@ internal static class MixedBodyScenarios
         Console.WriteLine("  coming about at speed");
         Console.WriteLine("    unit           | asked for | tightest arc traced | time to reverse");
 
-        foreach (var type in new[] { UnitType.Villager, UnitType.LightCavalry, UnitType.HeavyCavalry, UnitType.Wagon })
+        foreach (var type in new[]
+                 {
+                     UnitType.Villager, UnitType.HaulerCart, UnitType.LightCavalry, UnitType.HeavyCavalry,
+                 })
         {
             var world = new SimulationWorld();
             var id = world.SpawnAgent(new Vector2(-13f, 0f), type);

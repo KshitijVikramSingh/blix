@@ -269,9 +269,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         simulation.StartAtSeconds(3100f);
         selection.Clear();
         SettlementScenarios.Populate(
-            simulation, farms: 8, woodcutters: 4, carts: 4, wagons: 1, ringRadius: 19f);
+            simulation, farms: 8, woodcutters: 4, carts: 5, wagons: 0, ringRadius: 30f);
         cameraFocus = Vector2.Zero;
-        cameraDistance = MathF.Min(58f, cameraMaximumDistance);
+        cameraDistance = MathF.Min(78f, cameraMaximumDistance);
         Console.WriteLine(
             $"  settlement: {simulation.Nodes.LiveCount} nodes, {simulation.Agents.LiveCount} people, " +
             $"{simulation.Date}");
@@ -1160,9 +1160,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var fullness = node.IsSink
                 ? node.Occupancy <= 0 ? 0f : MathF.Min(1f, node.Occupants / (float)node.Occupancy)
                 : node.Capacity <= 0 ? 0f : MathF.Min(1f, node.Stock.Total / (float)node.Capacity);
-            // The cell the building occupies, so what is drawn is exactly the ground bodies route
-            // around. Height still reads how full it is.
-            var width = NodeFootprint.HalfExtent * 2f;
+            // Exactly the ground bodies route around, so what is drawn is the wall. Height still reads
+            // how full it is — a granary at capacity stands a good deal taller than an empty one.
+            var width = node.HalfExtent * 2f;
             var height = 0.9f + fullness * 1.6f;
             var ground = simulation.Terrain.SampleHeight(node.Position);
             terrainBatch.Add(

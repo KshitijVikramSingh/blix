@@ -1489,13 +1489,13 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 
 | | |
 |---|---|
-| suite | `--selftest` **72/72** (was 53/53 through Session 4) |
+| suite | `--selftest` **71/71** (was 53/53 through Session 4; one retired with the Heavy class) |
 | determinism coverage | **102 values a body**, 184 a tick, 25,580 at a checkpoint — every one probed |
 | catchment, measured | **12,320 m² on open ground**, effective radius 62.6 m against a nominal 66 — §15 |
 | soak, early career | **1.44 ms a tick at 300 agents, 23x real time**; a year is 4 min, ten years 39 — §15 |
 | interception | closing at **exactly the difference of speeds**; contact is a separate problem — §15 |
 | body | **1.79 m/s**, accel 2.0, decel 3.0, turn 3.03 rad/s, compression **1.5x** |
-| roster | **6 types, 2 body classes** — §3; radius 0.37 / 0.55 / 0.90 |
+| roster | **5 types, 1 body class** — §18; radius 0.37 / 0.55, routing 0.37 |
 | world | **600 m** for the game; 30 m calibration world untouched and asserted |
 | tick, 2,000 agents | **6.5 ms at 600 m** — measured back to back against the Session 4 build, which reads the same today; the 6.0 ms recorded there was a cooler machine, not a faster one |
 | jobs phase, 2,000 agents | **0.005 ms** with nothing assigned, 0.03–0.07 ms with 48 units at work |
@@ -2074,3 +2074,79 @@ building**, which also blocks the wagon from ever hauling and is a bigger hole t
 | economy phase | **0.01–0.03 ms** a tick headless; on the live 600 m map it warms up at 17 ms and settles to **0.48 ms by tick 78** |
 | grain produced against nominal | **99.7%** — the harvest crunch nearly absorbed at seven haulers |
 | new instrument | `--settlement [--years n]`, which is also §15's per-PR soak gate |
+
+---
+
+## 18. The second body class is retired, and buildings got their scale back
+
+Three of these came from watching it run rather than from reading anything, which is the argument for
+having a window at all.
+
+### The Heavy class is gone
+
+§3 derived a second body class at 0.90 m from the raster's clearance ladder — a body needing a 3 m gate
+where a villager passes a 1.5 m clearing — and the derivation was correct. **What retired it was the
+game.** Once buildings occupied the ground they stand on, a 0.90 m body could not be routed to a point
+beside one at all: the raster's clearance one cell out from a wall is 0.75, which is below 0.90. Two
+wagons accumulated a thousand refusals over a simulated year while a cost field priced the same journey
+at 89 seconds. A hauler that cannot approach a granary is not a hauler, and a class every building
+refuses is not a class.
+
+| | was | now |
+|---|---|---|
+| body classes | 2 | **1** |
+| decompositions | 2 meshes | **1** |
+| roster radii | 0.37 / 0.55 / 0.90 | 0.37 / 0.55 |
+| routing radius | per class | **0.37 for everything** |
+
+The wagon is gone. Heavy cavalry stays and keeps the more interesting half of what made it heavy — a
+2.6 m turning circle, so it cannot come about the way a person can — and that costs the router nothing.
+`AgentDefaults.RoutingRadius` is deliberately its own name rather than an alias for `Radius`: they are
+equal and they mean different things, and a second class, if a finer navigation cell ever makes one
+affordable, changes the second and not the first.
+
+**What that cost in coverage, and what it did not.** One self-test genuinely lost its subject — *"a heavy
+body takes the gate a villager can skip"* asserted §3 end to end and there is no wide body to assert it
+with. It is retired in place, with a comment where it stood, and the two-gap wall it was built on is
+still there for whoever re-derives a second class. The others kept a subject and were re-based on the
+cart rather than deleted: mixed-size avoidance, mixed crowds through a gate, and congestion priced by
+width all work at 0.37 against 0.55. *"Body radii inside one rung share a decomposition"* became
+*"every roster radius is inside one clearance rung"*, which is what is now load-bearing.
+
+### Buildings are the size buildings are
+
+A building occupied exactly one placement cell — 1.5 m, a garden shed standing next to a 1.45 m person.
+That was not a design decision; it was **forced** by the class above. While a 0.90 m body existed,
+anything larger left no cell beside it whose clearance that body could use, so the ring a cart was told
+to stand on fell inside the wall. Retiring the class removed the constraint.
+
+Footprints are now an **odd** number of placement cells, so a building centres on a cell and is symmetric
+about its own position: five for a granary (7.5 m), three for everything else (4.5 m). The grid quantises
+to 1.5 m and there is no point pretending to finer control than the thing being described. The collider,
+the drawing and the arrival tolerance all read the same table, so what is drawn is the wall.
+
+### Arrival is measured to the wall, and the wall of your own workplace is invisible to you
+
+Two things followed from bigger buildings, and both were visible immediately.
+
+**A circle round a square is a poor description of a square.** The arrival tolerance used the
+half-diagonal, which is the safe figure for a circular test and means a body approaching a *face* stops
+2.3 m short of a granary. It reads as hesitation. Arrival now measures the distance to the **box**, so a
+body approaching a face stops at the face.
+
+**A body does not need to be talked out of walking into the thing it is trying to reach.** Static
+avoidance slowed bodies to a crawl for the last few metres of every approach, and the geometry it was
+being careful about was the destination. The walls of a body's *own* workplace now contribute no
+avoidance lines to it — only its own, only while it is working, never while interrupted — so it
+approaches at pace and is stopped by contact, which is what depenetration is for. The same exclusion,
+symmetric, is what a mover and a settled ally already do to each other, and it is what an attack activity
+will need against the thing it is attacking.
+
+### And a footgun closed
+
+Buildings going from 1.5 m to 7.5 m put carts that used to muster beside the granary *inside* it,
+standing on ground with zero clearance, unable to route anywhere, for a whole simulated year. Every
+caller that places a body relative to a building would have to be found and corrected — or it can be true
+once: **a body spawned inside a building appears beside it instead.** Two self-tests opt out by name,
+because expelling an embedded body is a feature and clearance is asserted by putting a body where its own
+radius does not fit.

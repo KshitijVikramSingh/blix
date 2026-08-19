@@ -16,19 +16,30 @@ internal static class AgentDefaults
     /// <summary>Body radius of a standard unit, in metres.</summary>
     public const float Radius = 0.37f;
 
-    /// <summary>Body radius of the heavy class — large mounts and wagons — in metres.</summary>
+    /// <summary>
+    /// The one radius the navigation layer routes at.
+    /// </summary>
     /// <remarks>
-    /// A body 1.8 m across. It is not a tuned number and it does not want to be: anything from
-    /// 0.72 m to 1.21 m behaves identically, because a corridor on this raster measures 0.750 m of
-    /// clearance or 1.250 m and nothing in between. What it has to do is sit above 0.715, which is
-    /// what a 1.5 m clearing admits, and below 1.215, which is what a 3 m gate admits. See
-    /// <c>plan-rts-game.md</c> §3.
+    /// <b>There used to be two.</b> §3 derived a second class at 0.90 m from the raster's clearance
+    /// ladder — a body that needs a 3 m gate where a villager passes a 1.5 m clearing — and the
+    /// derivation was sound. What retired it was the game: once buildings occupied the ground they stand
+    /// on, a 0.90 m body could not be routed to a point beside a 1.5 m building at all, because the
+    /// raster's clearance beside a wall is 0.75 and that is below 0.90. A hauler that cannot approach a
+    /// granary is not a hauler, and a class every building refuses is not a class.
+    /// <para>
+    /// So every unit routes at this radius and the router keeps one decomposition instead of two. What
+    /// distinguishes bodies now is what they physically are — the cart is 0.55 m wide and is avoided and
+    /// depenetrated at 0.55 — and what they can do: speed, turning circle, capacity, appetite. Those were
+    /// always the interesting axes; the navigation radius was the one that cost a mesh.
+    /// </para>
+    /// <para>
+    /// <see cref="RoutingRadius"/> is deliberately its own name rather than an alias for
+    /// <see cref="Radius"/>. They are equal and they mean different things: one is how wide a body is,
+    /// the other is what the router plans for. A second class, if the navigation cell ever gets finer,
+    /// changes the second and not the first.
+    /// </para>
     /// </remarks>
-    public const float HeavyRadius = 0.90f;
-
-    /// <summary>The radius a unit of this class uses.</summary>
-    public static float RadiusOf(BodyClass bodyClass) =>
-        bodyClass == BodyClass.Heavy ? HeavyRadius : Radius;
+    public const float RoutingRadius = Radius;
 
     /// <summary>Radius used by the dense stress scenarios, kept in proportion.</summary>
     public const float CrowdRadius = 0.265f;
@@ -198,29 +209,3 @@ internal static class AgentDefaults
     public static float SeparationThreshold(float radius) => SeparationThreshold(radius, radius);
 }
 
-/// <summary>
-/// The body sizes terrain can tell apart, which is what a unit type picks rather than a radius.
-/// </summary>
-/// <remarks>
-/// A radius is not a free parameter. Clearance is sampled once per cell at its centre on a 0.5 m
-/// raster, so two radii inside half a cell of each other see exactly the same ground however the
-/// terrain is drawn — there is no clearing a 0.37 m villager fits through and a 0.55 m cart does
-/// not. Giving each unit type its own number would therefore buy no behaviour and cost a retained
-/// copy of the whole rectangle decomposition per distinct value, since
-/// <c>PathService.Mesh</c> keys its cache on the radius.
-/// <para>
-/// So there are two, and they are what a unit type refers to. Everything the settlement runs on is
-/// <see cref="Foot"/> — villager, soldier, scout, and the hauler cart, which shares the villager's
-/// passage deliberately. <see cref="Heavy"/> is what has to use a gate. See
-/// <c>plan-rts-game.md</c> §3 for the derivation and for why a third class is not available
-/// without a finer navigation cell.
-/// </para>
-/// </remarks>
-internal enum BodyClass
-{
-    /// <summary>Villager, soldier, scout, hauler cart. Fits a 1.5 m clearing.</summary>
-    Foot,
-
-    /// <summary>Large mounts and wagons. Needs a 3 m gate.</summary>
-    Heavy,
-}

@@ -159,26 +159,37 @@ internal static class SettlementScenarios
         world.SeedStock(granary, Resource.Grain, 2000);
         world.SeedStock(granary, Resource.Wood, 1000);
 
-        // Houses ring the granary well inside its catchment, because a household outside every
-        // catchment is a household that goes hungry however full the stores are.
+        // Houses ring the granary well inside its catchment, because a household outside every catchment
+        // is a household that goes hungry however full the stores are. The ring is sized so the gaps
+        // between houses are at least a couple of building widths: buildings are 4.5 m across now, and a
+        // ring that fitted them when they were 1.5 m puts them shoulder to shoulder with no room for a
+        // cart to pass between.
         var people = farms + woodcutters + carts + wagons;
         var households = (people + Occupancy - 1) / Occupancy;
+        var houseWidth = NodeFootprint.HalfExtentOf(NodeKind.House) * 2f;
+        var houseRing = MathF.Max(
+            ringRadius * 0.4f,
+            households * houseWidth * 2f / MathF.Tau);
         for (var i = 0; i < households; i++)
         {
             var angle = (i + 0.5f) / households * MathF.Tau;
             world.AddNode(
                 NodeKind.House,
-                centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * (ringRadius * 0.35f),
+                centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * houseRing,
                 capacity: 0,
                 occupancy: Occupancy);
         }
 
         var producers = new List<(NodeId Node, Vector2 At)>();
         var count = farms + woodcutters;
+        // Same rule for the producers: whatever the caller asked for, or far enough out that the ring has
+        // two building widths of gap between neighbours, whichever is larger.
+        var yardWidth = NodeFootprint.HalfExtentOf(NodeKind.Farm) * 2f;
+        var producerRing = MathF.Max(ringRadius, count * yardWidth * 2f / MathF.Tau);
         for (var i = 0; i < count; i++)
         {
             var angle = i / (float)count * MathF.Tau;
-            var at = centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * ringRadius;
+            var at = centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * producerRing;
             var farm = i < farms;
             producers.Add((
                 world.AddNode(
@@ -214,8 +225,7 @@ internal static class SettlementScenarios
         {
             var angle = i / (float)(carts + wagons) * MathF.Tau;
             world.SpawnAgent(
-                centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 5f,
-                i < carts ? UnitType.HaulerCart : UnitType.Wagon);
+                centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 5f, UnitType.HaulerCart);
         }
 
         return granary;

@@ -74,30 +74,46 @@ internal enum NodeKind
 }
 
 /// <summary>
-/// How much ground a node stands on, and how near a body has to get to have reached it.
+/// How much ground a node stands on, in placement cells, and how near a body has to get to reach it.
 /// </summary>
 /// <remarks>
-/// <b>A building occupies exactly one placement cell.</b> Not a circle of whatever radius suited the
-/// renderer — the placement grid is what the game already describes built ground with, both the
-/// navigation raster and the static side of the velocity solve are derived from it, and a footprint
-/// that does not line up with it cannot be described exactly by either.
+/// <b>An odd number of cells, always.</b> A building is described in the grid the game already uses for
+/// built ground — both the navigation raster and the static side of the velocity solve derive from it, so
+/// a footprint that does not line up with it cannot be described exactly by either. Odd counts centre on
+/// a cell, which means the building is symmetric about its own position and the wall, the drawing and the
+/// arrival tolerance are the same square. An even count would have to centre on a cell corner and every
+/// one of those three would round differently.
 /// <para>
-/// The first attempt gave each kind its own radius and blocked every cell the circle touched, and the
-/// quantisation bit immediately: a 1.7 m granary blocked a plus-shape four and a half metres across,
-/// so the ring a cart was told to stand on — its radius plus the building's — was <em>inside the
-/// wall</em>. Every hand in the settlement stalled and nothing was ever delivered. One cell, exactly,
-/// removes the whole class of problem.
-/// </para>
-/// <para>
-/// A granary being the same size as a house is a greybox simplification and is fine: what matters at
-/// this stage is that the wall, the drawing and the arrival tolerance are the same wall. Real sizes
-/// arrive with real art and become a cell count.
+/// It was <em>one</em> cell for everything, which was 1.5 m — a granary the size of a garden shed
+/// standing next to a 1.45 m villager. One cell was not a design decision, it was forced: while a second
+/// body class existed at 0.90 m, anything larger left no cell beside it whose clearance a 0.90 body could
+/// use, so the ring a cart was told to stand on fell inside the wall. Retiring that class removed the
+/// constraint — the widest routing radius is now 0.37 m and the clearance one cell out from a wall is
+/// 0.75 — so buildings can be the size they should have been.
 /// </para>
 /// </remarks>
 internal static class NodeFootprint
 {
-    /// <summary>Half the width of a building, which is half a placement cell.</summary>
-    public static float HalfExtent => SimulationWorld.PlacementCellSize * 0.5f;
+    /// <summary>Placement cells across, odd so the building centres on one.</summary>
+    /// <remarks>
+    /// Five cells is 7.5 m for a granary — a communal barn beside a 1.45 m person — and three is 4.5 m
+    /// for everything else, which is a cottage or a farmyard. The grid quantises to 1.5 m, so the
+    /// available sizes are 1.5, 4.5 and 7.5, and there is no point pretending to finer control than the
+    /// thing being described.
+    /// </remarks>
+    public static int CellsOf(NodeKind kind) => kind switch
+    {
+        NodeKind.Granary => 5,
+        NodeKind.ForwardDepot => 3,
+        NodeKind.Farm => 3,
+        NodeKind.Woodcutter => 3,
+        NodeKind.House => 3,
+        _ => 0,
+    };
+
+    /// <summary>Half the width of a building, in metres.</summary>
+    public static float HalfExtentOf(NodeKind kind) =>
+        CellsOf(kind) * SimulationWorld.PlacementCellSize * 0.5f;
 
     /// <summary>
     /// Radius of the circle that just contains a building, which is what arrival is measured against.
@@ -111,10 +127,10 @@ internal static class NodeFootprint
     public static float ApproachRadiusOf(NodeKind kind) => kind == NodeKind.Pile
         // A heap is not a wall. Walk right up to it.
         ? 0.4f
-        : HalfExtent * 1.41421356f;
+        : HalfExtentOf(kind) * 1.41421356f;
 
     /// <summary>Whether this kind of node is built ground that bodies must go around.</summary>
-    public static bool Blocks(NodeKind kind) => kind != NodeKind.Pile;
+    public static bool Blocks(NodeKind kind) => CellsOf(kind) > 0;
 }
 
 /// <summary>
@@ -208,6 +224,9 @@ internal struct EconomyNode
 
     /// <summary>How near a body has to get to have reached this node.</summary>
     public readonly float FootprintRadius => NodeFootprint.ApproachRadiusOf(Kind);
+
+    /// <summary>Half the width of this node's building, in metres.</summary>
+    public readonly float HalfExtent => NodeFootprint.HalfExtentOf(Kind);
 
     /// <summary>Room left for more of this resource.</summary>
     public readonly int RoomFor(Resource resource) => Math.Max(0, Capacity - Stock[resource]);

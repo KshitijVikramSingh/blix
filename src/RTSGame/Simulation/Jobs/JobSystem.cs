@@ -125,11 +125,29 @@ internal static class JobSystem
     /// </remarks>
     private static bool IsAtPlace(in AgentState agent)
     {
-        var extent = agent.Jobs.PlaceExtent;
-        var distance = Vector2.DistanceSquared(agent.Position, agent.Jobs.Place);
-        if (distance <= Square(JobDefaults.AtPlaceDistance(agent.Radius, extent))) return true;
-        return agent.Jobs.SettledNearby &&
-               distance <= Square(JobDefaults.CrowdedPlaceDistance(agent.Radius, extent));
+        if (agent.Jobs.PlaceExtent <= 0f)
+        {
+            // A bare point on the ground. A few of the body's own radii, as it always was.
+            var toPoint = Vector2.DistanceSquared(agent.Position, agent.Jobs.Place);
+            return toPoint <= Square(JobDefaults.AtPlaceDistance(agent.Radius)) ||
+                   (agent.Jobs.SettledNearby &&
+                    toPoint <= Square(JobDefaults.CrowdedPlaceDistance(agent.Radius)));
+        }
+
+        // Distance to the building's wall rather than to a circle drawn round it, so a body approaching
+        // a face stops at the face. Measured from the box, which is what the wall is.
+        var gap = DistanceToPlace(in agent);
+        if (gap <= agent.Radius + JobDefaults.TouchSlack) return true;
+        return agent.Jobs.SettledNearby && gap <= agent.Radius * JobDefaults.PlaceCrowdShare;
+    }
+
+    /// <summary>How far this body is from the wall of its place, or zero if it is against it.</summary>
+    public static float DistanceToPlace(in AgentState agent)
+    {
+        var half = new Vector2(agent.Jobs.PlaceHalfWidth);
+        var nearest = Vector2.Clamp(
+            agent.Position, agent.Jobs.Place - half, agent.Jobs.Place + half);
+        return Vector2.Distance(agent.Position, nearest);
     }
 
     /// <summary>
@@ -239,8 +257,10 @@ internal static class JobSystem
             // walking at an occupied square twice more changes nothing about who is on it. Open
             // ground gets the retries first, since falling short of empty ground means the
             // journey went wrong and journeys come right.
-            var nearEnough = Vector2.DistanceSquared(agent.Position, jobs.Place) <=
-                             Square(JobDefaults.CrowdedPlaceDistance(agent.Radius, jobs.PlaceExtent));
+            var nearEnough = jobs.PlaceExtent > 0f
+                ? DistanceToPlace(in agent) <= agent.Radius * JobDefaults.PlaceCrowdShare
+                : Vector2.DistanceSquared(agent.Position, jobs.Place) <=
+                  Square(JobDefaults.CrowdedPlaceDistance(agent.Radius));
             if (nearEnough && place is PlaceCondition.Crowded ||
                 nearEnough && place is PlaceCondition.Open && jobs.Retries >= JobDefaults.CrowdedAttempts)
             {

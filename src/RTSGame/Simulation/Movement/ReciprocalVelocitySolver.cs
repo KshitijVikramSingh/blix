@@ -459,6 +459,34 @@ internal sealed class ReciprocalVelocitySolver
     /// corner three rather than one per cell of wall.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Whether this wall belongs to the very building the body is working at.
+    /// </summary>
+    /// <remarks>
+    /// The hatch. A body arriving somewhere to do a job does not need to be talked out of walking into
+    /// it: it slows itself to a crawl for the last few metres, which reads as hesitation, and the thing
+    /// it is being careful about is the thing it is trying to reach. So the walls of its own workplace
+    /// contribute no avoidance lines to it — it approaches at pace and is stopped by contact, which is
+    /// what depenetration is for and what makes arrival snap.
+    /// <para>
+    /// Only its own, only while it is working, and never while it is interrupted — a body dragged away by
+    /// an order has no business ignoring anything. The same exclusion, symmetric, is what a mover and a
+    /// settled ally already do to each other, and it is what an attack activity will need against the
+    /// thing it is attacking.
+    /// </para>
+    /// </remarks>
+    private static bool IsOwnWorkplace(in AgentState agent, in StaticBox box)
+    {
+        var jobs = agent.Jobs;
+        if (jobs.PlaceExtent <= 0f || jobs.IsInterrupted) return false;
+        if (jobs.Activity == Jobs.ActivityKind.None) return false;
+        // Only a wall entirely inside the workplace's own square. A run of cells that reaches past it
+        // belongs to something else as well, and that something else is still worth avoiding.
+        var half = jobs.PlaceHalfWidth + 0.05f;
+        return box.Minimum.X >= jobs.Place.X - half && box.Maximum.X <= jobs.Place.X + half &&
+               box.Minimum.Y >= jobs.Place.Y - half && box.Maximum.Y <= jobs.Place.Y + half;
+    }
+
     private void AddStaticLines(in AgentState agent, PathService paths)
     {
         // Only geometry the body could reach within the horizon can constrain it.
@@ -475,6 +503,7 @@ internal sealed class ReciprocalVelocitySolver
         for (var i = 0; i < boxCount; i++)
         {
             var box = boxes[i];
+            if (IsOwnWorkplace(in agent, in box)) continue;
             var closest = Vector2.Clamp(agent.Position, box.Minimum, box.Maximum);
             var offset = agent.Position - closest;
             var distance = offset.Length();
