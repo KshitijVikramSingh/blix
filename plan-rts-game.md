@@ -1380,7 +1380,7 @@ complaint the whole trade layer exists to answer.
 
 ### Held every session
 
-1. **51/51 stays green**, or a threshold moves deliberately and is recorded with its old value.
+1. **53/53 stays green**, or a threshold moves deliberately and is recorded with its old value.
 2. **The determinism test grows with each system.** It covers movement only today.
 3. **Serialization discipline** — stable ids over references. Fresh-start succession (§5) makes this
    core-loop rather than a save feature; it is cheap continuously and expensive retrofitted.
@@ -1398,7 +1398,7 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 
 | | |
 |---|---|
-| suite | `--selftest` **51/51** |
+| suite | `--selftest` **53/53** |
 | body | **1.79 m/s**, accel 2.0, decel 3.0, turn 3.03 rad/s, compression **1.5x** |
 | world | **600 m** for the game; 30 m calibration world untouched and asserted |
 | tick, 2,000 agents | **6.0 ms at 600 m, 5.8 ms at 1200 m** — extent no longer moves it |

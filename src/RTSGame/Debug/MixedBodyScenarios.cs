@@ -87,6 +87,7 @@ internal static class MixedBodyScenarios
         ReciprocalVelocitySolver.NeighborLookahead = original;
         Console.WriteLine();
 
+        ReportArrival();
         ReportSpeeds();
         ReportTurningCircle();
         ReportShove();
@@ -448,6 +449,46 @@ internal static class MixedBodyScenarios
                 $"    {type.Name,-14} | {(type.HasTurningCircle ? $"{type.TurningRadius,6:F2} m" : "  free"),-9} | " +
                 $"{(tightest == float.MaxValue ? "        never turned" : $"{tightest,13:F2} m     ")} | " +
                 $"{(reversedAt < 0f ? " never" : $"{reversedAt,5:F1} s")}");
+        }
+
+        Console.WriteLine();
+    }
+
+    /// <summary>Whether each unit type can settle on an empty point at all.</summary>
+    private static void ReportArrival()
+    {
+        Console.WriteLine("  arriving at an empty point");
+        Console.WriteLine("    unit           | arrived | closest approach | speed there");
+
+        foreach (var type in UnitType.All)
+        {
+            var world = new SimulationWorld();
+            var target = new Vector2(6f, 0f);
+            var id = world.SpawnAgent(new Vector2(-9f, 0f), type);
+            world.QueueMove(new[] { id }, target);
+
+            var arrived = -1f;
+            var closest = float.MaxValue;
+            var speedThere = 0f;
+            for (var tick = 0; tick < 1800; tick++)
+            {
+                world.Tick(Step);
+                ref readonly var agent = ref world.Agents.Get(id);
+                var distance = Vector2.Distance(agent.Position, target);
+                if (distance < closest)
+                {
+                    closest = distance;
+                    speedThere = agent.Velocity.Length();
+                }
+
+                if (agent.HasDestination) continue;
+                arrived = (tick + 1) * Step;
+                break;
+            }
+
+            Console.WriteLine(
+                $"    {type.Name,-14} | {(arrived < 0f ? "  never" : $"{arrived,5:F1}s"),-7} | " +
+                $"{closest,11:F2} m     | {speedThere,4:F2} m/s");
         }
 
         Console.WriteLine();

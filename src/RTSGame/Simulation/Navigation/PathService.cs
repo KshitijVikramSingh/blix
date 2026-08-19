@@ -118,6 +118,44 @@ internal sealed partial class PathService
     /// </para>
     /// </remarks>
     internal static float CongestionSpeedScaling = 1f;
+
+    /// <summary>Body radius the congestion terms are quoted against, in metres.</summary>
+    /// <remarks>
+    /// Same device as <see cref="ReferenceSpeed"/>, mirroring <c>AgentDefaults.Radius</c> so this
+    /// layer still does not need to know what an agent is.
+    /// </remarks>
+    private const float ReferenceRadius = 0.37f;
+
+    /// <summary>
+    /// What a queue costs a body of this width, against what it costs the reference body.
+    /// </summary>
+    /// <remarks>
+    /// The speed term above rests on a queue costing whoever is in it the same wall clock. Measured
+    /// through one 3 m gap behind thirty villagers, that is simply untrue, and not by a little: a
+    /// 0.55 m cart lost 0.2 s to it, a 0.37 m villager 0.3 s, and a <b>0.90 m body 16.2 s</b>. A
+    /// wide body waits for a hole it fits through, and in a queue of narrow ones most of the holes
+    /// are not it.
+    /// <para>
+    /// So the same jam is worth vastly more to a wagon than to a villager, and until now the router
+    /// charged them identically. Scaled linearly on width because the effect is about how many
+    /// bodies fit abreast; the measured ratio is far steeper than linear, but a cost term that tried
+    /// to reproduce fifty-fold would be a barrier wearing a cost's clothes, and this document has
+    /// paid for that mistake twice already.
+    /// </para>
+    /// <para>
+    /// Free, as it happens: the field is already cached per body radius, so a term that varies with
+    /// radius adds no field that was not going to be built anyway.
+    /// </para>
+    /// </remarks>
+    internal static float CongestionSizeScale(float agentRadius)
+    {
+        if (agentRadius <= 0f || CongestionSizeScaling <= 0f) return 1f;
+        var full = agentRadius / ReferenceRadius;
+        return 1f + (full - 1f) * Math.Clamp(CongestionSizeScaling, 0f, 1f);
+    }
+
+    /// <summary>How much of the width correction above to apply: 1 all of it, 0 none.</summary>
+    internal static float CongestionSizeScaling = 1f;
     /// <summary>Seconds of delay represented by one unit of measured backpressure.</summary>
     /// <remarks>
     /// Deliberately large. It looks like it should send units on absurd detours,
@@ -359,7 +397,12 @@ internal sealed partial class PathService
     /// predictive at the group level rather than reactive per agent: nobody has to
     /// jam and then individually replan.
     /// </remarks>
-    private float CongestionCost(GridCell from, GridCell to, float turnSeconds, float speedScale)
+    private float CongestionCost(
+        GridCell from,
+        GridCell to,
+        float turnSeconds,
+        float speedScale,
+        float agentRadius)
     {
         // Almost every edge of almost every search crosses ground nobody is stuck on, and
         // on that ground this whole function is a multiplication by zero — two square
@@ -376,7 +419,7 @@ internal sealed partial class PathService
         var pressure = here * congestion.DirectionalFactor(from, travel) +
                        there * congestion.DirectionalFactor(to, travel);
         return pressure * 0.5f * CongestionSecondsPerPressure * ManoeuvreAmplification(turnSeconds) *
-               speedScale;
+               speedScale * CongestionSizeScale(agentRadius);
     }
 
     /// <summary>
@@ -1189,7 +1232,7 @@ internal sealed partial class PathService
         // search below be compared against the flat one and any difference be attributed
         // to the hierarchy rather than to having moved an expression.
         return costAtCurrent + stepCost * SecondsPerCell * surfaceCost + elevationCost +
-               CongestionCost(current, previous, turnSeconds, speedScale) + turnSeconds;
+               CongestionCost(current, previous, turnSeconds, speedScale, agentRadius) + turnSeconds;
     }
 
     private float[] BuildFlowField(
@@ -1488,7 +1531,8 @@ internal sealed partial class PathService
                 var nextCost = cost[currentIndex] + stepCost * SecondsPerCell * surfaceCost +
                                elevationCost +
                                PointCongestionCost(next, congestionAvoidanceCenter) +
-                               CongestionCost(current, next, turnSeconds, congestionSpeedScale) +
+                               CongestionCost(
+                                   current, next, turnSeconds, congestionSpeedScale, agentRadius) +
                                additionalCost +
                                turnSeconds;
                 if (nextCost >= cost[nextIndex]) continue;

@@ -81,11 +81,15 @@ internal static class CongestionSpeedScenarios
             Console.WriteLine();
         }
 
+        ReportRealisedDelay();
+
         Console.WriteLine();
         Console.WriteLine(
             "  A body's own speed cancels out of every leg of travel, so a row where the columns");
         Console.WriteLine(
-            "  disagree is the queue being valued differently and nothing else.");
+            "  disagree is the queue being valued differently — by speed, and by width, which the");
+        Console.WriteLine(
+            "  table above shows matters far more.");
 
         if (Failures.Count > 0)
         {
@@ -113,43 +117,8 @@ internal static class CongestionSpeedScenarios
         UnitType type,
         float detourOffset)
     {
-        var world = new SimulationWorld();
-        var grid = world.Terrain.Transform;
-        var column = grid.Width / 2;
-        var nearFrom = grid.Height / 2 - GapCells / 2;
-        var detourFrom = nearFrom + (int)(detourOffset / grid.CellSize);
-
-        for (var z = 0; z < grid.Height; z++)
-        {
-            var open = (z >= nearFrom && z < nearFrom + GapCells) ||
-                       (z >= detourFrom && z < detourFrom + GapCells);
-            if (open) continue;
-            world.Terrain.SetSurface(new GridCell(column, z), TerrainSurface.Impassable);
-        }
-
-        world.RebuildTerrainNavigation();
-        var wallX = world.Navigation.CellCenter(new GridCell(column, 0)).X;
-        var lane = world.Navigation.CellCenter(new GridCell(0, grid.Height / 2)).Y;
-        var goal = new Vector2(wallX + 6f, lane);
-
-        // The queue: enough bodies to saturate a 3 m gap and keep it saturated.
-        var crowd = new List<AgentId>();
-        for (var row = 0; row < 6; row++)
-        for (var column2 = 0; column2 < 5; column2++)
-        {
-            crowd.Add(world.SpawnAgent(
-                new Vector2(wallX - 1.2f - column2 * 0.85f, lane - 2f + row * 0.85f),
-                UnitType.Villager));
-        }
-
-        world.QueueMove(crowd, goal);
-
-        // Let the jam form and register before anything is asked to route around it.
-        for (var tick = 0; tick < 150; tick++) world.Tick(Step);
+        var world = BuildJam(type, detourOffset, out var wallX, out var lane, out var goal, out var subject);
         var liveCells = world.Congestion.LiveCellCount;
-
-        var subject = world.SpawnAgent(new Vector2(wallX - 11f, lane), type);
-        world.QueueMove(new[] { subject }, goal);
 
         float? crossing = null;
         var arrived = -1f;
@@ -168,7 +137,6 @@ internal static class CongestionSpeedScenarios
         if (arrived < 0f)
         {
             ref readonly var stalled = ref world.Agents.Get(subject);
-            // Buffered rather than printed, so one body failing does not tear the table apart.
             Failures.Add(
                 $"    {type.Name} at a {detourOffset:F0} m detour: stopped " +
                 $"{Vector2.Distance(stalled.Position, goal):F2} m short of the goal, doing " +
@@ -177,5 +145,122 @@ internal static class CongestionSpeedScenarios
         }
 
         return (crossing, arrived, liveCells);
+    }
+
+    /// <summary>
+    /// One wall with a jammed near gap and a detour, and one body of this type waiting to choose.
+    /// </summary>
+    /// <remarks>
+    /// A fresh world per run, so a test body never meets another test body and the jam it arrives
+    /// at is identical every time. The queue is made of villagers actually trying to get through,
+    /// because the congestion field only accumulates where a body wants to move and is not moving —
+    /// a wall of immovable bodies is a wall, not a jam, and deposits nothing.
+    /// </remarks>
+    private static SimulationWorld BuildJam(
+        UnitType type,
+        float detourOffset,
+        out float wallX,
+        out float lane,
+        out Vector2 goal,
+        out AgentId subject)
+    {
+        var world = new SimulationWorld();
+        var grid = world.Terrain.Transform;
+        var column = grid.Width / 2;
+        var nearFrom = grid.Height / 2 - GapCells / 2;
+        var detourFrom = nearFrom + (int)(detourOffset / grid.CellSize);
+
+        for (var z = 0; z < grid.Height; z++)
+        {
+            var open = (z >= nearFrom && z < nearFrom + GapCells) ||
+                       (z >= detourFrom && z < detourFrom + GapCells);
+            if (open) continue;
+            world.Terrain.SetSurface(new GridCell(column, z), TerrainSurface.Impassable);
+        }
+
+        world.RebuildTerrainNavigation();
+        wallX = world.Navigation.CellCenter(new GridCell(column, 0)).X;
+        lane = world.Navigation.CellCenter(new GridCell(0, grid.Height / 2)).Y;
+        goal = new Vector2(wallX + 6f, lane);
+
+        var crowd = new List<AgentId>();
+        for (var row = 0; row < 6; row++)
+        for (var rank = 0; rank < 5; rank++)
+        {
+            crowd.Add(world.SpawnAgent(
+                new Vector2(wallX - 1.2f - rank * 0.85f, lane - 2f + row * 0.85f),
+                UnitType.Villager));
+        }
+
+        world.QueueMove(crowd, goal);
+
+        // Let the jam form and register before anything is asked to route around it.
+        for (var tick = 0; tick < 150; tick++) world.Tick(Step);
+
+        subject = world.SpawnAgent(new Vector2(wallX - 11f, lane), type);
+        world.QueueMove(new[] { subject }, goal);
+        return world;
+    }
+
+    /// <summary>
+    /// What the queue actually cost each unit, against the premise that it costs everybody the same.
+    /// </summary>
+    /// <remarks>
+    /// The whole speed correction rests on one claim: a jam costs whoever is standing in it the same
+    /// wall clock however fast they would otherwise be moving. That is worth checking rather than
+    /// assuming, because a jam also <em>drains</em> — a body that arrives later meets a shorter
+    /// queue — and the two effects pull in opposite directions. If realised delay is flat across
+    /// speeds the premise holds; if it falls as bodies get faster, then the field is over-charging
+    /// the quick ones and a drain term is the missing piece.
+    /// <para>
+    /// The detour is put far enough away that every unit goes through the jam, so this measures the
+    /// queue and not the routing decision.
+    /// </para>
+    /// </remarks>
+    private static void ReportRealisedDelay()
+    {
+        Console.WriteLine();
+        Console.WriteLine("  what the queue actually cost, with the detour priced out of reach");
+        Console.WriteLine("    unit           | speed    | crossing | delayed | delay as travel");
+
+        foreach (var type in new[]
+                 {
+                     UnitType.HaulerCart, UnitType.Villager, UnitType.HeavyCavalry,
+                     UnitType.LightCavalry,
+                 })
+        {
+            var (delay, crossing) = DelayThroughJam(type);
+            Console.WriteLine(
+                $"    {type.Name,-14} | {type.MaximumSpeed,4:F2} m/s | " +
+                $"{(crossing < 0f ? " never" : $"{crossing,5:F1}s"),-8} | {delay,5:F1}s   | " +
+                $"{delay * type.MaximumSpeed,5:F1} m of ground not covered");
+        }
+    }
+
+    /// <summary>Seconds this body spent wanting to move and not moving, on its way through.</summary>
+    private static (float Delay, float Crossing) DelayThroughJam(UnitType type)
+    {
+        var world = BuildJam(type, detourOffset: 24f, out var wallX, out var lane, out var goal, out var subject);
+
+        var delay = 0f;
+        var crossing = -1f;
+        for (var tick = 0; tick < 2400; tick++)
+        {
+            world.Tick(Step);
+            ref readonly var agent = ref world.Agents.Get(subject);
+            // Wanting to move and not moving, which is the same definition the congestion field
+            // deposits on — so this is the realised version of what the field predicts.
+            if (agent.HasDestination &&
+                agent.PreferredVelocity.Length() > agent.MaximumSpeed * 0.25f &&
+                agent.Velocity.Length() < agent.MaximumSpeed * 0.25f)
+            {
+                delay += Step;
+            }
+
+            if (crossing < 0f && agent.Position.X > wallX + 0.5f) crossing = (tick + 1) * Step;
+            if (!agent.HasDestination) break;
+        }
+
+        return (delay, crossing);
     }
 }

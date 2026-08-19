@@ -283,6 +283,19 @@ internal sealed class RoutingSettings
     /// <c>PathService.CongestionSpeedScaling</c> for the sweep — the arithmetic is unambiguous and
     /// the clock is not.
     /// </remarks>
+    /// <summary>How much a body's own width changes what a queue is worth to it.</summary>
+    /// <remarks>
+    /// Measured through one 3 m gap behind thirty villagers: a 0.55 m cart lost 0.2 s to it and a
+    /// 0.90 m body 16.2 s. A wide body waits for a hole it fits through and most of the holes in a
+    /// queue of narrow bodies are not it.
+    /// </remarks>
+    [Tune(0.0, 1.0, Label = "congestion by unit width", Group = "Routing")]
+    public float CongestionSizeScaling
+    {
+        get => PathService.CongestionSizeScaling;
+        set => PathService.CongestionSizeScaling = value;
+    }
+
     [Tune(0.0, 1.0, Label = "congestion by unit speed", Group = "Routing")]
     public float CongestionSpeedScaling
     {

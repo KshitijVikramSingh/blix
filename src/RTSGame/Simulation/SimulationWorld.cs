@@ -18,7 +18,20 @@ internal sealed class SimulationWorld
 
     private const float ArrivalDistance = 0.035f;
     private const float WaypointArrivalDistance = 0.075f;
-    private const float CrowdedArrivalDistance = 0.24f;
+    /// <summary>
+    /// How near a contested destination a body must be before it may settle for standing there,
+    /// as a share of its own radius.
+    /// </summary>
+    /// <remarks>
+    /// Was a flat 0.24 m, which is 0.65 of a standard body and a fifth of a wagon — so the wider a
+    /// unit got, the more exactly it was required to stand on a point it physically cannot occupy
+    /// to that precision. A 0.9 m body approaching an occupied destination off-axis cannot correct
+    /// onto it either: at its turning circle it orbits at a couple of metres, and 0.24 m of
+    /// tolerance is a target it can never hit. Written as a share, it is 0.24 m for the body every
+    /// arrival threshold here was tuned against and grows with anything larger, which is the only
+    /// reading under which it says the same thing about both.
+    /// </remarks>
+    private const float CrowdedArrivalRadiusShare = 0.6486f;
     private const float CrowdedArrivalNeighborhood = 1.25f;
     internal const int CrowdedArrivalFailedAttemptLimit = 6;
     private const int CrowdedArrivalContactFramesPerAttempt = 4;
@@ -1426,16 +1439,39 @@ internal sealed class SimulationWorld
         // to bump into several travellers at a chokepoint, declare itself
         // arrived many metres early, and become a permanent idle obstruction.
         var sharedDestinationCount = 0;
+        // Bodies that have already stopped between this one and where it is going. Counted
+        // separately from the cohort above because the two answer different questions: that one
+        // is "how many were sent here", this one is "how many are standing here now". A unit
+        // arriving alone at ground a crowd settled on earlier — under its own order, with its own
+        // slots — has a cohort of one and an occupied destination, and sizing its arrival
+        // neighbourhood off the cohort told it the crowd was not there.
+        var occupantsAhead = 0;
         for (var i = 0; i < agents.Length; i++)
         {
-            if (!agents[i].IsAlive) continue;
+            ref readonly var other = ref agents[i];
+            if (!other.IsAlive) continue;
             if (Vector2.DistanceSquared(
-                    agents[i].RequestedDestination,
+                    other.RequestedDestination,
                     agent.RequestedDestination) <= 0.04f)
             {
                 sharedDestinationCount++;
             }
+
+            if (other.Id == agent.Id || other.HasDestination ||
+                other.LocomotionState != AgentLocomotionState.Idle)
+            {
+                continue;
+            }
+
+            if (Vector2.Distance(other.Position, agent.RequestedDestination) < distanceToDestination)
+            {
+                occupantsAhead++;
+            }
         }
+
+        // Whichever describes more bodies. Taking the larger can only ever widen the neighbourhood,
+        // so every cohort this was tuned against behaves exactly as it did.
+        var arrivalCohort = Math.Max(sharedDestinationCount, occupantsAhead);
         // Approximate the packed cluster radius, plus one body-diameter contact
         // shell. This bounds arrival propagation to the destination cohort while
         // allowing a large selection to settle at its physically reachable
@@ -1447,17 +1483,17 @@ internal sealed class SimulationWorld
         var irregularTerrainShell = Terrain.Revision > 0 ? 1.2f : 0f;
         var packedNeighborhood = agent.Radius *
                                  (6.8f + irregularTerrainShell +
-                                  MathF.Sqrt(sharedDestinationCount / 0.82f)) +
+                                  MathF.Sqrt(arrivalCohort / 0.82f)) +
                                  0.35f;
         var arrivalNeighborhood = MathF.Max(CrowdedArrivalNeighborhood, packedNeighborhood);
         if (distanceToDestination > arrivalNeighborhood) return false;
 
-        if (distanceToDestination <= CrowdedArrivalDistance &&
+        if (distanceToDestination <= agent.Radius * CrowdedArrivalRadiusShare &&
             !CanOccupyArrivalPosition(agent, agent.Destination)) return true;
         for (var i = 0; i < agents.Length; i++)
         {
             ref var other = ref agents[i];
-            if (!other.IsAlive || !HasArrivalPriority(other, agent)) continue;
+            if (!other.IsAlive || !HasArrivalPriority(other, agent, distanceToDestination)) continue;
             // Reached state propagates across a physically packed frontier,
             // not a loose social-distance chain that can stretch all the way
             // back through a doorway.
@@ -1477,14 +1513,28 @@ internal sealed class SimulationWorld
 
     private static bool HasArrivalPriority(
         in AgentState other,
-        in AgentState agent)
+        in AgentState agent,
+        float agentDistanceToDestination)
     {
         if (other.Id == agent.Id || other.ReturningToHold || other.HasDestination ||
             other.LocomotionState != AgentLocomotionState.Idle)
         {
             return false;
         }
-        if (Vector2.DistanceSquared(other.RequestedDestination, agent.RequestedDestination) > 0.04f)
+        // Either it was sent where this body is going, or it has settled on the way there. The
+        // second half is new, and it is what a body arriving under its own order needs: a crowd
+        // that got there first was ordered to its own formation slots, not to this body's
+        // destination, so on the first test alone none of them was ever *its* obstruction and the
+        // whole crowded-arrival path stayed switched off. A large body feels this first because it
+        // cannot squeeze to the point itself, but nothing about it is a question of size.
+        // <para>
+        // What keeps this from declaring arrival next to any idle bystander is not this test: it is
+        // that the body must be packed against this one, must be nearer the destination, and must
+        // be *settled* — a traveller passing through is none of those — and that the whole
+        // mechanism is bounded by the arrival neighbourhood.
+        // </para>
+        if (Vector2.DistanceSquared(other.RequestedDestination, agent.RequestedDestination) > 0.04f &&
+            Vector2.Distance(other.Position, agent.RequestedDestination) >= agentDistanceToDestination)
         {
             return false;
         }

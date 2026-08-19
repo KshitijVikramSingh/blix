@@ -102,6 +102,8 @@ internal static class SimulationSelfTests
         Check("a scout outpaces a villager in proportion to its speed", ScoutOutpacesVillager());
         Check("warning does not shrink as bodies get faster", WarningHoldsAcrossSpeeds());
         Check("a queue is worth more to a body that would otherwise be quick", CongestionIsPricedBySpeed());
+        Check("a latecomer arrives at ground a settled crowd is standing on", LatecomerArrivesAtOccupiedGround());
+        Check("a queue is worth more to a body that is wide", CongestionIsPricedByWidth());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
 
@@ -2799,6 +2801,116 @@ internal static class SimulationSelfTests
                 $"    congestion by speed: cart {cart:F3}, villager {villager:F3}, " +
                 $"soldier {soldier:F3}, scout {scout:F3} — must ascend, villager exactly 1, " +
                 "soldier equal to villager, scout proportionate");
+        }
+
+        return passed;
+    }
+
+    /// <summary>
+    /// A unit sent, under its own order, to ground a crowd has already settled on must arrive.
+    /// </summary>
+    /// <remarks>
+    /// The crowded-arrival path identified an obstruction by whether it had been *ordered* to the
+    /// same destination. A group move gives every member its own formation slot, so a crowd that
+    /// arrived earlier shares no requested destination with a latecomer, none of them was ever its
+    /// obstruction, and the mechanism stayed switched off: it pushed toward a point thirty bodies
+    /// were standing on until the test ran out of ticks.
+    /// <para>
+    /// Both sizes, because the shape of the bug is not about size — a large body merely meets it
+    /// first, since it cannot squeeze close enough to the point to arrive the ordinary way. The
+    /// villager here passed before the fix and is kept as the control: if it ever starts failing,
+    /// the problem is arrival in general and not this.
+    /// </para>
+    /// </remarks>
+    private static bool LatecomerArrivesAtOccupiedGround()
+    {
+        var passed = true;
+        foreach (var type in new[] { UnitType.Villager, UnitType.HeavyCavalry })
+        {
+            var world = new SimulationWorld();
+            var target = new Vector2(4f, 0f);
+            var crowd = new List<AgentId>();
+            for (var row = 0; row < 5; row++)
+            for (var column = 0; column < 4; column++)
+            {
+                crowd.Add(world.SpawnAgent(
+                    new Vector2(-4f + column * 0.9f, -2f + row * 0.9f), UnitType.Villager));
+            }
+
+            world.QueueMove(crowd, target);
+
+            // Run until the crowd is genuinely settled, so the latecomer meets standing bodies
+            // rather than a moving column it can follow in behind.
+            var settled = false;
+            for (var tick = 0; tick < 600 * WalkingPace && !settled; tick++)
+            {
+                world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+                settled = crowd.All(id => !world.Agents.Get(id).HasDestination);
+            }
+
+            if (!settled)
+            {
+                Console.WriteLine($"    {type.Name}: the crowd never settled, so this proves nothing");
+                passed = false;
+                continue;
+            }
+
+            var latecomer = world.SpawnAgent(new Vector2(-9f, 0f), type);
+            world.QueueMove(new[] { latecomer }, target);
+
+            var arrived = -1f;
+            for (var tick = 0; tick < 600 * WalkingPace; tick++)
+            {
+                world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+                if (world.Agents.Get(latecomer).HasDestination) continue;
+                arrived = (tick + 1) * (float)SimulationWorld.FixedDeltaSeconds;
+                break;
+            }
+
+            if (arrived > 0f) continue;
+            ref readonly var stalled = ref world.Agents.Get(latecomer);
+            passed = false;
+            Console.WriteLine(
+                $"    {type.Name}: never arrived, stopped " +
+                $"{Vector2.Distance(stalled.Position, target):F2} m short doing " +
+                $"{stalled.Velocity.Length():F2} m/s, stuck {stalled.StuckSeconds:F1}s");
+        }
+
+        return passed;
+    }
+
+    /// <summary>
+    /// A jam costs a wide body more than a narrow one, because most of the holes in a queue of
+    /// narrow bodies are not it.
+    /// </summary>
+    /// <remarks>
+    /// The speed term next door rests on a queue costing whoever is in it the same wall clock.
+    /// Measured through one 3 m gap behind thirty villagers, it does not: a 0.55 m cart lost 0.2 s
+    /// to it, a 0.37 m villager 0.3 s, and a 0.90 m body <b>16.2 s</b>. Width is by far the larger
+    /// term and the router had none at all.
+    /// <para>
+    /// Asserted on the term and not on a route, for the same reason as its sibling: which way a
+    /// body goes at a jam is chaotic in the geometry. The reference body must price a queue at
+    /// exactly one, or every constant the congestion layer was tuned against silently moves.
+    /// </para>
+    /// </remarks>
+    private static bool CongestionIsPricedByWidth()
+    {
+        var villager = PathService.CongestionSizeScale(UnitType.Villager.Radius);
+        var cart = PathService.CongestionSizeScale(UnitType.HaulerCart.Radius);
+        var heavy = PathService.CongestionSizeScale(UnitType.Wagon.Radius);
+
+        var ordered = villager < cart && cart < heavy;
+        var referenceIsOne = MathF.Abs(villager - 1f) < 0.001f;
+        // Linear in width: twice as wide, twice the share of an aperture, twice the wait.
+        var proportionate = MathF.Abs(heavy - UnitType.Wagon.Radius / AgentDefaults.Radius) < 0.001f;
+
+        var passed = ordered && referenceIsOne && proportionate;
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    congestion by width: villager {villager:F3}, cart {cart:F3}, " +
+                $"heavy {heavy:F3} — must ascend, villager exactly 1, heavy proportionate");
         }
 
         return passed;

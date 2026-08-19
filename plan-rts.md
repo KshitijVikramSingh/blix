@@ -1,6 +1,6 @@
 # RTSGame — locomotion layer: state, seams, and what not to break
 
-Status as of 2026-08-19. `--selftest` **51/51 passing**, on a body that walks at 1.79 m/s and a
+Status as of 2026-08-19. `--selftest` **53/53 passing**, on a body that walks at 1.79 m/s and a
 router that partitions ground into rectangles rather than searching it. Durations in the tests
 carry a `WalkingPace` factor recording that they were tuned against a body running at 4.5 —
 see `plan-rts-game.md` §13 Session 2 for what the re-base moved, and **§8 below for the routing
@@ -33,6 +33,26 @@ One fixed 30 Hz tick, in this order:
 
 **The layering rule that makes it work:** intent → velocity → position, each owning one
 thing. Every regression this session came from something reaching across those.
+
+### Arrival is a physical question, not a bookkeeping one
+
+Two bugs, both found by a large body and neither about size. **A latecomer could not arrive at
+ground a settled crowd was standing on**: the crowded-arrival path identified an obstruction by
+whether it had been *ordered* to the same destination, and a group move gives every member its own
+formation slot — so a crowd that arrived earlier shared no requested destination with a latecomer,
+none of them was ever its obstruction, and the mechanism stayed switched off while it pushed at a
+point thirty bodies occupied. It now also counts a body that has *settled* between this one and its
+destination, and sizes the arrival neighbourhood by whichever of the two describes more bodies, so
+it can only ever widen.
+
+**And `CrowdedArrivalDistance` was a flat 0.24 m** — 0.65 of a standard body, a fifth of a wagon —
+so the wider a unit was, the more exactly it was required to stand on a point it cannot occupy to
+that precision. A 0.9 m body approaching an occupied destination off-axis cannot correct onto it
+either: at its turning circle it orbits at a couple of metres. Now a share of the body's own radius,
+which is 0.24 m for the body every arrival threshold here was tuned against.
+
+A villager is the control in the test for both, and passed before the fix — the size is what makes a
+body meet these first, not what causes them.
 
 ### Static geometry is part of the velocity solve
 Walls reach the solver as half-plane constraints (`AddStaticLines`, fed by
@@ -440,13 +460,32 @@ at once, and a change justified by one of their jobs breaks the other.
 
 ## 7. Known open items
 
-- **A large body cannot reach a goal a crowd of small ones is standing on.** Found by
-  `--congestiontest` and reproduced with everything else switched off, so it is nobody's new bug:
-  heavy cavalry stops **1.3 to 1.6 m short** of a goal thirty villagers have arrived at, doing
-  0.03 m/s, stuck for 25 to 41 s, and never registers arrival. The crowded-arrival machinery
-  (`CrowdedArrivalAttempts`) exists for exactly this shape and evidently sizes it against the body
-  that is arriving rather than against the bodies already there. Nothing asserts on it yet because
-  no scenario before this one had a large body arriving into a small crowd.
+- **Congestion is now priced by the body's own width as well as its speed**, and width is by far
+  the larger term. The speed correction rested on a jam costing whoever is in it the same wall
+  clock. Measured through one 3 m gap behind thirty villagers, it does not, and not by a little:
+
+  | body | radius | speed | delay actually suffered |
+  |---|---|---|---|
+  | hauler cart | 0.55 | 1.10 | 0.2 s |
+  | villager | 0.37 | 1.79 | 0.3 s |
+  | **heavy cavalry** | **0.90** | 2.50 | **16.2 s** |
+  | light cavalry | 0.37 | 3.50 | 3.6 s |
+
+  Two things fall out, and the first withdraws a guess made here a day earlier. **A fast body meets
+  *more* queue, not less** — 3.6 s against 0.3 s at identical width — so the drain effect that was
+  supposed to be cancelling the speed term is real and runs the other way, and the speed term is if
+  anything under-charging.
+
+  And **width dominates**: fifty times the delay for two and a half times the radius, because a
+  wide body waits for a hole it fits through and most of the holes in a queue of narrow bodies are
+  not it. The router had no width term at all. Added linearly on radius — the measured ratio is far
+  steeper, and a term trying to reproduce fifty-fold would be a barrier wearing a cost's clothes,
+  which this document has paid for twice. Free, as it happens: the field is already cached per body
+  radius, so a term varying with radius builds nothing new.
+
+  On the sweep heavy cavalry gains 2.3 s at an 8 m detour and loses 0.2 s twice, net 1.9 s; forced
+  through the jam its realised delay falls **16.2 s to 13.3 s**. Villager rows are bit-identical by
+  construction, the reference body pricing a queue at exactly one.
 - **Congestion is now priced by the body's own speed, on a dial, and the clock is not convinced.**
   Route cost is seconds at a reference pace and a body's own speed scales every leg of travel
   equally, which is what lets one field serve everyone; congestion is the one term that does not,
@@ -463,7 +502,9 @@ at once, and a change justified by one of their jobs breaks the other.
   because the status quo is a known dimensional error rather than a tuned value, and left on
   `PathService.CongestionSpeedScaling` because one geometry is not a measurement. **Session 6 is
   the decisive one** — many haulers of differing speeds sharing routes continuously is the workload
-  this term exists for, and nothing before it will settle the number.
+  this term exists for, and nothing before it will settle the number. *Re-measured once the arrival
+  bug below was fixed: the win holds at 2.3 s and the loss shrinks to 0.3 s, so net two seconds in
+  favour rather than one against.*
 
   The field is keyed by speed only where it matters: with nothing stuck anywhere, every unit shares
   one field however fast it is, and the split happens on a rebuild the congestion revision was
