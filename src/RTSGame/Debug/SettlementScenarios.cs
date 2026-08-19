@@ -214,8 +214,12 @@ internal static class SettlementScenarios
             // Outward from the centre, so hands stand on the far side of the yard from the traffic.
             var outward = placed - centre;
             outward = outward.LengthSquared() > 0.001f ? Vector2.Normalize(outward) : Vector2.UnitX;
+            // Mustered a body's width off the wall rather than off the circle round the building, which
+            // put everybody 2.2 m out on the first frame and read as a settlement standing back from its
+            // own work before it had even started.
             var hand = world.SpawnAgent(
-                placed + outward * (extent + 1.3f), UnitType.Villager);
+                placed + outward * (world.Nodes.Get(node).HalfExtent + UnitType.Villager.Radius + 0.9f),
+                UnitType.Villager);
             world.QueueAssign(
                 new[] { hand },
                 Assignment.Hold(placed, Stagger(20f, i, producers.Count), extent));
@@ -243,6 +247,38 @@ internal static class SettlementScenarios
     /// </remarks>
     private static float Stagger(float period, int index, int count) =>
         period * (1f + 0.1f * (index / (float)Math.Max(1, count) - 0.5f));
+
+    /// <summary>
+    /// How far each working body actually ends up from the wall it is working at.
+    /// </summary>
+    /// <remarks>
+    /// Reported every season because it is the number that goes wrong silently. Three separate figures
+    /// had to agree before it came right — the walk target, the arrival tolerance and the crowd fallback —
+    /// and while they disagreed, every body in the settlement failed to arrive, waited out a retry, and
+    /// settled short of its own work. Nothing failed; it just looked like hesitation. <b>"Settled short"
+    /// being anything other than zero is the warning.</b>
+    /// </remarks>
+    private static void ReportGaps(SimulationWorld world)
+    {
+        var hands = new List<float>();
+        var settled = 0;
+        foreach (ref readonly var agent in world.Agents.All)
+        {
+            if (!agent.IsAlive || agent.Jobs.PlaceExtent <= 0f) continue;
+            if (agent.Jobs.Activity == ActivityKind.None) continue;
+            var half = new Vector2(agent.Jobs.PlaceHalfWidth);
+            var nearest = Vector2.Clamp(
+                agent.Position, agent.Jobs.Place - half, agent.Jobs.Place + half);
+            hands.Add(Vector2.Distance(agent.Position, nearest));
+            if (agent.Jobs.SettledNearby) settled++;
+        }
+
+        if (hands.Count == 0) return;
+        hands.Sort();
+        Console.WriteLine(
+            $"      at the wall: median {hands[hands.Count / 2]:F2} m over {hands.Count} bodies, " +
+            $"{settled} settled short of it");
+    }
 
     private static float ClearanceAt(SimulationWorld world, Vector2 position) =>
         world.Navigation.TryWorldToCell(position, out var cell) ? world.Navigation.Clearance(cell) : -1f;
@@ -277,6 +313,7 @@ internal static class SettlementScenarios
                 $"at {world.Date}");
         }
 
+        ReportGaps(world);
         Console.WriteLine(
             $"  {world.Date,-18} | {grain.Stored,5:N0} | {wood.Stored,5:N0} | {hands,5} | " +
             $"{world.Economy.HaulsAssigned,5:N0} | {carried.Total,8:N0} | " +

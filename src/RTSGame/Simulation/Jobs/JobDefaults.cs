@@ -83,6 +83,21 @@ internal static class JobDefaults
     /// </summary>
     internal static float TouchSlack = 0.25f;
 
+    /// <summary>
+    /// How much of the arrival tolerance exists because the router works in cells.
+    /// </summary>
+    /// <remarks>
+    /// One navigation cell. A body is routed to a cell the raster says it may occupy, and the clearance
+    /// beside a wall is quantised — the achievable rungs on this raster are 0.25, 0.75 and 1.25 — so the
+    /// nearest cell a 0.37 m body may stand in is a whole rung out from the wall, not a body's width out.
+    /// Demanding closer than that is demanding something the router cannot deliver: measured, bodies
+    /// stopped a median of 0.97 m from the wall while the tolerance asked for 0.62, so <b>all nineteen of
+    /// them failed to arrive, waited out a retry, and settled short instead</b> — which is the hesitation
+    /// that looked like slowing down on approach. It was never avoidance; it was a five-second pause
+    /// before accepting a position it was already standing in.
+    /// </remarks>
+    internal static float RasterReach = 0.5f;
+
     /// <summary>How near this body has to be to count as at its place.</summary>
     /// <remarks>
     /// Whichever is larger: a few of the body's own radii, which is what a bare point on the ground

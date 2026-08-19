@@ -1127,6 +1127,23 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
     }
 
+    /// <summary>Whether a placement cell is part of some building's footprint.</summary>
+    private bool StandsOnANode(Vector2 cellCentre)
+    {
+        foreach (ref readonly var node in simulation.Nodes.All)
+        {
+            if (!node.IsAlive || node.HalfExtent <= 0f) continue;
+            var half = node.HalfExtent + 0.01f;
+            if (MathF.Abs(cellCentre.X - node.Position.X) <= half &&
+                MathF.Abs(cellCentre.Y - node.Position.Y) <= half)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// Draws the nodes, so a settlement is something you can see rather than infer.
     /// </summary>
@@ -1160,10 +1177,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var fullness = node.IsSink
                 ? node.Occupancy <= 0 ? 0f : MathF.Min(1f, node.Occupants / (float)node.Occupancy)
                 : node.Capacity <= 0 ? 0f : MathF.Min(1f, node.Stock.Total / (float)node.Capacity);
-            // Exactly the ground bodies route around, so what is drawn is the wall. Height still reads
-            // how full it is — a granary at capacity stands a good deal taller than an empty one.
+            // Exactly the ground bodies route around, so what is drawn is the wall. A building is taller
+            // than the people using it whatever is in it — a granary that reads as a doormat when empty is
+            // not a granary — so fullness raises it rather than deciding whether it exists at all.
             var width = node.HalfExtent * 2f;
-            var height = 0.9f + fullness * 1.6f;
+            var height = AgentDefaults.BodyHeight * (1.15f + fullness * 0.85f);
             var ground = simulation.Terrain.SampleHeight(node.Position);
             terrainBatch.Add(
                 Matrix4x4.CreateScale(width, height, width) *
@@ -1205,7 +1223,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         const float blockHeight = 1.45f;
         foreach (var cell in grid.OccupiedCells)
         {
+            // Skip ground a building already stands on. The building draws itself, as one solid thing of
+            // the right size; drawing its cells as well made every farm a tray of nine grey ice cubes on
+            // a coloured plate, which is what "ridiculously blocky" looked like on screen. A wall
+            // somebody built by hand still draws per cell, because that is what it is.
             var center = grid.Transform.CellCenter(cell);
+            if (StandsOnANode(center)) continue;
             var terrainHeight = simulation.Terrain.SampleHeight(center);
             var model = Matrix4x4.CreateScale(blockWidth, blockHeight, blockWidth) *
                         Matrix4x4.CreateTranslation(center.X, terrainHeight + blockHeight * 0.5f, center.Y);

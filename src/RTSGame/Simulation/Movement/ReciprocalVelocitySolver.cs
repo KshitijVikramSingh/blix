@@ -139,6 +139,10 @@ internal sealed class ReciprocalVelocitySolver
     /// <summary>Total solves, for ratios.</summary>
     public long Solves { get; private set; }
 
+    /// <summary>Static walls skipped because they belong to the body's own workplace.</summary>
+    /// <remarks>Diagnostic: if this is zero while bodies are working, the hatch is not firing.</remarks>
+    public long OwnWorkplaceSkips { get; private set; }
+
     /// <summary>The totals, which a loaded world continues rather than restarts.</summary>
     internal void WriteCounters(WorldWriter writer)
     {
@@ -503,7 +507,12 @@ internal sealed class ReciprocalVelocitySolver
         for (var i = 0; i < boxCount; i++)
         {
             var box = boxes[i];
-            if (IsOwnWorkplace(in agent, in box)) continue;
+            if (IsOwnWorkplace(in agent, in box))
+            {
+                OwnWorkplaceSkips++;
+                continue;
+            }
+
             var closest = Vector2.Clamp(agent.Position, box.Minimum, box.Maximum);
             var offset = agent.Position - closest;
             var distance = offset.Length();

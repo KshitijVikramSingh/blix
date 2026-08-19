@@ -184,6 +184,8 @@ internal sealed class SimulationWorld
     public long AvoidanceInfeasible => steeringSystem.Solver.InfeasibleSolves;
     public long AvoidanceTerrainFallbacks => steeringSystem.Solver.TerrainFallbacks;
     public long AvoidanceTerrainDeadStops => steeringSystem.Solver.TerrainFallbackFailures;
+    /// <summary>Walls a body ignored because they were its own workplace's.</summary>
+    public long OwnWorkplaceSkips => steeringSystem.Solver.OwnWorkplaceSkips;
     /// <summary>Ticks in which some agent judged its destination locally contested.</summary>
     public int CrowdedArrivalBlockCount { get; private set; }
     public float CongestionRecoveryCooldown => congestionRecoveryCooldown;

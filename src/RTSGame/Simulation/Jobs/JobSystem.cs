@@ -137,7 +137,7 @@ internal static class JobSystem
         // Distance to the building's wall rather than to a circle drawn round it, so a body approaching
         // a face stops at the face. Measured from the box, which is what the wall is.
         var gap = DistanceToPlace(in agent);
-        if (gap <= agent.Radius + JobDefaults.TouchSlack) return true;
+        if (gap <= agent.Radius + JobDefaults.TouchSlack + JobDefaults.RasterReach) return true;
         return agent.Jobs.SettledNearby && gap <= agent.Radius * JobDefaults.CrowdedTouchShare;
     }
 

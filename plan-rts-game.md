@@ -2173,6 +2173,48 @@ layer considers to be at the node, and two definitions of that would drift apart
 | settle-short fallback | **1.65 m** for a cart (was 4.40) |
 | hands at work | **19 of 19** (was 17), wood back to 3,493 a year from 2,994 |
 
+### They were still standing off, and it was not avoidance — it was giving up
+
+Measured rather than reasoned about, after two rounds of computing what the gap *should* be:
+
+```
+gaps to the wall: median 0.97 m over 19 bodies, 19 settled short
+```
+
+**Every body in the settlement was failing to arrive.** The tolerance asked for 0.62 m, they could only
+reach 0.97, so each one walked to its place, did not qualify, waited out a five-second retry, and then
+accepted the position it was already standing in. Nothing failed and nothing was reported. What it looks
+like on screen is a body slowing to a stop short of its work and hesitating before starting — which is
+exactly what it was, and it was never avoidance. The **own-workplace hatch was firing 18.7 million times**;
+that part was working.
+
+The missing term is the router. A body is routed to a cell the raster says it may occupy, and clearance
+beside a wall is quantised — the achievable rungs here are 0.25, 0.75 and 1.25 — so the nearest cell a
+0.37 m body may stand in is a whole rung out from the wall, not a body's width out. **Demanding closer
+than the router can deliver is a tolerance that can never be met.** With one navigation cell added to it:
+
+| | before | after |
+|---|---|---|
+| median gap to the wall | 0.97 m | 0.97 m |
+| bodies settling short | **19 of 19** | **0** |
+| pause before starting work | ~5 s | none |
+
+The gap did not move, because the gap was never the problem — the *verdict* on it was. What remains,
+0.6 m of air between a body's edge and a wall, is the raster's floor at 0.5 m cells and is the honest
+limit until `plan-rts.md` §8 revisits cell size.
+
+### A building was being drawn twice
+
+Visible the moment there was a screenshot, and not deducible from any number: every farm was a tray of
+nine grey cubes on a coloured plate. The node drew itself as one solid box **and** every placement cell it
+occupied drew itself as an obstacle block, because those blocks predate buildings and know only that the
+cell is built on. Granaries and houses hid it by being tall enough to swallow their own cubes; farms and
+woodcutters, which are usually near-empty and therefore short, did not.
+
+Buildings draw once now, and a wall built by hand still draws per cell because that is what it is. A
+building is also at least a person and a bit tall whatever is in it — fullness raises it rather than
+deciding whether it reads as a building at all.
+
 ### And a footgun closed
 
 Buildings going from 1.5 m to 7.5 m put carts that used to muster beside the granary *inside* it,
