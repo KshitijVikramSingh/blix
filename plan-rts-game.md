@@ -864,7 +864,9 @@ nothing.
 
 - **One body model.** `AgentDefaults` assumes a single radius, speed and turn rate. Workers,
   soldiers, carts and raiders break that at once, and the logged "congestion delay does not scale
-  with unit speed" item goes live the moment speeds differ.
+  with unit speed" item goes live the moment speeds differ. **Both settled in Session 4**: the
+  roster is in §3, and congestion is now priced by the body's own speed on a dial, with the sweep
+  and the reason it is a dial in `plan-rts.md` §7.
 - **Carts want a turning circle.** The speed-scaled turn rate tried and reverted in Thread B
   (`ω = a/v`) was wrong for people because it lifted the anti-spin limit exactly where crowds need
   it — but it is *correct* for a loaded cart. Per-type turn models resolve the conflict.
@@ -1307,8 +1309,9 @@ scout outpaces a villager in proportion to its speed, and warning does not shrin
 faster.
 
 **Both logged debts came due, and one of them bit in a way the roadmap did not predict.**
-Congestion delay still does not scale with unit speed — inert at one pace, a 3.2x spread from cart
-to scout, and now genuinely live. And the *velocity solve's* horizon turned out to have the same
+Congestion delay now scales with the body's own speed — dimensionally unarguable, ambiguous on the
+clock, and therefore on a dial with the sweep recorded rather than declared settled. And the
+*velocity solve's* horizon turned out to have the same
 disease as the flat neighbour distance did for large bodies: it is a distance, the argument for its
 size is a reaction time, and two light cavalry closing at 7 m/s had **0.05 s** of warning against a
 villager pair's 0.17. Scaled by the pair's speeds, clamped so it can only widen, and asserted.
@@ -1377,7 +1380,7 @@ complaint the whole trade layer exists to answer.
 
 ### Held every session
 
-1. **50/50 stays green**, or a threshold moves deliberately and is recorded with its old value.
+1. **51/51 stays green**, or a threshold moves deliberately and is recorded with its old value.
 2. **The determinism test grows with each system.** It covers movement only today.
 3. **Serialization discipline** — stable ids over references. Fresh-start succession (§5) makes this
    core-loop rather than a save feature; it is cheap continuously and expensive retrofitted.
@@ -1395,7 +1398,7 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 
 | | |
 |---|---|
-| suite | `--selftest` **50/50** |
+| suite | `--selftest` **51/51** |
 | body | **1.79 m/s**, accel 2.0, decel 3.0, turn 3.03 rad/s, compression **1.5x** |
 | world | **600 m** for the game; 30 m calibration world untouched and asserted |
 | tick, 2,000 agents | **6.0 ms at 600 m, 5.8 ms at 1200 m** — extent no longer moves it |

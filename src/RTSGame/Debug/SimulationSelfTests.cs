@@ -3,6 +3,7 @@ using RTSGame.Control;
 using RTSGame.Simulation;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Collision;
+using RTSGame.Simulation.Navigation;
 using RTSGame.Simulation.Spatial;
 using RTSGame.Simulation.Terrain;
 
@@ -100,6 +101,7 @@ internal static class SimulationSelfTests
         Check("a wagon cannot come about like a person", WagonComesAboutSlowly());
         Check("a scout outpaces a villager in proportion to its speed", ScoutOutpacesVillager());
         Check("warning does not shrink as bodies get faster", WarningHoldsAcrossSpeeds());
+        Check("a queue is worth more to a body that would otherwise be quick", CongestionIsPricedBySpeed());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
 
@@ -2761,5 +2763,44 @@ internal static class SimulationSelfTests
         }
 
         return -1f;
+    }
+
+    /// <summary>
+    /// A jam costs the same wall clock whoever is in it, so it is worth more of a fast body's
+    /// journey than of a slow one's.
+    /// </summary>
+    /// <remarks>
+    /// Asserted on the term rather than on a route. Which way a body actually goes at a jam is
+    /// chaotic in the geometry — swept across one wall and four unit types, three runs in
+    /// twenty-four changed at all — so a test pinned to one of those outcomes would be a coin toss
+    /// with a comment on it. What is not chaotic, and what would silently stop being true if the
+    /// scaling were removed or the reference pace drifted, is the ordering and the ratio.
+    /// </remarks>
+    private static bool CongestionIsPricedBySpeed()
+    {
+        var cart = PathService.CongestionSpeedScale(UnitType.HaulerCart.MaximumSpeed);
+        var villager = PathService.CongestionSpeedScale(UnitType.Villager.MaximumSpeed);
+        var soldier = PathService.CongestionSpeedScale(UnitType.Soldier.MaximumSpeed);
+        var scout = PathService.CongestionSpeedScale(UnitType.LightCavalry.MaximumSpeed);
+
+        var ordered = cart < villager && villager < scout;
+        // The reference body is the unit of the field, so it must price a queue at exactly one.
+        var referenceIsOne = MathF.Abs(villager - 1f) < 0.001f;
+        // A soldier is 5% off a villager and must share a field with one, or six unit types become
+        // six cached fields for a difference nobody could see.
+        var soldierShares = MathF.Abs(soldier - villager) < 0.001f;
+        // Twice the pace, twice the share of the journey a fixed delay eats.
+        var scoutIsProportionate = MathF.Abs(scout - UnitType.LightCavalry.MaximumSpeed / 1.79f) < 0.09f;
+
+        var passed = ordered && referenceIsOne && soldierShares && scoutIsProportionate;
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    congestion by speed: cart {cart:F3}, villager {villager:F3}, " +
+                $"soldier {soldier:F3}, scout {scout:F3} — must ascend, villager exactly 1, " +
+                "soldier equal to villager, scout proportionate");
+        }
+
+        return passed;
     }
 }

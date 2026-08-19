@@ -59,6 +59,65 @@ internal sealed partial class PathService
     /// route cost stops being seconds and starts being a number.
     /// </remarks>
     private const float ReferenceSpeed = 1.79f;
+
+    /// <summary>
+    /// What a second of queueing is worth to a body at this speed, against a leg of travel.
+    /// </summary>
+    /// <remarks>
+    /// Route costs are seconds at <see cref="ReferenceSpeed"/>, and a body's own speed scales every
+    /// leg of travel equally — which is exactly why one field can serve every unit. Congestion is
+    /// the one term that does not scale, because a jam costs whoever is in it the same wall clock
+    /// however fast they would otherwise be going. So in the field's units a jam is worth
+    /// <c>speed / reference</c> of what it is worth to the reference body: to a scout at twice the
+    /// pace a twenty-second queue eats twice as much of the journey, and to a cart at two thirds of
+    /// it, two thirds as much.
+    /// <para>
+    /// Concretely, on a choice between ten reference-seconds of jammed road and a thirty-second
+    /// clear detour — a dead tie at the reference pace — the scout's real cost is 25.1 s the short
+    /// way against 15.3 s round, and the cart's is 36.3 s against 48.8 s. They should disagree, and
+    /// unscaled they cannot: they read the same field and it says the routes are equal.
+    /// </para>
+    /// <para>
+    /// Bucketed to an eighth, because the field is cached per distinct value and this is the term
+    /// that decides how many of them there are. A villager and a soldier are 5% apart and land in
+    /// one bucket, which is the point — and anything within 6% of another unit is not routing
+    /// differently for a reason anybody could see.
+    /// </para>
+    /// </remarks>
+    internal static float CongestionSpeedScale(float agentSpeed)
+    {
+        if (agentSpeed <= 0f || CongestionSpeedScaling <= 0f) return 1f;
+        var full = agentSpeed / ReferenceSpeed;
+        var blended = 1f + (full - 1f) * Math.Clamp(CongestionSpeedScaling, 0f, 1f);
+        return MathF.Round(blended * 8f) / 8f;
+    }
+
+    /// <summary>
+    /// How much of the speed correction above to apply: 1 all of it, 0 none.
+    /// </summary>
+    /// <remarks>
+    /// A dial rather than a constant because the arithmetic and the measurement disagree, and this
+    /// document's rule is that the clock decides. Swept over one wall with a jammed near gap and a
+    /// detour from 2 m to 8 m, across four unit types, exactly three of twenty-four runs changed:
+    /// the cart stopped detouring at 5 m and arrived <b>2.3 s sooner</b>, and the scout started
+    /// detouring at 6 m and arrived <b>1.4 s later</b>. Net nine tenths of a second, one win and
+    /// one loss.
+    /// <para>
+    /// What the loss most likely exposes is a second missing term rather than a wrong first one.
+    /// The field describes the jam as it stands, and a jam drains: a fast body reaches the gap
+    /// sooner and meets more of the queue than the field predicts, a slow one arrives later and
+    /// meets less. That pushes the opposite way to the correction here and partly cancels it, and
+    /// neither effect is modelled. Shipped at 1 because charging every unit the same absolute
+    /// seconds inside a field denominated in reference-seconds is dimensionally wrong however the
+    /// clock comes out, and left on a dial because one geometry is not a measurement.
+    /// </para>
+    /// <para>
+    /// <b>The decisive measurement is Session 6</b>, where many haulers of differing speeds share
+    /// routes continuously. That is the workload this term exists for and nothing before it will
+    /// settle the number.
+    /// </para>
+    /// </remarks>
+    internal static float CongestionSpeedScaling = 1f;
     /// <summary>Seconds of delay represented by one unit of measured backpressure.</summary>
     /// <remarks>
     /// Deliberately large. It looks like it should send units on absurd detours,
@@ -237,11 +296,11 @@ internal sealed partial class PathService
     private readonly PlacementGrid placement;
     private readonly NavigationGrid grid;
     private readonly CongestionField congestion;
-    private readonly Dictionary<(int Goal, int Radius, int Nav, int Congestion, bool Turns), RectangleFlowField> flowFields = new();
+    private readonly Dictionary<(int Goal, int Radius, int Speed, int Nav, int Congestion, bool Turns), RectangleFlowField> flowFields = new();
     // Newest field per goal, regardless of congestion revision, so the next revision can
     // adopt whatever of it is still valid. Separate from the retention table above, which
     // exists for a different reason entirely — see GetFlowField.
-    private readonly Dictionary<(int Goal, int Radius, int Nav, bool Turns), RectangleFlowField> latestFields = new();
+    private readonly Dictionary<(int Goal, int Radius, int Speed, int Nav, bool Turns), RectangleFlowField> latestFields = new();
     /// <summary>
     /// Per-cell memo of whether a body of a given radius fits at the cell centre,
     /// as 0 unknown / 1 admitted / 2 refused, keyed by radius in centimetres.
@@ -300,7 +359,7 @@ internal sealed partial class PathService
     /// predictive at the group level rather than reactive per agent: nobody has to
     /// jam and then individually replan.
     /// </remarks>
-    private float CongestionCost(GridCell from, GridCell to, float turnSeconds)
+    private float CongestionCost(GridCell from, GridCell to, float turnSeconds, float speedScale)
     {
         // Almost every edge of almost every search crosses ground nobody is stuck on, and
         // on that ground this whole function is a multiplication by zero — two square
@@ -316,7 +375,8 @@ internal sealed partial class PathService
         if (travel.LengthSquared() > 0.0001f) travel = Vector2.Normalize(travel);
         var pressure = here * congestion.DirectionalFactor(from, travel) +
                        there * congestion.DirectionalFactor(to, travel);
-        return pressure * 0.5f * CongestionSecondsPerPressure * ManoeuvreAmplification(turnSeconds);
+        return pressure * 0.5f * CongestionSecondsPerPressure * ManoeuvreAmplification(turnSeconds) *
+               speedScale;
     }
 
     /// <summary>
@@ -418,7 +478,8 @@ internal sealed partial class PathService
         Vector2 requestedGoal,
         float agentRadius,
         Vector2? congestionAvoidanceCenter = null,
-        float[]? additionalNavigationCosts = null)
+        float[]? additionalNavigationCosts = null,
+        float agentSpeed = 0f)
     {
         PathQueries++;
         requestedGoal = terrain.ClampPosition(requestedGoal, agentRadius + BodyFootprint.NavigationMargin);
@@ -462,7 +523,8 @@ internal sealed partial class PathService
             goal,
             agentRadius,
             congestionAvoidanceCenter,
-            additionalNavigationCosts);
+            additionalNavigationCosts,
+            CongestionSpeedScale(agentSpeed));
         if (cells is null) return null;
 
         var destination = goal == requestedCell ? requestedGoal : grid.CellCenter(goal);
@@ -867,7 +929,11 @@ internal sealed partial class PathService
         return IsPositionFreeOfPlacement(position, agentRadius);
     }
 
-    public Vector2 FlowDirection(Vector2 position, Vector2 requestedGoal, float agentRadius)
+    public Vector2 FlowDirection(
+        Vector2 position,
+        Vector2 requestedGoal,
+        float agentRadius,
+        float agentSpeed = 0f)
     {
         if (!grid.TryWorldToCell(position, out var current) ||
             !grid.TryWorldToCell(requestedGoal, out var requestedGoalCell))
@@ -879,7 +945,7 @@ internal sealed partial class PathService
             : FindNearestWalkable(requestedGoalCell, agentRadius);
         if (goal is not { } resolvedGoal) return Vector2.Zero;
 
-        var costs = GetFlowField(resolvedGoal, agentRadius, congestion.Revision);
+        var costs = GetFlowField(resolvedGoal, agentRadius, congestion.Revision, agentSpeed: agentSpeed);
 
         var currentCost = costs.CostAt(current);
         var best = current;
@@ -921,7 +987,8 @@ internal sealed partial class PathService
         Vector2 position,
         Vector2 requestedGoal,
         float agentRadius,
-        int congestionRevision = int.MaxValue)
+        int congestionRevision = int.MaxValue,
+        float agentSpeed = 0f)
     {
         if (!grid.TryWorldToCell(position, out var current) ||
             !grid.TryWorldToCell(requestedGoal, out var requestedGoalCell))
@@ -933,7 +1000,8 @@ internal sealed partial class PathService
             : FindNearestWalkable(requestedGoalCell, agentRadius);
         if (goal is not { } resolvedGoal) return Vector2.Zero;
 
-        var costs = GetFlowField(resolvedGoal, agentRadius, congestionRevision);
+        var costs = GetFlowField(
+            resolvedGoal, agentRadius, congestionRevision, agentSpeed: agentSpeed);
         var centerCost = costs.CostAt(current);
         if (!float.IsFinite(centerCost)) return Vector2.Zero;
 
@@ -1021,18 +1089,26 @@ internal sealed partial class PathService
         GridCell goal,
         float agentRadius,
         int congestionRevision,
-        bool chargeTurns = true)
+        bool chargeTurns = true,
+        float agentSpeed = 0f)
     {
         var goalIndex = grid.Transform.Index(goal);
         var radiusKey = (int)MathF.Round(agentRadius * 100f);
+        // Speed is part of the key only because congestion is priced in it, so on ground where
+        // nothing is stuck every unit shares one field however fast it is — which is the ordinary
+        // case, and the reason this does not multiply the cache by the size of the roster. The
+        // moment a jam exists the congestion revision has moved anyway, so the split happens on a
+        // rebuild that was going to happen regardless.
+        var speedScale = congestion.LiveCellCount == 0 ? 1f : CongestionSpeedScale(agentSpeed);
+        var speedKey = (int)MathF.Round(speedScale * 8f);
         if (flowFields.TryGetValue(
-                (goalIndex, radiusKey, grid.Revision, congestionRevision, chargeTurns),
+                (goalIndex, radiusKey, speedKey, grid.Revision, congestionRevision, chargeTurns),
                 out var retained))
         {
             return retained;
         }
 
-        var key = (goalIndex, radiusKey, grid.Revision, congestion.Revision, chargeTurns);
+        var key = (goalIndex, radiusKey, speedKey, grid.Revision, congestion.Revision, chargeTurns);
         if (flowFields.TryGetValue(key, out var costs)) return costs;
         // A navigation edit makes every older field unreachable, so those go
         // immediately. Congestion revisions are aged out instead of dropped, to
@@ -1052,7 +1128,7 @@ internal sealed partial class PathService
         // Corners for the route, a tile for the body. The abstract layer is a Dijkstra over
         // portal corners with no cell-level search behind it; the tiles are filled only where
         // something asks, and are what keeps the gradient continuous.
-        var lineage = (goalIndex, radiusKey, grid.Revision, chargeTurns);
+        var lineage = (goalIndex, radiusKey, speedKey, grid.Revision, chargeTurns);
         var (mesh, meshIndex) = Mesh(agentRadius);
         costs = new RectangleFlowField(
             mesh,
@@ -1064,6 +1140,7 @@ internal sealed partial class PathService
             CongestionSecondsPerPressure,
             this,
             agentRadius,
+            speedScale,
             chargeTurns);
         FlowFieldBuilds++;
         flowFields[key] = costs;
@@ -1089,6 +1166,7 @@ internal sealed partial class PathService
         int arrivalAtCurrent,
         float agentRadius,
         bool chargeTurns,
+        float speedScale,
         out int travelDirection)
     {
         var offset = NeighborOffsets[directionIndex];
@@ -1111,10 +1189,14 @@ internal sealed partial class PathService
         // search below be compared against the flat one and any difference be attributed
         // to the hierarchy rather than to having moved an expression.
         return costAtCurrent + stepCost * SecondsPerCell * surfaceCost + elevationCost +
-               CongestionCost(current, previous, turnSeconds) + turnSeconds;
+               CongestionCost(current, previous, turnSeconds, speedScale) + turnSeconds;
     }
 
-    private float[] BuildFlowField(GridCell goal, float agentRadius, bool chargeTurns = true)
+    private float[] BuildFlowField(
+        GridCell goal,
+        float agentRadius,
+        bool chargeTurns = true,
+        float congestionSpeedScale = 1f)
     {
         var costs = new float[grid.Width * grid.Height];
         var closed = new bool[costs.Length];
@@ -1152,6 +1234,7 @@ internal sealed partial class PathService
                     arrival[currentIndex],
                     agentRadius,
                     chargeTurns,
+                    congestionSpeedScale,
                     out var travelDirection);
                 if (nextCost >= costs[previousIndex]) continue;
                 costs[previousIndex] = nextCost;
@@ -1347,7 +1430,8 @@ internal sealed partial class PathService
         GridCell goal,
         float agentRadius,
         Vector2? congestionAvoidanceCenter,
-        float[]? additionalNavigationCosts)
+        float[]? additionalNavigationCosts,
+        float congestionSpeedScale)
     {
         // Reused across calls. A* was allocating three full-grid arrays every
         // time it ran, and once every obstructed unit started re-planning against
@@ -1404,7 +1488,7 @@ internal sealed partial class PathService
                 var nextCost = cost[currentIndex] + stepCost * SecondsPerCell * surfaceCost +
                                elevationCost +
                                PointCongestionCost(next, congestionAvoidanceCenter) +
-                               CongestionCost(current, next, turnSeconds) +
+                               CongestionCost(current, next, turnSeconds, congestionSpeedScale) +
                                additionalCost +
                                turnSeconds;
                 if (nextCost >= cost[nextIndex]) continue;

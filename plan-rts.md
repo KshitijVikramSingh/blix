@@ -1,6 +1,6 @@
 # RTSGame — locomotion layer: state, seams, and what not to break
 
-Status as of 2026-08-19. `--selftest` **50/50 passing**, on a body that walks at 1.79 m/s and a
+Status as of 2026-08-19. `--selftest` **51/51 passing**, on a body that walks at 1.79 m/s and a
 router that partitions ground into rectangles rather than searching it. Durations in the tests
 carry a `WalkingPace` factor recording that they were tuned against a body running at 4.5 —
 see `plan-rts-game.md` §13 Session 2 for what the re-base moved, and **§8 below for the routing
@@ -314,6 +314,11 @@ which is what a correct memo looks like:
   cell by cell, on a 200 m map of staggered walls, at several settings of the abstract search's
   horizon (`--spans`). `lost` is the column that matters — a cell the hierarchy cannot price is a
   body that believes it has no route and stops.
+- `--congestiontest` sweeps one wall with a jammed near gap and a detour from 2 m to 8 m, across
+  four unit types, and reports which way each went and how long it took. The question is whether a
+  slow body and a fast one disagree about a queue, which they should. Read the whole sweep: at a
+  short detour everybody goes round and at a long one everybody waits, and the only rows where the
+  question is live are the ones in between.
 - `--mixedtest` reports what mixing body sizes and speeds does: head-on separation and reaction in
   combined radii, warning as a *time* per unit speed, the arc a body with a turning circle traces,
   how far a settled body is shoved, whether a body holds its line across traffic, and a mixed
@@ -435,6 +440,34 @@ at once, and a change justified by one of their jobs breaks the other.
 
 ## 7. Known open items
 
+- **A large body cannot reach a goal a crowd of small ones is standing on.** Found by
+  `--congestiontest` and reproduced with everything else switched off, so it is nobody's new bug:
+  heavy cavalry stops **1.3 to 1.6 m short** of a goal thirty villagers have arrived at, doing
+  0.03 m/s, stuck for 25 to 41 s, and never registers arrival. The crowded-arrival machinery
+  (`CrowdedArrivalAttempts`) exists for exactly this shape and evidently sizes it against the body
+  that is arriving rather than against the bodies already there. Nothing asserts on it yet because
+  no scenario before this one had a large body arriving into a small crowd.
+- **Congestion is now priced by the body's own speed, on a dial, and the clock is not convinced.**
+  Route cost is seconds at a reference pace and a body's own speed scales every leg of travel
+  equally, which is what lets one field serve everyone; congestion is the one term that does not,
+  because a queue costs whoever is in it the same wall clock. So in the field's units a jam is
+  worth `speed / reference` of what it is worth to the reference body — dimensionally unarguable,
+  and on the sweep, ambiguous. Three of twenty-four runs changed: the cart stopped detouring at 5 m
+  and arrived **2.3 s sooner**, the scout started detouring at 6 m and arrived **1.4 s later**.
+  Net nine tenths of a second.
+
+  What the loss probably exposes is a *second* missing term rather than a wrong first one. The
+  field describes the jam as it stands and a jam drains: a fast body reaches the gap sooner and
+  meets more of the queue than the field predicts, a slow one arrives later and meets less. That
+  pushes the opposite way and partly cancels this, and neither effect is modelled. Shipped at 1
+  because the status quo is a known dimensional error rather than a tuned value, and left on
+  `PathService.CongestionSpeedScaling` because one geometry is not a measurement. **Session 6 is
+  the decisive one** — many haulers of differing speeds sharing routes continuously is the workload
+  this term exists for, and nothing before it will settle the number.
+
+  The field is keyed by speed only where it matters: with nothing stuck anywhere, every unit shares
+  one field however fast it is, and the split happens on a rebuild the congestion revision was
+  forcing anyway.
 - **A wagon's turning circle is honoured in time, not in geometry.** `omega = v / R` with a pivot
   floor, and told to come about it slows down first — so by the time it is turning hard it is doing
   0.3 m/s and traces 0.88 m against a nominal 3.4. What is real is that it cannot flick round:

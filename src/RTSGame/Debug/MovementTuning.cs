@@ -275,6 +275,21 @@ internal sealed class WallSettings
 
 internal sealed class RoutingSettings
 {
+    /// <summary>How much a body's own speed changes what a queue is worth to it.</summary>
+    /// <remarks>
+    /// One means a scout values a twenty-second jam at twice what the reference body does, because
+    /// it eats twice as much of its journey; zero means everybody prices a queue identically, which
+    /// is what the router did while every unit walked at the same pace. See
+    /// <c>PathService.CongestionSpeedScaling</c> for the sweep — the arithmetic is unambiguous and
+    /// the clock is not.
+    /// </remarks>
+    [Tune(0.0, 1.0, Label = "congestion by unit speed", Group = "Routing")]
+    public float CongestionSpeedScaling
+    {
+        get => PathService.CongestionSpeedScaling;
+        set => PathService.CongestionSpeedScaling = value;
+    }
+
     // In cells rather than seconds now: what a queue costs is how many bodies are ahead
     // times how long one takes to clear a cell, and the second half of that is a property of
     // how fast the body walks. A slider in seconds meant this quietly re-tuned itself every

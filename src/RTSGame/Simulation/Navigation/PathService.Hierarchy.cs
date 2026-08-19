@@ -117,6 +117,7 @@ internal sealed partial class PathService
             region,
             field.AgentRadius,
             field.ChargeTurns,
+            field.CongestionSpeedScale,
             System.Runtime.InteropServices.CollectionsMarshal.AsSpan(seeds),
             retained: true);
     }
@@ -147,6 +148,7 @@ internal sealed partial class PathService
         int region,
         float agentRadius,
         bool chargeTurns,
+        float congestionSpeedScale,
         ReadOnlySpan<(GridCell Cell, float Cost)> seeds,
         bool retained,
         ReadOnlySpan<GridCell> until = default)
@@ -223,6 +225,7 @@ internal sealed partial class PathService
                     arrival[currentIndex],
                     agentRadius,
                     chargeTurns,
+                    congestionSpeedScale,
                     out var travelDirection);
                 if (nextCost >= costs[previousIndex]) continue;
                 costs[previousIndex] = nextCost;
@@ -270,6 +273,7 @@ internal sealed partial class PathService
             CongestionSecondsPerPressure,
             this,
             agentRadius,
+            1f,
             chargeTurns: true);
 
         var reachable = 0;

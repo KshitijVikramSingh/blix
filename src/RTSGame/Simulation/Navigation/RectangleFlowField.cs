@@ -39,6 +39,17 @@ internal sealed class RectangleFlowField
     private readonly Dictionary<int, float[]> tiles = new();
 
     public float AgentRadius { get; }
+
+    /// <summary>
+    /// What a second of queueing is worth to the body this field was built for.
+    /// </summary>
+    /// <remarks>
+    /// Held on the field rather than passed to each query because a tile filled later has to
+    /// charge congestion exactly as the corner graph above it did — one field that priced its
+    /// abstract layer for a scout and its tiles for a villager would have a gradient that
+    /// disagrees with its own routing.
+    /// </remarks>
+    public float CongestionSpeedScale { get; }
     public bool ChargeTurns { get; }
     /// <summary>Tiles filled so far, which is what steering has cost this field.</summary>
     public int RefinedTiles => tiles.Count;
@@ -66,10 +77,12 @@ internal sealed class RectangleFlowField
         float congestionSecondsPerPressure,
         PathService owner,
         float agentRadius,
+        float congestionSpeedScale,
         bool chargeTurns)
     {
         this.owner = owner;
         AgentRadius = agentRadius;
+        CongestionSpeedScale = congestionSpeedScale;
         ChargeTurns = chargeTurns;
         this.mesh = mesh;
         this.index = index;

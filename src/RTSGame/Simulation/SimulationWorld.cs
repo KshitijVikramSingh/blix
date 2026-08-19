@@ -584,7 +584,9 @@ internal sealed class SimulationWorld
     /// </summary>
     private bool BeginFlowTransit(ref AgentState agent, Vector2 target)
     {
-        if (pathService.SampleFlowGradient(agent.Position, target, agent.NavigationRadius) == Vector2.Zero)
+        if (pathService.SampleFlowGradient(
+                agent.Position, target, agent.NavigationRadius, agentSpeed: agent.MaximumSpeed) ==
+            Vector2.Zero)
         {
             return false;
         }
@@ -1021,7 +1023,8 @@ internal sealed class SimulationWorld
             requestedDestination,
             agent.NavigationRadius,
             congestionAvoidanceCenter,
-            additionalNavigationCosts);
+            additionalNavigationCosts,
+            agent.MaximumSpeed);
         pathfindingTicksThisTick += Stopwatch.GetTimestamp() - pathfindingStart;
         if (result is not { } path)
         {
@@ -1083,13 +1086,15 @@ internal sealed class SimulationWorld
             agent.Position,
             joinPoint,
             agent.NavigationRadius,
-            congestionAvoidanceCenter);
+            congestionAvoidanceCenter,
+            agentSpeed: agent.MaximumSpeed);
         var second = first is null
             ? null
             : pathService.FindPath(
                 joinPoint,
                 requestedDestination,
-                agent.NavigationRadius);
+                agent.NavigationRadius,
+                agentSpeed: agent.MaximumSpeed);
         pathfindingTicksThisTick += Stopwatch.GetTimestamp() - pathfindingStart;
         if (first is not { } approach || second is not { } continuation)
         {
@@ -1317,7 +1322,8 @@ internal sealed class SimulationWorld
             agent.Position,
             agent.RequestedDestination,
             agent.NavigationRadius,
-            agent.AdoptedCongestionRevision);
+            agent.AdoptedCongestionRevision,
+            agent.MaximumSpeed);
         if (flow == Vector2.Zero)
         {
             // The field no longer offers this body a route (terrain edit, or it

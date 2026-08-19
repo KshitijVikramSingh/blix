@@ -39,6 +39,11 @@ public static class Program
             Environment.Exit(0);
         }
 
+        if (args.Contains("--congestiontest"))
+        {
+            Environment.Exit(CongestionSpeedScenarios.Run());
+        }
+
         if (args.Contains("--mixedtest"))
         {
             Environment.Exit(MixedBodyScenarios.Run());
