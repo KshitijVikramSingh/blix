@@ -21,7 +21,8 @@ internal enum TerrainSurface : byte
 internal static class TerrainSurfaceRules
 {
     /// <summary>Time multiplier of the quickest surface, for heuristic admissibility.</summary>
-    public const float MinimumPathCost = 1f / 1.10f;
+    /// <remarks>Kept in step with the road multiplier below; the two disagreeing is a wrong route.</remarks>
+    public const float MinimumPathCost = 1f / 1.45f;
 
     public static bool IsPassable(TerrainSurface surface) => surface != TerrainSurface.Impassable;
 
@@ -60,9 +61,28 @@ internal static class TerrainSurfaceRules
         .DefaultIfEmpty(1f)
         .Min();
 
+    /// <summary>
+    /// How fast this ground is, relative to open grass. The one source of truth for it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Road was 1.10 and is now 1.45, and the reason is a measurement.</b> §6 of
+    /// <c>plan-rts-game.md</c> claims that "roads literally grow usable territory, and settlements form
+    /// ribbons along them — nobody has to author that". <c>--catchment</c> established that a catchment
+    /// reaches along a road by <em>exactly</em> the road's speed multiplier and no more, because a
+    /// catchment is a time budget: measured 72 m along the road against 66 m on open ground, which is
+    /// 1.09 against a multiplier of 1.10. Nine per cent is not a ribbon, so the claim was false and one
+    /// of the two had to move.
+    /// <para>
+    /// 1.45 is a maintained road against grass rather than a highway, and it makes the catchment reach
+    /// about 96 m along a road against 66 m across country — a bulge a player can see and build toward.
+    /// It follows through the whole system for free, because path cost is derived from this: routes
+    /// prefer roads more strongly, hauling legs along roads are genuinely cheaper in the seconds the
+    /// hauling board prices in, and none of that needed a second number.
+    /// </para>
+    /// </remarks>
     public static float SpeedMultiplier(TerrainSurface surface) => surface switch
     {
-        TerrainSurface.Road => 1.10f,
+        TerrainSurface.Road => 1.45f,
         TerrainSurface.Grass => 1.00f,
         TerrainSurface.Rough => 0.78f,
         TerrainSurface.Mud => 0.55f,

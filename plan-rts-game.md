@@ -7,22 +7,24 @@ bottom third of it.**
 
 - **The code** is `src/RTSGame`: one fixed 30 Hz tick, ORCA velocity control that sees walls,
   flow-field group movement, congestion routing priced in seconds, an adaptive rectangle partition
-  for routes, six unit types across two body classes, and a jobs layer. `--selftest`
-  **65/65** on branch `rts-locomotion`. Its tick order, its invariants and its **five measured
+  for routes, six unit types across two body classes, a jobs layer, save and load, and an economy.
+  `--selftest` **71/71** on branch `rts-locomotion`. Its tick order, its invariants and its **five measured
   refusals** live in **`plan-rts.md`** — read that before touching movement, because most of what
   looks tunable there is load-bearing in two ways at once.
 - **This document** is the game that goes on top, settled across long design sessions in August
   2026. §1–§11 are decided, not speculative — the numbers are derived and the derivations are
   recorded beside them, because they move as a set. **§12 is what is genuinely still open**, and it
   is shorter than it was.
-- **Sessions 1 through 5 are done** (2026-08-18/19); their records are in §13 and the measured state
+- **Sessions 1 through 6 are done** (2026-08-18/19); their records are in §13 and the measured state
   is §14. In order: the 1200 m map went from a 549 ms tick and a 4.1 s move order to **5.8 ms at
   2,000 agents**; the body came down from a 4.5 m/s run to a **1.79 m/s walk** with every threshold
   re-based; the map came down to **600 m**; the routing layer was rebuilt twice more into rectangles
   and tiles; the roster landed — villager, soldier, hauler cart, light cavalry, heavy cavalry,
-  wagon; and the jobs layer landed with assignment, activity and interrupt on the body.
+  wagon; the jobs layer landed with assignment, activity and interrupt on the body; and the economy
+  landed — calendar, stock, catchments, hauling priced in seconds, and a two-year settlement whose books
+  balance exactly.
 
-### Start at Session 6, and read §15 first
+### Start at the MVP slice, and read §15 and §17 first
 
 **§15 is an audit of what Sessions 6 to 9 actually owe**, made on 2026-08-19 by checking the code
 rather than re-reading this document. It found four things worth knowing before any of them starts,
@@ -1397,6 +1399,11 @@ here for the first time.
 **Gate:** a settlement that produces, stores, hauls and consumes runs headless through a full year
 with no counter drifting and no unit permanently stalled.
 
+**Met, 2026-08-19, and "no counter drifting" is exact rather than tolerated.** Stock is counted in
+whole units, so `seeded + produced − consumed − lost` must equal what is stored plus what is on
+somebody's back, checked every tick. Over a two-year run — 324,000 ticks — it never moved, and the one
+time it did it named the bug in a sentence. §17 is the record.
+
 ### Session 7 — The strategic layer and the soak harness
 
 They are the same artefact. A soak test needs a world doing economically meaningful things for
@@ -1453,7 +1460,7 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 
 | | |
 |---|---|
-| suite | `--selftest` **68/68** in 6.5 s (was 53/53 through Session 4) |
+| suite | `--selftest` **71/71** (was 53/53 through Session 4) |
 | determinism coverage | **102 values a body**, 184 a tick, 25,580 at a checkpoint — every one probed |
 | catchment, measured | **12,320 m² on open ground**, effective radius 62.6 m against a nominal 66 — §15 |
 | soak, early career | **1.44 ms a tick at 300 agents, 23x real time**; a year is 4 min, ten years 39 — §15 |
@@ -1470,7 +1477,9 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 | frame | 7.4 ms |
 | tuning dials on the panel | **14**, plus **5 jobs dials** off it — reach, crowded reach, attempts, grace, retry |
 | order grace, measured | **5.5 s** from standing free to back on the job; the walk back is separate and is a distance |
-| catchment | **60 s at hauler pace, 66 m** — §6 |
+| catchment | **60 s at hauler pace, 66 m**; measured 62.6 m effective on open ground — §6, §15 |
+| settlement | two years, drift **0**, exactly 270 grain and 120 wood eaten per person per year — §17 |
+| road | **1.45x**, raised from 1.10 so §6's ribbon claim is true — §17 |
 
 ### Debts this work is carrying
 
@@ -1847,3 +1856,102 @@ session that breaks them.
 3. **An order-kind census.** A command kind with no save format would be silently dropped: a unit told
    to do something that never does it, once, after a load. The test reflects over the command hierarchy
    and requires every concrete kind to be accounted for.
+
+---
+
+## 17. Session 6 — the economy, and what an exact ledger caught
+
+Landed 2026-08-19. Two years of a settlement run headless in six seconds, and the seasonal story §6
+describes is visible in the trace rather than argued for.
+
+| | year 1 spring | summer | harvest | winter | year 2 spring |
+|---|---|---|---|---|---|
+| grain stored | 2,000 | 440 | 665 | **5,034** | 3,356 |
+| wood stored | 1,000 | 992 | **2,408** | 2,357 | 1,348 |
+| grain lasts | 1.1 seasons | growing | growing | 2.9 seasons | 1.9 seasons |
+
+Food bottoms just before the harvest and peaks after it; wood peaks in autumn and drains through
+winter at three times the rate. Nobody wrote that sequence down — the seasons are canonical and every
+rate is a normalised function of them, so the calendar produces the calendar. Over two years the
+settlement ate **exactly** 270 grain and 120 wood per person per year, which are the nominal figures,
+and went short zero times. Stores rose year over year, which is §10's soak assertion — autonomy time
+climbing with the arrangement — observed for the first time.
+
+### The decisions worth knowing about
+
+**Stock is integers, and that is the load-bearing choice.** The gate says "no counter drifting", and a
+float ledger accumulated over 162,000 ticks can only ever be checked against a tolerance somebody
+picked. In whole units it is exact arithmetic. Rates stay continuous, as rule 1 demands — a node
+accumulates fractional production and spills whole units — so nothing about the design gave anything
+up for it.
+
+**Hands are counted from the jobs layer, not from a parallel notion of employment.** A body posted at a
+node under a `Hold` assignment, standing in its yard, is a pair of hands there; one walking toward it is
+not yet, and one dragged away by an order is not any more. So §2's identity — labour and attention are
+substitutes — is not modelled, it is what happens: pull a farmer away and the farm's output stops for
+exactly as long as you keep them.
+
+**A haul is one round trip, not a standing route.** Collect, deliver, go back on the board. A hauler
+that kept a route for life would have been priced once, at the moment it was hired, and the promise
+that a jammed lane makes a different hauler cheaper would be a promise about a decision nobody ever
+revisits.
+
+**Lean staffing wins, and the layout shows it.** Output has diminishing returns in hands at one place,
+so twelve farms of one hand out-produce six of two by forty per cent for the same labour. The
+settlement in the trace is twelve farms, seven woodcutters, five carts and two wagons, feeding 26.
+
+**The calendar is derived from the tick number**, so it is not state and there is nothing to keep in
+step. `EpochTicks` was added for succession — a career beginning in whatever year the map has reached —
+and it turned out to earn its keep immediately: the economy self-test starts in a harvest rather than
+spending three seasons simulating its way to one.
+
+### What the exact ledger caught
+
+**Seventeen grain vanished at tick 116,520.** `JobSystem.Assign` reset the whole jobs struct, cargo
+included, so a wagon that arrived at a full granary had its remaining load destroyed when the finished
+job was cleared. Cargo is a thing in the world and not a note about intent; `Assign` now preserves it,
+and a delivery that arrives to a full store is re-pointed at whatever else has room rather than ending.
+A tolerance-based check would have called seventeen units noise.
+
+It also forced a third ledger. A body that dies carrying units has removed them from the economy, so
+`Lost` is part of the identity rather than an afterthought — and Session 8 makes that the ordinary case,
+because a raider killed on the way home is the defender's whole objective.
+
+**One wagon starved the entire hauling network.** The board would not send a cart for a load smaller
+than a share of *the largest cart in the world*, so adding a single 200-unit wagon to a settlement of
+40-unit carts raised the bar to seventy units, no hundred-and-fifty-unit yard reached it in time, and
+journeys fell from 342 a year to 163 while the settlement starved. The bar is the *smallest* cart:
+a load worth the smallest cart's trip is worth dispatching, and which cart goes is the board's decision,
+made in seconds.
+
+**Two carts were being sent for the same grain.** Half of all haul jobs were being abandoned on arrival
+at an emptied yard. A yard already being collected from is no longer offered to a second cart, which is
+cheaper than reserving units and has the same effect: abandoned jobs went from 160 in half a year to 14
+in a whole one.
+
+### The road multiplier, decided
+
+§15 measured that a catchment reaches along a road by **exactly** the road's speed multiplier — 72 m
+against 66 m on open ground, at a multiplier of 1.10 — so §6's claim that "roads literally grow usable
+territory, and settlements form ribbons along them" was false by construction. **Road is now 1.45**,
+a maintained road against grass rather than a highway. Re-measured: reach along the road **82 m**, and
+the catchment's area grows **36%**, from 5,101 m² to 6,925. It follows through the whole system for
+free because path cost is derived from speed — routes prefer roads more strongly and hauling legs along
+them are cheaper in the same seconds the board prices in.
+
+### Debt 7 is still open, and now for a better reason
+
+The congestion width and speed terms were to be settled by "many haulers of differing sizes sharing
+routes continuously", and the settlement has exactly that — five carts at 0.55 m and two wagons at 0.90
+sharing one granary approach. **Congestion peak over two years: 0 to 2.** A healthy settlement does not
+jam. The terms need a deliberately over-subscribed lane rather than a working one, which is a different
+scenario and an honest thing to have learned: the workload that was supposed to settle them is the
+workload in which they never fire.
+
+| | |
+|---|---|
+| suite | `--selftest` **71/71** |
+| two-year settlement | 324,000 ticks, drift **0**, short **0**, 943 hauls, 47 dropped |
+| economy phase | **0.01–0.03 ms** a tick at 26 people and 20 nodes |
+| grain produced against nominal | **99.7%** — the harvest crunch nearly absorbed at seven haulers |
+| new instrument | `--settlement [--years n]`, which is also §15's per-PR soak gate |

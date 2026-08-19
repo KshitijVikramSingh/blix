@@ -1,5 +1,6 @@
 using System.Numerics;
 using RTSGame.Simulation.Collision;
+using RTSGame.Simulation.Economy;
 using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Navigation;
 
@@ -40,6 +41,8 @@ internal struct AgentState
     public float TurningRadius;
     /// <summary>What this body can carry, for the hauling layer.</summary>
     public int CarryCapacity;
+    /// <summary>How much this body eats, relative to a villager. See <c>UnitType.Appetite</c>.</summary>
+    public float Appetite;
     public float MaximumSpeed;
     public float Acceleration;
     /// <summary>Rate this body sheds speed at; see AgentDefaults.Deceleration.</summary>
@@ -63,6 +66,9 @@ internal struct AgentState
     public float BehaviorUpdateCooldown;
     public float HoldReturnCooldown;
     public AgentId BehaviorTarget;
+    /// <summary>Which store feeds this body. See <see cref="AgentSupply"/>.</summary>
+    public AgentSupply Supply;
+
     /// <summary>What this unit is committed to, doing, and currently being kept from.</summary>
     /// <remarks>
     /// Three layers in one struct: see <see cref="AgentJobs"/>. It lives on the body rather

@@ -13,6 +13,7 @@ using RTSGame.Debug;
 using RTSGame.Simulation;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Collision;
+using RTSGame.Simulation.Economy;
 using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Spatial;
 using RTSGame.Simulation.Terrain;
@@ -362,6 +363,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Console.WriteLine("  B: toggle block-edit mode   left-click in block mode: add/remove block");
         Console.WriteLine("  S: stop   F: follow   P: patrol to pointer   H: chase   X: flee   Backspace: despawn selected");
         Console.WriteLine("  U: post selected at pointer   O: shuttle (press twice for both ends)   Y: off work");
+        Console.WriteLine("  D: granary at pointer   A: farm   W: woodcutter   post hands with U and they become the hands");
         Console.WriteLine("  a standing job survives an order: give one, let go, and they go back to it");
         Console.WriteLine("  N: nav / surface / slope / congestion overlays   C: colliders   V: velocity   K: paths   I: states");
         Console.WriteLine("  T: per-phase timings   M: live movement trace (cohort/slot, contacts, worst overlap)");
@@ -379,6 +381,36 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// nothing in the simulation knows about it.
     /// </summary>
     private Vector2? shuttleAnchor;
+
+    /// <summary>Builds a node at the pointer, and turns a hauler loose if the settlement has none.</summary>
+    /// <remarks>
+    /// A granary with nobody to carry to it is a granary that never fills, and the board only ever
+    /// notices a cart that already exists — so the first store built brings its own carts. That is a
+    /// convenience of this testbed and not a mechanic: when construction is real, carts are built.
+    /// </remarks>
+    private void Build(NodeKind kind, int capacity, Resource produces)
+    {
+        if (!pointerOnTerrain) return;
+        var id = simulation.AddNode(kind, pointerWorld, capacity, produces);
+        Console.WriteLine(
+            $"  {kind} at ({pointerWorld.X:F0}, {pointerWorld.Y:F0}) — " +
+            $"{simulation.Nodes.LiveCount} node(s). Post hands with U; carts find their own work");
+        if (kind != NodeKind.Granary) return;
+
+        var carts = 0;
+        foreach (ref readonly var agent in simulation.Agents.All)
+        {
+            if (agent.IsAlive && agent.CarryCapacity >= UnitType.HaulerCart.CarryCapacity) carts++;
+        }
+
+        for (var i = carts; i < 4; i++)
+        {
+            simulation.SpawnAgent(
+                pointerWorld + new Vector2(3f + i * 1.4f, -3f), UnitType.HaulerCart);
+        }
+
+        if (carts < 4) Console.WriteLine($"  {4 - carts} hauler cart(s) turned loose");
+    }
 
     /// <summary>Puts the selection to work standing at the pointer.</summary>
     private void AssignPost()
@@ -582,6 +614,44 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
 
         ReportJobs(debug);
+        ReportEconomy(debug);
+    }
+
+    /// <summary>
+    /// The one thing §8 says the interface is for: how long this lasts without you.
+    /// </summary>
+    /// <remarks>
+    /// Autonomy time is the score, the win condition and the soak assertion all at once — "granary: 2.4
+    /// seasons at current draw" — so it is displayed as seasons rather than as a stock level. A stock
+    /// level tells a player a number; seasons-until-empty tells them whether to do something about it,
+    /// which is the only question the low-attention mode can afford to ask.
+    /// </remarks>
+    private void ReportEconomy(DebugContext debug)
+    {
+        if (simulation.Nodes.LiveCount == 0) return;
+        var date = simulation.Date;
+        using var scope = debug.Scope("settlement");
+        debug.Values.Value("year", date.Year + 1);
+        debug.Values.Value("season", date.Season.ToString());
+        debug.Values.Value("day", date.Day);
+
+        foreach (var resource in Resources.All)
+        {
+            var outlook = simulation.Economy.Outlook(
+                resource, simulation.Nodes, simulation.Agents, date.Season);
+            debug.Values.Value($"{resource} stored", outlook.Stored);
+            debug.Values.Value(
+                $"{resource} lasts",
+                float.IsPositiveInfinity(outlook.Seasons) ? "growing" : $"{outlook.Seasons:F1} seasons");
+            debug.Stats.Gauge($"{resource} stored", outlook.Stored);
+        }
+
+        var hands = 0;
+        foreach (ref readonly var node in simulation.Nodes.All) hands += node.Hands;
+        debug.Values.Value("hands at work", hands);
+        debug.Values.Value("nodes", simulation.Nodes.LiveCount);
+        debug.Values.Value("hauls", simulation.Economy.HaulsAssigned);
+        debug.Values.Value("went short", simulation.Economy.Unmet.Grain + simulation.Economy.Unmet.Wood);
     }
 
     /// <summary>
@@ -1378,6 +1448,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 simulation.QueueAssign(selection.Snapshot(), Assignment.None);
                 shuttleAnchor = null;
                 Console.WriteLine($"  {selection.Selected.Count} unit(s) taken off work");
+                break;
+            case Key.D:
+                Build(NodeKind.Granary, capacity: 2000, Resource.Grain);
+                break;
+            case Key.A:
+                Build(NodeKind.Farm, capacity: 150, Resource.Grain);
+                break;
+            case Key.W:
+                Build(NodeKind.Woodcutter, capacity: 150, Resource.Wood);
                 break;
             case Key.LeftControl:
             case Key.RightControl:

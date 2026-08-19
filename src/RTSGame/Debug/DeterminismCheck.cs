@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Reflection;
 using RTSGame.Simulation;
 using RTSGame.Simulation.Agents;
+using RTSGame.Simulation.Economy;
 using RTSGame.Simulation.Movement;
 using RTSGame.Simulation.Spatial;
 
@@ -64,7 +65,8 @@ internal static class DeterminismCheck
     {
         "SimulationWorld.Agents", "SimulationWorld.Terrain", "SimulationWorld.Placement",
         "SimulationWorld.Navigation", "SimulationWorld.Congestion", "SimulationWorld.Colliders",
-        "SimulationWorld.TickNumber", "SimulationWorld.LastContactCount",
+        "SimulationWorld.TickNumber", "SimulationWorld.EpochTicks",
+        "SimulationWorld.LastContactCount",
         "SimulationWorld.CongestionRepathCount", "SimulationWorld.ImmediateRouteRepairCount",
         "SimulationWorld.CongestionRerouteCount", "SimulationWorld.CrowdedArrivalBlockCount",
         "SimulationWorld.LastCongestionRoot", "SimulationWorld.LastCongestionRepathAgent",
@@ -72,7 +74,11 @@ internal static class DeterminismCheck
         "SimulationWorld.nextMoveGroupId", "SimulationWorld.blockColliders",
         "SimulationWorld.congestionRecoveryCooldown",
         "SimulationWorld.rasterizedTerrainRevision", "SimulationWorld.routePlansThisTick",
-        "SimulationWorld.ExtentMeters",
+        "SimulationWorld.ExtentMeters", "SimulationWorld.Nodes", "SimulationWorld.economy",
+        "EconomySystem.Produced", "EconomySystem.Consumed", "EconomySystem.Seeded",
+        "EconomySystem.Unmet", "EconomySystem.Lost",
+        "EconomySystem.HaulsAssigned", "EconomySystem.HaulsAbandoned",
+        "EconomySystem.boardCooldown",
         "MoveGroup.Id", "MoveGroup.Target", "MoveGroup.Members", "MoveGroup.Slots",
         "MoveGroup.FormationRadius", "MoveGroup.SettlingTicks", "MoveGroup.TransitCentroid",
         "MoveGroup.HasTransitCentroid", "MoveGroup.TransitFlow",
@@ -96,6 +102,14 @@ internal static class DeterminismCheck
         ["SimulationWorld.agentIndex"] = "rebuilt from body positions every tick, and those are fingerprinted.",
         ["SimulationWorld.placementHits"] = "query result buffer, refilled before each read.",
         ["SimulationWorld.holdPositionHits"] = "query result buffer, refilled before each read.",
+        ["EconomySystem.tasks"] =
+            "rebuilt from scratch by every pass of the hauling board, before anything reads it.",
+        ["EconomySystem.claimed"] =
+            "rebuilt by every pass of the board from which carts are already hauling, and that is on " +
+            "the carts.",
+        ["EconomySystem.idleHaulers"] =
+            "rebuilt from the bodies by every pass of the board; who is idle is a fact about the " +
+            "bodies, and those are fingerprinted.",
     };
 
     /// <summary>
@@ -115,7 +129,8 @@ internal static class DeterminismCheck
     /// Types the census walks field by field. Anything a carried field points at is either
     /// one of these, plain data, or has a line in <see cref="Boundaries"/>.
     /// </summary>
-    private static readonly Type[] Censused = { typeof(SimulationWorld), typeof(MoveGroup) };
+    private static readonly Type[] Censused =
+        { typeof(SimulationWorld), typeof(MoveGroup), typeof(EconomySystem) };
 
     /// <summary>
     /// Subsystems read through a named surface instead of field by field, and what that
@@ -157,6 +172,9 @@ internal static class DeterminismCheck
             "every proxy ever added, in id order, with its owner, shape, centre and enabled " +
             "flag. Its hashes and partitions are rebuilt from those.",
         ["AgentCommand"] = "walked in full by PlainDataWalker, whatever kind of order it is.",
+        ["NodeStore"] =
+            "every slot including tombstones, each walked in full by PlainDataWalker because a node " +
+            "is plain data, plus its slot count, live count and revision.",
     };
 
     private const BindingFlags Instance =
@@ -390,6 +408,7 @@ internal static class DeterminismCheck
     {
         sink.Push("world", -1);
         sink.Add("TickNumber", world.TickNumber);
+        sink.Add("EpochTicks", world.EpochTicks);
         sink.Add("ExtentMeters", world.ExtentMeters);
         sink.Add("Slots", world.Agents.Count);
         sink.Add("LiveBodies", world.Agents.LiveCount);
@@ -404,6 +423,9 @@ internal static class DeterminismCheck
         sink.Add("OccupiedCells", world.Placement.OccupiedCells.Count);
         sink.Add("BlockedCells", world.BlockColliders.Count);
         sink.Add("ColliderCount", world.Colliders.All.Count);
+        sink.Add("Nodes", world.Nodes.Count);
+        sink.Add("LiveNodes", world.Nodes.LiveCount);
+        sink.Add("NodeRevision", world.Nodes.Revision);
         sink.Add("LastCongestionRoot", world.LastCongestionRoot.Value);
         sink.Add("LastCongestionRepathAgent", world.LastCongestionRepathAgent.Value);
 
@@ -425,6 +447,8 @@ internal static class DeterminismCheck
             PlainDataWalker.Write(ref sink, "order", command);
         }
 
+        WriteEconomy(world, ref sink);
+
         var bodies = world.Agents.All;
         for (var slot = 0; slot < bodies.Length; slot++)
         {
@@ -438,6 +462,40 @@ internal static class DeterminismCheck
         WriteRoutes(world, ref sink);
         WriteMap(world, ref sink);
         WriteColliders(world, ref sink);
+    }
+
+    /// <summary>
+    /// The nodes and the ledgers, which between them are the whole economy's state.
+    /// </summary>
+    /// <remarks>
+    /// Nodes go through <see cref="PlainDataWalker"/> rather than a hand-written field list, for the
+    /// same reason a body goes through a compiled schema: a node is plain data, so what it carries is
+    /// read off the struct and a field added by the trade layer is compared without anybody being asked.
+    /// The ledgers are read as well as the stock, because they are what conservation is checked against
+    /// and a difference in them is a unit produced or eaten in one run and not the other.
+    /// </remarks>
+    private static void WriteEconomy<TSink>(SimulationWorld world, ref TSink sink)
+        where TSink : struct, IStateSink
+    {
+        sink.Push("economy", -1);
+        sink.Add("BoardCooldown", world.Economy.BoardCooldown);
+        sink.Add("HaulsAssigned", world.Economy.HaulsAssigned);
+        sink.Add("HaulsAbandoned", world.Economy.HaulsAbandoned);
+        foreach (var resource in Resources.All)
+        {
+            sink.Add("Produced", world.Economy.Produced[resource]);
+            sink.Add("Consumed", world.Economy.Consumed[resource]);
+            sink.Add("Seeded", world.Economy.Seeded[resource]);
+            sink.Add("Unmet", world.Economy.Unmet[resource]);
+            sink.Add("Lost", world.Economy.Lost[resource]);
+        }
+
+        var nodes = world.Nodes.All;
+        for (var slot = 0; slot < nodes.Length; slot++)
+        {
+            sink.Push("node", slot);
+            PlainDataWalker.Write(ref sink, "node", nodes[slot]);
+        }
     }
 
     /// <summary>

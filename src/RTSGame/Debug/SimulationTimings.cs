@@ -7,6 +7,7 @@ internal enum SimulationPhase
     Congestion,
     AgentIndex,
     Commands,
+    Economy,
     Jobs,
     Behaviors,
     NavigationRefresh,

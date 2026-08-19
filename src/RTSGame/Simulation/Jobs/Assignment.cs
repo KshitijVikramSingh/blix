@@ -1,4 +1,5 @@
 using System.Numerics;
+using RTSGame.Simulation.Economy;
 
 namespace RTSGame.Simulation.Jobs;
 
@@ -15,6 +16,17 @@ internal enum AssignmentKind
     /// Be at one place, then the other, indefinitely. Hauling with the cargo left out.
     /// </summary>
     Shuttle,
+
+    /// <summary>
+    /// Carry one resource from a source node to a sink node, indefinitely. A shuttle with cargo.
+    /// </summary>
+    /// <remarks>
+    /// The nodes are named by id and their positions are carried alongside as a convenience, and the
+    /// ids are the truth: a granary that burns down leaves an assignment naming a dead node, which the
+    /// board drops, rather than an assignment naming a point in an empty field that a hauler keeps
+    /// walking to.
+    /// </remarks>
+    Haul,
 }
 
 /// <summary>What a unit is doing at this instant, in service of its assignment.</summary>
@@ -63,13 +75,32 @@ internal enum InterruptKind
 /// How long the unit stays at a place before the assignment moves it on. In seconds, like
 /// everything else in this design: it is how long the work takes.
 /// </param>
+/// <param name="Source">Node a haul collects from; <see cref="NodeId.None"/> otherwise.</param>
+/// <param name="Sink">Node a haul delivers to; <see cref="NodeId.None"/> otherwise.</param>
+/// <param name="Cargo">What a haul carries.</param>
 internal readonly record struct Assignment(
     AssignmentKind Kind,
     Vector2 Anchor,
     Vector2 FarAnchor,
-    float DwellSeconds)
+    float DwellSeconds,
+    NodeId Source = default,
+    NodeId Sink = default,
+    Resource Cargo = default)
 {
     public static Assignment None => default;
+
+    /// <summary>Carry <paramref name="cargo"/> from one node to another, indefinitely.</summary>
+    public static Assignment Haul(
+        NodeId source,
+        Vector2 sourcePosition,
+        NodeId sink,
+        Vector2 sinkPosition,
+        Resource cargo,
+        float handoverSeconds) =>
+        new(AssignmentKind.Haul, sourcePosition, sinkPosition, handoverSeconds, source, sink, cargo);
+
+    /// <summary>Which node a leg of a haul is served at.</summary>
+    public NodeId NodeOfLeg(int leg) => leg % 2 != 0 ? Sink : Source;
 
     /// <summary>Stand at a post, checking in every <paramref name="dwellSeconds"/>.</summary>
     public static Assignment Hold(Vector2 post, float dwellSeconds) =>
@@ -80,9 +111,22 @@ internal readonly record struct Assignment(
         new(AssignmentKind.Shuttle, first, second, dwellSeconds);
 
     /// <summary>Where the given leg of this assignment is served.</summary>
-    public Vector2 PlaceOfLeg(int leg) => Kind == AssignmentKind.Shuttle && leg % 2 != 0
-        ? FarAnchor
-        : Anchor;
+    public Vector2 PlaceOfLeg(int leg) =>
+        Kind is AssignmentKind.Shuttle or AssignmentKind.Haul && leg % 2 != 0 ? FarAnchor : Anchor;
+
+    /// <summary>Whether this assignment alternates between two places.</summary>
+    public bool HasTwoEnds => Kind is AssignmentKind.Shuttle or AssignmentKind.Haul;
+
+    /// <summary>
+    /// Whether the assignment goes on indefinitely, or ends when its last leg does.
+    /// </summary>
+    /// <remarks>
+    /// A haul is <b>one round trip</b> and not a standing route, and that is the whole point of pricing
+    /// it: a hauler that kept a route for the rest of its life would be priced once, at the moment it
+    /// was hired, and the promise that a jammed lane makes a different hauler cheaper would be a
+    /// promise about a decision nobody ever revisits. Collect, deliver, and go back on the board.
+    /// </remarks>
+    public bool RepeatsForever => Kind is AssignmentKind.Hold or AssignmentKind.Shuttle;
 }
 
 /// <summary>
@@ -156,6 +200,15 @@ internal struct AgentJobs
     /// job halfway through the sequence. Grace, not a mode: it runs out on its own.
     /// </remarks>
     public float InterruptGrace;
+
+    /// <summary>What this body is carrying, for a haul.</summary>
+    public Resource Carrying;
+
+    /// <summary>Whole units on this body's back. Neither stored nor consumed until delivered.</summary>
+    public int CarriedUnits;
+
+    /// <summary>The assignment has run its course and will be cleared on the next tick.</summary>
+    public bool Finished;
 
     public readonly bool HasAssignment => Assignment.Kind != AssignmentKind.None;
     public readonly bool IsInterrupted => Interrupt != InterruptKind.None;

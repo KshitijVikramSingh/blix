@@ -11,9 +11,20 @@ internal enum JobStep
 
     /// <summary>Send it to a place. The world owns routing; the jobs layer only asks.</summary>
     WalkTo,
+
+    /// <summary>
+    /// A leg of work has just finished here. For a haul, the tick to move cargo on or off the body.
+    /// </summary>
+    /// <remarks>
+    /// The jobs layer cannot do the transfer itself — stock lives in nodes and this decides only — so
+    /// it reports the moment and the leg, and the world acts. The leg reported is the one that
+    /// <em>finished</em>, not the one starting, because the assignment has already moved on by then and
+    /// asking the world to work that out was the sort of subtlety that goes wrong once and silently.
+    /// </remarks>
+    LegFinished,
 }
 
-internal readonly record struct JobRequest(JobStep Step, Vector2 Target)
+internal readonly record struct JobRequest(JobStep Step, Vector2 Target, int Leg = -1)
 {
     public static JobRequest None => default;
 }
@@ -74,6 +85,14 @@ internal static class JobSystem
         ref var jobs = ref agent.Jobs;
         if (jobs.IsInterrupted) return ServeInterrupt(ref agent, deltaSeconds, place);
         if (!jobs.HasAssignment) return JobRequest.None;
+        // A finished job is cleared here rather than where it finished, so the tick that reported the
+        // last leg is the tick the world moved the cargo on.
+        if (jobs.Finished)
+        {
+            Assign(ref agent, Assignment.None);
+            return JobRequest.None;
+        }
+
 
         if (jobs.Activity == ActivityKind.None) BeginActivity(ref jobs);
 
@@ -90,8 +109,9 @@ internal static class JobSystem
         jobs.DwellRemaining -= deltaSeconds;
         if (jobs.DwellRemaining > 0f) return JobRequest.None;
 
+        var finished = jobs.Leg;
         CompleteActivity(ref jobs);
-        return JobRequest.None;
+        return new JobRequest(JobStep.LegFinished, jobs.Place, finished);
     }
 
     /// <summary>
@@ -132,9 +152,41 @@ internal static class JobSystem
     }
 
     /// <summary>Gives this unit a standing commitment, or takes its current one away.</summary>
+    /// <remarks>
+    /// Everything about the old job goes — its progress, its activity, its interrupt — <b>except what
+    /// the body is physically carrying</b>, because cargo is a thing in the world and not a note about
+    /// intent. Wiping the whole struct destroyed a wagon's load the first time a granary filled up mid
+    /// delivery, and the exact ledger named it: seventeen grain gone at tick 116,520.
+    /// </remarks>
     public static void Assign(ref AgentState agent, Assignment assignment)
     {
-        agent.Jobs = new AgentJobs { Assignment = assignment };
+        agent.Jobs = new AgentJobs
+        {
+            Assignment = assignment,
+            Carrying = agent.Jobs.Carrying,
+            CarriedUnits = agent.Jobs.CarriedUnits,
+        };
+    }
+
+    /// <summary>
+    /// Sends a body that is already carrying to a different place to put it down.
+    /// </summary>
+    /// <remarks>
+    /// For a delivery that arrives to find the store full. The assignment is not finished — there is
+    /// still a load on the cart — so it is pointed at somewhere else with room and walks on, rather than
+    /// ending and leaving the units in limbo.
+    /// </remarks>
+    public static void Retarget(ref AgentState agent, Assignment assignment, int leg)
+    {
+        ref var jobs = ref agent.Jobs;
+        jobs.Assignment = assignment;
+        jobs.Leg = leg;
+        jobs.Finished = false;
+        jobs.Activity = ActivityKind.None;
+        jobs.WalkIssued = false;
+        jobs.Retries = 0;
+        jobs.RetryCooldown = 0f;
+        jobs.SettledNearby = false;
     }
 
     /// <summary>
@@ -232,9 +284,13 @@ internal static class JobSystem
     private static void CompleteActivity(ref AgentJobs jobs)
     {
         jobs.LegsCompleted++;
-        jobs.Leg = jobs.Assignment.Kind == AssignmentKind.Shuttle ? (jobs.Leg + 1) % 2 : 0;
+        var wasLastLeg = !jobs.Assignment.HasTwoEnds || jobs.Leg % 2 != 0;
+        jobs.Leg = jobs.Assignment.HasTwoEnds ? (jobs.Leg + 1) % 2 : 0;
         jobs.Activity = ActivityKind.None;
         jobs.DwellRemaining = 0f;
+        // A job with an end reaches it, and the body goes back to being available. The world is told
+        // which leg finished first, so a haul's cargo is delivered before the assignment vanishes.
+        if (wasLastLeg && !jobs.Assignment.RepeatsForever) jobs.Finished = true;
     }
 
     /// <summary>Whether the body still has somewhere it has been told to be.</summary>

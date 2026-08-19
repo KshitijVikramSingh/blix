@@ -4,6 +4,7 @@ using RTSGame.Simulation;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Collision;
 using RTSGame.Simulation.Commands;
+using RTSGame.Simulation.Economy;
 using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Navigation;
 using RTSGame.Simulation.Persistence;
@@ -121,6 +122,9 @@ internal static class SimulationSelfTests
         Check("a saved world has the same future", ASavedWorldHasTheSameFuture());
         Check("a save this build cannot read is refused", ABadSaveIsRefused());
         Check("every order kind survives a save", EveryOrderKindSurvivesASave());
+        Check("the year adds up and its rates are normalised", TheYearAddsUp());
+        Check("a settlement feeds itself without losing a grain", ASettlementFeedsItself());
+        Check("a working settlement runs identically twice", TheEconomyRunsIdenticallyTwice());
         Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
@@ -3115,6 +3119,8 @@ internal static class SimulationSelfTests
                 i % 2 == 0 ? UnitType.Villager : UnitType.HaulerCart));
         }
 
+        AddEconomy(world);
+
         // Built ground, so the placement grid, the block colliders and the raster all have something
         // in them, and a route has something to go around.
         for (var z = -2; z <= 2; z++) world.QueueToggleObstacle(new Vector2(0f, z * 1.5f));
@@ -3136,11 +3142,190 @@ internal static class SimulationSelfTests
         return world;
     }
 
+    /// <summary>Adds a working economy to the world a save is taken from.</summary>
+    /// <remarks>
+    /// So the round trip covers nodes, ledgers and a cart with grain on its back rather than only
+    /// bodies. Cargo in transit is the interesting case: it is neither stored nor consumed, and a save
+    /// that dropped it would balance the books by losing units.
+    /// </remarks>
+    private static void AddEconomy(SimulationWorld world)
+    {
+        var granary = world.AddNode(NodeKind.Granary, new Vector2(-4f, 4f), capacity: 200);
+        world.SeedStock(granary, Resource.Grain, 25);
+        var farm = new Vector2(8f, -6f);
+        world.AddNode(NodeKind.Farm, farm, capacity: 60);
+        var hand = world.SpawnAgent(farm + new Vector2(1.2f, 0f), UnitType.Villager);
+        world.QueueAssign(new[] { hand }, Assignment.Hold(farm, dwellSeconds: 5f));
+        world.SpawnAgent(new Vector2(2f, 0f), UnitType.HaulerCart);
+    }
+
     private static long SaveSize(SimulationWorld world)
     {
         using var stream = new MemoryStream();
         WorldSave.Save(world, stream);
         return stream.Length;
+    }
+
+    /// <summary>
+    /// The year adds up, and moving when a resource arrives cannot change how much of it arrives.
+    /// </summary>
+    /// <remarks>
+    /// The seasons are canonical and every rate is a function of them, which is only safe if the
+    /// function is normalised — so this integrates each seasonal shape over a whole year and requires
+    /// the answer to be the annual amount it was given. Without that, moving the harvest spike or
+    /// lengthening a season is a balance change disguised as a flavour change, and the prototype's
+    /// three disagreeing crop windows are what that looks like after a while.
+    /// </remarks>
+    private static bool TheYearAddsUp()
+    {
+        var seasons = 0f;
+        foreach (var season in Enum.GetValues<Season>()) seasons += WorldCalendar.LengthOf(season);
+        var boundaries = WorldCalendar.At(0f).Season == Season.Spring &&
+                         WorldCalendar.At(1199f).Season == Season.Spring &&
+                         WorldCalendar.At(1201f).Season == Season.Summer &&
+                         WorldCalendar.At(3001f).Season == Season.Harvest &&
+                         WorldCalendar.At(4001f).Season == Season.Winter &&
+                         WorldCalendar.At(WorldCalendar.YearSeconds + 1f) is { Year: 1, Season: Season.Spring };
+
+        // Integrate each shape over the year a second at a time and compare with the annual figure.
+        var report = new List<string>();
+        var normalised = true;
+        foreach (var resource in Resources.All)
+        {
+            var produced = 0f;
+            var drawn = 0f;
+            for (var second = 0f; second < WorldCalendar.YearSeconds; second += 1f)
+            {
+                var season = WorldCalendar.At(second).Season;
+                produced += EconomyRates.ProductionPerSecond(resource, season);
+                drawn += EconomyRates.DrawPerSecond(resource, season, appetite: 1f);
+            }
+
+            var nominalProduced = resource == Resource.Grain
+                ? EconomyRates.GrainPerHandPerYear
+                : EconomyRates.WoodPerHandPerYear;
+            var nominalDrawn = resource == Resource.Grain
+                ? EconomyRates.GrainPerVillagerPerYear
+                : EconomyRates.WoodPerVillagerPerYear;
+            normalised &= MathF.Abs(produced - nominalProduced) < nominalProduced * 0.002f;
+            normalised &= MathF.Abs(drawn - nominalDrawn) < nominalDrawn * 0.002f;
+            report.Add($"{resource}: {produced:F0}/{nominalProduced:F0} made, {drawn:F0}/{nominalDrawn:F0} drawn");
+        }
+
+        var passed = MathF.Abs(seasons - WorldCalendar.YearSeconds) < 0.001f && boundaries && normalised;
+        Console.WriteLine(
+            $"    year {seasons:F0} s over {WorldCalendar.DaysPerYear} days | {string.Join(" | ", report)}");
+        return passed;
+    }
+
+    /// <summary>
+    /// A settlement produces, hauls, stores and consumes, and not one unit goes missing.
+    /// </summary>
+    /// <remarks>
+    /// The small, fast version of Session 6's gate — <c>--settlement</c> is the full year. What it
+    /// checks that a longer run cannot check any better is the exact one: stock is whole units, so
+    /// <c>seeded + produced − consumed</c> must equal what is stored plus what is being carried, with no
+    /// tolerance anywhere. Every tick.
+    /// </remarks>
+    private static bool ASettlementFeedsItself()
+    {
+        var world = new SimulationWorld();
+        // Start in the harvest, because spring brings in no grain at all by design and a test that
+        // began there would be measuring how well the settlement waits.
+        world.StartAtSeconds(3100f);
+        var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 400);
+        world.SeedStock(granary, Resource.Grain, 40);
+
+        var farms = new List<Vector2>();
+        for (var i = 0; i < 3; i++)
+        {
+            var at = new Vector2(-8f + i * 8f, 8f);
+            farms.Add(at);
+            world.AddNode(NodeKind.Farm, at, capacity: 60);
+        }
+
+        foreach (var at in farms)
+        {
+            var hand = world.SpawnAgent(at + new Vector2(1.2f, 0f), UnitType.Villager);
+            world.QueueAssign(new[] { hand }, Assignment.Hold(at, dwellSeconds: 6f));
+        }
+
+        for (var i = 0; i < 2; i++)
+        {
+            world.SpawnAgent(new Vector2(-2f + i * 4f, -3f), UnitType.HaulerCart);
+        }
+
+        var drift = default(ResourceTotals);
+        var stalled = 0;
+        for (var tick = 0; tick < 30 * 240; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (drift.Grain != 0 || drift.Wood != 0) break;
+        }
+
+        foreach (ref readonly var agent in world.Agents.All)
+        {
+            if (agent.IsAlive && agent.Jobs.CannotReachWork) stalled++;
+        }
+
+        var hands = 0;
+        foreach (ref readonly var node in world.Nodes.All) hands += node.Hands;
+        var stored = world.Nodes.Get(granary).Stock.Grain;
+        var passed = drift.Grain == 0 && drift.Wood == 0 && stalled == 0 && hands == 3 &&
+                     world.Economy.Produced.Grain > 0 && world.Economy.Consumed.Grain > 0 &&
+                     world.Economy.HaulsAssigned > 0 && stored > 0;
+        Console.WriteLine(
+            $"    settlement: {hands} hands, produced {world.Economy.Produced.Grain}, ate " +
+            $"{world.Economy.Consumed.Grain}, {world.Economy.HaulsAssigned} hauls, {stored} in the " +
+            $"granary, drift {drift.Grain}/{drift.Wood}, stalled {stalled}");
+        return passed;
+    }
+
+    /// <summary>
+    /// Two runs of a working settlement agree tick for tick, over everything the economy carries.
+    /// </summary>
+    /// <remarks>
+    /// The fingerprint reads nodes, ledgers and cargo without having been told to — a node is plain
+    /// data, so it goes through the same walker a pending order does. What this adds is a scenario in
+    /// which any of that actually changes, because a fingerprint over a field nothing writes proves
+    /// nothing about it. Hauling is the interesting part: the board prices every idle cart against every
+    /// task and picks a winner, so a tie broken differently would show up here and nowhere else.
+    /// </remarks>
+    private static bool TheEconomyRunsIdenticallyTwice()
+    {
+        var fault = DeterminismCheck.Diverges(BuildEconomyWorld(), BuildEconomyWorld(), ticks: 30 * 90);
+        if (fault is not null) Console.WriteLine($"    {fault}");
+        return fault is null;
+    }
+
+    private static SimulationWorld BuildEconomyWorld()
+    {
+        var world = new SimulationWorld();
+        var granary = world.AddNode(NodeKind.Granary, new Vector2(0f, -4f), capacity: 300);
+        world.SeedStock(granary, Resource.Grain, 30);
+        world.SeedStock(granary, Resource.Wood, 30);
+
+        // Two producers of each resource sharing one granary, so the board has ties to break and two
+        // kinds of cargo to price.
+        for (var i = 0; i < 4; i++)
+        {
+            var at = new Vector2(-9f + i * 6f, 8f);
+            world.AddNode(
+                i % 2 == 0 ? NodeKind.Farm : NodeKind.Woodcutter,
+                at,
+                capacity: 80,
+                i % 2 == 0 ? Resource.Grain : Resource.Wood);
+            var hand = world.SpawnAgent(at + new Vector2(1.2f, 0f), UnitType.Villager);
+            world.QueueAssign(new[] { hand }, Assignment.Hold(at, dwellSeconds: 5f + i));
+        }
+
+        for (var i = 0; i < 3; i++)
+        {
+            world.SpawnAgent(new Vector2(-3f + i * 3f, -8f), UnitType.HaulerCart);
+        }
+
+        return world;
     }
 
     private static void Tick(SimulationWorld world, int count)

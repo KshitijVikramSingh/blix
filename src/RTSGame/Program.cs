@@ -44,6 +44,13 @@ public static class Program
             Environment.Exit(CongestionSpeedScenarios.Run());
         }
 
+        if (args.Contains("--settlement"))
+        {
+            var settlementExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var years = Value(args, "--years") is { } span ? float.Parse(span) : 1f;
+            Environment.Exit(SettlementScenarios.Run(settlementExtent, years));
+        }
+
         if (args.Contains("--catchment"))
         {
             var catchExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;

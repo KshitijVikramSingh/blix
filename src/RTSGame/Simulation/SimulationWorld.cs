@@ -4,6 +4,7 @@ using RTSGame.Debug;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Collision;
 using RTSGame.Simulation.Commands;
+using RTSGame.Simulation.Economy;
 using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Movement;
 using RTSGame.Simulation.Navigation;
@@ -130,12 +131,15 @@ internal sealed class SimulationWorld
     private readonly Dictionary<GridCell, ColliderId> blockColliders = new();
     private readonly List<ColliderId> placementHits = new();
     private readonly List<ColliderId> holdPositionHits = new();
+    private readonly EconomySystem economy = new();
     private float congestionRecoveryCooldown;
     private int rasterizedTerrainRevision = -1;
     private int routePlansThisTick;
     private long pathfindingTicksThisTick;
 
     public AgentStore Agents { get; } = new();
+    /// <summary>Places that produce and store. §6's hauling network is between these.</summary>
+    public NodeStore Nodes { get; } = new();
     public TerrainMap Terrain { get; }
     public PlacementGrid Placement { get; }
     public NavigationGrid Navigation { get; }
@@ -190,6 +194,74 @@ internal sealed class SimulationWorld
     public int AgentIndexRebuildsPerTick => agentIndex.Rebuilds;
     public AgentId LastCongestionRoot { get; private set; } = new(-1);
     public AgentId LastCongestionRepathAgent { get; private set; } = new(-1);
+
+    /// <summary>Production, consumption, catchments and the hauling board.</summary>
+    public EconomySystem Economy => economy;
+
+    /// <summary>Where in the year this world is.</summary>
+    /// <remarks>
+    /// Derived from the tick number and the epoch rather than counted, so there is no second opinion
+    /// about what time it is.
+    /// </remarks>
+    public CalendarDate Date => WorldCalendar.At(TickNumber + EpochTicks);
+
+    /// <summary>Ticks the world had already lived through when this run of it began.</summary>
+    /// <remarks>
+    /// One number, and it is the whole of what §5's succession needs from the calendar: a career ends
+    /// and the next begins on the same map in whatever year the map has reached. It also lets anything
+    /// that wants to examine a particular season start in it rather than simulating its way there,
+    /// which is how the economy self-test looks at a harvest without spending three seasons getting to
+    /// one.
+    /// </remarks>
+    internal long EpochTicks { get; private set; }
+
+    /// <summary>Starts this world partway through the calendar.</summary>
+    internal void StartAtSeconds(float seconds) =>
+        EpochTicks = (long)MathF.Round(seconds / (float)FixedDeltaSeconds);
+
+    /// <summary>Builds a node and gives it a collider so bodies route around it.</summary>
+    public NodeId AddNode(
+        NodeKind kind,
+        Vector2 position,
+        int capacity,
+        Resource produces = Resource.Grain,
+        float catchmentSeconds = 60f,
+        FactionId? faction = null)
+    {
+        var resolved = faction ?? new FactionId(0);
+        var at = Terrain.ClampPosition(position);
+        var id = Nodes.Add(new EconomyNode
+        {
+            Kind = kind,
+            Faction = resolved,
+            Position = at,
+            Capacity = capacity,
+            Produces = produces,
+            CatchmentSeconds = catchmentSeconds,
+        });
+        // Interactable rather than solid: a granary a hauler cannot walk up to is a granary nobody can
+        // use, and the yard a crowd settles into is the jobs layer's business rather than the collider
+        // world's.
+        Placement.Transform.TryWorldToCell(at, out var cell);
+        Nodes.Get(id).Collider = Colliders.Add(
+            ColliderOwner.Placement(cell, Placement.Transform),
+            resolved,
+            ColliderLayer.Structure,
+            ColliderRole.Interactable,
+            ColliderShape.Circle(1.2f),
+            at);
+        return id;
+    }
+
+    /// <summary>Puts stock into a node by hand, recorded so conservation still balances.</summary>
+    public void SeedStock(NodeId id, Resource resource, int units)
+    {
+        if (!Nodes.Contains(id) || units <= 0) return;
+        ref var node = ref Nodes.Get(id);
+        var accepted = Math.Min(units, node.RoomFor(resource));
+        node.Stock.Add(resource, accepted);
+        economy.RecordSeeded(resource, accepted);
+    }
 
     // State the determinism fingerprint has to read and nothing else needs. Each of these
     // is something the world carries from one tick into the next without it being visible
@@ -265,7 +337,8 @@ internal sealed class SimulationWorld
             type.MaximumSpeed,
             type.NavigationRadius,
             type.TurningRadius,
-            type.CarryCapacity);
+            type.CarryCapacity,
+            type.Appetite);
 
     public AgentId SpawnAgent(
         Vector2 position,
@@ -274,13 +347,14 @@ internal sealed class SimulationWorld
         float maximumSpeed = AgentDefaults.MaximumSpeed,
         float navigationRadius = 0f,
         float turningRadius = 0f,
-        int carryCapacity = 0)
+        int carryCapacity = 0,
+        float appetite = 1f)
     {
         position = Terrain.ClampPosition(position, radius + BodyFootprint.NavigationMargin);
         var resolvedFaction = faction ?? new FactionId(0);
         var id = Agents.Spawn(
             position, resolvedFaction, radius, maximumSpeed, navigationRadius, turningRadius,
-            carryCapacity);
+            carryCapacity, appetite);
         var owner = ColliderOwner.Agent(id);
         ref var agent = ref Agents.Get(id);
         agent.Colliders = new AgentColliderSet(
@@ -328,6 +402,15 @@ internal sealed class SimulationWorld
         {
             if (!Agents.Contains(id)) continue;
             ref var agent = ref Agents.Get(id);
+            // Whatever it was carrying goes with it. Recorded rather than silently dropped, because
+            // conservation is checked exactly and a raider killed with somebody's grain on its back is
+            // Session 8's normal case rather than an anomaly.
+            if (agent.Jobs.CarriedUnits > 0)
+            {
+                economy.RecordLost(agent.Jobs.Carrying, agent.Jobs.CarriedUnits);
+                agent.Jobs.CarriedUnits = 0;
+            }
+
             CompletePath(ref agent);
             Colliders.Remove(agent.Colliders.Movement);
             Colliders.Remove(agent.Colliders.Avoidance);
@@ -490,6 +573,7 @@ internal sealed class SimulationWorld
     internal void Write(WorldWriter writer)
     {
         writer.Long(TickNumber);
+        writer.Long(EpochTicks);
         writer.Int(LastContactCount);
         writer.Int(CongestionRepathCount);
         writer.Int(ImmediateRouteRepairCount);
@@ -511,6 +595,8 @@ internal sealed class SimulationWorld
         Terrain.Write(writer);
         Placement.Write(writer);
         Agents.Write(writer);
+        Nodes.Write(writer);
+        economy.Write(writer);
         Colliders.Write(writer);
         Congestion.Write(writer);
         paths.Write(writer);
@@ -534,6 +620,7 @@ internal sealed class SimulationWorld
     internal void Read(WorldReader reader)
     {
         TickNumber = reader.Long();
+        EpochTicks = reader.Long();
         LastContactCount = reader.Int();
         CongestionRepathCount = reader.Int();
         ImmediateRouteRepairCount = reader.Int();
@@ -553,6 +640,8 @@ internal sealed class SimulationWorld
         Terrain.Read(reader);
         Placement.Read(reader);
         Agents.Read(reader);
+        Nodes.Read(reader);
+        economy.Read(reader);
         Colliders.Read(reader);
         Congestion.Read(reader);
         paths.Read(reader);
@@ -622,6 +711,12 @@ internal sealed class SimulationWorld
         var phaseStart = Stopwatch.GetTimestamp();
         ApplyCommands();
         Timings.Record(SimulationPhase.Commands, Stopwatch.GetTimestamp() - phaseStart);
+
+        phaseStart = Stopwatch.GetTimestamp();
+        // Before jobs, so a hauler handed a job this tick starts walking on it this tick, and so
+        // production reflects who was standing where at the end of the last one.
+        economy.Update(Nodes, Agents, Date.Season, deltaSeconds, TryTravelSeconds);
+        Timings.Record(SimulationPhase.Economy, Stopwatch.GetTimestamp() - phaseStart);
 
         phaseStart = Stopwatch.GetTimestamp();
         UpdateJobs(deltaSeconds);
@@ -775,8 +870,15 @@ internal sealed class SimulationWorld
                 ? ClassifyPlace(in agents[i])
                 : PlaceCondition.Open;
             var request = JobSystem.Advance(ref agents[i], deltaSeconds, place);
-            if (request.Step != JobStep.WalkTo) continue;
-            BeginSoloMove(ref agents[i], Terrain.ClampPosition(request.Target));
+            switch (request.Step)
+            {
+                case JobStep.WalkTo:
+                    BeginSoloMove(ref agents[i], Terrain.ClampPosition(request.Target));
+                    break;
+                case JobStep.LegFinished:
+                    Handover(ref agents[i], request.Leg);
+                    break;
+            }
         }
     }
 
@@ -831,6 +933,58 @@ internal sealed class SimulationWorld
                 AssignPath(ref agent, agent.GroupSlot);
             }
         }
+    }
+
+    /// <summary>
+    /// Moves cargo on or off a hauler that has just finished a leg.
+    /// </summary>
+    /// <remarks>
+    /// The one place units change hands, so it is the one place conservation could be broken. Loading
+    /// takes from the source's stock and adds to the body; unloading does the reverse; neither invents
+    /// or discards a unit, and what will not fit stays where it was. A body carrying cargo it cannot
+    /// deliver keeps it and the board leaves it alone until it has.
+    /// </remarks>
+    private void Handover(ref AgentState agent, int leg)
+    {
+        ref var jobs = ref agent.Jobs;
+        if (jobs.Assignment.Kind != AssignmentKind.Haul) return;
+        var nodeId = jobs.Assignment.NodeOfLeg(leg);
+        if (!Nodes.Contains(nodeId)) return;
+        ref var node = ref Nodes.Get(nodeId);
+        var cargo = jobs.Assignment.Cargo;
+
+        if (nodeId == jobs.Assignment.Source)
+        {
+            if (jobs.CarriedUnits > 0) return;
+            var taken = Math.Min(agent.CarryCapacity, node.Stock[cargo]);
+            if (taken <= 0) return;
+            node.Stock.Add(cargo, -taken);
+            jobs.Carrying = cargo;
+            jobs.CarriedUnits = taken;
+            return;
+        }
+
+        if (jobs.CarriedUnits <= 0) return;
+        var delivered = Math.Min(jobs.CarriedUnits, node.RoomFor(jobs.Carrying));
+        node.Stock.Add(jobs.Carrying, delivered);
+        jobs.CarriedUnits -= delivered;
+        if (jobs.CarriedUnits <= 0) return;
+
+        // The store filled while this load was on its way. The job is not over — there are units on the
+        // cart — so it is pointed at whatever else has room, or left pointed here to try again. Either
+        // way the cargo stays on the cart, which is the only answer that keeps the books.
+        var elsewhere = EconomySystem.EmptiestStoreWithRoom(Nodes, jobs.Carrying, node.Faction, nodeId);
+        var target = Nodes.Contains(elsewhere) ? elsewhere : nodeId;
+        JobSystem.Retarget(
+            ref agent,
+            Assignment.Haul(
+                jobs.Assignment.Source,
+                jobs.Assignment.Anchor,
+                target,
+                Nodes.Get(target).Position,
+                jobs.Carrying,
+                EconomySystem.HandoverSeconds),
+            leg: 1);
     }
 
     /// <summary>What the ground where a unit's work is looks like, for the jobs layer.</summary>

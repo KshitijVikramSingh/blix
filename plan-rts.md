@@ -12,7 +12,7 @@ Verify it: `dotnet run --project src/RTSGame/RTSGame.csproj -c Release -- --self
 Measure it: same with `--benchmark`, and `--doorwaytest` for two-way gap contention
 Measure it at size: same with `--scale` — see §5, and `plan-rts-game.md` §13 for what it found
 More than one kind of body: `--mixedtest`, `--congestiontest`, `--radiisweep` — see §5
-Watch a settlement work without you: `--jobs [--minutes n]`, `--catchment` — see §5
+Watch a settlement work without you: `--settlement [--years n]`, `--jobs`, `--catchment` — see §5
 Routing substrate: **§8** — answered, shipped, with both refusals kept
 
 **The one thing to take from this document if you take nothing else.** Every bug found while unit
@@ -317,6 +317,10 @@ which is what a correct memo looks like:
 - In-game: `M` trace, `T` timings, `N` overlays (nav / surface / slope / **congestion**),
   `C` colliders, `V` velocity, `K` paths, `I` states, `Backspace` despawn selection,
   `Z` camera-follows-selection, `R` recentre camera
+- In-game economy: `D` builds a granary at the pointer (and turns four hauler carts loose the first
+  time), `A` a farm, `W` a woodcutter. Post villagers at a farm with `U` and they *are* its hands — the
+  farm produces because they are standing in it. The panel's **settlement** scope is the one-verb HUD:
+  what is stored and how many seasons it lasts.
 - In-game jobs: `U` posts the selection at the pointer, `O` twice lays out a shuttle between two
   points, `Y` takes them off work. The panel's **jobs** scope counts assigned / working /
   interrupted / cannot-reach and legs done — the proportion is the reading, and it is the panel
@@ -388,6 +392,13 @@ which is what a correct memo looks like:
   instrument honest: one perturbs each of the 102 body values in turn and requires the fingerprint to
   notice, and one injects a divergence at a known tick and requires that tick to be named. A digest
   nobody has tried to fool is not evidence.
+- `--settlement [--extent m] [--years n]` runs a settlement that produces, stores, hauls and consumes,
+  and reports a row per season: stock, autonomy time in seasons, hands at work, journeys given out, units
+  in transit, shortfalls, the congestion peak and the tick cost. **It is Session 6's gate and §15's
+  per-PR soak gate**, and it exits non-zero on either of two faults: a unit that cannot reach its work,
+  or a single unit of stock unaccounted for. Conservation is checked every tick and it is exact —
+  `seeded + produced − consumed − lost` against what is stored plus what is carried — because stock is
+  whole units. The one time it fired it named the bug in a sentence.
 - `--catchment [--extent m] [--budget s]` measures what a catchment actually covers, on five
   placements of the game map: cells and area inside the budget, the effective radius of a disc of the
   same area, the longest and shortest reach over 32 bearings, and catchments per territory. It exists
