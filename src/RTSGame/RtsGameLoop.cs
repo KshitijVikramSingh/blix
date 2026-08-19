@@ -125,7 +125,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private readonly List<InstanceData> groundInstances = new();
     private readonly List<InstanceData> detailInstances = new();
     private int groundTerrainRevision = -1;
-    private Vector2 groundFocusBlock = new(float.NaN);
     private InstancedBatch unitBatch = null!;
     private readonly List<TerrainSurfaceLayer> terrainSurfaceLayers = new();
     private VulkanGraphicsDevice vk = null!;
@@ -737,30 +736,23 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 color));
         }
 
-        BuildDetailedGround();
+        BuildTerrainFeatures();
     }
 
     /// <summary>
     /// Rebuilds the ground instance lists, but only when something they depend on has moved.
     /// </summary>
     /// <remarks>
-    /// The coarse blocks depend on the terrain alone. The detail window also depends on where
-    /// the camera is looking, but only to the nearest block — so panning across a map rebuilds
-    /// a handful of times rather than sixty times a second.
+    /// Nothing here depends on the camera any more, so a rebuild happens on a terrain edit and
+    /// at no other time.
     /// </remarks>
     private void RebuildGroundInstancesIfStale()
     {
-        var block = CoarseGroundBlockSize;
-        var focusBlock = new Vector2(
-            MathF.Floor(cameraFocus.X / block),
-            MathF.Floor(cameraFocus.Y / block));
-        if (groundTerrainRevision == simulation.Terrain.Revision && focusBlock == groundFocusBlock)
-        {
-            return;
-        }
-
+        // Terrain only. The detail used to be a window around the camera, so this also had to
+        // watch where the camera was and rebuild fourteen thousand blocks whenever it crossed
+        // one; patches do not move when the viewer does.
+        if (groundTerrainRevision == simulation.Terrain.Revision) return;
         groundTerrainRevision = simulation.Terrain.Revision;
-        groundFocusBlock = focusBlock;
         groundInstances.Clear();
         detailInstances.Clear();
         BuildCoarseGround();
@@ -776,71 +768,64 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private const float BlockHeightTolerance = 0.35f;
     /// <summary>
-    /// Per-cell ground for the parts of the map that actually have something on them.
+    /// The parts of the map that are not plain grass at ground level, drawn as whole patches.
     /// </summary>
     /// <remarks>
-    /// The coarse blocks are five or ten metres across, which is the right scale for reading
-    /// speed off open ground and far too blunt for a three-metre pond or a ramp: sculpted
-    /// features came out as chunky rectangles that did not line up with the terrain underneath
-    /// them, because a whole block took the surface of whatever happened to be at its centre.
-    /// <para>
-    /// Same rule as the router uses one layer down — resolve to the resolution where the detail
-    /// exists, stay broad everywhere else. A cell is drawn finely only where it disagrees with
-    /// the plain ground beneath it: a surface other than grass, or ground that is not level.
-    /// On an empty map that is nothing at all, and around a sculpted feature it is a few
-    /// thousand cells.
+    /// This used to be per-cell within forty metres of the camera, which put a visible seam
+    /// across the map — a ridge stepped finely near the crowd and blocky beyond it. Any fixed
+    /// radius does that and moving it only moves the seam. A patch of ground that is one surface
+    /// at one height is exactly describable by a single box however large and however distant, so
+    /// the terrain is merged into those patches once per edit and every one of them is drawn.
+    /// Detail now exists where the ground has detail rather than where the camera happens to be.
     /// </remarks>
-    private void BuildDetailedGround()
+    private void BuildTerrainFeatures()
     {
         if (UsesFineGround) return;
-        var terrain = simulation.Terrain;
         var grid = simulation.Navigation.Transform;
-        var cellSize = grid.CellSize;
-        var low = (cameraFocus - new Vector2(DetailedGroundRadius) - grid.Origin) / cellSize;
-        var high = (cameraFocus + new Vector2(DetailedGroundRadius) - grid.Origin) / cellSize;
-        var minimumX = Math.Clamp((int)MathF.Floor(low.X), 0, grid.Width - 1);
-        var minimumZ = Math.Clamp((int)MathF.Floor(low.Y), 0, grid.Height - 1);
-        var maximumX = Math.Clamp((int)MathF.Ceiling(high.X), 0, grid.Width - 1);
-        var maximumZ = Math.Clamp((int)MathF.Ceiling(high.Y), 0, grid.Height - 1);
-        var block = CoarseGroundBlockSize;
-
-        for (var z = minimumZ; z <= maximumZ; z++)
-        for (var x = minimumX; x <= maximumX; x++)
+        var cell = grid.CellSize;
+        foreach (var patch in TerrainPatches().All)
         {
-            var cell = new GridCell(x, z);
-            var center = grid.CellCenter(cell);
-            // Only where the cell disagrees with the coarse block covering it: a different
-            // surface, or a height the flat plate cannot stand in for.
-            var blockCentre = BlockCentre(grid, center, block);
-            var surface = terrain.Surface(cell);
-            var height = terrain.SampleHeight(center);
-            if (surface == terrain.SampleSurface(blockCentre) &&
-                MathF.Abs(height - terrain.SampleHeight(blockCentre)) < BlockHeightTolerance)
-            {
-                continue;
-            }
-
-            var color = TerrainColor(surface, (x + z) % 2 == 0);
-            if (detailInstances.Count == MaximumDetailCells) return;
-            // Sits a hair above the coarse column rather than in it, so the finer answer wins
-            // outright instead of z-fighting with the blunt one.
-            detailInstances.Add(new InstanceData(
-                GroundColumn(center, height + 0.012f, cellSize),
-                color));
+            if (patch.Surface == TerrainSurface.Grass && MathF.Abs(patch.Height) < 0.02f) continue;
+            if (detailInstances.Count == MaximumDetailPatches) return;
+            var width = (patch.MaximumX - patch.MinimumX + 1) * cell;
+            var depth = (patch.MaximumZ - patch.MinimumZ + 1) * cell;
+            var centre = grid.Origin + new Vector2(
+                (patch.MinimumX + (patch.MaximumX - patch.MinimumX + 1) * 0.5f) * cell,
+                (patch.MinimumZ + (patch.MaximumZ - patch.MinimumZ + 1) * 0.5f) * cell);
+            // Checkered off the patch's own position so a large feature still reads as ground
+            // rather than as one flat slab of colour.
+            var light = (patch.MinimumX / 8 + patch.MinimumZ / 8) % 2 == 0;
+            var model = GroundColumn(centre, patch.Height + 0.012f, 1f);
+            model = Matrix4x4.CreateScale(width, 1f, depth) * model;
+            detailInstances.Add(new InstanceData(model, TerrainColor(patch.Surface, light)));
         }
     }
+
+    private TerrainRectangles TerrainPatches()
+    {
+        if (terrainPatches is null || terrainPatches.Revision != simulation.Terrain.Revision)
+        {
+            terrainPatches = TerrainRectangles.Build(simulation.Terrain);
+        }
+
+        return terrainPatches;
+    }
+
+    private TerrainRectangles? terrainPatches;
+
+    /// <summary>Patches one batch can carry, minus room to spare.</summary>
+    private const int MaximumDetailPatches = 16_000;
 
     /// <summary>
     /// A patch of ground as a column standing on a floor, rather than a plate floating at its
     /// own height.
     /// </summary>
     /// <remarks>
-    /// Flat plates cannot describe a slope. On level ground nobody notices, and every version
-    /// of this before now was only ever tested on level ground; put a twenty-metre ridge in
-    /// front of it and the ground becomes a staircase of disconnected tiles with the sky
-    /// visible between them, which is what those bright stripes along the ridge were. A column
-    /// from a floor below the map up to the ground's own height has no gaps between neighbours
-    /// at all, whatever the step between them.
+    /// Flat plates cannot describe a slope. On level ground nobody notices, and every version of
+    /// this before was only ever looked at on a plain; put a twenty-metre ridge in front of it
+    /// and the ground becomes a staircase of disconnected tiles with the sky visible between
+    /// them. A column from a floor below the map up to the ground's own height has no gaps
+    /// between neighbours at all, whatever the step between them.
     /// </remarks>
     private static Matrix4x4 GroundColumn(Vector2 centre, float height, float width)
     {
@@ -849,21 +834,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         return Matrix4x4.CreateScale(width, thickness, width) *
                Matrix4x4.CreateTranslation(centre.X, height - thickness * 0.5f, centre.Y);
     }
-
-    /// <summary>Centre of the coarse block a point falls in.</summary>
-    private static Vector2 BlockCentre(GridTransform grid, Vector2 point, float block)
-    {
-        var local = point - grid.Origin;
-        return grid.Origin + new Vector2(
-            (MathF.Floor(local.X / block) + 0.5f) * block,
-            (MathF.Floor(local.Y / block) + 0.5f) * block);
-    }
-
-    /// <summary>How far from the camera per-cell ground detail is drawn, in metres.</summary>
-    private const float DetailedGroundRadius = 40f;
-
-    /// <summary>Detail cells one batch can carry, minus room to spare.</summary>
-    private const int MaximumDetailCells = 16_000;
 
     /// <summary>Checker squares across the map, bounded by what one batch can hold.</summary>
     /// <remarks>

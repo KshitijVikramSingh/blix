@@ -300,6 +300,12 @@ which is what a correct memo looks like:
   whether the cost field can be evaluated outright.
 - `--mapdump` prints the generated world as text and marks what a body cannot stand on, which is
   how a missing mountain pass gets found without a screenshot.
+- **The renderer uses the same idea as the router.** Open ground is a coarse checker for scale
+  reference, and everything that is not plain grass at ground level is merged into rectangles of
+  identical ground and drawn whole. It replaced a per-cell pass windowed to forty metres of the
+  camera, which put a visible seam across the map — a ridge stepped finely near the crowd and
+  blocky beyond it — and which no choice of radius fixes, since moving the radius only moves the
+  seam. Frame time halved as a side effect.
 - **Live tuning overlay** (backtick to toggle). **Eleven dials, down from forty-five.** What is on
   it is what is still a question: the body (top speed, acceleration, deceleration, turn rate), the
   clock, the two route-cost terms that are game design rather than solver tuning (congestion
