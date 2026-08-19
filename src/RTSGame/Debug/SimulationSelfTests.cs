@@ -115,6 +115,7 @@ internal static class SimulationSelfTests
         Check("a job's reach is written in bodies", JobReachIsWrittenInBodies());
         Check("an unreachable job fails politely", AnUnreachableJobFailsPolitely());
         Check("a workplace holds more hands than fit on it", AWorkplaceHoldsMoreHandsThanFitOnIt());
+        Check("a fast body closes on a slow one", AFastBodyClosesOnASlowOne());
         Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
@@ -2814,6 +2815,117 @@ internal static class SimulationSelfTests
             $"    shared post: {hands.Count - idle}/{hands.Count} working, {stranded} unable to " +
             $"reach, furthest {furthest:F2}m against a crowded reach of {reach:F2}m");
         return passed;
+    }
+
+    /// <summary>
+    /// A fast body closes on a fleeing slow one at the difference of their speeds — and, measured
+    /// here so it is on the record, cannot then touch it.
+    /// </summary>
+    /// <remarks>
+    /// §7's raid is exactly this and nothing had tested it: chase and flee were only ever pointed at
+    /// a body that could not move. The design rests on interception being <em>emergent</em> —
+    /// "loaded raiders are slow, so interception is emergent rather than scripted" — and the
+    /// raider's window is derived from a response time against an approach. Both are claims about
+    /// closing at the difference of two speeds, which is arithmetic and can be settled before health
+    /// or damage exist.
+    /// <para>
+    /// The negative case is what makes it worth asserting: a villager chasing light cavalry must
+    /// <em>lose</em> ground, or interception is being granted by the chase behaviour rather than
+    /// earned by the legs.
+    /// </para>
+    /// <para>
+    /// What this also found, and deliberately does not assert, because it is Session 8's problem
+    /// rather than a locomotion fault: <b>closing is not the same as catching, and the difference is
+    /// enormous.</b> The rate is exact over open field, but the last metre is not delivered by it. An
+    /// earlier form of this measurement waited for contact instead of measuring a rate, and light
+    /// cavalry starting 14 m behind a villager — closing at 1.71 m/s, so eight seconds of
+    /// arithmetic — first came within 1.34 m after <b>100 seconds</b>. It ends in a circling
+    /// stalemate at about contact distance: pure pursuit aims at where the quarry is, the quarry
+    /// turns, the pursuer overshoots, and both bodies are correctly avoiding each other the whole
+    /// time. Closest approach over two minutes is 0.8 m against 0.74 m of combined radii, so the
+    /// geometry is not the obstacle — the pursuit curve is.
+    /// </para>
+    /// <para>
+    /// §7 says combat resolves by physical contact and never by abstract resolution, so Session 8
+    /// cannot assume a chase delivers contact. It needs an attack activity that commits to it —
+    /// lead the quarry rather than aim at it, and let a body and its declared target ignore each
+    /// other in the velocity solve, exactly as a mover and a settled ally already do. That exclusion
+    /// has to be symmetric: the one-directional version drove idle units metres down a corridor when
+    /// it was tried for the crowd case.
+    /// </para>
+    /// </remarks>
+    private static bool AFastBodyClosesOnASlowOne()
+    {
+        var report = new List<string>();
+        var passed = true;
+        foreach (var (chaser, quarry) in new[]
+                 {
+                     (UnitType.LightCavalry, UnitType.Villager),
+                     (UnitType.LightCavalry, UnitType.Wagon),
+                     (UnitType.Villager, UnitType.LightCavalry),
+                 })
+        {
+            var closing = chaser.MaximumSpeed - quarry.MaximumSpeed;
+            var pursuit = MeasurePursuit(chaser, quarry);
+            var measured = (pursuit.Early - pursuit.Late) / PursuitWindowSeconds;
+
+            // Half the arithmetic rate is the bar, not the rate itself. Pure pursuit against a body
+            // that turns loses ground to cornering, and a fleeing body does not run in a straight
+            // line. What must hold is the sign and the order of magnitude: a faster body gains, a
+            // slower one loses, and it happens at something recognisably like the speed difference.
+            var agrees = closing > 0f
+                ? measured > closing * 0.5f
+                : measured < closing * 0.5f;
+            passed &= agrees;
+            report.Add(
+                $"{chaser.Name} after {quarry.Name}: {closing:+0.00;-0.00} m/s of legs, " +
+                $"{measured:+0.00;-0.00} measured, closest {pursuit.Closest:F1} m");
+        }
+
+        Console.WriteLine($"    {string.Join(" | ", report)}");
+        return passed;
+    }
+
+    /// <summary>Seconds between the two separation samples a closing rate is measured over.</summary>
+    private const float PursuitWindowSeconds = 15f;
+
+    private readonly record struct Pursuit(float Early, float Late, float Closest);
+
+    /// <summary>
+    /// Separations early and late in an open-field pursuit, and the closest the two ever came.
+    /// </summary>
+    /// <remarks>
+    /// On a 200 m world rather than the tuned 30 m square, and started 40 m apart, both for the same
+    /// reason: inside thirty metres the quarry is against a boundary within seconds and every number
+    /// becomes about the corner rather than about the legs. Cornering is real and belongs in the
+    /// game; it does not belong in a measurement of closing rate. Nothing here asserts a tuned
+    /// threshold, so the larger world costs nothing.
+    /// </remarks>
+    private static Pursuit MeasurePursuit(UnitType chaser, UnitType quarry)
+    {
+        const float headStart = 40f;
+        var world = new SimulationWorld(200f);
+        var hunter = world.SpawnAgent(new Vector2(-headStart * 0.5f, 0f), chaser);
+        var prey = world.SpawnAgent(new Vector2(headStart * 0.5f, 0f), quarry);
+        world.QueueChase(new[] { hunter }, prey);
+        world.QueueFlee(new[] { prey }, hunter);
+
+        var early = 0f;
+        var late = 0f;
+        var closest = float.PositiveInfinity;
+        const int settleTicks = 30 * 5;
+        var windowTicks = settleTicks + (int)(30 * PursuitWindowSeconds);
+        for (var tick = 1; tick <= 30 * 120; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            var separation = Vector2.Distance(
+                world.Agents.Get(hunter).Position, world.Agents.Get(prey).Position);
+            closest = MathF.Min(closest, separation);
+            if (tick == settleTicks) early = separation;
+            if (tick == windowTicks) late = separation;
+        }
+
+        return new Pursuit(early, late, closest);
     }
 
     private static void Tick(SimulationWorld world, int count)

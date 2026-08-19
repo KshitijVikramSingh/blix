@@ -407,6 +407,23 @@ internal sealed class SimulationWorld
         return pathService.IsContinuousStepClear(agent.Position, position, agent.NavigationRadius);
     }
 
+    /// <summary>
+    /// Seconds a body of this size takes to get from one point to another, through terrain, roads
+    /// and whatever is currently jammed.
+    /// </summary>
+    /// <remarks>
+    /// The query a catchment is made of and the one hauling will be priced in. <b>Route seconds are
+    /// at the router's reference pace, not at the asking body's</b> — one field serves every unit
+    /// precisely because a body's own speed scales every leg equally. So a budget expressed at some
+    /// other pace has to be converted before it is compared against this, and getting that backwards
+    /// sizes a catchment by the ratio of the two speeds: 63% too large for a hauler.
+    /// </remarks>
+    internal bool TryTravelSeconds(Vector2 from, Vector2 to, float navigationRadius, out float seconds) =>
+        pathService.TryOptimalTravelTime(to, from, navigationRadius, out seconds);
+
+    /// <summary>The pace route seconds are denominated at, for converting a budget into them.</summary>
+    internal static float RouteReferenceSpeed => AgentDefaults.WorldPace;
+
     public ReadOnlySpan<Vector2> GetRemainingPath(AgentId id)
     {
         if (!Agents.Contains(id)) return ReadOnlySpan<Vector2>.Empty;

@@ -7,37 +7,43 @@ bottom third of it.**
 
 - **The code** is `src/RTSGame`: one fixed 30 Hz tick, ORCA velocity control that sees walls,
   flow-field group movement, congestion routing priced in seconds, an adaptive rectangle partition
-  for routes, and — since Session 4 — six unit types across two body classes. `--selftest`
-  **53/53** on branch `rts-locomotion`. Its tick order, its invariants and its **five measured
+  for routes, six unit types across two body classes, and a jobs layer. `--selftest`
+  **65/65** on branch `rts-locomotion`. Its tick order, its invariants and its **five measured
   refusals** live in **`plan-rts.md`** — read that before touching movement, because most of what
   looks tunable there is load-bearing in two ways at once.
 - **This document** is the game that goes on top, settled across long design sessions in August
   2026. §1–§11 are decided, not speculative — the numbers are derived and the derivations are
   recorded beside them, because they move as a set. **§12 is what is genuinely still open**, and it
   is shorter than it was.
-- **Sessions 1 through 4 are done** (2026-08-18/19); their records are in §13 and the measured state
+- **Sessions 1 through 5 are done** (2026-08-18/19); their records are in §13 and the measured state
   is §14. In order: the 1200 m map went from a 549 ms tick and a 4.1 s move order to **5.8 ms at
   2,000 agents**; the body came down from a 4.5 m/s run to a **1.79 m/s walk** with every threshold
   re-based; the map came down to **600 m**; the routing layer was rebuilt twice more into rectangles
-  and tiles; and the roster landed — villager, soldier, hauler cart, light cavalry, heavy cavalry,
-  wagon.
+  and tiles; the roster landed — villager, soldier, hauler cart, light cavalry, heavy cavalry,
+  wagon; and the jobs layer landed with assignment, activity and interrupt on the body.
 
-### Start at Session 5, the jobs layer
+### Start at Session 6, and read §15 first
 
-Its blocking dependency — "do not start the jobs layer before the router" — is satisfied twice
-over, and the two numbers Sessions 5 and 6 rest on have both been re-derived against the map they
-will actually run on rather than left to be discovered mid-session:
+**§15 is an audit of what Sessions 6 to 9 actually owe**, made on 2026-08-19 by checking the code
+rather than re-reading this document. It found four things worth knowing before any of them starts,
+including one design claim that measurement contradicts and one units trap that would switch the
+catchment mechanic off for the second time. It also says where the **first playable slice** is, and
+argues for one change to the order.
+
+The two numbers Sessions 5 and 6 rest on were re-derived against the map they actually run on:
 
 - **The catchment is 60 s at hauler pace, 66 m** (§6). The figure it replaced covered a player's
-  whole territory, so the second-granary mechanic never fired at all.
+  whole territory, so the second-granary mechanic never fired at all. §15 has it measured on real
+  ground: 62.6 m effective on open terrain, and 10 to 40 catchments per territory near features
+  rather than the derived 6.58.
 - **The hauler exists and is 1.10 m/s at 0.55 m** (§3), which is what made that derivation possible.
 
-**What Session 5 must not assume.** Hauling is priced in seconds through the congestion field, and
+**What Session 6 must not assume.** Hauling is priced in seconds through the congestion field, and
 that field now charges a body by its own **width and speed** as well as by the jam — see
 `plan-rts.md` §7. Both are on dials at 1, both are unmeasured at scale, and **Session 6 is the run
 that settles them**: many haulers of differing sizes sharing routes continuously is the workload
 those terms exist for and nothing before it will decide the numbers. Do not tune them on a scenario;
-build the economy and read them off it.
+build the economy and read them off it. `--jobs` is already most of that run.
 
 Four things that will bite you if you skip them:
 
@@ -48,12 +54,15 @@ Four things that will bite you if you skip them:
 2. **Any new term in the route cost is honest seconds, with a fade matched to how fast the real
    condition actually clears.** This project has paid for that lesson twice — `plan-rts.md` §1 on
    barriers-as-cost, and invariant 15 on the decay tail. Threat will be the third opportunity.
-3. **The determinism self-test covers movement only.** Extend it as each system lands, or it keeps
-   passing while the game layer quietly goes non-deterministic through an unordered iteration nobody
-   noticed. Lockstep LAN and career-to-career persistence both depend on it. Session 1's rule of
-   thumb for what to add: assert the invariant a *behaviour* metric cannot see.
-4. **Do not start the jobs layer before the router.** It is the biggest new subsystem and the whole
-   design rests on it; calibrating it against a router about to change shape means tuning it twice.
+3. **The determinism self-test now reads whatever the state declares**, so new fields on a body are
+   covered the moment they compile. What is still owed per session is a *scenario* that exercises
+   them, and a ledger entry for anything hung off `SimulationWorld` — which the census will demand by
+   name, with instructions. Do not switch that census off to get a build green.
+4. **Serialization has been held as a discipline for five sessions and never once run.** Nothing in
+   the repo serializes anything. §5 makes fresh-start succession core-loop rather than a save
+   feature, and §15 argues this belongs at the *head* of Session 6: the determinism ledger already
+   enumerates exactly what is carried, which is the save manifest, and the fingerprint makes the
+   round trip decisive in one assertion. Every session that passes makes it more expensive.
 
 **This document records decisions together with their derivations.** Nearly every number below was
 derived from other numbers rather than chosen, and they move as a set — changing unit speed changes
@@ -1443,8 +1452,11 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 
 | | |
 |---|---|
-| suite | `--selftest` **64/64** in 6.4 s (was 53/53) |
+| suite | `--selftest` **65/65** in 6.5 s (was 53/53 through Session 4) |
 | determinism coverage | **102 values a body**, 184 a tick, 25,580 at a checkpoint — every one probed |
+| catchment, measured | **12,320 m² on open ground**, effective radius 62.6 m against a nominal 66 — §15 |
+| soak, early career | **1.44 ms a tick at 300 agents, 23x real time**; a year is 4 min, ten years 39 — §15 |
+| interception | closing at **exactly the difference of speeds**; contact is a separate problem — §15 |
 | body | **1.79 m/s**, accel 2.0, decel 3.0, turn 3.03 rad/s, compression **1.5x** |
 | roster | **6 types, 2 body classes** — §3; radius 0.37 / 0.55 / 0.90 |
 | world | **600 m** for the game; 30 m calibration world untouched and asserted |
@@ -1572,3 +1584,176 @@ whether the congestion terms are right.
 terrain generation is real: if the clearance rungs are still 0.250 / 0.750 / 1.250 then everything
 in §3 holds unchanged, and if they are not, something has put an obstacle off the half-metre lattice
 and §3's two classes want re-deriving before anything else is built on them.
+
+---
+
+## 15. What Sessions 6 to 9 owe — audited 2026-08-19
+
+Made by checking the code and measuring, not by re-reading this document. Two new instruments came
+out of it: `--catchment`, which measures what a catchment actually covers, and a self-test that
+measures whether a fast body runs down a slow one.
+
+### Verified, so the next session does not have to
+
+**1. The catchment query already exists, and it is congestion-aware.** `PathService`'s cost-to-goal
+field is denominated in seconds and already charges congestion; `TryOptimalTravelTime` reads it, and
+`SimulationWorld.TryTravelSeconds` now exposes it point to point. So §6's claim that *"the economy
+independently wants the structure the router needs"* is true in code and not only in prose: a
+catchment is one field whose goal is the granary, and every consumer inside it is a comparison
+against a number. **The bound is an optimisation, not a requirement** — the field is filled lazily,
+so an unbounded field costs what is asked of it.
+
+**2. The units trap, and it would switch the mechanic off for the second time.** Route seconds are at
+the router's **reference pace of 1.79 m/s**, not at the asking body's — one field can serve every
+unit precisely because a body's own speed scales every leg equally. So *60 s at hauler pace* is
+**36.9 route-seconds**, not 60. Comparing the budget directly against field cost gives a 107 m
+catchment instead of 66, which is 2.4 catchments per territory: back inside the range where the
+second granary is never forced. The re-derivation in §6 fixed that mechanic once by correcting an
+opinion; this would break it again by a units error. `CatchmentScenarios` does the conversion in one
+place with the reason written next to it.
+
+**3. A catchment is not round, and the number the mechanic rests on is an area.** §6 derives 66 m and
+then converts it to 6.58 catchments per territory by treating it as a disc. Measured on the 600 m game
+map, at a hauler's radius, `--catchment`:
+
+| placement | area | effective radius | far | near | per territory |
+|---|---|---|---|---|---|
+| nominal disc *(what §6 assumed)* | 13,685 m² | 66.0 m | — | — | **6.58** |
+| open ground | 12,320 m² | 62.6 m | 66 m | 60 m | **7.31** |
+| on the road | 5,101 m² | 40.3 m | 72 m | 8 m | 17.64 |
+| inside the pass | 8,979 m² | 53.5 m | 72 m | 17 m | 10.02 |
+| by the lake shore | 3,327 m² | 32.5 m | 50 m | 3 m | 27.05 |
+| beside the ridge | 2,261 m² | 26.8 m | 51 m | 6 m | 39.81 |
+
+Open ground is **10% short of the disc** — close enough that §6's derivation is sound, and the
+direction is safe: the mechanic is slightly stronger than designed, not weaker. Near terrain it is
+far stronger, 10 to 40 catchments per territory. **The consequence for Session 6 is that anything
+tuned against 6.58 is tuned against the best case.** Storage capacities, hauling costs and the
+founding cost anchor (§5: three years of a mature settlement's surplus) should be tuned against a
+measured catchment on the ground the settlement is actually on, and the trace should report it.
+
+**4. The road-ribbon claim is quantitatively false at the current multiplier.** §6 says *"roads
+literally grow usable territory, and settlements form ribbons along them — nobody has to author
+that."* Measured: a catchment reaches **72 m along the road against 66 m on open ground — 1.09x**,
+against a road speed multiplier of 1.10x. That is exact, and it is the ceiling: a road can grow a
+catchment along it by precisely its speed multiplier and no more, because the catchment *is* a time
+budget. **9% is not a ribbon.** The wide stretch factors in the table above (up to 16.7x) are terrain
+*refusing* ground, not a road *granting* it — "stops at a ridge" holds emphatically, "stretches along
+a road" does not.
+
+This is a decision, not a bug, and it belongs to Session 6 because settlement layout is what §6 says
+the mechanic is for. Either the road multiplier moves — and `PathCost` follows it by derivation, so
+routing prefers roads more strongly at the same time, which is probably wanted — or the claim comes
+out of §6. A useful anchor for the first option: reach along a road *is* the multiplier, so a
+noticeable ribbon wants something in the 1.4–1.5x region, which is a maintained road against rough
+ground rather than a highway.
+
+**5. The soak arithmetic holds, but the CI gate is a year and not a decade.** Measured at
+early-career scale: **300 agents on 600 m, 1.44 ms a tick, 23x real time** — §10 estimated 24x. A
+year is 5,400 sim seconds (§3), so:
+
+| run | wall clock | what it covers |
+|---|---|---|
+| **one year** | **~4 min** | §8's stress points 1–3: a quiet season, harvest, winter |
+| ten years | ~39 min | the early-career climb |
+| full career | ~6–8 h | saturation |
+
+§10 calls the ten-year run "a CI gate". Forty minutes is a nightly job. **The per-PR gate is one
+year**, it is four minutes, and it already covers three of the five stress points — which is most of
+what §8 says the number means.
+
+**6. Interception emerges exactly, and closing is not catching.** §7 derives the raider's window from
+a response time and asserts that *"loaded raiders are slow, so interception is emergent rather than
+scripted"*. Nothing had tested it: chase and flee were only ever pointed at a body that could not
+move. Measured over open field, closing rate against the difference of the two speeds:
+
+| pursuit | legs | measured | closest approach |
+|---|---|---|---|
+| light cavalry after a villager | +1.71 m/s | **+1.71** | 0.8 m |
+| light cavalry after a wagon | +2.40 m/s | +1.99 | 1.4 m |
+| a villager after light cavalry | −1.71 m/s | **−1.71** | 1.0 m |
+
+So the window derivations in §7 rest on numbers now. **But the last metre is not delivered by the
+rate.** An earlier form of the measurement waited for contact instead: light cavalry 14 m behind a
+villager, closing at 1.71 m/s — eight seconds of arithmetic — first came within 1.34 m after **100
+seconds**. It ends in a circling stalemate at about contact distance, because pure pursuit aims where
+the quarry *is*, the quarry turns, and both bodies are correctly avoiding each other throughout.
+Closest approach is 0.8 m against 0.74 m of combined radii, so the geometry is not the obstacle — the
+pursuit curve is. §7 says combat resolves by physical contact and never by abstract resolution, so
+**Session 8 cannot assume a chase delivers contact.** It needs an attack activity that commits: lead
+the quarry rather than aim at it, and let a body and its declared target ignore each other in the
+velocity solve, exactly as a mover and a settled ally already do — symmetrically, because the
+one-directional version of that exclusion drove idle units metres down a corridor when it was tried
+for the crowd case.
+
+### Owed at the head of Session 6
+
+1. **Serialization, which has been a discipline for five sessions and has never once run.** Nothing
+   in the repo serializes anything. §5 makes fresh-start succession core-loop rather than a save
+   feature, and rule 3 says the discipline is cheap continuously and expensive retrofitted — which is
+   an argument that has been made five times and acted on zero. Two things make now the cheapest it
+   will ever be: `DeterminismCheck`'s ledger already enumerates exactly what is carried, which *is*
+   the save manifest, and the fingerprint makes the round trip decisive in one assertion — save,
+   load, fingerprints equal; then tick both a hundred and compare again. Doing it after stock,
+   buildings, catchments and a strategic layer is precisely the retrofit the rule warns about.
+2. **A calendar, before consumption rather than with it.** §3 has the table — year 5,400 s, four
+   seasons, a day unit of 20 s — and §6's consumption is seasonal. Seasons are canonical and crop
+   windows derive from them; the prototype's three disagreeing windows are the warning, and they
+   drifted because nothing forced them to agree.
+3. **Nodes with stock.** Granary, farm, trade post, forward depot. This is the session's real new
+   state and it will trip the determinism census by name, which is the census working.
+4. **Autonomy time, in Session 6 rather than 7.** It is computable the moment stock and consumption
+   exist, it is the HUD's one verb, it is the score (§8), and it is the soak's monotonicity
+   assertion. Building it late means the economy lands with no way to read whether it is any good.
+5. **Conservation assertions written with the stock, not after it.** Produced = consumed + stored + in
+   transit, every tick. "No counter drifts" is one of §10's four soak assertions and it is cheap
+   while there is one commodity and expensive once there are four.
+6. **Debt 11 — stagger assignments.** Sixteen haulers given the same shuttle in one tick pulse
+   forever; the jobs trace shows a lane's throughput swinging between 0 and 32 legs a minute. Session
+   6 puts many more units on shared lanes.
+7. **Debt 7 — mixed body sizes on the shared lane in `--jobs`.** The trace is most of the run that
+   settles the congestion width and speed dials; what it lacks is haulers of differing sizes.
+
+### Owed before Session 7 and 8
+
+Session 7's strategic layer and soak harness need the economy above and little else — the jobs layer
+is the layer an idle player and an AI neighbour both run, and it exists. Two things: use the one-year
+gate from point 5, and settle §12's *"are trade partners AI-run settlements or abstract markets"*
+here rather than in Session 9, because it decides whether prices emerge from neighbours' actual
+stores, and the neighbours are what Session 7 builds.
+
+Session 8 owes the attack activity from point 6 above, and it inherits two seams that are declared and
+unproven: `ColliderRole.Damageable | Interactable` is assigned at spawn and read by nothing, and
+`AgentLocomotionState.Chase` and `Flee` are now measured against a *moving* body for the first time.
+The micro multiplier remains §12's highest-value measurement and nothing is owed before it except
+combat itself.
+
+### Where the first playable slice is
+
+The roadmap runs 6 → 7 → 8, which puts the *threat* third and means nothing is playable until Session
+8. That is one session later than it needs to be, and the reason is in §2: the thesis is that labour
+and attention are substitutes, and **that cannot be felt without something that punishes
+inattention.** An economy with no threat is a spreadsheet; combat with no economy is a skirmish
+sandbox. The two halves of the thesis are the two halves of the slice.
+
+**The MVP is Session 6 plus a thin slice of 8 — call it 6.5 — and it is one session and a bit from
+here, not three.** Concretely:
+
+- calendar, one commodity (grain), one farm, one granary, haulers on shuttle assignments, seasonal
+  consumption, autonomy time on the HUD;
+- a raiding party that walks in, takes stock, and walks out slower than it came;
+- nothing else. No trade, no strategic layer, no tech, no construction beyond placing the granary.
+
+That is playable in the only sense that matters for this design: **you can leave, and come back to
+find out whether leaving was affordable.** Everything in §8's stress-point ladder is legible against
+it from the first run.
+
+**Recommended order: 6 → 6.5 (the slice) → 7 → 8 → 9.** Session 7's harness then has a complete loop
+to soak rather than half of one, and Session 8's bot has a real economy to attack rather than a
+sandbox.
+
+**The argument against, kept because it is real.** §13 pairs the strategic layer and the soak harness
+deliberately — "they are the same artefact" — and pulling a combat slice forward means the soak lands
+a session later, so an economic regression could go a session unnoticed. The mitigation is cheap and
+is point 5 above: the one-year gate is four minutes and can land with Session 6, well before the
+harness proper.

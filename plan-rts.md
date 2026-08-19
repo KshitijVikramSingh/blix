@@ -12,7 +12,7 @@ Verify it: `dotnet run --project src/RTSGame/RTSGame.csproj -c Release -- --self
 Measure it: same with `--benchmark`, and `--doorwaytest` for two-way gap contention
 Measure it at size: same with `--scale` — see §5, and `plan-rts-game.md` §13 for what it found
 More than one kind of body: `--mixedtest`, `--congestiontest`, `--radiisweep` — see §5
-Watch a settlement work without you: `--jobs [--minutes n]` — see §5
+Watch a settlement work without you: `--jobs [--minutes n]`, `--catchment` — see §5
 Routing substrate: **§8** — answered, shipped, with both refusals kept
 
 **The one thing to take from this document if you take nothing else.** Every bug found while unit
@@ -381,6 +381,14 @@ which is what a correct memo looks like:
   instrument honest: one perturbs each of the 102 body values in turn and requires the fingerprint to
   notice, and one injects a divergence at a known tick and requires that tick to be named. A digest
   nobody has tried to fool is not evidence.
+- `--catchment [--extent m] [--budget s]` measures what a catchment actually covers, on five
+  placements of the game map: cells and area inside the budget, the effective radius of a disc of the
+  same area, the longest and shortest reach over 32 bearings, and catchments per territory. It exists
+  because `plan-rts-game.md` §6 derives a 66 m radius and then converts it to a per-territory ratio by
+  assuming the catchment is round, and that ratio is the whole mechanic. **Note the conversion it
+  does:** route seconds are at this file's reference pace and a budget quoted at a body's own pace has
+  to be scaled into them first — 60 s at hauler pace is 36.9 route-seconds, and skipping that sizes
+  the catchment at 107 m.
 - `--jobs [--extent m] [--minutes n]` runs a workforce on standing assignments and reports, every
   thirty seconds, legs completed per minute by lane, how many units are working against interrupted
   against unable to reach their work, and what the jobs phase costs. Two lanes at the two lengths the

@@ -44,6 +44,13 @@ public static class Program
             Environment.Exit(CongestionSpeedScenarios.Run());
         }
 
+        if (args.Contains("--catchment"))
+        {
+            var catchExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var budget = Value(args, "--budget") is { } seconds ? float.Parse(seconds) : 60f;
+            Environment.Exit(CatchmentScenarios.Run(catchExtent, budget));
+        }
+
         if (args.Contains("--jobs"))
         {
             var jobsExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
