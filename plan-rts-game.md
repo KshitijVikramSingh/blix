@@ -2749,3 +2749,80 @@ earlier than §22 recorded, which is better pacing: you finish year one and must
 - **Frame headroom.** The sky is drawn first, at 4x, over every pixel, before the world draws on top of
   it. Drawing it last with depth testing on would shade only the pixels the world did not cover, which on
   a top-down camera is a small fraction. First thing to try if the budget tightens.
+
+---
+
+## 24. Hauling is a job, not a kind of unit
+
+A design correction, and the identity got shorter again — which by now is the reliable sign.
+
+**There is no hauler unit.** A villager given a route spends a sack of the settlement's timber on a
+handcart and wears the `HaulerCart` frame — wider, slower, holding more — until it is given something
+else to do. `UnitType.HaulerCart` survives, but as the answer to *"how big and how fast is somebody
+pulling a cart"* rather than as a thing you have seven of.
+
+The design argument is §2's. A permanent cart unit is a decision made once and paid for forever; a role is
+a decision whose cost you can see and change. And a settlement that needs no hauling should have **no
+carts in it**, not seven idle ones — which is exactly what the gate now says. "Zero hauling journeys in a
+year" became the stronger claim **"zero carts built"**: nobody even had to make one.
+
+### A route is a standing commitment; a haul is one round trip
+
+Two assignment kinds, not a flag, because they differ in the thing that matters:
+
+| | who authors it | how long it lasts | why |
+|---|---|---|---|
+| `Haul` | the board | **one round trip** | so it can be re-priced. A body that kept a route for life would be priced once, at hiring, and the promise that a jammed lane makes a different body cheaper would be about a decision nobody revisits. |
+| `Carry` | the player | until the source runs dry | nobody re-auctions it because nobody is meant to. "These three are on the timber run." |
+
+So the board keeps the two cases nobody would ever micromanage — **stranded stock** (Stage B's trigger) and
+**goods lying in the road** — and the player owns the rest. A carter between routes goes back on the board,
+which is what a settlement's general carrier does between errands. A route running dry is `RoutesFinished`,
+not `HaulsAbandoned`: it is a job ending on its own terms, and counting it as a failure would make the
+abandoned column meaningless.
+
+### The cost is the interesting part
+
+A cart costs one villager's sack of timber — 30 — which is the smallest amount of anything anybody carries
+in this game and therefore the natural unit for "token". A settlement burns two thousand a year, so a cart
+is under two per cent of its fuel: cheap enough that the first one is never the decision, dear enough that
+thirty of them is.
+
+The wood is **consumed**, not moved: it has stopped being timber, so it belongs on the same side of the
+identity as a loaf, and building a hauling network shows up in the ledger as something the settlement spent
+wood on. And it is **refused** when the timber is not there — which is the dependency Stage B's receding
+wood line exists to create: *you cannot cart wood in before you have wood.*
+
+### What the three layers gave for free
+
+`Y` takes a carter off work and the cart goes with the job. An **order does not** — an interrupt never
+touches the assignment, so a carter sent somewhere by hand walks there and comes back to its route still
+pulling its cart. That fell out of the jobs model rather than being written, which is the third time that
+layer has paid for itself.
+
+### Two things that had been quietly wrong
+
+**Capacity is not what makes somebody a hauler.** The board recruited any body with `CarryCapacity > 0`,
+which was true of exactly the carts when it was written — and is now true of every villager, because a
+reaper walks its own crop in. Left alone, the board would have put its stranded-stock journeys on
+farmhands.
+
+**A collider had to be able to change size.** A body's dimensions were fixed at spawn, so all four of a
+carter's proxies needed reshaping in place. Removing and re-adding them would work and would be wrong: ids
+are handed out by position and never reused, so a body that took a cart and gave it back would leave eight
+dead proxies behind and shift every id issued afterwards — which the determinism fingerprint reads and a
+save has to reproduce.
+
+| | |
+|---|---|
+| suite | `--selftest` **76/76** |
+| one year, compact | 8,122 grain of 8,400 nominal, drift 0, short 0, **0 carts built, 0 hauls** |
+| the role, measured | cart costs 30 wood and the ledger says so; a second refused for want of it; 0.37 → 0.55 m body and colliders; 17 legs on one standing route; kept through an order; scrapped when taken off work; drift 0 |
+| benchmarks | pen 1.33x, gate 1.78x, 33 dead stops — unmoved |
+
+### What Stage C inherits
+
+The scenario's seven ex-carts are now **seven spare villagers**, which is the right thing for them to be:
+spare labour is what a growing settlement has and what a receding wood line produces. Stage C is what gives
+it somewhere to go — and new villagers will arrive **idle**, not auto-farming, because posting them is the
+decision the game is made of.

@@ -660,6 +660,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Console.WriteLine("  U: post selected at pointer   O: shuttle (press twice for both ends)   Y: off work");
         Console.WriteLine("  D: granary at pointer   A: farm   Ctrl+A: house   W: forward depot (lumber camp)");
         Console.WriteLine("  U: post a villager — on a field it farms it, on a tree it cuts it");
+        Console.WriteLine("  Ctrl+O: haul route — press on the source node, then on the destination node");
+        Console.WriteLine("     hauling is a job, not a unit: it costs wood, and Y takes the cart away");
         Console.WriteLine("  houses are the only things that eat: one outside every catchment goes hungry");
         Console.WriteLine("  wood is finite and standing: when no store can reach a tree, build a depot at the line");
         Console.WriteLine("  --village starts a working settlement mid-harvest; --compression <x> sets the clock");
@@ -680,6 +682,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// nothing in the simulation knows about it.
     /// </summary>
     private Vector2? shuttleAnchor;
+
+    /// <summary>First end of a hauling route being laid out. Interface state only.</summary>
+    private NodeId? routeSource;
 
     /// <summary>Builds a node at the pointer, and turns a hauler loose if the settlement has none.</summary>
     /// <remarks>
@@ -756,6 +761,79 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"  {selection.Selected.Count} unit(s) shuttling ({anchor.X:F1}, {anchor.Y:F1}) <-> " +
             $"({pointerWorld.X:F1}, {pointerWorld.Y:F1})");
     }
+
+    /// <summary>
+    /// Puts the selection on a hauling route: two presses, source node then sink node.
+    /// </summary>
+    /// <remarks>
+    /// <b>Hauling is a job you give somebody, not a unit you build.</b> Which is what this key is for: pick
+    /// villagers, point at where the goods are, point at where they should go. Each of them spends a sack
+    /// of the settlement's timber on a handcart and runs that route until the source is empty — after
+    /// which they still have the cart, and the board finds them stranded stock or a heap to fetch.
+    /// <para>
+    /// Refused, out loud, if there is no timber to build a cart from. That is not an inconvenience, it is
+    /// the dependency Stage B's receding wood line is supposed to create: you cannot cart wood in until
+    /// you have some wood.
+    /// </para>
+    /// <para>
+    /// Both ends have to be nodes rather than points on the ground, because a route is between two places
+    /// that hold goods and a patch of grass is not one. Naming them by id also means a route survives its
+    /// granary being rebuilt somewhere else, and dies with it being destroyed, rather than pointing at a
+    /// spot in an empty field forever.
+    /// </para>
+    /// </remarks>
+    private void AssignRoute()
+    {
+        if (!pointerOnTerrain || selection.Selected.Count == 0) return;
+        var node = EconomySystem.NodeAt(simulation.Nodes, pointerWorld, RoutePickRadius);
+        if (!simulation.Nodes.Contains(node))
+        {
+            Console.WriteLine("  route: point at a store, a yard or a heap — a route runs between places");
+            return;
+        }
+
+        if (routeSource is not { } source)
+        {
+            routeSource = node;
+            Console.WriteLine(
+                $"  route: collecting from {simulation.Nodes.Get(node).Kind} at " +
+                $"({pointerWorld.X:F1}, {pointerWorld.Y:F1}) — press Ctrl+O again on the destination");
+            return;
+        }
+
+        routeSource = null;
+        if (source == node)
+        {
+            Console.WriteLine("  route: a route needs two different places");
+            return;
+        }
+
+        // Whatever the source actually holds, preferring wood, because that is what a route is usually
+        // for: a lumber camp fills with timber nobody lives near and somebody has to bring it in.
+        ref readonly var from = ref simulation.Nodes.Get(source);
+        var cargo = from.Stock.Wood >= from.Stock.Grain ? Resource.Wood : Resource.Grain;
+        var put = 0;
+        var refused = 0;
+        foreach (var id in selection.Snapshot())
+        {
+            if (simulation.TryAssignRoute(id, source, node, cargo)) put++;
+            else refused++;
+        }
+
+        Console.WriteLine(
+            $"  route: {put} carting {cargo} from {from.Kind} to {simulation.Nodes.Get(node).Kind}" +
+            (refused > 0
+                ? $"; {refused} refused — a cart costs {SimulationWorld.CartTimber} wood and no store " +
+                  "within reach has it"
+                : $" ({SimulationWorld.CartTimber} wood a cart)"));
+    }
+
+    /// <summary>How near the pointer has to be to a node to be pointing at it.</summary>
+    /// <remarks>
+    /// Generous — a heap is 40 cm across and a granary is 7.5 m, and a player pointing near either means
+    /// that one. The node search takes the nearest within this, so overlap resolves the obvious way.
+    /// </remarks>
+    private const float RoutePickRadius = 6f;
 
     private AgentId[] AllAgentIds()
     {
@@ -2002,6 +2080,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 // findable at a glance, which is the thing the greybox did for free by being one colour.
                 if (selected) person.Add(placement, SelectedUnitColor);
                 else person.Add(placement);
+
+                // The cart, drawn behind them, because a carter has to be findable in a crowd. A wider
+                // body is the honest difference — 0.37 m to 0.55 — and at this camera distance it is
+                // thirteen per cent of height and nothing you would notice. The pack has no cart, so a
+                // crate on the ground behind the body stands in: what matters is that the silhouette says
+                // "this one is hauling" without reading the panel.
+                if (agent.HasCart && art!.GrainHeap is { } cart)
+                {
+                    var behind = position - agent.Facing * (agent.Radius + 0.42f);
+                    cart.Add(SettlementArt.Placement(behind, height, agent.Radius * 1.7f, yaw));
+                }
             }
             // A load is physically on the body, so it is drawn on the body: a cart you can see is loaded
             // is a cart you can see is worth intercepting, which is the whole of §7's return trip.
@@ -2242,11 +2331,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 AssignPost();
                 break;
             case Key.O:
-                AssignShuttle();
+                // A route is a shuttle with cargo, so it is the shuttle key with a modifier — the same
+                // shape as Ctrl+A placing a house instead of a farm. Every letter on the board is taken.
+                if (additiveSelection) AssignRoute();
+                else AssignShuttle();
                 break;
             case Key.Y:
                 simulation.QueueAssign(selection.Snapshot(), Assignment.None);
                 shuttleAnchor = null;
+                routeSource = null;
                 Console.WriteLine($"  {selection.Selected.Count} unit(s) taken off work");
                 break;
             case Key.D:

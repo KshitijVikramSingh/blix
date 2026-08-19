@@ -96,7 +96,17 @@ internal sealed class ColliderProxy
     public required FactionId Faction { get; init; }
     public required ColliderLayer Layer { get; init; }
     public required ColliderRole Roles { get; init; }
-    public required ColliderShape Shape { get; init; }
+    /// <summary>
+    /// How big this proxy is.
+    /// </summary>
+    /// <remarks>
+    /// Settable, not init-only, since a body's size is no longer fixed at spawn: a villager granted a cart
+    /// becomes wider and all four of its proxies grow with it. Go through
+    /// <c>ColliderWorld.Reshape</c> rather than writing it directly — the spatial hashes index a proxy by
+    /// its bounds, and a shape changed behind their back leaves them describing a body that is no longer
+    /// that size.
+    /// </remarks>
+    public required ColliderShape Shape { get; set; }
     public Vector2 Center { get; set; }
     public bool Enabled { get; set; } = true;
 }

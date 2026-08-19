@@ -309,6 +309,118 @@ internal sealed class SimulationWorld
     }
 
     /// <summary>
+    /// Timber a handcart is built from, in whole units.
+    /// </summary>
+    /// <remarks>
+    /// One villager's sack, which is the smallest amount of anything anybody carries in this game and
+    /// therefore the natural unit for "token". A settlement burns two thousand a year, so a cart is well
+    /// under two per cent of its fuel — cheap enough that the first one is never the decision, and dear
+    /// enough that thirty of them is, which is the shape a cost like this should have.
+    /// </remarks>
+    public static int CartTimber => UnitType.Villager.CarryCapacity;
+
+    /// <summary>
+    /// Puts a body on a hauling route, building it a cart out of the settlement's timber.
+    /// </summary>
+    /// <remarks>
+    /// <b>Hauling is a job, not a kind of unit.</b> There is nothing to spawn: a villager is given a route,
+    /// the settlement spends a sack of timber on a handcart, and the body becomes wider, slower and
+    /// higher-capacity for as long as it keeps the job. Ask it to do something else and the cart goes.
+    /// <para>
+    /// It is refused rather than made free if the timber is not there, and that is the interesting part —
+    /// <em>you cannot build a hauling network before you have a wood supply</em>, which is exactly the
+    /// dependency Stage B's receding wood line creates. The wood is <see cref="ResourceTotals"/>-consumed
+    /// rather than moved, because the cart is not a place goods are stored: it has been turned into a cart,
+    /// and conservation should say so.
+    /// </para>
+    /// <para>
+    /// The route is a <see cref="AssignmentKind.Carry"/> and not a <see cref="AssignmentKind.Haul"/>: the
+    /// board's hauls are one round trip each so that they can be re-priced, and this is a standing
+    /// commitment the player made and nobody should re-auction.
+    /// </para>
+    /// </remarks>
+    public bool TryAssignRoute(AgentId body, NodeId source, NodeId sink, Resource cargo)
+    {
+        if (!Agents.Contains(body) || !Nodes.Contains(source) || !Nodes.Contains(sink)) return false;
+        if (source == sink) return false;
+        ref var agent = ref Agents.Get(body);
+        // Already carting: the cart is bought and paid for, so a new route is free. Changing where
+        // somebody drives is not a new cart.
+        if (!agent.HasCart && !TryBuildCart(ref agent)) return false;
+
+        ref readonly var from = ref Nodes.Get(source);
+        ref readonly var to = ref Nodes.Get(sink);
+        JobSystem.Assign(ref agent, Assignment.Carry(
+            source, from.Position, sink, to.Position, cargo, EconomySystem.HandoverSeconds,
+            from.FootprintRadius, to.FootprintRadius));
+        return true;
+    }
+
+    /// <summary>
+    /// Builds a body a cart without giving it a route, or refuses for want of timber.
+    /// </summary>
+    /// <remarks>
+    /// The role without the route: somebody who is a carter and has nothing particular to cart. The
+    /// hauling board then finds them the jobs nobody would micromanage — stranded stock, and goods lying
+    /// in the road — which is what a settlement's general carrier does between errands.
+    /// </remarks>
+    public bool TryBuildCart(AgentId body)
+    {
+        if (!Agents.Contains(body)) return false;
+        ref var agent = ref Agents.Get(body);
+        return !agent.HasCart && TryBuildCart(ref agent);
+    }
+
+    /// <summary>
+    /// Spends the timber and swaps the body onto the cart's frame, or refuses.
+    /// </summary>
+    /// <remarks>
+    /// The nearest store with the wood in it pays. Straight-line nearest rather than in route seconds,
+    /// like every other short-range question a body asks: this is asked once, when the job is given, and a
+    /// routing query to choose between two granaries the player can see would cost more than it settles.
+    /// </remarks>
+    private bool TryBuildCart(ref AgentState agent)
+    {
+        var yard = EconomySystem.NearestStoreWith(Nodes, Resource.Wood, CartTimber, agent.Faction, agent.Position);
+        if (!Nodes.Contains(yard)) return false;
+        Nodes.Get(yard).Stock.Add(Resource.Wood, -CartTimber);
+        economy.RecordConsumed(Resource.Wood, CartTimber);
+        WearBody(ref agent, UnitType.HaulerCart);
+        agent.HasCart = true;
+        return true;
+    }
+
+    /// <summary>Takes the cart away, which is what happens when a carter is given any other job.</summary>
+    private void ScrapCart(ref AgentState agent)
+    {
+        if (!agent.HasCart) return;
+        agent.HasCart = false;
+        WearBody(ref agent, UnitType.Villager);
+    }
+
+    /// <summary>
+    /// Swaps a live body onto a different frame: its size, its pace and what it can carry.
+    /// </summary>
+    /// <remarks>
+    /// Not everything a <c>UnitType</c> describes — the appetite stays, because a carter is the same
+    /// person and eats the same, and the navigation radius is one figure for the whole roster by design so
+    /// there is nothing to change. What does change is the three things a cart actually is: how much room
+    /// it takes up, how fast it goes and how much it holds. All four collider proxies are reshaped with
+    /// it, or the body would be drawn and priced at one size and collide at another.
+    /// </remarks>
+    private void WearBody(ref AgentState agent, UnitType frame)
+    {
+        agent.Radius = frame.Radius;
+        agent.MaximumSpeed = frame.MaximumSpeed;
+        agent.TurningRadius = frame.TurningRadius;
+        agent.CarryCapacity = frame.CarryCapacity;
+        Colliders.Reshape(agent.Colliders.Movement, ColliderShape.Circle(frame.Radius));
+        Colliders.Reshape(agent.Colliders.Avoidance, ColliderShape.Circle(frame.Radius + 0.30f));
+        Colliders.Reshape(agent.Colliders.Placement, ColliderShape.Circle(frame.Radius + 0.10f));
+        Colliders.Reshape(agent.Colliders.Interaction, ColliderShape.Circle(frame.Radius + 0.06f));
+    }
+
+    /// <summary>
     /// Turns a bare post that landed on a field or a tree into the job that belongs there.
     /// </summary>
     /// <remarks>
@@ -1061,7 +1173,13 @@ internal sealed class SimulationWorld
         {
             if (!Agents.Contains(id)) continue;
             ref var agent = ref Agents.Get(id);
-            JobSystem.Assign(ref agent, PostedOnAWorkSite(in agent, resolved));
+            var job = PostedOnAWorkSite(in agent, resolved);
+            // Asked to do something that is not carrying: the cart goes. Which is the whole of "they keep
+            // hauling until they are asked to do something else" — an interrupt is not being asked to do
+            // something else, because an interrupt never touches the assignment, so a carter given a
+            // direct order walks where it is told and comes back to its route with its cart.
+            if (!job.MovesCargo) ScrapCart(ref agent);
+            JobSystem.Assign(ref agent, job);
             // A unit taken off work stops where it stands rather than finishing the walk it
             // was on. Being given work, on the other hand, does not need a halt: the jobs
             // layer will send it where it is now needed on this same tick.
@@ -1178,7 +1296,10 @@ internal sealed class SimulationWorld
         }
 
         ref var jobs = ref agent.Jobs;
-        if (jobs.Assignment.Kind != AssignmentKind.Haul) return;
+        // Both kinds of cargo run: the board's one-trip haul and the player's standing route. The
+        // transfer is identical — what differs is who decided on it and whether it repeats — so there is
+        // one place units change hands and therefore one place conservation could be broken.
+        if (!jobs.Assignment.MovesCargo) return;
         var nodeId = jobs.Assignment.NodeOfLeg(leg);
         if (!Nodes.Contains(nodeId)) return;
         ref var node = ref Nodes.Get(nodeId);
@@ -1208,15 +1329,12 @@ internal sealed class SimulationWorld
         var target = Nodes.Contains(elsewhere) ? elsewhere : nodeId;
         JobSystem.Retarget(
             ref agent,
-            Assignment.Haul(
-                jobs.Assignment.Source,
-                jobs.Assignment.Anchor,
-                target,
-                Nodes.Get(target).Position,
-                jobs.Carrying,
-                EconomySystem.HandoverSeconds,
-                jobs.Assignment.PlaceExtent,
-                Nodes.Get(target).FootprintRadius),
+            jobs.Assignment with
+            {
+                Sink = target,
+                FarAnchor = Nodes.Get(target).Position,
+                FarPlaceExtent = Nodes.Get(target).FootprintRadius,
+            },
             leg: 1);
     }
 

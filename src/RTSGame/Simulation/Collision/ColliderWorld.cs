@@ -84,6 +84,29 @@ internal sealed class ColliderWorld
         else staticHashDirty = true;
     }
 
+    /// <summary>
+    /// Changes a proxy's shape in place, keeping its id.
+    /// </summary>
+    /// <remarks>
+    /// Because a body's size is no longer fixed at spawn: a villager granted a cart becomes wider, and
+    /// every one of its four proxies has to grow with it. Removing and re-adding them would work and
+    /// would be wrong — ids are handed out by position and never reused, so a body that took a cart and
+    /// gave it back would leave eight dead proxies behind and shift every id issued afterwards, which the
+    /// determinism fingerprint reads and a save has to reproduce.
+    /// </remarks>
+    public void Reshape(ColliderId id, ColliderShape shape)
+    {
+        if (!Contains(id)) return;
+        var collider = colliders[id.Value];
+        if (collider.Shape.Equals(shape)) return;
+        collider.Shape = shape;
+        // A shape change moves the proxy's bounds, so whichever hash indexes it is stale — the same
+        // invalidation Move does, for the same reason.
+        if ((collider.Layer & ColliderLayer.Agent) != 0) agentHashDirty = true;
+        else staticHashDirty = true;
+        partitionsDirty = true;
+    }
+
     public ColliderProxy Get(ColliderId id)
     {
         if (!Contains(id)) throw new ArgumentOutOfRangeException(nameof(id));

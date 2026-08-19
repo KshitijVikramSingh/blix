@@ -82,9 +82,10 @@ internal static class SettlementScenarios
             $"RTSGame settlement — {world.ExtentMeters:F0} m, {world.Agents.LiveCount} people, " +
             $"{world.Nodes.LiveCount} nodes, {years:F2} year(s)");
         Console.WriteLine(
-            $"  {Farms} farms and {Woodcutters} woodcutters at one hand each, {Carts} carts and " +
-            $"{Wagons} wagons, one granary of {world.Nodes.Get(granary).Capacity:N0}, " +
-            $"housing for {Occupancy} per household");
+            $"  {Farms} farms and {Woodcutters} cutters at one hand each, {Carts + Wagons} spare hands, " +
+            $"one granary of {world.Nodes.Get(granary).Capacity:N0}, " +
+            $"housing for {Occupancy} per household — a cart costs " +
+            $"{SimulationWorld.CartTimber} wood and nobody has built one");
         Console.WriteLine(
             "        date        | grain | wood  | hands | fields             | forest         | " +
             "hauls | carrying | grain-left | wood-left | short | unhoused | stalled | ms/tick");
@@ -280,11 +281,19 @@ internal static class SettlementScenarios
                     EconomySystem.HandoverSeconds));
         }
 
+        // <b>Spare hands, not carts.</b> There is no hauler unit any more: hauling is a job a villager
+        // takes, which costs the settlement a sack of timber and gives them a handcart for as long as they
+        // keep it. So a settlement that needs no hauling has no carts in it — not seven idle ones — and
+        // the "zero hauling journeys in a year" figure now means something stronger than it did: nobody
+        // even had to build a cart.
+        //
+        // What these are instead is the labour a growing settlement has spare, which is what Stage C is
+        // about and what a receding wood line produces on its own.
         for (var i = 0; i < carts + wagons; i++)
         {
             var angle = i / (float)(carts + wagons) * MathF.Tau;
             world.SpawnAgent(
-                centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 5f, UnitType.HaulerCart);
+                centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 7f, UnitType.Villager);
         }
 
         return granary;
@@ -626,9 +635,16 @@ internal static class SettlementScenarios
             $"  over {years:F2} year(s): produced {economy.Produced.Grain:N0} grain and " +
             $"{economy.Produced.Wood:N0} wood, ate {economy.Consumed.Grain:N0} and " +
             $"{economy.Consumed.Wood:N0}, went short {economy.Unmet.Grain:N0} and {economy.Unmet.Wood:N0}");
+        var carts = 0;
+        foreach (ref readonly var body in world.Agents.All)
+        {
+            if (body.IsAlive && body.HasCart) carts++;
+        }
+
         Console.WriteLine(
-            $"  hauling: {economy.HaulsAssigned:N0} jobs given out, {economy.HaulsAbandoned:N0} dropped " +
-            "when the source emptied or the sink filled");
+            $"  hauling: {carts} carts built, {economy.HaulsAssigned:N0} board jobs given out, " +
+            $"{economy.HaulsAbandoned:N0} dropped when the source emptied or the sink filled, " +
+            $"{economy.RoutesFinished:N0} standing routes run dry");
         var (standing, trees) = world.Nodes.StandingTimber();
         // Against what the woodland started with, not against everything ever seeded: the granary's
         // founding stock is also seeded wood, and subtracting standing timber from the whole ledger

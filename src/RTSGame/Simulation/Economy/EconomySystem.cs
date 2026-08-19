@@ -150,6 +150,9 @@ internal sealed class EconomySystem
     /// <summary>Haul jobs dropped because the source emptied or the sink filled.</summary>
     public long HaulsAbandoned { get; private set; }
 
+    /// <summary>Standing routes that ran their source dry, which is a route ending as designed.</summary>
+    public long RoutesFinished { get; private set; }
+
     /// <summary>Seconds until the board next looks for work, which two runs have to agree on.</summary>
     internal float BoardCooldown => boardCooldown;
 
@@ -159,6 +162,45 @@ internal sealed class EconomySystem
         var seeded = Seeded;
         seeded.Add(resource, units);
         Seeded = seeded;
+    }
+
+    /// <summary>
+    /// Records stock that has left the world by being turned into something.
+    /// </summary>
+    /// <remarks>
+    /// Consumption is normally a household eating, and there is a second way now: a cart. Timber spent on
+    /// a handcart has not moved somewhere, it has <em>stopped being timber</em>, so it belongs on the same
+    /// side of the identity as a loaf. Recording it anywhere else — or not recording it — is a unit going
+    /// missing, and the drift check would name the tick it happened on.
+    /// </remarks>
+    public void RecordConsumed(Resource resource, int units)
+    {
+        var consumed = Consumed;
+        consumed.Add(resource, units);
+        Consumed = consumed;
+    }
+
+    /// <summary>The nearest store of this faction holding at least <paramref name="units"/>.</summary>
+    public static NodeId NearestStoreWith(
+        NodeStore nodes,
+        Resource resource,
+        int units,
+        FactionId faction,
+        Vector2 from)
+    {
+        var best = NodeId.None;
+        var bestDistance = float.PositiveInfinity;
+        foreach (ref readonly var node in nodes.All)
+        {
+            if (!node.IsAlive || !node.Stores || node.Faction != faction) continue;
+            if (node.Stock[resource] < units) continue;
+            var distance = Vector2.DistanceSquared(node.Position, from);
+            if (distance >= bestDistance) continue;
+            bestDistance = distance;
+            best = node.Id;
+        }
+
+        return best;
     }
 
     /// <summary>The nearest store of this faction with room for a resource, from a point.</summary>
@@ -726,13 +768,19 @@ internal sealed class EconomySystem
         claimed.Clear();
         foreach (ref readonly var agent in agents.All)
         {
-            if (!agent.IsAlive || agent.CarryCapacity <= 0) continue;
+            // Only bodies that actually have a cart. Every villager has a carry capacity now — a reaper
+            // walks its own crop in — so capacity is no longer what makes somebody a hauler, and reading
+            // it as one would have put the board's stranded-stock journeys on farmhands.
+            if (!agent.IsAlive || !agent.HasCart) continue;
             // A yard already being collected from is not offered to a second cart. The alternative is
             // reserving units, which is more bookkeeping for the same effect: without either, two carts
             // are sent for the same grain and one of them arrives to an empty yard, which is what half
             // the abandoned jobs in the first run of this were.
-            if (agent.Jobs.Assignment.Kind == AssignmentKind.Haul)
+            if (agent.Jobs.Assignment.MovesCargo)
             {
+                // A standing route counts as a claim on its source too: two carters sent for the same
+                // stock is the same waste whoever sent them, and the player's route is the one the board
+                // should defer to.
                 claimed.Add((agent.Jobs.Assignment.Source, agent.Jobs.Assignment.Cargo));
                 continue;
             }
@@ -965,7 +1013,7 @@ internal sealed class EconomySystem
         for (var i = 0; i < bodies.Length; i++)
         {
             ref var agent = ref bodies[i];
-            if (!agent.IsAlive || agent.Jobs.Assignment.Kind != AssignmentKind.Haul) continue;
+            if (!agent.IsAlive || !agent.Jobs.Assignment.MovesCargo) continue;
             // A body holding cargo finishes its delivery whatever the board thinks, or the units it is
             // carrying would have nowhere to go and conservation would have something to say about it.
             if (agent.Jobs.CarriedUnits > 0) continue;
@@ -980,8 +1028,13 @@ internal sealed class EconomySystem
             }
 
             if (!stale) continue;
+            // A route that has run dry is not an abandoned haul, it is a job finished — "they keep hauling
+            // till the source exhausts" is the route ending on its own terms, and counting it as a
+            // failure would make the abandoned column meaningless. The cart stays: a carter between
+            // routes is a carter, and the board will find it stranded stock or a heap to fetch.
+            if (agent.Jobs.Assignment.Kind == AssignmentKind.Carry) RoutesFinished++;
+            else HaulsAbandoned++;
             JobSystem.Assign(ref agent, Assignment.None);
-            HaulsAbandoned++;
         }
     }
 
@@ -1117,7 +1170,7 @@ internal sealed class EconomySystem
         var smallest = int.MaxValue;
         foreach (ref readonly var agent in agents.All)
         {
-            if (agent.IsAlive && agent.CarryCapacity > 0)
+            if (agent.IsAlive && agent.HasCart)
             {
                 smallest = Math.Min(smallest, agent.CarryCapacity);
             }

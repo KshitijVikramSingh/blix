@@ -77,6 +77,7 @@ internal static class DeterminismCheck
         "SimulationWorld.ExtentMeters", "SimulationWorld.Nodes", "SimulationWorld.economy",
         "EconomySystem.Produced", "EconomySystem.Consumed", "EconomySystem.Seeded",
         "EconomySystem.Unmet", "EconomySystem.HaulsAssigned", "EconomySystem.HaulsAbandoned",
+        "EconomySystem.RoutesFinished",
         "EconomySystem.boardCooldown",
         "MoveGroup.Id", "MoveGroup.Target", "MoveGroup.Members", "MoveGroup.Slots",
         "MoveGroup.FormationRadius", "MoveGroup.SettlingTicks", "MoveGroup.TransitCentroid",
@@ -483,6 +484,7 @@ internal static class DeterminismCheck
         sink.Add("BoardCooldown", world.Economy.BoardCooldown);
         sink.Add("HaulsAssigned", world.Economy.HaulsAssigned);
         sink.Add("HaulsAbandoned", world.Economy.HaulsAbandoned);
+        sink.Add("RoutesFinished", world.Economy.RoutesFinished);
         foreach (var resource in Resources.All)
         {
             sink.Add("Produced", world.Economy.Produced[resource]);

@@ -131,6 +131,7 @@ internal static class SimulationSelfTests
         Check(
             "a lumber camp is a store nobody eats from, and that is what makes haulers",
             TheWoodLineDecidesWhetherHaulersAreNeeded());
+        Check("a cart is a job a villager takes, and pays for", ACartIsAJobAndNotAUnit());
         Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
@@ -3444,9 +3445,18 @@ internal static class SimulationSelfTests
         world.AddNode(NodeKind.Farm, farm, capacity: 200);
         world.SeedStock(world.Nodes.All[1].Id, Resource.Grain, 60);
 
-        // Two carts: one to be destroyed carrying, one to come back for what it dropped.
-        var doomed = world.SpawnAgent(new Vector2(7f, 0f), UnitType.HaulerCart);
-        world.SpawnAgent(new Vector2(-7f, 0f), UnitType.HaulerCart);
+        // Two carters: one to be destroyed carrying, one to come back for what it dropped. Built rather
+        // than spawned, because there is no hauler unit — hauling is a job a villager takes and the
+        // settlement pays for in timber, so the granary has to have some.
+        world.SeedStock(granary, Resource.Wood, SimulationWorld.CartTimber * 2);
+        var doomed = world.SpawnAgent(new Vector2(7f, 0f), UnitType.Villager);
+        var spare = world.SpawnAgent(new Vector2(-7f, 0f), UnitType.Villager);
+        var built = world.TryBuildCart(doomed) && world.TryBuildCart(spare);
+        if (!built)
+        {
+            Console.WriteLine("    no cart could be built, so nothing can be hauled");
+            return false;
+        }
 
         // Let the board load the first cart and get it out on the road.
         var carried = 0;
@@ -3726,10 +3736,13 @@ internal static class SimulationSelfTests
                     EconomySystem.HandoverSeconds));
         }
 
-        // Carts, standing at the granary with nothing to do until the geometry gives them something.
+        // Two carters, standing at the granary with nothing to do until the geometry gives them
+        // something. The settlement pays for their carts out of the granary's timber — which is the
+        // dependency worth having: hauling wood in requires already having wood.
+        world.SeedStock(granary, Resource.Wood, SimulationWorld.CartTimber * 2);
         for (var i = 0; i < 2; i++)
         {
-            world.SpawnAgent(new Vector2(-6f, i * 2f - 1f), UnitType.HaulerCart);
+            world.TryBuildCart(world.SpawnAgent(new Vector2(-6f, i * 2f - 1f), UnitType.Villager));
         }
 
         var drift = 0L;
@@ -3742,6 +3755,98 @@ internal static class SimulationSelfTests
         }
 
         return (world.Economy.HaulsAssigned, world.Nodes.Get(granary).Stock.Wood, drift);
+    }
+
+    /// <summary>
+    /// Hauling is a role, and the whole of what that means.
+    /// </summary>
+    /// <remarks>
+    /// Four claims, and each of them is something the old permanent hauler unit could not express:
+    /// <list type="bullet">
+    /// <item><b>It costs timber, and the timber is gone.</b> Not moved onto the cart — turned into one. So
+    /// it is consumed, the conservation identity still closes, and building a hauling network is visible
+    /// in the ledger as a thing the settlement spent wood on.</item>
+    /// <item><b>Without timber it is refused.</b> You cannot cart wood in before you have wood, which is
+    /// the dependency Stage B's receding wood line exists to create.</item>
+    /// <item><b>The body changes.</b> A carter is the <c>HaulerCart</c> frame worn by a person — wider,
+    /// slower, holding more — and its collider proxies grow with it, or it would be priced at one size and
+    /// collide at another.</item>
+    /// <item><b>Asked to do something else, the cart goes.</b> But an <em>order</em> is not being asked to
+    /// do something else: an interrupt never touches the assignment, so a carter sent somewhere by hand
+    /// comes back to its route still pulling its cart.</item>
+    /// </list>
+    /// </remarks>
+    private static bool ACartIsAJobAndNotAUnit()
+    {
+        var world = new SimulationWorld();
+        var granary = world.AddNode(NodeKind.Granary, new Vector2(-9f, 0f), capacity: 400);
+        var depot = world.AddNode(NodeKind.ForwardDepot, new Vector2(9f, 0f), capacity: 400);
+        world.SeedStock(granary, Resource.Wood, SimulationWorld.CartTimber);
+        // Enough that the route is still running when the order arrives. A route that has already drained
+        // its source has ended, and an ended route has no cart to test — which is what the first version
+        // of this measured: 120 grain, all of it moved, and LegsCompleted read as zero because the
+        // assignment had been cleared before the assertion looked at it.
+        world.SeedStock(depot, Resource.Grain, 400);
+
+        var villager = world.SpawnAgent(new Vector2(0f, 4f), UnitType.Villager);
+        var pauper = world.SpawnAgent(new Vector2(0f, -4f), UnitType.Villager);
+        var wideBefore = world.Agents.Get(villager).Radius;
+        var carryBefore = world.Agents.Get(villager).CarryCapacity;
+        var woodBefore = world.Nodes.Get(granary).Stock.Wood;
+        var consumedBefore = world.Economy.Consumed.Wood;
+
+        // Exactly one cart's worth of timber in the world, so the first route is granted and the second
+        // is refused for want of it.
+        var granted = world.TryAssignRoute(villager, depot, granary, Resource.Grain);
+        var refused = !world.TryAssignRoute(pauper, depot, granary, Resource.Grain);
+        var paid = woodBefore - world.Nodes.Get(granary).Stock.Wood == SimulationWorld.CartTimber &&
+                   world.Economy.Consumed.Wood - consumedBefore == SimulationWorld.CartTimber;
+
+        var carter = world.Agents.Get(villager);
+        var wore = carter.HasCart &&
+                   MathF.Abs(carter.Radius - UnitType.HaulerCart.Radius) < 0.001f &&
+                   carter.CarryCapacity == UnitType.HaulerCart.CarryCapacity &&
+                   MathF.Abs(
+                       world.Colliders.Get(carter.Colliders.Movement).Shape.Radius -
+                       UnitType.HaulerCart.Radius) < 0.001f;
+
+        // The route runs, and keeps running: a standing commitment, not one round trip. A Haul would have
+        // ended after the first delivery and gone back on the board.
+        var legs = 0;
+        for (var tick = 0; tick < 30 * 240; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            legs = Math.Max(legs, world.Agents.Get(villager).Jobs.LegsCompleted);
+        }
+
+        var moved = world.Nodes.Get(granary).Stock.Grain;
+        var stillOnRoute = world.Agents.Get(villager).Jobs.Assignment.Kind == AssignmentKind.Carry;
+
+        // An order is an interrupt, so the cart survives it.
+        world.QueueMove(new[] { villager }, new Vector2(0f, 9f));
+        Tick(world, 30 * 6);
+        var keptThroughAnOrder = world.Agents.Get(villager).HasCart;
+
+        // Being taken off work is not an interrupt, and the cart goes with the job.
+        world.QueueAssign(new[] { villager }, Assignment.None);
+        Tick(world, 2);
+        var after = world.Agents.Get(villager);
+        var scrapped = !after.HasCart &&
+                       MathF.Abs(after.Radius - wideBefore) < 0.001f &&
+                       after.CarryCapacity == carryBefore &&
+                       MathF.Abs(
+                           world.Colliders.Get(after.Colliders.Movement).Shape.Radius - wideBefore) <
+                       0.001f;
+
+        var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+        var passed = granted && refused && paid && wore && moved > 0 && legs > 2 && stillOnRoute &&
+                     keptThroughAnOrder && scrapped && drift.Grain == 0 && drift.Wood == 0;
+        Console.WriteLine(
+            $"    cart cost {SimulationWorld.CartTimber} wood (paid={paid}), second one refused={refused}, " +
+            $"body {wideBefore:F2}->{UnitType.HaulerCart.Radius:F2} m (worn={wore}); route ran {legs} legs, " +
+            $"moved {moved} grain, still standing={stillOnRoute}; kept through an order=" +
+            $"{keptThroughAnOrder}, scrapped when taken off work={scrapped}; drift {drift.Grain}/{drift.Wood}");
+        return passed;
     }
 
     private static void Tick(SimulationWorld world, int count)

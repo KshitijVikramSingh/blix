@@ -41,6 +41,25 @@ internal struct AgentState
     public float TurningRadius;
     /// <summary>What this body can carry, for the hauling layer.</summary>
     public int CarryCapacity;
+
+    /// <summary>
+    /// This body is pulling a handcart, which is a job rather than a kind of unit.
+    /// </summary>
+    /// <remarks>
+    /// <b>There is no hauler unit.</b> A cart is a role a villager takes: it costs the settlement a sack
+    /// of timber, and while the body has it, it is wider, slower and carries more — the
+    /// <c>UnitType.HaulerCart</c> body, worn by a person. Which is why this flag exists at all rather than
+    /// the roster having two entries: the body's <see cref="Radius"/>, <see cref="MaximumSpeed"/> and
+    /// <see cref="CarryCapacity"/> are all overwritten while it holds, and something has to remember to
+    /// put them back.
+    /// <para>
+    /// The design reason is §2's: hauler count should track what the settlement is doing rather than what
+    /// it once spawned. A permanent cart unit is a decision made once and paid for forever, whereas a role
+    /// is a decision you can see the cost of and change — and a settlement that needs no hauling should
+    /// have no carts in it, not seven idle ones.
+    /// </para>
+    /// </remarks>
+    public bool HasCart;
     /// <summary>How much this body eats, relative to a villager. See <c>UnitType.Appetite</c>.</summary>
     public float Appetite;
     public float MaximumSpeed;

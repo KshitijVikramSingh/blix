@@ -66,9 +66,20 @@ internal sealed record UnitType(
         new("soldier", AgentDefaults.Radius, 1.70f, 0f, 0, Appetite: 1.35f);
 
     /// <summary>
-    /// The hauler. Wider than a person and deliberately in the same class, so it takes the same
-    /// passages and merely takes up more room in the queue for one.
+    /// The handcart — a <em>frame a villager wears</em>, not a unit anybody spawns.
     /// </summary>
+    /// <remarks>
+    /// Wider than a person and deliberately in the same class, so it takes the same passages and merely
+    /// takes up more room in the queue for one.
+    /// <para>
+    /// <b>Nothing in the game spawns this any more.</b> Hauling is a job: a villager given a route pays a
+    /// sack of timber for a cart and wears these dimensions until it is given something else to do — see
+    /// <c>SimulationWorld.TryAssignRoute</c>. So this entry is no longer "a kind of unit you have", it is
+    /// the answer to "how big and how fast is somebody pulling a cart", which is exactly what a roster
+    /// entry should be. The movement fixtures still spawn bodies at these dimensions directly, and that is
+    /// legitimate: they are testing a 0.55 m body in a queue, not a hauler.
+    /// </para>
+    /// </remarks>
     public static readonly UnitType HaulerCart =
         new("hauler cart", 0.55f, 1.10f, 0f, 40);
 

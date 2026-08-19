@@ -29,6 +29,29 @@ internal enum AssignmentKind
     Haul,
 
     /// <summary>
+    /// Run a route: carry one resource from a source node to a sink node until the source is empty.
+    /// </summary>
+    /// <remarks>
+    /// <b>A haul the player authored, as against a haul the board auctioned.</b> The difference is not
+    /// cosmetic and it is why this is a second kind rather than a flag on <see cref="Haul"/>:
+    /// <list type="bullet">
+    /// <item>A <see cref="Haul"/> is <em>one round trip</em>, and that is the whole point of pricing it —
+    /// a body that kept a route for life would be priced once, at the moment it was hired, and the promise
+    /// that a jammed lane makes a different body cheaper would be a promise about a decision nobody ever
+    /// revisits. Collect, deliver, go back on the board.</item>
+    /// <item>A <see cref="Carry"/> is a <em>standing commitment</em>: this person, this route, until the
+    /// source runs dry or you tell them otherwise. Nobody re-auctions it because nobody is meant to. It is
+    /// the player saying "these three are on the timber run", which is the shape of decision §2 wants
+    /// attention spent on.</item>
+    /// </list>
+    /// <para>
+    /// The board keeps the first for the two cases nobody would ever micromanage — stranded stock, and
+    /// goods lying in the road — and the player owns the second.
+    /// </para>
+    /// </remarks>
+    Carry,
+
+    /// <summary>
     /// Work a place, and carry what it yields to the nearest store.
     /// </summary>
     /// <remarks>
@@ -144,6 +167,23 @@ internal readonly record struct Assignment(
     /// <summary>Which node a leg of a haul or a shift of work is served at.</summary>
     public NodeId NodeOfLeg(int leg) => leg % 2 != 0 ? Sink : Source;
 
+    /// <summary>Run <paramref name="cargo"/> from one node to another until the source is empty.</summary>
+    public static Assignment Carry(
+        NodeId source,
+        Vector2 sourcePosition,
+        NodeId sink,
+        Vector2 sinkPosition,
+        Resource cargo,
+        float handoverSeconds,
+        float sourceExtent,
+        float sinkExtent) =>
+        new(
+            AssignmentKind.Carry, sourcePosition, sinkPosition, handoverSeconds, source, sink, cargo,
+            sourceExtent, sinkExtent);
+
+    /// <summary>Whether this assignment moves cargo between two nodes, however it was authored.</summary>
+    public bool MovesCargo => Kind is AssignmentKind.Haul or AssignmentKind.Carry;
+
     /// <summary>Work <paramref name="site"/> and carry what it yields to a store.</summary>
     public static Assignment Work(
         NodeId site,
@@ -182,7 +222,7 @@ internal readonly record struct Assignment(
 
     /// <summary>Whether this assignment alternates between two places.</summary>
     public bool HasTwoEnds =>
-        Kind is AssignmentKind.Shuttle or AssignmentKind.Haul or AssignmentKind.Work;
+        Kind is AssignmentKind.Shuttle or AssignmentKind.Haul or AssignmentKind.Carry or AssignmentKind.Work;
 
     /// <summary>
     /// Whether the assignment goes on indefinitely, or ends when its last leg does.
@@ -194,7 +234,7 @@ internal readonly record struct Assignment(
     /// promise about a decision nobody ever revisits. Collect, deliver, and go back on the board.
     /// </remarks>
     public bool RepeatsForever =>
-        Kind is AssignmentKind.Hold or AssignmentKind.Shuttle or AssignmentKind.Work;
+        Kind is AssignmentKind.Hold or AssignmentKind.Shuttle or AssignmentKind.Carry or AssignmentKind.Work;
 }
 
 /// <summary>
