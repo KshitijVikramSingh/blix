@@ -2223,3 +2223,117 @@ caller that places a body relative to a building would have to be found and corr
 once: **a body spawned inside a building appears beside it instead.** Two self-tests opt out by name,
 because expelling an embedded body is a feature and clearance is asserted by putting a body where its own
 radius does not fit.
+
+---
+
+## 19. What the prototype actually does — read from `swarm_strategy_v10_0.html`, 2026-08-19
+
+Read before designing the MVP slice, because this document has been quoting the prototype in passing for
+several sessions — `w.task`, `totalSecured()`, the three disagreeing crop windows — without anywhere
+recording what its **fundamental loop** is. It is richer than the passing references imply, and three of
+its central mechanics are simply absent from what has been built.
+
+### The loop, as the prototype defines it
+
+**One currency: a person-second of work at a place.** Farming, logging, quarrying and building are all
+literally `+= dt` while a body stands at a thing. Nothing produces at a rate on its own; a thing produces
+because somebody is stood at it working, and `w.work` accumulates what each villager has done.
+
+**The seasons have verbs, and they are the emotional shape of the year:**
+
+| season | days | verb |
+|---|---|---|
+| Spring | 60 | **COMMIT** |
+| Summer | 90 | **EXPLOIT** |
+| Harvest | 50 | **SCRAMBLE** |
+| Winter | 70 | **SURVIVE** |
+
+**A farm is a three-phase labour cycle with deadlines, run twice a year.** This is the mechanism the
+verbs describe and it is the thing most worth carrying across:
+
+- **PREP** — 28 labour-seconds, and it sets the *ceiling*: `potential = prep / 28`. Miss it and the
+  ceiling is gone for that cycle. Nothing you do later recovers it.
+- **MAINTAIN** — 7 labour-seconds, and it only *retains*: `0.76 + 0.24 × (maint / 7)`. Cheap, and
+  ignoring it costs a quarter of the crop.
+- **HARVEST** — 24 labour-seconds, and it is you physically reaping what you grew. Yield is
+  `14 × potential`, earned second by second. Food left unreaped is food you never had.
+
+Two overlapping cycles, A and B, on their own 270-day windows (A prep 0–45, maint 45–90, harvest 90–135;
+B 135–175, 175–215, 215–255; rest 255–270) — which is why §6 insists the crop windows be *derived* from
+the seasons: in the prototype they are independent, and B's harvest falls in the season called Winter.
+
+Farm state is spoken plainly to the player: `PREPARING`, `PREPARED`, `UNPREPARED`, `NEGLECTED`,
+`MAINTAINED`, `READY`, `HARVESTING`, `HARVESTED`, `FAILED`.
+
+**The producer carries its own output.** A harvesting farmer accumulates food *in its hands* at
+`14/24` per second, up to `CARRY_CAP = 3`, then walks to the nearest store and deposits. A logger walks to
+the nearest tree, chops until `cutNeed` is met, carries the wood in. Hauling as a distinct task exists
+**only to clean up loose stacks**. So the walk is the cost, it is paid by the person who made the thing,
+and "resource regions are deliberately far apart now; distance is the terrain" is a comment in the seed
+function.
+
+**Resources are physical, placed, and finite.** Trees have `cutNeed` and a wood value; stone nodes have a
+stone amount and clear the trees around themselves. Forests are seeded as five large frontiers, stone as
+four fields. The map is the economy.
+
+**Loose stacks lie on the ground** and are recovered by whoever is nearest. Killing a loaded raider drops
+its stolen food back as a stack — `Recovered 2.4 stolen food.`
+
+**Delegation is priorities plus self-assignment.** `state.priorities = {farm, build, wood, stone}`, and a
+new villager auto-assigns by categorical preference: a vacant farm, else logging, else a quarry. An
+unassigned villager takes local chores scored by priority against distance. The player nudges the shape of
+the settlement rather than the individuals.
+
+**Buildings cost labour and materials**, and the builder inherits the job: `setAssignment(w,'builder',
+site,{after:'farmer'})` — whoever builds the farm becomes its farmer.
+
+**Population is endogenous.** Growth needs 45 days of food, housing room and warmth. Shortage accumulates
+*privation*, and privation spends itself first as **emigration** — the ordinary carrying-capacity
+correction — and only at catastrophic levels as death. Housing caps the population, which is §6's
+"grain → people, gated by housing" already working.
+
+**Raids are pressure, not a timer.** Pressure grows with *wealth* — food per capita — so prosperity makes
+raids **more serious rather than much more frequent**, and a cooldown of 78 s or more preserves real
+recovery windows. Three tiers: thieves, then armed raiders, then a warband. Raiders enter at a map edge,
+breach palisades and gates, steal food, and run for the nearest edge. Detection is **105 at the settlement
+against 190 at an outpost** — §7's "an outpost pushes R outward", as a number.
+
+**Soldiers are an assignment**, trained at a barracks for 16 s and demobilizable back to civilian life.
+Civilians defend themselves locally as an **interrupt** — which is what the interrupt layer was invented
+for, before it was ever a manual order.
+
+**The year is visible.** A timeline strip across the top shows all seven crop phases as bands, with food
+demand, wood demand and farm workload as curves and a playhead on today. You can see the winter wood
+spike and the harvest scramble coming.
+
+### Where we already agree
+
+The three-layer jobs model is carried across faithfully — assignment as persistent commitment, activity as
+what it is doing now, interrupt as temporary and never rewriting the assignment — and so are the season
+lengths, the physicality of resources, and dropped loot. Conservation in whole units is *stronger* here
+than in the prototype, which uses floats and a `shortageDebt`.
+
+### Where we evolved deliberately, and should stay evolved
+
+- **Node-to-node hauling by carts, priced in seconds through congestion**, instead of every producer
+  walking its own output in. §6 chose this so hauler count tracks buildings rather than population.
+- **Catchments in route-seconds** instead of the prototype's flat distance limits (620, 700, 720, 760
+  pixels), so reach follows roads and stops at ridges.
+- **Houses as clocked sinks**, so distribution is a property of layout.
+
+### Where we have drifted without deciding — the list to work through
+
+1. **A farm is a rate, not a cycle.** There is no PREP, no ceiling you can lose, no reaping deadline. This
+   is the largest gap by a distance: *the three-phase cycle is what the four verbs describe*, and without
+   it Spring is not COMMIT and Harvest is not SCRAMBLE — they are just multipliers on a rate.
+2. **Buildings cost nothing.** They appear instantly. In the prototype construction is labour, which is
+   how attention converts into infrastructure and how §2's identity is paid.
+3. **Resources neither deplete nor sit anywhere.** No trees, no stone, no frontier — so "distance is the
+   terrain" is not true of our map, and a farm is an abstract producer that can be put anywhere.
+4. **No stone, quarry or barracks**, so no materials for the defence ladder.
+5. **Population is fixed.** No growth, no privation, no emigration — so a surplus has no purpose and a
+   shortage has no consequence beyond a counter.
+6. **No priorities.** The player posts individuals; the prototype's delegation is a handful of sliders and
+   villagers who find their own work. That *is* the low-attention mode.
+7. **No timeline.** The player cannot see the year coming, which is most of how the prototype makes a
+   season legible before any number is read.
