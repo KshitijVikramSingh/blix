@@ -65,9 +65,24 @@ internal static class JobDefaults
     /// </remarks>
     internal static float RetrySeconds = 2.0f * AgentDefaults.PaceScale;
 
+    /// <summary>
+    /// Slack beyond touching, so a body that has arrived is not one contact away from having left.
+    /// </summary>
+    internal static float TouchSlack = 0.25f;
+
     /// <summary>How near this body has to be to count as at its place.</summary>
-    internal static float AtPlaceDistance(float radius) => radius * PlaceRadiusShare;
+    /// <remarks>
+    /// Whichever is larger: a few of the body's own radii, which is what a bare point on the ground
+    /// wants, or <b>touching the thing</b> — its radius plus the body's plus a little slack. A place
+    /// with an extent is a building, and reaching a building means reaching its wall. Demanding its
+    /// centre is what had carts shouldering into farms and jostling the hands working them, and what
+    /// stopped a wagon ever quite arriving anywhere.
+    /// </remarks>
+    internal static float AtPlaceDistance(float radius, float placeExtent = 0f) => MathF.Max(
+        radius * PlaceRadiusShare,
+        placeExtent + radius + TouchSlack);
 
     /// <summary>How near counts once a crowd has taken the place itself.</summary>
-    internal static float CrowdedPlaceDistance(float radius) => radius * PlaceCrowdShare;
+    internal static float CrowdedPlaceDistance(float radius, float placeExtent = 0f) =>
+        placeExtent + radius * PlaceCrowdShare;
 }

@@ -250,7 +250,7 @@ internal sealed class SimulationWorld
             resolved,
             ColliderLayer.Structure,
             ColliderRole.Interactable,
-            ColliderShape.Circle(1.2f),
+            ColliderShape.Circle(NodeFootprint.RadiusOf(kind)),
             at);
         return id;
     }
@@ -1044,7 +1044,9 @@ internal sealed class SimulationWorld
                 target,
                 Nodes.Get(target).Position,
                 jobs.Carrying,
-                EconomySystem.HandoverSeconds),
+                EconomySystem.HandoverSeconds,
+                jobs.Assignment.PlaceExtent,
+                Nodes.Get(target).FootprintRadius),
             leg: 1);
     }
 

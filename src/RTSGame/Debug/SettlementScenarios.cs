@@ -185,9 +185,13 @@ internal static class SettlementScenarios
         for (var i = 0; i < producers.Count; i++)
         {
             var (node, at) = producers[i];
-            var hand = world.SpawnAgent(at + new Vector2(1.4f, 0f), UnitType.Villager);
-            world.QueueAssign(new[] { hand }, Assignment.Hold(at, Stagger(20f, i, producers.Count)));
-            _ = node;
+            // Posted at the node with its footprint, so a hand works at the edge of the yard rather
+            // than trying to stand in the middle of the building.
+            var extent = world.Nodes.Get(node).FootprintRadius;
+            var hand = world.SpawnAgent(at + new Vector2(extent + 0.8f, 0f), UnitType.Villager);
+            world.QueueAssign(
+                new[] { hand },
+                Assignment.Hold(at, Stagger(20f, i, producers.Count), extent));
         }
 
         for (var i = 0; i < carts + wagons; i++)

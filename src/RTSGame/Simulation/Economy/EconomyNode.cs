@@ -74,6 +74,35 @@ internal enum NodeKind
 }
 
 /// <summary>
+/// How much ground each kind of node stands on, in metres of radius.
+/// </summary>
+/// <remarks>
+/// One table, because three things need it and they were disagreeing: the collider called every node
+/// 1.2 m whatever it was, the renderer drew a granary at 1.7 and a house at 1.0, and the jobs layer
+/// ignored the building altogether and sent bodies at the centre point. That last one is what a player
+/// notices — a cart aiming for the middle of a farm has to get <em>inside</em> the farm to have arrived,
+/// so it shoulders through the building and through whoever is working there.
+/// <para>
+/// <b>Touching is arrival.</b> A cart that reaches the wall of a granary has reached the granary, and
+/// the handover timer covers the rest — it is already four seconds of loading, which is where the
+/// fidelity belongs rather than in the last metre of approach.
+/// </para>
+/// </remarks>
+internal static class NodeFootprint
+{
+    public static float RadiusOf(NodeKind kind) => kind switch
+    {
+        NodeKind.Granary => 1.7f,
+        NodeKind.ForwardDepot => 1.5f,
+        NodeKind.Farm => 1.2f,
+        NodeKind.Woodcutter => 1.2f,
+        NodeKind.House => 1.0f,
+        // A heap is a heap. Small, and walked right up to.
+        _ => 0.5f,
+    };
+}
+
+/// <summary>
 /// A place that produces, stores, or both.
 /// </summary>
 /// <remarks>
@@ -161,6 +190,9 @@ internal struct EconomyNode
 
     /// <summary>Room for another household member.</summary>
     public readonly int Housing => Math.Max(0, Occupancy - Occupants);
+
+    /// <summary>How much ground this node stands on.</summary>
+    public readonly float FootprintRadius => NodeFootprint.RadiusOf(Kind);
 
     /// <summary>Room left for more of this resource.</summary>
     public readonly int RoomFor(Resource resource) => Math.Max(0, Capacity - Stock[resource]);

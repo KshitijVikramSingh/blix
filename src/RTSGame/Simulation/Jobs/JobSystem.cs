@@ -125,10 +125,11 @@ internal static class JobSystem
     /// </remarks>
     private static bool IsAtPlace(in AgentState agent)
     {
+        var extent = agent.Jobs.PlaceExtent;
         var distance = Vector2.DistanceSquared(agent.Position, agent.Jobs.Place);
-        if (distance <= Square(JobDefaults.AtPlaceDistance(agent.Radius))) return true;
+        if (distance <= Square(JobDefaults.AtPlaceDistance(agent.Radius, extent))) return true;
         return agent.Jobs.SettledNearby &&
-               distance <= Square(JobDefaults.CrowdedPlaceDistance(agent.Radius));
+               distance <= Square(JobDefaults.CrowdedPlaceDistance(agent.Radius, extent));
     }
 
     /// <summary>
@@ -182,6 +183,8 @@ internal static class JobSystem
         jobs.Assignment = assignment;
         jobs.Leg = leg;
         jobs.Finished = false;
+        // Cleared rather than recomputed: the next Advance begins the activity and sets the place and
+        // its extent together, which is the only place those two are allowed to be chosen.
         jobs.Activity = ActivityKind.None;
         jobs.WalkIssued = false;
         jobs.Retries = 0;
@@ -237,7 +240,7 @@ internal static class JobSystem
             // ground gets the retries first, since falling short of empty ground means the
             // journey went wrong and journeys come right.
             var nearEnough = Vector2.DistanceSquared(agent.Position, jobs.Place) <=
-                             Square(JobDefaults.CrowdedPlaceDistance(agent.Radius));
+                             Square(JobDefaults.CrowdedPlaceDistance(agent.Radius, jobs.PlaceExtent));
             if (nearEnough && place is PlaceCondition.Crowded ||
                 nearEnough && place is PlaceCondition.Open && jobs.Retries >= JobDefaults.CrowdedAttempts)
             {
@@ -274,6 +277,7 @@ internal static class JobSystem
     {
         jobs.Activity = ActivityKind.Working;
         jobs.Place = jobs.Assignment.PlaceOfLeg(jobs.Leg);
+        jobs.PlaceExtent = jobs.Assignment.ExtentOfLeg(jobs.Leg);
         jobs.DwellRemaining = jobs.Assignment.DwellSeconds;
         jobs.WalkIssued = false;
         jobs.Retries = 0;

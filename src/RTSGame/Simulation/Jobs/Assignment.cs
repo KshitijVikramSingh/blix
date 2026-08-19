@@ -78,6 +78,17 @@ internal enum InterruptKind
 /// <param name="Source">Node a haul collects from; <see cref="NodeId.None"/> otherwise.</param>
 /// <param name="Sink">Node a haul delivers to; <see cref="NodeId.None"/> otherwise.</param>
 /// <param name="Cargo">What a haul carries.</param>
+/// <param name="PlaceExtent">
+/// Radius of the thing at <see cref="Anchor"/>, so that <em>touching</em> it counts as arriving.
+/// </param>
+/// <param name="FarPlaceExtent">Radius of the thing at <see cref="FarAnchor"/>.</param>
+/// <remarks>
+/// <see cref="PlaceExtent"/> is zero for a bare point on the ground, which is what a hand-given post is,
+/// and the radius of the building for anything attached to a node. Without it a body has to reach the
+/// centre of a farm to have arrived, which means walking into the farm and shouldering past whoever is
+/// working there — and a wagon, needing to put its middle where a villager's middle would go, never
+/// quite manages it.
+/// </remarks>
 internal readonly record struct Assignment(
     AssignmentKind Kind,
     Vector2 Anchor,
@@ -85,7 +96,9 @@ internal readonly record struct Assignment(
     float DwellSeconds,
     NodeId Source = default,
     NodeId Sink = default,
-    Resource Cargo = default)
+    Resource Cargo = default,
+    float PlaceExtent = 0f,
+    float FarPlaceExtent = 0f)
 {
     public static Assignment None => default;
 
@@ -96,15 +109,27 @@ internal readonly record struct Assignment(
         NodeId sink,
         Vector2 sinkPosition,
         Resource cargo,
-        float handoverSeconds) =>
-        new(AssignmentKind.Haul, sourcePosition, sinkPosition, handoverSeconds, source, sink, cargo);
+        float handoverSeconds,
+        float sourceExtent,
+        float sinkExtent) =>
+        new(
+            AssignmentKind.Haul, sourcePosition, sinkPosition, handoverSeconds, source, sink, cargo,
+            sourceExtent, sinkExtent);
 
     /// <summary>Which node a leg of a haul is served at.</summary>
     public NodeId NodeOfLeg(int leg) => leg % 2 != 0 ? Sink : Source;
 
+    /// <summary>How much ground the thing at a given leg stands on.</summary>
+    /// <remarks>
+    /// Two ends can be two sizes — a farmyard is not a granary — so the extent travels with the leg
+    /// rather than being one number for the assignment.
+    /// </remarks>
+    public float ExtentOfLeg(int leg) =>
+        HasTwoEnds && leg % 2 != 0 ? FarPlaceExtent : PlaceExtent;
+
     /// <summary>Stand at a post, checking in every <paramref name="dwellSeconds"/>.</summary>
-    public static Assignment Hold(Vector2 post, float dwellSeconds) =>
-        new(AssignmentKind.Hold, post, post, dwellSeconds);
+    public static Assignment Hold(Vector2 post, float dwellSeconds, float placeExtent = 0f) =>
+        new(AssignmentKind.Hold, post, post, dwellSeconds, PlaceExtent: placeExtent);
 
     /// <summary>Work one end, then the other, dwelling at each.</summary>
     public static Assignment Shuttle(Vector2 first, Vector2 second, float dwellSeconds) =>
@@ -159,6 +184,17 @@ internal struct AgentJobs
 
     /// <summary>Where the current activity happens.</summary>
     public Vector2 Place;
+
+    /// <summary>
+    /// How much ground the thing at <see cref="Place"/> stands on.
+    /// </summary>
+    /// <remarks>
+    /// Kept beside the place rather than looked up from the assignment each time, because the two are a
+    /// pair: the place is chosen by leg and so is the extent, and reading one from the current leg while
+    /// the other was set from a previous one is a bug that would only show up as a body arriving at a
+    /// farm using a granary's tolerance.
+    /// </remarks>
+    public float PlaceExtent;
 
     /// <summary>Seconds of work left once the unit is at <see cref="Place"/>.</summary>
     public float DwellRemaining;

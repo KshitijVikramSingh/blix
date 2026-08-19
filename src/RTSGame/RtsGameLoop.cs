@@ -463,9 +463,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     {
         if (!pointerOnTerrain || selection.Selected.Count == 0) return;
         shuttleAnchor = null;
-        simulation.QueueAssign(selection.Snapshot(), Assignment.Hold(pointerWorld, PostDwellSeconds));
+        // Posting on a building posts at the building: the place is its centre and its extent is its
+        // footprint, so hands gather round the yard instead of trying to occupy the middle of it.
+        var node = EconomySystem.NodeAt(simulation.Nodes, pointerWorld, radius: 3.5f);
+        var at = simulation.Nodes.Contains(node) ? simulation.Nodes.Get(node).Position : pointerWorld;
+        var extent = simulation.Nodes.Contains(node)
+            ? simulation.Nodes.Get(node).FootprintRadius
+            : 0f;
+        simulation.QueueAssign(selection.Snapshot(), Assignment.Hold(at, PostDwellSeconds, extent));
         Console.WriteLine(
-            $"  {selection.Selected.Count} unit(s) posted at ({pointerWorld.X:F1}, {pointerWorld.Y:F1})");
+            $"  {selection.Selected.Count} unit(s) posted at ({at.X:F1}, {at.Y:F1})" +
+            (extent > 0f ? $" — working the {simulation.Nodes.Get(node).Kind}" : string.Empty));
     }
 
     /// <summary>
@@ -1152,7 +1160,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var fullness = node.IsSink
                 ? node.Occupancy <= 0 ? 0f : MathF.Min(1f, node.Occupants / (float)node.Occupancy)
                 : node.Capacity <= 0 ? 0f : MathF.Min(1f, node.Stock.Total / (float)node.Capacity);
-            var width = node.Stores ? 3.4f : node.IsSink ? 2.0f : 2.4f;
+            // The same footprint the collider uses and the jobs layer arrives at, so what is drawn is
+            // what a body actually walks up to.
+            var width = node.FootprintRadius * 2f;
             var height = 0.9f + fullness * 1.6f;
             var ground = simulation.Terrain.SampleHeight(node.Position);
             terrainBatch.Add(

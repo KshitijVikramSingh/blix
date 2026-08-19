@@ -558,7 +558,8 @@ internal sealed class EconomySystem
             if (bestIndex < 0) continue;
             ref var chosen = ref agents.Get(idleHaulers[bestIndex]);
             JobSystem.Assign(ref chosen, Assignment.Haul(
-                task.Source, source.Position, task.Sink, sink.Position, task.Resource, HandoverSeconds));
+                task.Source, source.Position, task.Sink, sink.Position, task.Resource, HandoverSeconds,
+                source.FootprintRadius, sink.FootprintRadius));
             claimed.Add((task.Source, task.Resource));
             idleHaulers.RemoveAt(bestIndex);
             HaulsAssigned++;
