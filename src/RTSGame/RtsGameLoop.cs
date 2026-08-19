@@ -69,6 +69,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private static readonly Vector4 SelectionColor = new(0.26f, 0.86f, 0.94f, 1f);
     private static readonly Vector4 DestinationColor = new(0.98f, 0.82f, 0.32f, 1f);
     private static readonly Vector4 ObstacleColor = new(0.33f, 0.35f, 0.37f, 1f);
+    // A store, a field and a woodlot, told apart at a glance because the whole point of the
+    // low-attention mode is that a settlement is legible without reading a number.
+    private static readonly Vector4 GranaryColor = new(0.82f, 0.66f, 0.30f, 1f);
+    private static readonly Vector4 FarmColor = new(0.55f, 0.68f, 0.28f, 1f);
+    private static readonly Vector4 WoodcutterColor = new(0.42f, 0.31f, 0.22f, 1f);
+    private static readonly Vector4 DepotColor = new(0.62f, 0.55f, 0.42f, 1f);
+    // Goods, wherever they are: on a cart's back or lying in the road. The same two colours for both,
+    // so a heap and a load read as the same substance in two places.
+    private static readonly Vector4 HouseColor = new(0.72f, 0.46f, 0.36f, 1f);
+    private static readonly Vector4 GrainColor = new(0.90f, 0.78f, 0.34f, 1f);
+    private static readonly Vector4 WoodColor = new(0.48f, 0.34f, 0.21f, 1f);
     private static readonly Vector4 BuildValidColor = new(0.30f, 0.84f, 0.72f, 1f);
     private static readonly Vector4 BuildRemoveColor = new(0.96f, 0.53f, 0.28f, 1f);
     private static readonly Vector4 BuildInvalidColor = new(0.82f, 0.24f, 0.22f, 1f);
@@ -181,7 +192,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         bool startTerrainLab = false,
         bool debugAll = false,
         float extentMeters = DefaultWorldExtentMeters,
-        float compression = DefaultCompression)
+        float compression = DefaultCompression,
+        bool startVillage = false)
     {
         worldExtentMeters = extentMeters;
         clock.Compression = compression;
@@ -220,7 +232,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
         simulation = new SimulationWorld(worldExtentMeters);
         cameraFocus = Vector2.Zero;
-        if (startTerrainLab)
+        if (startVillage)
+        {
+            LoadSettlementScenario();
+        }
+        else if (startTerrainLab)
         {
             LoadTerrainScenario();
         }
@@ -235,6 +251,32 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private void SpawnScenarioAgents(int count)
     {
         MovementStressScenarios.Populate(simulation, count, issueGroupMove: false);
+    }
+
+    /// <summary>
+    /// Drops a working settlement into the live world, in the middle of a harvest.
+    /// </summary>
+    /// <remarks>
+    /// The same arrangement <c>--settlement</c> asserts about for a year, laid out tighter so it fits a
+    /// screen: half the ring radius, and started at day 155 rather than at day zero because spring
+    /// brings in no grain by design and a demo that opened there would be a demo of waiting. What there
+    /// is to watch is hands standing in fields, carts deciding for themselves which yard to empty next,
+    /// and the granary filling — and then the season turning and the wood going the other way.
+    /// </remarks>
+    private void LoadSettlementScenario()
+    {
+        simulation = new SimulationWorld(worldExtentMeters);
+        simulation.StartAtSeconds(3100f);
+        selection.Clear();
+        SettlementScenarios.Populate(
+            simulation, farms: 8, woodcutters: 4, carts: 4, wagons: 1, ringRadius: 19f);
+        cameraFocus = Vector2.Zero;
+        cameraDistance = MathF.Min(58f, cameraMaximumDistance);
+        Console.WriteLine(
+            $"  settlement: {simulation.Nodes.LiveCount} nodes, {simulation.Agents.LiveCount} people, " +
+            $"{simulation.Date}");
+        Console.WriteLine(
+            "  watch the panel's settlement scope: what is stored, and how many seasons it lasts");
     }
 
     private void LoadStressScenario(int count)
@@ -352,8 +394,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         UpdatePointerWorld();
 
         // The automated Vulkan smoke exercises the same queued group-command seam
-        // as player input; it does not mutate agent movement state directly.
-        if (exitAfterFrames > 0)
+        // as player input; it does not mutate agent movement state directly. It does not do it to a
+        // settlement, though: an order is an interrupt, so this correctly pulled all twelve hands out
+        // of their fields and the smoke run then reported a village where nobody was working.
+        if (exitAfterFrames > 0 && simulation.Nodes.LiveCount == 0)
         {
             simulation.QueueMove(AllAgentIds(), new Vector2(7f, 5f));
         }
@@ -363,7 +407,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Console.WriteLine("  B: toggle block-edit mode   left-click in block mode: add/remove block");
         Console.WriteLine("  S: stop   F: follow   P: patrol to pointer   H: chase   X: flee   Backspace: despawn selected");
         Console.WriteLine("  U: post selected at pointer   O: shuttle (press twice for both ends)   Y: off work");
-        Console.WriteLine("  D: granary at pointer   A: farm   W: woodcutter   post hands with U and they become the hands");
+        Console.WriteLine("  D: granary at pointer   A: farm   Ctrl+A: house   W: woodcutter   U: post hands");
+        Console.WriteLine("  houses are the only things that eat: one outside every catchment goes hungry");
+        Console.WriteLine("  --village starts a working settlement mid-harvest; --compression <x> sets the clock");
         Console.WriteLine("  a standing job survives an order: give one, let go, and they go back to it");
         Console.WriteLine("  N: nav / surface / slope / congestion overlays   C: colliders   V: velocity   K: paths   I: states");
         Console.WriteLine("  T: per-phase timings   M: live movement trace (cohort/slot, contacts, worst overlap)");
@@ -388,10 +434,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// notices a cart that already exists — so the first store built brings its own carts. That is a
     /// convenience of this testbed and not a mechanic: when construction is real, carts are built.
     /// </remarks>
-    private void Build(NodeKind kind, int capacity, Resource produces)
+    private void Build(NodeKind kind, int capacity, Resource produces, int occupancy = 0)
     {
         if (!pointerOnTerrain) return;
-        var id = simulation.AddNode(kind, pointerWorld, capacity, produces);
+        var id = simulation.AddNode(kind, pointerWorld, capacity, produces, occupancy: occupancy);
         Console.WriteLine(
             $"  {kind} at ({pointerWorld.X:F0}, {pointerWorld.Y:F0}) — " +
             $"{simulation.Nodes.LiveCount} node(s). Post hands with U; carts find their own work");
@@ -649,6 +695,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var hands = 0;
         foreach (ref readonly var node in simulation.Nodes.All) hands += node.Hands;
         debug.Values.Value("hands at work", hands);
+        debug.Values.Value("unhoused", simulation.UnhousedCount);
         debug.Values.Value("nodes", simulation.Nodes.LiveCount);
         debug.Values.Value("hauls", simulation.Economy.HaulsAssigned);
         debug.Values.Value("went short", simulation.Economy.Unmet.Grain + simulation.Economy.Unmet.Wood);
@@ -857,6 +904,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         detailBatch.SetInstances(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(detailInstances));
         terrainBatch.Begin(viewProjectionBytes);
         BuildObstacleInstances();
+        BuildNodeInstances();
         BuildNavigationOverlay();
         BuildPathDebug();
         BuildVelocityDebug();
@@ -1071,6 +1119,75 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
     }
 
+    /// <summary>
+    /// Draws the nodes, so a settlement is something you can see rather than infer.
+    /// </summary>
+    /// <remarks>
+    /// A block per node, coloured by kind and raised by how full it is: a granary at capacity stands a
+    /// metre taller than an empty one. It is a placeholder that happens to say the useful thing — the
+    /// stock level is readable across the map without selecting anything, which is what §2's
+    /// low-attention mode needs from a building before it needs a model.
+    /// </remarks>
+    private void BuildNodeInstances()
+    {
+        foreach (ref readonly var node in simulation.Nodes.All)
+        {
+            if (!node.IsAlive) continue;
+            if (node.IsPile)
+            {
+                DrawPile(in node);
+                continue;
+            }
+
+            var color = node.Kind switch
+            {
+                NodeKind.Granary => GranaryColor,
+                NodeKind.Farm => FarmColor,
+                NodeKind.Woodcutter => WoodcutterColor,
+                NodeKind.House => HouseColor,
+                _ => DepotColor,
+            };
+            // A store's height reads how full it is; a house's reads how full <em>it</em> is, which is
+            // people. Both are the same idea: the useful number legible from across the map.
+            var fullness = node.IsSink
+                ? node.Occupancy <= 0 ? 0f : MathF.Min(1f, node.Occupants / (float)node.Occupancy)
+                : node.Capacity <= 0 ? 0f : MathF.Min(1f, node.Stock.Total / (float)node.Capacity);
+            var width = node.Stores ? 3.4f : node.IsSink ? 2.0f : 2.4f;
+            var height = 0.9f + fullness * 1.6f;
+            var ground = simulation.Terrain.SampleHeight(node.Position);
+            terrainBatch.Add(
+                Matrix4x4.CreateScale(width, height, width) *
+                Matrix4x4.CreateTranslation(node.Position.X, ground + height * 0.5f, node.Position.Y),
+                color);
+        }
+    }
+
+    /// <summary>
+    /// A heap of goods on the ground, low and wide, the colour of what it is.
+    /// </summary>
+    /// <remarks>
+    /// Drawn small and flat so it reads as spillage rather than as a building — a thing to go and fetch.
+    /// Which is the point: a cart lost on the road leaves this behind, and whoever gets to it first has
+    /// it, so it needs to be visible from across the map without being mistaken for a granary.
+    /// </remarks>
+    private void DrawPile(in EconomyNode pile)
+    {
+        var ground = simulation.Terrain.SampleHeight(pile.Position);
+        foreach (var resource in Resources.All)
+        {
+            var units = pile.Stock[resource];
+            if (units <= 0) continue;
+            // A heap of forty grain is a cart's worth and about a metre across; bigger heaps spread
+            // rather than tower, because a pile of grain does.
+            var spread = 0.7f + MathF.Sqrt(units / 40f) * 0.9f;
+            var height = 0.22f + MathF.Min(0.5f, units / 200f);
+            terrainBatch.Add(
+                Matrix4x4.CreateScale(spread, height, spread) *
+                Matrix4x4.CreateTranslation(pile.Position.X, ground + height * 0.5f, pile.Position.Y),
+                resource == Resource.Grain ? GrainColor : WoodColor);
+        }
+    }
+
     private void BuildObstacleInstances()
     {
         var grid = simulation.Placement;
@@ -1223,11 +1340,29 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 unitBatch.Add(ringModel, SelectionColor);
             }
 
-            // Height tracks radius so a smaller unit reads as a smaller body rather
-            // than a thinner column of the same stature.
-            var bodyHeight = AgentDefaults.BodyHeight * bodyScale;
+            // Width is the footprint; height is not. Height used to track radius one for one, which was
+            // fine when there was a single body class and became silly the moment there were three: a
+            // 0.90 m wagon is 2.4 times a villager across, and drawing it 2.4 times as tall made it a
+            // five-metre crate. A cube root or so keeps the original intent — a smaller body still
+            // reads as a smaller body — while letting a wide thing be wide: the wagon comes out 2.4
+            // times across and a third taller, which is what a cart looks like.
+            var bodyHeight = AgentDefaults.BodyHeight * MathF.Pow(bodyScale, 0.3f);
             var unitModel = Matrix4x4.CreateScale(bodyScale, bodyHeight, bodyScale) *
                             Matrix4x4.CreateTranslation(position.X, height + bodyHeight * 0.5f, position.Y);
+            // A load is physically on the body, so it is drawn on the body: a cart you can see is loaded
+            // is a cart you can see is worth intercepting, which is the whole of §7's return trip.
+            if (agent.Jobs.CarriedUnits > 0)
+            {
+                var loadWidth = bodyScale * 0.72f;
+                var loadHeight = 0.18f + 0.34f * MathF.Min(1f, agent.Jobs.CarriedUnits /
+                    MathF.Max(1f, agent.CarryCapacity));
+                unitBatch.Add(
+                    Matrix4x4.CreateScale(loadWidth, loadHeight, loadWidth) *
+                    Matrix4x4.CreateTranslation(
+                        position.X, height + bodyHeight + loadHeight * 0.5f, position.Y),
+                    agent.Jobs.Carrying == Resource.Grain ? GrainColor : WoodColor);
+            }
+
             var crowdYielding = agent.IsVisiblyYielding;
             var unitColor = crowdYielding
                 ? QueuedUnitColor
@@ -1453,7 +1588,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 Build(NodeKind.Granary, capacity: 2000, Resource.Grain);
                 break;
             case Key.A:
-                Build(NodeKind.Farm, capacity: 150, Resource.Grain);
+                // Ctrl to place the sink rather than the source: houses are the only thing in the
+                // economy that consumes, so they want a key, and every letter was already taken.
+                if (additiveSelection) Build(NodeKind.House, capacity: 0, Resource.Grain, occupancy: 4);
+                else Build(NodeKind.Farm, capacity: 150, Resource.Grain);
                 break;
             case Key.W:
                 Build(NodeKind.Woodcutter, capacity: 150, Resource.Wood);

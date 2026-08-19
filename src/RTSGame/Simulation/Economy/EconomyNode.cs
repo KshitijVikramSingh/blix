@@ -33,6 +33,44 @@ internal enum NodeKind
 
     /// <summary>Stores at the frontier, so a distant holding runs without a hauler each way.</summary>
     ForwardDepot,
+
+    /// <summary>
+    /// Where people live, and the only place a resource stops being physical.
+    /// </summary>
+    /// <remarks>
+    /// A house is a <em>clocked sink</em>: it draws for its occupants, and what it draws comes out of the
+    /// store whose catchment it stands in without anybody carrying it. That is not a shortcut, it is
+    /// §6's scoping decision made explicit — "households draw from their catchment directly", because a
+    /// hauler per household would put hauler count in proportion to population, which is hundreds,
+    /// instead of buildings, which is tens. The difference between a hauling network you play and a
+    /// traffic simulation you watch.
+    /// <para>
+    /// So resources are physical everywhere except at the last step. They are grown at a yard, carried
+    /// by a cart, stored in a granary, dropped on the road if the cart dies — and only when a household
+    /// eats do they leave the world. Everything about distribution falls out of that: reach decides
+    /// whether a house is supplied at all, so you cannot sprawl past your granaries, and a house outside
+    /// every catchment goes hungry however full the stores are.
+    /// </para>
+    /// </remarks>
+    House,
+
+    /// <summary>
+    /// Goods on the ground where somebody dropped them.
+    /// </summary>
+    /// <remarks>
+    /// A resource is a physical thing, so it never stops existing because whoever was carrying it did.
+    /// A cart destroyed on the road leaves its load lying there until something comes for it — one of
+    /// yours, or one of theirs. That is what makes §7's interception worth doing: killing a loaded
+    /// raider does not deny them the grain, it <em>returns</em> it, and the return trip is the
+    /// defender's window precisely because the loot is recoverable at the end of it.
+    /// <para>
+    /// A pile is a node because that is all a pile is: stock at a place with nobody looking after it.
+    /// The hauling board already looks for stock in the wrong place, so it collects piles without being
+    /// taught what one is — and conservation needs no term for dropped goods, because a pile's contents
+    /// are stored like anything else's.
+    /// </para>
+    /// </remarks>
+    Pile,
 }
 
 /// <summary>
@@ -70,14 +108,59 @@ internal struct EconomyNode
     /// <summary>Catchment budget in seconds at hauler pace, for a node that owns one.</summary>
     public float CatchmentSeconds;
 
+    /// <summary>People this house has room for.</summary>
+    public int Occupancy;
+
+    /// <summary>People currently living here. Counted every tick, like hands.</summary>
+    public int Occupants;
+
+    /// <summary>
+    /// Appetites of the people living here, added up.
+    /// </summary>
+    /// <remarks>
+    /// Summed rather than averaged, and summed rather than taken as occupants times one appetite,
+    /// because a household of two villagers and a soldier eats what those three eat. §6 says soldiers
+    /// eat more, and this is where that arrives at a granary.
+    /// </remarks>
+    public float AppetiteSum;
+
+    /// <summary>
+    /// The store this sink draws from, or none if it stands outside every catchment.
+    /// </summary>
+    /// <remarks>
+    /// Bound per node rather than per body, and only when the set of stores changes — a house does not
+    /// move, so the question of which granary reaches it has a static answer. That is also why this
+    /// moved off the bodies: asking every villager every few seconds which store fed it meant a routing
+    /// query per person, and the answer never depended on the person.
+    /// </remarks>
+    public NodeId Supply;
+
+    /// <summary>Route seconds from here to <see cref="Supply"/>, for the overlay.</summary>
+    public float SupplySeconds;
+
+    /// <summary>Node-network revision the supply binding was made against.</summary>
+    public int SupplyRevision;
+
     /// <summary>Collider standing in for this node, so bodies do not walk through it.</summary>
     public ColliderId Collider;
 
     public bool IsAlive;
 
     public readonly bool Produces_ => Kind is NodeKind.Farm or NodeKind.Woodcutter;
+
+    /// <summary>Somewhere goods can be delivered to. A pile is not: nobody delivers to a pile.</summary>
     public readonly bool Stores => Kind is NodeKind.Granary or NodeKind.ForwardDepot;
+
     public readonly bool OwnsCatchment => Kind is NodeKind.Granary or NodeKind.ForwardDepot;
+
+    /// <summary>Goods lying on the ground, which anybody may come for.</summary>
+    public readonly bool IsPile => Kind == NodeKind.Pile;
+
+    /// <summary>A clocked sink: it draws, and it is the last place a resource is physical.</summary>
+    public readonly bool IsSink => Kind == NodeKind.House;
+
+    /// <summary>Room for another household member.</summary>
+    public readonly int Housing => Math.Max(0, Occupancy - Occupants);
 
     /// <summary>Room left for more of this resource.</summary>
     public readonly int RoomFor(Resource resource) => Math.Max(0, Capacity - Stock[resource]);
@@ -126,7 +209,10 @@ internal sealed class NodeStore
         node.IsAlive = true;
         nodes[Count++] = node;
         LiveCount++;
-        Revision++;
+        // Only a node that feeds somebody changes who is fed by what. A sack of grain appearing on the
+        // road does not, and bumping the revision for one would send every body in the world to
+        // reconsider which granary supplies it every time a cart was destroyed.
+        if (node.OwnsCatchment) Revision++;
         return id;
     }
 
@@ -134,12 +220,15 @@ internal sealed class NodeStore
     {
         if (!Contains(id)) return false;
         ref var node = ref nodes[id.Value];
+        var fed = node.OwnsCatchment;
         node.IsAlive = false;
         node.Stock = default;
         node.Pending = default;
         node.Hands = 0;
+        node.Occupants = 0;
+        node.AppetiteSum = 0f;
         LiveCount--;
-        Revision++;
+        if (fed) Revision++;
         return true;
     }
 

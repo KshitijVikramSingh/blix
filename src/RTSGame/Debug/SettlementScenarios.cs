@@ -38,6 +38,9 @@ internal static class SettlementScenarios
     /// <summary>Hauler carts, at 0.55 m and 40 units.</summary>
     private const int Carts = 5;
 
+    /// <summary>People per household. Houses are the clocked sinks; nothing else eats.</summary>
+    private const int Occupancy = 4;
+
     /// <summary>
     /// Wagons, at 0.90 m and 200 units — deliberately, because of debt 7.
     /// </summary>
@@ -71,10 +74,11 @@ internal static class SettlementScenarios
             $"{world.Nodes.LiveCount} nodes, {years:F2} year(s)");
         Console.WriteLine(
             $"  {Farms} farms and {Woodcutters} woodcutters at one hand each, {Carts} carts and " +
-            $"{Wagons} wagons, one granary of {world.Nodes.Get(granary).Capacity:N0}");
+            $"{Wagons} wagons, one granary of {world.Nodes.Get(granary).Capacity:N0}, " +
+            $"housing for {Occupancy} per household");
         Console.WriteLine(
             "        date        | grain | wood  | hands | hauls | carrying | grain-left | wood-left | " +
-            "short | stalled | jam | ms/tick");
+            "short | unhoused | stalled | jam | ms/tick");
 
         var reported = Season.Winter;
         for (var tick = 1; tick <= totalTicks; tick++)
@@ -117,8 +121,28 @@ internal static class SettlementScenarios
     private static SimulationWorld Build(float extentMeters, out NodeId granary)
     {
         var world = new SimulationWorld(extentMeters);
-        var centre = Vector2.Zero;
-        granary = world.AddNode(NodeKind.Granary, centre, capacity: 4000);
+        granary = Populate(world, Farms, Woodcutters, Carts, Wagons, ringRadius: 36f);
+        return world;
+    }
+
+    /// <summary>
+    /// Lays a working settlement into an existing world, and returns its granary.
+    /// </summary>
+    /// <remarks>
+    /// Shared by the headless gate and the live game, deliberately: two settlement definitions would
+    /// drift, and the one thing worth being able to say about the thing on screen is that it is the
+    /// same arrangement the year-long run asserts about.
+    /// </remarks>
+    public static NodeId Populate(
+        SimulationWorld world,
+        int farms,
+        int woodcutters,
+        int carts,
+        int wagons,
+        float ringRadius,
+        Vector2 centre = default)
+    {
+        var granary = world.AddNode(NodeKind.Granary, centre, capacity: 4000);
 
         // Spring harvests nothing, so a settlement that starts in spring starts on its stores: 22
         // mouths eat about 1,320 grain before the first crop is tended. Seeded rather than conjured —
@@ -126,13 +150,27 @@ internal static class SettlementScenarios
         world.SeedStock(granary, Resource.Grain, 2000);
         world.SeedStock(granary, Resource.Wood, 1000);
 
+        // Houses ring the granary well inside its catchment, because a household outside every
+        // catchment is a household that goes hungry however full the stores are.
+        var people = farms + woodcutters + carts + wagons;
+        var households = (people + Occupancy - 1) / Occupancy;
+        for (var i = 0; i < households; i++)
+        {
+            var angle = (i + 0.5f) / households * MathF.Tau;
+            world.AddNode(
+                NodeKind.House,
+                centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * (ringRadius * 0.35f),
+                capacity: 0,
+                occupancy: Occupancy);
+        }
+
         var producers = new List<(NodeId Node, Vector2 At)>();
-        var count = Farms + Woodcutters;
+        var count = farms + woodcutters;
         for (var i = 0; i < count; i++)
         {
             var angle = i / (float)count * MathF.Tau;
-            var at = centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 36f;
-            var farm = i < Farms;
+            var at = centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * ringRadius;
+            var farm = i < farms;
             producers.Add((
                 world.AddNode(
                     farm ? NodeKind.Farm : NodeKind.Woodcutter,
@@ -149,17 +187,18 @@ internal static class SettlementScenarios
             var (node, at) = producers[i];
             var hand = world.SpawnAgent(at + new Vector2(1.4f, 0f), UnitType.Villager);
             world.QueueAssign(new[] { hand }, Assignment.Hold(at, Stagger(20f, i, producers.Count)));
+            _ = node;
         }
 
-        for (var i = 0; i < Carts + Wagons; i++)
+        for (var i = 0; i < carts + wagons; i++)
         {
-            var angle = i / (float)(Carts + Wagons) * MathF.Tau;
+            var angle = i / (float)(carts + wagons) * MathF.Tau;
             world.SpawnAgent(
                 centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 5f,
-                i < Carts ? UnitType.HaulerCart : UnitType.Wagon);
+                i < carts ? UnitType.HaulerCart : UnitType.Wagon);
         }
 
-        return world;
+        return granary;
     }
 
     /// <summary>
@@ -198,7 +237,8 @@ internal static class SettlementScenarios
             $"  {world.Date,-18} | {grain.Stored,5:N0} | {wood.Stored,5:N0} | {hands,5} | " +
             $"{world.Economy.HaulsAssigned,5:N0} | {carried.Total,8:N0} | " +
             $"{Seasons(grain.Seasons),10} | {Seasons(wood.Seasons),9} | " +
-            $"{world.Economy.Unmet.Grain + world.Economy.Unmet.Wood,5:N0} | {stalled,7} | " +
+            $"{world.Economy.Unmet.Grain + world.Economy.Unmet.Wood,5:N0} | " +
+            $"{world.UnhousedCount,8} | {stalled,7} | " +
             $"{world.Congestion.Peak,3:F0} | " +
             $"{world.Timings.Format(world.Agents.Count, world.TickNumber).Split("total ")[1].Split(" ms")[0]}");
     }

@@ -318,7 +318,9 @@ which is what a correct memo looks like:
   `C` colliders, `V` velocity, `K` paths, `I` states, `Backspace` despawn selection,
   `Z` camera-follows-selection, `R` recentre camera
 - In-game economy: `D` builds a granary at the pointer (and turns four hauler carts loose the first
-  time), `A` a farm, `W` a woodcutter. Post villagers at a farm with `U` and they *are* its hands — the
+  time), `A` a farm, **`Ctrl+A` a house**, `W` a woodcutter. Houses are the only things that consume, so
+  a settlement with no house never eats and one whose houses sit outside every catchment starves beside a
+  full granary. Post villagers at a farm with `U` and they *are* its hands — the
   farm produces because they are standing in it. The panel's **settlement** scope is the one-verb HUD:
   what is stored and how many seasons it lasts.
 - In-game jobs: `U` posts the selection at the pointer, `O` twice lays out a shuttle between two

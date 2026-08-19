@@ -226,6 +226,7 @@ internal sealed class SimulationWorld
         int capacity,
         Resource produces = Resource.Grain,
         float catchmentSeconds = 60f,
+        int occupancy = 0,
         FactionId? faction = null)
     {
         var resolved = faction ?? new FactionId(0);
@@ -238,6 +239,7 @@ internal sealed class SimulationWorld
             Capacity = capacity,
             Produces = produces,
             CatchmentSeconds = catchmentSeconds,
+            Occupancy = occupancy,
         });
         // Interactable rather than solid: a granary a hauler cannot walk up to is a granary nobody can
         // use, and the yard a crowd settles into is the jobs layer's business rather than the collider
@@ -252,6 +254,70 @@ internal sealed class SimulationWorld
             at);
         return id;
     }
+
+    /// <summary>People with no house to live in, which §6 wants named as a blocked sink.</summary>
+    /// <remarks>
+    /// Not an error and not starvation exactly: an unhoused body draws nothing, so a settlement with
+    /// stores rising and people unhoused is the case §6 asks the interface to say out loud — "grain
+    /// surplus rising, population capped by housing" — rather than one the player has to deduce.
+    /// </remarks>
+    public int UnhousedCount
+    {
+        get
+        {
+            var unhoused = 0;
+            foreach (ref readonly var agent in Agents.All)
+            {
+                if (agent.IsAlive && !Nodes.Contains(agent.Home.House)) unhoused++;
+            }
+
+            return unhoused;
+        }
+    }
+
+    /// <summary>Puts whatever a body is carrying on the ground where it stands.</summary>
+    /// <remarks>
+    /// Merged into a pile already lying there if one is close enough, so a lane where several carts were
+    /// lost is a few heaps rather than one per cart. Nothing is created or destroyed: the units move
+    /// from the body's back to a place, and a pile's contents are stored like any other node's — which
+    /// is why dropped goods need no term in the conservation identity at all.
+    /// </remarks>
+    internal NodeId DropCargo(ref AgentState agent)
+    {
+        if (agent.Jobs.CarriedUnits <= 0) return NodeId.None;
+        var resource = agent.Jobs.Carrying;
+        var units = agent.Jobs.CarriedUnits;
+        agent.Jobs.CarriedUnits = 0;
+
+        foreach (ref var existing in Nodes.MutableSpan())
+        {
+            if (!existing.IsAlive || !existing.IsPile) continue;
+            if (Vector2.DistanceSquared(existing.Position, agent.Position) > PileMergeDistanceSquared)
+            {
+                continue;
+            }
+
+            existing.Stock.Add(resource, units);
+            existing.Capacity = Math.Max(existing.Capacity, existing.Stock[resource]);
+            return existing.Id;
+        }
+
+        var pile = Nodes.Add(new EconomyNode
+        {
+            Kind = NodeKind.Pile,
+            // Nobody's. A heap on the road is there for whoever reaches it, which is what makes looting
+            // a thing that happens rather than a rule that has to be written.
+            Faction = FactionId.None,
+            Position = agent.Position,
+            Capacity = units,
+            CatchmentSeconds = 0f,
+        });
+        Nodes.Get(pile).Stock.Add(resource, units);
+        return pile;
+    }
+
+    /// <summary>How near a heap has to be to have goods added to it rather than a new one started.</summary>
+    private static float PileMergeDistanceSquared => 2.5f * 2.5f;
 
     /// <summary>Puts stock into a node by hand, recorded so conservation still balances.</summary>
     public void SeedStock(NodeId id, Resource resource, int units)
@@ -402,15 +468,10 @@ internal sealed class SimulationWorld
         {
             if (!Agents.Contains(id)) continue;
             ref var agent = ref Agents.Get(id);
-            // Whatever it was carrying goes with it. Recorded rather than silently dropped, because
-            // conservation is checked exactly and a raider killed with somebody's grain on its back is
-            // Session 8's normal case rather than an anomaly.
-            if (agent.Jobs.CarriedUnits > 0)
-            {
-                economy.RecordLost(agent.Jobs.Carrying, agent.Jobs.CarriedUnits);
-                agent.Jobs.CarriedUnits = 0;
-            }
-
+            // Whatever it was carrying falls where it stood. A resource is a physical thing and does
+            // not stop existing because its carrier did — which is exactly what makes intercepting a
+            // loaded raider worth doing, since killing it returns the grain rather than denying it.
+            DropCargo(ref agent);
             CompletePath(ref agent);
             Colliders.Remove(agent.Colliders.Movement);
             Colliders.Remove(agent.Colliders.Avoidance);

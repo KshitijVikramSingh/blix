@@ -227,6 +227,7 @@ public static class Program
 
         var traceMovement = args.Contains("--trace-movement");
         var startTerrainLab = args.Contains("--terrain-lab");
+        var startVillage = args.Contains("--village");
         var debugAll = args.Contains("--debug-all");
         var extent = Value(args, "--extent") is { } raw
             ? float.Parse(raw)
@@ -240,7 +241,8 @@ public static class Program
             startTerrainLab,
             debugAll,
             extent,
-            compression);
+            compression,
+            startVillage);
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
     }

@@ -125,6 +125,7 @@ internal static class SimulationSelfTests
         Check("the year adds up and its rates are normalised", TheYearAddsUp());
         Check("a settlement feeds itself without losing a grain", ASettlementFeedsItself());
         Check("a working settlement runs identically twice", TheEconomyRunsIdenticallyTwice());
+        Check("dropped cargo stays in the world and is recovered", DroppedCargoStaysInTheWorld());
         Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
@@ -3152,6 +3153,7 @@ internal static class SimulationSelfTests
     {
         var granary = world.AddNode(NodeKind.Granary, new Vector2(-4f, 4f), capacity: 200);
         world.SeedStock(granary, Resource.Grain, 25);
+        world.AddNode(NodeKind.House, new Vector2(-1f, 3f), capacity: 0, occupancy: 24);
         var farm = new Vector2(8f, -6f);
         world.AddNode(NodeKind.Farm, farm, capacity: 60);
         var hand = world.SpawnAgent(farm + new Vector2(1.2f, 0f), UnitType.Villager);
@@ -3235,6 +3237,10 @@ internal static class SimulationSelfTests
         world.StartAtSeconds(3100f);
         var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 400);
         world.SeedStock(granary, Resource.Grain, 40);
+        // A house, because houses are the only things that eat. Inside the granary's catchment, so it
+        // is actually supplied — a household outside every catchment goes hungry however full the
+        // stores are, which is a different test.
+        world.AddNode(NodeKind.House, new Vector2(3f, -3f), capacity: 0, occupancy: 8);
 
         var farms = new List<Vector2>();
         for (var i = 0; i < 3; i++)
@@ -3305,6 +3311,7 @@ internal static class SimulationSelfTests
         var granary = world.AddNode(NodeKind.Granary, new Vector2(0f, -4f), capacity: 300);
         world.SeedStock(granary, Resource.Grain, 30);
         world.SeedStock(granary, Resource.Wood, 30);
+        world.AddNode(NodeKind.House, new Vector2(3f, -4f), capacity: 0, occupancy: 8);
 
         // Two producers of each resource sharing one granary, so the board has ties to break and two
         // kinds of cargo to price.
@@ -3326,6 +3333,85 @@ internal static class SimulationSelfTests
         }
 
         return world;
+    }
+
+    /// <summary>
+    /// A carrier destroyed leaves its load on the ground, and somebody else comes for it.
+    /// </summary>
+    /// <remarks>
+    /// A resource is a physical thing. It does not stop existing because whoever was carrying it did, and
+    /// this was got wrong first time round: a body dying with cargo was booked to a "lost" ledger, which
+    /// quietly made killing a loaded raider the most effective way of destroying grain. §7 wants the
+    /// opposite — <em>"the return trip is the defender's window"</em> only means anything if intercepting
+    /// a raider <b>returns</b> the loot rather than denying it, and that requires the loot to be lying
+    /// there afterwards.
+    /// <para>
+    /// So this is §7's interception in miniature, with the combat left out because none exists yet: load
+    /// a cart, destroy it mid-journey, and require the grain to be on the ground, to be collected by
+    /// another cart, to reach the granary, and for not one unit to have gone missing at any point. The
+    /// conservation identity got <em>shorter</em> when this was fixed, which is usually the sign that a
+    /// design correction was the right one.
+    /// </para>
+    /// </remarks>
+    private static bool DroppedCargoStaysInTheWorld()
+    {
+        var world = new SimulationWorld();
+        world.StartAtSeconds(3100f);
+        var granary = world.AddNode(NodeKind.Granary, new Vector2(-9f, 0f), capacity: 400);
+        var farm = new Vector2(9f, 0f);
+        world.AddNode(NodeKind.Farm, farm, capacity: 200);
+        world.SeedStock(world.Nodes.All[1].Id, Resource.Grain, 60);
+
+        // Two carts: one to be destroyed carrying, one to come back for what it dropped.
+        var doomed = world.SpawnAgent(new Vector2(7f, 0f), UnitType.HaulerCart);
+        world.SpawnAgent(new Vector2(-7f, 0f), UnitType.HaulerCart);
+
+        // Let the board load the first cart and get it out on the road.
+        var carried = 0;
+        for (var tick = 0; tick < 30 * 60 && carried == 0; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            if (world.Agents.Contains(doomed)) carried = world.Agents.Get(doomed).Jobs.CarriedUnits;
+        }
+
+        if (carried == 0)
+        {
+            Console.WriteLine("    nothing was ever loaded, so there is nothing to drop");
+            return false;
+        }
+
+        var beforeDrop = world.Economy.Discrepancy(world.Nodes, world.Agents);
+        var where = world.Agents.Get(doomed).Position;
+        world.DespawnAgents(new[] { doomed });
+
+        // On the ground, where it fell, belonging to nobody.
+        var pile = NodeId.None;
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (node.IsAlive && node.IsPile) pile = node.Id;
+        }
+
+        var dropped = pile.IsValid ? world.Nodes.Get(pile).Stock.Grain : 0;
+        var nearby = pile.IsValid && Vector2.Distance(world.Nodes.Get(pile).Position, where) < 0.01f;
+        var afterDrop = world.Economy.Discrepancy(world.Nodes, world.Agents);
+
+        // And the survivor fetches it. Two minutes is generous for twenty metres.
+        var recovered = false;
+        var worstDrift = 0L;
+        for (var tick = 0; tick < 30 * 150 && !recovered; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            worstDrift = Math.Max(worstDrift, Math.Abs(drift.Grain));
+            recovered = !world.Nodes.Contains(pile) && world.Nodes.Get(granary).Stock.Grain >= dropped;
+        }
+
+        var passed = dropped == carried && nearby && recovered && worstDrift == 0 &&
+                     beforeDrop.Grain == 0 && afterDrop.Grain == 0;
+        Console.WriteLine(
+            $"    {carried} grain carried, {dropped} on the ground where it fell (matched position: " +
+            $"{nearby}), recovered: {recovered}, worst drift: {worstDrift}");
+        return passed;
     }
 
     private static void Tick(SimulationWorld world, int count)

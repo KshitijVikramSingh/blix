@@ -1,35 +1,33 @@
 namespace RTSGame.Simulation.Economy;
 
 /// <summary>
-/// Which store feeds this body, and when it will ask again.
+/// Where this body lives.
 /// </summary>
 /// <remarks>
-/// §6 inverts the obvious arrangement: a source owns a catchment and consumers inside it are bound to
-/// it, rather than every consumer asking every tick where the nearest source is. This is a body's end
-/// of that binding, and it is re-asked on a timer rather than continuously because the answer only
-/// changes when the body has walked somewhere or the network has changed.
+/// A body's tie to the economy is its household, not a store. It used to be a store — every villager
+/// asked every few seconds which granary was nearest it in route seconds — and that was wrong twice
+/// over: it put a routing query per person on the tick when the answer never depended on the person,
+/// and it meant a farmhand posted at the edge of a holding could starve while living in a house next
+/// door to a full granary.
 /// <para>
-/// A body bound to nothing is outside every catchment and goes without, which is what makes reach
-/// decide whether a place is supplied at all — and therefore what makes settlement layout a decision
-/// rather than decoration. Plain data, so it saves and fingerprints with the rest of the body.
+/// So the catchment question is asked of the <em>house</em>, which does not move, and the body only has
+/// to know which house it belongs to. Plain data, so it saves and fingerprints with the rest of the
+/// body.
 /// </para>
 /// </remarks>
-internal struct AgentSupply
+internal struct AgentHome
 {
-    /// <summary>The store this body draws from, or none if it is outside every catchment.</summary>
-    public NodeId Node;
+    /// <summary>The household this body belongs to, or none if there is no room anywhere.</summary>
+    /// <remarks>
+    /// None is a signal rather than an error: §6 wants a persistent surplus to name its blocked sink,
+    /// and "grain rising, population capped by housing" is exactly a settlement with unhoused people in
+    /// it.
+    /// </remarks>
+    public NodeId House;
 
-    /// <summary>Seconds until this body asks again which store is nearest.</summary>
+    /// <summary>Seconds until this body looks for a place to live again.</summary>
     public float RebindSeconds;
 
     /// <summary>Node-network revision the binding was made against.</summary>
-    /// <remarks>
-    /// So building or losing a granary re-binds everybody on the next tick rather than up to a rebind
-    /// period later, which is the case a player actually watches: place a second granary and the
-    /// nearer half of the settlement should start drawing from it.
-    /// </remarks>
     public int Revision;
-
-    /// <summary>Route seconds from this body to its store, for the overlay and for hauling.</summary>
-    public float Seconds;
 }

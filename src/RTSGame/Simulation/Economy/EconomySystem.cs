@@ -87,7 +87,7 @@ internal sealed class EconomySystem
     /// <summary>Share below which a store will pull stock from a fuller one.</summary>
     internal static float LowWater = 0.25f;
 
-    /// <summary>Seconds between a body reconsidering which store feeds it.</summary>
+    /// <summary>Seconds between a body looking for somewhere to live.</summary>
     internal static float RebindSeconds = 8f;
 
     /// <summary>
@@ -108,10 +108,16 @@ internal sealed class EconomySystem
 
     /// <summary>Everything ever produced, consumed, or seeded into the world by hand.</summary>
     /// <remarks>
-    /// The three ledgers conservation is checked against, and the reason stock is counted in whole
-    /// units: <c>Seeded + Produced - Consumed</c> must equal what is stored plus what is being carried,
+    /// The ledgers conservation is checked against, and the reason stock is counted in whole units:
+    /// <c>Seeded + Produced - Consumed</c> must equal what is stored plus what is being carried,
     /// exactly, with no tolerance. A float ledger over a year of ticks could only ever be checked
     /// against a tolerance somebody picked, which is a much weaker claim than the gate asks for.
+    /// <para>
+    /// There is deliberately no term for goods lost. Nothing is lost: a body destroyed while carrying
+    /// leaves a heap where it fell, and a heap is a node whose contents are stored like any other's. The
+    /// identity got <em>shorter</em> when resources became physical, which is usually the sign that a
+    /// design correction was the right one.
+    /// </para>
     /// </remarks>
     public ResourceTotals Produced { get; private set; }
 
@@ -121,15 +127,6 @@ internal sealed class EconomySystem
 
     /// <summary>Demand that arrived at an empty store. The signal, not an error.</summary>
     public ResourceTotals Unmet { get; private set; }
-
-    /// <summary>Units that left the world on a body that died carrying them.</summary>
-    /// <remarks>
-    /// Part of the conservation identity rather than an afterthought: a cart destroyed with grain on it
-    /// has removed that grain from the economy, and a ledger that did not say so would read as drift.
-    /// Session 8 makes this the ordinary case — a raider killed on the way home is the defender's whole
-    /// objective.
-    /// </remarks>
-    public ResourceTotals Lost { get; private set; }
 
     /// <summary>Haul jobs handed out since the world began.</summary>
     public long HaulsAssigned { get; private set; }
@@ -146,14 +143,6 @@ internal sealed class EconomySystem
         var seeded = Seeded;
         seeded.Add(resource, units);
         Seeded = seeded;
-    }
-
-    /// <summary>Records stock that left the world on a body that died carrying it.</summary>
-    public void RecordLost(Resource resource, int units)
-    {
-        var lost = Lost;
-        lost.Add(resource, units);
-        Lost = lost;
     }
 
     /// <summary>The store of this faction with the most room for a resource, other than one.</summary>
@@ -192,7 +181,7 @@ internal sealed class EconomySystem
         var difference = default(ResourceTotals);
         foreach (var resource in Resources.All)
         {
-            var expected = Seeded[resource] + Produced[resource] - Consumed[resource] - Lost[resource];
+            var expected = Seeded[resource] + Produced[resource] - Consumed[resource];
             difference[resource] = stored[resource] + carried[resource] - expected;
         }
 
@@ -221,10 +210,10 @@ internal sealed class EconomySystem
     {
         var stored = nodes.TotalStored()[resource];
         var draw = 0f;
-        foreach (ref readonly var agent in agents.All)
+        foreach (ref readonly var node in nodes.All)
         {
-            if (!agent.IsAlive) continue;
-            draw += EconomyRates.DrawPerSecond(resource, season, EconomyRates.AppetiteOf(agent));
+            if (!node.IsAlive || !node.IsSink) continue;
+            draw += EconomyRates.DrawPerSecond(resource, season, node.AppetiteSum);
         }
 
         var produced = 0f;
@@ -257,12 +246,14 @@ internal sealed class EconomySystem
     {
         CountHands(nodes, agents);
         Produce(nodes, season, deltaSeconds);
-        BindSupply(nodes, agents, deltaSeconds, price);
-        Consume(nodes, agents, season, deltaSeconds);
+        BindHomes(nodes, agents, deltaSeconds);
+        BindCatchments(nodes, price);
+        Consume(nodes, season, deltaSeconds);
 
         boardCooldown -= deltaSeconds;
         if (boardCooldown > 0f) return;
         boardCooldown = BoardIntervalSeconds;
+        SweepEmptyPiles(nodes);
         RunBoard(nodes, agents, price);
     }
 
@@ -327,104 +318,155 @@ internal sealed class EconomySystem
     }
 
     /// <summary>
-    /// Binds each body to the store that feeds it, which is the cheapest one within its catchment.
+    /// Puts each body in a household, and counts who lives where.
     /// </summary>
     /// <remarks>
-    /// §6 inverts the obvious question: rather than every consumer asking every tick where the nearest
-    /// source is, a source owns a catchment and consumers inside it are bound to it. This is that,
-    /// asked once every <see cref="RebindSeconds"/> per body instead of every tick, and in seconds
-    /// rather than in metres — so a catchment follows roads and stops at a ridge without anybody
-    /// writing that down.
-    /// <para>
-    /// The budget is quoted at hauler pace and route seconds are at the router's reference pace, so it
-    /// is converted before being compared. Skipping that conversion sizes every catchment by the ratio
-    /// of the two speeds, which is how the mechanic was switched off the first time.
-    /// </para>
+    /// Cheap and spatial only in that a body prefers a nearer house: this is straight-line distance
+    /// rather than route seconds, because where somebody sleeps is not a logistics decision and paying
+    /// for a routing query per person per rebind is exactly what moving the catchment onto the houses
+    /// was for.
     /// </remarks>
-    private static void BindSupply(
-        NodeStore nodes,
-        AgentStore agents,
-        float deltaSeconds,
-        TravelPrice price)
+    private static void BindHomes(NodeStore nodes, AgentStore agents, float deltaSeconds)
     {
+        var houses = nodes.MutableSpan();
+        for (var i = 0; i < houses.Length; i++)
+        {
+            if (!houses[i].IsSink) continue;
+            houses[i].Occupants = 0;
+            houses[i].AppetiteSum = 0f;
+        }
+
         var bodies = agents.MutableSpan();
         for (var i = 0; i < bodies.Length; i++)
         {
             ref var agent = ref bodies[i];
             if (!agent.IsAlive) continue;
-            agent.Supply.RebindSeconds -= deltaSeconds;
-            var bound = agent.Supply.Node.IsValid && nodes.Contains(agent.Supply.Node);
-            if (bound && agent.Supply.RebindSeconds > 0f && agent.Supply.Revision == nodes.Revision)
+            agent.Home.RebindSeconds -= deltaSeconds;
+            var housed = agent.Home.House.IsValid && nodes.Contains(agent.Home.House);
+            var settled = housed &&
+                          agent.Home.RebindSeconds > 0f &&
+                          agent.Home.Revision == nodes.Revision;
+            if (settled)
             {
+                MoveIn(ref nodes.Get(agent.Home.House), in agent);
                 continue;
             }
 
-            agent.Supply.RebindSeconds = RebindSeconds;
-            agent.Supply.Revision = nodes.Revision;
-            agent.Supply.Node = NodeId.None;
-            var best = float.PositiveInfinity;
-            foreach (ref readonly var node in nodes.All)
+            agent.Home.RebindSeconds = RebindSeconds;
+            agent.Home.Revision = nodes.Revision;
+            agent.Home.House = NodeId.None;
+            var nearest = float.PositiveInfinity;
+            foreach (ref readonly var house in nodes.All)
             {
-                if (!node.IsAlive || !node.OwnsCatchment || node.Faction != agent.Faction) continue;
-                if (!price(agent.Position, node.Position, agent.NavigationRadius, out var seconds))
+                if (!house.IsAlive || !house.IsSink || house.Faction != agent.Faction) continue;
+                if (house.Housing <= 0) continue;
+                var distance = Vector2.DistanceSquared(house.Position, agent.Position);
+                if (distance >= nearest) continue;
+                nearest = distance;
+                agent.Home.House = house.Id;
+            }
+
+            if (agent.Home.House.IsValid) MoveIn(ref nodes.Get(agent.Home.House), in agent);
+        }
+    }
+
+    private static void MoveIn(ref EconomyNode house, in AgentState occupant)
+    {
+        house.Occupants++;
+        house.AppetiteSum += EconomyRates.AppetiteOf(occupant);
+    }
+
+    /// <summary>
+    /// Binds each sink to the store whose catchment reaches it.
+    /// </summary>
+    /// <remarks>
+    /// §6 inverts the obvious arrangement: a source owns a catchment and whatever is inside it is bound
+    /// to it, rather than every consumer asking where the nearest source is. This is that, asked of the
+    /// buildings — which do not move, so it is asked only when the set of stores changes — and asked in
+    /// <b>seconds</b> rather than metres, so a catchment follows a road and stops at a ridge without
+    /// anybody writing that down.
+    /// <para>
+    /// The budget is quoted at hauler pace and route seconds are at the router's reference pace, so it is
+    /// converted before being compared. Skipping that conversion sizes every catchment by the ratio of
+    /// the two speeds, which is how the mechanic was switched off the first time.
+    /// </para>
+    /// </remarks>
+    private static void BindCatchments(NodeStore nodes, TravelPrice price)
+    {
+        var sinks = nodes.MutableSpan();
+        for (var i = 0; i < sinks.Length; i++)
+        {
+            ref var sink = ref sinks[i];
+            if (!sink.IsAlive || !sink.IsSink) continue;
+            var bound = sink.Supply.IsValid && nodes.Contains(sink.Supply);
+            if (bound && sink.SupplyRevision == nodes.Revision) continue;
+
+            sink.SupplyRevision = nodes.Revision;
+            sink.Supply = NodeId.None;
+            sink.SupplySeconds = 0f;
+            var best = float.PositiveInfinity;
+            foreach (ref readonly var store in nodes.All)
+            {
+                if (!store.IsAlive || !store.OwnsCatchment || store.Faction != sink.Faction) continue;
+                if (!price(sink.Position, store.Position, HaulerNavigationRadius, out var seconds))
                 {
                     continue;
                 }
 
-                var budget = node.CatchmentSeconds * HaulerPace / RouteReferencePace;
+                var budget = store.CatchmentSeconds * HaulerPace / RouteReferencePace;
                 if (seconds > budget || seconds >= best) continue;
                 best = seconds;
-                agent.Supply.Node = node.Id;
+                sink.Supply = store.Id;
+                sink.SupplySeconds = seconds;
             }
-
-            agent.Supply.Seconds = float.IsFinite(best) ? best : 0f;
         }
     }
 
     /// <summary>The pace a catchment budget is quoted at — a loaded hauler's.</summary>
     internal static float HaulerPace = UnitType.HaulerCart.MaximumSpeed;
 
+    /// <summary>The body a catchment is measured for, which is the cart that would serve it.</summary>
+    internal static float HaulerNavigationRadius = UnitType.HaulerCart.NavigationRadius;
+
     /// <summary>The pace route seconds are denominated at.</summary>
     internal static float RouteReferencePace = AgentDefaults.WorldPace;
 
-    private void Consume(
-        NodeStore nodes,
-        AgentStore agents,
-        Season season,
-        float deltaSeconds)
+    /// <summary>
+    /// Households draw for their occupants, out of the store whose catchment reaches them.
+    /// </summary>
+    /// <remarks>
+    /// The only place in the simulation where a resource stops being a physical thing. It is taken from
+    /// the store's stock and it does not travel to get here — that is the abstraction §6 chose
+    /// deliberately, and it is the whole of the distribution logic: a house inside a catchment is fed, a
+    /// house outside every catchment is not, and nothing else needs deciding.
+    /// <para>
+    /// Draw is per house rather than per body so the sub-unit remainder lives on the node with everything
+    /// else that accrues, and so a settlement's demand is a property of its buildings.
+    /// </para>
+    /// </remarks>
+    private void Consume(NodeStore nodes, Season season, float deltaSeconds)
     {
-        // Demand is gathered per store rather than per body, so the sub-unit remainder lives on the
-        // node with everything else that accrues. A body outside every catchment contributes to
-        // nobody's demand and simply goes without, which is what makes reach decide whether a place
-        // is supplied at all.
-        var demand = new float[nodes.Count, Resources.All.Length];
-        foreach (ref readonly var agent in agents.All)
-        {
-            if (!agent.IsAlive || !agent.Supply.Node.IsValid) continue;
-            if (!nodes.Contains(agent.Supply.Node)) continue;
-            var appetite = EconomyRates.AppetiteOf(agent);
-            foreach (var resource in Resources.All)
-            {
-                demand[agent.Supply.Node.Value, (int)resource] +=
-                    EconomyRates.DrawPerSecond(resource, season, appetite) * deltaSeconds;
-            }
-        }
-
         var consumed = Consumed;
         var unmet = Unmet;
-        var mutable = nodes.MutableSpan();
-        for (var i = 0; i < mutable.Length; i++)
+        var sinks = nodes.MutableSpan();
+        for (var i = 0; i < sinks.Length; i++)
         {
-            ref var node = ref mutable[i];
-            if (!node.IsAlive) continue;
+            ref var sink = ref sinks[i];
+            if (!sink.IsAlive || !sink.IsSink || sink.Occupants <= 0) continue;
             foreach (var resource in Resources.All)
             {
-                var wanted = demand[i, (int)resource];
-                if (wanted <= 0f) continue;
-                var whole = node.Pending.Accrue(resource, wanted);
+                var wanted = EconomyRates.DrawPerSecond(resource, season, sink.AppetiteSum) *
+                             deltaSeconds;
+                var whole = sink.Pending.Accrue(resource, wanted);
                 if (whole <= 0) continue;
-                var taken = Math.Min(whole, node.Stock[resource]);
-                node.Stock.Add(resource, -taken);
+
+                // A household with no store in reach goes without, however full the world is. That is
+                // what stops a settlement sprawling past its distribution.
+                var available = sink.Supply.IsValid && nodes.Contains(sink.Supply)
+                    ? nodes.Get(sink.Supply).Stock[resource]
+                    : 0;
+                var taken = Math.Min(whole, available);
+                if (taken > 0) nodes.Get(sink.Supply).Stock.Add(resource, -taken);
                 consumed.Add(resource, taken);
                 if (whole > taken) unmet.Add(resource, whole - taken);
             }
@@ -523,6 +565,18 @@ internal sealed class EconomySystem
         }
     }
 
+    /// <summary>Removes heaps that have been carried away, so an empty pile is not a permanent node.</summary>
+    private static void SweepEmptyPiles(NodeStore nodes)
+    {
+        for (var slot = 0; slot < nodes.Count; slot++)
+        {
+            var id = new NodeId(slot);
+            if (!nodes.Contains(id)) continue;
+            ref readonly var node = ref nodes.Get(id);
+            if (node.IsPile && node.Stock.Total <= 0) nodes.Remove(id);
+        }
+    }
+
     /// <summary>Drops a haul whose source has emptied or whose sink has filled.</summary>
     private void ReleaseStaleHauls(NodeStore nodes, AgentStore agents)
     {
@@ -569,9 +623,15 @@ internal sealed class EconomySystem
                 if (source.Stock[resource] <= 0) continue;
                 var worthFetching = source.Stock[resource] >= worthLoad ||
                                     source.Stock[resource] >= source.Capacity * HighWater;
-                var giving = source.Produces_
-                    ? worthFetching
-                    : source.Stores && source.Stock[resource] >= source.Capacity * HighWater;
+                // A heap on the ground is always worth collecting, however small: left alone it is not
+                // stock in the wrong place, it is stock nobody has. What stops a cart crossing the map
+                // for three units of grain is not a threshold, it is that the trip is priced and the
+                // heap's urgency is proportional to its size.
+                var giving = source.IsPile
+                    ? true
+                    : source.Produces_
+                        ? worthFetching
+                        : source.Stores && source.Stock[resource] >= source.Capacity * HighWater;
                 if (!giving) continue;
 
                 var bestSink = NodeId.None;
@@ -579,7 +639,10 @@ internal sealed class EconomySystem
                 foreach (ref readonly var sink in nodes.All)
                 {
                     if (!sink.IsAlive || !sink.Stores || sink.Id == source.Id) continue;
-                    if (sink.Faction != source.Faction) continue;
+                    // A heap belongs to nobody, so anybody's store is a valid destination for it. That
+                    // one relaxation is the whole of looting: an enemy's dropped grain is collected by
+                    // the same board, priced the same way, with no rule about theft anywhere.
+                    if (!source.IsPile && sink.Faction != source.Faction) continue;
                     var room = sink.RoomFor(resource);
                     if (room <= 0) continue;
                     if (source.Stores && sink.Stock[resource] > sink.Capacity * LowWater) continue;
@@ -596,8 +659,14 @@ internal sealed class EconomySystem
                 // A producer's yard filling up is more urgent than a store being uneven, and a fuller
                 // yard is more urgent than an emptier one.
                 var fullness = source.Stock[resource] / (float)Math.Max(1, source.Capacity);
-                tasks.Add(new HaulTask(
-                    source.Id, bestSink, resource, source.Produces_ ? 1f + fullness : bestNeed));
+                var urgency = source.IsPile
+                    // Bigger heaps first, and all of them below a yard about to overflow: a farm that
+                    // stops producing costs more than grain sitting still costs.
+                    ? 0.5f + 0.5f * MathF.Min(1f, source.Stock[resource] / MathF.Max(1f, worthLoad))
+                    : source.Produces_
+                        ? 1f + fullness
+                        : bestNeed;
+                tasks.Add(new HaulTask(source.Id, bestSink, resource, urgency));
             }
         }
     }
@@ -654,7 +723,6 @@ internal sealed class EconomySystem
             writer.Long(Consumed[resource]);
             writer.Long(Seeded[resource]);
             writer.Long(Unmet[resource]);
-            writer.Long(Lost[resource]);
         }
     }
 
@@ -667,20 +735,17 @@ internal sealed class EconomySystem
         var consumed = default(ResourceTotals);
         var seeded = default(ResourceTotals);
         var unmet = default(ResourceTotals);
-        var lost = default(ResourceTotals);
         foreach (var resource in Resources.All)
         {
             produced[resource] = reader.Long();
             consumed[resource] = reader.Long();
             seeded[resource] = reader.Long();
             unmet[resource] = reader.Long();
-            lost[resource] = reader.Long();
         }
 
         Produced = produced;
         Consumed = consumed;
         Seeded = seeded;
         Unmet = unmet;
-        Lost = lost;
     }
 }

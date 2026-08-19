@@ -66,8 +66,8 @@ internal struct AgentState
     public float BehaviorUpdateCooldown;
     public float HoldReturnCooldown;
     public AgentId BehaviorTarget;
-    /// <summary>Which store feeds this body. See <see cref="AgentSupply"/>.</summary>
-    public AgentSupply Supply;
+    /// <summary>Where this body lives. See <see cref="AgentHome"/>.</summary>
+    public AgentHome Home;
 
     /// <summary>What this unit is committed to, doing, and currently being kept from.</summary>
     /// <remarks>

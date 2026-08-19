@@ -542,6 +542,35 @@ codebase already does this well (`AgentId` with tombstones, ids never reused).
 
 That taxonomy is the whole economic layer, and it says what each mechanic is *for*.
 
+### A resource is a physical thing until the moment it is consumed
+
+**Added 2026-08-19, and it corrected an implementation that had it wrong.** Grain exists at a place:
+grown in a yard, carried on a cart's back, stored in a granary, **lying in the road if the cart is
+destroyed**. It never stops existing because whoever was carrying it did. The first version of the
+economy booked a dead carrier's load to a "lost" ledger, which quietly made killing a loaded raider the
+most effective way to destroy grain — the exact opposite of §7, where *"the return trip is the
+defender's window"* only means anything if intercepting a raider **returns** the loot rather than
+denying it.
+
+So a dropped load becomes a **heap**, which is simply a node with stock and nobody looking after it.
+The hauling board already looks for stock in the wrong place, so it collects heaps without being taught
+what one is, and a heap belongs to no faction — which is the whole of looting, with no rule about theft
+anywhere. The conservation identity got *shorter*: there is no loss term, because nothing is lost.
+
+**The one exception is consumption, and it is the only abstraction in the chain.** A **house** is a
+clocked sink: it draws for its occupants, and what it draws comes out of the store whose catchment
+reaches it *without anybody carrying it*. That is this section's scoping decision made concrete —
+households draw from their catchment directly, because a hauler per household would put hauler count in
+proportion to population rather than buildings. Everything about distribution then falls out with no
+further rules: reach decides whether a house is supplied at all, so you cannot sprawl past your
+granaries, and a household outside every catchment goes hungry however full the stores are.
+
+It also removed work rather than adding it. Bodies used to ask, every few seconds, which granary was
+nearest them in route seconds — a routing query per person for an answer that never depended on the
+person, and one that let a farmhand posted at the edge of a holding starve while living next door to a
+full granary. A house does not move, so the catchment question is asked of the *building*, once, when
+the set of stores changes.
+
 ### Consumption is the demand side of the hauling problem
 
 Resources sink **by population type, year round, from the nearest source**. Everyone eats. Soldiers
@@ -1460,7 +1489,7 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 
 | | |
 |---|---|
-| suite | `--selftest` **71/71** (was 53/53 through Session 4) |
+| suite | `--selftest` **72/72** (was 53/53 through Session 4) |
 | determinism coverage | **102 values a body**, 184 a tick, 25,580 at a checkpoint — every one probed |
 | catchment, measured | **12,320 m² on open ground**, effective radius 62.6 m against a nominal 66 — §15 |
 | soak, early career | **1.44 ms a tick at 300 agents, 23x real time**; a year is 4 min, ten years 39 — §15 |
@@ -1479,6 +1508,7 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 | order grace, measured | **5.5 s** from standing free to back on the job; the walk back is separate and is a distance |
 | catchment | **60 s at hauler pace, 66 m**; measured 62.6 m effective on open ground — §6, §15 |
 | settlement | two years, drift **0**, exactly 270 grain and 120 wood eaten per person per year — §17 |
+| resources | physical everywhere but consumption; a dead carrier drops a heap anyone may take — §6 |
 | road | **1.45x**, raised from 1.10 so §6's ribbon claim is true — §17 |
 
 ### Debts this work is carrying
@@ -1939,6 +1969,28 @@ the catchment's area grows **36%**, from 5,101 m² to 6,925. It follows through 
 free because path cost is derived from speed — routes prefer roads more strongly and hauling legs along
 them are cheaper in the same seconds the board prices in.
 
+### The correction that arrived after the gate
+
+Session 6 shipped consumption as a draw against *bodies* bound to granaries, and a dead carrier's load
+booked to a `Lost` ledger. Both were wrong, and §6 above now records why. What landed instead:
+
+- **Heaps.** A body destroyed carrying leaves its load where it fell, merged into a heap already there
+  if one is within 2.5 m. Heaps are collected by the same board that collects a full farmyard, belong to
+  nobody, and are swept away when emptied. `Lost` is gone and the conservation identity is shorter.
+- **Houses.** Consumption moved from bodies to **clocked sinks**, and the catchment binding moved with
+  it — from every body every eight seconds to every house whenever the set of stores changes. Warm-up on
+  the live map fell from 31 ms in the economy phase to 17, and it settles to **0.48 ms by tick 78**.
+- **Unhoused is a signal.** A body with no household draws nothing, so a settlement with stores rising
+  and people unhoused is §6's blocked sink — *"grain surplus rising, population capped by housing"* —
+  reported rather than deduced.
+- **Loads and heaps are drawn.** A loaded cart carries a visible block the colour of what is on it, and
+  a heap is a low spread pile of the same colour. §7's return trip needs a player to be able to see
+  which cart is worth intercepting.
+
+The test is §7's interception in miniature, with the combat left out because none exists yet: load a
+cart, destroy it mid-journey, and require the grain to be on the ground *at the position it fell*, to be
+collected by another cart, to reach the granary, and for not one unit to have gone missing at any point.
+
 ### Debt 7 is still open, and now for a better reason
 
 The congestion width and speed terms were to be settled by "many haulers of differing sizes sharing
@@ -1950,8 +2002,8 @@ workload in which they never fire.
 
 | | |
 |---|---|
-| suite | `--selftest` **71/71** |
-| two-year settlement | 324,000 ticks, drift **0**, short **0**, 943 hauls, 47 dropped |
-| economy phase | **0.01–0.03 ms** a tick at 26 people and 20 nodes |
+| suite | `--selftest` **72/72** |
+| two-year settlement | 324,000 ticks, drift **0**, short **0**, **0 unhoused**, 980 hauls, 63 dropped |
+| economy phase | **0.01–0.03 ms** a tick headless; on the live 600 m map it warms up at 17 ms and settles to **0.48 ms by tick 78** |
 | grain produced against nominal | **99.7%** — the harvest crunch nearly absorbed at seven haulers |
 | new instrument | `--settlement [--years n]`, which is also §15's per-PR soak gate |

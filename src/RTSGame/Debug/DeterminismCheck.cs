@@ -76,8 +76,7 @@ internal static class DeterminismCheck
         "SimulationWorld.rasterizedTerrainRevision", "SimulationWorld.routePlansThisTick",
         "SimulationWorld.ExtentMeters", "SimulationWorld.Nodes", "SimulationWorld.economy",
         "EconomySystem.Produced", "EconomySystem.Consumed", "EconomySystem.Seeded",
-        "EconomySystem.Unmet", "EconomySystem.Lost",
-        "EconomySystem.HaulsAssigned", "EconomySystem.HaulsAbandoned",
+        "EconomySystem.Unmet", "EconomySystem.HaulsAssigned", "EconomySystem.HaulsAbandoned",
         "EconomySystem.boardCooldown",
         "MoveGroup.Id", "MoveGroup.Target", "MoveGroup.Members", "MoveGroup.Slots",
         "MoveGroup.FormationRadius", "MoveGroup.SettlingTicks", "MoveGroup.TransitCentroid",
@@ -487,7 +486,6 @@ internal static class DeterminismCheck
             sink.Add("Consumed", world.Economy.Consumed[resource]);
             sink.Add("Seeded", world.Economy.Seeded[resource]);
             sink.Add("Unmet", world.Economy.Unmet[resource]);
-            sink.Add("Lost", world.Economy.Lost[resource]);
         }
 
         var nodes = world.Nodes.All;
