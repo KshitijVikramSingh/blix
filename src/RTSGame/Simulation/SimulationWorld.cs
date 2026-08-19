@@ -1212,20 +1212,26 @@ internal sealed class SimulationWorld
         var bearing = toward.LengthSquared() > 0.000001f
             ? Vector2.Normalize(toward)
             : Vector2.UnitX;
-        var nearest = extent + agent.Radius + JobDefaults.TouchSlack * 0.5f;
+        var halfWidth = agent.Jobs.PlaceHalfWidth;
+        var standoff = agent.Radius + JobDefaults.TouchSlack * 0.5f;
         var step = NavigationCellSize;
-        // Far enough out to clear a heavy body's clearance plus the raster's own quantisation, and no
-        // further: past this the place is genuinely walled in and retrying politely is the right answer.
-        var furthest = nearest + agent.Radius * 2f + 2f;
+        // A couple of body widths of searching outward, and no further: past that the place is genuinely
+        // walled in and retrying politely is the right answer.
+        var furthest = standoff + agent.Radius * 2f + 2f;
 
-        for (var radius = nearest; radius <= furthest; radius += step)
+        for (var outward = standoff; outward <= furthest; outward += step)
         for (var turn = 0; turn < ApproachBearings.Length; turn++)
         {
             var angle = ApproachBearings[turn];
             var direction = new Vector2(
                 bearing.X * MathF.Cos(angle) - bearing.Y * MathF.Sin(angle),
                 bearing.X * MathF.Sin(angle) + bearing.Y * MathF.Cos(angle));
-            var candidate = Terrain.ClampPosition(place + direction * radius);
+            // Measured out from the building's wall along this bearing, not from a circle drawn round it.
+            // The circle version aimed 2.2 m past the face of a granary while arrival was measured at
+            // 0.8 m from it, so a cart never arrived: it retried twice, gave up, and settled wherever it
+            // happened to be standing — which is why everything stood a couple of metres off its work.
+            var candidate = Terrain.ClampPosition(
+                place + direction * (BoundaryAlong(direction, halfWidth) + outward));
             if (!CanRouteTo(candidate, in agent)) continue;
             point = candidate;
             return true;
@@ -1259,6 +1265,20 @@ internal sealed class SimulationWorld
         Navigation.TryWorldToCell(point, out var cell) &&
         Navigation.IsWalkable(cell, agent.NavigationRadius) &&
         pathService.IsPositionNavigable(point, agent.NavigationRadius);
+
+    /// <summary>
+    /// How far the wall of a square of this half-width is from its centre, along a direction.
+    /// </summary>
+    /// <remarks>
+    /// The half-width along a face, the half-diagonal into a corner, and the right answer everywhere
+    /// between. One line, and it is the difference between a body walking up to a building and a body
+    /// stopping at the radius of a circle that happens to contain it.
+    /// </remarks>
+    private static float BoundaryAlong(Vector2 direction, float halfWidth)
+    {
+        var dominant = MathF.Max(MathF.Abs(direction.X), MathF.Abs(direction.Y));
+        return dominant <= 0.0001f ? halfWidth : halfWidth / dominant;
+    }
 
     /// <summary>Bearings tried around a place, the body's own first and then either side of it.</summary>
     private static readonly float[] ApproachBearings =

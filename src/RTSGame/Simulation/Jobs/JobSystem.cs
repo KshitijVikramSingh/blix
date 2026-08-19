@@ -138,7 +138,7 @@ internal static class JobSystem
         // a face stops at the face. Measured from the box, which is what the wall is.
         var gap = DistanceToPlace(in agent);
         if (gap <= agent.Radius + JobDefaults.TouchSlack) return true;
-        return agent.Jobs.SettledNearby && gap <= agent.Radius * JobDefaults.PlaceCrowdShare;
+        return agent.Jobs.SettledNearby && gap <= agent.Radius * JobDefaults.CrowdedTouchShare;
     }
 
     /// <summary>How far this body is from the wall of its place, or zero if it is against it.</summary>
@@ -258,7 +258,7 @@ internal static class JobSystem
             // ground gets the retries first, since falling short of empty ground means the
             // journey went wrong and journeys come right.
             var nearEnough = jobs.PlaceExtent > 0f
-                ? DistanceToPlace(in agent) <= agent.Radius * JobDefaults.PlaceCrowdShare
+                ? DistanceToPlace(in agent) <= agent.Radius * JobDefaults.CrowdedTouchShare
                 : Vector2.DistanceSquared(agent.Position, jobs.Place) <=
                   Square(JobDefaults.CrowdedPlaceDistance(agent.Radius));
             if (nearEnough && place is PlaceCondition.Crowded ||

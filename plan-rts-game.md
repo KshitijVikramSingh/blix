@@ -2142,6 +2142,37 @@ approaches at pace and is stopped by contact, which is what depenetration is for
 symmetric, is what a mover and a settled ally already do to each other, and it is what an attack activity
 will need against the thing it is attacking.
 
+### They still stood too far off, and it was three places measuring the same thing differently
+
+Arrival was measured to the wall, which was right, but two other places were still measuring to a circle
+drawn round the building — and a third to its centre. All three had to agree.
+
+**The walk target.** It was placed at `circumscribing radius + body + slack` from the centre, which for a
+granary is 2.23 m past the face while arrival wants 0.80 m from it. So a body walked to a point 1.4 m
+outside its own arrival tolerance, failed to arrive, retried twice, gave up, and **settled where it was
+standing** — which is the whole of the symptom. The target is now measured out from the wall along the
+approach bearing: the half-width along a face, the half-diagonal into a corner, and the right answer
+everywhere between, so it lands 0.68 m off the building whichever way the body came.
+
+**The crowd fallback.** When the ground against a wall is taken, a body may settle short — and the figure
+for that was eight radii, 4.4 m for a cart, inherited from the bare-point case where a crowd has to
+arrange itself around a *point*. A building has a whole wall to line up along, so it is three radii now:
+1.1 m for a villager, 1.65 for a cart, which is a second rank behind the first and no more.
+
+**Counting hands.** A body was a pair of hands at a node if it was within a flat 4 m of the node's
+*centre*, which is a figure that necessarily depends on how big the building is. At 4.5 m across, a hand
+standing at the corner of its own woodcutter is 4.8 m from the middle of it and did not count: the
+settlement quietly lost two of nineteen pairs of hands and a seventh of its wood. It is measured to the
+wall now, at the same three radii the jobs layer settles a crowd at — because a hand *is* a body the jobs
+layer considers to be at the node, and two definitions of that would drift apart.
+
+| | |
+|---|---|
+| walk target | **0.68 m** off the wall (was 2.23 m off a granary's face) |
+| arrival | 0.80 m from the wall |
+| settle-short fallback | **1.65 m** for a cart (was 4.40) |
+| hands at work | **19 of 19** (was 17), wood back to 3,493 a year from 2,994 |
+
 ### And a footgun closed
 
 Buildings going from 1.5 m to 7.5 m put carts that used to muster beside the granary *inside* it,

@@ -53,6 +53,19 @@ internal static class JobDefaults
     internal static float PlaceCrowdShare = 8.0f;
 
     /// <summary>
+    /// How far from a building's wall a body may settle when the ground against it is taken, as a
+    /// multiple of its own radius.
+    /// </summary>
+    /// <remarks>
+    /// Much tighter than <see cref="PlaceCrowdShare"/>, which is measured from a <em>point</em> and has to
+    /// leave room for a crowd to arrange itself around one. A building has a whole wall to line up along,
+    /// so three radii — 1.1 m for a villager, 1.65 for a cart — is a second rank behind the first and no
+    /// more. It was eight, measured from the circle round the building rather than from the wall, and that
+    /// is what let a cart call itself at work while standing four metres clear of a granary.
+    /// </remarks>
+    internal static float CrowdedTouchShare = 3.0f;
+
+    /// <summary>
     /// Failed attempts at a reachable place before the body works from where the crowd left it.
     /// </summary>
     internal static int CrowdedAttempts = 2;

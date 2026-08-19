@@ -73,13 +73,18 @@ internal sealed class EconomySystem
     /// </remarks>
     internal static float HandoverSeconds = 4f;
 
-    /// <summary>How near a body has to be to a node to be working it, in metres.</summary>
+    /// <summary>
+    /// How near a body has to be to a building's wall to be working it, as a multiple of its radius.
+    /// </summary>
     /// <remarks>
-    /// A node is a building rather than a point, and a place for several pairs of hands — the jobs
-    /// layer already settles a crowd around a workplace rather than queueing it for one square metre,
-    /// and this is the yard that crowd stands in.
+    /// The same figure the jobs layer settles a crowd at, and deliberately the same: a hand is a body the
+    /// jobs layer considers to be <em>at</em> the node, and two definitions of that would drift. It was a
+    /// flat four metres from the node's centre, which was fine while a building was one 1.5 m cell and
+    /// stopped being fine the moment they were 4.5 and 7.5 — a hand standing at the corner of its own
+    /// woodcutter was 4.8 m from the middle of it and did not count, so the settlement quietly lost two
+    /// of nineteen pairs of hands and a seventh of its wood.
     /// </remarks>
-    internal static float WorkRadius = 4f;
+    internal static float WorkReachShare => JobDefaults.CrowdedTouchShare;
 
     /// <summary>Share of a store's capacity above which it will give stock away.</summary>
     internal static float HighWater = 0.75f;
@@ -279,12 +284,12 @@ internal sealed class EconomySystem
         {
             if (!agent.IsAlive || agent.Jobs.Assignment.Kind != AssignmentKind.Hold) continue;
             if (agent.Jobs.Activity == ActivityKind.None || agent.Jobs.IsInterrupted) continue;
-            // Posted here, not passing through. A hauler loading at a farm is standing in the yard and
-            // is emphatically not a farmhand, which is what counting anybody nearby produced: seventeen
-            // pairs of hands at sixteen farms. And it is where the body <em>is</em> rather than where it
-            // was told to be, so a hand walking to the farm is not working it yet and one dragged away
-            // by an order is not working it any more.
-            var nearest = NodeAt(nodes, agent.Position, WorkRadius);
+            // Posted here, not passing through. A hauler loading at a farm is standing in the yard and is
+            // emphatically not a farmhand, which is what counting anybody nearby produced: seventeen pairs
+            // of hands at sixteen farms. And it is where the body <em>is</em> rather than where it was told
+            // to be, so a hand walking to the farm is not working it yet and one dragged away by an order
+            // is not working it any more.
+            var nearest = WorkedNode(nodes, in agent);
             if (!nearest.IsValid) continue;
             ref var node = ref nodes.Get(nearest);
             if (node.Produces_) node.Hands++;
@@ -694,6 +699,33 @@ internal sealed class EconomySystem
         }
 
         return smallest == int.MaxValue ? 1 : smallest;
+    }
+
+    /// <summary>
+    /// The producing node this body is standing at the wall of, or none.
+    /// </summary>
+    /// <remarks>
+    /// Measured to the building's wall rather than to its centre, so the answer does not depend on how
+    /// big the building is — which a distance from the centre necessarily does, and got wrong the moment
+    /// buildings stopped all being one cell.
+    /// </remarks>
+    private static NodeId WorkedNode(NodeStore nodes, in AgentState agent)
+    {
+        var reach = agent.Radius * WorkReachShare + JobDefaults.TouchSlack;
+        var best = NodeId.None;
+        var bestGap = reach;
+        foreach (ref readonly var node in nodes.All)
+        {
+            if (!node.IsAlive || node.IsPile) continue;
+            var half = new Vector2(node.HalfExtent);
+            var nearest = Vector2.Clamp(agent.Position, node.Position - half, node.Position + half);
+            var gap = Vector2.Distance(agent.Position, nearest);
+            if (gap > bestGap) continue;
+            bestGap = gap;
+            best = node.Id;
+        }
+
+        return best;
     }
 
     /// <summary>The node within <paramref name="radius"/> of a point, or none.</summary>
