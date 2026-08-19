@@ -20,7 +20,7 @@ One fixed 30 Hz tick, in this order:
 
 | # | Step | Owns |
 |---|---|---|
-| 1 | `Congestion.Update` | decaying per-cell backpressure map (sparse: only cells holding pressure) |
+| 1 | `Congestion.Update` | decaying backpressure, swept and stored by jam rather than by area |
 | 2 | `ApplyCommands` | move / stop / follow / patrol / chase / flee, group creation |
 | 3 | `UpdateBehaviors` + `UpdateGroupFormations` | locomotion states; cohort centroid; slot hand-off |
 | 4 | `RefreshInvalidPaths` (+ `ReconsiderCongestedRoute`) | route validity and congestion re-evaluation |
@@ -295,7 +295,12 @@ which is what a correct memo looks like:
   cell by cell, on a 200 m map of staggered walls, at several settings of the abstract search's
   horizon (`--spans`). `lost` is the column that matters — a cell the hierarchy cannot price is a
   body that believes it has no route and stops.
-- **Live tuning overlay** (backtick to toggle). **Eight dials, down from forty-five.** What is on
+- `--rectangles [--terrain]` reports the walkable decomposition: how many rectangles the ground
+  becomes, how many crossings between them, and the per-rectangle crossing degree that decides
+  whether the cost field can be evaluated outright.
+- `--mapdump` prints the generated world as text and marks what a body cannot stand on, which is
+  how a missing mountain pass gets found without a screenshot.
+- **Live tuning overlay** (backtick to toggle). **Eleven dials, down from forty-five.** What is on
   it is what is still a question: the body (top speed, acceleration, deceleration, turn rate), the
   clock, the two route-cost terms that are game design rather than solver tuning (congestion
   cells/pressure, climb s/m), and formation station-keeping. Everything the locomotion work settled
@@ -472,7 +477,31 @@ at once, and a change justified by one of their jobs breaks the other.
 
 ---
 
-## 8. The substrate question: should this be a navmesh?
+## 8. The substrate question: answered, and what it became
+
+**Settled 2026-08-19 and shipped.** The routing layer is an adaptive partition of walkable ground
+— maximal rectangles of uniform terrain — with a graph over the corners of the borders between
+them, and dense tiles filled only where a body is looking. The argument, the six design decisions,
+the measurements and the two things that were tried and refused are all below, in the order they
+happened, because the reasoning is worth more than the conclusion.
+
+**What it replaced, and what it cost to get here:**
+
+| | flat field | portals over fixed regions | rectangles + tiles |
+|---|---|---|---|
+| move order, 1200 m | 4,108 ms | 42–93 ms | — |
+| move order, ridge map at 600 m | — | 5–161 ms | **8–27 ms** |
+| tick, 2,000 agents at 600 m | — | 10.1 ms | **6.0 ms** |
+| tick, 2,000 agents at 1200 m | 571 ms | 11.6 ms | **5.8 ms** |
+| route quality, mean / worst | 1.000 | 1.0056 / 1.679 | **1.0014 / 1.187** |
+| resident, 1200 m | 315 MB | 237 MB | **177 MB** |
+
+**The tick no longer depends on the size of the map.** 6.0 ms at 600 m against 5.8 ms at 1200 m is
+the whole argument, arriving as a measurement.
+
+---
+
+### The original question
 
 Raised 2026-08-18, from a sharper version of the rule that has driven most of this session:
 **spend the budget where navigation and velocity decisions happen, not uniformly over a

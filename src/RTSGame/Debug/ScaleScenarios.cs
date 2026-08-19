@@ -93,12 +93,11 @@ internal static class ScaleScenarios
             $"raster {world.NavigationBytes / 1024.0 / 1024.0:F2} MB " +
             $"({world.ChunkedRegions}/{world.RegionCount} regions chunked) | " +
             $"managed {GC.GetTotalMemory(false) / (1024.0 * 1024.0):F0} MB");
-        var portalStart = Stopwatch.GetTimestamp();
-        var portals = world.PortalCount;
+        var meshStart = Stopwatch.GetTimestamp();
+        var mesh = world.DecomposeWalkable(AgentDefaults.Radius);
         Console.WriteLine(
-            $"    graph  | {world.RegionCount:N0} regions | {portals:N0} portals | " +
-            $"{portals * 2:N0} nodes | built in " +
-            $"{Stopwatch.GetElapsedTime(portalStart).TotalMilliseconds:F0} ms");
+            $"    ground | {mesh.Count:N0} rectangles | {mesh.Crossings.Count:N0} crossings | " +
+            $"decomposed in {Stopwatch.GetElapsedTime(meshStart).TotalMilliseconds:F0} ms");
 
         // Idle: no destinations, so no routing and no deposits. Only the area floor.
         var idle = Populate(world, agentCount, issueGroupMove: false);
@@ -116,7 +115,6 @@ internal static class ScaleScenarios
             $"live cells {world.Congestion.LiveCellCount:N0}");
         var idleSearches = world.RegionSearches;
         var idleTiles = world.TileRefinements;
-        var idleInherited = world.InheritedTiles;
 
         // Moving: the same crowd, under one group move, which is the honest tick.
         world.QueueMove(idle, MoveTarget(world));
@@ -147,8 +145,7 @@ internal static class ScaleScenarios
             $"live cells {world.Congestion.LiveCellCount:N0} | " +
             $"congestion {world.Congestion.ResidentBytes / 1024.0:N0} KB | " +
             $"region-searches {world.RegionSearches - idleSearches:N0} | " +
-            $"tiles {world.TileRefinements - idleTiles:N0} built, " +
-            $"{world.InheritedTiles - idleInherited:N0} inherited");
+            $"tiles {world.TileRefinements - idleTiles:N0}");
         Console.WriteLine();
     }
 
@@ -217,10 +214,6 @@ internal static class ScaleScenarios
         Console.WriteLine();
 
         var half = extentMeters * 0.5f;
-        foreach (var weight in new[] { 1f, 1.5f, 2f, 3f })
-        {
-        RTSGame.Simulation.Navigation.PathService.HeuristicWeight = weight;
-        Console.WriteLine($"  heuristic weight {weight:F1}");
         foreach (var fraction in new[] { 0.05f, 0.25f, 0.5f, 0.95f })
         {
             var world = new SimulationWorld(extentMeters);
@@ -250,10 +243,6 @@ internal static class ScaleScenarios
                 $"tiles {world.TileRefinements:N0}");
         }
 
-        Console.WriteLine();
-        }
-
-        RTSGame.Simulation.Navigation.PathService.HeuristicWeight = 1f;
 
         // What a player actually does: click somewhere else, in the same world, again and
         // again. Crossing costs are cached against terrain and congestion, not against the
@@ -272,9 +261,6 @@ internal static class ScaleScenarios
             $"({repeated.ChunkedRegions}/{repeated.RegionCount} regions chunked)");
         var crowd = Populate(repeated, agentCount, issueGroupMove: false);
         repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);
-        Console.WriteLine(
-            $"  regions {repeated.RegionCount:N0} | portals {repeated.PortalCount:N0} | " +
-            $"terrain {(sculpted ? "ridge, lake and road" : "empty")}");
         for (var order = 0; order < 8; order++)
         {
             // Eight points around the map, each well away from the last.
@@ -289,8 +275,7 @@ internal static class ScaleScenarios
             repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);
             Console.WriteLine(
                 $"  order {order + 1} | {Stopwatch.GetElapsedTime(start).TotalMilliseconds,8:F1} ms | " +
-                $"searches {repeated.RegionSearches - searchesBefore,6:N0} | " +
-                $"cached ingress {repeated.CachedIngressCount:N0}");
+                $"searches {repeated.RegionSearches - searchesBefore,6:N0}");
             for (var tick = 0; tick < 20; tick++)
             {
                 repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);

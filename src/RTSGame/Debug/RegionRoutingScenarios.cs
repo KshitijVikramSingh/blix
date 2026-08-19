@@ -31,59 +31,31 @@ internal static class RegionRoutingScenarios
     public static int Run(float[]? spans = null)
     {
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
-        Console.WriteLine("RTSGame region-routing fidelity");
+        Console.WriteLine("RTSGame routing fidelity");
         Console.WriteLine(
             $"  {ExtentMeters:F0} m map, walls with gaps, goal in the far corner. " +
-            "Ratio is hierarchical cost over flat cost, so 1.000 is the flat answer.");
+            "Ratio is the router's cost over the flat whole-map search it replaced, so 1.000 is");
+        Console.WriteLine("  the exact answer and anything below it is a route that does not exist.");
         Console.WriteLine();
 
-        var probe = Build();
-        Console.WriteLine(
-            $"  map: {probe.RegionCount} regions | {probe.PortalCount} portals | " +
-            $"extent {probe.ExtentMeters:F1} m");
-        Console.WriteLine();
-
-        var original = PathService.HeuristicWeight;
-        foreach (var span in spans ?? new[] { 1f, 1.25f, 1.5f, 2f, 3f })
-        {
-            PathService.HeuristicWeight = span;
-            var world = Build();
-            var fidelity = world.MeasureRoutingFidelity(
-                new Vector2(ExtentMeters * 0.42f, ExtentMeters * 0.42f),
-                AgentDefaults.Radius);
-            Console.WriteLine(
-                $"  weight {span,4:F2} | mean {fidelity.MeanRatio:F4} | " +
-                $"p99 {fidelity.NinetyNinthRatio:F4} | worst {fidelity.WorstRatio:F3} " +
-                $"at {fidelity.WorstCell.X},{fidelity.WorstCell.Z} | " +
-                $"lost {fidelity.UnreachableCells}/{fidelity.ReachableCells} | " +
-                $"settled {fidelity.SettledNodes} | tiles {fidelity.RefinedRegions} | " +
-                $"searches {fidelity.RegionSearches} | " +
-                $"seedless {fidelity.SeedlessRegions} | partial {fidelity.UnpricedSeedRegions} | " +
-                $"fallback-failed {world.UnpricedAfterFallback}");
-        }
-
-        PathService.HeuristicWeight = original;
-
-        // The same map, the same goal, the same flat reference — so the two partitions are
-        // directly comparable rather than merely both plausible.
-        var rectangleWorld = Build();
-        var rectangleWatch = Stopwatch.StartNew();
-        var rectangles = rectangleWorld.MeasureRectangleFidelity(
+        var world = Build();
+        var watch = Stopwatch.StartNew();
+        var fidelity = world.MeasureRectangleFidelity(
             new Vector2(ExtentMeters * 0.42f, ExtentMeters * 0.42f),
             AgentDefaults.Radius);
-        Console.WriteLine();
         Console.WriteLine(
-            $"  rectangles   | mean {rectangles.MeanRatio:F4} | " +
-            $"p99 {rectangles.NinetyNinthRatio:F4} | worst {rectangles.WorstRatio:F3} " +
-            $"at {rectangles.WorstCell.X},{rectangles.WorstCell.Z} | " +
-            $"lost {rectangles.UnreachableCells}/{rectangles.ReachableCells} | " +
-            $"{rectangles.RefinedRegions:N0} rectangles, {rectangles.SettledNodes:N0} crossings settled | " +
-            $"whole comparison in {rectangleWatch.ElapsedMilliseconds} ms");
+            $"  clear ground | mean {fidelity.MeanRatio:F4} | p99 {fidelity.NinetyNinthRatio:F4} | " +
+            $"worst {fidelity.WorstRatio:F3} at {fidelity.WorstCell.X},{fidelity.WorstCell.Z} | " +
+            $"lost {fidelity.UnreachableCells}/{fidelity.ReachableCells}");
+        Console.WriteLine(
+            $"               | {fidelity.RefinedRegions:N0} rectangles, " +
+            $"{fidelity.SettledNodes:N0} corners settled, no cell-level search | " +
+            $"measured in {watch.ElapsedMilliseconds} ms");
 
-        // Does a jam reach the rectangle field at all? The flat reference charges congestion
-        // too, so if this field ignored it the ratio would fall away below one — a route the
-        // reference thinks is dear and this one thinks is cheap. Immovable bodies are the
-        // quickest way to make pressure without waiting for a crowd to develop one.
+        // Does a jam reach the field at all? The flat reference charges congestion too, so a
+        // router that ignored it would drift below one here — a route the reference thinks is
+        // dear and this one thinks is cheap. Immovable bodies are the quickest way to make
+        // pressure without waiting for a crowd to develop one.
         var jammed = Build();
         var wall = new List<AgentId>();
         for (var i = 0; i < 40; i++)
@@ -106,6 +78,11 @@ internal static class RegionRoutingScenarios
             $"p99 {jammedFidelity.NinetyNinthRatio:F4} | worst {jammedFidelity.WorstRatio:F3} | " +
             $"lost {jammedFidelity.UnreachableCells}/{jammedFidelity.ReachableCells} | " +
             $"live cells {jammed.Congestion.LiveCellCount:N0}");
+        Console.WriteLine();
+        Console.WriteLine(
+            "  A jam must not push the mean below one: the reference charges congestion too, so");
+        Console.WriteLine(
+            "  drifting under would mean this router cannot see what the reference can.");
         return 0;
     }
 

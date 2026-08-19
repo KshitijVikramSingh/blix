@@ -135,14 +135,10 @@ internal sealed class SimulationWorld
     public int FlowFieldBuilds => pathService.FlowFieldBuilds;
     /// <summary>Regions the routing hierarchy divides this map into.</summary>
     public int RegionCount => pathService.RegionCount;
-    /// <summary>Border crossings in the portal graph for a standard body.</summary>
-    public int PortalCount => pathService.PortalCountFor(AgentDefaults.Radius);
     /// <summary>Region-bounded searches run so far, the unit of hierarchical work.</summary>
     public long RegionSearches => pathService.RegionSearches;
     /// <summary>Region tiles refined so far.</summary>
     public long TileRefinements => pathService.TileRefinements;
-    /// <summary>Region tiles adopted whole from the previous field for the same goal.</summary>
-    public long InheritedTiles => pathService.InheritedTiles;
     /// <summary>Walkable ground decomposed into uniform rectangles, for the adaptive partition.</summary>
     internal WalkableRectangles DecomposeWalkable(float agentRadius) =>
         WalkableRectangles.Build(Navigation, agentRadius);
@@ -152,21 +148,7 @@ internal sealed class SimulationWorld
     /// <summary>Regions holding a full-resolution raster rather than five numbers.</summary>
     public int ChunkedRegions => Navigation.ChunkedRegions;
 
-    /// <summary>Cached region-crossing cost sets held by the router.</summary>
-    public int CachedIngressCount => pathService.CachedIngressCount;
-    /// <summary>Tiles built while some crossing out of their region had no price.</summary>
-    public long UnpricedAfterFallback => pathService.UnpricedAfterFallback;
 
-    /// <summary>How far hierarchical routing sits above the flat optimum on this map.</summary>
-    internal RoutingFidelity MeasureRoutingFidelity(Vector2 goalPosition, float agentRadius)
-    {
-        if (!Navigation.TryWorldToCell(Terrain.ClampPosition(goalPosition), out var goal))
-        {
-            throw new ArgumentOutOfRangeException(nameof(goalPosition));
-        }
-
-        return pathService.MeasureFidelity(goal, agentRadius);
-    }
 
     /// <summary>How far the rectangle decomposition sits above the flat optimum.</summary>
     internal RoutingFidelity MeasureRectangleFidelity(Vector2 goalPosition, float agentRadius)

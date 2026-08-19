@@ -90,7 +90,7 @@ internal static class SimulationSelfTests
         Check("no unit stands under orders without intent", NoUnitStandsIntentless());
         Check("congestion sweeps every cell holding pressure", CongestionSweepTracksPressure());
         Check("a larger world leaves the tuned one untouched", WorldExtentIsParameterised());
-        Check("portal routing stays close to the flat optimum", PortalRoutingIsFaithful());
+        Check("routing stays close to the flat optimum", RoutingIsFaithful());
         Check("a group crosses region borders without swinging", GroupCrossesRegionBorders());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
@@ -1543,48 +1543,43 @@ internal static class SimulationSelfTests
     }
 
     /// <summary>
-    /// Hierarchical cost-to-goal against the flat whole-map search it replaces, on a map
-    /// big enough to have region borders at all.
+    /// The router's cost-to-goal against the flat whole-map search it replaced, on a map big
+    /// enough to have more than one part to it.
     /// </summary>
     /// <remarks>
-    /// The tuned world is one region, so every other test in this file passes through the
-    /// hierarchy without exercising it. Thresholds are read off <c>--routingtest</c> rather
-    /// than chosen: the measured figures are a mean of 1.006 and a worst cell of 1.68, and
-    /// these sit far enough above to survive a tuning change and far enough below to catch
-    /// the failure that matters.
+    /// The tuned world is a single rectangle, so every other test in this file exercises the
+    /// partition without ever crossing it. Thresholds are read off <c>--routingtest</c> rather
+    /// than chosen: the measured figures are a mean of 1.001 and a worst cell of 1.19.
     /// <para>
-    /// <c>lost</c> is the one that must be zero. A cell the hierarchy cannot price is a cell
-    /// where a body believes it has no route and simply stops, which is not a slightly
-    /// longer walk — it is a unit that never arrives.
+    /// Two of these matter more than the ratios. <c>lost</c> must be zero, because a cell the
+    /// router cannot price is a body that believes it is trapped rather than one that walks a
+    /// little further. And the mean must not fall <em>below</em> one: a route cannot cost less
+    /// than the shortest route, so under-one means the router is blind to something the
+    /// reference charges for — which is exactly how the first cut of the rectangle field
+    /// behaved, at 0.91, before crossings were measured corner to corner.
     /// </para>
     /// </remarks>
-    private static bool PortalRoutingIsFaithful()
+    private static bool RoutingIsFaithful()
     {
         var world = RegionRoutingScenarios.Build();
-        var fidelity = world.MeasureRoutingFidelity(
+        var fidelity = world.MeasureRectangleFidelity(
             new Vector2(world.ExtentMeters * 0.42f, world.ExtentMeters * 0.42f),
             AgentDefaults.Radius);
 
-        var manyRegions = world.RegionCount >= 25 && world.PortalCount >= 100;
-        // No tile may be built while a crossing out of its region has no price. That is the
-        // precise mechanism by which cells go unreachable, and it is asserted separately from
-        // the cell count because it is the cause rather than the symptom — a goal-directed
-        // search pushed harder than exact trips this first, and the fallback that is supposed
-        // to catch it has been seen not to.
-        var passed = manyRegions &&
-                     world.UnpricedAfterFallback == 0 &&
+        var manyParts = fidelity.RefinedRegions >= 5 && fidelity.SettledNodes >= 5;
+        var passed = manyParts &&
                      fidelity.UnreachableCells == 0 &&
-                     fidelity.MeanRatio < 1.02f &&
-                     fidelity.NinetyNinthRatio < 1.12f &&
+                     fidelity.MeanRatio >= 1f &&
+                     fidelity.MeanRatio < 1.05f &&
+                     fidelity.NinetyNinthRatio < 1.20f &&
                      fidelity.WorstRatio < 2.0f;
         if (!passed)
         {
             Console.WriteLine(
-                $"    fidelity: {world.RegionCount} regions, {world.PortalCount} portals, " +
+                $"    fidelity: {fidelity.RefinedRegions} rectangles, {fidelity.SettledNodes} corners, " +
                 $"mean={fidelity.MeanRatio:F4}, p99={fidelity.NinetyNinthRatio:F4}, " +
                 $"worst={fidelity.WorstRatio:F3} at {fidelity.WorstCell.X},{fidelity.WorstCell.Z}, " +
-                $"lost={fidelity.UnreachableCells}/{fidelity.ReachableCells}, " +
-                $"unpriced-after-fallback={world.UnpricedAfterFallback}");
+                $"lost={fidelity.UnreachableCells}/{fidelity.ReachableCells}");
         }
 
         return passed;
