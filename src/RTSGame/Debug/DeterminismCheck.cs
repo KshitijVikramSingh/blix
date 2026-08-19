@@ -78,6 +78,7 @@ internal static class DeterminismCheck
         "EconomySystem.Produced", "EconomySystem.Consumed", "EconomySystem.Seeded",
         "EconomySystem.Unmet", "EconomySystem.HaulsAssigned", "EconomySystem.HaulsAbandoned",
         "EconomySystem.RoutesFinished", "EconomySystem.Born", "EconomySystem.Emigrated",
+        "EconomySystem.Raised",
         "EconomySystem.boardCooldown",
         "MoveGroup.Id", "MoveGroup.Target", "MoveGroup.Members", "MoveGroup.Slots",
         "MoveGroup.FormationRadius", "MoveGroup.SettlingTicks", "MoveGroup.TransitCentroid",
@@ -490,6 +491,7 @@ internal static class DeterminismCheck
         sink.Add("RoutesFinished", world.Economy.RoutesFinished);
         sink.Add("Born", world.Economy.Born);
         sink.Add("Emigrated", world.Economy.Emigrated);
+        sink.Add("Raised", world.Economy.Raised);
         foreach (var resource in Resources.All)
         {
             sink.Add("Produced", world.Economy.Produced[resource]);

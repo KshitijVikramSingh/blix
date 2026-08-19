@@ -132,6 +132,7 @@ internal static class SimulationSelfTests
             "a lumber camp is a store nobody eats from, and that is what makes haulers",
             TheWoodLineDecidesWhetherHaulersAreNeeded());
         Check("a cart is a job a villager takes, and pays for", ACartIsAJobAndNotAUnit());
+        Check("a building costs timber carried out and hands standing at it", ABuildingCostsLabour());
         Check("housing caps a population and food brakes it", PeopleArriveWhenThereIsRoomAndFood());
         Check("a household that goes hungry loses somebody", PrivationSpendsItselfAsEmigration());
         Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
@@ -3854,6 +3855,87 @@ internal static class SimulationSelfTests
             $"body {wideBefore:F2}->{UnitType.HaulerCart.Radius:F2} m (worn={wore}); route ran {legs} legs, " +
             $"moved {moved} grain, still standing={stillOnRoute}; kept through an order=" +
             $"{keptThroughAnOrder}, scrapped when taken off work={scrapped}; drift {drift.Grain}/{drift.Wood}");
+        return passed;
+    }
+
+    /// <summary>
+    /// A building is paid for in material and somebody's time, and does nothing until it is paid.
+    /// </summary>
+    /// <remarks>
+    /// Four claims:
+    /// <list type="bullet">
+    /// <item><b>An unfinished building does nothing.</b> Not "does less" — a half-built granary stores
+    /// nothing, owns no catchment and cannot be delivered to as a store, because every predicate on the
+    /// node asks whether it is built rather than every caller remembering to.</item>
+    /// <item><b>Timber has to be carried there.</b> A site is a demand at a place, which is the one task
+    /// the hauling board reads backwards, and it is the most urgent thing on the board because hands
+    /// standing at a site with no materials are hands doing nothing at all.</item>
+    /// <item><b>Then hands.</b> Labour accrues per site from whoever is standing at it, so four builders
+    /// are four times the work — a building has no output, so there is nothing to attribute.</item>
+    /// <item><b>And the timber stops existing.</b> Consumed into the wall on completion, so the
+    /// conservation identity closes with no term for material turned into building.</item>
+    /// </list>
+    /// </remarks>
+    private static bool ABuildingCostsLabour()
+    {
+        var world = new SimulationWorld(240f);
+        var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 4000);
+        world.SeedStock(granary, Resource.Wood, 900);
+        world.SeedStock(granary, Resource.Grain, 900);
+
+        // A depot far enough away that its timber has to be carted rather than being in the same yard.
+        var site = world.AddNode(
+            NodeKind.ForwardDepot, new Vector2(40f, 0f), capacity: 400, built: false);
+        var timber = Construction.TimberFor(NodeKind.ForwardDepot);
+        var startedUseless = !world.Nodes.Get(site).Stores &&
+                             !world.Nodes.Get(site).OwnsCatchment &&
+                             world.Nodes.Get(site).IsUnderConstruction;
+
+        // A carter to bring the materials, and two builders posted on the site.
+        var carter = world.SpawnAgent(new Vector2(-6f, 0f), UnitType.Villager);
+        world.TryBuildCart(carter);
+        for (var i = 0; i < 2; i++)
+        {
+            var hand = world.SpawnAgent(new Vector2(40f, 6f + i * 1.4f), UnitType.Villager);
+            world.QueueAssign(
+                new[] { hand },
+                Assignment.Post(
+                    site,
+                    world.Nodes.Get(site).Position,
+                    world.Nodes.Get(site).FootprintRadius,
+                    EconomySystem.WorkShiftSeconds));
+        }
+
+        // Long enough for the timber to arrive and two pairs of hands to finish 600 labour-seconds.
+        var deliveredAt = -1f;
+        var raisedAt = -1f;
+        var drift = 0L;
+        for (var tick = 1; tick <= 30 * 900; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            var discrepancy = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            drift = discrepancy.Grain + discrepancy.Wood;
+            if (drift != 0) break;
+            if (!world.Nodes.Contains(site)) break;
+            if (deliveredAt < 0f && world.Nodes.Get(site).TimberWanted == 0)
+            {
+                deliveredAt = tick / 30f;
+            }
+
+            if (raisedAt < 0f && world.Nodes.Get(site).IsBuilt) raisedAt = tick / 30f;
+        }
+
+        ref readonly var finished = ref world.Nodes.Get(site);
+        var works = finished.IsBuilt && finished.Stores && finished.OwnsCatchment;
+        // The timber left the world rather than sitting in the finished building.
+        var spent = finished.Stock.Wood == 0 && world.Economy.Consumed.Wood >= timber;
+        var passed = startedUseless && deliveredAt > 0f && raisedAt > deliveredAt && works && spent &&
+                     world.Economy.Raised == 1 && drift == 0;
+        Console.WriteLine(
+            $"    a depot at 40 m: useless while a site={startedUseless}, {timber} timber carted out by " +
+            $"{deliveredAt:F0} s, two builders finished {Construction.LabourFor(NodeKind.ForwardDepot):F0} " +
+            $"labour-seconds by {raisedAt:F0} s, then it stores and owns a catchment={works}; timber " +
+            $"consumed into the wall={spent}; drift {drift}");
         return passed;
     }
 

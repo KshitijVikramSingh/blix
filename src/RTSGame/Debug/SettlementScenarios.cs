@@ -689,6 +689,12 @@ internal static class SettlementScenarios
             $"  population: {economy.Born:N0} born, {economy.Emigrated:N0} left because their household " +
             $"went hungry, {world.Agents.LiveCount:N0} alive; readiness to feed one more is " +
             $"{economy.Readiness * 100f:F0}%");
+        Console.WriteLine(
+            $"  construction: {economy.Raised:N0} buildings finished — a house is " +
+            $"{Construction.TimberFor(NodeKind.House)} timber carried out and " +
+            $"{Construction.LabourFor(NodeKind.House):F0} labour-seconds, a depot " +
+            $"{Construction.TimberFor(NodeKind.ForwardDepot)} and " +
+            $"{Construction.LabourFor(NodeKind.ForwardDepot):F0}");
 
         // What the year cost per person, against what the rates say it should have. A settlement that ate
         // less than its appetite went short somewhere, and the shortfall column says where. Measured in

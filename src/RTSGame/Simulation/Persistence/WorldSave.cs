@@ -186,10 +186,7 @@ internal static class WorldSave
             case AssignGroupCommand assign:
                 writer.Int((int)CommandTag.Assign);
                 writer.Blob<AgentId>(assign.Agents);
-                writer.Int((int)assign.Assignment.Kind);
-                writer.Vector(assign.Assignment.Anchor);
-                writer.Vector(assign.Assignment.FarAnchor);
-                writer.Float(assign.Assignment.DwellSeconds);
+                WriteAssignment(writer, assign.Assignment);
                 return;
             default:
                 throw new NotSupportedException(
@@ -211,13 +208,52 @@ internal static class WorldSave
         var tag => throw new InvalidDataException($"Unknown order tag {tag} in the save."),
     };
 
+    /// <summary>
+    /// Every field of an assignment, because four of them was not enough.
+    /// </summary>
+    /// <remarks>
+    /// This used to write the kind, both anchors and the dwell — which was the whole of an assignment when
+    /// the only ones a player could issue were a post and a shuttle, both of which are two points and a
+    /// duration. It has not been the whole of one for three stages: a haul names two nodes and a cargo, a
+    /// shift of work names its site and has a different duration at each end, and a route names both.
+    /// Everything unwritten came back as <c>default</c> — which for a node id is node <em>zero</em>, so an
+    /// order in flight across a save turned into an order about the first node in the world.
+    /// <para>
+    /// It went unnoticed because the round-trip test queued a shuttle, whose unwritten fields were all
+    /// already default. Making <see cref="Assignment.Hold"/> and <see cref="Assignment.Shuttle"/> say
+    /// <c>NodeId.None</c> instead of leaving it to default is what finally made the two differ.
+    /// </para>
+    /// </remarks>
+    private static void WriteAssignment(WorldWriter writer, Assignment assignment)
+    {
+        writer.Int((int)assignment.Kind);
+        writer.Vector(assignment.Anchor);
+        writer.Vector(assignment.FarAnchor);
+        writer.Float(assignment.DwellSeconds);
+        writer.Int(assignment.Source.Value);
+        writer.Int(assignment.Sink.Value);
+        writer.Int((int)assignment.Cargo);
+        writer.Float(assignment.PlaceExtent);
+        writer.Float(assignment.FarPlaceExtent);
+        writer.Float(assignment.FarDwellSeconds);
+    }
+
     private static AgentCommand ReadAssign(WorldReader reader)
     {
         var agents = reader.Blob<AgentId>();
         var kind = (AssignmentKind)reader.Int();
         var anchor = reader.Vector();
         var farAnchor = reader.Vector();
-        return new AssignGroupCommand(agents, new Assignment(kind, anchor, farAnchor, reader.Float()));
+        var dwell = reader.Float();
+        var source = new NodeId(reader.Int());
+        var sink = new NodeId(reader.Int());
+        var cargo = (Resource)reader.Int();
+        var extent = reader.Float();
+        var farExtent = reader.Float();
+        var farDwell = reader.Float();
+        return new AssignGroupCommand(
+            agents,
+            new Assignment(kind, anchor, farAnchor, dwell, source, sink, cargo, extent, farExtent, farDwell));
     }
 
     /// <summary>Every kind of order the save format handles, for the census that keeps it honest.</summary>

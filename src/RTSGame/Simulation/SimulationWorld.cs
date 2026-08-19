@@ -229,7 +229,8 @@ internal sealed class SimulationWorld
         Resource produces = Resource.Grain,
         float catchmentSeconds = 60f,
         int occupancy = 0,
-        FactionId? faction = null)
+        FactionId? faction = null,
+        bool built = true)
     {
         var resolved = faction ?? new FactionId(0);
         var at = Terrain.ClampPosition(position);
@@ -242,6 +243,11 @@ internal sealed class SimulationWorld
             Produces = produces,
             CatchmentSeconds = catchmentSeconds,
             Occupancy = occupancy,
+            // Standing and finished unless the caller says otherwise. The default is <em>built</em> rather
+            // than under construction because most callers are scenarios and tests laying out a settlement
+            // that already exists — a fixture that had to wait a season for its granary would be testing
+            // construction rather than whatever it was about. The game's own build key passes false.
+            BuildWork = built ? Construction.LabourFor(kind) : 0f,
         });
         Placement.Transform.TryWorldToCell(at, out var cell);
         Nodes.Get(id).Collider = Colliders.Add(
@@ -480,6 +486,15 @@ internal sealed class SimulationWorld
         var at = EconomySystem.NodeAt(Nodes, assignment.Anchor, PlacementCellSize);
         if (!Nodes.Contains(at)) return assignment;
         ref readonly var site = ref Nodes.Get(at);
+        // A site first, whatever it is going to be: posting somebody on a half-built granary means "help
+        // put this up", not "work here", and the same key does both because the difference is a fact about
+        // the building rather than about the order.
+        if (site.IsUnderConstruction)
+        {
+            return Assignment.Post(
+                at, site.Position, site.FootprintRadius, EconomySystem.WorkShiftSeconds);
+        }
+
         return site.Kind switch
         {
             NodeKind.Farm => Assignment.Work(

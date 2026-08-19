@@ -278,6 +278,26 @@ internal sealed class SettlementArt : IDisposable
         Matrix4x4.CreateTranslation(position.X, groundHeight, position.Y);
 
     /// <summary>
+    /// A building coming out of the ground: full footprint, a share of its height.
+    /// </summary>
+    /// <remarks>
+    /// The cheapest honest way to draw construction, and the only one that needs no second model. It
+    /// distorts the geometry — a squashed roof is a squashed roof — and the distortion is exactly the read
+    /// you want, because a building that is half up <em>should</em> look wrong. The alternative is a
+    /// scaffolding model the pack does not have, or drawing the site as a pile of timber, which loses the
+    /// one thing a player wants to see at a glance: how far along it is.
+    /// </remarks>
+    public static Matrix4x4 Rising(
+        Vector2 position,
+        float groundHeight,
+        float widthMetres,
+        float yaw,
+        float heightShare) =>
+        Matrix4x4.CreateScale(widthMetres, widthMetres * MathF.Max(0.02f, heightShare), widthMetres) *
+        Matrix4x4.CreateRotationY(yaw) *
+        Matrix4x4.CreateTranslation(position.X, groundHeight, position.Y);
+
+    /// <summary>
     /// A stable pseudo-random turn for a node, so buildings do not all face the same way.
     /// </summary>
     /// <remarks>

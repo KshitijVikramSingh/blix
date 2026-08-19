@@ -210,12 +210,30 @@ internal readonly record struct Assignment(
         HasTwoEnds && leg % 2 != 0 ? FarPlaceExtent : PlaceExtent;
 
     /// <summary>Stand at a post, checking in every <paramref name="dwellSeconds"/>.</summary>
+    /// <remarks>
+    /// <b>The node ids are None, explicitly.</b> They default to <c>default(NodeId)</c>, which is node
+    /// <em>zero</em> and not "no node" — so a bare post named the first node in the world, and anything
+    /// that asked a Hold which node it was serving got a real answer about somebody else's granary. It
+    /// happened to be harmless only because the one caller that asks went on to check the node was a work
+    /// site and node zero never is. That is not a thing to leave standing.
+    /// </remarks>
     public static Assignment Hold(Vector2 post, float dwellSeconds, float placeExtent = 0f) =>
-        new(AssignmentKind.Hold, post, post, dwellSeconds, PlaceExtent: placeExtent);
+        new(
+            AssignmentKind.Hold, post, post, dwellSeconds, NodeId.None, NodeId.None,
+            PlaceExtent: placeExtent);
+
+    /// <summary>Stand at a node and work on it — a builder at a site, and what counts them as hands.</summary>
+    public static Assignment Post(
+        NodeId site,
+        Vector2 at,
+        float extent,
+        float dwellSeconds) =>
+        new(
+            AssignmentKind.Hold, at, at, dwellSeconds, site, NodeId.None, PlaceExtent: extent);
 
     /// <summary>Work one end, then the other, dwelling at each.</summary>
     public static Assignment Shuttle(Vector2 first, Vector2 second, float dwellSeconds) =>
-        new(AssignmentKind.Shuttle, first, second, dwellSeconds);
+        new(AssignmentKind.Shuttle, first, second, dwellSeconds, NodeId.None, NodeId.None);
 
     /// <summary>Where the given leg of this assignment is served.</summary>
     public Vector2 PlaceOfLeg(int leg) => HasTwoEnds && leg % 2 != 0 ? FarAnchor : Anchor;

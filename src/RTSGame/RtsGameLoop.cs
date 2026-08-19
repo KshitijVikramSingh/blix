@@ -155,13 +155,25 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     {
         VerticalFieldOfView = MathF.PI * 42f / 180f,
         NearPlane = 0.25f,
+        // Recomputed every frame from how far back the camera is standing — see UpdateCamera. It was a
+        // flat 150 m, which is fine at the zoom it was written for and silently wrong at any other: the
+        // zoom range went to eight hundred metres on a 600 m map, so pulling back past a hundred and fifty
+        // clipped the entire world away and the screen went to sky.
         FarPlane = 150f,
     };
     // What the camera is looking at. It used to be the origin, full stop, which is fine on
     // a thirty-metre square and useless on a kilometre one: the body has to be watched
     // covering distance, and that means going with it.
     private Vector2 cameraFocus;
-    private bool cameraFollowsSelection = true;
+    /// <summary>
+    /// Whether the camera chases the selection. Off by default, now that panning exists.
+    /// </summary>
+    /// <remarks>
+    /// It was on, because following was the only way the camera ever went anywhere. With a pan it is a
+    /// surprise: a view that drifts whenever a selected body walks is a view you are fighting. Z turns it
+    /// back on for the thing it is genuinely good at, which is watching one long walk.
+    /// </remarks>
+    private bool cameraFollowsSelection;
 
     private IRenderHost host = null!;
     private IGraphicsDevice graphicsDevice = null!;
@@ -301,8 +313,33 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private float aspect = 16f / 9f;
     private float cameraYaw = MathF.PI * 0.25f;
     private float cameraDistance = 31f;
-    private float cameraMinimumDistance = 19f;
-    private float cameraMaximumDistance = 46f;
+
+    /// <summary>How close the camera may come. Near enough to read one body.</summary>
+    /// <remarks>
+    /// Eight metres rather than nineteen. Nineteen was the floor for a session about how a crowd moves,
+    /// where the thing being judged is a dozen bodies at once; a settlement wants to be looked at from
+    /// close enough to see what one villager is carrying.
+    /// </remarks>
+    private const float CameraNearestDistance = 8f;
+
+    /// <summary>How far back the camera may stand.</summary>
+    /// <remarks>
+    /// Enough to hold the settlement and its whole tree line, and no more. It was the map's own extent
+    /// times 1.35 — eight hundred metres — which is a viewpoint from which a villager is a subpixel and
+    /// which, with a fixed far plane, showed nothing at all.
+    /// </remarks>
+    private const float CameraFurthestDistance = 240f;
+
+    /// <summary>Metres a second the arrow keys pan, as a share of how far back the camera is.</summary>
+    /// <remarks>
+    /// A share rather than a speed, because a pan that crosses the screen in a second when zoomed in
+    /// takes a minute when zoomed out — what a player means by "pan left" is a fraction of what they can
+    /// see, not a distance in metres.
+    /// </remarks>
+    private const float CameraPanSharePerSecond = 1.1f;
+
+    private bool panLeft, panRight, panUp, panDown;
+    private bool draggingCamera;
     private float mouseX;
     private float mouseY;
     private Vector2 pointerWorld;
@@ -340,9 +377,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // A camera sized for a thirty-metre square shows a kilometre map as a patch of
         // ground, which is the one thing this session must not do — the body has to be
         // watched crossing real distances as well as stepping round a doorway.
-        cameraMinimumDistance = 19f;
-        cameraMaximumDistance = MathF.Max(46f, extentMeters * 1.35f);
-        cameraDistance = MathF.Min(46f, cameraMaximumDistance);
+        cameraDistance = 46f;
         camera.FarPlane = MathF.Max(150f, extentMeters * 3f);
         // What is left on the panel is what is still a question. Everything the locomotion
         // work settled — solver relaxation, congestion decay, contact yielding, the recovery
@@ -412,7 +447,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         SettlementScenarios.Populate(
             simulation, farms: 8, woodcutters: 4, carts: 5, wagons: 0, ringRadius: 30f);
         cameraFocus = Vector2.Zero;
-        cameraDistance = MathF.Min(78f, cameraMaximumDistance);
+        cameraDistance = 78f;
         Console.WriteLine(
             $"  settlement: {simulation.Nodes.LiveCount} nodes, {simulation.Agents.LiveCount} people, " +
             $"{simulation.Date}");
@@ -672,7 +707,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Console.WriteLine("  J: cycle pen-escape variants (main exit + random alternates)");
         Console.WriteLine("  L: load terrain laboratory (ramp, cliff, road, mud, rough, pond)");
         Console.WriteLine("  blue unit: yielding under crowd pressure   red unit: navigation progress failure");
-        Console.WriteLine("  Q/E or arrows: rotate 90°   wheel: zoom   Esc: quit");
+        Console.WriteLine("  arrows: pan   middle-drag: drag the ground   Q/E: rotate 90°   wheel: zoom");
+        Console.WriteLine("  Z: camera follows the selection (off by default)   Esc: quit");
         Console.WriteLine($"  {simulation.Agents.Count} agents   simulation: 30 Hz fixed step");
         Console.WriteLine("  placement grid: 1.5 m   navigation grid: 0.5 m   collider hash: 2.0 m");
     }
@@ -695,7 +731,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private void Build(NodeKind kind, int capacity, Resource produces, int occupancy = 0)
     {
         if (!pointerOnTerrain) return;
-        var id = simulation.AddNode(kind, pointerWorld, capacity, produces, occupancy: occupancy);
+        // Placed as a site, not as a building. It stands on its ground from this moment — bodies route
+        // around it, and completion re-rasterises nothing — but it stores nothing, feeds nobody and owns no
+        // catchment until its timber has been carried out and somebody has stood at it long enough.
+        var built = !Construction.NeedsBuilding(kind);
+        var id = simulation.AddNode(
+            kind, pointerWorld, capacity, produces, occupancy: occupancy, built: built);
+        if (!built)
+        {
+            Console.WriteLine(
+                $"  {kind} site: wants {Construction.TimberFor(kind)} timber carried out and " +
+                $"{Construction.LabourFor(kind):F0} labour-seconds — post villagers on it with U");
+        }
+
         Console.WriteLine(
             $"  {kind} at ({pointerWorld.X:F0}, {pointerWorld.Y:F0}) — " +
             $"{simulation.Nodes.LiveCount} node(s). Post hands with U; carts find their own work");
@@ -1068,6 +1116,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         debug.Values.Value("hands at work", hands);
         debug.Values.Value("spare hands", spare);
         debug.Values.Value("carts", carts);
+
+        // What the building sites are waiting for, because "wants timber" and "idle site" are two
+        // different problems fixed by opposite actions — one wants a cart, the other wants people — and a
+        // settlement with no carter cannot get materials anywhere at all. Silence on this was the one gap
+        // in the loop: a site with nobody to carry to it simply sat there.
+        var sites = 0;
+        var worst = string.Empty;
+        foreach (ref readonly var node in simulation.Nodes.All)
+        {
+            if (!node.IsAlive || !node.IsUnderConstruction) continue;
+            sites++;
+            if (worst.Length == 0 || node.TimberWanted > 0) worst = Construction.StateOf(in node);
+        }
+
+        if (sites > 0) debug.Values.Value("building sites", $"{sites} — {worst}");
         debug.Values.Value("unhoused", simulation.UnhousedCount);
         debug.Values.Value("nodes", simulation.Nodes.LiveCount);
         debug.Values.Value("hauls", simulation.Economy.HaulsAssigned);
@@ -1173,7 +1236,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             nextTimingReport = time.Total + 1.0;
         }
 
-        UpdateCameraFocus((float)Math.Clamp(time.Delta, 0.0, 0.25));
+        var frame = (float)Math.Clamp(time.Delta, 0.0, 0.25);
+        PanCamera(frame);
+        UpdateCameraFocus(frame);
         UpdateCamera();
         UpdatePointerWorld();
     }
@@ -1189,6 +1254,40 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             MathF.Cos(cameraYaw) * horizontal);
         camera.Transform.Position = eye;
         camera.Transform.LookAt(focus, Vector3.UnitY);
+        // The far plane has to follow the zoom or one of the two is always wrong: too near and the world
+        // is clipped away when you pull back, too far and the depth buffer's precision is spent on empty
+        // sky when you are close. Four times the standoff plus a margin covers the ground behind the focus
+        // at this elevation at every zoom.
+        camera.FarPlane = cameraDistance * 4f + 120f;
+    }
+
+    /// <summary>
+    /// Moves the camera over the map: held arrow keys, and dragging the ground with the middle button.
+    /// </summary>
+    /// <remarks>
+    /// There was no panning at all, which made the camera's only way of getting anywhere the fact that it
+    /// followed whatever was selected — so looking at a corner of the map meant selecting something in it,
+    /// and the view drifted whenever a selected body walked. Following is still available on Z and is off
+    /// by default now, because a camera that moves on its own is a surprise once there is a way to move it
+    /// deliberately.
+    /// <para>
+    /// Arrow panning is in <em>screen</em> space rather than world space: "left" means left on the monitor,
+    /// which after a 90-degree rotation is a different compass direction. Anything else is unusable the
+    /// first time somebody presses Q.
+    /// </para>
+    /// </remarks>
+    private void PanCamera(float deltaSeconds)
+    {
+        var x = (panRight ? 1f : 0f) - (panLeft ? 1f : 0f);
+        var z = (panUp ? 1f : 0f) - (panDown ? 1f : 0f);
+        if (x == 0f && z == 0f) return;
+        // Screen right and screen "into the distance", on the ground plane, at the current yaw.
+        var forward = new Vector2(MathF.Sin(cameraYaw), MathF.Cos(cameraYaw));
+        var right = new Vector2(-forward.Y, forward.X);
+        var move = right * x - forward * z;
+        if (move.LengthSquared() > 1f) move = Vector2.Normalize(move);
+        cameraFocus = simulation.Terrain.ClampPosition(
+            cameraFocus + move * (cameraDistance * CameraPanSharePerSecond * deltaSeconds));
     }
 
     /// <summary>
@@ -1710,8 +1809,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 // Scaled to the footprint the simulation enforces rather than to anything about the
                 // model: a granary is 7.5 m because NodeFootprint says it occupies five placement cells
                 // and bodies route around exactly that square. The art fits the game, not the reverse.
-                var placement = SettlementArt.Placement(
-                    node.Position, ground, width, SettlementArt.SquareYawOf(node.Id.Value));
+                var yaw = SettlementArt.SquareYawOf(node.Id.Value);
+                if (node.IsUnderConstruction)
+                {
+                    DrawSite(in node, ground, width, yaw);
+                    continue;
+                }
+
+                var placement = SettlementArt.Placement(node.Position, ground, width, yaw);
                 switch (node.Kind)
                 {
                     case NodeKind.Granary:
@@ -1730,6 +1835,47 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
             DrawGreyboxBuilding(in node, ground, width);
         }
+    }
+
+    /// <summary>
+    /// A building site: the timber lying on it, and the walls as far up as they have got.
+    /// </summary>
+    /// <remarks>
+    /// Two things a player needs at a glance and they are two different problems. <b>Timber on the
+    /// ground</b> says the materials have arrived, and its absence says a cart is wanted; <b>height</b> says
+    /// how far the labour has got, and a site that has stopped rising has nobody standing at it. Collapsing
+    /// them into one "under construction" marker would leave the player unable to tell a hauling problem
+    /// from a labour one, which are fixed by opposite actions.
+    /// </remarks>
+    private void DrawSite(in EconomyNode site, float ground, float width, float yaw)
+    {
+        var timber = Construction.TimberFor(site.Kind);
+        var delivered = timber <= 0 ? 1f : MathF.Min(1f, site.Stock.Wood / (float)timber);
+        if (delivered > 0.02f && art!.WoodHeap is { } logs)
+        {
+            // Stacked round the footprint rather than in the middle of it, because the middle is where the
+            // walls are going and because a stack that grows outward reads as materials arriving.
+            var stacks = 1 + (int)(delivered * 3.99f);
+            for (var i = 0; i < stacks; i++)
+            {
+                var angle = yaw + (i + 0.5f) / stacks * MathF.Tau;
+                var at = site.Position +
+                         new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * (width * 0.42f);
+                logs.Add(SettlementArt.Placement(at, ground, width * 0.30f, angle));
+            }
+        }
+
+        var labour = Construction.LabourFor(site.Kind);
+        var raised = labour <= 0f ? 1f : MathF.Min(1f, site.BuildWork / labour);
+        if (raised <= 0.01f) return;
+        var rising = SettlementArt.Rising(site.Position, ground, width, yaw, raised);
+        var model = site.Kind switch
+        {
+            NodeKind.Granary => art!.Granary,
+            NodeKind.House => art!.Houses[site.Id.Value % art.Houses.Length],
+            _ => art!.Depot,
+        };
+        model.Add(rising);
     }
 
     /// <summary>
@@ -2193,6 +2339,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void OnMouseMove(float x, float y, float deltaX, float deltaY)
     {
+        // Middle-drag grabs the ground. Both ends of the drag are raycast against the terrain with the
+        // <em>same</em> camera, so the world moves exactly as far under the cursor as the cursor moved —
+        // which is the only version of this that feels like dragging a map rather than nudging a dial.
+        // Approximating it as "screen pixels times some function of the zoom" is off by the perspective
+        // and drifts under the cursor as you drag toward the horizon.
+        if (draggingCamera &&
+            TryScreenToGround(x - deltaX, y - deltaY, out var from) &&
+            TryScreenToGround(x, y, out var to))
+        {
+            cameraFocus = simulation.Terrain.ClampPosition(cameraFocus - (to - from));
+        }
+
         mouseX = x;
         mouseY = y;
         selection.Update(x, y);
@@ -2207,7 +2365,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             return;
         }
 
-        if (button == MouseButton.Left)
+        if (button == MouseButton.Middle)
+        {
+            draggingCamera = true;
+        }
+        else if (button == MouseButton.Left)
         {
             selection.Begin(mouseX, mouseY);
         }
@@ -2220,6 +2382,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void OnMouseUp(MouseButton button)
     {
+        if (button == MouseButton.Middle) draggingCamera = false;
         if (obstacleEditMode) return;
         if (button != MouseButton.Left) return;
         selection.Update(mouseX, mouseY);
@@ -2239,8 +2402,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var step = MathF.Max(2f, cameraDistance * 0.12f);
         cameraDistance = Math.Clamp(
             cameraDistance - offsetY * step,
-            cameraMinimumDistance,
-            cameraMaximumDistance);
+            CameraNearestDistance,
+            CameraFurthestDistance);
     }
 
     private AgentId? FindNearestUnselectedTarget()
@@ -2395,13 +2558,25 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             case Key.RightControl:
                 additiveSelection = true;
                 break;
+            // Rotation is Q and E; the arrows pan. They used to do both, which meant there was no way to
+            // move the camera sideways at all and pressing Left to look left spun the world instead.
             case Key.Q:
-            case Key.Left:
                 cameraYaw -= MathF.PI * 0.5f;
                 break;
             case Key.E:
-            case Key.Right:
                 cameraYaw += MathF.PI * 0.5f;
+                break;
+            case Key.Left:
+                panLeft = true;
+                break;
+            case Key.Right:
+                panRight = true;
+                break;
+            case Key.Up:
+                panUp = true;
+                break;
+            case Key.Down:
+                panDown = true;
                 break;
         }
     }
@@ -2409,6 +2584,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     public void OnKeyUp(Key key)
     {
         if (key is Key.LeftControl or Key.RightControl) additiveSelection = false;
+        // Held rather than edge-triggered: key events fire once, and a pan has to keep going for as long
+        // as the key is down, so the state lives here and PanCamera reads it every frame.
+        if (key == Key.Left) panLeft = false;
+        if (key == Key.Right) panRight = false;
+        if (key == Key.Up) panUp = false;
+        if (key == Key.Down) panDown = false;
     }
 
     public void Dispose()

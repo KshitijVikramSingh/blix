@@ -221,6 +221,16 @@ internal struct EconomyNode
     /// <summary>Catchment budget in seconds at hauler pace, for a node that owns one.</summary>
     public float CatchmentSeconds;
 
+    /// <summary>
+    /// Labour-seconds spent putting this building up.
+    /// </summary>
+    /// <remarks>
+    /// A node whose labour is not yet spent is that node, unfinished — see <see cref="Construction"/>. It
+    /// occupies its final footprint from the moment it is placed, so bodies route around it while it is a
+    /// site and completion re-rasterises nothing.
+    /// </remarks>
+    public float BuildWork;
+
     /// <summary>Labour-seconds of ground broken on this field this year. Sets its ceiling.</summary>
     public float PrepareWork;
 
@@ -301,11 +311,33 @@ internal struct EconomyNode
 
     public bool IsAlive;
 
-    /// <summary>A place worked for what it yields. Fields; nothing else, now that wood is trees.</summary>
-    public readonly bool Produces_ => Kind == NodeKind.Farm;
+    /// <summary>
+    /// Whether this building is finished.
+    /// </summary>
+    /// <remarks>
+    /// <b>Every predicate below asks this, which is the point.</b> An unfinished granary stores nothing,
+    /// feeds nobody and owns no catchment — and putting the test inside the predicates rather than at their
+    /// twenty-six call sites means there are no twenty-six chances to forget one. Kinds that need no
+    /// building answer true from the moment they exist, because their labour requirement is zero.
+    /// </remarks>
+    public readonly bool IsBuilt => BuildWork >= Construction.LabourFor(Kind);
 
-    /// <summary>A place labour is spent at: a field to be worked or a tree to be cut.</summary>
-    public readonly bool IsWorkSite => Kind is NodeKind.Farm or NodeKind.Tree;
+    /// <summary>A site: placed, standing on its ground, and not yet a building.</summary>
+    public readonly bool IsUnderConstruction => !IsBuilt;
+
+    /// <summary>Timber still wanted on site before work can begin.</summary>
+    public readonly int TimberWanted => IsBuilt
+        ? 0
+        : Math.Max(0, Construction.TimberFor(Kind) - Stock.Wood);
+
+    /// <summary>A place worked for what it yields. Fields; nothing else, now that wood is trees.</summary>
+    public readonly bool Produces_ => IsBuilt && Kind == NodeKind.Farm;
+
+    /// <summary>
+    /// A place labour is spent at: a field to be worked, a tree to be cut, or a building to be raised.
+    /// </summary>
+    public readonly bool IsWorkSite =>
+        IsUnderConstruction || Kind is NodeKind.Farm or NodeKind.Tree;
 
     /// <summary>
     /// Stock that is not yet a resource — timber still standing in a tree.
@@ -319,15 +351,18 @@ internal struct EconomyNode
     public readonly bool IsStanding => Kind == NodeKind.Tree;
 
     /// <summary>Somewhere goods can be delivered to. A pile is not: nobody delivers to a pile.</summary>
-    public readonly bool Stores => Kind is NodeKind.Granary or NodeKind.ForwardDepot;
+    public readonly bool Stores => IsBuilt && Kind is NodeKind.Granary or NodeKind.ForwardDepot;
 
-    public readonly bool OwnsCatchment => Kind is NodeKind.Granary or NodeKind.ForwardDepot;
+    /// <summary>Somewhere a cart can unload — a store, or a site waiting for its materials.</summary>
+    public readonly bool AcceptsDeliveries => Stores || TimberWanted > 0;
+
+    public readonly bool OwnsCatchment => IsBuilt && Kind is NodeKind.Granary or NodeKind.ForwardDepot;
 
     /// <summary>Goods lying on the ground, which anybody may come for.</summary>
     public readonly bool IsPile => Kind == NodeKind.Pile;
 
     /// <summary>A clocked sink: it draws, and it is the last place a resource is physical.</summary>
-    public readonly bool IsSink => Kind == NodeKind.House;
+    public readonly bool IsSink => IsBuilt && Kind == NodeKind.House;
 
     /// <summary>Room for another household member.</summary>
     public readonly int Housing => Math.Max(0, Occupancy - Occupants);
@@ -338,8 +373,17 @@ internal struct EconomyNode
     /// <summary>Half the width of this node's building, in metres.</summary>
     public readonly float HalfExtent => NodeFootprint.HalfExtentOf(Kind);
 
-    /// <summary>Room left for more of this resource.</summary>
-    public readonly int RoomFor(Resource resource) => Math.Max(0, Capacity - Stock[resource]);
+    /// <summary>
+    /// Room left for more of this resource.
+    /// </summary>
+    /// <remarks>
+    /// A site takes exactly its timber and nothing else, which is what makes it a valid destination for a
+    /// haul without needing a second capacity field: <see cref="Capacity"/> goes on meaning what the
+    /// finished building will hold, and the limit while it is a site is computed from what it is becoming.
+    /// </remarks>
+    public readonly int RoomFor(Resource resource) => IsUnderConstruction
+        ? resource == Resource.Wood ? TimberWanted : 0
+        : Math.Max(0, Capacity - Stock[resource]);
 }
 
 /// <summary>
@@ -408,12 +452,17 @@ internal sealed class NodeStore
         node.ReapWork = 0f;
         node.Growth = 0f;
         node.Privation = 0f;
+        node.BuildWork = 0f;
         LiveCount--;
         if (fed) Revision++;
         return true;
     }
 
     /// <summary>Everything physically anywhere, which conservation is checked against.</summary>
+    /// <remarks>
+    /// Timber delivered to a building site counts, because it is timber sitting on the ground at a place —
+    /// it stops being timber only when the building is finished and it is consumed into it.
+    /// </remarks>
     /// <remarks>
     /// Timber still standing in a tree is included, and has to be: it was seeded into the world, so it
     /// is on the left of the identity, and a cutter moving it from a trunk to its own hands must not

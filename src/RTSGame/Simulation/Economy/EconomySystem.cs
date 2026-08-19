@@ -357,6 +357,7 @@ internal sealed class EconomySystem
         // Everything that is produced is produced by labour standing at the thing, now that wood is
         // trees. There is no longer a pass in which a node accrues output on its own.
         WorkSites(nodes, agents, season, deltaSeconds);
+        Raise(nodes, deltaSeconds);
         BindHomes(nodes, agents, deltaSeconds);
         BindCatchments(nodes, price);
         Consume(nodes, season, deltaSeconds);
@@ -652,6 +653,51 @@ internal sealed class EconomySystem
             Produced = produced;
         }
     }
+
+    /// <summary>
+    /// Puts up the buildings that have their timber and somebody standing at them.
+    /// </summary>
+    /// <remarks>
+    /// Per site from the hands at it, rather than per body like a crop: a building has no output, so there
+    /// is nothing to attribute to whoever did the work and four builders are simply four times the work.
+    /// <para>
+    /// The timber is <b>consumed on completion</b> and not before, which is one decision worth stating.
+    /// Spending it gradually would be more physical and would mean a half-built house had half its timber
+    /// in it and half of it gone — and then abandoning a site would have destroyed material, so there would
+    /// have to be a rule about salvage. Consuming it at the end means an unfinished site is simply timber
+    /// standing on the ground where somebody left it, which is what conservation already knows how to
+    /// describe and what a player would expect if they knocked the site down.
+    /// </para>
+    /// </remarks>
+    private void Raise(NodeStore nodes, float deltaSeconds)
+    {
+        var consumed = Consumed;
+        var sites = nodes.MutableSpan();
+        for (var i = 0; i < sites.Length; i++)
+        {
+            ref var site = ref sites[i];
+            if (!site.IsAlive || site.IsBuilt) continue;
+            // Materials first: hands standing at a site with no timber are hands doing nothing, which is
+            // the difference between a hauling problem and a labour problem and the report says which.
+            if (site.TimberWanted > 0 || site.Hands <= 0) continue;
+
+            site.BuildWork += site.Hands * deltaSeconds;
+            if (!site.IsBuilt) continue;
+
+            // Finished. The timber stops being timber, so it leaves the world through the same door a loaf
+            // does and the identity still closes.
+            var timber = Construction.TimberFor(site.Kind);
+            site.Stock.Add(Resource.Wood, -timber);
+            consumed.Add(Resource.Wood, timber);
+            site.BuildWork = Construction.LabourFor(site.Kind);
+            Raised++;
+        }
+
+        Consumed = consumed;
+    }
+
+    /// <summary>Buildings finished since the world began.</summary>
+    public long Raised { get; private set; }
 
     /// <summary>
     /// Takes wood out of a tree and puts it in the cutter's hands.
@@ -1166,6 +1212,11 @@ internal sealed class EconomySystem
                 ref readonly var source = ref nodes.Get(assignment.Source);
                 ref readonly var sink = ref nodes.Get(assignment.Sink);
                 stale = source.Stock[assignment.Cargo] <= 0 || sink.RoomFor(assignment.Cargo) <= 0;
+                // A finished building has no room for timber, which is correct and would otherwise strand
+                // a cart mid-journey holding materials for a wall that no longer needs them. It is not
+                // stale — it is a delivery that should be redirected — and Handover already does that when
+                // the load arrives and will not fit.
+                if (stale && sink.IsBuilt && assignment.Cargo == Resource.Wood) stale = false;
             }
 
             if (!stale) continue;
@@ -1234,6 +1285,8 @@ internal sealed class EconomySystem
             // and a woodland is two orders of magnitude more numerous than the buildings — so it is
             // skipped first, before the per-resource sweep, rather than falling through every test.
             if (!source.IsAlive || source.IsStanding) continue;
+            // Nor is a site a source. It is holding timber that is about to become a wall.
+            if (source.IsUnderConstruction) continue;
             var stranded = source.Stores && !drawnOn.Contains(source.Id);
             foreach (var resource in Resources.All)
             {
@@ -1293,6 +1346,42 @@ internal sealed class EconomySystem
                         : bestNeed;
                 tasks.Add(new HaulTask(source.Id, bestSink, resource, urgency));
             }
+        }
+
+        CollectSiteDemand(nodes, worthLoad);
+    }
+
+    /// <summary>
+    /// Timber wanted at building sites, which is the one task the board reads backwards.
+    /// </summary>
+    /// <remarks>
+    /// Every other journey on the board starts from goods in the wrong place and looks for somewhere better
+    /// — a heap, a stranded store, an uneven pair of granaries. A site is the opposite shape: it is a
+    /// <em>demand</em> at a place, and the question is which store can answer it. So it gets its own pass
+    /// rather than being bent into the source-driven sweep, and it is the most urgent thing on the board:
+    /// hands standing at a site with no materials are hands doing nothing at all, which is worse than any
+    /// amount of stock sitting still.
+    /// <para>
+    /// This is also the thing that makes a cart necessary rather than merely useful. A settlement with no
+    /// carter cannot get timber to a site, and a cart costs timber — so the first cart comes out of the
+    /// founding stores, and after that the hauling network is what lets the settlement build at all.
+    /// </para>
+    /// </remarks>
+    private void CollectSiteDemand(NodeStore nodes, int worthLoad)
+    {
+        foreach (ref readonly var site in nodes.All)
+        {
+            if (!site.IsAlive || site.TimberWanted <= 0) continue;
+            var from = NearestStoreWith(
+                nodes,
+                Resource.Wood,
+                Math.Min(site.TimberWanted, Math.Max(1, worthLoad)),
+                site.Faction,
+                site.Position);
+            if (!nodes.Contains(from)) continue;
+            // Above a producer's overflowing yard, which is 2.0 at its worst: idle labour costs more than
+            // stalled production, because a farm that stops producing still has its hands doing something.
+            tasks.Add(new HaulTask(from, site.Id, Resource.Wood, 2.5f));
         }
     }
 

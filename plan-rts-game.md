@@ -2939,3 +2939,127 @@ Per-person figures were divided by the *final* headcount, which reported 513 gra
   labour** is what gives them somewhere to go that is not a field.
 - Privation and emigration are the shape death will take in Stage E, one level up: the machinery for
   "somebody leaves the world and drops what they were carrying" already exists and is exercised.
+
+---
+
+## 26. Stage D — construction as labour, and a camera you can steer
+
+### A building under construction is that building, unfinished
+
+Not a separate kind of node with its own rules — the same node with its labour not yet spent. Which is why
+the `IsBuilt` test went **inside** the predicates on `EconomyNode` rather than at their twenty-six call
+sites: an unfinished granary stores nothing, feeds nobody and owns no catchment in all twenty-six places,
+and there are no twenty-six chances to forget one.
+
+It also means **the footprint never changes.** A site occupies exactly the ground the finished building
+will, so bodies route around it from the moment it is placed and completion re-rasterises nothing — which
+matters, because placing a building is already the one operation that rebuilds the navigation raster, and
+doing it twice per building would double the cost of the most expensive thing the player can do.
+
+### Paid for in the only two currencies the game has
+
+| | timber | labour |
+|---|---|---|
+| granary | 18 sacks | 3,600 s |
+| house | 6 sacks | 1,200 s |
+| forward depot | **4 sacks** | 600 s |
+| farm | — | — |
+
+In *sacks*, because a villager's carry is the unit everything else in this economy is measured in and "six
+sacks of timber" is a thing a player can hold in their head where "180 wood" is not. Labour is sized
+against the seasons, like the crop windows: a house is 1,200 against a 1,200-second spring, so one pair of
+hands takes a season and four take a quarter of one.
+
+The depot is deliberately cheap. It is the answer to a receding wood line, and **the answer must not cost
+more than the problem** — four sacks is affordable out of a settlement already running short, which is
+exactly when it is wanted, and that is what makes acting early rather than late a real decision instead of
+a hint.
+
+**A field costs nothing**, and that is not an oversight. Breaking ground is already the crop cycle's Prepare
+window — 900 labour-seconds inside a 1,200-second spring, the most expensive thing a farmhand does all year.
+Charging construction on top would be charging twice for the same work, and a field that had to be *built*
+and then *prepared* would put a season between deciding to plough and ploughing.
+
+Labour accrues **per site from the hands standing at it**, unlike a crop. A field accrues per body because
+the reaper carries the crop away in its own hands and the grain has to go somewhere; a building has no
+output, so there is nothing to attribute and four builders are simply four times the work.
+
+The timber is **consumed on completion**, not gradually. Spending it as it goes would be more physical and
+would mean abandoning a half-built house destroyed material — so there would have to be a rule about
+salvage. Consuming it at the end means an unfinished site is simply timber standing on the ground where
+somebody left it, which is what conservation already knows how to describe.
+
+### The one task the board reads backwards
+
+Every other journey on the hauling board starts from **goods in the wrong place** and looks for somewhere
+better — a heap, a stranded store, an uneven pair of granaries. A site is the opposite shape: a **demand at
+a place**, where the question is which store can answer it. So it gets its own pass, and it outranks a
+producer's overflowing yard, because hands standing at a site with no materials are hands doing nothing at
+all — where a farm that stops producing still has its hands doing something.
+
+This is also what makes a cart **necessary** rather than merely useful, and it closes a loop three stages
+wide: a settlement with no carter cannot get timber to a site, a cart costs timber, and the timber comes
+out of a woodland that is receding. The first cart comes from the founding stores; after that the hauling
+network is what lets the settlement build at all.
+
+### Two bugs, and the second was hiding behind the first
+
+**`Assignment.Hold`'s node ids defaulted to node zero, not "no node".** `default(NodeId)` is `NodeId(0)`
+and `NodeId.None` is `NodeId(-1)`, so a bare post named the first node in the world. Harmless only by
+accident: the one caller that asks a Hold which node it serves went on to check the node was a work site,
+and node zero never is.
+
+**Fixing that exposed the save format.** `AssignGroupCommand` wrote four of an assignment's ten fields —
+the kind, both anchors and the dwell — which *was* the whole of an assignment when the only ones a player
+could issue were a post and a shuttle. It has not been the whole of one for three stages: a haul names two
+nodes and a cargo, a shift of work names its site and has a different duration at each end, a route names
+both. Everything unwritten came back as `default`, so **an order in flight across a save became an order
+about node zero.** It went unnoticed because the round-trip test queued a shuttle, whose unwritten fields
+were already default — making Hold and Shuttle say `NodeId.None` explicitly is what finally made the two
+differ, and the census test failed on the next run.
+
+Worth keeping as a pattern: *a test that only exercises the default case cannot tell you that you saved the
+defaults.*
+
+### The camera, which had three things wrong with it
+
+- **The far plane was a flat 150 m while the zoom range went to 810** on a 600 m map. Pulling back past a
+  hundred and fifty clipped the entire world away and the screen went to sky. It follows the zoom now, and
+  the range is 8–240 m: near enough to read what one villager is carrying, far enough to hold the
+  settlement and its tree line.
+- **There was no panning at all.** The camera's only way of getting anywhere was that it followed whatever
+  was selected — so looking at a corner of the map meant selecting something in it, and the view drifted
+  whenever a selected body walked. Following is still on `Z` and is off by default now, because a camera
+  that moves on its own is a surprise once there is a way to move it deliberately.
+- **The arrows rotated**, so pressing Left to look left spun the world. Rotation is Q/E; the arrows pan, in
+  *screen* space rather than world space, because "left" means left on the monitor and after a 90-degree
+  rotation that is a different compass direction.
+
+Middle-drag grabs the ground, and both ends of the drag are raycast against the terrain with the **same**
+camera — so the world moves exactly as far under the cursor as the cursor moved. Approximating it as screen
+pixels times some function of the zoom is off by the perspective and drifts under the cursor as you drag
+toward the horizon.
+
+| | |
+|---|---|
+| suite | `--selftest` **79/79** |
+| one year, compact | 8,121 grain of 8,400 nominal, drift 0, short 0, **4 born, 0 left, 0 faults** |
+| construction, measured | a depot at 40 m: 120 timber carted out by 185 s, two builders finished 600 labour-seconds by 485 s, then it stores and owns a catchment; timber consumed, drift 0 |
+| tick cost | 0.77 ms at ten thousand nodes |
+
+### The one thing accumulating
+
+**Per-tick O(nodes) passes.** There are now six of them — the hand count's clear, the crop roll, the home
+rebind's clear, consumption, population, and construction — plus the gate's own conservation check. Each is
+about 0.1 ms at ten thousand nodes and together they are most of the tick. None is wrong and none is worth
+fixing yet; the pattern is worth naming because the next one will make it 0.9 ms, and the fix when it comes
+is the same one `CountHands` already got: ask the thing that knows rather than sweeping everything that
+might.
+
+### What Stage E inherits
+
+- **Privation and emigration are the shape death will take**, one level up: the machinery for "somebody
+  leaves the world and drops what they were carrying" exists and is exercised every run.
+- **A site is a thing that can be interrupted**, which is what a raid on a half-built granary means.
+- **Buildings can now be lost for a cost that is legible** — a burnt store is eighteen sacks and half a
+  year of somebody's time, which is what makes defending one a decision rather than a reflex.
