@@ -19,6 +19,8 @@
   the correction, because it was a ratchet rather than a derivation and that is worth not
   repeating. The routing layer was then rebuilt twice more; `plan-rts.md` §8 is the record and
   is answered rather than open.
+- **Read §14 first** — it is the measured state, the debts this work is carrying, and what changed
+  underneath the rest of the roadmap.
 - **Start at Session 4, unit types.** It is the elastic session and the one the rest now waits on:
   soldier, cart and scout speeds are numbers in §3 that nothing implements, and the second body
   radius is what will say whether one decomposition can serve every unit or whether it needs one
@@ -1227,8 +1229,68 @@ complaint the whole trade layer exists to answer.
 
 ### Held every session
 
-1. **37/37 stays green**, or a threshold moves deliberately and is recorded with its old value.
+1. **42/42 stays green**, or a threshold moves deliberately and is recorded with its old value.
 2. **The determinism test grows with each system.** It covers movement only today.
 3. **Serialization discipline** — stable ids over references. Fresh-start succession (§5) makes this
    core-loop rather than a save feature; it is cheap continuously and expensive retrofitted.
 4. **Every new cost term is honest seconds with a matched fade.**
+5. **Resolve only where the answer can change.** Five things were rewritten this way and every one
+   paid: the congestion sweep, congestion storage, the navigation raster, the routing partition
+   and the renderer. The habit it corrects is reaching for a distance cutoff or a fixed grid when
+   the real question is *where does the information actually live*.
+
+---
+
+## 14. Where this stands, 2026-08-19
+
+Measured, not asserted. Everything here is reproducible from the flags in `plan-rts.md` §5.
+
+| | |
+|---|---|
+| suite | `--selftest` **42/42** |
+| body | **1.79 m/s**, accel 2.0, decel 3.0, turn 3.03 rad/s, compression **1.5x** |
+| world | **600 m** for the game; 30 m calibration world untouched and asserted |
+| tick, 2,000 agents | **6.0 ms at 600 m, 5.8 ms at 1200 m** — extent no longer moves it |
+| move order, ridge map | **8–27 ms**, 3–4 searches |
+| route quality vs the flat optimum | mean **1.0014**, p99 1.098, worst 1.187, **no cell lost** |
+| resident at 1200 m | **177 MB** (was 315), congestion **253 KB** (was 74.9 MB) |
+| frame | 7.4 ms |
+| tuning dials on the panel | **11** (was 45) |
+
+### Debts this session is carrying
+
+Named so the next reader does not have to rediscover them.
+
+1. **`walked/optimal` moved with the router** — pen 1.19 → 1.30, gate 1.62 → 1.78. Bodies walk
+   further even though the field's *costs* are closer to optimal, most likely tiles seeded from a
+   corner-graph field steering slightly wide near borders. Nothing fails on it. It is the first
+   number to look at if crowds start reading as wandering.
+2. **The congestion test is weak.** It compares a mean over 154,000 cells, and a 22 m jam barely
+   moves that. The sharp version compares only the cells whose route passes through the jam.
+3. **`PaceScale` was applied too broadly in Session 2.** The wall horizon turned out to be geometry
+   rather than duration and was tuned back by hand; the other users of it want the same question
+   asked, and none of them has been.
+4. **33 dead stops at the one-cell gate.** Zero in the pen. Both better than before the body
+   change, and the gate is the tighter case.
+5. **Substrate stage 3 — dropping the fine grid — is still gated** on congestion and the steering
+   gradient having a uniform-resolution home. `plan-rts.md` §8 has the argument.
+6. **Dynamic rebuild granularity was deliberately deferred** in §8's design. Placing a building
+   currently re-rasterises; what it should do to the decomposition is undecided.
+
+### What the roadmap looks like from here
+
+Sessions 1, 2 and 3 are done and the substrate arc that grew out of Session 3 was not on the
+roadmap at all. Two things changed underneath the remaining sessions and both want acting on
+before, not during:
+
+- **The map is 600 m, not 1200.** §12's open catchment radius (~90 s proposed) was sized against
+  the larger map and a player's territory is now 300 m across. **Sessions 5 and 6 rest on it**, so
+  it should be re-derived first rather than discovered mid-session.
+- **Soak testing got cheaper.** §10 costed it at ~9 ms a tick and 3.7x real time; it is 6.0 ms and
+  about 5.5x. The early-career CI gate in §10 is comfortably affordable now.
+
+**Session 4, unit types, is next**, and it is load-bearing in a way it was not when the roadmap was
+written. Soldier at 1.7 m/s, cart at 1.1 and scout at 3.5 are numbers in §3 that nothing
+implements — and the first unit with a **different body radius** is what decides whether one
+rectangle decomposition serves every unit or whether it needs one per radius. That question sits
+under Sessions 5 through 9, so it wants answering early and cheaply.
