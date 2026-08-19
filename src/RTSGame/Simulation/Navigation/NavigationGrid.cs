@@ -93,7 +93,7 @@ internal sealed class NavigationGrid
     {
         if (!Contains(cell)) return false;
         var ground = GroundAt(cell);
-        return !ground.Blocked && ground.Clearance >= agentRadius + 0.035f;
+        return !ground.Blocked && ground.Clearance >= agentRadius + BodyFootprint.NavigationMargin;
     }
 
     public bool CanTraverse(GridCell from, GridCell to, float agentRadius)
@@ -103,9 +103,9 @@ internal sealed class NavigationGrid
         // height about both cells.
         if (!Contains(from) || !Contains(to)) return false;
         var fromGround = GroundAt(from);
-        if (fromGround.Blocked || fromGround.Clearance < agentRadius + 0.035f) return false;
+        if (fromGround.Blocked || fromGround.Clearance < agentRadius + BodyFootprint.NavigationMargin) return false;
         var toGround = GroundAt(to);
-        if (toGround.Blocked || toGround.Clearance < agentRadius + 0.035f) return false;
+        if (toGround.Blocked || toGround.Clearance < agentRadius + BodyFootprint.NavigationMargin) return false;
         var heightDelta = MathF.Abs(toGround.Height - fromGround.Height);
         if (heightDelta > Terrain.TerrainMap.MaximumStepHeight) return false;
         // Level ground has no grade, so there is nothing for the distance to divide into.

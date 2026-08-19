@@ -213,11 +213,11 @@ internal sealed class WallSettings
         set => ReciprocalVelocitySolver.StaticSeparationMargin = value;
     }
 
-    [Tune(0.5, 8.0, Label = "neighbour range (m)", Group = "Walls")]
-    public float NeighborDistance
+    [Tune(0.0, 4.0, Label = "neighbour lookahead (m)", Group = "Walls")]
+    public float NeighborLookahead
     {
-        get => ReciprocalVelocitySolver.NeighborDistance;
-        set => ReciprocalVelocitySolver.NeighborDistance = value;
+        get => ReciprocalVelocitySolver.NeighborLookahead;
+        set => ReciprocalVelocitySolver.NeighborLookahead = value;
     }
 }
 

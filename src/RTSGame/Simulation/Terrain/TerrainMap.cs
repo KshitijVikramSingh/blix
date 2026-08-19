@@ -144,7 +144,7 @@ internal sealed class TerrainMap
     /// </remarks>
     public bool IsBodyTraversable(Vector2 center, float radius)
     {
-        if (!Contains(center, radius + 0.035f)) return false;
+        if (!Contains(center, radius + BodyFootprint.NavigationMargin)) return false;
         if (Transform.TryWorldToCell(center, out var bodyCell) &&
             LevelNeighborhood(NeighborhoodCells(radius))[Transform.Index(bodyCell)])
         {

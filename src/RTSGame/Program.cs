@@ -39,6 +39,17 @@ public static class Program
             Environment.Exit(0);
         }
 
+        if (args.Contains("--mixedtest"))
+        {
+            Environment.Exit(MixedBodyScenarios.Run());
+        }
+
+        if (args.Contains("--radiisweep"))
+        {
+            var sweepExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            Environment.Exit(BodyRadiusSweep.Run(ParseFloats(args, "--radii"), sweepExtent));
+        }
+
         if (args.Contains("--rectangles"))
         {
             var rectExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;

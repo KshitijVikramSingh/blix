@@ -1,6 +1,6 @@
 # RTSGame — locomotion layer: state, seams, and what not to break
 
-Status as of 2026-08-19. `--selftest` **42/42 passing**, on a body that walks at 1.79 m/s and a
+Status as of 2026-08-19. `--selftest` **46/46 passing**, on a body that walks at 1.79 m/s and a
 router that partitions ground into rectangles rather than searching it. Durations in the tests
 carry a `WalkingPace` factor recording that they were tuned against a body running at 4.5 —
 see `plan-rts-game.md` §13 Session 2 for what the re-base moved, and **§8 below for the routing
@@ -131,6 +131,20 @@ and by every diagnostic buffer. Keep ids stable; do not compact the agent array.
 ## 3. Invariants — hard-won, do not "simplify" these
 
 Each of these was measured. Reverting one costs specific tests.
+
+0. **Any distance between two bodies is written as those two bodies plus a margin, never as a
+   number.** `NeighborLookahead` was a flat 1.52 m and two of §3's heavy class measure 1.80 m across
+   the pair — wider than the horizon — so they never entered each other's neighbour list and the
+   first either knew of the other was the position solver prising them apart. Nothing overlapped,
+   which is why nothing caught it: avoidance had quietly become collision response. The same shape
+   of bug is available to every constant in this file that is a distance.
+   *Recorded with its old value, as rule 1 requires.* Written as `radius + radius + 0.78`, which is
+   1.52 exactly for two standard bodies, so **every 0.37 m scenario is bit-identical** — pen
+   1.30x / 137.6 red / pile 17, gate 1.78x / 335.0 / pile 20 / 33 dead stops, all unchanged. The
+   0.265 m stress crowd is the one that moved, because a smaller pair now measures 1.31 m rather
+   than 1.52: infeasible **7.2% → 6.5%** at 200 agents and **12.3% → 10.3%** at 500, dead stops 0
+   in both. Anticipation is a reaction *time* — 0.78 m is 0.44 s at walking pace whatever the body
+   is — where the flat number gave a small body more warning than a large one, which is backwards.
 
 1. **Progress is measured along the route, not straight-line to the destination.**
    Anything going *round* something closes no straight-line distance while running flat
@@ -295,6 +309,11 @@ which is what a correct memo looks like:
   cell by cell, on a 200 m map of staggered walls, at several settings of the abstract search's
   horizon (`--spans`). `lost` is the column that matters — a cell the hierarchy cannot price is a
   body that believes it has no route and stops.
+- `--radiisweep [--radii a,b,c] [--extent m]` reports what a second body radius costs the
+  decomposition: walkable cells, rectangles, crossings, crossing degree, connected parts, build time
+  and bytes per radius, on four maps, plus the **rung spectrum** — every clearance a cell centre on
+  that map actually holds. The spectrum is the output that matters; the per-map tables are
+  placeholders. See §8, "What a second body radius costs".
 - `--rectangles [--terrain]` reports the walkable decomposition: how many rectangles the ground
   becomes, how many crossings between them, and the per-rectangle crossing degree that decides
   whether the cost field can be evaluated outright.
@@ -355,6 +374,28 @@ still for 22 s in play. Sweep the space.
 
 Kept because each looked obviously right and cost real time to disprove.
 
+- **Weighting the depenetration share by mass.** `agentShare` is a flat half for any two movable
+  bodies, so a 0.9 m wagon and a 0.37 m villager each take half of every correction between them
+  and the wagon is shoved off its line by each person it passes through. Weighting by area — equal
+  radii still give exactly a half, so a crowd of one size is bit-identical — does exactly what it
+  was reasoned to do and is still not worth it. Over **17 arrangements** of a mixed column through
+  a 3 m gate, sweeping heavy count and whether the heavy bodies lead or trail:
+
+  | share | dead stops | cleared, total | worst separation | heavy body's deviation crossing traffic |
+  |---|---|---|---|---|
+  | **flat half (kept)** | 75 | 289.9 s | **0.997** | 8.70 m |
+  | by area, position and velocity | **55** | 293.6 s | 0.972 | **7.41 m** |
+  | by area, position only | 60 | 320.7 s | 0.999 | 8.29 m |
+  | by area, clamped to 3:1 | 78 | 290.0 s | 0.940 | 7.91 m |
+
+  Area weighting buys a quarter fewer dead stops and a wagon that holds its line 15% better, and
+  pays for it in the one metric this layer guards hardest: a pair overlapping by 3.6 cm rather than
+  4 mm, in one arrangement out of seventeen. **Overlap is not a metric to trade**, so it is
+  reverted — and the mixed-crowd self-test now sweeps three arrangements including the one that
+  exposed this, so the refusal is guarded rather than remembered. Note also how chaotic dead stops
+  are in the heavy count: 0, 0, 0, 1, 0, 28, 1 across seven arrangements at a single setting. One
+  configuration is a sample here, never a measurement.
+
 - **March order as ORCA priority.** Order group members by their place in the column
   rather than by distance to goal, so a queue stops re-negotiating who goes first. Dead
   stops at a one-cell gate: **5** without it, **386** with a rank fixed at order time,
@@ -383,6 +424,18 @@ at once, and a change justified by one of their jobs breaks the other.
 ---
 
 ## 7. Known open items
+
+- **A heavy body walking into a settled one displaces it 1.81 m** at its furthest, against 1.14 m
+  for a villager doing the same, and in both cases the idle body walks back to within 0.00 m of
+  where it stood. Nothing is lost; it reads as a shove rather than a brush. This is *not* the even
+  correction share — §6 measured and refused changing that — it is `YieldShare`, which gives the
+  settled body 85% of the separation on the grounds of intent rather than size, and which is
+  deliberate. Whether it should also know about size is open, and untried.
+- **A mixed group builds one flow field per distinct radius, and that is accepted.** Members sample
+  the field for their own radius, so a cohort containing a wagon follows two gradients that differ
+  wherever the ground is tight. Formation slots are laid out at the largest member's spacing, which
+  is conservative and correct. Left as it stands: with two body classes it is two fields, both
+  cached, and the cost is bounded by the number of classes rather than the number of units.
 
 - **Doorway turn-taking is improved, not solved.** Freezing and dead stops at a two-way
   gap are gone (31 frozen ticks → 2, 28 dead stops → 0) and clearing is 24% quicker, but
@@ -843,3 +896,45 @@ should start.
 
 Written down in advance so that the decision is made by the number rather than by whoever is
 holding the keyboard when it comes up.
+
+### What a second body radius costs — **measured 2026-08-19, `--radiisweep`**
+
+`PathService.Mesh` already keys its cache on `(navigation revision, radius)`, so the expensive
+answer — one decomposition per body radius — has always been available. The question was whether it
+is ever needed. It is, exactly once, and the rest of the answer is a property of the raster rather
+than of any map.
+
+**Clearance is one sample per cell, taken at its centre.** Centres are half a metre apart, so the
+best-placed sample inside a gap sits anywhere from its middle to 0.25 m off it, and the same gap
+measures 0.25 m wider or narrower depending only on where the grid fell. That is the sampling, not
+the geometry, so **it survives any obstacle shape** — trees at real positions do not buy finer
+discrimination than painted cells do. Hence the rule:
+
+> **Two body radii are distinguishable by terrain only if they differ by more than half a
+> navigation cell.** At 0.5 m cells, more than 0.25 m.
+
+**And the rungs a straight corridor can produce are fixed by the lattice.** Every obstacle box has
+its faces on the 0.5 m lattice — painted impassable cells, cliff edges at `centre + halfCell`,
+placement cells three nav cells wide, the map bounds — and every cell centre sits a quarter-cell off
+it, so each component of a cell-to-box distance is 0 or 0.25 + 0.5k. A corridor therefore measures
+0.250, 0.750, 1.250 or 1.750, admitting bodies of 0.215, 0.715, 1.215, 1.715. Four maps return
+exactly that set, including one cut at 45° specifically to break it; they differ only in how many
+cells sit on each rung. Diagonal configurations add 0.354, 0.791 and 1.061, which is why those show
+up in the spectrum but never in a gap.
+
+| | |
+|---|---|
+| classes needed | **two**, split at radius 0.715 |
+| cost of the second, 600 m ridge map | 4.4 ms, 76 KB, against 9.2 ms and 73 KB for the first |
+| identical across | any two radii in (0.319, 0.715] — provably, since walkability is monotone in radius, so equal cell counts across the band are equal *sets* |
+| connected parts | 1 at every radius on every map tried; a wider body loses fringe, never a route |
+
+**Two things to do with this.** `RadiusKey` rounds the radius to centimetres, so three unit types
+would build and retain three byte-identical meshes — it wants to be the *rung*, which is this
+document's standing rule applied to a cache key. And the sweep is worth re-running when terrain
+generation is real: the rungs are the thing to read, and if they are no longer 0.250 / 0.750 /
+1.250 then something has put an obstacle off the lattice.
+
+**What it does not cover.** This is the decomposition and the walkable set. Whether a 0.9 m body and
+a 0.37 m body mix in a crowd is untouched — every constant in §3 and §4 is calibrated on one body
+size, and §7's logged debt on that stands unchanged.

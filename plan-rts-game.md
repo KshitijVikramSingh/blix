@@ -22,9 +22,9 @@
 - **Read §14 first** — it is the measured state, the debts this work is carrying, and what changed
   underneath the rest of the roadmap.
 - **Start at Session 4, unit types.** It is the elastic session and the one the rest now waits on:
-  soldier, cart and scout speeds are numbers in §3 that nothing implements, and the second body
-  radius is what will say whether one decomposition can serve every unit or whether it needs one
-  per radius.
+  soldier, cart and scout speeds are numbers in §3 that nothing implements. The body-radius half of
+  it is **answered** — §3's radius classes, measured 2026-08-19 — so what is left there is per-type
+  speed, turn model and capacity, and keying the decomposition cache by rung rather than by radius.
 
 Four things that will bite you if you skip them:
 
@@ -188,6 +188,73 @@ villager converted through the unit-scaled tile above is 1.48.
 
 The road multiplier needs no new machinery: `TerrainSurfaceRules.PathCost = 1/SpeedMultiplier`
 already exists, so a road is a surface type the router prices correctly for free.
+
+### Body radius — two classes, and the one threshold that separates them
+
+**Settled 2026-08-19, measured with `--radiisweep` before any unit type existed**, because §13's
+Session 4 rests on it and so does everything after: the first body with a radius other than 0.37 m
+decides whether one rectangle decomposition serves every unit or the map needs one per radius.
+
+**The rule, and it is a property of the raster rather than of any map.** A body may stand on a cell
+when `Clearance >= radius + 0.035`, and clearance is one sample per cell taken at its centre. Cell
+centres are half a metre apart, so the best-placed sample inside a gap sits anywhere from its middle
+to a quarter-metre off it, and the *same* gap measures a quarter-metre wider or narrower depending
+only on where the grid fell. That swing is the sampling, not the geometry, so it survives any
+obstacle shape — including trees placed at real positions rather than painted cell by cell.
+
+> **Terrain can only tell two body radii apart if they differ by more than half a navigation cell,
+> 0.25 m.** Below that there is no gap width that reliably admits the smaller and reliably stops the
+> larger; the same tree line does either, depending where it landed.
+
+**What a straight gap can measure.** Obstacle boxes have their faces on the 0.5 m lattice — painted
+impassable cells, cliff edges half a cell off a centre, placement cells three nav cells wide, the map
+bounds — and every cell centre sits a quarter-cell off it. So the clearances a corridor can produce
+are 0.250, 0.750, 1.250, 1.750, and the bodies they admit are 0.215, 0.715, 1.215, 1.715. Four maps,
+one of them cut at forty-five degrees to try to break it, return exactly that set and differ only in
+how many cells sit on each rung.
+
+**Which lands the classes on a single threshold, 0.715 m, doing three jobs at once:**
+
+| passage | how it arises | nav clearance | admits |
+|---|---|---|---|
+| narrow clearing, wall gap | terrain, or one placement cell of 1.5 m | 0.750 | **≤ 0.715** |
+| gate, road, wide clearing | deliberate, two placement cells of 3.0 m | 1.250 | ≤ 1.215 |
+
+```
+Villager / soldier / scout   0.37 m      UNCHANGED
+Hauler cart                  0.45-0.60   the settlement band, same passage as a villager
+Heavy — large mount, wagon   ~0.90       anywhere in (0.715, 1.215] behaves identically
+```
+
+- **The hauler shares the villager's passage deliberately.** It is the unit the whole economy runs
+  on, and a settlement whose carts need different ground from its people is a second navigation
+  problem for no design gain. Any radius from 0.32 to 0.715 is *provably the same body* to the
+  router — walkability is monotone in radius, so equal cell counts across that band are equal sets,
+  not similar ones.
+- **A 1.5 m gap blocking the heavy class is the desired behaviour, not a defect.** Players should
+  build gates and roads rather than wall their own wagons out, and a gate is twice the width of a
+  wall — which is AoE2's rule arriving from the placement grid rather than being imposed on it.
+- **The heavy class is where the second decomposition comes from**, and there are exactly two of
+  them on any map however many unit types exist. On the 600 m map that is 9.2 ms / 73 KB plus
+  4.4 ms / 76 KB, which is nothing.
+- **Radius belongs to the class, not to the unit type.** `PathService.Mesh` keys its cache on the
+  radius rounded to centimetres, so it already yields exactly two meshes for the roster above — but
+  it would yield five if a designer gave the villager, the soldier and the scout radii of 0.35, 0.37
+  and 0.40, which are the same body to the raster and would retain three byte-identical copies of
+  one decomposition. Keying by *rung* instead was considered and **refused**: it is only correct
+  while every obstacle face is on the lattice, and if that ever stops being true it fails by routing
+  a wagon through a gap it does not fit, which is the worst available failure. Naming two radii and
+  letting unit types share them costs nothing and cannot fail that way. The self-test
+  `body radii inside one rung share a decomposition` is what will notice if the lattice assumption
+  goes. **In the code this is `BodyClass.Foot` / `BodyClass.Heavy` with `AgentDefaults.RadiusOf`**,
+  so a unit type names a class and never a number.
+- **Mid-size discrimination is not available and should not be designed for.** A 0.37 villager and a
+  0.55 cart cannot be separated by any terrain the generator can draw, because they are inside one
+  half-cell. Wanting a third class means a finer navigation cell, which is the constant `plan-rts.md`
+  is calibrated against — so it is a substrate decision, not a tuning one.
+- **The condition to watch** is the lattice: an obstacle whose faces are not on it — a rotated
+  building, an arbitrary footprint — makes the achievable clearances dense. It does *not* change the
+  half-cell rule, which is about sampling, but it does move where the rungs are.
 
 ### Map sizes — **corrected, 2026-08-18: the game is 600 m**
 
@@ -1158,6 +1225,11 @@ form computes what the search computed, without walking the frontier to get ther
 Per-type body radius, speed, turn model and carry capacity off `AgentDefaults`, rather than
 re-littering literals — which `AgentDefaults`' own remarks record as a real bug source.
 
+**The radius question is settled ahead of the session** — §3's radius classes. Two decompositions
+serve any number of unit types, split at 0.715 m, and `PathService.Mesh` should key on that rung
+rather than on the radius in centimetres, or each type retains a byte-identical copy of one of
+them.
+
 Landing it **activates two logged debts**: congestion delay does not scale with unit speed, which
 goes live the moment speeds differ; and carts want the speed-scaled turn model (`ω = a/v`) that was
 measured badly wrong for people and is correct for a loaded vehicle.
@@ -1229,7 +1301,7 @@ complaint the whole trade layer exists to answer.
 
 ### Held every session
 
-1. **42/42 stays green**, or a threshold moves deliberately and is recorded with its old value.
+1. **46/46 stays green**, or a threshold moves deliberately and is recorded with its old value.
 2. **The determinism test grows with each system.** It covers movement only today.
 3. **Serialization discipline** — stable ids over references. Fresh-start succession (§5) makes this
    core-loop rather than a save feature; it is cheap continuously and expensive retrofitted.
@@ -1247,7 +1319,7 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 
 | | |
 |---|---|
-| suite | `--selftest` **42/42** |
+| suite | `--selftest` **46/46** |
 | body | **1.79 m/s**, accel 2.0, decel 3.0, turn 3.03 rad/s, compression **1.5x** |
 | world | **600 m** for the game; 30 m calibration world untouched and asserted |
 | tick, 2,000 agents | **6.0 ms at 600 m, 5.8 ms at 1200 m** — extent no longer moves it |
@@ -1289,8 +1361,17 @@ before, not during:
 - **Soak testing got cheaper.** §10 costed it at ~9 ms a tick and 3.7x real time; it is 6.0 ms and
   about 5.5x. The early-career CI gate in §10 is comfortably affordable now.
 
-**Session 4, unit types, is next**, and it is load-bearing in a way it was not when the roadmap was
-written. Soldier at 1.7 m/s, cart at 1.1 and scout at 3.5 are numbers in §3 that nothing
-implements — and the first unit with a **different body radius** is what decides whether one
-rectangle decomposition serves every unit or whether it needs one per radius. That question sits
-under Sessions 5 through 9, so it wants answering early and cheaply.
+**Session 4, unit types, is next**, and it was load-bearing in a way it was not when the roadmap was
+written: the first unit with a **different body radius** decides whether one rectangle decomposition
+serves every unit or whether it needs one per radius, and that sits under Sessions 5 through 9.
+
+**Answered early and cheaply, 2026-08-19, and written up in §3.** Two decompositions serve any number
+of unit types, split at a body radius of 0.715 m, because terrain cannot separate two radii inside
+half a navigation cell however it is shaped. The villager, the soldier, the scout and the hauler cart
+are one class and share a passage; large mounts and wagons are the other and need a gate. What
+remains of Session 4 is per-type speed, turn model and capacity — the elastic session it was
+originally described as.
+
+The instrument is `--radiisweep`, and it is worth re-running when terrain generation is real: if the
+rungs are still 0.250 / 0.750 / 1.250, everything in §3 holds unchanged, and if they are not, then
+something is putting obstacles off the lattice and that is the thing to go and look at.

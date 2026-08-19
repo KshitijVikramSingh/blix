@@ -13,7 +13,26 @@ namespace RTSGame.Simulation.Movement;
 /// </summary>
 internal sealed class ReciprocalVelocitySolver
 {
-    internal static float NeighborDistance = 1.52f;
+    /// <summary>
+    /// How far beyond touching a body looks for neighbours to avoid, in metres.
+    /// </summary>
+    /// <remarks>
+    /// This was a flat 1.52 m, which is a distance between centres and therefore a different
+    /// amount of warning depending on how big the bodies are. Two standard bodies are 0.74 m
+    /// across the pair, so 1.52 gave them 0.78 m of approach to react in; two of the heavy class in
+    /// <c>plan-rts-game.md</c> §3 are 1.80 m across the pair, which is *wider than the horizon* —
+    /// they would never have entered each other's neighbour list at all, and the first either knew
+    /// of the other is the contact branch of the position solver. Measured with <c>--mixedtest</c>:
+    /// the solver first turned two heavy bodies at exactly 1.00 combined radii, which is to say at
+    /// the moment they touched.
+    /// <para>
+    /// So it is written as the anticipation it always was — the gap beyond contact, added to
+    /// whatever the pair actually measures. 0.78 is 1.52 less two standard bodies, so a crowd of
+    /// standard bodies queries and filters at exactly 1.52 m as before and every constant tuned
+    /// against it still means what it meant.
+    /// </para>
+    /// </remarks>
+    internal static float NeighborLookahead = 0.78f;
     // Reusing a fraction of last tick's answer as the optimisation target gives
     // the solve a memory. Without it an agent re-derives which side to pass on
     // from scratch every tick and flips between symmetric solutions, which is
@@ -116,6 +135,7 @@ internal sealed class ReciprocalVelocitySolver
         var source = agents.All;
         EnsureCapacity(source.Length);
         Array.Clear(blocked, 0, source.Length);
+        var largestRadius = agents.LargestRadius();
 
         // One solve for every map. Branching the responsibility model on whether
         // the terrain had been edited meant flat and sculpted maps ran genuinely
@@ -165,13 +185,17 @@ internal sealed class ReciprocalVelocitySolver
             }
             lines.Clear();
             var desired = desiredVelocities[agentIndex];
-            index.Query(agent.Position, NeighborDistance, agentIndex, neighbors);
+            // The broad phase reaches out by the biggest body in the world, because that is the
+            // furthest away something relevant can be; the exact horizon is per pair, just below.
+            // A crowd with nothing large in it therefore queries exactly as it always did.
+            index.Query(agent.Position, agent.Radius + largestRadius + NeighborLookahead, agentIndex, neighbors);
             foreach (var otherIndex in neighbors)
             {
                 ref readonly var other = ref source[otherIndex];
                 var relativePosition = other.Position - agent.Position;
                 var distanceSquared = relativePosition.LengthSquared();
-                if (distanceSquared > NeighborDistance * NeighborDistance) continue;
+                var horizon = agent.Radius + other.Radius + NeighborLookahead;
+                if (distanceSquared > horizon * horizon) continue;
                 if (IsShovableAlly(agent, other)) continue;
                 // Movers that have not chosen yet are handled when their own turn
                 // comes and they see this agent's committed velocity.

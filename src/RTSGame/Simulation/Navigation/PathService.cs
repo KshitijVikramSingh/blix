@@ -421,7 +421,7 @@ internal sealed partial class PathService
         float[]? additionalNavigationCosts = null)
     {
         PathQueries++;
-        requestedGoal = terrain.ClampPosition(requestedGoal, agentRadius + 0.035f);
+        requestedGoal = terrain.ClampPosition(requestedGoal, agentRadius + BodyFootprint.NavigationMargin);
         if (!grid.TryWorldToCell(start, out var startCell) || !grid.TryWorldToCell(requestedGoal, out var requestedCell))
         {
             return null;
@@ -510,7 +510,7 @@ internal sealed partial class PathService
 
     public bool IsDirectPathClear(Vector2 start, Vector2 end, float agentRadius)
     {
-        var expansion = agentRadius + 0.035f;
+        var expansion = agentRadius + BodyFootprint.NavigationMargin;
         if (!terrain.Contains(start, expansion) || !terrain.Contains(end, expansion)) return false;
         if (!IsContinuousBodyPathClear(start, end, agentRadius)) return false;
 
@@ -553,7 +553,7 @@ internal sealed partial class PathService
 
     public bool IsStepClear(Vector2 start, Vector2 end, float agentRadius)
     {
-        var expansion = agentRadius + 0.035f;
+        var expansion = agentRadius + BodyFootprint.NavigationMargin;
         if (!terrain.Contains(end, expansion) || !terrain.CanTraverse(start, end)) return false;
         if (!terrain.IsBodyTraversable(end, agentRadius)) return false;
         // Simulation steps are short enough that static collision cannot be
@@ -610,7 +610,7 @@ internal sealed partial class PathService
         float agentRadius,
         bool allowPlacementEscape = false)
     {
-        var expansion = agentRadius + 0.035f;
+        var expansion = agentRadius + BodyFootprint.NavigationMargin;
         return terrain.Contains(start, expansion) &&
                terrain.Contains(end, expansion) &&
                IsContinuousBodyPathClear(start, end, agentRadius, allowPlacementEscape);

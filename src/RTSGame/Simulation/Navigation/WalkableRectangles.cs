@@ -84,6 +84,21 @@ internal sealed class WalkableRectangles
         crossingStart[rectangle + 1] - crossingStart[rectangle]);
     /// <summary>Walkable cells the decomposition covers, which must be all of them.</summary>
     public int CoveredCells { get; private set; }
+
+    /// <summary>
+    /// Bytes this decomposition holds, for the question of what a second body radius costs.
+    /// </summary>
+    /// <remarks>
+    /// The payload rather than the allocation: a rectangle is four cell indices and two floats, a
+    /// crossing is six cell indices, and the two index arrays are one entry per rectangle and two
+    /// per crossing. List capacity slack is left out because the number this exists to answer is
+    /// how the structure scales with the number of body radii, not what the allocator rounded up to.
+    /// </remarks>
+    public long ResidentBytes =>
+        (long)rectangles.Count * 24 +
+        (long)crossings.Count * 24 +
+        (long)crossingStart.Length * sizeof(int) +
+        (long)rectangleCrossings.Length * sizeof(int);
     /// <summary>Body radius this decomposition is valid for.</summary>
     public float AgentRadius { get; }
     /// <summary>Terrain revision it was built against.</summary>

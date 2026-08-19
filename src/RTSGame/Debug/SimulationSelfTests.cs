@@ -92,6 +92,10 @@ internal static class SimulationSelfTests
         Check("a larger world leaves the tuned one untouched", WorldExtentIsParameterised());
         Check("routing stays close to the flat optimum", RoutingIsFaithful());
         Check("a group crosses region borders without swinging", GroupCrossesRegionBorders());
+        Check("large bodies avoid each other before touching", LargeBodiesAvoidBeforeContact());
+        Check("a mixed-size crowd files through a gate without overlap", MixedSizeCrowdIsSafe());
+        Check("body radii inside one rung share a decomposition", RadiusRungsShareADecomposition());
+        Check("a heavy body takes the gate a villager can skip", HeavyBodyRoutesAroundAFootPassage());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
 
@@ -2330,5 +2334,253 @@ internal static class SimulationSelfTests
     private static void Tick(SimulationWorld world, int count)
     {
         for (var i = 0; i < count; i++) world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+    }
+
+    /// <summary>
+    /// A gap of this many navigation cells admits a standard body and refuses a heavy one.
+    /// </summary>
+    /// <remarks>
+    /// Three cells is 1.5 m, whose best cell-centre clearance is 0.75 m, which is exactly the width
+    /// one placement cell leaves between two built walls. See §3 — the same threshold does duty for
+    /// accidental wall gaps, deliberate gates and terrain clearings, and it is the only one the
+    /// half-metre raster has between "everybody" and "nobody".
+    /// </remarks>
+    private const int FootGapCells = 3;
+
+    /// <summary>Six cells, 3 m: the gate width, which admits everything.</summary>
+    private const int GateGapCells = 6;
+
+    /// <summary>
+    /// Two bodies of the heavy class must begin avoiding each other before they are in contact.
+    /// </summary>
+    /// <remarks>
+    /// The neighbour horizon used to be a flat 1.52 m between centres, which is less than two heavy
+    /// bodies measure across the pair — so they never entered each other's neighbour list and the
+    /// first either knew of the other was the position solver pushing them apart. Nothing overlapped,
+    /// because contact resolution caught it, which is why no existing test saw this: the failure is
+    /// that avoidance had become collision response. Measured in combined radii so it says the same
+    /// thing at any body size, and asserted above 1.0, which is the moment of touching.
+    /// </remarks>
+    private static bool LargeBodiesAvoidBeforeContact()
+    {
+        var world = new SimulationWorld();
+        var combined = AgentDefaults.HeavyRadius * 2f;
+        var offset = combined * 0.33f;
+        var left = world.SpawnAgent(new Vector2(-6f, offset * 0.5f), radius: AgentDefaults.HeavyRadius);
+        var right = world.SpawnAgent(new Vector2(6f, -offset * 0.5f), radius: AgentDefaults.HeavyRadius);
+        world.QueueMove(new[] { left }, new Vector2(6f, offset * 0.5f));
+        world.QueueMove(new[] { right }, new Vector2(-6f, -offset * 0.5f));
+
+        var reaction = -1f;
+        var closest = float.MaxValue;
+        for (var tick = 0; tick < 300 * WalkingPace; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            ref readonly var first = ref world.Agents.Get(left);
+            ref readonly var second = ref world.Agents.Get(right);
+            var distance = Vector2.Distance(first.Position, second.Position);
+            closest = MathF.Min(closest, distance);
+            if (reaction < 0f &&
+                (MathF.Abs(first.Velocity.Y) > 0.05f || MathF.Abs(second.Velocity.Y) > 0.05f))
+            {
+                reaction = distance;
+            }
+        }
+
+        var reactionInBodies = reaction / combined;
+        var passed = reaction > 0f && reactionInBodies > 1.10f && closest >= combined - 0.01f;
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    heavy pair: reaction={reactionInBodies:F2} combined radii (needs >1.10), " +
+                $"closest={closest / combined:F3} (needs >=0.99)");
+        }
+
+        return passed;
+    }
+
+    /// <summary>
+    /// A column of mixed sizes through a gate keeps every pair apart by its own combined radius.
+    /// </summary>
+    /// <remarks>
+    /// Every other separation assertion in this file compares against
+    /// <c>SeparationThreshold(AgentDefaults.Radius)</c>, which is one body doubled and therefore
+    /// means nothing once two sizes share a crowd — it would pass a wagon standing inside a
+    /// villager. This one is pairwise, which is the only form that survives a second body type.
+    /// </remarks>
+    private static bool MixedSizeCrowdIsSafe()
+    {
+        // Three arrangements, not one. A single mix is a sample: sweeping the heavy count and
+        // whether the heavy bodies lead or trail moved the worst overlap around by a factor of ten
+        // while the correction share was being measured, so a test that fixes one arrangement is
+        // choosing the answer it gets. These three are the ones that produced the worst figures.
+        var passed = true;
+        foreach (var (heavies, heavyFirst) in new[] { (4, true), (6, false), (8, true) })
+        {
+            var world = new SimulationWorld();
+            var placement = world.Placement.Transform;
+            for (var z = 0; z < placement.Height; z++)
+            {
+                if (z is 10 or 11) continue;
+                world.QueueToggleObstacle(placement.CellCenter(new GridCell(10, z)));
+            }
+
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            var gate = placement.CellCenter(new GridCell(10, 10));
+
+            var ids = new List<AgentId>();
+            for (var i = 0; i < 12; i++)
+            {
+                var heavy = heavyFirst ? i < heavies : i >= 12 - heavies;
+                ids.Add(world.SpawnAgent(
+                    new Vector2(gate.X - 5f - i % 3 * 2.2f, gate.Y + (i / 3 - 1.5f) * 2.2f),
+                    radius: AgentDefaults.RadiusOf(heavy ? BodyClass.Heavy : BodyClass.Foot)));
+            }
+
+            world.QueueMove(ids, new Vector2(gate.X + 5f, gate.Y));
+
+            var worstRatio = float.MaxValue;
+            for (var tick = 0; tick < 800 * WalkingPace; tick++)
+            {
+                world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+                for (var i = 0; i < ids.Count; i++)
+                for (var j = i + 1; j < ids.Count; j++)
+                {
+                    ref readonly var first = ref world.Agents.Get(ids[i]);
+                    ref readonly var second = ref world.Agents.Get(ids[j]);
+                    // Pairwise: a bar built from one radius doubled would pass a wagon standing
+                    // inside a villager, which is the whole reason this test exists.
+                    var bar = AgentDefaults.SeparationThreshold(first.Radius, second.Radius);
+                    worstRatio = MathF.Min(
+                        worstRatio,
+                        Vector2.Distance(first.Position, second.Position) / bar);
+                }
+            }
+
+            var arrived = ids.Count(id => world.Agents.Get(id).Position.X > gate.X + 2f);
+            if (worstRatio >= 1f && arrived == ids.Count) continue;
+            passed = false;
+            Console.WriteLine(
+                $"    mixed gate, {heavies} heavy {(heavyFirst ? "leading" : "trailing")}: " +
+                $"worst separation {worstRatio:F3} of the pair's bar (needs >=1.000), " +
+                $"arrived {arrived}/{ids.Count}");
+        }
+
+        return passed;
+    }
+
+    /// <summary>
+    /// Two radii the raster cannot tell apart must produce the same decomposition, and two it can
+    /// must not.
+    /// </summary>
+    /// <remarks>
+    /// This is the guard on §3's radius classes. Clearance is one sample per cell taken at its
+    /// centre and every obstacle face is on the half-metre lattice, so the clearances a map can
+    /// hold are 0.250, 0.354, 0.750, 0.791, 1.061 — and every body between 0.319 m and 0.715 m sees
+    /// exactly the same ground. That is what lets a villager, a soldier, a scout and a hauler cart
+    /// share one decomposition instead of retaining four identical copies of it.
+    /// <para>
+    /// The second half of the assertion is what stops it being vacuous, and it is the one that will
+    /// fail first: put an obstacle on the map whose faces are not on the lattice — a rotated
+    /// building, a scattered tree with a real footprint — and the achievable clearances become
+    /// dense, the rungs move, and the sharing argument stops holding. A failure here is not a bug
+    /// in the decomposition, it is notice that §3 needs re-deriving.
+    /// </para>
+    /// </remarks>
+    private static bool RadiusRungsShareADecomposition()
+    {
+        var world = BuildTwoGapWall(out _, out _, out _);
+
+        var villager = world.DecomposeWalkable(AgentDefaults.Radius);
+        var withinRung = world.DecomposeWalkable(0.65f);
+        var heavy = world.DecomposeWalkable(AgentDefaults.HeavyRadius);
+
+        var shared = villager.CoveredCells == withinRung.CoveredCells &&
+                     villager.Count == withinRung.Count &&
+                     villager.Crossings.Count == withinRung.Crossings.Count;
+        var separated = heavy.CoveredCells < villager.CoveredCells;
+
+        if (!shared || !separated)
+        {
+            Console.WriteLine(
+                $"    rungs: villager {villager.CoveredCells} cells / {villager.Count} rects, " +
+                $"0.65 {withinRung.CoveredCells} / {withinRung.Count} (must match), " +
+                $"heavy {heavy.CoveredCells} (must be fewer)");
+        }
+
+        return shared && separated;
+    }
+
+    /// <summary>
+    /// A villager takes the narrow clearing; a heavy body goes round to the gate.
+    /// </summary>
+    /// <remarks>
+    /// §3's radius classes end to end, and the reason terrain is allowed to discriminate at all: a
+    /// tree line or a wall gap a foot unit slips through is not a route for a wagon, which has to
+    /// use the gate. Asserted as where each body crosses the wall rather than as how far it walked,
+    /// because the distance is a consequence and the crossing is the claim.
+    /// </remarks>
+    private static bool HeavyBodyRoutesAroundAFootPassage()
+    {
+        var footCrossing = WallCrossingOf(AgentDefaults.Radius);
+        var heavyCrossing = WallCrossingOf(AgentDefaults.HeavyRadius);
+
+        // Which side of the wall each one used: the narrow clearing sits on the centre line, the
+        // gate several metres along it.
+        var passed = footCrossing is { } foot && MathF.Abs(foot) < 2f &&
+                     heavyCrossing is { } heavyZ && heavyZ > 4f;
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    crossings: villager at z={(footCrossing?.ToString("F2") ?? "never crossed")} " +
+                $"(needs |z|<2, the clearing), heavy at " +
+                $"z={(heavyCrossing?.ToString("F2") ?? "never crossed")} (needs z>4, the gate)");
+        }
+
+        return passed;
+    }
+
+    /// <summary>Walks one body across the two-gap wall and reports where it got through.</summary>
+    private static float? WallCrossingOf(float radius)
+    {
+        var world = BuildTwoGapWall(out var wallX, out var start, out var goal);
+        var id = world.SpawnAgent(start, radius: radius);
+        world.QueueMove(new[] { id }, goal);
+
+        for (var tick = 0; tick < 900 * WalkingPace; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            ref readonly var agent = ref world.Agents.Get(id);
+            if (agent.Position.X > wallX + 0.5f) return agent.Position.Y;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// One wall with two ways through it: a foot-only clearing, and a gate that admits anything.
+    /// </summary>
+    private static SimulationWorld BuildTwoGapWall(out float wallX, out Vector2 start, out Vector2 goal)
+    {
+        var world = new SimulationWorld();
+        var grid = world.Terrain.Transform;
+        var column = grid.Width / 2;
+        var narrowFrom = grid.Height / 2 - FootGapCells / 2;
+        var gateFrom = grid.Height / 2 + 10;
+
+        for (var z = 0; z < grid.Height; z++)
+        {
+            var inNarrow = z >= narrowFrom && z < narrowFrom + FootGapCells;
+            var inGate = z >= gateFrom && z < gateFrom + GateGapCells;
+            if (inNarrow || inGate) continue;
+            world.Terrain.SetSurface(new GridCell(column, z), TerrainSurface.Impassable);
+        }
+
+        world.RebuildTerrainNavigation();
+        wallX = world.Navigation.CellCenter(new GridCell(column, 0)).X;
+        var centreZ = world.Navigation.CellCenter(new GridCell(0, grid.Height / 2)).Y;
+        start = new Vector2(wallX - 6f, centreZ);
+        goal = new Vector2(wallX + 6f, centreZ);
+        return world;
     }
 }

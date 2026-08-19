@@ -93,6 +93,24 @@ internal sealed class AgentStore
 
     public Span<AgentState> MutableSpan() => agents.AsSpan(0, Count);
 
+    /// <summary>Radius of the largest body currently alive, in metres.</summary>
+    /// <remarks>
+    /// Any broad phase that has to find every body a given one could be touching has to reach out
+    /// by the biggest radius in the world, not by its own — so both the velocity solve and
+    /// depenetration want this number and it is defined once. Zero when nothing is alive, which is
+    /// the right answer: an empty query.
+    /// </remarks>
+    public float LargestRadius()
+    {
+        var largest = 0f;
+        foreach (ref readonly var agent in All)
+        {
+            if (agent.IsAlive) largest = MathF.Max(largest, agent.Radius);
+        }
+
+        return largest;
+    }
+
     private void EnsureCapacity(int required)
     {
         if (required <= agents.Length) return;

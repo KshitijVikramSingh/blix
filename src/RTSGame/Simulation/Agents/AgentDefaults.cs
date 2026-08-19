@@ -16,6 +16,20 @@ internal static class AgentDefaults
     /// <summary>Body radius of a standard unit, in metres.</summary>
     public const float Radius = 0.37f;
 
+    /// <summary>Body radius of the heavy class — large mounts and wagons — in metres.</summary>
+    /// <remarks>
+    /// A body 1.8 m across. It is not a tuned number and it does not want to be: anything from
+    /// 0.72 m to 1.21 m behaves identically, because a corridor on this raster measures 0.750 m of
+    /// clearance or 1.250 m and nothing in between. What it has to do is sit above 0.715, which is
+    /// what a 1.5 m clearing admits, and below 1.215, which is what a 3 m gate admits. See
+    /// <c>plan-rts-game.md</c> §3.
+    /// </remarks>
+    public const float HeavyRadius = 0.90f;
+
+    /// <summary>The radius a unit of this class uses.</summary>
+    public static float RadiusOf(BodyClass bodyClass) =>
+        bodyClass == BodyClass.Heavy ? HeavyRadius : Radius;
+
     /// <summary>Radius used by the dense stress scenarios, kept in proportion.</summary>
     public const float CrowdRadius = 0.265f;
 
@@ -149,8 +163,45 @@ internal static class AgentDefaults
     public const float ProgressShareOfStep = 0.0133f;
 
     /// <summary>
-    /// Smallest centre distance two bodies of the given radii may sit at and still
-    /// count as separated, allowing a small tolerance for a single tick's contact.
+    /// Smallest centre distance two bodies may sit at and still count as separated, allowing a
+    /// small tolerance for a single tick's contact.
     /// </summary>
-    public static float SeparationThreshold(float radius) => radius * 2f - 0.01f;
+    /// <remarks>
+    /// Pairwise, because with two body classes in the world a bar built from one radius doubled is
+    /// not a statement about any actual pair — it would pass a wagon standing inside a villager.
+    /// The single-radius form is kept for the many assertions about a crowd that is all one size,
+    /// and is the same arithmetic with both arguments equal.
+    /// </remarks>
+    public static float SeparationThreshold(float radius, float otherRadius) =>
+        radius + otherRadius - 0.01f;
+
+    /// <summary>The separation bar for two bodies of the same radius.</summary>
+    public static float SeparationThreshold(float radius) => SeparationThreshold(radius, radius);
+}
+
+/// <summary>
+/// The body sizes terrain can tell apart, which is what a unit type picks rather than a radius.
+/// </summary>
+/// <remarks>
+/// A radius is not a free parameter. Clearance is sampled once per cell at its centre on a 0.5 m
+/// raster, so two radii inside half a cell of each other see exactly the same ground however the
+/// terrain is drawn — there is no clearing a 0.37 m villager fits through and a 0.55 m cart does
+/// not. Giving each unit type its own number would therefore buy no behaviour and cost a retained
+/// copy of the whole rectangle decomposition per distinct value, since
+/// <c>PathService.Mesh</c> keys its cache on the radius.
+/// <para>
+/// So there are two, and they are what a unit type refers to. Everything the settlement runs on is
+/// <see cref="Foot"/> — villager, soldier, scout, and the hauler cart, which shares the villager's
+/// passage deliberately. <see cref="Heavy"/> is what has to use a gate. See
+/// <c>plan-rts-game.md</c> §3 for the derivation and for why a third class is not available
+/// without a finer navigation cell.
+/// </para>
+/// </remarks>
+internal enum BodyClass
+{
+    /// <summary>Villager, soldier, scout, hauler cart. Fits a 1.5 m clearing.</summary>
+    Foot,
+
+    /// <summary>Large mounts and wagons. Needs a 3 m gate.</summary>
+    Heavy,
 }

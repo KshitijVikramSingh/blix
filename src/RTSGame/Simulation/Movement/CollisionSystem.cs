@@ -83,7 +83,7 @@ internal sealed class CollisionSystem
         if (mutable.Length < 2) return 0;
         if (corrections.Length < mutable.Length) Array.Resize(ref corrections, mutable.Length);
 
-        var largestRadius = MaximumRadius(agents.All);
+        var largestRadius = agents.LargestRadius();
         var resolved = 0;
         for (var pass = 0; pass < RelaxationPasses; pass++)
         {
@@ -205,20 +205,10 @@ internal sealed class CollisionSystem
         if (correction.LengthSquared() <= 0f) return false;
         var proposed = terrain.ClampPosition(
             agent.Position + correction,
-            agent.Radius + 0.035f);
+            agent.Radius + BodyFootprint.NavigationMargin);
         if (!paths.IsPositionNavigable(proposed, agent.Radius)) return false;
         agent.Position = proposed;
         return true;
-    }
-
-    private static float MaximumRadius(ReadOnlySpan<AgentState> agents)
-    {
-        var maximum = 0f;
-        foreach (ref readonly var agent in agents)
-        {
-            if (agent.IsAlive) maximum = MathF.Max(maximum, agent.Radius);
-        }
-        return maximum;
     }
 
     private static Vector2 StableSeparationDirection(AgentId first, AgentId second)
@@ -254,7 +244,7 @@ internal sealed class CollisionSystem
                 if (!ResolveCircleAabb(ref agent, obstacle.Center, obstacle.Shape.HalfExtents)) continue;
                 count++;
             }
-            agent.Position = terrain.ClampPosition(agent.Position, agent.Radius + 0.035f);
+            agent.Position = terrain.ClampPosition(agent.Position, agent.Radius + BodyFootprint.NavigationMargin);
         }
         return count;
     }

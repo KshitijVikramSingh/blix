@@ -230,7 +230,7 @@ internal sealed class SimulationWorld
         float radius = AgentDefaults.Radius,
         float maximumSpeed = AgentDefaults.MaximumSpeed)
     {
-        position = Terrain.ClampPosition(position, radius + 0.035f);
+        position = Terrain.ClampPosition(position, radius + BodyFootprint.NavigationMargin);
         var resolvedFaction = faction ?? new FactionId(0);
         var id = Agents.Spawn(position, resolvedFaction, radius, maximumSpeed);
         var owner = ColliderOwner.Agent(id);
@@ -870,8 +870,8 @@ internal sealed class SimulationWorld
         }
 
         var requested = flee
-            ? Terrain.ClampPosition(agent.Position - direction * 6f, agent.Radius + 0.035f)
-            : Terrain.ClampPosition(target.Position - direction * stopDistance, agent.Radius + 0.035f);
+            ? Terrain.ClampPosition(agent.Position - direction * 6f, agent.Radius + BodyFootprint.NavigationMargin)
+            : Terrain.ClampPosition(target.Position - direction * stopDistance, agent.Radius + BodyFootprint.NavigationMargin);
         if (agent.HasDestination && Vector2.DistanceSquared(requested, agent.RequestedDestination) < 0.25f)
         {
             return;
@@ -1483,7 +1483,7 @@ internal sealed class SimulationWorld
                 // it gets the same swept static check a path follower gets.
                 var flowStep = Terrain.ClampPosition(
                     agent.Position + displacement,
-                    agent.Radius + 0.035f);
+                    agent.Radius + BodyFootprint.NavigationMargin);
                 if (pathService.IsContinuousStepClear(agent.Position, flowStep, agent.Radius))
                 {
                     agent.Position = flowStep;
@@ -1511,7 +1511,7 @@ internal sealed class SimulationWorld
             }
             if (!agent.HasDestination || !agent.Path.IsValid)
             {
-                agent.Position = Terrain.ClampPosition(agent.Position + displacement, agent.Radius + 0.035f);
+                agent.Position = Terrain.ClampPosition(agent.Position + displacement, agent.Radius + BodyFootprint.NavigationMargin);
                 continue;
             }
 
@@ -1527,7 +1527,7 @@ internal sealed class SimulationWorld
                 continue;
             }
 
-            var proposed = Terrain.ClampPosition(agent.Position + displacement, agent.Radius + 0.035f);
+            var proposed = Terrain.ClampPosition(agent.Position + displacement, agent.Radius + BodyFootprint.NavigationMargin);
             if (pathService.IsContinuousStepClear(agent.Position, proposed, agent.Radius))
             {
                 agent.Position = proposed;
