@@ -189,6 +189,38 @@ villager converted through the unit-scaled tile above is 1.48.
 The road multiplier needs no new machinery: `TerrainSurfaceRules.PathCost = 1/SpeedMultiplier`
 already exists, so a road is a surface type the router prices correctly for free.
 
+### The roster — **shipped 2026-08-19**
+
+Six types, in `UnitType`. A type names a body rather than carrying loose numbers, which is what
+`AgentDefaults`' own remarks record as a real bug source the last time it was otherwise.
+
+| type | class | radius | speed | turning circle | carries |
+|---|---|---|---|---|---|
+| villager | Foot | 0.37 | 1.79 | free | 8 |
+| soldier | Foot | 0.37 | 1.70 | free | — |
+| hauler cart | Foot | **0.55** | 1.10 | free | 40 |
+| light cavalry | Foot | 0.37 | 3.50 | free | — |
+| heavy cavalry | Heavy | 0.90 | **2.50** | 2.6 m | — |
+| wagon | Heavy | 0.90 | 1.10 | 3.4 m | 200 |
+
+- **The hauler is mid-sized and in the Foot class on purpose.** It takes the same passages as a
+  villager and merely takes up more room in the queue for one. Its 0.55 m and a villager's 0.37 m
+  are *provably the same body* to the router, so it routes on the Foot field exactly rather than
+  approximately, and six types are two decompositions rather than six.
+- **Cavalry splits by weight rather than by role.** Scout cavalry is a horse's pace on a person's
+  footprint, so it goes wherever infantry goes; heavy cavalry is the size of a wagon and has to use
+  a gate. Speed and access are traded against each other by the rider, not by the unit's job.
+- **The wagon is not slower than the cart.** §3 derived one cart speed and there is no reading that
+  makes a drawn wagon slower than a pushed handcart, so its trade is capacity and access — carries
+  five times as much, needs a gate — rather than a number nobody could defend.
+- **Two numbers here are not derived and are marked as such in the code**: heavy cavalry's 2.50 m/s
+  is "between a walk and a scout", and the two turning circles are shapes rather than measurements.
+  They are slider questions. Every other speed comes from a real-world reading (§3 above).
+- **Only Heavy gets a turning circle**, because the speed-scaled turn rate was measured badly wrong
+  inside a crowd — gate dead stops 5 to 288 — and light cavalry is in the crowd. That leaves a
+  scout cornering like a person at 3.5 m/s, which is the one thing the split looks odd about, and
+  it is a look question rather than a correctness one.
+
 ### Body radius — two classes, and the one threshold that separates them
 
 **Settled 2026-08-19, measured with `--radiisweep` before any unit type existed**, because §13's
@@ -530,10 +562,39 @@ needs.**
 - **Catchments are measured in seconds, so they follow terrain and roads.** A catchment stretches
   along a road and stops at a ridge. Roads literally grow usable territory, and settlements form
   ribbons along them — nobody has to author that.
-- **One granary per core, with a number.** ~90 s catchment at 1.5 m/s is ~135 m, essentially the core
-  tenure radius derived from response time. The natural economic unit and the natural defensive unit
-  are the same size. Expanding past it requires a second granary plus a hauling link — which is the
-  *"the core is the root of the hauling graph"* idea with a radius attached.
+- **One granary per core, with a number: 60 s at hauler pace, which is 66 m.**
+  **Re-derived 2026-08-19**, because the original — ~90 s at 1.5 m/s, ~135 m — was sized against a
+  1200 m map and against walking pace, and both of those moved.
+
+  Two corrections, and the second is the one that matters. A catchment is a *hauling* budget, so it
+  is denominated at the hauler's 1.1 m/s (§3) and not at a villager's walk. And the original never
+  checked the round trip it implies, which is what a player actually watches.
+
+  | budget | radius | catchments per territory | round trip from the edge | mean round trip | soldier to the edge |
+  |---|---|---|---|---|---|
+  | 90 s at villager pace *(the old number)* | 161 m | **1.10** | 195 s | 130 s | 95 s |
+  | 90 s at hauler pace | 99 m | 2.92 | 120 s | 80 s | 58 s |
+  | 75 s at hauler pace | 82 m | 4.21 | 100 s | 67 s | 49 s |
+  | **60 s at hauler pace** | **66 m** | **6.58** | **80 s** | **53 s** | **39 s** |
+  | 45 s at hauler pace | 50 m | 11.69 | 60 s | 40 s | 29 s |
+
+  Round trips are wall clock at the default 1.5x compression; a territory is a quarter of the 600 m
+  map, 90,000 m², a disc of radius 169 m.
+
+  **At the old number the mechanic is switched off.** 1.10 catchments per territory means one
+  granary covers everything a player holds, so "expanding past it requires a second granary plus a
+  hauling link" never fires and the whole hauling network is decorative. That is not a value that
+  wanted tuning, it is a mechanic that had quietly stopped existing.
+
+  At 66 m a player's territory holds six or seven catchments, so the second granary is forced early
+  and the network is real. And the coincidence this bullet always claimed actually arrives:
+  **39 s at soldier pace against a raid that takes 20–40 s**, so the radius you can supply is the
+  radius you can defend, and the natural economic unit and the natural defensive unit are the same
+  size — which at 161 m and 95 s they were not.
+
+  **§3's derivation 3 uses a ~150 m core radius and is the same number**, so it is wrong in the same
+  way and by the same factor. It is left as written because that section is kept as the record of a
+  superseded argument, but nothing should be derived from it again.
 
 ### Scoping: hauling is node-to-node only
 
@@ -951,6 +1012,9 @@ time climbs monotonically with the structures built**.
 
 ## 12. Open questions
 
+*Catchment radius was here and is now answered in §6 — 60 s at hauler pace, 66 m — because the
+hauler having a speed is what made the derivation possible.*
+
 - **The micro multiplier is a target, not a measurement.** 1.5-2x in numbers is reasoned from
   Lanchester and from how "disproportionately stronger" ought to feel; nothing has measured it. Until
   the competent-combat bot exists and the ratio is run, the balance between the two modes of play is
@@ -966,8 +1030,6 @@ time climbs monotonically with the structures built**.
   interacts directly with whether an absent player can be ground down without ever being alarmed.
 - **AI dispositions and the world-generation mix.** How many producers, traders and raiders; whether
   disposition is fixed or drifts with circumstance.
-- **Catchment radius** (~90 s proposed) is a tuning dial that decides how dense settlements must be
-  and how early a second granary is forced. Wants measuring against actual settlement layouts.
 - **What a "marked map" records**, and at what granularity — roads and cleared ground certainly;
   foundations, place names, graves, and how ruins decay over careers are open.
 - **Population growth model.** Grain → people is the proposed fundamental sink, gated by housing.
@@ -1237,6 +1299,20 @@ measured badly wrong for people and is correct for a loaded vehicle.
 **Gate:** existing tests pass on the default type; new tests for a cart's turning circle and a
 scout's speed differential.
 
+**Done, 2026-08-19. Gate met, `--selftest` 50/50**, and the pen and gate benchmarks bit-identical
+— 1.30x / 137.6 red / pile 17 and 1.78x / 335.0 / pile 20 / 33 dead stops — which is what "existing
+tests pass on the default type" has to mean. Four new assertions: every unit type routes at its
+class rather than its own radius, a wagon cannot come about like a person (6.4 s against 1.3), a
+scout outpaces a villager in proportion to its speed, and warning does not shrink as bodies get
+faster.
+
+**Both logged debts came due, and one of them bit in a way the roadmap did not predict.**
+Congestion delay still does not scale with unit speed — inert at one pace, a 3.2x spread from cart
+to scout, and now genuinely live. And the *velocity solve's* horizon turned out to have the same
+disease as the flat neighbour distance did for large bodies: it is a distance, the argument for its
+size is a reaction time, and two light cavalry closing at 7 m/s had **0.05 s** of warning against a
+villager pair's 0.17. Scaled by the pair's speeds, clamped so it can only widen, and asserted.
+
 **The elastic session** — smallest of the nine, and the natural place to absorb overflow, either
 tail-ending Session 3 or heading Session 5.
 
@@ -1301,7 +1377,7 @@ complaint the whole trade layer exists to answer.
 
 ### Held every session
 
-1. **46/46 stays green**, or a threshold moves deliberately and is recorded with its old value.
+1. **50/50 stays green**, or a threshold moves deliberately and is recorded with its old value.
 2. **The determinism test grows with each system.** It covers movement only today.
 3. **Serialization discipline** — stable ids over references. Fresh-start succession (§5) makes this
    core-loop rather than a save feature; it is cheap continuously and expensive retrofitted.
@@ -1319,7 +1395,7 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 
 | | |
 |---|---|
-| suite | `--selftest` **46/46** |
+| suite | `--selftest` **50/50** |
 | body | **1.79 m/s**, accel 2.0, decel 3.0, turn 3.03 rad/s, compression **1.5x** |
 | world | **600 m** for the game; 30 m calibration world untouched and asserted |
 | tick, 2,000 agents | **6.0 ms at 600 m, 5.8 ms at 1200 m** — extent no longer moves it |
@@ -1361,8 +1437,24 @@ before, not during:
 - **Soak testing got cheaper.** §10 costed it at ~9 ms a tick and 3.7x real time; it is 6.0 ms and
   about 5.5x. The early-career CI gate in §10 is comfortably affordable now.
 
-**Session 4, unit types, is next**, and it was load-bearing in a way it was not when the roadmap was
-written: the first unit with a **different body radius** decides whether one rectangle decomposition
+**Session 4 is done, 2026-08-19** — the roster is in §3, the gate is met at 50/50, and the two
+things that changed underneath the rest of the roadmap have both been acted on rather than
+discovered mid-session:
+
+- **The catchment radius is re-derived**, §6. 60 s at hauler pace, 66 m, down from a nominal 135.
+  The old number gave 1.10 catchments per territory — one granary covering everything a player
+  holds, so the second-granary mechanic never fired at all. Sessions 5 and 6 now rest on a number
+  that was derived against the map they will actually run on, and against the unit that traverses
+  it. It only became derivable once the hauler had a speed, which is why it waited for this session
+  rather than for a decision.
+- **Soak testing is affordable** and the early-career CI gate in §10 can be wired when Session 7
+  builds the harness.
+
+**Sessions 5 and 6 are next**, and the standing instruction in the handoff still holds: do not start
+the jobs layer before the router, which is now done twice over.
+
+*Superseded, kept for the shape of it:* Session 4 was load-bearing in a way it was not when the
+roadmap was written: the first unit with a **different body radius** decides whether one rectangle decomposition
 serves every unit or whether it needs one per radius, and that sits under Sessions 5 through 9.
 
 **Answered early and cheaply, 2026-08-19, and written up in §3.** Two decompositions serve any number

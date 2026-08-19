@@ -110,8 +110,13 @@ internal static class AgentDefaults
     /// An eighth of top speed. It was written as 0.55 m/s against a top speed of 4.5, and
     /// left alone it would have become a third of a walk — a body swinging freely at a third
     /// of its travel speed, which is a skater, not a person.
+    /// <para>
+    /// Now a *share*, in <see cref="FreeTurnShare"/>, and read against each body's own top speed
+    /// rather than the default one. An eighth of a walk and an eighth of a gallop are different
+    /// speeds and the same statement, which is what this was always trying to say.
+    /// </para>
     /// </remarks>
-    public static float FreeTurnSpeed = MaximumSpeed * 0.1222f;
+    public static float FreeTurnSpeed => MaximumSpeed * FreeTurnShare;
 
     /// <summary>Speed the second-denominated constants in this simulation were tuned at.</summary>
     /// <remarks>
@@ -134,7 +139,21 @@ internal static class AgentDefaults
     /// distinction wrong in either direction is how a change of pace turns into a change of
     /// behaviour nobody intended.
     /// </remarks>
-    public static float PaceScale => TuningSpeed / MaximumSpeed;
+    public static float PaceScale => TuningSpeed / WorldPace;
+
+    /// <summary>The pace this world's second-denominated constants are calibrated at.</summary>
+    /// <remarks>
+    /// Equal to a villager's speed, and deliberately a separate constant from it. Every duration in
+    /// this simulation describes how long some physical condition lasts — how long a jam drains,
+    /// how long a body commits to a route — and those are properties of the world, not of whoever
+    /// happens to be walking through it. Derived from <see cref="MaximumSpeed"/> it would have
+    /// meant "however fast the default unit is", so adding a scout at twice the pace or a cart at
+    /// two thirds of it would have silently re-timed every one of them.
+    /// </remarks>
+    public const float WorldPace = 1.79f;
+
+    /// <summary>Share of its own top speed below which a body may turn freely.</summary>
+    public const float FreeTurnShare = 0.1222f;
 
     /// <summary>
     /// Speed below which a body counts as not travelling, in metres per second.

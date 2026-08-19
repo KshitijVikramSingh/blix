@@ -224,15 +224,31 @@ internal sealed class SimulationWorld
             AgentIndexCellSize, Terrain.Minimum, Terrain.Maximum);
     }
 
+    /// <summary>Spawns a unit of the given type.</summary>
+    public AgentId SpawnAgent(Vector2 position, UnitType type, FactionId? faction = null) =>
+        SpawnAgent(
+            position,
+            faction,
+            type.Radius,
+            type.MaximumSpeed,
+            type.NavigationRadius,
+            type.TurningRadius,
+            type.CarryCapacity);
+
     public AgentId SpawnAgent(
         Vector2 position,
         FactionId? faction = null,
         float radius = AgentDefaults.Radius,
-        float maximumSpeed = AgentDefaults.MaximumSpeed)
+        float maximumSpeed = AgentDefaults.MaximumSpeed,
+        float navigationRadius = 0f,
+        float turningRadius = 0f,
+        int carryCapacity = 0)
     {
         position = Terrain.ClampPosition(position, radius + BodyFootprint.NavigationMargin);
         var resolvedFaction = faction ?? new FactionId(0);
-        var id = Agents.Spawn(position, resolvedFaction, radius, maximumSpeed);
+        var id = Agents.Spawn(
+            position, resolvedFaction, radius, maximumSpeed, navigationRadius, turningRadius,
+            carryCapacity);
         var owner = ColliderOwner.Agent(id);
         ref var agent = ref Agents.Get(id);
         agent.Colliders = new AgentColliderSet(
@@ -305,7 +321,7 @@ internal sealed class SimulationWorld
         seconds = 0f;
         if (!Agents.Contains(id)) return false;
         ref readonly var agent = ref Agents.Get(id);
-        return pathService.TryOptimalTravelTime(goal, agent.Position, agent.Radius, out seconds);
+        return pathService.TryOptimalTravelTime(goal, agent.Position, agent.NavigationRadius, out seconds);
     }
 
     /// <summary>
@@ -317,7 +333,7 @@ internal sealed class SimulationWorld
         ref readonly var agent = ref Agents.Get(id);
         var travelling = AgentDefaults.TravellingSpeed;
         if (agent.Velocity.LengthSquared() < travelling * travelling) return -1f;
-        if (!pathService.TryFindPassageAxis(agent.Position, agent.Radius, out var axis)) return -1f;
+        if (!pathService.TryFindPassageAxis(agent.Position, agent.NavigationRadius, out var axis)) return -1f;
         var heading = Vector2.Normalize(agent.Velocity);
         // The axis is undirected, so measure to whichever end the body is heading for.
         var alignment = MathF.Abs(Vector2.Dot(heading, axis));
@@ -328,21 +344,21 @@ internal sealed class SimulationWorld
     {
         if (!Agents.Contains(id)) return false;
         ref var agent = ref Agents.Get(id);
-        return pathService.IsPositionNavigable(agent.Position, agent.Radius);
+        return pathService.IsPositionNavigable(agent.Position, agent.NavigationRadius);
     }
 
     public bool IsAgentStepGeometryValid(AgentId id, Vector2 position)
     {
         if (!Agents.Contains(id)) return false;
         ref var agent = ref Agents.Get(id);
-        return pathService.IsStepClear(agent.Position, position, agent.Radius);
+        return pathService.IsStepClear(agent.Position, position, agent.NavigationRadius);
     }
 
     public bool IsAgentContinuousStepGeometryValid(AgentId id, Vector2 position)
     {
         if (!Agents.Contains(id)) return false;
         ref var agent = ref Agents.Get(id);
-        return pathService.IsContinuousStepClear(agent.Position, position, agent.Radius);
+        return pathService.IsContinuousStepClear(agent.Position, position, agent.NavigationRadius);
     }
 
     public ReadOnlySpan<Vector2> GetRemainingPath(AgentId id)
@@ -568,7 +584,7 @@ internal sealed class SimulationWorld
     /// </summary>
     private bool BeginFlowTransit(ref AgentState agent, Vector2 target)
     {
-        if (pathService.SampleFlowGradient(agent.Position, target, agent.Radius) == Vector2.Zero)
+        if (pathService.SampleFlowGradient(agent.Position, target, agent.NavigationRadius) == Vector2.Zero)
         {
             return false;
         }
@@ -1003,7 +1019,7 @@ internal sealed class SimulationWorld
         var result = pathService.FindPath(
             agent.Position,
             requestedDestination,
-            agent.Radius,
+            agent.NavigationRadius,
             congestionAvoidanceCenter,
             additionalNavigationCosts);
         pathfindingTicksThisTick += Stopwatch.GetTimestamp() - pathfindingStart;
@@ -1023,7 +1039,7 @@ internal sealed class SimulationWorld
         {
             pathService.ReserveGroupRoute(
                 path,
-                agent.Radius,
+                agent.NavigationRadius,
                 additionalNavigationCosts,
                 groupReservationExclusionRadius);
         }
@@ -1066,14 +1082,14 @@ internal sealed class SimulationWorld
         var first = pathService.FindPath(
             agent.Position,
             joinPoint,
-            agent.Radius,
+            agent.NavigationRadius,
             congestionAvoidanceCenter);
         var second = first is null
             ? null
             : pathService.FindPath(
                 joinPoint,
                 requestedDestination,
-                agent.Radius);
+                agent.NavigationRadius);
         pathfindingTicksThisTick += Stopwatch.GetTimestamp() - pathfindingStart;
         if (first is not { } approach || second is not { } continuation)
         {
@@ -1158,7 +1174,7 @@ internal sealed class SimulationWorld
                 var pathSegment = nextWaypoint - currentWaypoint;
                 if (pathSegment.LengthSquared() <= 0.0001f ||
                     Vector2.Dot(agent.Position - currentWaypoint, pathSegment) <= 0f ||
-                    !pathService.IsDirectPathClear(agent.Position, nextWaypoint, agent.Radius))
+                    !pathService.IsDirectPathClear(agent.Position, nextWaypoint, agent.NavigationRadius))
                 {
                     break;
                 }
@@ -1300,7 +1316,7 @@ internal sealed class SimulationWorld
         var flow = pathService.SampleFlowGradient(
             agent.Position,
             agent.RequestedDestination,
-            agent.Radius,
+            agent.NavigationRadius,
             agent.AdoptedCongestionRevision);
         if (flow == Vector2.Zero)
         {
@@ -1326,7 +1342,7 @@ internal sealed class SimulationWorld
         // gradient rather than competing with it — still one intent vector — and is what
         // turns a fan converging on an opening into a file lining up for it.
         var liningUpForGap = false;
-        if (pathService.TryFindApertureApproach(agent.Position, flow, agent.Radius, out var aim))
+        if (pathService.TryFindApertureApproach(agent.Position, flow, agent.NavigationRadius, out var aim))
         {
             var toAim = aim - agent.Position;
             if (toAim.LengthSquared() > 0.0001f)
@@ -1484,7 +1500,7 @@ internal sealed class SimulationWorld
                 var flowStep = Terrain.ClampPosition(
                     agent.Position + displacement,
                     agent.Radius + BodyFootprint.NavigationMargin);
-                if (pathService.IsContinuousStepClear(agent.Position, flowStep, agent.Radius))
+                if (pathService.IsContinuousStepClear(agent.Position, flowStep, agent.NavigationRadius))
                 {
                     agent.Position = flowStep;
                     agent.FlowStepRejections = 0;
@@ -1528,7 +1544,7 @@ internal sealed class SimulationWorld
             }
 
             var proposed = Terrain.ClampPosition(agent.Position + displacement, agent.Radius + BodyFootprint.NavigationMargin);
-            if (pathService.IsContinuousStepClear(agent.Position, proposed, agent.Radius))
+            if (pathService.IsContinuousStepClear(agent.Position, proposed, agent.NavigationRadius))
             {
                 agent.Position = proposed;
             }
@@ -1552,7 +1568,7 @@ internal sealed class SimulationWorld
         {
             ref var agent = ref agents[i];
             if (!agent.IsAlive) continue;
-            var positionIsValid = pathService.IsPositionNavigable(agent.Position, agent.Radius);
+            var positionIsValid = pathService.IsPositionNavigable(agent.Position, agent.NavigationRadius);
             if (positionIsValid) continue;
             agent.Position = agent.PreviousPosition;
             agent.Velocity = Vector2.Zero;
@@ -1762,7 +1778,7 @@ internal sealed class SimulationWorld
                     ? agent.PreferredVelocity
                     : agent.RequestedDestination - agent.Position;
                 if (pathService.TryFindObstructingAperture(
-                        agent.Position, intent, agent.Radius, out var abandoned))
+                        agent.Position, intent, agent.NavigationRadius, out var abandoned))
                 {
                     agent.AbandonedAperture = abandoned;
                     agent.AbandonedApertureSeconds = ApertureAbandonHoldSeconds;
@@ -1855,7 +1871,7 @@ internal sealed class SimulationWorld
 
         if (agent.UsesFlowTransit &&
             pathService.TryOptimalTravelTime(
-                agent.RequestedDestination, agent.Position, agent.Radius, out var seconds))
+                agent.RequestedDestination, agent.Position, agent.NavigationRadius, out var seconds))
         {
             return seconds * agent.MaximumSpeed;
         }
@@ -1870,7 +1886,7 @@ internal sealed class SimulationWorld
         return pathService.IsContinuousStepClear(
             agent.Position,
             route[agent.WaypointIndex],
-            agent.Radius);
+            agent.NavigationRadius);
     }
 
     private bool TryAdvanceToVisibleWaypoint(ref AgentState agent)
@@ -1885,7 +1901,7 @@ internal sealed class SimulationWorld
             {
                 continue;
             }
-            if (!pathService.IsDirectPathClear(agent.Position, route[candidate], agent.Radius)) continue;
+            if (!pathService.IsDirectPathClear(agent.Position, route[candidate], agent.NavigationRadius)) continue;
             agent.WaypointIndex = candidate;
             agent.ProgressSampleWaypointIndex = candidate;
             agent.ProgressSampleDistance = Vector2.Distance(agent.Position, route[candidate]);
@@ -2090,18 +2106,18 @@ internal sealed class SimulationWorld
         var offset = agent.Destination - agent.Position;
         var distance = offset.Length();
         if (distance <= 0.0001f || distance > WaypointArrivalDistance + 0.0001f) return;
-        if (!pathService.IsContinuousStepClear(agent.Position, agent.Destination, agent.Radius)) return;
+        if (!pathService.IsContinuousStepClear(agent.Position, agent.Destination, agent.NavigationRadius)) return;
         if (!CanOccupyArrivalPosition(agent, agent.Destination)) return;
         agent.Position = agent.Destination;
     }
 
     private bool CanOccupyArrivalPosition(in AgentState agent, Vector2 position)
     {
-        if (!pathService.IsPositionNavigable(position, agent.Radius)) return false;
+        if (!pathService.IsPositionNavigable(position, agent.NavigationRadius)) return false;
         foreach (ref readonly var other in Agents.All)
         {
             if (!other.IsAlive || other.Id == agent.Id) continue;
-            var minimumDistance = agent.Radius + other.Radius + 0.001f;
+            var minimumDistance = agent.NavigationRadius + other.Radius + 0.001f;
             if (Vector2.DistanceSquared(position, other.Position) <
                 minimumDistance * minimumDistance)
             {

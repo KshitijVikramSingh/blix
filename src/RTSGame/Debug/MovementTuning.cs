@@ -61,22 +61,43 @@ internal sealed class BodyFeelSettings
     [Tune(0.5, 12.0, Label = "turn rate (rad/s)")]
     public float MaximumTurnSpeed = AgentDefaults.MaximumTurnSpeed;
 
+    /// <summary>How fast a body with a turning circle may come round while barely moving.</summary>
+    /// <remarks>
+    /// This decides what a wagon reversing looks like, and there is no headless measure that
+    /// settles it. Low, and it must roll to turn, so it swings wide — and risks sitting pointed the
+    /// wrong way. High, and it slows to a crawl and pivots, which is what it does at the shipped
+    /// value: asked for a 3.4 m circle it traces 0.88 m, because by then it is doing 0.3 m/s. What
+    /// the shipped value does buy is the part that matters at range — 6.4 s to come about against a
+    /// villager's 1.3.
+    /// </remarks>
+    [Tune(0.02, 2.0, Label = "wagon pivot floor (rad/s)")]
+    public float PivotTurnSpeed = LocalSteeringSystem.PivotTurnSpeed;
+
     /// <summary>Pushes the current values onto the defaults and every live body.</summary>
     /// <remarks>
-    /// Free-turn speed used to be a slider beside these and is now an eighth of top speed,
+    /// Free-turn speed used to be a slider beside these and is now a share of top speed,
     /// because that is what it always was — written as 0.55 m/s against a body doing 4.5, it
     /// would have become a third of a walk if left alone. The routing layer's turn rate
     /// follows this one for the same reason: two numbers that are required to agree are not
     /// two decisions.
+    /// <para>
+    /// These <em>scale</em> a body rather than replacing it. They used to assign, which was right
+    /// while every unit was the same body and became wrong the moment a roster existed: dragging
+    /// top speed would have flattened a cart, a scout and a wagon into one pace and there would
+    /// have been no way back short of a restart. Held at the defaults every ratio is one, so a
+    /// world nobody has touched the sliders in is bit-identical.
+    /// </para>
     /// </remarks>
     public void Apply(SimulationWorld world)
     {
         AgentDefaults.Acceleration = Acceleration;
         AgentDefaults.Deceleration = Deceleration;
         AgentDefaults.MaximumTurnSpeed = MaximumTurnSpeed;
-        AgentDefaults.FreeTurnSpeed = MaximumSpeed * 0.1222f;
+        LocalSteeringSystem.PivotTurnSpeed = PivotTurnSpeed;
         PathService.ReferenceTurnSpeed = MaximumTurnSpeed;
 
+        var speedRatio = MaximumSpeed / AgentDefaults.MaximumSpeed;
+        var turnRatio = MaximumTurnSpeed / defaultTurnSpeed;
         var agents = world.Agents.MutableSpan();
         for (var i = 0; i < agents.Length; i++)
         {
@@ -84,10 +105,41 @@ internal sealed class BodyFeelSettings
             if (!agent.IsAlive) continue;
             // A body deliberately given no speed budget is holding ground on purpose —
             // a wall unit — and must not be handed one by a slider.
-            if (agent.MaximumSpeed > 0f) agent.MaximumSpeed = MaximumSpeed;
+            if (agent.MaximumSpeed > 0f) agent.MaximumSpeed = baseSpeeds[agent.Id.Value] * speedRatio;
             agent.Acceleration = Acceleration;
             agent.Deceleration = Deceleration;
-            agent.MaximumTurnSpeed = MaximumTurnSpeed;
+            agent.MaximumTurnSpeed = baseTurnSpeeds[agent.Id.Value] * turnRatio;
+        }
+    }
+
+    /// <summary>What each body was spawned with, so the sliders scale rather than overwrite.</summary>
+    /// <remarks>
+    /// Indexed by agent id, which is never reused, so a despawned unit's entry is simply never
+    /// read again. Captured on first sight rather than at spawn because this is a debug overlay and
+    /// must not put a hook in the spawn path to exist.
+    /// </remarks>
+    private float[] baseSpeeds = Array.Empty<float>();
+    private float[] baseTurnSpeeds = Array.Empty<float>();
+    private int observed;
+    private readonly float defaultTurnSpeed = AgentDefaults.MaximumTurnSpeed;
+
+    /// <summary>Records any body seen for the first time at whatever it was built with.</summary>
+    public void Observe(SimulationWorld world)
+    {
+        var agents = world.Agents.All;
+        if (baseSpeeds.Length < agents.Length)
+        {
+            Array.Resize(ref baseSpeeds, Math.Max(agents.Length, 64));
+            Array.Resize(ref baseTurnSpeeds, Math.Max(agents.Length, 64));
+        }
+
+        // Counted separately from the array's capacity: ids are slot indices, so a world that
+        // grows to five bodies inside an array sized for sixty-four would otherwise never record
+        // anything after the first frame, and every unit spawned later would scale from zero.
+        for (; observed < agents.Length; observed++)
+        {
+            baseSpeeds[observed] = agents[observed].MaximumSpeed;
+            baseTurnSpeeds[observed] = agents[observed].MaximumTurnSpeed;
         }
     }
 

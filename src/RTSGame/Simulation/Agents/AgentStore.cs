@@ -28,11 +28,24 @@ internal sealed class AgentStore
     /// </remarks>
     public ReadOnlySpan<AgentState> All => agents.AsSpan(0, Count);
 
+    /// <summary>Spawns a unit of the given type.</summary>
+    public AgentId Spawn(Vector2 position, FactionId faction, UnitType type) => Spawn(
+        position,
+        faction,
+        type.Radius,
+        type.MaximumSpeed,
+        type.NavigationRadius,
+        type.TurningRadius,
+        type.CarryCapacity);
+
     public AgentId Spawn(
         Vector2 position,
         FactionId faction,
         float radius = AgentDefaults.Radius,
-        float maximumSpeed = AgentDefaults.MaximumSpeed)
+        float maximumSpeed = AgentDefaults.MaximumSpeed,
+        float navigationRadius = 0f,
+        float turningRadius = 0f,
+        int carryCapacity = 0)
     {
         EnsureCapacity(Count + 1);
         var id = new AgentId(Count);
@@ -47,6 +60,11 @@ internal sealed class AgentStore
             Facing = Vector2.UnitX,
             Destination = position,
             Radius = radius,
+            // A body spawned as a bare radius routes at that radius, which is what every
+            // scenario predating unit types expects and is correct for any single-class world.
+            NavigationRadius = navigationRadius > 0f ? navigationRadius : radius,
+            TurningRadius = turningRadius,
+            CarryCapacity = carryCapacity,
             MaximumSpeed = maximumSpeed,
             Acceleration = AgentDefaults.Acceleration,
             Deceleration = AgentDefaults.Deceleration,
@@ -92,6 +110,23 @@ internal sealed class AgentStore
     }
 
     public Span<AgentState> MutableSpan() => agents.AsSpan(0, Count);
+
+    /// <summary>Top speed of the fastest body currently alive, in metres per second.</summary>
+    /// <remarks>
+    /// The velocity solve's horizon widens with how fast a pair can close, so the broad phase has
+    /// to reach out by the fastest body in the world for the same reason it reaches out by the
+    /// biggest: it cannot know which neighbour it is about to find.
+    /// </remarks>
+    public float LargestSpeed()
+    {
+        var largest = 0f;
+        foreach (ref readonly var agent in All)
+        {
+            if (agent.IsAlive) largest = MathF.Max(largest, agent.MaximumSpeed);
+        }
+
+        return largest;
+    }
 
     /// <summary>Radius of the largest body currently alive, in metres.</summary>
     /// <remarks>

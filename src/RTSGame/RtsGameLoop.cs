@@ -566,6 +566,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     public void OnUpdate(Time time)
     {
         // Before stepping, so a slider moved this frame is felt this frame.
+        bodyFeel.Observe(simulation);
         bodyFeel.Apply(simulation);
         // Compression scales wall-clock time on the way in, never the bodies. The spiral
         // guard scales with it too: a quarter-second of catch-up at 1x is a quarter-second

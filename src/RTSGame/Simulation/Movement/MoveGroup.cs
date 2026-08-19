@@ -68,11 +68,16 @@ internal sealed class MoveGroup
         PathService paths)
     {
         var largestRadius = 0f;
+        // Two different questions. How far apart to space slots is about how much room the bodies
+        // take up; whether a slot exists at all is a path query, and those are asked at the class
+        // radius so a mixed cohort does not build a second identical field.
+        var largestNavigationRadius = 0f;
         var centroid = Vector2.Zero;
         foreach (var memberId in members)
         {
             ref readonly var agent = ref agents.Get(memberId);
             largestRadius = MathF.Max(largestRadius, agent.Radius);
+            largestNavigationRadius = MathF.Max(largestNavigationRadius, agent.NavigationRadius);
             centroid += agent.Position;
         }
         centroid /= members.Length;
@@ -87,7 +92,8 @@ internal sealed class MoveGroup
             ? Vector2.Normalize(approach)
             : Vector2.UnitX;
 
-        var candidates = BuildSlotCandidates(target, approach, spacing, largestRadius, members.Length, paths);
+        var candidates = BuildSlotCandidates(
+            target, approach, spacing, largestNavigationRadius, members.Length, paths);
 
         var memberOrder = members
             .Select((memberId, index) => (memberId, index))

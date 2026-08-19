@@ -206,7 +206,7 @@ internal sealed class CollisionSystem
         var proposed = terrain.ClampPosition(
             agent.Position + correction,
             agent.Radius + BodyFootprint.NavigationMargin);
-        if (!paths.IsPositionNavigable(proposed, agent.Radius)) return false;
+        if (!paths.IsPositionNavigable(proposed, agent.NavigationRadius)) return false;
         agent.Position = proposed;
         return true;
     }

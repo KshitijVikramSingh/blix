@@ -96,6 +96,10 @@ internal static class SimulationSelfTests
         Check("a mixed-size crowd files through a gate without overlap", MixedSizeCrowdIsSafe());
         Check("body radii inside one rung share a decomposition", RadiusRungsShareADecomposition());
         Check("a heavy body takes the gate a villager can skip", HeavyBodyRoutesAroundAFootPassage());
+        Check("every unit type routes at its class, not its own radius", UnitTypesRouteByClass());
+        Check("a wagon cannot come about like a person", WagonComesAboutSlowly());
+        Check("a scout outpaces a villager in proportion to its speed", ScoutOutpacesVillager());
+        Check("warning does not shrink as bodies get faster", WarningHoldsAcrossSpeeds());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
 
@@ -2582,5 +2586,180 @@ internal static class SimulationSelfTests
         start = new Vector2(wallX - 6f, centreZ);
         goal = new Vector2(wallX + 6f, centreZ);
         return world;
+    }
+
+    /// <summary>
+    /// Every unit type's own radius and its class's must be the same body to the router.
+    /// </summary>
+    /// <remarks>
+    /// The hauler cart is 0.55 m and routes on the 0.37 m field, which is exact rather than
+    /// approximate only while the two sit inside one clearance rung. That is what lets six unit
+    /// types share two decompositions instead of retaining a copy each. If a type is ever given a
+    /// radius across a rung boundary — or the raster stops producing rungs at all — this is where
+    /// it surfaces, and the answer is to move the type or to re-derive §3, never to widen the test.
+    /// </remarks>
+    private static bool UnitTypesRouteByClass()
+    {
+        var world = BuildTwoGapWall(out _, out _, out _);
+        var passed = true;
+        foreach (var type in UnitType.All)
+        {
+            var own = world.DecomposeWalkable(type.Radius);
+            var byClass = world.DecomposeWalkable(type.NavigationRadius);
+            if (own.CoveredCells == byClass.CoveredCells &&
+                own.Count == byClass.Count &&
+                own.Crossings.Count == byClass.Crossings.Count)
+            {
+                continue;
+            }
+
+            passed = false;
+            Console.WriteLine(
+                $"    {type.Name}: own radius {type.Radius:F2} gives {own.CoveredCells} cells / " +
+                $"{own.Count} rects, class radius {type.NavigationRadius:F2} gives " +
+                $"{byClass.CoveredCells} / {byClass.Count} — they must match");
+        }
+
+        return passed;
+    }
+
+    /// <summary>
+    /// A body with a turning circle takes materially longer to reverse than one without.
+    /// </summary>
+    /// <remarks>
+    /// Asserted as time to come about rather than as the radius of the arc, because the arc is not
+    /// what the implementation delivers: a wagon told to reverse slows down first, and by the time
+    /// it is turning hard it is doing 0.3 m/s and traces well inside its nominal circle. What is
+    /// real, and what a player sees at range, is that it cannot flick round — 6.4 s against a
+    /// villager's 1.3. The pivot floor is a slider precisely because the look of it is unsettled.
+    /// </remarks>
+    private static bool WagonComesAboutSlowly()
+    {
+        var villager = SecondsToComeAbout(UnitType.Villager);
+        var wagon = SecondsToComeAbout(UnitType.Wagon);
+        var passed = villager > 0f && wagon > 0f && wagon > villager * 3f;
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    coming about: villager {villager:F1}s, wagon {wagon:F1}s " +
+                "(wagon must take over three times as long)");
+        }
+
+        return passed;
+    }
+
+    private static float SecondsToComeAbout(UnitType type)
+    {
+        var world = new SimulationWorld();
+        var id = world.SpawnAgent(new Vector2(-13f, 0f), type);
+        world.QueueMove(new[] { id }, new Vector2(13f, 0f));
+        // Ordered while still travelling: from rest there is no turn to measure.
+        for (var tick = 0; tick < 90; tick++) world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        world.QueueMove(new[] { id }, new Vector2(-13f, 0f));
+
+        for (var tick = 0; tick < 600; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            if (world.Agents.Get(id).Velocity.X < -0.1f)
+            {
+                return (tick + 1) * (float)SimulationWorld.FixedDeltaSeconds;
+            }
+        }
+
+        return -1f;
+    }
+
+    /// <summary>
+    /// A scout covers open ground faster than a villager, by about the ratio of their speeds.
+    /// </summary>
+    /// <remarks>
+    /// The speed differential is the whole of what a scout is, and it is the first thing a
+    /// threshold written as an absolute speed would quietly eat — several were, and are now shares
+    /// of a body's own top speed for exactly this reason.
+    /// </remarks>
+    private static bool ScoutOutpacesVillager()
+    {
+        var villager = SecondsToCross(UnitType.Villager);
+        var scout = SecondsToCross(UnitType.LightCavalry);
+        var expected = UnitType.Villager.MaximumSpeed / UnitType.LightCavalry.MaximumSpeed;
+        var actual = scout / villager;
+        // Generous, because acceleration and arrival braking are shared costs that do not scale.
+        var passed = villager > 0f && scout > 0f && actual < expected * 1.25f && actual > expected * 0.75f;
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    crossing: villager {villager:F1}s, scout {scout:F1}s, ratio {actual:F2} " +
+                $"(speeds imply {expected:F2})");
+        }
+
+        return passed;
+    }
+
+    private static float SecondsToCross(UnitType type)
+    {
+        var world = new SimulationWorld();
+        var id = world.SpawnAgent(new Vector2(-12f, 0f), type);
+        world.QueueMove(new[] { id }, new Vector2(12f, 0f));
+        for (var tick = 0; tick < 900 * WalkingPace; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            if (!world.Agents.Get(id).HasDestination)
+            {
+                return (tick + 1) * (float)SimulationWorld.FixedDeltaSeconds;
+            }
+        }
+
+        return -1f;
+    }
+
+    /// <summary>
+    /// A faster pair must not get less warning than a slower one.
+    /// </summary>
+    /// <remarks>
+    /// The neighbour lookahead is a distance and the argument for its size is a reaction time, so
+    /// left unscaled it hands a fast unit a fraction of the warning it hands a slow one — two light
+    /// cavalry closing at 7 m/s had <b>0.05 s</b>, a tick and a half. Exactly the failure the flat
+    /// horizon produced for large bodies, arriving through speed instead of through size, which is
+    /// why this is asserted rather than remembered.
+    /// </remarks>
+    private static bool WarningHoldsAcrossSpeeds()
+    {
+        var villager = WarningSeconds(UnitType.Villager.MaximumSpeed);
+        var scout = WarningSeconds(UnitType.LightCavalry.MaximumSpeed);
+        var passed = villager > 0f && scout > villager * 0.75f;
+        if (!passed)
+        {
+            Console.WriteLine(
+                $"    warning: villager pair {villager:F2}s, scout pair {scout:F2}s " +
+                "(a faster pair must not get materially less)");
+        }
+
+        return passed;
+    }
+
+    /// <summary>Seconds of approach a pair at this speed has when the solve first turns them.</summary>
+    private static float WarningSeconds(float speed)
+    {
+        var world = new SimulationWorld();
+        var combined = AgentDefaults.Radius * 2f;
+        var offset = combined * 0.33f;
+        var left = world.SpawnAgent(
+            new Vector2(-9f, offset * 0.5f), radius: AgentDefaults.Radius, maximumSpeed: speed);
+        var right = world.SpawnAgent(
+            new Vector2(9f, -offset * 0.5f), radius: AgentDefaults.Radius, maximumSpeed: speed);
+        world.QueueMove(new[] { left }, new Vector2(9f, offset * 0.5f));
+        world.QueueMove(new[] { right }, new Vector2(-9f, -offset * 0.5f));
+
+        for (var tick = 0; tick < 1200; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            ref readonly var first = ref world.Agents.Get(left);
+            ref readonly var second = ref world.Agents.Get(right);
+            if (MathF.Abs(first.Velocity.Y) <= 0.05f && MathF.Abs(second.Velocity.Y) <= 0.05f) continue;
+            var gap = Vector2.Distance(first.Position, second.Position) - combined;
+            return gap / (speed * 2f);
+        }
+
+        return -1f;
     }
 }

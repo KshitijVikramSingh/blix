@@ -1,6 +1,6 @@
 # RTSGame — locomotion layer: state, seams, and what not to break
 
-Status as of 2026-08-19. `--selftest` **46/46 passing**, on a body that walks at 1.79 m/s and a
+Status as of 2026-08-19. `--selftest` **50/50 passing**, on a body that walks at 1.79 m/s and a
 router that partitions ground into rectangles rather than searching it. Durations in the tests
 carry a `WalkingPace` factor recording that they were tuned against a body running at 4.5 —
 see `plan-rts-game.md` §13 Session 2 for what the re-base moved, and **§8 below for the routing
@@ -137,7 +137,12 @@ Each of these was measured. Reverting one costs specific tests.
    the pair — wider than the horizon — so they never entered each other's neighbour list and the
    first either knew of the other was the position solver prising them apart. Nothing overlapped,
    which is why nothing caught it: avoidance had quietly become collision response. The same shape
-   of bug is available to every constant in this file that is a distance.
+   of bug is available to every constant in this file that is a distance — and the *second* one was
+   found by looking: the same horizon is a different amount of warning depending on how fast the
+   bodies are, so two light cavalry closing at 7 m/s had **0.05 s** to react where two villagers
+   had 0.17. It is now scaled by the pair's top speeds against `AgentDefaults.WorldPace` and
+   clamped so it can only ever widen, which leaves everything at the calibrated pace untouched and
+   levels warning at 0.17–0.18 s from a walk to a gallop.
    *Recorded with its old value, as rule 1 requires.* Written as `radius + radius + 0.78`, which is
    1.52 exactly for two standard bodies, so **every 0.37 m scenario is bit-identical** — pen
    1.30x / 137.6 red / pile 17, gate 1.78x / 335.0 / pile 20 / 33 dead stops, all unchanged. The
@@ -309,6 +314,11 @@ which is what a correct memo looks like:
   cell by cell, on a 200 m map of staggered walls, at several settings of the abstract search's
   horizon (`--spans`). `lost` is the column that matters — a cell the hierarchy cannot price is a
   body that believes it has no route and stops.
+- `--mixedtest` reports what mixing body sizes and speeds does: head-on separation and reaction in
+  combined radii, warning as a *time* per unit speed, the arc a body with a turning circle traces,
+  how far a settled body is shoved, whether a body holds its line across traffic, and a mixed
+  column through a gate over seventeen arrangements. Diagnostic rather than assertion — the
+  arrangements swing dead stops by a factor of ten, so read the totals, never one row.
 - `--radiisweep [--radii a,b,c] [--extent m]` reports what a second body radius costs the
   decomposition: walkable cells, rectangles, crossings, crossing degree, connected parts, build time
   and bytes per radius, on four maps, plus the **rung spectrum** — every clearance a cell centre on
@@ -425,6 +435,15 @@ at once, and a change justified by one of their jobs breaks the other.
 
 ## 7. Known open items
 
+- **A wagon's turning circle is honoured in time, not in geometry.** `omega = v / R` with a pivot
+  floor, and told to come about it slows down first — so by the time it is turning hard it is doing
+  0.3 m/s and traces 0.88 m against a nominal 3.4. What is real is that it cannot flick round:
+  **6.4 s to reverse against a villager's 1.3**, which is what a player sees at range, and what the
+  self-test asserts. Making it swing wide instead would mean a body that refuses to slow through a
+  turn, which is a steering change rather than a constant, and the floor is on the slider because
+  no headless measure settles the look. Note §9 of `plan-rts-game.md` records this model as
+  `omega = a / v`; that is a lateral-grip limit and lets a *stationary* body spin arbitrarily fast,
+  which is the opposite of a turning circle. `v / R` is the one implemented.
 - **A heavy body walking into a settled one displaces it 1.81 m** at its furthest, against 1.14 m
   for a villager doing the same, and in both cases the idle body walks back to within 0.00 m of
   where it stood. Nothing is lost; it reads as a shove rather than a brush. This is *not* the even

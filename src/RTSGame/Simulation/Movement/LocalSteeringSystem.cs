@@ -26,6 +26,16 @@ namespace RTSGame.Simulation.Movement;
 /// </remarks>
 internal sealed class LocalSteeringSystem
 {
+    /// <summary>
+    /// Rate a body with a turning circle may come round at while barely moving, in radians a second.
+    /// </summary>
+    /// <remarks>
+    /// A wagon turns by rolling, so at rest its turn rate is zero and it would stay pointed wherever
+    /// it stopped forever — a deadlock rather than a behaviour. This is the floor that makes a halted
+    /// wagon something that can be brought round slowly instead of something stuck.
+    /// </remarks>
+    internal static float PivotTurnSpeed = 0.35f;
+
     // Below this speed a resolved velocity is mostly avoidance noise, and facing
     // it makes a body pirouette in place.
     private const float FacingDeadZone = 0.30f;
@@ -166,16 +176,54 @@ internal sealed class LocalSteeringSystem
         var speed = solved.Length();
         if (speed <= 0.0001f) return solved;
         var current = agent.Velocity;
-        if (current.LengthSquared() <= AgentDefaults.FreeTurnSpeed * AgentDefaults.FreeTurnSpeed)
+        var freeTurnSpeed = FreeTurnSpeedOf(agent);
+        if (agent.TurningRadius <= 0f &&
+            current.LengthSquared() <= freeTurnSpeed * freeTurnSpeed)
         {
             return solved;
         }
         var heading = RotateTowards(
             Vector2.Normalize(current),
             solved / speed,
-            agent.MaximumTurnSpeed * deltaSeconds);
+            TurnRateOf(agent, current.Length()) * deltaSeconds);
         return heading * speed;
     }
+
+    /// <summary>
+    /// How fast this body may swing its heading at the speed it is currently doing.
+    /// </summary>
+    /// <remarks>
+    /// For anything on foot this is the flat limit, unchanged: a person may turn as hard as the
+    /// limit allows at any pace, and the limit doubles as the low-pass that stops the velocity
+    /// solve spinning bodies on the spot. A speed-scaled rate was measured against that job and
+    /// failed badly — gate dead stops 5 to 288 — because in a crowd every body is slow and scaling
+    /// by speed lifts the limit exactly where it works hardest.
+    /// <para>
+    /// A body with a turning circle is the case that model was actually for, and it is
+    /// <c>omega = v / R</c>, not <c>a / v</c> as §9 of <c>plan-rts-game.md</c> recorded. The
+    /// distinction matters and is the whole behaviour: <c>a / v</c> lets a *stationary* body spin
+    /// arbitrarily fast, which is the opposite of a turning circle, whereas <c>v / R</c> says a
+    /// wagon changes direction only by rolling round an arc it cannot tighten. What it costs is
+    /// that a body at rest can never turn, so it would sit forever pointed the wrong way; hence
+    /// the pivot floor, which is a wagon being manhandled round rather than driven.
+    /// </para>
+    /// </remarks>
+    private static float TurnRateOf(in AgentState agent, float speed)
+    {
+        if (agent.TurningRadius <= 0f) return agent.MaximumTurnSpeed;
+        var rolling = speed / agent.TurningRadius;
+        return Math.Clamp(rolling, PivotTurnSpeed, agent.MaximumTurnSpeed);
+    }
+
+    /// <summary>Speed below which a body may swing freely, as a share of its own top speed.</summary>
+    /// <remarks>
+    /// Per body rather than global, because it is a statement about a body picking its way slowly
+    /// and an eighth of a walk is a different number from an eighth of a gallop. Identical to the
+    /// old global for anything moving at the default pace, which is every unit that existed when
+    /// the constants around it were tuned.
+    /// </remarks>
+    private static float FreeTurnSpeedOf(in AgentState agent) =>
+        agent.MaximumSpeed * AgentDefaults.FreeTurnShare;
 
     private void EnsureCapacity(int count)
     {

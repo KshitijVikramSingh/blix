@@ -27,6 +27,18 @@ internal struct AgentState
     public Vector2 HoldPosition;
     public Vector2 GroupSlot;
     public float Radius;
+    /// <summary>Radius the navigation layer routes this body at; see <c>UnitType</c>.</summary>
+    /// <remarks>
+    /// Its class's radius rather than its own, so the decomposition and the flow fields are cached
+    /// once per class instead of once per unit type. Exact rather than approximate: two radii
+    /// inside one clearance rung have identical walkable sets. Path queries take this; terrain
+    /// clamps, colliders and anything about where the body physically is take <see cref="Radius"/>.
+    /// </remarks>
+    public float NavigationRadius;
+    /// <summary>Smallest circle this body can turn in, or zero if it may pivot on the spot.</summary>
+    public float TurningRadius;
+    /// <summary>What this body can carry, for the hauling layer.</summary>
+    public int CarryCapacity;
     public float MaximumSpeed;
     public float Acceleration;
     /// <summary>Rate this body sheds speed at; see AgentDefaults.Deceleration.</summary>

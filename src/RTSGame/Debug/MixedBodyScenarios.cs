@@ -87,6 +87,8 @@ internal static class MixedBodyScenarios
         ReciprocalVelocitySolver.NeighborLookahead = original;
         Console.WriteLine();
 
+        ReportSpeeds();
+        ReportTurningCircle();
         ReportShove();
         ReportLine();
         ReportGate();
@@ -327,6 +329,125 @@ internal static class MixedBodyScenarios
             var final = world.Agents.Get(crosser).Position;
             Console.WriteLine(
                 $"    {name,-9} | {worst,10:F2} m    | {MathF.Abs(final.Y),10:F2} m   | {walked,5:F1} m");
+        }
+
+        Console.WriteLine();
+    }
+
+    /// <summary>
+    /// How much warning the velocity solve gives, as a time rather than as a distance.
+    /// </summary>
+    /// <remarks>
+    /// The neighbour horizon is written as a distance beyond contact, and the argument for that
+    /// number is a reaction *time*: 0.78 m is 0.44 s at walking pace. That argument only held while
+    /// every unit walked. A scout closes on another scout at 7 m/s, so the same 0.78 m is 0.11 s —
+    /// a quarter of the warning, from the same constant, for the same reason the flat 1.52 m gave
+    /// two heavy bodies none. Measured here before deciding whether it wants fixing.
+    /// </remarks>
+    private static void ReportSpeeds()
+    {
+        Console.WriteLine("  warning, as a time rather than a distance");
+        Console.WriteLine("    pair                  | speed    | reaction | closing | warning");
+
+        foreach (var (name, speed) in new[]
+                 {
+                     ("hauler cart", UnitType.HaulerCart.MaximumSpeed),
+                     ("villager", UnitType.Villager.MaximumSpeed),
+                     ("heavy cavalry", UnitType.HeavyCavalry.MaximumSpeed),
+                     ("light cavalry", UnitType.LightCavalry.MaximumSpeed),
+                 })
+        {
+            var world = new SimulationWorld();
+            const float radius = Villager;
+            var combined = radius * 2f;
+            var offset = combined * 0.33f;
+            var left = world.SpawnAgent(new Vector2(-9f, offset * 0.5f), radius: radius, maximumSpeed: speed);
+            var right = world.SpawnAgent(new Vector2(9f, -offset * 0.5f), radius: radius, maximumSpeed: speed);
+            world.QueueMove(new[] { left }, new Vector2(9f, offset * 0.5f));
+            world.QueueMove(new[] { right }, new Vector2(-9f, -offset * 0.5f));
+
+            var reaction = -1f;
+            for (var tick = 0; tick < 1200; tick++)
+            {
+                world.Tick(Step);
+                ref readonly var first = ref world.Agents.Get(left);
+                ref readonly var second = ref world.Agents.Get(right);
+                if (reaction >= 0f) continue;
+                if (MathF.Abs(first.Velocity.Y) > 0.05f || MathF.Abs(second.Velocity.Y) > 0.05f)
+                {
+                    reaction = Vector2.Distance(first.Position, second.Position);
+                }
+            }
+
+            // What matters is the gap left to close when the solve first acts, over the rate it is
+            // closing at — which is the seconds the body actually has to do something about it.
+            var gap = reaction < 0f ? 0f : reaction - combined;
+            var closing = speed * 2f;
+            Console.WriteLine(
+                $"    two at {name,-14} | {speed,4:F2} m/s | " +
+                $"{(reaction < 0f ? "  never" : $"{reaction,6:F2} m")} | {closing,4:F1} m/s | " +
+                $"{(reaction < 0f ? "   -  " : $"{gap / closing,5:F2} s")}");
+        }
+
+        Console.WriteLine();
+    }
+
+    /// <summary>
+    /// The tightest arc a body actually traces when told to come about at speed.
+    /// </summary>
+    /// <remarks>
+    /// Measured as speed over the rate its heading is swinging, which is the radius of the arc it
+    /// is on at that instant, and reported as the tightest one it managed. The claim a turning
+    /// circle makes is not that a wagon turns slowly — it is that a wagon changes direction only
+    /// by rolling round an arc it cannot tighten, so the radius is the thing to look at.
+    /// <para>
+    /// The reversal is ordered while the body is still travelling. Ordered after it had arrived,
+    /// there is no arc to trace: a stopped body turns on the spot at the pivot floor and the
+    /// measurement reads zero for everything, which is what the first version of this did.
+    /// </para>
+    /// </remarks>
+    private static void ReportTurningCircle()
+    {
+        Console.WriteLine("  coming about at speed");
+        Console.WriteLine("    unit           | asked for | tightest arc traced | time to reverse");
+
+        foreach (var type in new[] { UnitType.Villager, UnitType.LightCavalry, UnitType.HeavyCavalry, UnitType.Wagon })
+        {
+            var world = new SimulationWorld();
+            var id = world.SpawnAgent(new Vector2(-13f, 0f), type);
+            world.QueueMove(new[] { id }, new Vector2(13f, 0f));
+
+            // Long enough to be at speed, far short of arriving.
+            for (var tick = 0; tick < 90; tick++) world.Tick(Step);
+            world.QueueMove(new[] { id }, new Vector2(-13f, 0f));
+
+            var tightest = float.MaxValue;
+            var reversedAt = -1f;
+            var previousHeading = world.Agents.Get(id).Velocity;
+            for (var tick = 0; tick < 600; tick++)
+            {
+                world.Tick(Step);
+                ref readonly var agent = ref world.Agents.Get(id);
+                var velocity = agent.Velocity;
+                var speed = velocity.Length();
+                if (speed > 0.3f && previousHeading.LengthSquared() > 0.09f)
+                {
+                    var from = Vector2.Normalize(previousHeading);
+                    var to = velocity / speed;
+                    var swing = MathF.Acos(Math.Clamp(Vector2.Dot(from, to), -1f, 1f));
+                    // Below a tenth of a degree a tick this is straight-line travel and the
+                    // quotient is dominated by float noise rather than by any arc.
+                    if (swing > 0.0017f) tightest = MathF.Min(tightest, speed * Step / swing);
+                }
+
+                previousHeading = velocity;
+                if (reversedAt < 0f && velocity.X < -0.1f) reversedAt = (tick + 1) * Step;
+            }
+
+            Console.WriteLine(
+                $"    {type.Name,-14} | {(type.HasTurningCircle ? $"{type.TurningRadius,6:F2} m" : "  free"),-9} | " +
+                $"{(tightest == float.MaxValue ? "        never turned" : $"{tightest,13:F2} m     ")} | " +
+                $"{(reversedAt < 0f ? " never" : $"{reversedAt,5:F1} s")}");
         }
 
         Console.WriteLine();
