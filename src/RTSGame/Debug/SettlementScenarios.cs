@@ -207,6 +207,21 @@ internal static class SettlementScenarios
             producers.Add((world.AddNode(NodeKind.Farm, at, YardCapacity, Resource.Grain), at));
         }
 
+        // A settlement that starts partway through a year has already worked the windows that have passed.
+        // Without this, any mid-year start lands on a harvest whose fields were never broken — twelve
+        // failed crops and nothing to reap, which is correct arithmetic and a nonsense founding. It is a
+        // fact about setting a scenario up, not a rule of the game: the ground was broken last spring by
+        // people the simulation was not running yet.
+        var phase = CropCycle.PhaseOf(world.Date.Season);
+        foreach (var (node, _) in producers)
+        {
+            ref var field = ref world.Nodes.Get(node);
+            if (field.Kind != NodeKind.Farm) continue;
+            field.CycleYear = world.Date.Year;
+            if (phase is CropPhase.Maintain or CropPhase.Reap) field.PrepareWork = CropCycle.PrepareLabour;
+            if (phase is CropPhase.Reap) field.MaintainWork = CropCycle.MaintainLabour;
+        }
+
         // Wood is the far resource: a woodcutter stands where the trees are, and the trees are not next to
         // the granary. Stage B replaces this ring with an actual tree line.
         var woodRing = MathF.Max(ringRadius, woodcutters * slot * 2f / MathF.Tau);
