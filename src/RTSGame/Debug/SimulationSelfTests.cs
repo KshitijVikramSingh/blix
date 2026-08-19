@@ -104,6 +104,10 @@ internal static class SimulationSelfTests
         Check("a queue is worth more to a body that would otherwise be quick", CongestionIsPricedBySpeed());
         Check("a latecomer arrives at ground a settled crowd is standing on", LatecomerArrivesAtOccupiedGround());
         Check("a queue is worth more to a body that is wide", CongestionIsPricedByWidth());
+        Check("the fingerprint reads every value a body carries", FingerprintReadsEveryBodyValue());
+        Check("every field of the world is fingerprinted or argued away", WorldStateIsFullyAccountedFor());
+        Check("a divergence is reported on the tick it happens", DivergenceIsCaughtWhenItAppears());
+        Check("the checkpoint fingerprint reads the ground, not only the bodies", FullScopeReadsTheMap());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
 
@@ -497,23 +501,161 @@ internal static class SimulationSelfTests
 
     private static bool IdenticalSimulationsMatch()
     {
-        var first = BuildDeterministicWorld();
-        var second = BuildDeterministicWorld();
-        Tick(first, 180);
-        Tick(second, 180);
-        if (first.TickNumber != second.TickNumber || first.Agents.Count != second.Agents.Count) return false;
+        var fault = DeterminismCheck.Diverges(
+            BuildDeterministicWorld(), BuildDeterministicWorld(), 180);
+        if (fault is not null) Console.WriteLine($"    {fault}");
+        return fault is null;
+    }
 
-        for (var i = 0; i < first.Agents.Count; i++)
+    /// <summary>
+    /// Every value a body carries has to reach the fingerprint. Perturb each one in turn
+    /// and the fingerprint has to move.
+    /// </summary>
+    /// <remarks>
+    /// This is the test that makes the coverage claim worth anything. The schema is derived
+    /// from the struct by reflection, so it cannot forget a field — but "derived by
+    /// reflection" is a claim about a mechanism, and the mechanism has several ways to be
+    /// silently wrong: a nested struct walked to the wrong depth, a bool read as the address
+    /// of a bool, a field whose two values happen to fold to the same number. A digest
+    /// nobody has tried to fool is not evidence. So each of the seventy-odd leaves is
+    /// changed to a different value, one at a time, and the fingerprint has to notice all of
+    /// them.
+    /// <para>
+    /// It also fails when a field is added whose type the schema cannot reduce — the schema
+    /// throws while being built rather than skipping it — which is the alarm that replaces
+    /// remembering to extend this file.
+    /// </para>
+    /// </remarks>
+    private static bool FingerprintReadsEveryBodyValue()
+    {
+        var world = BuildDeterministicWorld();
+        Tick(world, 40);
+
+        var missed = new List<string>();
+        var bodies = world.Agents.MutableSpan();
+        var baseline = DeterminismCheck.Fingerprint(world, DeterminismCheck.Scope.Tick);
+        foreach (var leaf in AgentStateSchema.Leaves)
         {
-            var id = new AgentId(i);
-            ref var a = ref first.Agents.Get(id);
-            ref var b = ref second.Agents.Get(id);
-            if (a.Position != b.Position || a.Velocity != b.Velocity || a.HasDestination != b.HasDestination)
-            {
-                return false;
-            }
+            var original = bodies[0];
+            bodies[0] = AgentStateSchema.Perturb(original, leaf);
+            // Deliberately the Tick scope: perturbing a path handle to a handle that was
+            // never issued would make the Full walk ask the pool for a route it does not
+            // hold, which is a fair thing for the pool to refuse and not what is under test.
+            var perturbed = DeterminismCheck.Fingerprint(world, DeterminismCheck.Scope.Tick);
+            bodies[0] = original;
+            if (perturbed == baseline) missed.Add(leaf.Name);
         }
-        return true;
+
+        if (missed.Count > 0)
+        {
+            Console.WriteLine(
+                $"    fingerprint blind to {missed.Count} of {AgentStateSchema.Leaves.Count} " +
+                $"body values: {string.Join(", ", missed.Take(12))}");
+            return false;
+        }
+
+        // Printed rather than asserted against a number. What the right count is depends on
+        // what a body carries, which is a moving target by design; what matters is that it
+        // is all of them, and the loop above is what establishes that.
+        Console.WriteLine($"    fingerprint reads {AgentStateSchema.Leaves.Count} values per body");
+        return DeterminismCheck.Fingerprint(world, DeterminismCheck.Scope.Tick) == baseline;
+    }
+
+    /// <summary>
+    /// Every field of the world is classified as carried, derived or wall clock. A field
+    /// that is none of those is a hole in the determinism check, and holes in a passing test
+    /// do not announce themselves.
+    /// </summary>
+    private static bool WorldStateIsFullyAccountedFor()
+    {
+        var fault = DeterminismCheck.CensusFault();
+        if (fault is not null) Console.WriteLine($"    {fault}");
+        return fault is null;
+    }
+
+    /// <summary>
+    /// A check that reports the wrong tick is nearly as bad as one that reports nothing, so
+    /// introduce a difference at a known tick and require it to be named.
+    /// </summary>
+    /// <remarks>
+    /// The field perturbed here is <c>StuckSeconds</c>, chosen because the check this
+    /// replaces was blind to it: it compares positions, and a body's stall clock takes
+    /// seconds to turn into a position. This asserts both halves of the instrument — that it
+    /// sees the field at all, and that it says <em>tick 24</em> rather than reporting a
+    /// position at tick 60.
+    /// </remarks>
+    private static bool DivergenceIsCaughtWhenItAppears()
+    {
+        const int injectAt = 24;
+        var fault = DeterminismCheck.Diverges(
+            BuildDeterministicWorld(),
+            BuildDeterministicWorld(),
+            ticks: 60,
+            fullEvery: 30,
+            afterTick: tick => { });
+        if (fault is not null)
+        {
+            Console.WriteLine($"    control run diverged from itself: {fault}");
+            return false;
+        }
+
+        var second = BuildDeterministicWorld();
+        var injected = DeterminismCheck.Diverges(
+            BuildDeterministicWorld(),
+            second,
+            ticks: 60,
+            fullEvery: 30,
+            afterTick: tick =>
+            {
+                if (tick != injectAt) return;
+                second.Agents.MutableSpan()[3].StuckSeconds += 0.5f;
+            });
+
+        var passed = injected is not null &&
+                     injected.StartsWith($"tick {injectAt}:", StringComparison.Ordinal) &&
+                     injected.Contains("StuckSeconds", StringComparison.Ordinal);
+        Console.WriteLine($"    injected at tick {injectAt}, reported: {injected ?? "nothing"}");
+        return passed;
+    }
+
+    /// <summary>
+    /// The checkpoint scope has to actually visit the map, the stored routes and the
+    /// colliders — the parts too large to compare every tick and therefore the parts an
+    /// early return would silently skip.
+    /// </summary>
+    /// <remarks>
+    /// Structural rather than behavioural, deliberately. Everything the wider scope reads is
+    /// either derived from something the per-tick scope already reads, or reached through a
+    /// revision counter that it reads, so there is no state that only the wide walk can
+    /// notice — which means the honest thing to assert is that the walk goes there at all.
+    /// The value-level proof lives in the body probe, where it can be made properly.
+    /// </remarks>
+    private static bool FullScopeReadsTheMap()
+    {
+        var world = new SimulationWorld();
+        var id = world.SpawnAgent(new Vector2(-8f, 0f));
+        world.QueueToggleObstacle(new Vector2(2f, 2f));
+        world.QueueMove(new[] { id }, new Vector2(8f, 3f));
+        Tick(world, 20);
+
+        var narrow = DeterminismCheck.Trace(world, DeterminismCheck.Scope.Tick);
+        var wide = DeterminismCheck.Trace(world, DeterminismCheck.Scope.Full);
+        var sections = new[] { "raster.", "terrain.", "blocks.", "collider[", "route[" };
+        var missing = sections.Where(section =>
+            !wide.Any(entry => entry.Label.StartsWith(section, StringComparison.Ordinal))).ToArray();
+        var leaked = sections.Where(section =>
+            narrow.Any(entry => entry.Label.StartsWith(section, StringComparison.Ordinal))).ToArray();
+
+        if (missing.Length > 0 || leaked.Length > 0)
+        {
+            Console.WriteLine(
+                $"    checkpoint scope missing [{string.Join(", ", missing)}], " +
+                $"per-tick scope reading [{string.Join(", ", leaked)}]");
+            return false;
+        }
+
+        Console.WriteLine($"    fingerprint reads {narrow.Count:N0} values a tick, {wide.Count:N0} at a checkpoint");
+        return wide.Count > narrow.Count;
     }
 
     private static bool RoutesAroundBlockWall()
@@ -890,17 +1032,11 @@ internal static class SimulationSelfTests
     {
         var first = new SimulationWorld();
         var second = new SimulationWorld();
-        var firstIds = TerrainStressScenarios.Populate(first);
-        var secondIds = TerrainStressScenarios.Populate(second);
-        Tick(first, 600);
-        Tick(second, 600);
-        return firstIds.Zip(secondIds).All(pair =>
-        {
-            ref var a = ref first.Agents.Get(pair.First);
-            ref var b = ref second.Agents.Get(pair.Second);
-            return a.Position == b.Position && a.Velocity == b.Velocity &&
-                   a.HasDestination == b.HasDestination;
-        });
+        TerrainStressScenarios.Populate(first);
+        TerrainStressScenarios.Populate(second);
+        var fault = DeterminismCheck.Diverges(first, second, 600);
+        if (fault is not null) Console.WriteLine($"    {fault}");
+        return fault is null;
     }
 
     private static bool RepathRecoversFromInvalidStart()
@@ -2106,20 +2242,23 @@ internal static class SimulationSelfTests
         var second = new SimulationWorld();
         MovementStressScenarios.Populate(first, 500, issueGroupMove: true);
         MovementStressScenarios.Populate(second, 500, issueGroupMove: true);
-        Tick(first, 45);
-        Tick(second, 45);
+        var fault = DeterminismCheck.Diverges(first, second, 45);
+        if (fault is not null)
+        {
+            Console.WriteLine($"    {fault}");
+            return false;
+        }
 
+        // Kept alongside the fingerprint rather than folded into it. A NaN position is
+        // perfectly deterministic — two runs will agree on it bit for bit — so the
+        // fingerprint is exactly the wrong instrument for noticing one, and five hundred
+        // bodies shoving each other is where one would come from.
         for (var i = 0; i < 500; i++)
         {
-            ref var a = ref first.Agents.Get(new AgentId(i));
-            ref var b = ref second.Agents.Get(new AgentId(i));
-            if (!float.IsFinite(a.Position.X) || !float.IsFinite(a.Position.Y) ||
-                a.Position != b.Position || a.Velocity != b.Velocity ||
-                a.Facing != b.Facing || a.LocomotionState != b.LocomotionState)
-            {
-                return false;
-            }
+            ref var body = ref first.Agents.Get(new AgentId(i));
+            if (!float.IsFinite(body.Position.X) || !float.IsFinite(body.Position.Y)) return false;
         }
+
         return first.Timings.Format(first.Agents.Count, first.TickNumber).Contains("500 agents");
     }
 

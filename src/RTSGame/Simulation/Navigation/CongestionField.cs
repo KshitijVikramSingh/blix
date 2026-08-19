@@ -274,6 +274,29 @@ internal sealed class CongestionField
         return chunk is null ? 0f : chunk[SlotOf(cell)];
     }
 
+    /// <summary>
+    /// Unnormalised mean travel direction of whatever deposited here, as
+    /// <see cref="DirectionalFactor"/> reads it.
+    /// </summary>
+    /// <remarks>
+    /// Exposed for the determinism fingerprint, which has to compare the flow a cell holds
+    /// and not only the pressure. Two worlds can agree on how jammed every cell is and
+    /// disagree on which way the jam is facing, and that difference reaches a route through
+    /// <see cref="DirectionalFactor"/> without touching a single body first.
+    /// </remarks>
+    public Vector2 Flow(GridCell cell)
+    {
+        if (!transform.Contains(cell)) return Vector2.Zero;
+        var chunk = ChunkOf(cell);
+        var flowX = flowXChunks[chunk];
+        if (flowX is null) return Vector2.Zero;
+        var slot = SlotOf(cell);
+        return new Vector2(flowX[slot], flowZChunks[chunk]![slot]);
+    }
+
+    /// <summary>Regions the field is partitioned into, for anything sweeping the stamps.</summary>
+    public int RegionCount => regions.Count;
+
     public void Update(NavigationGrid navigation, ReadOnlySpan<AgentState> agents, float deltaSeconds)
     {
         var decay = MathF.Exp(-deltaSeconds / DecaySeconds);

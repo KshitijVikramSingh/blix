@@ -189,6 +189,23 @@ internal sealed class SimulationWorld
     public AgentId LastCongestionRoot { get; private set; } = new(-1);
     public AgentId LastCongestionRepathAgent { get; private set; } = new(-1);
 
+    // State the determinism fingerprint has to read and nothing else needs. Each of these
+    // is something the world carries from one tick into the next without it being visible
+    // on any body, which is exactly the state a check that only looked at agents was blind
+    // to. See DeterminismCheck for the ledger that classifies every field of this class.
+    /// <summary>Orders accepted but not yet applied. They apply on the next tick, so they are state.</summary>
+    internal IReadOnlyCollection<AgentCommand> PendingCommands => commands;
+    /// <summary>Live group orders, keyed by id. Iterated in id order by anything that compares worlds.</summary>
+    internal IReadOnlyDictionary<int, MoveGroup> MoveGroups => moveGroups;
+    /// <summary>Next id a group order will take, which two runs have to agree on.</summary>
+    internal int NextMoveGroupId => nextMoveGroupId;
+    /// <summary>Terrain revision the navigation raster was last built from.</summary>
+    internal int RasterizedTerrainRevision => rasterizedTerrainRevision;
+    /// <summary>Route plans spent against this tick's budget.</summary>
+    internal int RoutePlansThisTick => routePlansThisTick;
+    /// <summary>Placement cells holding a built obstacle, and the collider standing in for each.</summary>
+    internal IReadOnlyDictionary<GridCell, ColliderId> BlockColliders => blockColliders;
+
     /// <summary>Side length in metres of the world every tuned constant was measured on.</summary>
     /// <remarks>
     /// Not a suggestion. Every threshold in <c>--selftest</c> and every constant in

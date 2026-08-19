@@ -28,6 +28,17 @@ internal sealed class ColliderWorld
 
     public FactionRelations Factions { get; } = new();
 
+    /// <summary>
+    /// Every proxy ever added, in id order, including removed ones.
+    /// </summary>
+    /// <remarks>
+    /// For the determinism fingerprint, which needs the whole list rather than the enabled
+    /// part of it: ids are handed out by position, so two worlds that removed different
+    /// proxies would go on agreeing about everything enabled while disagreeing about which
+    /// id the next structure gets.
+    /// </remarks>
+    internal IReadOnlyList<ColliderProxy> All => colliders;
+
     public ColliderId Add(
         ColliderOwner owner,
         FactionId faction,
