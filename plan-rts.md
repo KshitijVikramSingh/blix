@@ -1,16 +1,16 @@
 # RTSGame — locomotion layer: state, seams, and what not to break
 
-Status as of 2026-08-18. `--selftest` **42/42 passing**, on a body that walks at 1.5 m/s — see
-`plan-rts-game.md` §13 Session 2 for what the re-base moved and why. Durations in the tests carry a
-`WalkingPace` factor recording that they were tuned against a body running at 4.5. ~10k lines in `src/RTSGame`.
-Branch `rts-locomotion`.
+Status as of 2026-08-19. `--selftest` **42/42 passing**, on a body that walks at 1.79 m/s and a
+router that partitions ground into rectangles rather than searching it. Durations in the tests
+carry a `WalkingPace` factor recording that they were tuned against a body running at 4.5 —
+see `plan-rts-game.md` §13 Session 2 for what the re-base moved, and **§8 below for the routing
+substrate**, which is answered rather than open. Branch `rts-locomotion`.
 
 Run it: `tools/run-rts-game.sh [--debug-all] [--extent <metres>]`
 Verify it: `dotnet run --project src/RTSGame/RTSGame.csproj -c Release -- --selftest`
 Measure it: same with `--benchmark`, and `--doorwaytest` for two-way gap contention
 Measure it at size: same with `--scale` — see §5, and `plan-rts-game.md` §13 for what it found
-Substrate question open: **§8** argues whether this layer should be a navmesh, and names the
-measurement that decides it
+Routing substrate: **§8** — answered, shipped, with both refusals kept
 
 ---
 

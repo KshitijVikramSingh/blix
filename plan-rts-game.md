@@ -12,12 +12,17 @@
 - **This document** is Thread A: the game that goes on top, settled across two long design sessions
   in August 2026. §1–§11 are decided, not speculative — the numbers are derived and the derivations
   are recorded beside them, because they move as a set. **§12 is what is genuinely still open.**
-- **Sessions 1 and 3 are done** (2026-08-18) and their records are in §13. Between them the 1200 m
-  map went from a 549 ms tick and a 4.1 s move order to a **16.6 ms tick at 2,000 agents and a
-  42-93 ms move order**, with route quality measured at 1.006x the flat optimum and the tuned 30 m
-  world bit-identical throughout. **Start at Session 2** — its precondition, a large map that runs
-  well enough to judge the body on, now holds. Session 3's leftover is named at the end of its
-  record and is a lever, not a defect.
+- **Sessions 1, 2 and 3 are done** (2026-08-18/19) and their records are in §13. The 1200 m map
+  went from a 549 ms tick and a 4.1 s move order to a **5.8 ms tick at 2,000 agents**, the body
+  came down from a 4.5 m/s run to a 1.79 m/s walk with every threshold re-based against it, and
+  the map came down from 1200 m to **600 m** — see §3, where the old derivation is kept beside
+  the correction, because it was a ratchet rather than a derivation and that is worth not
+  repeating. The routing layer was then rebuilt twice more; `plan-rts.md` §8 is the record and
+  is answered rather than open.
+- **Start at Session 4, unit types.** It is the elastic session and the one the rest now waits on:
+  soldier, cart and scout speeds are numbers in §3 that nothing implements, and the second body
+  radius is what will say whether one decomposition can serve every unit or whether it needs one
+  per radius.
 
 Four things that will bite you if you skip them:
 
