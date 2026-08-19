@@ -2,6 +2,7 @@ using System.Numerics;
 using RTSGame.Debug;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Commands;
+using RTSGame.Simulation.Economy;
 using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Spatial;
 
@@ -44,7 +45,7 @@ internal static class WorldSave
     /// <summary>
     /// Bumped whenever the byte layout changes in a way an older save cannot satisfy.
     /// </summary>
-    private const int Version = 2;
+    private const int Version = 3;
 
     /// <summary>
     /// Kinds of order that can be sitting in the queue when a save is taken.
@@ -97,9 +98,9 @@ internal static class WorldSave
         if (layout != BodyLayoutSignature())
         {
             throw new InvalidDataException(
-                "This save was written by a build whose unit state had a different shape, so its " +
-                "bodies cannot be read back. Saves do not survive a change to AgentState — see " +
-                "WorldSave.Version.");
+                "This save was written by a build whose unit or node state had a different shape, so " +
+                "its bodies cannot be read back. Saves do not survive a change to AgentState or to " +
+                "EconomyNode — see WorldSave.Version.");
         }
 
         var world = new SimulationWorld(reader.Float());
@@ -130,6 +131,12 @@ internal static class WorldSave
     {
         var signature = new FoldingStateSink();
         signature.Add("size", (ulong)System.Runtime.InteropServices.Marshal.SizeOf<AgentState>());
+        // A node's size too, because nodes are saved as a blob and a node that grew a field would
+        // otherwise be read back as plausible garbage — every field after the new one shifted by four
+        // bytes, silently, with no version to bump because nobody remembered to bump it. Adding
+        // Growth and Privation to a house is exactly that change, and this closes the hole for the
+        // next one.
+        signature.Add("node", (ulong)System.Runtime.InteropServices.Marshal.SizeOf<EconomyNode>());
         foreach (var leaf in AgentStateSchema.Leaves)
         {
             foreach (var character in leaf.Name) signature.Add("name", character);

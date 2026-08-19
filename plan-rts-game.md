@@ -2826,3 +2826,116 @@ The scenario's seven ex-carts are now **seven spare villagers**, which is the ri
 spare labour is what a growing settlement has and what a receding wood line produces. Stage C is what gives
 it somewhere to go — and new villagers will arrive **idle**, not auto-farming, because posting them is the
 decision the game is made of.
+
+---
+
+## 25. Stage C — population, and the loop closes
+
+A villager appears at a house that has room for them, inside the reach of a store that can feed them, when
+the settlement has enough put by to see the extra mouth through a winter. That is the whole mechanic, and
+every term in it is something the player built and can point at.
+
+Which closes the loop the rest of the economy had been building toward. **A surplus had no purpose before
+this**: stores climbed, autonomy climbed, and nothing happened. Now a surplus is people, people are labour,
+and labour is the only thing that turns a field or a tree into anything.
+
+### Housing is the cap, food is the brake
+
+Growth accrues **per house with room**, not per capita. So it is proportional to housing the player has
+built rather than to population — it does not compound on its own, and there is no invented damping curve
+to justify. *Building houses is how you ask for people.*
+
+And readiness — whether the stores would cover everyone here plus one, for a winter — is a **rate, not a
+gate**. A settlement with half a winter put by grows at half speed, so there is no cliff to fall off and no
+cliff to farm right up to the edge of. It is a **product** over grain and wood rather than a sum: bread and
+firewood are not substitutes, and being rich in one covers nothing.
+
+The winter is derived rather than picked. The year has one harvest and one season in which nothing grows and
+everything burns three times as much wood, so *"can we feed one more"* is exactly the question *"would we
+still get through the winter"* — and the threshold moves with the calendar instead of being a day count
+somebody has to remember to update. The one figure that is **chosen** is the pace: half a year of good
+conditions per free place. A year per place, measured, came out at under two births a year on a settlement
+of twenty-six, which is an hour of play for one person.
+
+### A newcomer arrives idle, on purpose
+
+They could be sent to the nearest field that wants hands, and that would be the game playing itself.
+Posting people is the decision §2 says attention is *for*, and auto-assigning them would quietly convert
+the one interesting choice in the settlement into a notification. So they stand outside their house until
+somebody gives them a job, and the spare-hands count is the prompt.
+
+### Privation spends itself as emigration
+
+A household whose store is empty accumulates privation; enough of it and somebody leaves. Not death —
+there is nothing to die of yet, and that belongs with Stage E.
+
+It is on the **house** rather than the settlement, which is what makes it legible: a house outside every
+catchment empties itself while the ones inside do not, so the mistake is on the map rather than in a
+shortfall total. And it drains three times faster than it fills, so a settlement that fixes its supply
+stops losing people instead of going on losing them for as long as the shortage lasted.
+
+### Three bugs, and two of them were the same mistake in different clothes
+
+**Privation was measured on the wrong ticks.** A household draws a fraction of a unit per tick with the
+rest accumulating in `Pending`, so "a whole unit came due and failed" is true about one tick in a hundred.
+A settlement whose wood ran out for a *year* accrued about a minute of privation and **nobody ever left**.
+Going without is a *state*: the store I draw from is empty and I want something, which is true every tick
+of a famine.
+
+**An empty settlement had perfect readiness.** Readiness measured the buffer against current draw and
+treated no draw as an infinite buffer — reasoning that a settlement with no houses yet is not short of
+food. True of the *start*, catastrophically untrue of the end: a settlement whose last household starved
+out also has no draw, so it scored 100% and its empty houses began producing people out of an empty
+granary. Measured, **a world with nothing in it grew a villager a year.** Asking whether the stores would
+cover *everyone here plus one* has no zero case, because the answer always includes at least that one.
+
+Both are the same error: treating a continuous condition as a discrete event, and treating an edge as a
+special case instead of finding the formulation that has no edge.
+
+**And an empty house kept its privation.** It neither accrues nor drains while nobody lives there, so the
+next person to move in inherited a full measure of somebody else's famine and walked straight back out.
+
+Plus one where the *test* was at fault: it zeroed a granary's stock to prove that food gates growth, which
+destroys units outside the ledger. The drift check caught it, correctly — **a test that breaks conservation
+to make a point has stopped testing the thing it was about.** It uses a second world now.
+
+### What two years look like
+
+| | year 1 spring | y1 winter | y2 summer | y2 winter | y3 spring |
+|---|---|---|---|---|---|
+| people | 26 | **30** | 30 | 22 | **14** |
+| housing spare | 10 | 6 | 6 | 14 | 22 |
+| readiness | 100% | 100% | 19% | **0%** | 0% |
+| trees in reach | 34 | 6 | 0 | 0 | 0 |
+
+It grows on food and then collapses on fuel. The collapse is the mechanic arriving on schedule rather than
+a failure: by the second summer the in-reach woodland is gone, wood hits zero, readiness goes to zero
+because readiness is a product — and then nine households all cross the privation threshold within a season
+of each other and the settlement loses roughly a person per household per season. An unattended settlement
+that has permanently exhausted its reachable fuel and does nothing about it depopulates, which is correct.
+The answer, in a game with a player in it, is a forward depot at the tree line.
+
+Worth naming: **the unattended failure mode is always wood.** Grain never binds — twelve fields against
+thirty mouths is comfortable — so every collapse in the gate is the wood line, which is Stage B's mechanic
+being the sharpest one in the economy.
+
+| | |
+|---|---|
+| suite | `--selftest` **78/78** |
+| one year, compact | 8,122 grain of 8,400 nominal, drift 0, short 0, **0 carts, 0 hauls, 0 emigrated** |
+| two years | 5 born, 17 left, drift 0 — growth on food, collapse on fuel |
+| per person per year | 270 grain against a nominal 270, measured in **mouth-years** |
+| tick cost | 0.4 ms at ten thousand nodes |
+
+### One reporting fix worth keeping
+
+Per-person figures were divided by the *final* headcount, which reported 513 grain a head against a nominal
+270 for a run that halved — the settlement had not eaten twice its ration, it had shrunk. It is measured in
+**mouth-years** now, accumulated a tick at a time, and reads 270 against 270.
+
+### What Stage D and E inherit
+
+- Spare hands are now produced by two things — a receding wood line, and births — and **construction as
+  labour** is what gives them somewhere to go that is not a field.
+- Privation and emigration are the shape death will take in Stage E, one level up: the machinery for
+  "somebody leaves the world and drops what they were carrying" already exists and is exercised.

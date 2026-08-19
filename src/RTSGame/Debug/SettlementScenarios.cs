@@ -87,13 +87,17 @@ internal static class SettlementScenarios
             $"housing for {Occupancy} per household — a cart costs " +
             $"{SimulationWorld.CartTimber} wood and nobody has built one");
         Console.WriteLine(
-            "        date        | grain | wood  | hands | fields             | forest         | " +
-            "hauls | carrying | grain-left | wood-left | short | unhoused | stalled | ms/tick");
+            "        date        | grain | wood  | people      | hands | fields             | " +
+            "forest         | hauls | carrying | grain-left | wood-left | short | unhoused | stalled | " +
+            "ms/tick");
 
         var reported = Season.Winter;
+        // Mouth-seconds, so a per-person figure means something in a settlement whose population moves.
+        var mouthSeconds = 0.0;
         for (var tick = 1; tick <= totalTicks; tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            mouthSeconds += world.Agents.LiveCount * SimulationWorld.FixedDeltaSeconds;
 
             // Conservation is checked every tick, not every season. It is a handful of additions, and
             // the value of an exact ledger is knowing the tick a unit went missing on.
@@ -112,7 +116,7 @@ internal static class SettlementScenarios
         }
 
         if (world.Date.Season != reported) Report(world, faults);
-        Summarise(world, years);
+        Summarise(world, years, mouthSeconds);
 
         foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");
         return faults.Count > 0 ? 1 : 0;
@@ -168,7 +172,11 @@ internal static class SettlementScenarios
         // neighbours — buildings are 4.5 m across and a ring that fitted them at 1.5 m puts them
         // shoulder to shoulder.
         var people = farms + woodcutters + carts + wagons;
-        var households = (people + Occupancy - 1) / Occupancy;
+        // Two households more than the people need, because population is capped by housing and a
+        // settlement with no spare room does not grow at all. Which is correct and is also why a run with
+        // exactly enough houses measured nothing: growth accrues in houses that have room, so a full
+        // settlement reports a readiness figure and no births. You build a house before you need it.
+        var households = (people + Occupancy - 1) / Occupancy + 2;
         var houseWidth = NodeFootprint.HalfExtentOf(NodeKind.House) * 2f;
         var houseArc = MathF.Max(
             NodeFootprint.HalfExtentOf(NodeKind.Granary) + houseWidth * 0.5f + 1.5f,
@@ -544,13 +552,37 @@ internal static class SettlementScenarios
 
         ReportGaps(world);
         Console.WriteLine(
-            $"  {world.Date,-18} | {grain.Stored,5:N0} | {wood.Stored,5:N0} | {hands,5} | " +
-            $"{Fields(world),-18} | {Forest(world),-14} | " +
+            $"  {world.Date,-18} | {grain.Stored,5:N0} | {wood.Stored,5:N0} | {People(world),-11} | " +
+            $"{hands,5} | {Fields(world),-18} | {Forest(world),-14} | " +
             $"{world.Economy.HaulsAssigned,5:N0} | {carried.Total,8:N0} | " +
             $"{Seasons(grain.Seasons),10} | {Seasons(wood.Seasons),9} | " +
             $"{world.Economy.Unmet.Grain + world.Economy.Unmet.Wood,5:N0} | " +
             $"{world.UnhousedCount,8} | {stalled,7} | " +
             $"{world.Timings.Format(world.Agents.Count, world.TickNumber).Split("total ")[1].Split(" ms")[0]}");
+    }
+
+    /// <summary>
+    /// Who lives here, how much room is left, and whether the settlement can afford another mouth.
+    /// </summary>
+    /// <remarks>
+    /// Readiness is the number worth watching. It is the brake on growth and it is continuous, so a
+    /// settlement at 40% is growing at 40% of its housing's pace — and the answer to a low figure is more
+    /// farms rather than more houses, which is the thing a bare population count cannot tell you.
+    /// </remarks>
+    private static string People(SimulationWorld world)
+    {
+        var room = 0;
+        var privation = 0;
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (!node.IsAlive || !node.IsSink) continue;
+            room += node.Housing;
+            if (node.Privation > 0.5f) privation++;
+        }
+
+        var readiness = world.Economy.Readiness;
+        return $"{world.Agents.LiveCount,3} +{room,2} {readiness * 100f,3:F0}%" +
+               (privation > 0 ? $" {privation}!" : string.Empty);
     }
 
     /// <summary>
@@ -628,7 +660,7 @@ internal static class SettlementScenarios
         ? "growing"
         : $"{seasons:F1} seas";
 
-    private static void Summarise(SimulationWorld world, float years)
+    private static void Summarise(SimulationWorld world, float years, double mouthSeconds)
     {
         var economy = world.Economy;
         Console.WriteLine(
@@ -653,13 +685,20 @@ internal static class SettlementScenarios
             $"  forest: {trees:N0} of {SeededTrees:N0} trees left, holding {standing:N0} of " +
             $"{SeededTimber:N0} wood — wood is never produced, only taken out of trees");
 
-        // What the year cost per person, against what the rates say it should have. A settlement that
-        // ate less than its appetite went short somewhere, and the shortfall column says where.
-        var mouths = world.Agents.LiveCount;
         Console.WriteLine(
-            $"  per person per year: {economy.Consumed.Grain / MathF.Max(1f, mouths * years):N0} grain " +
-            $"against a nominal {EconomyRates.GrainPerVillagerPerYear:N0}, " +
-            $"{economy.Consumed.Wood / MathF.Max(1f, mouths * years):N0} wood against " +
-            $"{EconomyRates.WoodPerVillagerPerYear:N0}");
+            $"  population: {economy.Born:N0} born, {economy.Emigrated:N0} left because their household " +
+            $"went hungry, {world.Agents.LiveCount:N0} alive; readiness to feed one more is " +
+            $"{economy.Readiness * 100f:F0}%");
+
+        // What the year cost per person, against what the rates say it should have. A settlement that ate
+        // less than its appetite went short somewhere, and the shortfall column says where. Measured in
+        // mouth-years rather than against the final headcount, so growth and emigration do not distort it
+        // — a settlement that halved otherwise appears to have eaten double its ration.
+        var mouthYears = MathF.Max(1f, (float)(mouthSeconds / WorldCalendar.YearSeconds));
+        Console.WriteLine(
+            $"  per person per year, over {mouthYears:F1} mouth-years: " +
+            $"{economy.Consumed.Grain / mouthYears:N0} grain against a nominal " +
+            $"{EconomyRates.GrainPerVillagerPerYear:N0}, {economy.Consumed.Wood / mouthYears:N0} wood " +
+            $"against {EconomyRates.WoodPerVillagerPerYear:N0}");
     }
 }

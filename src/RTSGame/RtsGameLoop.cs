@@ -1035,11 +1035,45 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         var hands = 0;
         foreach (ref readonly var node in simulation.Nodes.All) hands += node.Hands;
+
+        // Who is here, how much room is left for more, and whether the settlement can afford another
+        // mouth. Readiness is the number worth watching: it is the brake on growth and it is continuous,
+        // so the answer to a low figure is more farms rather than more houses — which a bare headcount
+        // cannot tell you. Spare hands is the other half: a newcomer arrives idle on purpose, so this is
+        // the count of people waiting to be given something to do.
+        var room = 0;
+        var hungry = 0;
+        foreach (ref readonly var node in simulation.Nodes.All)
+        {
+            if (!node.IsAlive || !node.IsSink) continue;
+            room += node.Housing;
+            if (node.Privation > 0.5f) hungry++;
+        }
+
+        var spare = 0;
+        var carts = 0;
+        foreach (ref readonly var body in simulation.Agents.All)
+        {
+            if (!body.IsAlive) continue;
+            if (body.HasCart) carts++;
+            if (!body.Jobs.HasAssignment && !body.Jobs.IsInterrupted) spare++;
+        }
+
+        debug.Values.Value("people", simulation.Agents.LiveCount);
+        debug.Values.Value("housing spare", room);
+        debug.Values.Value(
+            "can feed one more", $"{simulation.Economy.Readiness * 100f:F0}%");
+        debug.Values.Value("born / left", $"{simulation.Economy.Born} / {simulation.Economy.Emigrated}");
+        if (hungry > 0) debug.Values.Value("households going hungry", hungry);
         debug.Values.Value("hands at work", hands);
+        debug.Values.Value("spare hands", spare);
+        debug.Values.Value("carts", carts);
         debug.Values.Value("unhoused", simulation.UnhousedCount);
         debug.Values.Value("nodes", simulation.Nodes.LiveCount);
         debug.Values.Value("hauls", simulation.Economy.HaulsAssigned);
         debug.Values.Value("went short", simulation.Economy.Unmet.Grain + simulation.Economy.Unmet.Wood);
+        debug.Stats.Gauge("people", simulation.Agents.LiveCount);
+        debug.Stats.Gauge("readiness", simulation.Economy.Readiness);
     }
 
     /// <summary>

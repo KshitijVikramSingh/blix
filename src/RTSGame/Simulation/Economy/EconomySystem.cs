@@ -347,7 +347,9 @@ internal sealed class EconomySystem
         AgentStore agents,
         CalendarDate date,
         float deltaSeconds,
-        TravelPrice price)
+        TravelPrice price,
+        Birth? born = null,
+        Departure? left = null)
     {
         var season = date.Season;
         CountHands(nodes, agents);
@@ -358,6 +360,9 @@ internal sealed class EconomySystem
         BindHomes(nodes, agents, deltaSeconds);
         BindCatchments(nodes, price);
         Consume(nodes, season, deltaSeconds);
+        // After consuming, because whether the settlement can afford another mouth is a question about
+        // what is left once everybody has eaten.
+        Populate(nodes, agents, season, deltaSeconds, born, left);
 
         boardCooldown -= deltaSeconds;
         if (boardCooldown > 0f) return;
@@ -368,6 +373,114 @@ internal sealed class EconomySystem
 
     /// <summary>Seconds between two points for a body of a given navigation radius.</summary>
     internal delegate bool TravelPrice(Vector2 from, Vector2 to, float navigationRadius, out float seconds);
+
+    /// <summary>Puts a new person into the world beside their house.</summary>
+    /// <remarks>
+    /// A delegate for the same reason <see cref="TravelPrice"/> is one: spawning a body needs the terrain,
+    /// the placement grid and the collider world, and this file has none of them and should not. It decides
+    /// <em>that</em> somebody is born and where; the world decides what a body is.
+    /// </remarks>
+    internal delegate void Birth(NodeId house, Vector2 position);
+
+    /// <summary>Takes somebody out of the world, for good.</summary>
+    internal delegate void Departure(AgentId body);
+
+    /// <summary>
+    /// Grows the settlement where it can afford to, and loses people where it cannot.
+    /// </summary>
+    /// <remarks>
+    /// <b>A villager appears at a house with room, inside the reach of a store that can feed them.</b>
+    /// Every clause is load-bearing and every one of them is something the player built: the house is a
+    /// building, the room in it is how big that building is, and the reach is where it was put relative to
+    /// a granary. Nothing here is a timer.
+    /// <para>
+    /// Readiness is settlement-wide and continuous — a settlement with half a winter put by grows at half
+    /// speed — so the brake is food and the cap is housing, which is §6's whole population model.
+    /// </para>
+    /// <para>
+    /// The one thing that has to be careful is <em>which</em> body emigrates: the lowest id living in that
+    /// house, so two runs of the same world lose the same person. Picking "the nearest" or "the first
+    /// found" would be a divergence the fingerprint would catch a few thousand ticks later, somewhere
+    /// unrelated.
+    /// </para>
+    /// </remarks>
+    private void Populate(
+        NodeStore nodes,
+        AgentStore agents,
+        Season season,
+        float deltaSeconds,
+        Birth? born,
+        Departure? left)
+    {
+        var held = nodes.TotalHeld();
+        var mouths = 0f;
+        foreach (ref readonly var sink in nodes.All)
+        {
+            if (!sink.IsAlive || !sink.IsSink) continue;
+            mouths += sink.AppetiteSum;
+        }
+
+        Readiness = Population.Readiness(held.Grain, held.Wood, mouths, season);
+
+        var houses = nodes.MutableSpan();
+        for (var i = 0; i < houses.Length; i++)
+        {
+            ref var house = ref houses[i];
+            if (!house.IsAlive || !house.IsSink) continue;
+
+            // Privation first, because a house losing people is not a house gaining them, and a household
+            // that is starving should not be accruing growth from a settlement-wide readiness figure.
+            if (house.Privation >= Population.PrivationSeconds && house.Occupants > 0)
+            {
+                var leaving = LowestOccupant(agents, house.Id);
+                if (leaving.Value >= 0)
+                {
+                    house.Privation = 0f;
+                    house.Growth = 0f;
+                    Emigrated++;
+                    left?.Invoke(leaving);
+                    continue;
+                }
+            }
+
+            // A house outside every catchment cannot feed anybody, so nobody is born into it however
+            // rich the settlement is. That is the same rule that makes such a house go hungry, applied
+            // to the other direction.
+            if (house.Housing <= 0 || !house.Supply.IsValid || !nodes.Contains(house.Supply))
+            {
+                continue;
+            }
+
+            if (house.Privation > 0f) continue;
+            house.Growth += deltaSeconds * Readiness;
+            if (house.Growth < Population.PersonSeconds) continue;
+            house.Growth -= Population.PersonSeconds;
+            Born++;
+            // Beside the house rather than in it. The world moves them off built ground if the spot is
+            // occupied, which it usually is — a house is a 4.5 m building.
+            born?.Invoke(house.Id, house.Position);
+        }
+    }
+
+    /// <summary>The lowest-numbered body living in a house, or none.</summary>
+    private static AgentId LowestOccupant(AgentStore agents, NodeId house)
+    {
+        foreach (ref readonly var agent in agents.All)
+        {
+            if (agent.IsAlive && agent.Home.House == house) return agent.Id;
+        }
+
+        return new AgentId(-1);
+    }
+
+    /// <summary>How ready the settlement is to feed one more mouth, from nothing to all of it.</summary>
+    public float Readiness { get; private set; }
+
+    /// <summary>People born since the world began.</summary>
+    public long Born { get; private set; }
+
+    /// <summary>People who left because their household went hungry too long.</summary>
+    public long Emigrated { get; private set; }
 
     /// <summary>
     /// Counts the pairs of hands standing at each node.
@@ -604,6 +717,7 @@ internal sealed class EconomySystem
             houses[i].AppetiteSum = 0f;
         }
 
+
         var bodies = agents.MutableSpan();
         for (var i = 0; i < bodies.Length; i++)
         {
@@ -635,6 +749,15 @@ internal sealed class EconomySystem
             }
 
             if (agent.Home.House.IsValid) MoveIn(ref nodes.Get(agent.Home.House), in agent);
+        }
+
+        // An empty house has no privation, because privation is something a household is going through
+        // and there is no household. Without this it keeps whatever it had when the last occupant left,
+        // and the next person to move in inherits a full measure of somebody else's famine and walks
+        // straight back out again.
+        for (var i = 0; i < houses.Length; i++)
+        {
+            if (houses[i].IsSink && houses[i].Occupants == 0) houses[i].Privation = 0f;
         }
     }
 
@@ -721,23 +844,41 @@ internal sealed class EconomySystem
         {
             ref var sink = ref sinks[i];
             if (!sink.IsAlive || !sink.IsSink || sink.Occupants <= 0) continue;
+            var wentWithout = false;
             foreach (var resource in Resources.All)
             {
                 var wanted = EconomyRates.DrawPerSecond(resource, season, sink.AppetiteSum) *
                              deltaSeconds;
-                var whole = sink.Pending.Accrue(resource, wanted);
-                if (whole <= 0) continue;
-
                 // A household with no store in reach goes without, however full the world is. That is
                 // what stops a settlement sprawling past its distribution.
                 var available = sink.Supply.IsValid && nodes.Contains(sink.Supply)
                     ? nodes.Get(sink.Supply).Stock[resource]
                     : 0;
+                // <b>Going without is a state, not an event.</b> Privation used to be set only on the
+                // ticks a whole unit of demand actually came due and failed — which is about one tick in a
+                // hundred, since a household draws a fraction of a unit per tick and the rest accumulates
+                // in Pending. So a settlement whose wood ran out for a whole year accrued a minute of
+                // privation instead of a year of it, and nobody ever left. What the household is actually
+                // experiencing is that the store it draws from is empty and it wants something, which is
+                // true every tick of the famine.
+                if (wanted > 0f && available <= 0) wentWithout = true;
+
+                var whole = sink.Pending.Accrue(resource, wanted);
+                if (whole <= 0) continue;
                 var taken = Math.Min(whole, available);
                 if (taken > 0) nodes.Get(sink.Supply).Stock.Add(resource, -taken);
                 consumed.Add(resource, taken);
                 if (whole > taken) unmet.Add(resource, whole - taken);
             }
+
+            // Privation is measured in seconds gone without, on the household that went without. It
+            // drains faster than it fills, so a settlement that fixes its supply stops losing people
+            // rather than going on losing them for as long as the shortage lasted.
+            sink.Privation = MathF.Max(
+                0f,
+                sink.Privation + (wentWithout
+                    ? deltaSeconds
+                    : -deltaSeconds * Population.PrivationRecovery));
         }
 
         Consumed = consumed;

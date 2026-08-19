@@ -357,6 +357,46 @@ internal sealed class SimulationWorld
     }
 
     /// <summary>
+    /// A villager is born beside their house, with nothing to do.
+    /// </summary>
+    /// <remarks>
+    /// <b>Idle on purpose.</b> A new person could be sent to the nearest field that wants hands, and that
+    /// would be the game playing itself: posting people is the decision §2 says attention is for, and
+    /// auto-assigning them would quietly convert the one interesting choice in the settlement into a
+    /// notification. So they stand outside their house until somebody gives them a job — and the report's
+    /// spare-hands count is the prompt.
+    /// <para>
+    /// Beside the house rather than in it, and the spawn nudges off built ground, because a house is a
+    /// 4.5 m building and its own position is inside its walls.
+    /// </para>
+    /// </remarks>
+    private void BornAt(NodeId house, Vector2 position)
+    {
+        var body = UnitType.Villager;
+        // Just clear of the wall, on the side away from the settlement's middle so a newcomer does not
+        // appear in the middle of the traffic between store and field.
+        var outward = position.LengthSquared() > 0.001f ? Vector2.Normalize(position) : Vector2.UnitX;
+        var at = position + outward * (NodeFootprint.HalfExtentOf(NodeKind.House) + body.Radius + 0.6f);
+        var born = SpawnAgent(at, body);
+        // Bound to the house that produced them straight away rather than waiting for the next rebind, so
+        // the house's occupancy reflects the birth on the tick it happened and cannot briefly overshoot
+        // into a second one.
+        ref var agent = ref Agents.Get(born);
+        agent.Home.House = house;
+        agent.Home.Revision = Nodes.Revision;
+        agent.Home.RebindSeconds = EconomySystem.RebindSeconds;
+    }
+
+    /// <summary>Somebody leaves for good, because their household went hungry too long.</summary>
+    /// <remarks>
+    /// The ordinary carrying-capacity correction, and reversible in the sense that matters: the settlement
+    /// is smaller, so it eats less, so the survivors stop going short. It is not death — there is nothing
+    /// to die of yet — and whatever they were carrying falls where they stood, because a resource does not
+    /// stop existing because its carrier walked off over the hill.
+    /// </remarks>
+    private void Emigrate(AgentId body) => DespawnAgents(new[] { body });
+
+    /// <summary>
     /// Builds a body a cart without giving it a route, or refuses for want of timber.
     /// </summary>
     /// <remarks>
@@ -1047,7 +1087,7 @@ internal sealed class SimulationWorld
         phaseStart = Stopwatch.GetTimestamp();
         // Before jobs, so a hauler handed a job this tick starts walking on it this tick, and so
         // production reflects who was standing where at the end of the last one.
-        economy.Update(Nodes, Agents, Date, deltaSeconds, TryTravelSeconds);
+        economy.Update(Nodes, Agents, Date, deltaSeconds, TryTravelSeconds, BornAt, Emigrate);
         Timings.Record(SimulationPhase.Economy, Stopwatch.GetTimestamp() - phaseStart);
 
         phaseStart = Stopwatch.GetTimestamp();

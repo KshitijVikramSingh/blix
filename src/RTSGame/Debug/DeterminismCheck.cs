@@ -77,7 +77,7 @@ internal static class DeterminismCheck
         "SimulationWorld.ExtentMeters", "SimulationWorld.Nodes", "SimulationWorld.economy",
         "EconomySystem.Produced", "EconomySystem.Consumed", "EconomySystem.Seeded",
         "EconomySystem.Unmet", "EconomySystem.HaulsAssigned", "EconomySystem.HaulsAbandoned",
-        "EconomySystem.RoutesFinished",
+        "EconomySystem.RoutesFinished", "EconomySystem.Born", "EconomySystem.Emigrated",
         "EconomySystem.boardCooldown",
         "MoveGroup.Id", "MoveGroup.Target", "MoveGroup.Members", "MoveGroup.Slots",
         "MoveGroup.FormationRadius", "MoveGroup.SettlingTicks", "MoveGroup.TransitCentroid",
@@ -110,6 +110,9 @@ internal static class DeterminismCheck
         ["EconomySystem.idleHaulers"] =
             "rebuilt from the bodies by every pass of the board; who is idle is a fact about the " +
             "bodies, and those are fingerprinted.",
+        ["EconomySystem.Readiness"] =
+            "recomputed from the stores and the households at the head of every population pass, before " +
+            "anything reads it; it is a reported figure rather than a carried one.",
         ["EconomySystem.drawnOn"] =
             "rebuilt at the head of every pass of the board from the supply bindings on the houses, " +
             "which are on the nodes and are fingerprinted.",
@@ -485,6 +488,8 @@ internal static class DeterminismCheck
         sink.Add("HaulsAssigned", world.Economy.HaulsAssigned);
         sink.Add("HaulsAbandoned", world.Economy.HaulsAbandoned);
         sink.Add("RoutesFinished", world.Economy.RoutesFinished);
+        sink.Add("Born", world.Economy.Born);
+        sink.Add("Emigrated", world.Economy.Emigrated);
         foreach (var resource in Resources.All)
         {
             sink.Add("Produced", world.Economy.Produced[resource]);

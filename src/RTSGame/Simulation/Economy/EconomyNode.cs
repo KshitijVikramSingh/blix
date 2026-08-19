@@ -258,6 +258,28 @@ internal struct EconomyNode
     public float AppetiteSum;
 
     /// <summary>
+    /// Progress toward the next villager born in this house, in seconds of eligibility.
+    /// </summary>
+    /// <remarks>
+    /// On the house rather than on the settlement, because growth is proportional to housing built rather
+    /// than to population — see <see cref="Population.PersonSeconds"/>. It also means the progress is
+    /// <em>somewhere</em>: a house filling up is a thing on the map, and a house that stopped filling up
+    /// because it went outside a catchment is a thing you can point at.
+    /// </remarks>
+    public float Growth;
+
+    /// <summary>
+    /// Seconds this household has gone without what it asked for.
+    /// </summary>
+    /// <remarks>
+    /// The consequence of a shortage, and the reason it is not merely a counter: enough of this and
+    /// somebody leaves. Accrued and drained here rather than settlement-wide, so a house outside every
+    /// catchment empties itself while the ones inside do not — which puts the mistake on the map instead
+    /// of in a shortfall total.
+    /// </remarks>
+    public float Privation;
+
+    /// <summary>
     /// The store this sink draws from, or none if it stands outside every catchment.
     /// </summary>
     /// <remarks>
@@ -384,6 +406,8 @@ internal sealed class NodeStore
         node.PrepareWork = 0f;
         node.MaintainWork = 0f;
         node.ReapWork = 0f;
+        node.Growth = 0f;
+        node.Privation = 0f;
         LiveCount--;
         if (fed) Revision++;
         return true;

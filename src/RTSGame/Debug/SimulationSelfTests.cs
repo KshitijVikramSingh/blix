@@ -132,6 +132,8 @@ internal static class SimulationSelfTests
             "a lumber camp is a store nobody eats from, and that is what makes haulers",
             TheWoodLineDecidesWhetherHaulersAreNeeded());
         Check("a cart is a job a villager takes, and pays for", ACartIsAJobAndNotAUnit());
+        Check("housing caps a population and food brakes it", PeopleArriveWhenThereIsRoomAndFood());
+        Check("a household that goes hungry loses somebody", PrivationSpendsItselfAsEmigration());
         Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
@@ -3628,6 +3630,8 @@ internal static class SimulationSelfTests
         var world = new SimulationWorld();
         var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 4000);
         world.AddNode(NodeKind.House, new Vector2(0f, 7f), capacity: 0, occupancy: 4);
+        // Fed, so nobody emigrates mid-test and takes a load of wood over the hill with them.
+        world.SeedStock(granary, Resource.Grain, 2000);
         var tree = world.AddNode(NodeKind.Tree, new Vector2(9f, 0f), capacity: (int)Woodland.WoodPerTree);
         world.SeedStock(tree, Resource.Wood, (int)Woodland.WoodPerTree);
         var seeded = world.Economy.Seeded.Wood;
@@ -3705,6 +3709,10 @@ internal static class SimulationSelfTests
         // A house, so the granary is a store somebody eats out of. Without one nothing draws on it, the
         // granary itself counts as stranded, and the test would measure the opposite of what it means to.
         world.AddNode(NodeKind.House, new Vector2(0f, 9f), capacity: 0, occupancy: 4);
+        // And bread in it, because a household that goes hungry long enough loses somebody — who drops
+        // whatever they were carrying, which becomes a heap, which the board sends a cart for. That is
+        // correct behaviour and it is a haul this test would have counted as evidence about the wood line.
+        world.SeedStock(granary, Resource.Grain, 2000);
 
         var line = farTrees ? 70f : 12f;
         var trees = new List<NodeId>();
@@ -3846,6 +3854,117 @@ internal static class SimulationSelfTests
             $"body {wideBefore:F2}->{UnitType.HaulerCart.Radius:F2} m (worn={wore}); route ran {legs} legs, " +
             $"moved {moved} grain, still standing={stillOnRoute}; kept through an order=" +
             $"{keptThroughAnOrder}, scrapped when taken off work={scrapped}; drift {drift.Grain}/{drift.Wood}");
+        return passed;
+    }
+
+    /// <summary>
+    /// Growth needs three things, and each of them is something the player built.
+    /// </summary>
+    /// <remarks>
+    /// Room in a house, a store in reach of that house, and enough put by to see the extra mouth through a
+    /// winter. So this checks all three by taking them away one at a time on one map: a full house grows
+    /// nobody, a house outside every catchment grows nobody however rich the settlement is, and an empty
+    /// larder grows nobody however much housing there is.
+    /// <para>
+    /// The last one is a rate rather than a gate, which is the part worth asserting: a settlement with half
+    /// a winter put by grows at half speed, so there is no cliff to farm up to the edge of.
+    /// </para>
+    /// </remarks>
+    private static bool PeopleArriveWhenThereIsRoomAndFood()
+    {
+        var world = new SimulationWorld(240f);
+        var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 9000);
+        world.SeedStock(granary, Resource.Grain, 6000);
+        world.SeedStock(granary, Resource.Wood, 6000);
+
+        // Three houses: one with room in the catchment, one already full, one far outside every catchment.
+        var roomy = world.AddNode(NodeKind.House, new Vector2(10f, 0f), capacity: 0, occupancy: 4);
+        var full = world.AddNode(NodeKind.House, new Vector2(-10f, 0f), capacity: 0, occupancy: 1);
+        var stranded = world.AddNode(NodeKind.House, new Vector2(0f, 108f), capacity: 0, occupancy: 4);
+        world.SpawnAgent(new Vector2(-10f, 4f), UnitType.Villager);
+        world.SpawnAgent(new Vector2(0f, 104f), UnitType.Villager);
+
+        var started = world.Agents.LiveCount;
+        Tick(world, (int)(30 * WorldCalendar.YearSeconds));
+
+        var readiness = world.Economy.Readiness;
+        var grewRoomy = world.Nodes.Get(roomy).Occupants > 0;
+        var fullStayedFull = world.Nodes.Get(full).Occupants <= 1;
+        var strandedGrewNobody = world.Nodes.Get(stranded).Occupants <= 1 &&
+                                 !world.Nodes.Get(stranded).Supply.IsValid;
+        var born = world.Economy.Born;
+        var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+
+        // The same map with an empty larder, to show the brake is food and not housing. A second world
+        // rather than emptying the first one's granary: writing a node's stock to zero destroys units
+        // outside the ledger, and the drift check catches it — correctly, because a test that breaks
+        // conservation to make a point has stopped testing the thing it was about.
+        var (poorBorn, poorReadiness) = GrowthWithoutFood();
+        var stoppedWhenEmpty = poorBorn == 0 && poorReadiness <= 0.001f;
+
+        var passed = born > 0 && grewRoomy && fullStayedFull && strandedGrewNobody &&
+                     readiness > 0.9f && stoppedWhenEmpty && drift.Grain == 0 && drift.Wood == 0;
+        Console.WriteLine(
+            $"    a year at {readiness * 100f:F0}% readiness: {started} -> {world.Agents.LiveCount} people, " +
+            $"{born} born into the house with room; full house stayed full={fullStayedFull}, " +
+            $"house outside every catchment grew nobody={strandedGrewNobody}; the same map with an empty " +
+            $"larder bore {poorBorn} at {poorReadiness * 100f:F0}% readiness; drift {drift.Grain}/{drift.Wood}");
+        return passed;
+    }
+
+    /// <summary>The same arrangement with nothing in the granary: housing alone grows nobody.</summary>
+    private static (long Born, float Readiness) GrowthWithoutFood()
+    {
+        var world = new SimulationWorld(240f);
+        world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 9000);
+        world.AddNode(NodeKind.House, new Vector2(10f, 0f), capacity: 0, occupancy: 4);
+        world.SpawnAgent(new Vector2(10f, 5f), UnitType.Villager);
+        Tick(world, (int)(30 * WorldCalendar.YearSeconds));
+        return (world.Economy.Born, world.Economy.Readiness);
+    }
+
+    /// <summary>
+    /// A shortage costs people, and the cost is reversible.
+    /// </summary>
+    /// <remarks>
+    /// Privation is a <em>state</em> and not an event: the household is going without for as long as the
+    /// store it draws from is empty and it wants something, which is every tick of a famine. Measuring it
+    /// on the ticks a whole unit of demand happened to come due counted one tick in a hundred, so a
+    /// settlement whose wood ran out for a year accrued a minute of privation and nobody ever left.
+    /// <para>
+    /// And it drains faster than it fills, so a settlement that fixes its supply stops losing people
+    /// rather than going on losing them for as long as the shortage lasted.
+    /// </para>
+    /// </remarks>
+    private static bool PrivationSpendsItselfAsEmigration()
+    {
+        var world = new SimulationWorld(240f);
+        var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 9000);
+        var house = world.AddNode(NodeKind.House, new Vector2(9f, 0f), capacity: 0, occupancy: 4);
+        for (var i = 0; i < 4; i++) world.SpawnAgent(new Vector2(9f, 5f + i), UnitType.Villager);
+        var started = world.Agents.LiveCount;
+
+        // An empty granary: they are in a catchment and there is nothing in it.
+        Tick(world, (int)(30 * Population.PrivationSeconds * 1.1f));
+        var lost = world.Economy.Emigrated;
+        var privationRose = lost > 0;
+
+        // Fill it, and the remaining households stop leaving.
+        world.SeedStock(granary, Resource.Grain, 9000);
+        world.SeedStock(granary, Resource.Wood, 9000);
+        Tick(world, 30 * 60);
+        var recovered = world.Nodes.Get(house).Privation <= 0.001f;
+        var afterFilling = world.Economy.Emigrated;
+        Tick(world, (int)(30 * Population.PrivationSeconds * 1.1f));
+        var stayedPut = world.Economy.Emigrated == afterFilling;
+
+        var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+        var passed = privationRose && recovered && stayedPut && world.Agents.LiveCount < started &&
+                     drift.Grain == 0 && drift.Wood == 0;
+        Console.WriteLine(
+            $"    a season of empty stores: {started} -> {world.Agents.LiveCount} people, {lost} left; " +
+            $"privation cleared once the granary was filled={recovered}, and nobody else left after=" +
+            $"{stayedPut}; drift {drift.Grain}/{drift.Wood}");
         return passed;
     }
 
