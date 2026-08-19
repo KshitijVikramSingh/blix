@@ -1,0 +1,228 @@
+using System.Numerics;
+using Blix.Assets;
+using Blix.Geometry;
+using Blix.Graphics;
+using Blix.Graphics.Vulkan;
+
+namespace Blix.Render;
+
+// L3 — one static art asset, drawn many times, in as many materials as it has.
+//
+// The gap this fills: InstancedBatch draws ONE mesh with ONE pipeline many times, which
+// is exactly right for a cube and useless for an imported model. A low-poly building is
+// one mesh split into a primitive per material — walls, roof, timber, thatch — and there
+// is no per-vertex colour, so the material's base colour has to arrive as the instance
+// tint. That means N batches which must all be given the SAME set of instances, and
+// keeping those in step by hand is how a roof ends up on a different building from its
+// walls. Both TankArena and Bulwark grew a private version of this before it lived here.
+//
+// It also draws each part TWICE — once lit into a scene pass, once depth-only into a
+// shadow pass — because a prop that does not cast is a prop that does not look like it
+// is standing on the ground. The two draws read the same instance list by construction,
+// which is the property worth having: a caster cannot drift from what it casts for.
+//
+// Geometry only. It owns meshes, instance buffers and batches; it does NOT own a
+// pipeline, a shader, a push-constant layout, or an opinion about lighting. The caller
+// brings its scene pipeline, its caster pipeline and both push payloads, exactly as
+// ParticleBatch and InstancedBatch require.
+//
+// Construct with Create() from already-imported meshes: this assembly cannot see the
+// glTF importer (Blix depends on Blix.Render, not the other way round), and that is the
+// right layering — importing is the asset layer's job and drawing is this one's.
+//
+// Usage per frame:
+//     prop.Begin();
+//     foreach (var thing in things) prop.Add(thing.Model);
+//     prop.Stage(scenePush, shadowPush);
+//     graph.Pass(shadowPass, scope => prop.DrawShadow(scope));
+//     graph.Pass(scenePass,  scope => prop.DrawScene(scope, shadowBinding));
+public sealed class PropModel : IDisposable
+{
+    private readonly Part[] parts;
+
+    private PropModel(string name, Part[] parts, Bounds3 bounds, int triangles)
+    {
+        Name = name;
+        this.parts = parts;
+        Bounds = bounds;
+        TriangleCount = triangles;
+    }
+
+    public string Name { get; }
+
+    // Extent of the assembled model after whatever transform the caller baked in.
+    public Bounds3 Bounds { get; }
+
+    // Triangles for one copy, summed over the parts — the number a caller needs to
+    // decide whether four hundred of these is reasonable.
+    public int TriangleCount { get; }
+
+    public int PartCount => parts.Length;
+
+    // Copies staged this frame.
+    public int InstanceCount => parts.Length == 0 ? 0 : parts[0].Instances.Count;
+
+    // Build from a set of (mesh, tint) parts — one per material of the source asset.
+    //
+    // `bake` is applied to every part's geometry once, here, rather than to every
+    // instance every frame. Normalising an asset (recentre it, stand it on the origin,
+    // scale it to a unit footprint) is a fact about the asset, and baking it means an
+    // instance matrix is only ever the placement the game actually cares about.
+    //
+    // Pass casterPipeline/casterShader null for a prop that receives light but does not
+    // cast — ground decals, plots, anything flat enough that its own shadow is noise.
+    public static PropModel Create(
+        VulkanGraphicsDevice device,
+        string name,
+        IEnumerable<(MeshData Mesh, Vector4 Tint)> parts,
+        ShaderProgramHandle sceneShader,
+        PipelineHandle scenePipeline,
+        ShaderProgramHandle? casterShader = null,
+        PipelineHandle? casterPipeline = null,
+        Matrix4x4? bake = null)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        ArgumentNullException.ThrowIfNull(parts);
+        if (casterShader.HasValue != casterPipeline.HasValue)
+        {
+            throw new ArgumentException(
+                "A shadow caster needs both a shader and a pipeline: the instance buffer's material is " +
+                "created against the shader, and the draw is recorded against the pipeline.",
+                nameof(casterPipeline));
+        }
+
+        var built = new List<Part>();
+        var meshes = new List<MeshData>();
+        var triangles = 0;
+        var index = 0;
+        foreach (var (source, tint) in parts)
+        {
+            var mesh = bake is { } transform
+                ? source.Transformed(transform, $"{name}.{index}")
+                : source;
+            if (mesh.IndexCount == 0) continue;
+            meshes.Add(mesh);
+            triangles += mesh.IndexCount / 3;
+            var uploaded = Upload(device, mesh);
+            var sceneBuffer = new InstanceBuffer(device, sceneShader, $"{name}.{index}.scene");
+            var part = new Part
+            {
+                Tint = new Vector4(tint.X, tint.Y, tint.Z, 1f),
+                SceneBuffer = sceneBuffer,
+                Scene = new InstancedBatch(uploaded, scenePipeline, sceneBuffer),
+            };
+            if (casterShader is { } cs && casterPipeline is { } cp)
+            {
+                part.CasterBuffer = new InstanceBuffer(device, cs, $"{name}.{index}.caster");
+                part.Caster = new InstancedBatch(uploaded, cp, part.CasterBuffer);
+            }
+
+            built.Add(part);
+            index++;
+        }
+
+        return new PropModel(name, built.ToArray(), meshes.CombinedBounds(), triangles);
+    }
+
+    // Drop every copy staged last frame. Call once, before the frame's Adds.
+    public void Begin()
+    {
+        foreach (var part in parts) part.Instances.Clear();
+    }
+
+    // Place one copy. The transform is whatever the caller's shader expects to multiply
+    // a vertex by — this class never reads it.
+    public void Add(Matrix4x4 model)
+    {
+        foreach (var part in parts) part.Instances.Add(new InstanceData(model, part.Tint));
+    }
+
+    // Place one copy in a single colour, overriding every material. For a faction tint,
+    // a highlight, or a ghost — the cases where the asset's own palette is not wanted.
+    public void Add(Matrix4x4 model, Vector4 tint)
+    {
+        foreach (var part in parts) part.Instances.Add(new InstanceData(model, tint));
+    }
+
+    // Hand this frame's instances and push payloads to the batches. Split from the draws
+    // because the two draws happen in two different passes, and a batch's Begin/End pair
+    // brackets a single pass.
+    public void Stage(ReadOnlySpan<byte> scenePush, ReadOnlySpan<byte> shadowPush)
+    {
+        foreach (var part in parts)
+        {
+            var instances = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances);
+            part.Scene.Begin(scenePush);
+            part.Scene.SetInstances(instances);
+            if (part.Caster is null) continue;
+            part.Caster.Begin(shadowPush);
+            part.Caster.SetInstances(instances);
+        }
+    }
+
+    public void DrawScene(RenderPassBuilder pass, IReadOnlyList<ShaderTextureBinding>? textures = null)
+    {
+        foreach (var part in parts) part.Scene.End(pass, textures);
+    }
+
+    public void DrawShadow(RenderPassBuilder pass)
+    {
+        foreach (var part in parts) part.Caster?.End(pass);
+    }
+
+    public void Dispose()
+    {
+        foreach (var part in parts)
+        {
+            part.SceneBuffer.Dispose();
+            part.CasterBuffer?.Dispose();
+        }
+    }
+
+    // A transform that normalises an asset the way a game placing it on the ground
+    // wants: centred on its own footprint, standing on Y = 0, and scaled so the wider
+    // of its two ground dimensions is exactly one unit.
+    //
+    // Which makes an instance matrix `Scale(width) * RotateY(yaw) * Translate(x, y, z)`
+    // and nothing else — width in metres, y the terrain height under the position. No
+    // per-asset constants, because every number here is measured from the geometry: a
+    // pack of a hundred and thirty models authored to slightly different conventions all
+    // arrive the same way up and the same size, and adding the hundred and thirty-first
+    // needs no fitting pass.
+    public static Matrix4x4 NormaliseToUnitFootprint(Bounds3 bounds)
+    {
+        var size = bounds.Max - bounds.Min;
+        var footprint = MathF.Max(size.X, size.Z);
+        var scale = footprint > 1e-4f ? 1f / footprint : 1f;
+        var centre = new Vector3(
+            (bounds.Min.X + bounds.Max.X) * 0.5f,
+            bounds.Min.Y,
+            (bounds.Min.Z + bounds.Max.Z) * 0.5f);
+        return Matrix4x4.CreateTranslation(-centre) * Matrix4x4.CreateScale(scale);
+    }
+
+    private static Mesh Upload(VulkanGraphicsDevice device, MeshData mesh)
+    {
+        var vertices = device.CreateVertexBuffer(
+            new VertexBufferData(
+                new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static),
+                mesh.VertexBytes),
+            $"{mesh.Name}.vb");
+        // A low-poly building fits u16 comfortably; a dense one (a field of wheat, a
+        // rock group) does not, and the importer already decides which by vertex count.
+        var (indices, count) = mesh.Indices32 is { } wide
+            ? (device.CreateIndexBuffer(wide, name: $"{mesh.Name}.ib"), wide.Length)
+            : (device.CreateIndexBuffer(mesh.Indices, name: $"{mesh.Name}.ib"), mesh.Indices.Length);
+        return new Mesh(mesh.Name, vertices, indices, count, mesh.Bounds);
+    }
+
+    private sealed class Part
+    {
+        public Vector4 Tint;
+        public InstanceBuffer SceneBuffer = null!;
+        public InstanceBuffer? CasterBuffer;
+        public InstancedBatch Scene = null!;
+        public InstancedBatch? Caster;
+        public readonly List<InstanceData> Instances = new();
+    }
+}

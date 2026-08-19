@@ -2605,8 +2605,8 @@ only visible as `hands` reading 12 instead of 19 in one seasonal sample.
 |---|---|
 | suite | `--selftest` **75/75** |
 | one year, compact | 8,104 grain of a nominal 8,400 (96.5%), wood short **0**, drift **0**, **0 hauls** |
-| trees in reach | 38 → 31 → 17 → 10 over year one, **0 by summer of year two** |
-| when reach runs out | axes swinging drops to 0, stores drain, and 303 trees holding **27,270 wood** stand out of reach |
+| trees in reach | 34 → 27 → 13 → 6 over year one, **0 by the spring of year two** |
+| when reach runs out | axes swinging drops to 0, stores drain, and ten thousand trees holding **895,590 wood** stand out of reach |
 | the depot, in the self-test | trees at hand → **0 hauls**; wood line pushed out with a depot on it → **9 hauls**, both drift 0 |
 | benchmarks | pen 1.33x, gate 1.78x, 33 dead stops, red 119.2 agent-s — unmoved |
 
@@ -2621,3 +2621,131 @@ tree line, and the carts that appear when you build one are Stage B working.
   before death. The spare labour a receding wood line produces is the thing population growth wants.
 - **D — Construction as labour.** Which is what makes the depot in step 3 cost something.
 - **E — The raid, and civilian self-defence as an interrupt.**
+
+---
+
+## 23. The art pass, and the rule that came out of it
+
+CC0 low-poly pack in, greybox out. The pack turned out to be an unusually close fit — a hundred and
+thirty models, untextured, position-and-normal only, with a flat linear base colour per material and
+**twenty-one distinct colours describing all of it**. No sampler, no cook, no texture memory: every
+primitive becomes one instanced batch tinted by its material. It maps onto the design almost one to one,
+including a farm family that is *literally* a tilled plot plus standing wheat at three growth stages, and
+`_Cut` tree variants for stumps.
+
+### One new engine primitive, because this was the third copy
+
+`InstancedBatch` draws one mesh many times, which is right for a cube and useless for an imported model: a
+low-poly building is one mesh split into a primitive per material, with no vertex colours, so the
+material's colour has to arrive as the instance tint. That means N batches all needing the **same**
+instance set, and keeping those in step by hand is how a roof ends up on a different building from its
+walls. TankArena and Bulwark had each grown a private version.
+
+- `Blix.Assets/MeshDataExtensions.Transformed` — transform positions and normals (inverse-transpose),
+  recompute bounds. What TankArena's private `BakeMerge` should have been.
+- `Blix.Render/PropModel` — parts → one shared instance list → a scene draw and a shadow draw that
+  **cannot drift from each other**, because they read the same list by construction. Geometry only: the
+  caller brings pipelines, pushes and lighting.
+- `RTSGame/Rendering/SettlementArt` — which file is a granary, and how wide it stands.
+
+### The fit is measured, and the size is the simulation's
+
+The pack's convention is loose: identity node transforms and bases at Y ≈ 0, but horizontal centring
+wanders by up to half a unit because a model is drawn wherever it looked right inside its tile. So the fit
+is read off the geometry at load — recentre on the measured footprint, drop the measured base to the
+ground, scale so the wider ground dimension is one unit. **There is no table of per-asset constants**, and
+the hundred-and-thirty-first model needs no fitting pass.
+
+The one thing not measured is how wide a building is in metres, and that is correct: it is not a fact about
+the model. A granary is 7.5 m because `NodeFootprint` says five placement cells and bodies route around
+exactly that square. The art is scaled to the footprint the game enforces, not the reverse.
+
+### What looking at it caught, that no test would have
+
+Four things, in the order they became obvious:
+
+1. **The wheat was smeared into ribbons.** The crop had been stretched non-uniformly to fill its square
+   footprint, which smears every individual stalk along the stretched axis — and a hundred stalks smeared
+   identically stop being stalks. The *plot* is still stretched (it is flat, so the distortion is
+   invisible); the crop is uniform.
+2. **The tilled plot was invisible.** It is a flat slab and the coarse ground under it is a flat slab at
+   exactly the same height; two coplanar surfaces z-fight per pixel. Lifted 2 cm.
+3. **The ground was washed out.** Grass albedo was 0.42 green, written when the ground was the brightest
+   thing in the frame by construction. The pack's greens sit between 0.09 and 0.23, so a plain read as a
+   pale sheet with dark models scattered on it. The terrain is in the pack's palette now, matched to its
+   own materials where there is one to match. Same for the villagers, who were tonemapping to near-white.
+4. **The shadows were acne, not softness.** Broad dark smears on flat ground that correspond to nothing
+   are a surface shadowing itself, and depth bias cannot fix it: the error a shadow map makes on a surface
+   the light grazes is that one texel covers a long slice of it, and the amount grows without bound as the
+   angle closes. Enough depth bias to cover it detaches every shadow from its caster. So
+   `blix_shadow_normal_offset` moves the sample **along the surface normal**, off the surface, by a
+   distance related to how wide a texel is in world units — the actual scale of the error. Depth bias then
+   drops from 0.004 to 0.0012.
+
+And a fifth, which is the one worth remembering: **softness is tap density, not kernel width.** Sixteen
+binary comparisons spread over six texels of ground do not average into a gradient, they quantise into
+blotches — a shadow blurrier and dirtier at the same time. Narrowing the kernel to a texel and a half
+made it *softer looking*.
+
+### The rule: what cannot be measured is a control
+
+The lighting was flat, and the reason is worth writing down because it is not obvious. With a sun of 2.05
+and a terminator wrap of 0.25, a face-on surface lands at 1.25 HDR and a side face at 0.43 — but **ACES
+compresses both into its shoulder**, so they come out 0.78 and 0.42. An output ratio under two to one on a
+light ratio of three. The wrap was doing most of the damage: at a quarter, a face turned ninety degrees
+from the sun still collects a fifth of it.
+
+Which is exactly the kind of thing nobody derives, and exactly the kind of thing that had been sitting in a
+shader as `const float kSunIntensity = 2.05` looking like a fact. So `LookSettings` now carries every one
+of them on a slider — sun elevation and bearing, intensity, ambient, terminator wrap, shadow penumbra and
+normal offset, shadow box, fog, exposure, tonemap curve, saturation, contrast, checker contrast, ground
+variation, tree draw distance — and the shaders take them through the push constants rather than declaring
+them. The things that *are* facts stay out: the shadow map's texel size and world extent are geometry.
+
+That is the same rule the movement layer already followed and for the same reason: **a number nobody can
+measure should be visibly a question rather than quietly indistinguishable from an answer.** It is more
+tempting to break here than anywhere else, because a lighting constant looks exactly like a physical one.
+
+### A dense forest, and the two things it broke
+
+The woodland went from 341 trees to **ten thousand**, which is what "distance is the terrain" needs to look
+like from a camera. Two things had to change first, and both were latent bugs rather than optimisations:
+
+**Trees are culled against the camera's focus.** The camera sees about ninety metres and there are now
+thousands of models; without a cull the frame draws the whole map every frame. With it, the frame went
+*down* from 16.7 ms to 14.4 despite thirty times the trees. The radius is a slider, and it is never
+smaller than the shadow box — a tree behind the camera still casts into the frame.
+
+**A hand is a body standing at the site it was assigned to.** `CountHands` used to find the nearest node to
+each body by scanning every node in the world. Fine at twenty; at ten thousand it is nineteen scans of a
+ten-thousand-element struct array per tick, thirty-odd megabytes of streaming, and the settlement gate went
+from 0.19 ms a tick to **1.74**. Asking the assignment which site it named, and then whether the body is
+actually standing there, is O(1) — and it is the sharper question: a hauler unloading in a farmyard is not
+a farmhand, and a body still walking to its field is not working it yet. Back to **0.25 ms**.
+
+**And the first band of the scatter is load-bearing.** Everything §22 measures depends on how much wood
+stands within a cutter's reach of the store. Denser canopies just beyond reach scattered members *inward*,
+which pushed the in-reach count from 46 to 66 — half a settlement's annual fuel, arriving as a side effect
+of a density change. The band now starts clear of the reach radius. The crunch consequently lands a season
+earlier than §22 recorded, which is better pacing: you finish year one and must act in year two.
+
+| | |
+|---|---|
+| suite | `--selftest` **75/75** |
+| one year, 10,005 nodes | 8,111 grain of 8,400 nominal, drift 0, short 0, **0 hauls**, 0 stalled |
+| tick cost | 0.25 ms at ten thousand nodes (0.19 at three hundred) |
+| frame | 14.4 ms with 4x MSAA, three passes, ~10,000 trees on the map |
+| repo cost | 3.7 MB of art, 16 files, no textures, no cook step |
+| benchmarks | pen 1.33x, gate 1.78x, 33 dead stops, red 119.2 agent-s — unmoved |
+
+### Still open
+
+- **A felled tree leaves nothing behind.** `Resource_Tree_Group_Cut` is loaded and waiting, but a stump
+  needs a node that outlives the tree, which is a simulation change rather than a drawing one.
+- **Villagers are static.** The pack has no rig, so a villager slides rather than walks. Best-effort —
+  deleting the OBJ reverts to cylinders.
+- **Large numbers in the reports render with the machine's digit grouping** (`8,95,590`), which is the
+  locale doing as it is told and looks like a bug. One `CultureInfo.InvariantCulture` away.
+- **Frame headroom.** The sky is drawn first, at 4x, over every pixel, before the world draws on top of
+  it. Drawing it last with depth testing on would shade only the pixels the world did not cover, which on
+  a top-down camera is a small fraction. First thing to try if the budget tightens.

@@ -345,22 +345,43 @@ internal sealed class EconomySystem
         foreach (ref readonly var agent in agents.All)
         {
             if (!agent.IsAlive) continue;
-            // Posted at a node or working one. Both are a pair of hands there; a hauler passing through is
-            // not, which is what counting anybody nearby produced.
             if (agent.Jobs.Assignment.Kind is not (AssignmentKind.Hold or AssignmentKind.Work)) continue;
             if (agent.Jobs.Activity == ActivityKind.None || agent.Jobs.IsInterrupted) continue;
-            // Posted here, not passing through. A hauler loading at a farm is standing in the yard and is
-            // emphatically not a farmhand, which is what counting anybody nearby produced: seventeen pairs
-            // of hands at sixteen farms. And it is where the body <em>is</em> rather than where it was told
-            // to be, so a hand walking to the farm is not working it yet and one dragged away by an order
-            // is not working it any more.
-            var nearest = WorkedNode(nodes, in agent);
-            if (!nearest.IsValid) continue;
-            ref var node = ref nodes.Get(nearest);
-            // A field and a tree both count, because both are places labour is spent at. A store is
-            // not: a cutter putting a load down in a granary is not employed by the granary.
-            if (node.IsWorkSite) node.Hands++;
+            // <b>The site this body was assigned to, and then whether it is actually standing there.</b>
+            // Both halves matter. A hauler unloading in a farmyard is emphatically not a farmhand, which
+            // is what counting anybody nearby produced — seventeen pairs of hands at sixteen farms — and a
+            // body still walking to its field is not working it yet, which is what counting the assignment
+            // alone would produce.
+            //
+            // It used to find the nearest node to the body by scanning every node in the world, which was
+            // fine at twenty and is not at ten thousand: nineteen scans of a ten-thousand-element struct
+            // array is thirty-odd megabytes of streaming per tick, and the settlement gate went from a
+            // fifth of a millisecond a tick to one and three quarters the moment the forest got dense.
+            // Asking the assignment is O(1) and is also the sharper question.
+            var site = agent.Jobs.Assignment.Source;
+            if (!nodes.Contains(site)) continue;
+            ref var node = ref nodes.Get(site);
+            // A field and a tree both count, because both are places labour is spent at. A store is not:
+            // a cutter putting a load down in a granary is not employed by the granary.
+            if (!node.IsWorkSite) continue;
+            if (IsStandingAt(in node, in agent)) node.Hands++;
         }
+    }
+
+    /// <summary>Whether this body is close enough to a node's wall to be working it.</summary>
+    /// <remarks>
+    /// Measured to the building's wall rather than to its centre, so the answer does not depend on how big
+    /// the building is — which a distance from the centre necessarily does, and got wrong the moment
+    /// buildings stopped all being one cell. Squared throughout; there is no reason to take a root to
+    /// compare against a threshold.
+    /// </remarks>
+    private static bool IsStandingAt(in EconomyNode node, in AgentState agent)
+    {
+        var reach = agent.Radius * WorkReachShare + JobDefaults.TouchSlack;
+        var half = node.HalfExtent;
+        var outX = MathF.Max(MathF.Abs(agent.Position.X - node.Position.X) - half, 0f);
+        var outZ = MathF.Max(MathF.Abs(agent.Position.Y - node.Position.Y) - half, 0f);
+        return outX * outX + outZ * outZ <= reach * reach;
     }
 
     /// <summary>
@@ -1103,33 +1124,6 @@ internal sealed class EconomySystem
         }
 
         return smallest == int.MaxValue ? 1 : smallest;
-    }
-
-    /// <summary>
-    /// The producing node this body is standing at the wall of, or none.
-    /// </summary>
-    /// <remarks>
-    /// Measured to the building's wall rather than to its centre, so the answer does not depend on how
-    /// big the building is — which a distance from the centre necessarily does, and got wrong the moment
-    /// buildings stopped all being one cell.
-    /// </remarks>
-    private static NodeId WorkedNode(NodeStore nodes, in AgentState agent)
-    {
-        var reach = agent.Radius * WorkReachShare + JobDefaults.TouchSlack;
-        var best = NodeId.None;
-        var bestGap = reach;
-        foreach (ref readonly var node in nodes.All)
-        {
-            if (!node.IsAlive || node.IsPile) continue;
-            var half = new Vector2(node.HalfExtent);
-            var nearest = Vector2.Clamp(agent.Position, node.Position - half, node.Position + half);
-            var gap = Vector2.Distance(agent.Position, nearest);
-            if (gap > bestGap) continue;
-            bestGap = gap;
-            best = node.Id;
-        }
-
-        return best;
     }
 
     /// <summary>The node within <paramref name="radius"/> of a point, or none.</summary>

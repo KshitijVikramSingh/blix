@@ -334,7 +334,6 @@ internal static class SettlementScenarios
     /// </remarks>
     private static void ScatterWoodland(SimulationWorld world, Vector2 centre, float ringRadius)
     {
-        var placed = new List<Vector2>();
         var seed = 0x9E3779B9u;
 
         float Next()
@@ -348,6 +347,31 @@ internal static class SettlementScenarios
             return (z & 0xFFFFFFu) / (float)0x1000000u;
         }
 
+        // A coarse hash grid over the candidate positions, so the spacing test looks at a handful of
+        // neighbours instead of every tree placed so far. Ten thousand trees against a linear scan is
+        // fifty million distance tests and several seconds of startup; against this it is a few hundred
+        // thousand. The cell is sized to the widest spacing any band asks for, so a tree's neighbours are
+        // always in its own cell or one adjacent.
+        const float cellSize = 4f;
+        var buckets = new Dictionary<(int, int), List<Vector2>>();
+
+        bool TooClose(Vector2 at, float spacing)
+        {
+            var cx = (int)MathF.Floor(at.X / cellSize);
+            var cz = (int)MathF.Floor(at.Y / cellSize);
+            for (var dz = -1; dz <= 1; dz++)
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                if (!buckets.TryGetValue((cx + dx, cz + dz), out var bucket)) continue;
+                foreach (var other in bucket)
+                {
+                    if (Vector2.DistanceSquared(other, at) < spacing * spacing) return true;
+                }
+            }
+
+            return false;
+        }
+
         bool TryPlant(Vector2 at, float spacing)
         {
             // Never in the fields or under a building. A tree standing in a wheat field is not a
@@ -357,14 +381,13 @@ internal static class SettlementScenarios
                 return false;
             }
 
-            foreach (var other in placed)
-            {
-                if (Vector2.DistanceSquared(other, at) < spacing * spacing) return false;
-            }
-
+            if (TooClose(at, spacing)) return false;
             var node = world.AddNode(NodeKind.Tree, at, capacity: (int)Woodland.WoodPerTree);
             world.SeedStock(node, Resource.Wood, (int)Woodland.WoodPerTree);
-            placed.Add(world.Nodes.Get(node).Position);
+            var settled = world.Nodes.Get(node).Position;
+            var key = ((int)MathF.Floor(settled.X / cellSize), (int)MathF.Floor(settled.Y / cellSize));
+            if (!buckets.TryGetValue(key, out var list)) buckets[key] = list = new List<Vector2>();
+            list.Add(settled);
             return true;
         }
 
@@ -389,18 +412,34 @@ internal static class SettlementScenarios
             }
         }
 
-        // Thinned: what is left within a cutter's reach of the store after years of cutting. Sized to
-        // about two years of this settlement's burning, so a one-year gate never runs out and a two-year
-        // one only just does.
+        // <b>The first band is load-bearing and the rest are scenery.</b> Everything the economy gate
+        // measures depends on how much wood stands within a cutter's reach of the granary — about two
+        // years of this settlement's burning, so a one-year run never runs out and a two-year one only
+        // just does. Change 46 and the numbers in §22 change with it. Everything past reach is the map
+        // the player expands into, and its density is free to be whatever reads best.
         Band(FieldKeepOut + 3f, Woodland.ReachMetres, trees: 46, spacing: 3.4f, clump: 1);
-        // Canopies: clumps at the edge of reach, which is where the tree line currently sits.
-        Band(Woodland.ReachMetres, ringRadius * 1.4f, trees: 14, spacing: 3.0f, clump: 5);
-        // Woodland: continuous, and the reason a settlement expands rather than starves.
-        Band(ringRadius * 1.4f, ringRadius * 3f, trees: 30, spacing: 2.8f, clump: 8);
+        // Canopies: clumps just beyond reach, which is where the tree line currently sits. Started clear
+        // of the reach radius rather than at it, because a clump scatters its members several metres
+        // around its anchor and the ones that landed inward pushed the in-reach count from 46 to 66 —
+        // half a settlement's annual fuel, arriving as a side effect of a density change.
+        Band(Woodland.ReachMetres + 8f, ringRadius * 1.5f, trees: 120, spacing: 2.6f, clump: 6);
+        // Closing up: the transition from a thinned edge to woodland proper.
+        Band(ringRadius * 1.5f, ringRadius * 3f, trees: 260, spacing: 2.4f, clump: 9);
+        // Continuous forest, and the reason a settlement expands rather than starves. Out to a bit under
+        // half the map, because a 600 m world whose outer half is bare plain does not read as a world with
+        // a forest in it — it reads as a diorama with a hedge round it.
+        Band(ringRadius * 3f, ringRadius * 7f, trees: 900, spacing: 2.2f, clump: 11);
+
+        (SeededTimber, SeededTrees) = world.Nodes.StandingTimber();
     }
 
     /// <summary>Half-width of the ground the fields and the village occupy, which stays clear.</summary>
     private const float FieldKeepOut = 16f;
+
+    /// <summary>What the woodland held when it was seeded, so felling can be reported against it.</summary>
+    private static int SeededTimber;
+
+    private static int SeededTrees;
 
     private static Vector2 Polar(float turn, float inner, float outer, float radial)
     {
@@ -591,9 +630,12 @@ internal static class SettlementScenarios
             $"  hauling: {economy.HaulsAssigned:N0} jobs given out, {economy.HaulsAbandoned:N0} dropped " +
             "when the source emptied or the sink filled");
         var (standing, trees) = world.Nodes.StandingTimber();
+        // Against what the woodland started with, not against everything ever seeded: the granary's
+        // founding stock is also seeded wood, and subtracting standing timber from the whole ledger
+        // credited the settlement with felling a thousand units of granary.
         Console.WriteLine(
-            $"  forest: {trees:N0} trees left holding {standing:N0} wood, felled " +
-            $"{economy.Seeded.Wood - standing:N0} — wood is never produced, only taken out of trees");
+            $"  forest: {trees:N0} of {SeededTrees:N0} trees left, holding {standing:N0} of " +
+            $"{SeededTimber:N0} wood — wood is never produced, only taken out of trees");
 
         // What the year cost per person, against what the rates say it should have. A settlement that
         // ate less than its appetite went short somewhere, and the shortfall column says where.

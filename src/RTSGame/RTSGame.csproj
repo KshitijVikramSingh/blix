@@ -25,6 +25,16 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- CC0 art: 15 low-poly models + one OBJ body, untextured, position+normal only,
+         with a flat base colour per material. No cook step and no texture memory. -->
+    <None Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Blix.Assets\Blix.Assets.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <GlslShader Include="Shaders\world.vert" />
     <GlslShader Include="Shaders\world.frag" />
     <GlslShader Include="Shaders\shadow_caster.vert" />
