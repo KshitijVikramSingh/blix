@@ -3,6 +3,7 @@ using RTSGame.Control;
 using RTSGame.Simulation;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Collision;
+using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Navigation;
 using RTSGame.Simulation.Spatial;
 using RTSGame.Simulation.Terrain;
@@ -108,6 +109,13 @@ internal static class SimulationSelfTests
         Check("every field of the world is fingerprinted or argued away", WorldStateIsFullyAccountedFor());
         Check("a divergence is reported on the tick it happens", DivergenceIsCaughtWhenItAppears());
         Check("the checkpoint fingerprint reads the ground, not only the bodies", FullScopeReadsTheMap());
+        Check("a standing assignment works with nobody watching", StandingAssignmentWorksUnwatched());
+        Check("a standing assignment survives an interrupt and resumes it", AssignmentSurvivesAnInterrupt());
+        Check("an order never becomes a mode", AnOrderNeverBecomesAMode());
+        Check("a job's reach is written in bodies", JobReachIsWrittenInBodies());
+        Check("an unreachable job fails politely", AnUnreachableJobFailsPolitely());
+        Check("a workplace holds more hands than fit on it", AWorkplaceHoldsMoreHandsThanFitOnIt());
+        Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
 
@@ -2475,6 +2483,336 @@ internal static class SimulationSelfTests
             Console.WriteLine(
                 $"    intentless worst={worst:F2}s in {worstScenario} (agent {worstAgent.Value})");
         }
+        return passed;
+    }
+
+    /// <summary>
+    /// A unit given a standing assignment works it with nobody watching: walks to one end,
+    /// dwells, walks to the other, dwells, indefinitely.
+    /// </summary>
+    /// <remarks>
+    /// The shuttle is hauling with the cargo left out, which is why it is the assignment worth
+    /// having first: Session 6 replaces its two points with a granary and a farm and its dwell
+    /// with a load, and everything about the loop is already proven.
+    /// </remarks>
+    private static bool StandingAssignmentWorksUnwatched()
+    {
+        var world = new SimulationWorld();
+        var id = world.SpawnAgent(new Vector2(-6f, 0f));
+        var near = new Vector2(-5f, 0f);
+        var far = new Vector2(5f, 0f);
+        world.QueueAssign(new[] { id }, Assignment.Shuttle(near, far, dwellSeconds: 1.0f));
+
+        var visitedNear = false;
+        var visitedFar = false;
+        for (var tick = 0; tick < 30 * 60; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            ref var body = ref world.Agents.Get(id);
+            visitedNear |= Vector2.Distance(body.Position, near) < 0.5f;
+            visitedFar |= Vector2.Distance(body.Position, far) < 0.5f;
+        }
+
+        var worker = world.Agents.Get(id).Jobs;
+        // Ten metres each way at 1.79 m/s plus a second of dwell is about 12 s a round trip,
+        // so a minute is four or five legs. Asserting "more than two" rather than an exact
+        // count: what is under test is that the loop continues on its own, not the pace.
+        var passed = worker.LegsCompleted >= 2 && visitedNear && visitedFar &&
+                     worker.Retries == 0;
+        Console.WriteLine(
+            $"    shuttle legs={worker.LegsCompleted} nearVisited={visitedNear} " +
+            $"farVisited={visitedFar} retries={worker.Retries}");
+        return passed;
+    }
+
+    /// <summary>
+    /// Session 5's gate. A unit with a standing assignment survives an interrupt and resumes
+    /// it.
+    /// </summary>
+    /// <remarks>
+    /// Three things have to hold, and the third is the one that makes the design's claim real.
+    /// The unit obeys the order, so taking control works. Its assignment and its count of legs
+    /// finished are exactly what they were, so the order cost it nothing. And it goes back to
+    /// work by itself, so nobody has to remember to release it — there is no manual mode,
+    /// because a mode is a thing somebody has to switch off.
+    /// </remarks>
+    private static bool AssignmentSurvivesAnInterrupt()
+    {
+        var world = new SimulationWorld();
+        var id = world.SpawnAgent(new Vector2(-6f, 0f));
+        var near = new Vector2(-5f, 0f);
+        var far = new Vector2(5f, 0f);
+        var assignment = Assignment.Shuttle(near, far, dwellSeconds: 1.0f);
+        world.QueueAssign(new[] { id }, assignment);
+        Tick(world, 30 * 20);
+
+        var legsBefore = world.Agents.Get(id).Jobs.LegsCompleted;
+        if (legsBefore < 1)
+        {
+            Console.WriteLine($"    interrupt setup invalid: only {legsBefore} legs before the order");
+            return false;
+        }
+
+        // Somewhere neither end of the shuttle would take it.
+        var elsewhere = new Vector2(0f, 8f);
+        world.QueueMove(new[] { id }, elsewhere);
+
+        // Mid-walk, while the order is still being carried out. Snapshots by value rather than
+        // by reference: a ref into the store keeps reading the live body, so a check written
+        // against one reads whatever the unit is doing by the time it is printed, not what it
+        // was doing when the check was made.
+        Tick(world, 30 * 3);
+        var dragged = world.Agents.Get(id).Jobs;
+        var suspended = dragged.IsInterrupted &&
+                        dragged.Assignment == assignment &&
+                        dragged.LegsCompleted == legsBefore;
+
+        Tick(world, 30 * 9);
+        var arrived = world.Agents.Get(id);
+        var obeyed = Vector2.Distance(arrived.Position, elsewhere) < 1.0f;
+
+        // Long enough for the grace to expire and for a leg to be finished after it.
+        Tick(world, 30 * 30);
+        var resumed = world.Agents.Get(id).Jobs;
+        var backAtWork = !resumed.IsInterrupted &&
+                         resumed.LegsCompleted > legsBefore &&
+                         resumed.Assignment == assignment;
+
+        var passed = obeyed && suspended && backAtWork;
+        Console.WriteLine(
+            $"    interrupt obeyed={obeyed} suspended={suspended} " +
+            $"legs {legsBefore} -> {dragged.LegsCompleted} while dragged -> " +
+            $"{resumed.LegsCompleted} once released");
+        return passed;
+    }
+
+    /// <summary>
+    /// Taking control is an interrupt, not a mode: a run of orders leaves one interrupt and
+    /// the same assignment, and clearing the assignment is the only thing that stops the work.
+    /// </summary>
+    /// <remarks>
+    /// The failure this rules out is the classic one — a unit left in manual mode, standing
+    /// where you last dropped it, doing nothing, until you notice. There is nothing to leave
+    /// it in: the interrupt is a countdown, so the only way to make a unit stop working is to
+    /// say so, which is a different command.
+    /// </remarks>
+    private static bool AnOrderNeverBecomesAMode()
+    {
+        var world = new SimulationWorld();
+        var id = world.SpawnAgent(new Vector2(-6f, 0f));
+        var post = new Vector2(-5f, 3f);
+        world.QueueAssign(new[] { id }, Assignment.Hold(post, dwellSeconds: 0.5f));
+        Tick(world, 30 * 15);
+        var held = world.Agents.Get(id).Jobs.LegsCompleted;
+
+        // Three orders in a row, the way a player actually gives them.
+        foreach (var target in new[] { new Vector2(2f, -2f), new Vector2(6f, 0f), new Vector2(4f, 4f) })
+        {
+            world.QueueMove(new[] { id }, target);
+            Tick(world, 30 * 6);
+        }
+
+        var ordered = world.Agents.Get(id).Jobs;
+        var stillOneInterrupt = ordered.Interrupt == InterruptKind.Order &&
+                                ordered.Assignment.Kind == AssignmentKind.Hold;
+        Tick(world, 30 * 25);
+
+        var returned = world.Agents.Get(id);
+        var wentBack = !returned.Jobs.IsInterrupted &&
+                       returned.Jobs.LegsCompleted > held &&
+                       Vector2.Distance(returned.Position, post) <
+                       JobDefaults.AtPlaceDistance(returned.Radius);
+
+        // Now take it off work for real, which is the other command.
+        world.QueueAssign(new[] { id }, Assignment.None);
+        Tick(world, 2);
+        var releasedAt = world.Agents.Get(id).Jobs.LegsCompleted;
+        Tick(world, 30 * 20);
+        var idle = world.Agents.Get(id).Jobs;
+        var stoppedForGood = !idle.HasAssignment && !idle.IsInterrupted &&
+                             idle.LegsCompleted == releasedAt &&
+                             idle.Activity == ActivityKind.None;
+
+        var passed = stillOneInterrupt && wentBack && stoppedForGood;
+        Console.WriteLine(
+            $"    orders left interrupt={ordered.Interrupt} returned={wentBack} " +
+            $"legs {held}->{returned.Jobs.LegsCompleted} then cleared={stoppedForGood}");
+        return passed;
+    }
+
+    /// <summary>
+    /// How near a body has to be to count as at its place is written in bodies, so a wagon
+    /// works a post rather than circling one it cannot quite reach.
+    /// </summary>
+    /// <remarks>
+    /// Four bugs in Session 4 were a distance tuned against a 0.37 m body and then applied to
+    /// a 0.90 m one. This is the same trap in a new layer: arrival tolerance is contested
+    /// ground for a wide body, and a job that demanded the exact point would send it round
+    /// again every time it correctly stopped short. Both bodies are given the same post and
+    /// both have to settle into working it without accumulating attempts.
+    /// </remarks>
+    private static bool JobReachIsWrittenInBodies()
+    {
+        var report = new List<string>();
+        var passed = true;
+        foreach (var type in new[] { UnitType.Villager, UnitType.Wagon })
+        {
+            var world = new SimulationWorld();
+            var id = world.SpawnAgent(new Vector2(-7f, -7f), type);
+            var post = new Vector2(4f, 4f);
+            world.QueueAssign(new[] { id }, Assignment.Hold(post, dwellSeconds: 2.0f));
+            Tick(world, 30 * 45);
+
+            var body = world.Agents.Get(id);
+            var reach = JobDefaults.AtPlaceDistance(body.Radius);
+            var working = body.Jobs.LegsCompleted >= 2 && body.Jobs.Retries == 0 &&
+                          Vector2.Distance(body.Position, post) < reach;
+            report.Add(
+                $"{type.Name} reach={reach:F2}m legs={body.Jobs.LegsCompleted} " +
+                $"retries={body.Jobs.Retries} residual={Vector2.Distance(body.Position, post):F2}m");
+            passed &= working;
+        }
+
+        Console.WriteLine($"    {string.Join(" | ", report)}");
+        return passed;
+    }
+
+    /// <summary>
+    /// A job whose place cannot be reached has to fail politely: keep trying, at a bounded
+    /// rate, without churning the router or losing the assignment.
+    /// </summary>
+    /// <remarks>
+    /// The alternative, discovered the hard way in every system that has one, is a unit asking
+    /// for a route thirty times a second forever. Session 6's gate is a full year with no unit
+    /// permanently stalled, and this is the seed of it: the retry is priced in seconds like
+    /// everything else, so a stranded unit costs one query every couple of seconds and stands
+    /// there visibly waiting rather than visibly broken.
+    /// </remarks>
+    private static bool AnUnreachableJobFailsPolitely()
+    {
+        var world = new SimulationWorld();
+        var id = world.SpawnAgent(new Vector2(-6f, 0f));
+        // A block of built ground, with the job's place in the middle of it.
+        var walled = new Vector2(4f, 4f);
+        for (var x = -1; x <= 1; x++)
+        for (var z = -1; z <= 1; z++)
+        {
+            world.QueueToggleObstacle(walled + new Vector2(x * 1.5f, z * 1.5f));
+        }
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        world.QueueAssign(new[] { id }, Assignment.Hold(walled, dwellSeconds: 1.0f));
+
+        var queriesBefore = world.PathQueries;
+        Tick(world, 30 * 40);
+        var queries = world.PathQueries - queriesBefore;
+
+        var stranded = world.Agents.Get(id).Jobs;
+        // Forty seconds at one attempt per RetrySeconds is about twenty tries, and each try is
+        // a handful of queries rather than one. A per-tick spin would be well over a thousand.
+        var bounded = queries < 400;
+        var stillCommitted = stranded.Assignment.Kind == AssignmentKind.Hold &&
+                             stranded.LegsCompleted == 0 &&
+                             stranded.Retries > 0;
+        var passed = bounded && stillCommitted;
+        Console.WriteLine(
+            $"    unreachable retries={stranded.Retries} queries={queries} in 40 s, " +
+            $"committed={stillCommitted}");
+        return passed;
+    }
+
+    /// <summary>
+    /// Two runs of a world full of standing assignments, including an interrupt, agree tick
+    /// for tick over everything the jobs layer carries.
+    /// </summary>
+    /// <remarks>
+    /// The rule this satisfies is "the determinism test grows with each system", and the point
+    /// worth recording is how little it took: the seventeen values the jobs layer added to a
+    /// body were being compared before this test existed, because the fingerprint reads what
+    /// the struct declares. What this adds is a scenario that actually exercises them — a
+    /// fingerprint that covers a field nothing ever writes proves nothing about it.
+    /// </remarks>
+    private static bool JobsRunsIdenticallyTwice()
+    {
+        var fault = DeterminismCheck.Diverges(
+            BuildJobsWorld(),
+            BuildJobsWorld(),
+            ticks: 30 * 25,
+            fullEvery: 60,
+            afterTick: null);
+        if (fault is not null) Console.WriteLine($"    {fault}");
+        return fault is null;
+    }
+
+    /// <summary>
+    /// Twenty units on standing assignments over shared ground, half of them interrupted part
+    /// way through — deliberately enough traffic that the shuttles queue against each other.
+    /// </summary>
+    private static SimulationWorld BuildJobsWorld()
+    {
+        var world = new SimulationWorld();
+        var workers = new List<AgentId>();
+        for (var i = 0; i < 20; i++)
+        {
+            var id = world.SpawnAgent(new Vector2(-8f + i % 5 * 0.9f, -6f + i / 5 * 0.9f));
+            workers.Add(id);
+            // Shared endpoints on purpose: a lane both ways is where the jobs layer and the
+            // congestion field have to agree, and where two runs are most likely not to.
+            world.QueueAssign(
+                new[] { id },
+                i % 2 == 0
+                    ? Assignment.Shuttle(new Vector2(-4f, 2f), new Vector2(6f, 2f), 0.8f)
+                    : Assignment.Hold(new Vector2(2f + i % 3, -3f), 1.4f));
+        }
+
+        // An order to half of them, queued at construction so both worlds issue it identically.
+        world.QueueMove(workers.Where((_, index) => index % 2 == 1), new Vector2(0f, 7f));
+        return world;
+    }
+
+    /// <summary>
+    /// A workplace holds more hands than can stand on one square metre, so twelve units given
+    /// the same post all end up working it rather than queueing for the exact spot.
+    /// </summary>
+    /// <remarks>
+    /// Found by measurement rather than by design. The first run of the jobs trace had eight of
+    /// forty-eight units permanently unable to get to work, and they were the ones who lost the
+    /// race to a shared point: a place was a spot for one body, so everybody else spent the run
+    /// walking at an occupied square. The fix is not a looser tolerance — that would make a job
+    /// inside a wall look reachable — it is asking the world <em>why</em> the body stopped short.
+    /// Taken ground is worked from wherever the crowd left room; ground nobody can stand on is
+    /// waited out. Both halves are asserted here and in <c>AnUnreachableJobFailsPolitely</c>.
+    /// </remarks>
+    private static bool AWorkplaceHoldsMoreHandsThanFitOnIt()
+    {
+        var world = new SimulationWorld();
+        var post = new Vector2(3f, 3f);
+        var hands = new List<AgentId>();
+        for (var i = 0; i < 12; i++)
+        {
+            hands.Add(world.SpawnAgent(new Vector2(-8f + i % 4 * 0.9f, -6f + i / 4 * 0.9f)));
+        }
+
+        world.QueueAssign(hands, Assignment.Hold(post, dwellSeconds: 2f));
+        Tick(world, 30 * 60);
+
+        var idle = 0;
+        var stranded = 0;
+        var furthest = 0f;
+        foreach (var id in hands)
+        {
+            var body = world.Agents.Get(id);
+            if (body.Jobs.LegsCompleted == 0) idle++;
+            if (body.Jobs.CannotReachWork) stranded++;
+            furthest = MathF.Max(furthest, Vector2.Distance(body.Position, post));
+        }
+
+        // Everybody working, nobody reporting a job they cannot reach, and the whole shift
+        // standing within the crowded reach of the post rather than strung out behind it.
+        var reach = JobDefaults.CrowdedPlaceDistance(AgentDefaults.Radius);
+        var passed = idle == 0 && stranded == 0 && furthest <= reach;
+        Console.WriteLine(
+            $"    shared post: {hands.Count - idle}/{hands.Count} working, {stranded} unable to " +
+            $"reach, furthest {furthest:F2}m against a crowded reach of {reach:F2}m");
         return passed;
     }
 

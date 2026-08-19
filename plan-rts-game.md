@@ -1346,6 +1346,33 @@ becomes real, and it is the layer an idle player and an AI neighbour both run.
 **Gate:** a unit with a standing assignment survives an interrupt and resumes it; and **the
 determinism self-test is extended to cover the new state**.
 
+**Both halves met, and the second one differently than intended.** The rule had been owed something
+for three sessions, and the reason was structural rather than anybody's forgetfulness: the check
+compared five fields of a seventy-field `AgentState`, at the last tick of the run, and nothing above
+the level of a body. Extending it fell on whoever added the sixty-first field — in a different commit
+from the one that added it. **A rule whose cost is paid later than the change that incurs it is a
+rule that will be owed something.** So the rule was replaced by a mechanism. `AgentStateSchema` walks
+the struct to its primitive leaves by reflection and compiles a reader per leaf; the jobs layer's
+eighteen new values were being compared before the jobs tests were written, without a line of the
+determinism check being touched. A field of a type it cannot reduce is refused at construction, and
+a new field of `SimulationWorld` fails a census by name with what to do about it. Both alarms were
+verified by adding a field the way a future session would.
+
+The three layers landed as `AgentJobs` on the body — plain data, no references, so a job saves with
+its unit. An **activity** is one thing rather than several: *be at this place for this long*, which
+covers walking there and standing there without a transition, so a unit shoved off its post mid-dwell
+walks back and finishes the dwell. An **order** is marked as an interrupt in the command layer and
+nowhere else, which is what stops the jobs layer interrupting itself, and it expires on a grace
+countdown — so there is no manual mode to strand a unit in. `Assignment.None` is how a unit is
+actually taken off work.
+
+**One thing the design had not noticed: a workplace is not a spot.** The first run of the trace had
+eight of forty-eight units permanently unable to get to work, all of them ones that lost the race to
+a shared point. A looser tolerance is the wrong fix — it would make a job inside a wall look
+reachable. The fix is to ask the world *why* the body stopped short: taken ground is worked from
+wherever the crowd left room, ground nobody can stand on is waited out at one route query every five
+seconds. Twelve hands now share one post, and a job inside a wall is still refused.
+
 ### Session 6 — Stock, catchments and hauling
 
 Physical local storage; granary catchments as bounded fields; node-to-node hauling only
@@ -1393,8 +1420,13 @@ complaint the whole trade layer exists to answer.
 
 ### Held every session
 
-1. **53/53 stays green**, or a threshold moves deliberately and is recorded with its old value.
-2. **The determinism test grows with each system.** It covers movement only today.
+1. **64/64 stays green**, or a threshold moves deliberately and is recorded with its old value.
+   Was 53/53 through Session 4; Session 5 added eleven checks and rewrote three.
+2. **The determinism test grows with each system — by construction, not by discipline.** It reads
+   whatever `AgentState` declares, so a system that adds state is covered the moment it compiles.
+   What a session still owes is a *scenario* that exercises the new state, because a fingerprint
+   over a field nothing writes proves nothing about it, and an entry in `DeterminismCheck`'s ledger
+   for any new state hung off `SimulationWorld` — which the census will demand by name.
 3. **Serialization discipline** — stable ids over references. Fresh-start succession (§5) makes this
    core-loop rather than a save feature; it is cheap continuously and expensive retrofitted.
 4. **Every new cost term is honest seconds with a matched fade.**
@@ -1411,16 +1443,19 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 
 | | |
 |---|---|
-| suite | `--selftest` **53/53** |
+| suite | `--selftest` **64/64** in 6.4 s (was 53/53) |
+| determinism coverage | **102 values a body**, 184 a tick, 25,580 at a checkpoint — every one probed |
 | body | **1.79 m/s**, accel 2.0, decel 3.0, turn 3.03 rad/s, compression **1.5x** |
 | roster | **6 types, 2 body classes** — §3; radius 0.37 / 0.55 / 0.90 |
 | world | **600 m** for the game; 30 m calibration world untouched and asserted |
-| tick, 2,000 agents | **6.0 ms at 600 m, 5.8 ms at 1200 m** — extent no longer moves it |
+| tick, 2,000 agents | **6.5 ms at 600 m** — measured back to back against the Session 4 build, which reads the same today; the 6.0 ms recorded there was a cooler machine, not a faster one |
+| jobs phase, 2,000 agents | **0.005 ms** with nothing assigned, 0.03–0.07 ms with 48 units at work |
 | move order, ridge map | **8–27 ms**, 3–4 searches |
 | route quality vs the flat optimum | mean **1.0014**, p99 1.098, worst 1.187, **no cell lost** |
 | resident at 1200 m | **177 MB** (was 315), congestion **253 KB** (was 74.9 MB) |
 | frame | 7.4 ms |
-| tuning dials on the panel | **14** |
+| tuning dials on the panel | **14**, plus **5 jobs dials** off it — reach, crowded reach, attempts, grace, retry |
+| order grace, measured | **5.5 s** from standing free to back on the job; the walk back is separate and is a distance |
 | catchment | **60 s at hauler pace, 66 m** — §6 |
 
 ### Debts this work is carrying
@@ -1451,6 +1486,23 @@ are kept because the *reason* they closed is worth having.
    Inside tolerance and the only benchmark number that moved. Watch it if group arrivals read loose.
 9. **A mixed group builds one flow field per distinct radius** — accepted as it stands, because the
    cost is bounded by the number of body classes rather than the number of units.
+10. **The determinism census stops one layer below the world.** Every field of `SimulationWorld` and
+    `MoveGroup` is classified, and each subsystem a carried field points at has a named surface the
+    fingerprint reads it through — the congestion field through its live set and revision, the
+    navigation raster cell by cell, the path pool through the routes bodies hold. Those surfaces are
+    one-line arguments and they are reviewable, which is the most that can honestly be said for
+    them. Walking every private array of the congestion field would be a second implementation of it
+    living in a test. The boundary is where to look first if two runs ever disagree on something no
+    field explains.
+11. **A cohort assigned all at once stays synchronized.** The jobs trace shows a lane's throughput
+    pulsing between 0 and 32 legs a minute rather than settling, because sixteen units given the
+    same shuttle in the same tick arrive, dwell and leave together forever. Nothing fails on it and
+    it is not a locomotion problem — the fix is staggering the assignment, which belongs to whatever
+    hands work out in Session 6.
+12. **`PlaceCrowdShare` and `CrowdedAttempts` are argued from one scenario.** Eight radii and two
+    attempts, and both were chosen against a villager on open ground. The crowded reach is what
+    decides how wide a workplace effectively is, and Session 6 gives workplaces real extents — at
+    which point the reach should probably come from the place rather than from the body.
 
 ### What Sessions 5 to 9 now rest on
 
@@ -1467,26 +1519,48 @@ left to be discovered mid-session.
 - **Soak testing is affordable** — 6.0 ms a tick and about 5.5x real time, against §10's estimate of
   9 ms and 3.7x. The early-career CI gate can be wired whenever Session 7 builds the harness.
 
-**Session 5, the jobs layer, is next.** Assignment / activity / interrupt onto the `AgentCommand` and
-`AgentLocomotionState` seams, testable with trivial activities before any economy exists. Its gate
-is unchanged: a standing assignment survives an interrupt and resumes, **and the determinism
-self-test grows to cover the new state** — which is now the third session in a row that rule has
-been owed something, since it still covers movement only.
+**Session 5 is done and Session 6, stock and catchments and hauling, is next.** The jobs layer is in
+and its gate is met both ways: a standing assignment survives an interrupt and resumes it, and the
+determinism check grew to cover the new state without being edited, because it now reads whatever the
+struct declares. The rule that had been owed something for three sessions is no longer a rule anybody
+can forget — it is a mechanism that fails by name in the session that breaks it.
+
+**What Session 6 inherits, beyond the catchment number and the two congestion dials.**
+
+- **An activity is already the right shape for work.** *Be at this place for this long* is what a
+  hauling leg, a harvest and a repair all are; attaching a rate and a cargo is the change, not
+  attaching a state machine. `Assignment.Shuttle` is hauling with the cargo left out, and its two
+  points become node ids.
+- **`--jobs` is the harness the congestion terms want.** It already runs two lanes at the two lengths
+  the design predicts — the 66 m catchment and a 216 m haul through the ridge's single pass — with
+  every unit on that second lane using the same gap in both directions, continuously. That is debt 7's
+  workload. It wants haulers of differing sizes added to it and then it *is* the run that settles
+  width and speed.
+- **A workplace is not a spot, and the layer now knows the difference.** Ground that is taken is
+  worked from wherever the crowd left room; ground nobody can stand on is waited out. Session 6's
+  farms and granaries should carry their own extents, at which point debt 12 comes due.
 
 **Three things to carry into it.**
 
 1. **Radius belongs to the class, not the type.** A unit type names `BodyClass.Foot` or
    `BodyClass.Heavy` and takes its navigation radius from that, which is what keeps six types on two
    decompositions. A job that wants a new unit picks a class; it does not pick a number.
-2. **Everything about a body is written in bodies.** Four separate bugs this session were a distance
+2. **Everything about a body is written in bodies.** Four separate bugs in Session 4 were a distance
    written as a flat number that had been tuned against a 0.37 m body walking at 1.79 m/s: the
-   neighbour horizon twice, the crowded-arrival tolerance, and the free-turn speed. If the jobs
-   layer adds a threshold about how near, how far or how long, write it against the body or the
-   pace it describes.
+   neighbour horizon twice, the crowded-arrival tolerance, and the free-turn speed. Session 5 held
+   it — a job's reach is three radii and its crowded reach is eight, so a wagon works a post from
+   2.70 m and a villager from 1.11, both asserted. Any threshold Session 6 adds about how near, how
+   far or how long goes the same way.
 3. **Do not tune the congestion body terms on a scenario.** Width and speed both ship at 1 on dials
    and both are argued from arithmetic and one thin sweep. **Session 6 is the run that settles
    them** — many haulers of differing sizes sharing routes continuously is the workload they exist
-   for.
+   for, and `--jobs` is now most of that run.
+4. **"Busy" is not a locomotion state, it is a destination.** The jobs layer's first bug was reading
+   `LocomotionState == Move` as being under orders. A body in `Move` with no destination has stopped —
+   arrived, or never given a route at all — and a failed order leaves exactly that state, so a unit
+   whose workplace was unreachable stood in place forever having asked for a route twice. Anything
+   that waits for a unit to be free should ask whether it has somewhere to be, not what it was told
+   to do.
 
 **Session 6, stock and catchments and hauling, is the first milestone of the design rather than the
 engine**, and the first place autonomy time becomes measurable. It inherits the catchment number

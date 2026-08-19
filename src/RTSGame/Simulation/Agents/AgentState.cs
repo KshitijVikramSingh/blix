@@ -1,5 +1,6 @@
 using System.Numerics;
 using RTSGame.Simulation.Collision;
+using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Navigation;
 
 namespace RTSGame.Simulation.Agents;
@@ -62,6 +63,13 @@ internal struct AgentState
     public float BehaviorUpdateCooldown;
     public float HoldReturnCooldown;
     public AgentId BehaviorTarget;
+    /// <summary>What this unit is committed to, doing, and currently being kept from.</summary>
+    /// <remarks>
+    /// Three layers in one struct: see <see cref="AgentJobs"/>. It lives on the body rather
+    /// than in a table beside it so that saving a unit saves its job, and so that the
+    /// determinism fingerprint reads it without anybody having to add it to a list.
+    /// </remarks>
+    public AgentJobs Jobs;
     public bool RepathRequested;
     public bool HasRepathAvoidance;
     public bool PatrolTowardEnd;

@@ -13,6 +13,7 @@ using RTSGame.Debug;
 using RTSGame.Simulation;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Collision;
+using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Spatial;
 using RTSGame.Simulation.Terrain;
 
@@ -43,6 +44,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// with it — only how long the waiting takes in the chair.
     /// </remarks>
     public const float DefaultCompression = 1.5f;
+
+    /// <summary>Seconds a hand-assigned unit spends at each place before moving on.</summary>
+    /// <remarks>
+    /// Six seconds, which is long enough to read as work being done rather than as a unit
+    /// bouncing, and short enough that a shuttle's rhythm is visible inside a minute of
+    /// watching. Nothing depends on it — when the economy arrives, how long the work takes is
+    /// the work's own number.
+    /// </remarks>
+    private const float PostDwellSeconds = 6f;
 
     private readonly BodyFeelSettings bodyFeel = new();
     private readonly ClockSettings clock = new();
@@ -351,6 +361,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Console.WriteLine("  left-click/drag: select   Ctrl: additive selection   right-click: group move");
         Console.WriteLine("  B: toggle block-edit mode   left-click in block mode: add/remove block");
         Console.WriteLine("  S: stop   F: follow   P: patrol to pointer   H: chase   X: flee   Backspace: despawn selected");
+        Console.WriteLine("  U: post selected at pointer   O: shuttle (press twice for both ends)   Y: off work");
+        Console.WriteLine("  a standing job survives an order: give one, let go, and they go back to it");
         Console.WriteLine("  N: nav / surface / slope / congestion overlays   C: colliders   V: velocity   K: paths   I: states");
         Console.WriteLine("  T: per-phase timings   M: live movement trace (cohort/slot, contacts, worst overlap)");
         Console.WriteLine("  G: cycle 50 / 200 / 500-agent stress scenarios");
@@ -360,6 +372,50 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Console.WriteLine("  Q/E or arrows: rotate 90°   wheel: zoom   Esc: quit");
         Console.WriteLine($"  {simulation.Agents.Count} agents   simulation: 30 Hz fixed step");
         Console.WriteLine("  placement grid: 1.5 m   navigation grid: 0.5 m   collider hash: 2.0 m");
+    }
+
+    /// <summary>
+    /// First end of a shuttle being laid out, waiting for the second. Interface state only —
+    /// nothing in the simulation knows about it.
+    /// </summary>
+    private Vector2? shuttleAnchor;
+
+    /// <summary>Puts the selection to work standing at the pointer.</summary>
+    private void AssignPost()
+    {
+        if (!pointerOnTerrain || selection.Selected.Count == 0) return;
+        shuttleAnchor = null;
+        simulation.QueueAssign(selection.Snapshot(), Assignment.Hold(pointerWorld, PostDwellSeconds));
+        Console.WriteLine(
+            $"  {selection.Selected.Count} unit(s) posted at ({pointerWorld.X:F1}, {pointerWorld.Y:F1})");
+    }
+
+    /// <summary>
+    /// Lays out a shuttle in two presses: the first marks one end, the second the other.
+    /// </summary>
+    /// <remarks>
+    /// A shuttle is hauling with the cargo left out, which makes this the most useful thing to
+    /// be able to set by hand right now — watching twenty units run a lane both ways is how
+    /// the congestion terms get judged before there is any cargo to judge them with.
+    /// </remarks>
+    private void AssignShuttle()
+    {
+        if (!pointerOnTerrain || selection.Selected.Count == 0) return;
+        if (shuttleAnchor is not { } anchor)
+        {
+            shuttleAnchor = pointerWorld;
+            Console.WriteLine(
+                $"  shuttle: first end at ({pointerWorld.X:F1}, {pointerWorld.Y:F1}) — " +
+                "press O again for the other end");
+            return;
+        }
+
+        shuttleAnchor = null;
+        simulation.QueueAssign(
+            selection.Snapshot(), Assignment.Shuttle(anchor, pointerWorld, PostDwellSeconds));
+        Console.WriteLine(
+            $"  {selection.Selected.Count} unit(s) shuttling ({anchor.X:F1}, {anchor.Y:F1}) <-> " +
+            $"({pointerWorld.X:F1}, {pointerWorld.Y:F1})");
     }
 
     private AgentId[] AllAgentIds()
@@ -524,6 +580,44 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             debug.Stats.Gauge("contacts", simulation.LastContactCount);
             debug.Stats.Gauge("congestion-peak", simulation.Congestion.Peak);
         }
+
+        ReportJobs(debug);
+    }
+
+    /// <summary>
+    /// What the standing arrangement is currently doing, which is the quantity the whole design
+    /// is about: how much is happening without the player.
+    /// </summary>
+    /// <remarks>
+    /// Four numbers rather than a list, because the useful reading is a proportion — how many
+    /// of the units that have a job are actually working it, against how many are interrupted
+    /// or cannot reach their place. When autonomy time becomes measurable in Session 6, this is
+    /// the panel it grows out of.
+    /// </remarks>
+    private void ReportJobs(DebugContext debug)
+    {
+        var assigned = 0;
+        var working = 0;
+        var interrupted = 0;
+        var stranded = 0;
+        var legs = 0;
+        foreach (ref readonly var agent in simulation.Agents.All)
+        {
+            if (!agent.IsAlive || !agent.Jobs.HasAssignment) continue;
+            assigned++;
+            legs += agent.Jobs.LegsCompleted;
+            if (agent.Jobs.IsInterrupted) interrupted++;
+            else if (agent.Jobs.CannotReachWork) stranded++;
+            else working++;
+        }
+
+        using var scope = debug.Scope("jobs");
+        debug.Values.Value("assigned", assigned);
+        debug.Values.Value("working", working);
+        debug.Values.Value("interrupted", interrupted);
+        debug.Values.Value("cannot reach", stranded);
+        debug.Values.Value("legs done", legs);
+        debug.Stats.Gauge("working", working);
     }
 
     /// <summary>
@@ -1273,6 +1367,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 break;
             case Key.X:
                 IssueTargetBehavior(simulation.QueueFlee, "flee");
+                break;
+            case Key.U:
+                AssignPost();
+                break;
+            case Key.O:
+                AssignShuttle();
+                break;
+            case Key.Y:
+                simulation.QueueAssign(selection.Snapshot(), Assignment.None);
+                shuttleAnchor = null;
+                Console.WriteLine($"  {selection.Selected.Count} unit(s) taken off work");
                 break;
             case Key.LeftControl:
             case Key.RightControl:

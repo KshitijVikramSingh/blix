@@ -12,6 +12,7 @@ Verify it: `dotnet run --project src/RTSGame/RTSGame.csproj -c Release -- --self
 Measure it: same with `--benchmark`, and `--doorwaytest` for two-way gap contention
 Measure it at size: same with `--scale` — see §5, and `plan-rts-game.md` §13 for what it found
 More than one kind of body: `--mixedtest`, `--congestiontest`, `--radiisweep` — see §5
+Watch a settlement work without you: `--jobs [--minutes n]` — see §5
 Routing substrate: **§8** — answered, shipped, with both refusals kept
 
 **The one thing to take from this document if you take nothing else.** Every bug found while unit
@@ -316,6 +317,11 @@ which is what a correct memo looks like:
 - In-game: `M` trace, `T` timings, `N` overlays (nav / surface / slope / **congestion**),
   `C` colliders, `V` velocity, `K` paths, `I` states, `Backspace` despawn selection,
   `Z` camera-follows-selection, `R` recentre camera
+- In-game jobs: `U` posts the selection at the pointer, `O` twice lays out a shuttle between two
+  points, `Y` takes them off work. The panel's **jobs** scope counts assigned / working /
+  interrupted / cannot-reach and legs done — the proportion is the reading, and it is the panel
+  autonomy time grows out of. Give a working unit an order and let go of it: it goes back to the job
+  on its own, because an order is an interrupt and not a mode.
 - `--extent <metres>` runs the lab on a world of any size (default 30 m, the tuned one). Above
   ~70 m the ground is drawn as a coarse checker rather than per cell — the surface meshes index
   with `ushort` — and the per-cell debug overlay is windowed to the camera, because at 1200 m it
@@ -365,6 +371,27 @@ which is what a correct memo looks like:
   whether the cost field can be evaluated outright.
 - `--mapdump` prints the generated world as text and marks what a body cannot stand on, which is
   how a missing mountain pass gets found without a screenshot.
+- **The determinism check is an instrument as much as a test.** `DeterminismCheck.Diverges` steps two
+  worlds together and compares a fingerprint of everything either carries every tick, so a mismatch
+  is reported as `tick 24: body[3].StuckSeconds 0 against 0.5` rather than as two positions at the
+  end of a run. What it reads is not a list: `AgentStateSchema` walks `AgentState` to its primitive
+  leaves and compiles a reader per leaf, which is why the jobs layer's eighteen values were covered
+  before its tests were written. Every field of `SimulationWorld` is classified in a ledger as
+  carried, derived or wall clock, and a new one fails the census by name. Two self-tests keep the
+  instrument honest: one perturbs each of the 102 body values in turn and requires the fingerprint to
+  notice, and one injects a divergence at a known tick and requires that tick to be named. A digest
+  nobody has tried to fool is not evidence.
+- `--jobs [--extent m] [--minutes n]` runs a workforce on standing assignments and reports, every
+  thirty seconds, legs completed per minute by lane, how many units are working against interrupted
+  against unable to reach their work, and what the jobs phase costs. Two lanes at the two lengths the
+  design predicts: the 66 m catchment, and a haul through the ridge's single pass, so every unit on
+  the second lane uses the same gap in both directions continuously. An order lands at 180 s and is
+  then simply let go of, and the three moments after it are reported separately, because conflating
+  them is what made the first version of this unreadable: how long the order took to carry out, which
+  is a distance; how long after the unit was standing free the interrupt expired, which is the only
+  part the jobs layer decides; and how long after *that* it finished a leg, which is a walk. It exits
+  non-zero if anybody ends the run unable to reach their work or still holding an interrupt with
+  nobody ordering them about.
 - **The renderer uses the same idea as the router.** Open ground is a coarse checker for scale
   reference, and everything that is not plain grass at ground level is merged into rectangles of
   identical ground and drawn whole. It replaced a per-cell pass windowed to forty metres of the

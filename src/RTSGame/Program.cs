@@ -44,6 +44,13 @@ public static class Program
             Environment.Exit(CongestionSpeedScenarios.Run());
         }
 
+        if (args.Contains("--jobs"))
+        {
+            var jobsExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var jobsMinutes = Value(args, "--minutes") is { } span ? int.Parse(span) : 6;
+            Environment.Exit(JobScenarios.Run(jobsExtent, jobsMinutes));
+        }
+
         if (args.Contains("--mixedtest"))
         {
             Environment.Exit(MixedBodyScenarios.Run());

@@ -4,6 +4,7 @@ using RTSGame.Debug;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Collision;
 using RTSGame.Simulation.Commands;
+using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Movement;
 using RTSGame.Simulation.Navigation;
 using RTSGame.Simulation.Placement;
@@ -303,6 +304,21 @@ internal sealed class SimulationWorld
         }
     }
 
+    /// <summary>
+    /// Commits units to a standing assignment, or takes their current one away with
+    /// <see cref="Assignment.None"/>.
+    /// </summary>
+    /// <remarks>
+    /// Note what this is not: an order. Every other queue method here interrupts what a unit
+    /// is doing; this changes what it is for. The distinction is the jobs model's whole point,
+    /// and it is why there is no "manual mode" anywhere in this file to be stranded in.
+    /// </remarks>
+    public void QueueAssign(IEnumerable<AgentId> agents, Assignment assignment)
+    {
+        var snapshot = agents.Distinct().OrderBy(id => id.Value).ToArray();
+        if (snapshot.Length > 0) commands.Enqueue(new AssignGroupCommand(snapshot, assignment));
+    }
+
     /// <summary>Removes units from the world and releases everything they own.</summary>
     public int DespawnAgents(IEnumerable<AgentId> ids)
     {
@@ -469,6 +485,10 @@ internal sealed class SimulationWorld
         Timings.Record(SimulationPhase.Commands, Stopwatch.GetTimestamp() - phaseStart);
 
         phaseStart = Stopwatch.GetTimestamp();
+        UpdateJobs(deltaSeconds);
+        Timings.Record(SimulationPhase.Jobs, Stopwatch.GetTimestamp() - phaseStart);
+
+        phaseStart = Stopwatch.GetTimestamp();
         UpdateBehaviors(deltaSeconds);
         UpdateGroupFormations();
         Timings.Record(SimulationPhase.Behaviors, Stopwatch.GetTimestamp() - phaseStart);
@@ -547,12 +567,78 @@ internal sealed class SimulationWorld
                 case FleeGroupCommand flee:
                     ApplyTargetBehavior(flee.Agents, flee.Target, AgentLocomotionState.Flee);
                     break;
+                case AssignGroupCommand assign:
+                    ApplyAssignment(assign);
+                    break;
                 case ToggleObstacleCommand toggle:
                     placementChanged |= ApplyObstacleToggle(toggle.Cell);
                     break;
             }
+
+            // Anything that is an order rather than a commitment interrupts whatever the unit
+            // was committed to, and leaves the commitment alone. This is the single place that
+            // happens: a unit walking to its own workplace goes through BeginSoloMove and
+            // never comes past here, so the jobs layer cannot interrupt itself.
+            if (command is AssignGroupCommand or ToggleObstacleCommand) continue;
+            foreach (var id in OrderedAgents(command))
+            {
+                if (Agents.Contains(id)) JobSystem.Interrupt(ref Agents.Get(id));
+            }
         }
         if (placementChanged) RebuildTerrainNavigation();
+    }
+
+    /// <summary>Who an order was addressed to, whatever kind of order it is.</summary>
+    private static IEnumerable<AgentId> OrderedAgents(AgentCommand command) => command switch
+    {
+        MoveGroupCommand move => move.Agents,
+        StopGroupCommand stop => stop.Agents,
+        FollowGroupCommand follow => follow.Agents,
+        PatrolGroupCommand patrol => patrol.Agents,
+        ChaseGroupCommand chase => chase.Agents,
+        FleeGroupCommand flee => flee.Agents,
+        _ => Array.Empty<AgentId>(),
+    };
+
+    private void ApplyAssignment(AssignGroupCommand assign)
+    {
+        foreach (var id in assign.Agents)
+        {
+            if (!Agents.Contains(id)) continue;
+            ref var agent = ref Agents.Get(id);
+            JobSystem.Assign(ref agent, assign.Assignment);
+            // A unit taken off work stops where it stands rather than finishing the walk it
+            // was on. Being given work, on the other hand, does not need a halt: the jobs
+            // layer will send it where it is now needed on this same tick.
+            if (assign.Assignment.Kind == AssignmentKind.None && agent.HasDestination)
+            {
+                HaltMovement(ref agent);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Runs the jobs layer for every unit, and carries out whatever it asks for.
+    /// </summary>
+    /// <remarks>
+    /// Between commands and behaviours, which is the only place it can go: after orders, so
+    /// that an order issued this tick suspends the assignment before it can act on it, and
+    /// before locomotion, so that a unit sent somewhere new this tick spends no frame standing
+    /// still. A unit with no assignment costs one branch.
+    /// </remarks>
+    private void UpdateJobs(float deltaSeconds)
+    {
+        var agents = Agents.MutableSpan();
+        for (var i = 0; i < agents.Length; i++)
+        {
+            if (!agents[i].IsAlive) continue;
+            var place = JobSystem.AsksAboutItsPlace(in agents[i])
+                ? ClassifyPlace(in agents[i])
+                : PlaceCondition.Open;
+            var request = JobSystem.Advance(ref agents[i], deltaSeconds, place);
+            if (request.Step != JobStep.WalkTo) continue;
+            BeginSoloMove(ref agents[i], Terrain.ClampPosition(request.Target));
+        }
     }
 
     private void ApplyMove(MoveGroupCommand move)
@@ -573,6 +659,12 @@ internal sealed class SimulationWorld
         for (var slot = 0; slot < members.Length; slot++)
         {
             ref var agent = ref Agents.Get(members[slot]);
+            if (group is null)
+            {
+                BeginSoloMove(ref agent, target);
+                continue;
+            }
+
             DetachFromMoveGroup(ref agent);
             agent.LocomotionState = AgentLocomotionState.Move;
             agent.BehaviorTarget = new AgentId(-1);
@@ -580,17 +672,11 @@ internal sealed class SimulationWorld
             agent.CrowdedArrivalAttempts = 0;
             agent.CrowdedArrivalContactFrames = 0;
             agent.RepathCooldown = 0f;
-            agent.MoveGroupId = group?.Id ?? 0;
-            agent.GroupSlot = group?.Slots[slot] ?? target;
-            agent.FormationOffset = group?.SlotOffset(slot) ?? Vector2.Zero;
-            agent.ApproachingSlot = group is null;
+            agent.MoveGroupId = group.Id;
+            agent.GroupSlot = group.Slots[slot];
+            agent.FormationOffset = group.SlotOffset(slot);
+            agent.ApproachingSlot = false;
             agent.UsesFlowTransit = false;
-            if (group is null)
-            {
-                agent.RequestedDestination = agent.GroupSlot;
-                AssignPath(ref agent, agent.RequestedDestination);
-                continue;
-            }
 
             // Transit is a cohort behaviour. Members steer directly down one
             // shared cost field instead of each materialising a polyline through
@@ -606,6 +692,62 @@ internal sealed class SimulationWorld
                 AssignPath(ref agent, agent.GroupSlot);
             }
         }
+    }
+
+    /// <summary>What the ground where a unit's work is looks like, for the jobs layer.</summary>
+    /// <remarks>
+    /// The same two questions <see cref="TryReturnToHold"/> asks about a hold point, and asked
+    /// the same way: the router for whether a body this size fits, then the collider world for
+    /// whether somebody is already there. Only called on the tick a walk has ended short, so the
+    /// collider query is paid a handful of times a second across a whole settlement rather than
+    /// once per worker per tick.
+    /// </remarks>
+    private PlaceCondition ClassifyPlace(in AgentState agent)
+    {
+        var place = agent.Jobs.Place;
+        if (!pathService.IsPositionNavigable(place, agent.NavigationRadius))
+        {
+            return PlaceCondition.Unreachable;
+        }
+
+        Colliders.QueryCircle(
+            place,
+            agent.Radius + 0.08f,
+            new ColliderQueryFilter(
+                ColliderRole.MovementSolid,
+                ColliderLayer.Agent | ColliderLayer.Structure,
+                RelationMask.Ally | RelationMask.Neutral | RelationMask.Enemy,
+                ColliderOwner.Agent(agent.Id),
+                agent.Faction),
+            holdPositionHits);
+        return holdPositionHits.Count > 0 ? PlaceCondition.Crowded : PlaceCondition.Open;
+    }
+
+    /// <summary>
+    /// Sends one body to a point on its own — no cohort, no shared field, its own route.
+    /// </summary>
+    /// <remarks>
+    /// Extracted from the single-member branch of <see cref="ApplyMove"/> because the jobs
+    /// layer needs exactly this and must not go through the command path: a command marks the
+    /// unit as interrupted, and a unit walking to its own workplace is not being interrupted
+    /// by anybody. The target is expected to be clamped to the terrain already.
+    /// </remarks>
+    private void BeginSoloMove(ref AgentState agent, Vector2 target)
+    {
+        DetachFromMoveGroup(ref agent);
+        agent.LocomotionState = AgentLocomotionState.Move;
+        agent.BehaviorTarget = new AgentId(-1);
+        agent.ReturningToHold = false;
+        agent.CrowdedArrivalAttempts = 0;
+        agent.CrowdedArrivalContactFrames = 0;
+        agent.RepathCooldown = 0f;
+        agent.MoveGroupId = 0;
+        agent.GroupSlot = target;
+        agent.FormationOffset = Vector2.Zero;
+        agent.ApproachingSlot = true;
+        agent.UsesFlowTransit = false;
+        agent.RequestedDestination = target;
+        AssignPath(ref agent, target);
     }
 
     /// <summary>

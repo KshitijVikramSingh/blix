@@ -47,7 +47,15 @@ internal static class WorldTerrainScenarios
     private const float LakeRadius = 0.070f;
     private const float ShoreRadius = 0.092f;
 
-    public static AgentId[] Populate(SimulationWorld world, bool issueGroupMove = true)
+    /// <summary>Where the one gap in the ridge is, as a fraction of the extent.</summary>
+    /// <remarks>
+    /// Exposed because anything that wants to make the routing hierarchy work has to place its
+    /// business on both sides of the ridge, and the pass is the only way through.
+    /// </remarks>
+    public static Vector2 PassCentreOf(float extent) => new(PassCentre * extent, RidgeCentre * extent);
+
+    /// <summary>Shapes the ground and rebuilds navigation, spawning nothing.</summary>
+    public static void Shape(SimulationWorld world)
     {
         var terrain = world.Terrain;
         var grid = terrain.Transform;
@@ -68,6 +76,12 @@ internal static class WorldTerrainScenarios
         }
 
         world.RebuildTerrainNavigation();
+    }
+
+    public static AgentId[] Populate(SimulationWorld world, bool issueGroupMove = true)
+    {
+        Shape(world);
+        var extent = world.ExtentMeters;
 
         // On the road, south of the ridge, with the pass between them and their destination.
         var ids = new List<AgentId>();
