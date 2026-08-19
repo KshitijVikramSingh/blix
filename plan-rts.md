@@ -371,6 +371,13 @@ which is what a correct memo looks like:
   whether the cost field can be evaluated outright.
 - `--mapdump` prints the generated world as text and marks what a body cannot stand on, which is
   how a missing mountain pass gets found without a screenshot.
+- **A world can be saved and loaded, and the test for it is the fingerprint.** `WorldSave.Save` /
+  `Load`, and `RoundTrip` for a straight there-and-back. The acceptance test is not that the bytes
+  survive — it is that the loaded world *continues* as the same world, which is checked by ticking both
+  forward two hundred ticks and comparing every one. `plan-rts-game.md` §16 records the three things
+  that distinction found. One rule to know if you touch this: **route caches are dropped on both sides
+  before comparing**, because a cost field is refined as things ask about it and what it holds depends
+  on the order the questions came in — see `PathService.DropRouteCaches`.
 - **The determinism check is an instrument as much as a test.** `DeterminismCheck.Diverges` steps two
   worlds together and compares a fingerprint of everything either carries every tick, so a mismatch
   is reported as `tick 24: body[3].StuckSeconds 0 against 0.5` rather than as two positions at the

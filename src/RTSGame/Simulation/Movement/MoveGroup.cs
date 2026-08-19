@@ -1,6 +1,7 @@
 using System.Numerics;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Navigation;
+using RTSGame.Simulation.Persistence;
 
 namespace RTSGame.Simulation.Movement;
 
@@ -54,6 +55,52 @@ internal sealed class MoveGroup
         Members = members;
         Slots = slots;
         FormationRadius = formationRadius;
+    }
+
+    /// <summary>The order itself, its slots, and how far through settling it is.</summary>
+    internal void Write(WorldWriter writer)
+    {
+        writer.Int(Id);
+        writer.Vector(Target);
+        writer.Float(FormationRadius);
+        writer.Int(SettlingTicks);
+        writer.Vector(TransitCentroid);
+        writer.Bool(HasTransitCentroid);
+        writer.Vector(TransitFlow);
+        writer.Blob<AgentId>(Members);
+        writer.Blob<Vector2>(Slots);
+    }
+
+    /// <summary>
+    /// Rebuilds a group from a save rather than laying one out.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not <see cref="Create"/>. Laying out slots asks the router where a body can
+    /// stand, and the answer depends on the congestion field and on who is standing where — so
+    /// re-deriving the slots on load would hand a restored cohort different ground to walk to than
+    /// the one it was saved from, which is the whole failure a save is supposed to avoid. The slots
+    /// are state, and they come back as state.
+    /// </remarks>
+    internal static MoveGroup Read(WorldReader reader)
+    {
+        // Read into locals in order rather than into an initialiser: the fields go out in a fixed
+        // sequence and two of them are constructor arguments, so the sequence has to be visible.
+        var id = reader.Int();
+        var target = reader.Vector();
+        var formationRadius = reader.Float();
+        var settlingTicks = reader.Int();
+        var transitCentroid = reader.Vector();
+        var hasTransitCentroid = reader.Bool();
+        var transitFlow = reader.Vector();
+        var members = reader.Blob<AgentId>();
+        var slots = reader.Blob<Vector2>();
+        return new MoveGroup(id, target, members, slots, formationRadius)
+        {
+            SettlingTicks = settlingTicks,
+            TransitCentroid = transitCentroid,
+            HasTransitCentroid = hasTransitCentroid,
+            TransitFlow = transitFlow,
+        };
     }
 
     /// <summary>

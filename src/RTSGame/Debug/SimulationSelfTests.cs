@@ -3,8 +3,10 @@ using RTSGame.Control;
 using RTSGame.Simulation;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Collision;
+using RTSGame.Simulation.Commands;
 using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Navigation;
+using RTSGame.Simulation.Persistence;
 using RTSGame.Simulation.Spatial;
 using RTSGame.Simulation.Terrain;
 
@@ -116,6 +118,9 @@ internal static class SimulationSelfTests
         Check("an unreachable job fails politely", AnUnreachableJobFailsPolitely());
         Check("a workplace holds more hands than fit on it", AWorkplaceHoldsMoreHandsThanFitOnIt());
         Check("a fast body closes on a slow one", AFastBodyClosesOnASlowOne());
+        Check("a saved world has the same future", ASavedWorldHasTheSameFuture());
+        Check("a save this build cannot read is refused", ABadSaveIsRefused());
+        Check("every order kind survives a save", EveryOrderKindSurvivesASave());
         Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
@@ -2926,6 +2931,216 @@ internal static class SimulationSelfTests
         }
 
         return new Pursuit(early, late, closest);
+    }
+
+    /// <summary>
+    /// A world saved and loaded is the same world, and — the half that finds things — it has the
+    /// same future.
+    /// </summary>
+    /// <remarks>
+    /// §5 makes this core loop rather than a save feature: a career ends and the next one begins on
+    /// the same map, which has not reset. Rule 3 has asked for the discipline every session since,
+    /// and until now nothing serialized anything, so the discipline was never once exercised.
+    /// <para>
+    /// The acceptance test is the determinism fingerprint, in two parts, and the second part is what
+    /// makes this worth having. Matching fingerprints at the instant of loading only says the bytes
+    /// round-tripped. Ticking both worlds forward together says the loaded world <em>continues</em>
+    /// as the same world, and that is a strictly stronger claim: a save can carry every value the
+    /// fingerprint reads and still resume differently, because the fingerprint's boundary arguments
+    /// are about detecting a difference, not about reproducing the future. Two things were left out
+    /// of the first version of the save for exactly that reason and were caught here — the congestion
+    /// field's running totals, which decide when the next revision publishes, and the path pool's
+    /// free list, which decides which handle the next route takes.
+    /// </para>
+    /// <para>
+    /// The world under test is deliberately mid-everything: bodies walking, a group order in transit,
+    /// standing assignments, an interrupt, congestion on the ground, built obstacles, a despawned
+    /// unit leaving a tombstone, and an order still sitting in the queue unapplied.
+    /// </para>
+    /// </remarks>
+    private static bool ASavedWorldHasTheSameFuture()
+    {
+        var world = BuildSaveWorld();
+        // Everything except the counters of work done: a loaded world resumes with a cold
+        // flow-field cache and has to rebuild what the original had already built, which is a true
+        // difference between the two processes and not between the two worlds.
+        var before = DeterminismCheck.Fingerprint(world, DeterminismCheck.Scope.Full, includeWork: false);
+        var loaded = WorldSave.RoundTrip(world);
+        // And the saved world forgets its route caches, so the two are compared on equal terms. A cost
+        // field is refined as things ask about it, so what it holds depends on the order the questions
+        // came in — which is not state any save could write down. Skipping this shows up as one unit
+        // in the last place of a body's facing, one tick later.
+        world.DropRouteCaches();
+
+        if (DeterminismCheck.Fingerprint(loaded, DeterminismCheck.Scope.Full, includeWork: false) != before)
+        {
+            Console.WriteLine(
+                "    the load does not match the save: " +
+                $"{DeterminismCheck.Explain(world, loaded, DeterminismCheck.Scope.Full, includeWork: false)}");
+            return false;
+        }
+
+        // The part that matters. Two hundred ticks of two worlds that must agree every one of them.
+        var fault = DeterminismCheck.Diverges(
+            world, loaded, ticks: 200, fullEvery: 25, afterTick: null, includeWork: false);
+        if (fault is not null)
+        {
+            Console.WriteLine($"    the loaded world does not continue as the same world: {fault}");
+            return false;
+        }
+
+        Console.WriteLine(
+            $"    {SaveSize(BuildSaveWorld()):N0} bytes for {loaded.Agents.Count} bodies on " +
+            $"{loaded.ExtentMeters:F0} m, identical over 200 ticks");
+        return true;
+    }
+
+    /// <summary>
+    /// A save must refuse a file it cannot read rather than interpreting it.
+    /// </summary>
+    /// <remarks>
+    /// Bodies are stored as raw bytes, so a save written when <c>AgentState</c> had a different shape
+    /// would load as plausible garbage — units at coordinates read out of the middle of somebody's
+    /// stall timer. That is the one failure worth spending header bytes to make impossible, and the
+    /// signature it checks is derived from the determinism schema rather than hand-maintained, so it
+    /// moves on its own when the struct does.
+    /// </remarks>
+    private static bool ABadSaveIsRefused()
+    {
+        var reasons = new List<string>();
+        Refused("not a save at all", stream => stream.Write(new byte[64]));
+        Refused("a truncated save", stream =>
+        {
+            using var full = new MemoryStream();
+            WorldSave.Save(BuildSaveWorld(), full);
+            stream.Write(full.ToArray().AsSpan(0, 48));
+        });
+        Refused("a save from another body layout", stream =>
+        {
+            using var full = new MemoryStream();
+            WorldSave.Save(BuildSaveWorld(), full);
+            var bytes = full.ToArray();
+            // The layout signature sits after the magic and the version.
+            bytes[12] ^= 0xFF;
+            stream.Write(bytes);
+        });
+
+        var passed = reasons.Count == 0;
+        if (!passed) Console.WriteLine($"    accepted {string.Join(", ", reasons)}");
+        return passed;
+
+        void Refused(string what, Action<MemoryStream> write)
+        {
+            using var stream = new MemoryStream();
+            write(stream);
+            stream.Position = 0;
+            try
+            {
+                WorldSave.Load(stream);
+                reasons.Add(what);
+            }
+            catch (Exception exception) when (
+                exception is InvalidDataException or EndOfStreamException)
+            {
+            }
+        }
+    }
+
+    /// <summary>
+    /// Every kind of order has a save format, checked against the command hierarchy itself.
+    /// </summary>
+    /// <remarks>
+    /// An order sitting in the queue when a save is taken is state, and a command kind the save
+    /// format has never heard of would be silently dropped — a unit that was told to do something and
+    /// never does it, once, after a load, which is close to undebuggable. The same census trick the
+    /// determinism ledger uses: reflect over the hierarchy and require every concrete kind to be
+    /// accounted for, so the alarm fires in the session that adds one.
+    /// </remarks>
+    private static bool EveryOrderKindSurvivesASave()
+    {
+        var kinds = typeof(AgentCommand).Assembly
+            .GetTypes()
+            .Where(type => type.IsSubclassOf(typeof(AgentCommand)) && !type.IsAbstract)
+            .Select(type => type.Name)
+            .ToArray();
+        var missing = kinds.Where(kind => !WorldSave.SavedCommandKinds.Contains(kind)).ToArray();
+        if (missing.Length > 0)
+        {
+            Console.WriteLine(
+                $"    {string.Join(", ", missing)} would be dropped by every save. Add a CommandTag " +
+                "and a case in WorldSave.");
+            return false;
+        }
+
+        // And the round trip, with one of every kind actually in the queue, because a tag that is
+        // declared and written wrongly reads back as a different order.
+        var world = new SimulationWorld();
+        var first = world.SpawnAgent(new Vector2(-3f, 0f));
+        var second = world.SpawnAgent(new Vector2(3f, 0f));
+        var both = new[] { first, second };
+        world.QueueMove(both, new Vector2(0f, 4f));
+        world.QueueStop(both);
+        world.QueueFollow(new[] { first }, second);
+        world.QueuePatrol(new[] { first }, new Vector2(2f, 2f));
+        world.QueueChase(new[] { first }, second);
+        world.QueueFlee(new[] { second }, first);
+        world.QueueToggleObstacle(new Vector2(5f, 5f));
+        world.QueueAssign(both, Assignment.Shuttle(new Vector2(-2f, 1f), new Vector2(2f, 1f), 1.5f));
+
+        var queued = world.PendingCommands.Count;
+        var fault = DeterminismCheck.Diverges(
+            world, WorldSave.RoundTrip(world), ticks: 60, fullEvery: 20, afterTick: null, includeWork: false);
+        if (fault is not null) Console.WriteLine($"    with {queued} orders in flight: {fault}");
+        Console.WriteLine($"    {kinds.Length} order kinds, {queued} of them round-tripped in flight");
+        return fault is null;
+    }
+
+    /// <summary>
+    /// A world in the middle of everything a save could be taken during.
+    /// </summary>
+    private static SimulationWorld BuildSaveWorld()
+    {
+        var world = new SimulationWorld();
+        var walkers = new List<AgentId>();
+        for (var i = 0; i < 12; i++)
+        {
+            walkers.Add(world.SpawnAgent(new Vector2(-9f + i % 4 * 0.9f, -7f + i / 4 * 0.9f)));
+        }
+
+        var workers = new List<AgentId>();
+        for (var i = 0; i < 6; i++)
+        {
+            workers.Add(world.SpawnAgent(
+                new Vector2(6f, -6f + i * 0.9f),
+                i % 2 == 0 ? UnitType.Villager : UnitType.HaulerCart));
+        }
+
+        // Built ground, so the placement grid, the block colliders and the raster all have something
+        // in them, and a route has something to go around.
+        for (var z = -2; z <= 2; z++) world.QueueToggleObstacle(new Vector2(0f, z * 1.5f));
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+
+        world.QueueAssign(workers, Assignment.Shuttle(new Vector2(7f, 7f), new Vector2(7f, -7f), 2f));
+        world.QueueMove(walkers, new Vector2(9f, 8f));
+        Tick(world, 90);
+
+        // A tombstone, an interrupt in flight, and a jam: three states a save could land in that a
+        // freshly built world never sits in.
+        world.DespawnAgents(new[] { walkers[3] });
+        world.QueueMove(workers.Take(3), new Vector2(-8f, 8f));
+        Tick(world, 40);
+
+        // An order accepted and not yet applied, which is what makes the pending queue non-empty at
+        // the instant of the save.
+        world.QueueMove(walkers.Skip(6), new Vector2(-9f, -9f));
+        return world;
+    }
+
+    private static long SaveSize(SimulationWorld world)
+    {
+        using var stream = new MemoryStream();
+        WorldSave.Save(world, stream);
+        return stream.Length;
     }
 
     private static void Tick(SimulationWorld world, int count)

@@ -1,4 +1,5 @@
 using System.Numerics;
+using RTSGame.Simulation.Persistence;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Navigation;
 using RTSGame.Simulation.Spatial;
@@ -137,6 +138,23 @@ internal sealed class ReciprocalVelocitySolver
     public long TerrainFallbackFailures { get; private set; }
     /// <summary>Total solves, for ratios.</summary>
     public long Solves { get; private set; }
+
+    /// <summary>The totals, which a loaded world continues rather than restarts.</summary>
+    internal void WriteCounters(WorldWriter writer)
+    {
+        writer.Long(Solves);
+        writer.Long(InfeasibleSolves);
+        writer.Long(TerrainFallbacks);
+        writer.Long(TerrainFallbackFailures);
+    }
+
+    internal void ReadCounters(WorldReader reader)
+    {
+        Solves = reader.Long();
+        InfeasibleSolves = reader.Long();
+        TerrainFallbacks = reader.Long();
+        TerrainFallbackFailures = reader.Long();
+    }
     private bool[] velocityChosen = Array.Empty<bool>();
     private int[] solveOrder = Array.Empty<int>();
     private float[] priorityKey = Array.Empty<float>();

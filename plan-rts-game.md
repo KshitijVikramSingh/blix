@@ -58,11 +58,12 @@ Four things that will bite you if you skip them:
    covered the moment they compile. What is still owed per session is a *scenario* that exercises
    them, and a ledger entry for anything hung off `SimulationWorld` — which the census will demand by
    name, with instructions. Do not switch that census off to get a build green.
-4. **Serialization has been held as a discipline for five sessions and never once run.** Nothing in
-   the repo serializes anything. §5 makes fresh-start succession core-loop rather than a save
-   feature, and §15 argues this belongs at the *head* of Session 6: the determinism ledger already
-   enumerates exactly what is carried, which is the save manifest, and the fingerprint makes the
-   round trip decisive in one assertion. Every session that passes makes it more expensive.
+4. **Serialization exists now, and its acceptance test is stricter than it looks.** A save is not
+   correct because it round-trips; it is correct because the loaded world *continues* as the same
+   world, and §16 records the three things that distinction found — a manifest that is a superset of
+   what the fingerprint reads, work counters that describe the process rather than the world, and a
+   cost field that remembers the order it was asked. Add state to the world and the round-trip test
+   will tell you, by name, a few ticks later.
 
 **This document records decisions together with their derivations.** Nearly every number below was
 derived from other numbers rather than chosen, and they move as a set — changing unit speed changes
@@ -1452,7 +1453,7 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 
 | | |
 |---|---|
-| suite | `--selftest` **65/65** in 6.5 s (was 53/53 through Session 4) |
+| suite | `--selftest` **68/68** in 6.5 s (was 53/53 through Session 4) |
 | determinism coverage | **102 values a body**, 184 a tick, 25,580 at a checkpoint — every one probed |
 | catchment, measured | **12,320 m² on open ground**, effective radius 62.6 m against a nominal 66 — §15 |
 | soak, early career | **1.44 ms a tick at 300 agents, 23x real time**; a year is 4 min, ten years 39 — §15 |
@@ -1464,7 +1465,8 @@ Measured, not asserted. Everything here is reproducible from the flags in `plan-
 | jobs phase, 2,000 agents | **0.005 ms** with nothing assigned, 0.03–0.07 ms with 48 units at work |
 | move order, ridge map | **8–27 ms**, 3–4 searches |
 | route quality vs the flat optimum | mean **1.0014**, p99 1.098, worst 1.187, **no cell lost** |
-| resident at 1200 m | **177 MB** (was 315), congestion **253 KB** (was 74.9 MB) |
+| resident at 1200 m | **159 MB** (was 177, and 315 before that), congestion **253 KB** |
+| career save, 600 m | **7.4 MB in 13 ms**, loaded in 300 ms, bit-identical continuation — §16 |
 | frame | 7.4 ms |
 | tuning dials on the panel | **14**, plus **5 jobs dials** off it — reach, crowded reach, attempts, grace, retry |
 | order grace, measured | **5.5 s** from standing free to back on the job; the walk back is separate and is a distance |
@@ -1688,14 +1690,11 @@ for the crowd case.
 
 ### Owed at the head of Session 6
 
-1. **Serialization, which has been a discipline for five sessions and has never once run.** Nothing
-   in the repo serializes anything. §5 makes fresh-start succession core-loop rather than a save
-   feature, and rule 3 says the discipline is cheap continuously and expensive retrofitted — which is
-   an argument that has been made five times and acted on zero. Two things make now the cheapest it
-   will ever be: `DeterminismCheck`'s ledger already enumerates exactly what is carried, which *is*
-   the save manifest, and the fingerprint makes the round trip decisive in one assertion — save,
-   load, fingerprints equal; then tick both a hundred and compare again. Doing it after stock,
-   buildings, catchments and a strategic layer is precisely the retrofit the rule warns about.
+1. ~~**Serialization, which has been a discipline for five sessions and has never once run.**~~
+   **Done, 2026-08-19, before Session 6 started.** `Simulation/Persistence` saves a world and loads
+   it back, and the acceptance test is the fingerprint in two parts: identical on loading, and
+   identical again after two hundred ticks of both worlds stepped together. **The second part is what
+   found things, and it found three.** See §16.
 2. **A calendar, before consumption rather than with it.** §3 has the table — year 5,400 s, four
    seasons, a day unit of 20 s — and §6's consumption is seasonal. Seasons are canonical and crop
    windows derive from them; the prototype's three disagreeing windows are the warning, and they
@@ -1757,3 +1756,94 @@ deliberately — "they are the same artefact" — and pulling a combat slice for
 a session later, so an economic regression could go a session unnoticed. The mitigation is cheap and
 is point 5 above: the one-year gate is four minutes and can land with Session 6, well before the
 harness proper.
+
+---
+
+## 16. What serialization cost, and the three things it found
+
+Landed 2026-08-19 at the head of Session 6, before any economy, because rule 3's argument — cheap
+continuously, expensive retrofitted — had been made five times and acted on zero. §5 makes this core
+loop rather than a save feature: a career ends, usually violently, and the next begins on the same map,
+which has not reset.
+
+**What it cost.** A `Write`/`Read` pair on each component that carries state, next to the state, plus a
+header and an orchestrator. A body's state needs no per-field code at all: `AgentState` is plain data
+all the way down, so the whole array is one memory copy, and **a field added to a body is saved the day
+it is declared** — the same property that made the determinism fingerprint automatic, enforced this time
+by the compiler, because `Blob<T>` constrains `T` to `unmanaged` and putting a reference on a body stops
+the build.
+
+| | |
+|---|---|
+| save, 48-unit settlement on 600 m | **7.4 MB in 13 ms** |
+| load | **300 ms**, most of it rebuilding the raster |
+| save, 18 bodies on the 30 m test world | 83 KB |
+
+The bulk is ground, not units: one height per vertex and one surface per cell of the whole map, whether
+anything has happened on them or not. Narrowing `TerrainSurface` to a byte — five values did not need
+32 bits — took **4.2 MB off every save and 18 MB off resident memory at 1200 m** (177 → 159 MB), which
+is the same habit as everything else here: hold the information at the resolution that decides
+something. What remains is honest and uncompressed; a deflate stream would take it to a few hundred KB
+whenever save frequency makes that worth the format change.
+
+### 1. A save manifest is a superset of what the fingerprint reads
+
+The ledger in `DeterminismCheck` was assumed to *be* the manifest. It is not, and the reason is worth
+stating precisely: **the fingerprint's job is to detect a divergence, a save's job is to reproduce a
+future, and the second is strictly harder.** The ledger's boundary arguments are sound for the first and
+insufficient for the second. Two of them:
+
+- **The congestion field's running totals.** The ledger says they can only reach a decision through the
+  published revision, which is true. But they are what decides *when the next revision publishes*, so a
+  world loaded with zeroed accumulators publishes at a different tick and every route adopted after that
+  is a different route.
+- **The path pool's free list.** The ledger says a divergence in it can only matter by handing out a
+  different handle, and handles live on bodies, which are read. Also true. But the first route planned
+  after a load takes a different handle, and the two worlds part company on the next tick.
+
+Both were left out of the first version and both were caught by the tick-forward half of the test.
+
+### 2. Work counters describe the process, not the world
+
+Counters of routes planned and fields built are read by the fingerprint on purpose: identical code must
+do identical work, and a counter is the earliest place a diverged *decision* shows up. But a loaded
+world resumes with a cold cache and has to redo work the original had already done, so it legitimately
+disagrees. Saving the counters to paper over it — which was tried — only moved the disagreement to the
+first tick, because the loaded world then went on to build five more fields than the world it came from.
+
+So the comparison across a save excludes them, deliberately and by a named flag rather than by a
+tolerance. The distinction it draws is real: those counters are a property of a *process*, and a save
+crosses processes.
+
+### 3. A cost field remembers the order it was asked
+
+The one that took the longest to see. After the first two fixes the loaded world still diverged, by
+**one unit in the last place of a body's facing, one tick after loading.** The cause is that a flow
+field is built once and then *refined tile by tile as things ask about it*, so what it holds depends on
+the order the questions arrived in — and that order is not state anybody could write down.
+
+This is a limitation, not a bug, and the honest claim is narrower than "a save reproduces the world":
+
+> **Two worlds agree once both have forgotten what they had been asked.**
+
+Every peer loading the same save forgets equally, so lockstep survives one; a single career continuing
+from a save is a new lineage regardless. `SimulationWorld.DropRouteCaches` exists so the test can
+compare on equal terms and says so. With it, the continuation is bit-identical over two hundred ticks
+of a world mid-everything — bodies walking, a group order in transit, standing assignments, an
+interrupt in flight, congestion on the ground, built obstacles, a tombstone, and an order still sitting
+in the queue unapplied.
+
+### What keeps it honest from here
+
+Three census-style alarms, all of the same shape as the determinism ledger's — they fail by name, in the
+session that breaks them.
+
+1. **The round trip itself.** State left out of the save shows up as a divergence a few ticks later,
+   named down to the field. This is what replaces remembering to extend the save.
+2. **A layout signature in the header**, derived from the determinism schema rather than
+   hand-maintained, so it moves when `AgentState` does. Bodies are raw bytes; a save from a build with
+   a different body shape would otherwise load as plausible garbage — units standing at coordinates
+   read out of the middle of somebody's stall timer.
+3. **An order-kind census.** A command kind with no save format would be silently dropped: a unit told
+   to do something that never does it, once, after a load. The test reflects over the command hierarchy
+   and requires every concrete kind to be accounted for.

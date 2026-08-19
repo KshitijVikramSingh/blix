@@ -1,6 +1,15 @@
 namespace RTSGame.Simulation.Terrain;
 
-internal enum TerrainSurface
+/// <summary>
+/// What the ground is made of. One byte wide, because there are five of them.
+/// </summary>
+/// <remarks>
+/// The width is not cosmetic at this scale. There is one of these per navigation cell — 1.44M on the
+/// 600 m map and 5.76M at 1200 m — so the default 32-bit enum spent 23 MB of resident memory and 23 MB
+/// of every save describing a choice between five values. Same habit as the rest of this codebase:
+/// hold the information at the resolution that decides something.
+/// </remarks>
+internal enum TerrainSurface : byte
 {
     Grass,
     Road,

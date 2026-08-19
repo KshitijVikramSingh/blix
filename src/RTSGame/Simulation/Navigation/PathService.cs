@@ -1,4 +1,5 @@
 using System.Numerics;
+using RTSGame.Simulation.Persistence;
 using RTSGame.Simulation.Placement;
 using RTSGame.Simulation.Spatial;
 using RTSGame.Simulation.Terrain;
@@ -484,6 +485,61 @@ internal sealed partial class PathService
     /// would also have silently flattered the turn-cost change and broken comparability
     /// with every baseline recorded before it.
     /// </remarks>
+    /// <summary>
+    /// The record of work this router has done. Not the caches — those are keyed by revisions and
+    /// rebuild themselves — just the totals.
+    /// </summary>
+    /// <remarks>
+    /// Saved because a loaded career should report the same lifetime totals as the one it continues,
+    /// and because the determinism check reads them as a canary: two runs of identical code must do
+    /// identical work, and a decision that diverged before it moved anybody shows up in a counter
+    /// first. A load that reset them to zero would fail that check at the instant of loading, which
+    /// is how this came to be here.
+    /// </remarks>
+    /// <summary>
+    /// Throws away everything memoised about routes, putting a running world into the state a
+    /// freshly loaded one is in.
+    /// </summary>
+    /// <remarks>
+    /// Not an optimisation and not a reset — it exists so that a save can be tested honestly. A cost
+    /// field is built once and then <em>refined tile by tile as things ask about it</em>, so what it
+    /// holds depends on the order the questions arrived in, and that order is not state anybody could
+    /// write down. A world reloaded from a save therefore rebuilds its fields from scratch and gets
+    /// answers that can differ in the last bit of a float from the ones the running world had — which
+    /// showed up as exactly one unit in the last place of a body's facing, one tick after a load.
+    /// <para>
+    /// So the honest claim a save can make is not "the two processes agree" but "the two agree once
+    /// both have forgotten what they had been asked". Every peer loading the same save forgets
+    /// equally, which is what keeps lockstep intact across one; and a single career continuing from a
+    /// save is a new lineage regardless.
+    /// </para>
+    /// </remarks>
+    internal void DropRouteCaches()
+    {
+        flowFields.Clear();
+        latestFields.Clear();
+        cellCenterAdmission.Clear();
+        cellCenterAdmissionRevision = -1;
+        passageAxes.Clear();
+        passageAxisRevision = -1;
+    }
+
+    internal void WriteCounters(WorldWriter writer)
+    {
+        writer.Int(FlowFieldBuilds);
+        writer.Long(PathQueries);
+        writer.Long(RegionSearches);
+        writer.Long(TileRefinements);
+    }
+
+    internal void ReadCounters(WorldReader reader)
+    {
+        FlowFieldBuilds = reader.Int();
+        PathQueries = reader.Long();
+        RegionSearches = reader.Long();
+        TileRefinements = reader.Long();
+    }
+
     public bool TryOptimalTravelTime(Vector2 goalPosition, Vector2 from, float agentRadius, out float seconds)
     {
         seconds = 0f;

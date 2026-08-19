@@ -1,3 +1,4 @@
+using RTSGame.Simulation.Persistence;
 using RTSGame.Simulation.Spatial;
 
 namespace RTSGame.Simulation.Placement;
@@ -48,6 +49,22 @@ internal sealed class PlacementGrid
 
         Revision++;
         return true;
+    }
+
+    /// <summary>What is built on, and the revision anything cached against it is keyed by.</summary>
+    internal void Write(WorldWriter writer)
+    {
+        writer.Int(Revision);
+        writer.Blob<bool>(occupied);
+        writer.Blob<GridCell>(occupiedCells.ToArray());
+    }
+
+    internal void Read(WorldReader reader)
+    {
+        Revision = reader.Int();
+        reader.Blob<bool>(occupied);
+        occupiedCells.Clear();
+        occupiedCells.AddRange(reader.Blob<GridCell>());
     }
 
     private sealed class GridCellIndexOrder : IComparer<GridCell>

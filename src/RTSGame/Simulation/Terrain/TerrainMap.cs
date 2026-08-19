@@ -1,6 +1,8 @@
 using System.Numerics;
 using RTSGame.Simulation.Spatial;
 
+using RTSGame.Simulation.Persistence;
+
 namespace RTSGame.Simulation.Terrain;
 
 internal sealed class TerrainMap
@@ -73,6 +75,32 @@ internal sealed class TerrainMap
         vertexHeights[index] = height;
         Revision++;
     }
+
+    /// <summary>The authored ground: heights at the corners, a surface per cell, and the revision.</summary>
+    /// <remarks>
+    /// The revision goes out and comes back rather than being re-derived, because everything keyed
+    /// against it — the navigation raster, the flow-field cache — would otherwise be looking at a
+    /// number that had moved for no reason. Writing the heights back in on load bumps it once per
+    /// vertex, which is why <see cref="RestoreRevision"/> exists.
+    /// </remarks>
+    internal void Write(WorldWriter writer)
+    {
+        writer.Int(Revision);
+        writer.Blob<float>(vertexHeights);
+        writer.Blob<TerrainSurface>(surfaces);
+    }
+
+    internal void Read(WorldReader reader)
+    {
+        var revision = reader.Int();
+        reader.Blob<float>(vertexHeights);
+        reader.Blob<TerrainSurface>(surfaces);
+        levelNeighborhoodRevision = -1;
+        RestoreRevision(revision);
+    }
+
+    /// <summary>Puts the revision back where a load found it.</summary>
+    internal void RestoreRevision(int revision) => Revision = revision;
 
     public float SampleHeight(Vector2 position)
     {

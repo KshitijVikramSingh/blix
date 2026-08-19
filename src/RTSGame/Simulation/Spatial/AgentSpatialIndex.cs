@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Numerics;
+using RTSGame.Simulation.Persistence;
 using RTSGame.Simulation.Agents;
 
 namespace RTSGame.Simulation.Spatial;
@@ -94,6 +95,14 @@ internal sealed class AgentSpatialIndex
     /// by this — it only stops visiting cells that were already empty.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// The rebuild count, which the determinism check reads. The buckets themselves are not saved —
+    /// they are refilled from body positions on the next tick, as they are on every tick.
+    /// </summary>
+    internal void WriteCounters(WorldWriter writer) => writer.Int(Rebuilds);
+
+    internal void ReadCounters(WorldReader reader) => Rebuilds = reader.Int();
+
     public void Rebuild(ReadOnlySpan<AgentState> agents)
     {
         var start = Stopwatch.GetTimestamp();

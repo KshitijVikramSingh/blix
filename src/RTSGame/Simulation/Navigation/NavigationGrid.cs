@@ -130,6 +130,19 @@ internal sealed class NavigationGrid
     /// and are then dropped. Making the rasteriser itself region-aware is the next thing, and
     /// worth measuring before it is assumed: a rebuild happens on a terrain edit, not per tick.
     /// </remarks>
+    /// <summary>
+    /// Puts the revision back where a load found it, after the raster has been rebuilt from the
+    /// restored terrain.
+    /// </summary>
+    /// <remarks>
+    /// The raster itself is not saved — it is a pure function of the terrain and the placement grid,
+    /// both of which are — so a load rebuilds it and gets bit-identical ground for a fraction of the
+    /// bytes. What cannot be rebuilt is the <em>number</em>: the rebuild bumps the revision, and
+    /// every flow field ever cached is keyed by it, so a loaded world that had a different revision
+    /// from the one it was saved from would be the same ground under a different name.
+    /// </remarks>
+    internal void RestoreRevision(int revision) => Revision = revision;
+
     internal void ReplaceRaster(
         bool[] newBlocked,
         float[] newClearance,

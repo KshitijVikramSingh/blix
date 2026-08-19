@@ -7,6 +7,7 @@ using RTSGame.Simulation.Commands;
 using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Movement;
 using RTSGame.Simulation.Navigation;
+using RTSGame.Simulation.Persistence;
 using RTSGame.Simulation.Placement;
 using RTSGame.Simulation.Spatial;
 using RTSGame.Simulation.Terrain;
@@ -463,6 +464,127 @@ internal sealed class SimulationWorld
     {
         NavigationRasterizer.Rebuild(Placement, Navigation, Terrain);
         rasterizedTerrainRevision = Terrain.Revision;
+    }
+
+    /// <summary>
+    /// Everything this world carries, in the order <see cref="Read"/> expects it.
+    /// </summary>
+    /// <remarks>
+    /// This method and the ledger in <c>DeterminismCheck</c> describe the same state for two
+    /// different purposes, and neither can be derived from the other: the ledger says what has to be
+    /// <em>compared</em> to notice a divergence, this says what has to be <em>kept</em> to avoid one.
+    /// The second is the larger set. What keeps them from drifting apart is not discipline but the
+    /// round-trip self-test, which saves, loads, and then ticks both worlds forward — state left out
+    /// of here shows up there as a divergence a few ticks later, named down to the field.
+    /// </remarks>
+    /// <summary>
+    /// Forgets everything memoised about routes, leaving this world in the state a freshly loaded
+    /// one is in.
+    /// </summary>
+    /// <remarks>
+    /// For comparing a world against a saved copy of itself, which cannot be done fairly otherwise:
+    /// see <c>PathService.DropRouteCaches</c> for what a cost field remembers that no save can carry.
+    /// </remarks>
+    internal void DropRouteCaches() => pathService.DropRouteCaches();
+
+    internal void Write(WorldWriter writer)
+    {
+        writer.Long(TickNumber);
+        writer.Int(LastContactCount);
+        writer.Int(CongestionRepathCount);
+        writer.Int(ImmediateRouteRepairCount);
+        writer.Int(CongestionRerouteCount);
+        writer.Int(CrowdedArrivalBlockCount);
+        writer.Int(LastCongestionRoot.Value);
+        writer.Int(LastCongestionRepathAgent.Value);
+        writer.Float(congestionRecoveryCooldown);
+        writer.Int(rasterizedTerrainRevision);
+        writer.Int(routePlansThisTick);
+        writer.Int(nextMoveGroupId);
+        writer.Int(Navigation.Revision);
+        // The record of work done, which is not derived: a loaded career reports the same lifetime
+        // totals as the one it continues, and the determinism check reads them as a canary.
+        pathService.WriteCounters(writer);
+        steeringSystem.Solver.WriteCounters(writer);
+        agentIndex.WriteCounters(writer);
+
+        Terrain.Write(writer);
+        Placement.Write(writer);
+        Agents.Write(writer);
+        Colliders.Write(writer);
+        Congestion.Write(writer);
+        paths.Write(writer);
+
+        writer.Int(moveGroups.Count);
+        foreach (var id in moveGroups.Keys.OrderBy(id => id)) moveGroups[id].Write(writer);
+
+        writer.Int(blockColliders.Count);
+        foreach (var (cell, collider) in blockColliders
+                     .OrderBy(entry => Placement.Transform.Index(entry.Key)))
+        {
+            writer.Int(cell.X);
+            writer.Int(cell.Z);
+            writer.Int(collider.Value);
+        }
+
+        writer.Int(commands.Count);
+        foreach (var command in commands) WorldSave.WriteCommand(writer, command);
+    }
+
+    internal void Read(WorldReader reader)
+    {
+        TickNumber = reader.Long();
+        LastContactCount = reader.Int();
+        CongestionRepathCount = reader.Int();
+        ImmediateRouteRepairCount = reader.Int();
+        CongestionRerouteCount = reader.Int();
+        CrowdedArrivalBlockCount = reader.Int();
+        LastCongestionRoot = new AgentId(reader.Int());
+        LastCongestionRepathAgent = new AgentId(reader.Int());
+        congestionRecoveryCooldown = reader.Float();
+        rasterizedTerrainRevision = reader.Int();
+        routePlansThisTick = reader.Int();
+        nextMoveGroupId = reader.Int();
+        var navigationRevision = reader.Int();
+        pathService.ReadCounters(reader);
+        steeringSystem.Solver.ReadCounters(reader);
+        agentIndex.ReadCounters(reader);
+
+        Terrain.Read(reader);
+        Placement.Read(reader);
+        Agents.Read(reader);
+        Colliders.Read(reader);
+        Congestion.Read(reader);
+        paths.Read(reader);
+
+        moveGroups.Clear();
+        var groups = reader.Int();
+        for (var i = 0; i < groups; i++)
+        {
+            var group = MoveGroup.Read(reader);
+            moveGroups[group.Id] = group;
+        }
+
+        blockColliders.Clear();
+        var blocks = reader.Int();
+        for (var i = 0; i < blocks; i++)
+        {
+            var cell = new GridCell(reader.Int(), reader.Int());
+            blockColliders[cell] = new ColliderId(reader.Int());
+        }
+
+        commands.Clear();
+        var orders = reader.Int();
+        for (var i = 0; i < orders; i++) commands.Enqueue(WorldSave.ReadCommand(reader));
+
+        // The raster is derived, so it is rebuilt rather than stored — and then told what revision it
+        // is, because the rebuild bumps it and every flow field ever cached is keyed by the number.
+        // Rebuilding also has to happen after the terrain and the placement grid are back, which is
+        // why it is here and not in the constructor's sequence.
+        NavigationRasterizer.Rebuild(Placement, Navigation, Terrain);
+        Navigation.RestoreRevision(navigationRevision);
+        // The broad-phase index needs nothing: it is rebuilt from body positions inside the first
+        // steering pass, which is the same thing it does on every other tick.
     }
 
     public void Tick(float deltaSeconds)

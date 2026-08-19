@@ -1,6 +1,7 @@
 using System.Numerics;
 using RTSGame.Simulation.Collision;
 using RTSGame.Simulation.Navigation;
+using RTSGame.Simulation.Persistence;
 
 namespace RTSGame.Simulation.Agents;
 
@@ -144,6 +145,33 @@ internal sealed class AgentStore
         }
 
         return largest;
+    }
+
+    /// <summary>Writes every slot, tombstones included, as one run of bytes.</summary>
+    /// <remarks>
+    /// No per-field code, and that is the design rather than a shortcut: <see cref="AgentState"/> is
+    /// plain data all the way down, so the whole array is a memory copy and <b>a field added to a
+    /// body is saved the day it is declared</b>. The same property makes the determinism fingerprint
+    /// automatic, and the <c>unmanaged</c> constraint on <see cref="WorldWriter.Blob{T}"/> is what
+    /// keeps it true: putting a reference on a body stops this compiling.
+    /// <para>
+    /// Dead slots go out with the living. An id is an index here and is never reused, so dropping
+    /// tombstones would renumber every survivor after the gap and silently repoint the queue-leader
+    /// chain and every per-agent diagnostic buffer at a different unit.
+    /// </para>
+    /// </remarks>
+    internal void Write(WorldWriter writer)
+    {
+        writer.Int(LiveCount);
+        writer.Blob<AgentState>(agents.AsSpan(0, Count));
+    }
+
+    internal void Read(WorldReader reader)
+    {
+        LiveCount = reader.Int();
+        var loaded = reader.Blob<AgentState>();
+        agents = loaded.Length == 0 ? new AgentState[64] : loaded;
+        Count = loaded.Length;
     }
 
     private void EnsureCapacity(int required)

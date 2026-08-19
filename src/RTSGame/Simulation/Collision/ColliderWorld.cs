@@ -1,4 +1,5 @@
 using System.Numerics;
+using RTSGame.Simulation.Persistence;
 
 namespace RTSGame.Simulation.Collision;
 
@@ -116,6 +117,67 @@ internal sealed class ColliderWorld
             if (!MatchesFilter(candidate, filter) || !AabbOverlaps(center, halfExtents, candidate)) continue;
             results.Add(candidate.Id);
         }
+    }
+
+    /// <summary>
+    /// Every proxy in id order, disabled ones included, plus whatever faction relations have been
+    /// overridden.
+    /// </summary>
+    /// <remarks>
+    /// Ids are list positions and removal only disables, so writing the list in order and reading it
+    /// back in order restores every id exactly. Rebuilding them from the bodies instead would be
+    /// smaller and wrong: the four proxies a unit owns are recorded on the unit, and a world that had
+    /// removed a structure would renumber everything after it.
+    /// <para>
+    /// The spatial hashes and the layer partitions are not saved. They are rebuilt from these
+    /// proxies, and the dirty flags below are set so that happens before the first query.
+    /// </para>
+    /// </remarks>
+    internal void Write(WorldWriter writer)
+    {
+        writer.Int(colliders.Count);
+        foreach (var proxy in colliders)
+        {
+            writer.Int((int)proxy.Owner.Kind);
+            writer.Int(proxy.Owner.Value);
+            writer.Int(proxy.Faction.Value);
+            writer.Int((int)proxy.Layer);
+            writer.Int((int)proxy.Roles);
+            writer.Int((int)proxy.Shape.Kind);
+            writer.Float(proxy.Shape.Radius);
+            writer.Vector(proxy.Shape.HalfExtents);
+            writer.Vector(proxy.Center);
+            writer.Bool(proxy.Enabled);
+        }
+
+        Factions.Write(writer);
+    }
+
+    internal void Read(WorldReader reader)
+    {
+        colliders.Clear();
+        staticColliders.Clear();
+        agentColliders.Clear();
+        var count = reader.Int();
+        for (var i = 0; i < count; i++)
+        {
+            colliders.Add(new ColliderProxy
+            {
+                Id = new ColliderId(i),
+                Owner = new ColliderOwner((ColliderOwnerKind)reader.Int(), reader.Int()),
+                Faction = new FactionId(reader.Int()),
+                Layer = (ColliderLayer)reader.Int(),
+                Roles = (ColliderRole)reader.Int(),
+                Shape = new ColliderShape((ColliderShapeKind)reader.Int(), reader.Float(), reader.Vector()),
+                Center = reader.Vector(),
+                Enabled = reader.Bool(),
+            });
+        }
+
+        Factions.Read(reader);
+        partitionsDirty = true;
+        staticHashDirty = true;
+        agentHashDirty = true;
     }
 
     /// <summary>

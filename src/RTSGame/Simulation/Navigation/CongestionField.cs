@@ -1,5 +1,6 @@
 using System.Numerics;
 using RTSGame.Simulation.Agents;
+using RTSGame.Simulation.Persistence;
 using RTSGame.Simulation.Spatial;
 
 namespace RTSGame.Simulation.Navigation;
@@ -235,6 +236,106 @@ internal sealed class CongestionField
             return chunks * (long)RegionPartition.CellsPerRegion * 13L +
                    pressureChunks.LongLength * 4L * 8L;
         }
+    }
+
+    /// <summary>
+    /// Everything this field carries, including the running totals nothing outside it reads.
+    /// </summary>
+    /// <remarks>
+    /// This is the clearest case of the save manifest being a <em>superset</em> of what the
+    /// determinism fingerprint reads, and the reason is worth understanding before anything else here
+    /// is trusted. The fingerprint reads the live cells, the revision and the region stamps, and
+    /// argues — correctly — that the private totals can only reach a decision through the revision.
+    /// That argument is about <b>detecting</b> a divergence. Reproducing the future needs the totals
+    /// themselves, because they are what decides <em>when the next revision bumps</em>: a loaded
+    /// world starting from zeroed accumulators publishes at a different tick from the one it was
+    /// saved from, and every route adopted after that is a different route.
+    /// <para>
+    /// So the rule the ledger states — a boundary surface is enough to catch a difference — does not
+    /// transfer to saving, and the round-trip test that ticks both worlds forward is what catches the
+    /// difference. It caught exactly this.
+    /// </para>
+    /// </remarks>
+    internal void Write(WorldWriter writer)
+    {
+        writer.Int(Revision);
+        writer.Float(Peak);
+        writer.Float(publishedTotal);
+        writer.Float(currentTotal);
+        writer.Int(ticksSinceRebuild);
+        writer.Blob<int>(regionStamp);
+        writer.Blob<float>(stampedRegionTotal);
+        writer.Blob<float>(currentRegionTotal);
+        writer.Blob<bool>(regionMarked);
+        writer.Blob<bool>(regionPressured);
+        writer.Blob<int>(chunkOccupancy);
+        writer.Blob<int>(pressuredRegions.AsSpan(0, pressuredRegionCount));
+        writer.Blob<int>(previouslyPressuredRegions.AsSpan(0, previouslyPressuredRegionCount));
+        writer.Blob<int>(live.AsSpan(0, liveCount));
+        writer.Blob<int>(admitted.AsSpan(0, admittedCount));
+
+        var allocated = 0;
+        foreach (var chunk in pressureChunks)
+        {
+            if (chunk is not null) allocated++;
+        }
+
+        writer.Int(allocated);
+        for (var region = 0; region < pressureChunks.Length; region++)
+        {
+            if (pressureChunks[region] is not { } pressure) continue;
+            writer.Int(region);
+            writer.Blob<float>(pressure);
+            writer.Blob<float>(flowXChunks[region]!);
+            writer.Blob<float>(flowZChunks[region]!);
+            writer.Blob<bool>(liveChunks[region]!);
+        }
+    }
+
+    internal void Read(WorldReader reader)
+    {
+        Revision = reader.Int();
+        Peak = reader.Float();
+        publishedTotal = reader.Float();
+        currentTotal = reader.Float();
+        ticksSinceRebuild = reader.Int();
+        reader.Blob<int>(regionStamp);
+        reader.Blob<float>(stampedRegionTotal);
+        reader.Blob<float>(currentRegionTotal);
+        reader.Blob<bool>(regionMarked);
+        reader.Blob<bool>(regionPressured);
+        reader.Blob<int>(chunkOccupancy);
+        pressuredRegions = Restored(reader.Blob<int>(), pressuredRegions, out pressuredRegionCount);
+        previouslyPressuredRegions = Restored(
+            reader.Blob<int>(), previouslyPressuredRegions, out previouslyPressuredRegionCount);
+        live = Restored(reader.Blob<int>(), live, out liveCount);
+        admitted = Restored(reader.Blob<int>(), admitted, out admittedCount);
+
+        Array.Fill(pressureChunks, null);
+        Array.Fill(flowXChunks, null);
+        Array.Fill(flowZChunks, null);
+        Array.Fill(liveChunks, null);
+        var allocated = reader.Int();
+        for (var i = 0; i < allocated; i++)
+        {
+            var region = reader.Int();
+            pressureChunks[region] = reader.Blob<float>();
+            flowXChunks[region] = reader.Blob<float>();
+            flowZChunks[region] = reader.Blob<float>();
+            liveChunks[region] = reader.Blob<bool>();
+        }
+    }
+
+    /// <summary>
+    /// Puts a saved run back into one of the grow-on-demand buffers, keeping whatever capacity the
+    /// buffer already had if it is the larger.
+    /// </summary>
+    private static int[] Restored(int[] saved, int[] existing, out int count)
+    {
+        count = saved.Length;
+        if (saved.Length >= existing.Length) return saved;
+        Array.Copy(saved, existing, saved.Length);
+        return existing;
     }
 
     /// <summary>Region a cell's chunk lives in. Both halves are shifts: a region is 64 cells.</summary>

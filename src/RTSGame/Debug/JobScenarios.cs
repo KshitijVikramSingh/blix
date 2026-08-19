@@ -2,6 +2,7 @@ using System.Numerics;
 using RTSGame.Simulation;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Jobs;
+using RTSGame.Simulation.Persistence;
 
 namespace RTSGame.Debug;
 
@@ -57,8 +58,14 @@ internal static class JobScenarios
         var posted = Employ(world, 16, postedAt, Assignment.Hold(postedAt, 8f));
 
         var rally = depot + new Vector2(-0.05f * extent, -0.04f * extent);
-        var interruptAt = TicksPerSecond * 180;
         var totalTicks = TicksPerSecond * 60 * minutes;
+        // No order at all unless there is time left afterwards for the settlement to go back to work
+        // on its own, which is the whole thing the order is here to demonstrate. A shorter run than
+        // that ended with sixteen units still legitimately interrupted and reported it as a fault.
+        var recoveryTicks = TicksPerSecond * 150;
+        var interruptAt = totalTicks > TicksPerSecond * 180 + recoveryTicks
+            ? TicksPerSecond * 180
+            : int.MaxValue;
 
         Console.WriteLine(
             $"RTSGame jobs trace — {extent:F0} m, {world.Agents.Count} units, {minutes} sim minutes");
@@ -129,14 +136,17 @@ internal static class JobScenarios
 
         var final = Census(world);
         Console.WriteLine("  legs per minute above, by lane. Sixteen units on each.");
-        Console.WriteLine(
-            $"  order at 180 s, {local.Length} units: standing free after " +
-            $"{Mean(freeAt, orderTick):F1} s (a distance), interrupt expired " +
-            $"{Mean(releasedAt, freeAt):F1} s later (the grace), first leg finished " +
-            $"{Mean(resumedAt, freeAt):F1} s after that (a walk)");
+        Console.WriteLine(orderTick > 0
+            ? $"  order at 180 s, {local.Length} units: standing free after " +
+              $"{Mean(freeAt, orderTick):F1} s (a distance), interrupt expired " +
+              $"{Mean(releasedAt, freeAt):F1} s later (the grace), first leg finished " +
+              $"{Mean(resumedAt, freeAt):F1} s after that (a walk)"
+            : $"  no order issued: {minutes} minutes leaves no room to watch one be recovered from");
         Console.WriteLine(
             $"  ending: {final.Working} working, {final.Interrupted} interrupted, " +
             $"{final.Unreachable} unable to reach their place");
+
+        ReportSave(world);
 
         // The two things this trace exists to catch: nobody permanently unable to get to work,
         // and nobody left holding an interrupt after being let go. Everything else is a number.
@@ -149,6 +159,36 @@ internal static class JobScenarios
         }
 
         return faults > 0 ? 1 : 0;
+    }
+
+    /// <summary>
+    /// What saving this settlement costs, measured where a career save would actually be taken.
+    /// </summary>
+    /// <remarks>
+    /// §5 makes the save core loop, so its cost belongs in the trace of the thing being saved rather
+    /// than in a microbenchmark of an empty map. The bulk is the ground: heights and surfaces are one
+    /// value per cell of the whole world whether anything has happened on them or not, and the
+    /// congestion field costs whatever the jams cost. Both are the numbers to watch when Session 6
+    /// adds stock and nodes.
+    /// </remarks>
+    private static void ReportSave(SimulationWorld world)
+    {
+        using var buffer = new MemoryStream();
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        WorldSave.Save(world, buffer);
+        var saved = watch.Elapsed.TotalMilliseconds;
+        buffer.Position = 0;
+        watch.Restart();
+        var loaded = WorldSave.Load(buffer);
+        var read = watch.Elapsed.TotalMilliseconds;
+
+        world.DropRouteCaches();
+        var matches =
+            DeterminismCheck.Fingerprint(world, DeterminismCheck.Scope.Full, includeWork: false) ==
+            DeterminismCheck.Fingerprint(loaded, DeterminismCheck.Scope.Full, includeWork: false);
+        Console.WriteLine(
+            $"  save {buffer.Length / 1024f:N0} KB in {saved:F0} ms, loaded back in {read:F0} ms, " +
+            $"identical: {matches}");
     }
 
     private static float Seconds(int ticks) => ticks / (float)TicksPerSecond;

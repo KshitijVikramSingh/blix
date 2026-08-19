@@ -163,18 +163,30 @@ internal static class DeterminismCheck
         BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
     /// <summary>One number standing for everything the world carries at this instant.</summary>
-    public static ulong Fingerprint(SimulationWorld world, Scope scope)
+    /// <param name="includeWork">
+    /// Whether to read the counters of work done — routes planned, fields built, solves run. True
+    /// when comparing two live runs, where identical code must do identical work and a counter is the
+    /// earliest sign of a decision diverging. <b>False when comparing a world against a saved copy of
+    /// itself</b>, because a loaded world resumes with a cold flow-field cache and has to redo work
+    /// the original had already done. That is a true difference between the two <em>processes</em> and
+    /// not between the two worlds, and saving the counters to hide it — which was tried — only moves
+    /// the disagreement to the first tick.
+    /// </param>
+    public static ulong Fingerprint(SimulationWorld world, Scope scope, bool includeWork = true)
     {
         var sink = new FoldingStateSink();
-        Walk(world, scope, ref sink);
+        Walk(world, scope, includeWork, ref sink);
         return sink.Value;
     }
 
     /// <summary>Every value the fingerprint is made of, labelled, for explaining a mismatch.</summary>
-    public static List<(string Label, ulong Value)> Trace(SimulationWorld world, Scope scope)
+    public static List<(string Label, ulong Value)> Trace(
+        SimulationWorld world,
+        Scope scope,
+        bool includeWork = true)
     {
         var sink = new TracingStateSink();
-        Walk(world, scope, ref sink);
+        Walk(world, scope, includeWork, ref sink);
         return sink.Entries;
     }
 
@@ -199,14 +211,15 @@ internal static class DeterminismCheck
         SimulationWorld second,
         int ticks,
         int fullEvery = 30,
-        Action<int>? afterTick = null)
+        Action<int>? afterTick = null,
+        bool includeWork = true)
     {
         // Before anything moves. A scenario that populated two worlds differently would
         // otherwise be reported as a divergence at tick 1, which sends the reader looking
         // at the tick instead of at the setup.
-        if (Fingerprint(first, Scope.Full) != Fingerprint(second, Scope.Full))
+        if (Fingerprint(first, Scope.Full, includeWork) != Fingerprint(second, Scope.Full, includeWork))
         {
-            return $"before the first tick: {Explain(first, second, Scope.Full)}";
+            return $"before the first tick: {Explain(first, second, Scope.Full, includeWork)}";
         }
 
         for (var tick = 1; tick <= ticks; tick++)
@@ -215,15 +228,15 @@ internal static class DeterminismCheck
             second.Tick((float)SimulationWorld.FixedDeltaSeconds);
             afterTick?.Invoke(tick);
 
-            if (Fingerprint(first, Scope.Tick) != Fingerprint(second, Scope.Tick))
+            if (Fingerprint(first, Scope.Tick, includeWork) != Fingerprint(second, Scope.Tick, includeWork))
             {
-                return $"tick {tick}: {Explain(first, second, Scope.Tick)}";
+                return $"tick {tick}: {Explain(first, second, Scope.Tick, includeWork)}";
             }
 
             if (tick % fullEvery != 0 && tick != ticks) continue;
-            if (Fingerprint(first, Scope.Full) != Fingerprint(second, Scope.Full))
+            if (Fingerprint(first, Scope.Full, includeWork) != Fingerprint(second, Scope.Full, includeWork))
             {
-                return $"tick {tick} (full): {Explain(first, second, Scope.Full)}";
+                return $"tick {tick} (full): {Explain(first, second, Scope.Full, includeWork)}";
             }
         }
 
@@ -300,10 +313,14 @@ internal static class DeterminismCheck
     /// <summary>Fields of a body the fingerprint reads, for reporting what the coverage is.</summary>
     public static int BodyFieldCount => AgentStateSchema.Leaves.Count;
 
-    private static string Explain(SimulationWorld first, SimulationWorld second, Scope scope)
+    public static string Explain(
+        SimulationWorld first,
+        SimulationWorld second,
+        Scope scope,
+        bool includeWork = true)
     {
-        var left = Trace(first, scope);
-        var right = Trace(second, scope);
+        var left = Trace(first, scope, includeWork);
+        var right = Trace(second, scope, includeWork);
         for (var i = 0; i < Math.Min(left.Count, right.Count); i++)
         {
             if (left[i].Label != right[i].Label)
@@ -341,7 +358,34 @@ internal static class DeterminismCheck
         return end > 1 ? name[1..end] : name;
     }
 
-    private static void Walk<TSink>(SimulationWorld world, Scope scope, ref TSink sink)
+    /// <summary>
+    /// Counters of work done. State only in the sense that identical code must do identical work —
+    /// nothing reads them back — which makes them the earliest place a diverged decision shows up and
+    /// the one part of the walk a saved world legitimately disagrees about.
+    /// </summary>
+    private static void WriteWorkCounters<TSink>(SimulationWorld world, ref TSink sink)
+        where TSink : struct, IStateSink
+    {
+        sink.Add("CongestionRepathCount", world.CongestionRepathCount);
+        sink.Add("ImmediateRouteRepairCount", world.ImmediateRouteRepairCount);
+        sink.Add("CongestionRerouteCount", world.CongestionRerouteCount);
+        sink.Add("CrowdedArrivalBlockCount", world.CrowdedArrivalBlockCount);
+        sink.Add("FlowFieldBuilds", world.FlowFieldBuilds);
+        sink.Add("PathQueries", world.PathQueries);
+        sink.Add("RegionSearches", world.RegionSearches);
+        sink.Add("TileRefinements", world.TileRefinements);
+        sink.Add("AvoidanceSolves", world.AvoidanceSolves);
+        sink.Add("AvoidanceInfeasible", world.AvoidanceInfeasible);
+        sink.Add("AvoidanceTerrainFallbacks", world.AvoidanceTerrainFallbacks);
+        sink.Add("AvoidanceTerrainDeadStops", world.AvoidanceTerrainDeadStops);
+        sink.Add("AgentIndexRebuildsPerTick", world.AgentIndexRebuildsPerTick);
+    }
+
+    private static void Walk<TSink>(
+        SimulationWorld world,
+        Scope scope,
+        bool includeWork,
+        ref TSink sink)
         where TSink : struct, IStateSink
     {
         sink.Push("world", -1);
@@ -369,19 +413,7 @@ internal static class DeterminismCheck
         // up anywhere else.
         sink.Push("work", -1);
         sink.Add("LastContactCount", world.LastContactCount);
-        sink.Add("CongestionRepathCount", world.CongestionRepathCount);
-        sink.Add("ImmediateRouteRepairCount", world.ImmediateRouteRepairCount);
-        sink.Add("CongestionRerouteCount", world.CongestionRerouteCount);
-        sink.Add("CrowdedArrivalBlockCount", world.CrowdedArrivalBlockCount);
-        sink.Add("FlowFieldBuilds", world.FlowFieldBuilds);
-        sink.Add("PathQueries", world.PathQueries);
-        sink.Add("RegionSearches", world.RegionSearches);
-        sink.Add("TileRefinements", world.TileRefinements);
-        sink.Add("AvoidanceSolves", world.AvoidanceSolves);
-        sink.Add("AvoidanceInfeasible", world.AvoidanceInfeasible);
-        sink.Add("AvoidanceTerrainFallbacks", world.AvoidanceTerrainFallbacks);
-        sink.Add("AvoidanceTerrainDeadStops", world.AvoidanceTerrainDeadStops);
-        sink.Add("AgentIndexRebuildsPerTick", world.AgentIndexRebuildsPerTick);
+        if (includeWork) WriteWorkCounters(world, ref sink);
 
         // Orders accepted this tick and applied on the next one. Walked in full rather than
         // counted: two runs holding a different order in the same slot would otherwise be
