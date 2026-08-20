@@ -192,8 +192,15 @@ internal sealed class LookSettings
     /// models and the camera can see about ninety metres of it, so this is the difference between a frame
     /// that fits and one that does not.
     /// </remarks>
-    [Tune(40.0, 600.0, Label = "tree draw distance (m)", Group = "ground")]
-    public float TreeDrawMetres = 150f;
+    /// <remarks>
+    /// <b>Retired as a distance and kept as a ceiling.</b> A tree matters if it or its shadow can be seen,
+    /// and the sun's box already answers both, so the draw radius is the box — see the note beside
+    /// <c>treeDrawRadius</c>. What is still worth having is a hard stop, because pulling the camera all the
+    /// way out on a dense map is thousands of models and the frame is allowed to give up before the
+    /// simulation does.
+    /// </remarks>
+    [Tune(40.0, 600.0, Label = "tree draw ceiling (m)", Group = "ground")]
+    public float TreeDrawMetres = 220f;
 
     /// <summary>How much brighter tilled soil is drawn than the pack authored it.</summary>
     /// <remarks>

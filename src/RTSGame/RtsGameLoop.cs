@@ -1596,9 +1596,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         MemoryMarshal.Write(shadowPush.AsSpan(0, 64), in sunViewProjection);
         MemoryMarshal.Write(gradePush.AsSpan(0, 16), in grade);
 
-        // Recomputed once a frame rather than per tree, and never smaller than the shadow box, or trees
-        // whose shadows fall into view would stop casting them.
-        var treeDrawRadius = MathF.Max(look.TreeDrawMetres, SunOrthoExtent * 0.75f);
+        // <b>Exactly the shadow box, because that is the honest answer and it was two numbers before.</b>
+        // A tree matters if it can be seen or if its shadow can, and the sun's box is already sized to
+        // cover both — the visible ground plus a margin for casters standing outside it. So there is nothing
+        // left for an independent draw distance to decide: beyond the box a tree cannot cast into view, and
+        // inside it a tree might.
+        //
+        // It was max(150 m, box × 0.75), which is two numbers pretending to agree. At the default zoom that
+        // drew trees to 150 m against 64 m of visible ground — <b>2.3× as far as anybody can see</b>, and
+        // more than twice as far as the box that decides whether they cast anything. Pulled in it is now
+        // 73 m, which is the same picture for a quarter of the trees.
+        var treeDrawRadius = MathF.Min(look.TreeDrawMetres, SunOrthoExtent * 0.5f);
         treeDrawRadiusSquared = treeDrawRadius * treeDrawRadius;
 
         BuildTerrainInstances();
@@ -2729,7 +2737,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var half = SunOrthoExtent * 0.5f;
         var texelCentimetres = SunOrthoExtent / ShadowMapSize * 100f;
         return
-            $"SEES {seen:F0} m · TREES {look.TreeDrawMetres:F0} m ({look.TreeDrawMetres / seen:F1}x) · " +
+            $"SEES {seen:F0} m · TREES {MathF.Sqrt(treeDrawRadiusSquared):F0} m " +
+            $"({MathF.Sqrt(treeDrawRadiusSquared) / seen:F2}x) · " +
             $"SHADOW {half:F0} m ({half / seen:F2}x, texel {texelCentimetres:F1} cm) · " +
             $"FOG {cameraDistance * look.FogStartZooms:F0}-" +
             $"{cameraDistance * MathF.Max(look.FogStartZooms + 0.1f, look.FogEndZooms):F0} m";
