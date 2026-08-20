@@ -339,6 +339,8 @@ internal sealed class ReciprocalVelocitySolver
         other.MaximumSpeed > 0f &&
         agent.Faction == other.Faction;
 
+
+
     private static bool HasHigherPriority(
         ReadOnlySpan<AgentState> agents,
         float[] priorityKey,

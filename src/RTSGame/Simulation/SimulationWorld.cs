@@ -2422,6 +2422,17 @@ internal sealed class SimulationWorld
                     UpdateTargetBehavior(ref agent, stopDistance: 1.45f, flee: false, updatePeriod: 0.35f);
                     break;
                 case AgentLocomotionState.Chase:
+                    // <b>The stop distance is load-bearing and that is not obvious.</b> Removing it was
+                    // tried on the reasoning that a chase is for catching: the body halts at 0.95 m, and
+                    // at an acceleration of 2 m/s² it needs nine tenths of a second to get going again,
+                    // by which time the quarry is a metre further on — so contact ought to be a duty cycle
+                    // rather than a state. Measured over five seeds it was <em>worse</em> (raiders killed
+                    // 4.4 to 3.0, carried off 424 to 480) and body-seconds of fighting did not move at all,
+                    // 244 to 237, which is the part that settles it.
+                    //
+                    // The reason is that halting at 0.95 m parks the body <em>inside</em> its own 1.10 m
+                    // reach and keeps it there, while pathing at a moving target churns the route and
+                    // tracks it worse. Stopping just short of somebody is how you stay next to them.
                     UpdateTargetBehavior(
                         ref agent,
                         stopDistance: AgentDefaults.ChaseStopMetres,

@@ -4109,3 +4109,79 @@ a correct-sounding change to a delicate layer, measured, and reverted.
 **So the report stands unfixed and it is now the clearest open question in the arc:** a body should not be
 able to walk through people who are fighting it, and the mechanism belongs inside the avoidance solve —
 where an enemy is not a neighbour to be politely avoided — rather than in a multiplier outside it.
+
+## 40. The instrument was broken, and §38's conclusion with it
+
+Taking the locomotion layer up in earnest started with an audit and five changes. **All five measured
+worse. Then the sixth measurement showed that none of them did.**
+
+### The audit, which is worth keeping
+
+Two structural facts, both established by reading rather than guessing:
+
+- **Nothing in the movement layer distinguishes an enemy from a stranger.** Every `RelationMask` in it is
+  `All`, and in 829 lines of the velocity solver the only mention of a faction is `IsShovableAlly`.
+- **The solve is not reciprocal-split.** It goes front-to-back and the lower-priority body takes *full*
+  responsibility for the pair, with priority among movers running on distance still to travel. So a thief
+  a metre from a defender that is itself a metre from its goal is the body doing all the avoiding — the
+  layer hands the raider sole charge of not being caught, and it is good at it.
+
+Those are real and they still want addressing. What follows is why nothing could be concluded about them.
+
+### Five plausible mechanisms, all rejected
+
+| | their dead | stolen |
+|---|---|---|
+| sticky quarry, seeds 11–55 *(§38 baseline)* | 4.4 ± 0.5 | 424 ± 22 |
+| + being surrounded holds you, all directions | 3.2 ± 2.3 | 472 ± 91 |
+| + held only when leaving | 3.0 ± 1.2 | 496 ± 22 |
+| + a chase closes all the way instead of halting at 0.95 m | 3.0 ± 1.0 | 480 ± 40 |
+| + hostiles excluded from the velocity solve entirely | 3.0 ± 1.6 | 480 ± 63 |
+
+Five changes, five regressions, all to about the same place. That similarity is the tell, and it took too
+long to notice: **a set of unrelated changes cannot all cost the same amount.** So the last measurement was
+not a sixth change. It was the §38 baseline again, on five *fresh* seeds:
+
+| | got home /24 | their dead | stolen | recovered |
+|---|---|---|---|---|
+| sticky quarry, seeds 11–55 | 10.6 ± 0.5 | **4.4 ± 0.5** | **424 ± 22** | 202 ± 13 |
+| sticky quarry, seeds 66–111 | 12.6 ± 0.5 | **2.4 ± 0.5** | **504 ± 22** | 118 ± 50 |
+| pooled, n = 10 | 11.6 ± 1.2 | 3.4 ± 1.2 | 464 ± 47 | 160 ± 56 |
+
+**The same configuration, unchanged, produces 4.4 or 2.4 raiders killed depending on which five seeds you
+draw.** So §38's headline is void: sticky quarry was never measured better than nearest-target — it drew a
+lucky block. And the five "regressions" were regressions to the true mean, not damage. Four of the five may
+have been fine, or better; nothing here can say.
+
+### What was wrong with the instrument, precisely
+
+**Tight spreads inside a block are not evidence of anything, and §38 read them as evidence of competence.**
+Within a block of five seeds the spread is ±0.5; across blocks it is ±1.2. The seeds are *not independent
+samples*: they all share one map, one settlement layout and one raid schedule, and vary only the bearings a
+raid arrives on. Five draws from a narrow correlated slice look precise and are not accurate.
+
+The deeper problem is that `--raidtest` measures **everything at once** — economy, jobs, hauling, threat,
+pathing, and a scripted director — over six minutes. Anything that perturbs timing reroutes the whole run.
+It is a fine gate for "did something break" and it is the wrong instrument for "is this locomotion change
+an improvement", which is what it has been used for all session.
+
+### What the arc actually needs first
+
+Not a sixth hypothesis. **An instrument that isolates one mechanism**, in the style the movement
+benchmarks already established for crowds — `pen escape`, `one-cell gate`, reporting walked/optimal,
+dead-stops, mean clearance. The combat and pursuit equivalents want the same treatment:
+
+- *N defenders against one raider, on open ground.* Time to kill, body-seconds of contact, contact duty
+  cycle, and whether the raider gets clear. No economy, no director, no fields.
+- *One pursuer against one quarry at a speed ratio.* Distance over time, and how much of the chase is
+  spent inside reach — which is the number every one of this session's five hypotheses was really about,
+  and not one of them measured it.
+- *A body trying to cross a ring of enemies.* Does it get through, how long does it take, and how far does
+  it deviate. That is the reported bug, stated as a measurement.
+
+Each is seconds to run, deterministic, and has one thing in it. And each can be swept across many
+configurations rather than five, because nothing in it costs six minutes.
+
+The two audit findings above are the first candidates to put through it. Until then the honest position is
+that **sticky quarry is unproven rather than good**, and it stays only because it is cheap, principled and
+has not been shown to hurt.
