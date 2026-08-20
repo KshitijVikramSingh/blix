@@ -3652,3 +3652,97 @@ grain and measured an ended route. 400 was comfortable at a four-second handover
 half the window; a quarter-second let the same cart move the lot. So the fixture is sized ten times over
 now, with the reason written down: **a fixture whose margin depends on how long a transfer takes is
 measuring the transfer, not the cart.** 22 legs, 440 grain, still standing.
+
+## 33. Looting is indoors, and the reason nothing ever died
+
+Two reports: *raiders can loot without even being near the granary*, and *they don't actually die even
+surrounded*. Both true. The first was one bug; the second was **four**, in a chain, each of which had to be
+fixed before the next became visible.
+
+### Looting happens inside the building
+
+Entering the looting mood required being at the store. *Taking the grain did not.* So a raider shoved out
+of the yard by the crowd that came to stop it went on emptying the granary from wherever it had been
+pushed to.
+
+The first fix was to re-check the reach every tick — and it was the wrong fix, because it made shoving a
+raider off a doorway into an accidental defence mechanic whose outcome depended on crowd physics. The
+right shape, from the playtest note: **the raider goes inside.** For its rummaging window it cannot be
+shoved and cannot be fought; then it pops out with everything it can carry and makes a break for it, and
+the people who gathered while it was in there get their chance.
+
+`AgentState.Sheltered` is reversible absence, which is a different thing from a despawn: the four collider
+proxies are *disabled* rather than removed (`ColliderWorld.SetEnabled`), so the body comes back as itself
+with every handle still valid. It stays in the world's roster the whole time, and **that is deliberate** —
+a sheltered raider is still in the hostiles list, so the alarm holds while the granary is being robbed and
+the defence gathers at the door it went in by. Excluding it there would have looked like tidiness and
+would have meant a settlement that goes back to work while it is being burgled.
+
+The grain is taken on the way *out*, not on the way in, so while a thief is in there the units are simply
+still in the granary — no term in the ledger for goods in somebody's pockets inside a building, and a
+store destroyed mid-raid cannot vanish anything.
+
+**Rummaging time is per resource**, because it should be: grain is stored loose and a thief has to fill a
+sack, timber is stacked and you pick it up and go. `WoodLootShare` at 0.4 makes a lumber camp a
+qualitatively different target from a granary — it is robbed before anyone can gather, where a granary
+gives you a window — which is a real asymmetry between two buildings for the price of one number.
+
+### The chain of four, and why each hid the next
+
+**1. Nobody pursued at all.** §29's stand-down was correct and complete: once a thief was twelve metres
+from the granary it threatened nothing, so the defence went back to work — and the loot always got home.
+The missing case is that question one asks what would *leave with a raider*, and **the raider already
+carrying it is the most literal answer there is.** A loaded hostile is now a thing worth protecting, and
+pursuit is leashed by sight rather than by a distance anybody chose.
+
+**2. A loaded raider was as fast as an empty one.** 2.05 m/s in and 2.05 m/s out, against a villager's
+1.79 — so no defence could ever catch one. `RaidDirector`'s own class comment had been claiming otherwise
+for two sessions: *"slower loaded than empty, which is the whole of §7's argument for interception."* At
+`LadenShare` 0.7 it makes 1.44 m/s and the walk home is a window that closes on it.
+
+**3. Pursuit was by stale waypoint.** Defenders re-aimed every three seconds — which is the commitment
+window, and exactly right for *deciding*. It meant each one was always walking to where the raider had
+been: four metres of staleness against a closing speed of a third of a metre a second, so the gap could
+never be shut. A column of villagers ninety metres from home, still following. **Deciding every three
+seconds and steering every tick are different jobs**, and the movement layer already owns the second one —
+so a defender that stands is now handed the *body* (`QueueChase`) rather than the ground.
+
+**4. And then, with all of that fixed, still nothing died.** A chasing body settles at **0.95 m**. Two
+0.37 m bodies reached each other at **0.81 m**. Every defender in the game came to a halt a hand's breadth
+outside striking distance and stood there for the rest of the raid.
+
+That is this project's recurring finding for the sixth time — *two layers each with their own definition of
+"next to", and the one that happened to be convenient winning* — and it is the purest example of it yet,
+because both numbers were right on their own. `AgentDefaults.ChaseStopMetres` is named now, and the harm
+reach is written as a **floor** rather than by nudging `ReachShare` until it happened to clear: a body's
+reach is its own business, *except* that it can never be shorter than the distance at which the movement
+layer stops bringing bodies together.
+
+### Measured, one fix at a time, at a raid every 45 s
+
+| | raiders killed | settlers lost | furthest a settler went | grain carried off |
+|---|---|---|---|---|
+| as reported | 0 of 24 | 12 | 23 m | 600 |
+| + loaded raiders are slow | 0 of 24 | 13 | 24 m | 600 |
+| + a loaded raider is worth chasing | 0 of 24 | 10 | **109 m** | 600 |
+| + chase the body, not the ground | 0 of 24 | 3 | 90 m | 600 |
+| + reach cannot be shorter than the stop | **1** | 13 | 23 m | 560 |
+
+Every row is informative. Chasing without tracking produced the hundred-metre column; tracking without
+reach produced a defence that escorted raiders politely off the map and lost only three people doing it;
+reach turned it into an actual fight, which cost thirteen.
+
+At the **shipped** cadence of one raid every 240 s the settlement copes: three raids, one raider killed,
+three settlers lost, 23 people still alive, and nobody more than 22 m from home.
+
+### What is left is balance, and it is the roster's problem
+
+A villager is strength 1 and health 20; a raider is strength 3 and health 40. So a villager dies in under
+seven seconds and killing a raider takes forty villager-seconds of contact — six farmhands trade one of
+their own for one thief, and that is the *intended* ordering, written down in `UnitType`: **a villager
+fights badly on purpose.**
+
+Which means the thing the numbers are now asking for is not a tuning pass, it is `UnitType.Soldier` —
+strength 3, health 45, already on the roster and with no way to make one. That is the combat arc's
+business and it is the right place for it to start: the mechanics are all working end to end now, and what
+they reveal is a missing unit rather than a wrong number.

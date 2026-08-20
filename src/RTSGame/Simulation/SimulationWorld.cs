@@ -428,8 +428,63 @@ internal sealed class SimulationWorld
     private void MarchAgainstThreat(AgentId body, Vector2 toward) =>
         QueueMove(new[] { body }, Terrain.ClampPosition(toward));
 
+    /// <summary>
+    /// Puts a body inside a building, out of every query, and takes it back out again.
+    /// </summary>
+    /// <remarks>
+    /// Reversible absence, which is a different thing from a despawn: the four proxies are disabled rather
+    /// than removed, so the body comes back as itself with every handle anybody held still valid, and it
+    /// stays in the roster the whole time so the settlement can go on knowing its granary is being robbed.
+    /// <para>
+    /// It stops moving because it has nowhere to be and nothing can push it — with its proxies dark, the
+    /// avoidance solve does not see it and neither does depenetration, so a crowd walks over the doorway it
+    /// went in at rather than shouldering it around the yard.
+    /// </para>
+    /// </remarks>
+    public bool EnterShelter(AgentId id)
+    {
+        if (!Agents.Contains(id)) return false;
+        ref var agent = ref Agents.Get(id);
+        if (agent.Sheltered) return true;
+        agent.Sheltered = true;
+        CompletePath(ref agent);
+        agent.Velocity = Vector2.Zero;
+        SetBodyPresent(in agent, false);
+        return true;
+    }
+
+    /// <summary>Back out into the world, at a place, and visible to everything again.</summary>
+    public bool LeaveShelter(AgentId id, Vector2 at)
+    {
+        if (!Agents.Contains(id)) return false;
+        ref var agent = ref Agents.Get(id);
+        if (!agent.Sheltered) return true;
+        agent.Sheltered = false;
+        // Out onto open ground, not into the wall it came through.
+        agent.Position = NudgeOutOfBuildings(Terrain.ClampPosition(at), agent.Radius);
+        SetBodyPresent(in agent, true);
+        // The proxies could not follow it while they were dark, so they are where it went in. Put them
+        // where it came out, or it collides at the door for a tick and is depenetrated somewhere odd.
+        Colliders.Move(agent.Colliders.Movement, agent.Position);
+        Colliders.Move(agent.Colliders.Avoidance, agent.Position);
+        Colliders.Move(agent.Colliders.Placement, agent.Position);
+        Colliders.Move(agent.Colliders.Interaction, agent.Position);
+        return true;
+    }
+
+    private void SetBodyPresent(in AgentState agent, bool present)
+    {
+        Colliders.SetEnabled(agent.Colliders.Movement, present);
+        Colliders.SetEnabled(agent.Colliders.Avoidance, present);
+        Colliders.SetEnabled(agent.Colliders.Placement, present);
+        Colliders.SetEnabled(agent.Colliders.Interaction, present);
+    }
+
     /// <summary>The danger has passed: drop the walk, and let the jobs layer have the body back.</summary>
     private void StandDown(AgentId body) => QueueStop(new[] { body });
+
+    /// <summary>Go at a body and keep going at it, which is what the chase order already does.</summary>
+    private void ChargeThreat(AgentId body, AgentId target) => QueueChase(new[] { body }, target);
 
     /// <summary>
     /// Starts an errand to put a load somewhere before its carrier goes to fight.
@@ -998,6 +1053,15 @@ internal sealed class SimulationWorld
             // loaded raider worth doing, since killing it returns the grain rather than denying it.
             DropCargo(ref agent);
             CompletePath(ref agent);
+            // A disabled proxy is invisible to Remove, which goes through Contains. Put the body back in
+            // the world for the instant it takes to take it out properly, or its four proxies stay in the
+            // store forever — dark and harmless, and still a leak.
+            if (agent.Sheltered)
+            {
+                agent.Sheltered = false;
+                SetBodyPresent(in agent, true);
+            }
+
             Colliders.Remove(agent.Colliders.Movement);
             Colliders.Remove(agent.Colliders.Avoidance);
             Colliders.Remove(agent.Colliders.Placement);
@@ -1534,7 +1598,8 @@ internal sealed class SimulationWorld
             CanSee,
             MarchAgainstThreat,
             StandDown,
-            StowBeforeFighting);
+            StowBeforeFighting,
+            ChargeThreat);
         // The errand outlives the reason for it, so it is advanced whatever the defence decided this tick.
         AdvanceStowing();
         Timings.Record(SimulationPhase.Threat, Stopwatch.GetTimestamp() - phaseStart);
@@ -2339,7 +2404,11 @@ internal sealed class SimulationWorld
                     UpdateTargetBehavior(ref agent, stopDistance: 1.45f, flee: false, updatePeriod: 0.35f);
                     break;
                 case AgentLocomotionState.Chase:
-                    UpdateTargetBehavior(ref agent, stopDistance: 0.95f, flee: false, updatePeriod: 0.22f);
+                    UpdateTargetBehavior(
+                        ref agent,
+                        stopDistance: AgentDefaults.ChaseStopMetres,
+                        flee: false,
+                        updatePeriod: 0.22f);
                     break;
                 case AgentLocomotionState.Flee:
                     UpdateTargetBehavior(ref agent, stopDistance: 0f, flee: true, updatePeriod: 0.30f);

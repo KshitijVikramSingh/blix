@@ -65,6 +65,19 @@ internal static class AgentDefaults
     /// </remarks>
     public const float MaximumSpeed = 1.79f;
 
+    /// <summary>
+    /// How close a chasing body settles behind the body it is chasing, in metres.
+    /// </summary>
+    /// <remarks>
+    /// Named because something else has to agree with it. It is a following distance — near enough to be
+    /// on somebody's heels without shouldering them along — and for a chase that means to <em>fight</em>
+    /// it is also the closest a defender will ever get. See <c>ThreatSystem.Update</c>: harm reached 0.81 m
+    /// while a chase settled at 0.95, so every defender in the game halted a hand's breadth outside
+    /// striking distance and stayed there. Twenty-four raiders walked home with six hundred grain and not
+    /// one of them was ever hurt enough to notice.
+    /// </remarks>
+    public const float ChaseStopMetres = 0.95f;
+
     /// <summary>How hard a body picks up speed, in metres per second squared.</summary>
     /// <remarks>
     /// Mutable so the tuning overlay can move it; the constant is the shipped default.

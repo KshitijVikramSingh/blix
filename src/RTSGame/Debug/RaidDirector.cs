@@ -33,9 +33,34 @@ internal sealed class RaidSettings
     [Tune(1.0, 12.0, Label = "raiders per raid", Group = "raids")]
     public int Party = 3;
 
-    /// <summary>Seconds a raider spends filling its hands at a store.</summary>
-    [Tune(1.0, 30.0, Label = "seconds looting", Group = "raids")]
+    /// <summary>Seconds a raider spends inside a granary filling its hands with grain.</summary>
+    /// <remarks>
+    /// Grain is the slow case and therefore the one the dial is written in: it is stored loose or in sacks
+    /// and a thief has to fill something before it can carry any. See <see cref="WoodLootShare"/> for the
+    /// other end of that — the two together are what make a granary a different kind of target from a
+    /// timber yard rather than the same target with a different label.
+    /// </remarks>
+    [Tune(1.0, 30.0, Label = "seconds looting grain", Group = "raids")]
     public float LootSeconds = 6f;
+
+    /// <summary>
+    /// How long taking timber takes, as a share of taking grain.
+    /// </summary>
+    /// <remarks>
+    /// Much shorter, because logs are stacked and you carry them: a thief in a timber yard picks up what it
+    /// can hold and leaves, where one in a granary has to fill a sack. Which gives the two kinds of store
+    /// genuinely different defensive problems — a lumber camp is robbed before anybody can gather, and a
+    /// granary gives you a window. That is worth having as a real asymmetry rather than as flavour, and it
+    /// costs one number.
+    /// </remarks>
+    [Tune(0.1, 1.0, Label = "timber loots this much faster", Group = "raids")]
+    public float WoodLootShare = 0.4f;
+
+    /// <summary>Seconds inside a store, for what is being taken out of it.</summary>
+    public float RummageSecondsFor(Resource resource) =>
+        resource == Resource.Wood
+            ? LootSeconds * Math.Clamp(WoodLootShare, 0.05f, 1f)
+            : LootSeconds;
 
     /// <summary>How far out a raid appears, in metres.</summary>
     /// <remarks>
@@ -47,6 +72,25 @@ internal sealed class RaidSettings
     /// </remarks>
     [Tune(40.0, 290.0, Label = "raid appears at (m)", Group = "raids")]
     public float ArrivesAt = 120f;
+
+    /// <summary>
+    /// A loaded raider's pace, as a share of an empty one's.
+    /// </summary>
+    /// <remarks>
+    /// <b>Below a villager's, and that is the whole of §7's argument for interception.</b> A raider walks
+    /// in at 2.05 m/s against a villager's 1.79, which is right — you cannot catch a raid on its way in,
+    /// and you should not be able to. It walked <em>out</em> at 2.05 too, which meant a defence could never
+    /// catch it either: measured over eight raids, twenty-four raiders and not one of them died. The
+    /// villagers formed a column and followed it to the map edge, which is what "they don't actually die
+    /// even surrounded" looks like from above.
+    /// <para>
+    /// At 0.7 a loaded raider makes 1.44 m/s against an unloaded villager's 1.79, so the walk home is a
+    /// window that closes on it. Killing it returns the grain rather than denying it, which is why the loot
+    /// is worth chasing at all.
+    /// </para>
+    /// </remarks>
+    [Tune(0.3, 1.0, Label = "loaded raider pace", Group = "raids")]
+    public float LadenShare = 0.7f;
 
     /// <summary>Whether the camera snaps to a raid when it appears.</summary>
     /// <remarks>
@@ -79,6 +123,13 @@ internal sealed class RaidDirector
     private readonly RaidSettings settings;
     private readonly List<Raider> party = new();
     private readonly FactionId enemy = new(1);
+
+    /// <summary>How far past a store's wall a raider can still get in at it, in metres.</summary>
+    /// <remarks>
+    /// One number for both getting there and being there. Two definitions of "at the granary" is how a
+    /// raider came to be able to loot from outside one.
+    /// </remarks>
+    private const float LootReach = 1.2f;
     private float untilNext;
     private uint seed = 0x1B873593u;
 
@@ -119,12 +170,28 @@ internal sealed class RaidDirector
     /// feedback: a raid that has appeared two hundred metres away and a raid that is at the granary door are
     /// the same sentence and want entirely different reactions.
     /// </remarks>
-    public string Status => party.Count == 0
-        ? settings.Enabled ? $"quiet — next raid in {MathF.Max(0f, untilNext):F0}s" : "raids off"
-        : $"{party.Count} RAIDERS · " +
-          (nearest <= 14f
-              ? $"AT YOUR STORES · {CountBy(RaiderMood.Escaping)} getting away"
-              : $"{nearest:F0} m OFF · {CountBy(RaiderMood.Escaping)} getting away");
+    public string Status
+    {
+        get
+        {
+            if (party.Count == 0)
+            {
+                return settings.Enabled
+                    ? $"quiet — next raid in {MathF.Max(0f, untilNext):F0}s"
+                    : "raids off";
+            }
+
+            // Inside is worth its own word. A raider in the granary is not visible on the map, so the
+            // panel is the only thing that can say why the villagers are standing around a building.
+            var inside = CountBy(RaiderMood.Looting);
+            var where = inside > 0
+                ? $"{inside} INSIDE YOUR STORES"
+                : nearest <= 14f
+                    ? "AT YOUR STORES"
+                    : $"{nearest:F0} m OFF";
+            return $"{party.Count} RAIDERS · {where} · {CountBy(RaiderMood.Escaping)} getting away";
+        }
+    }
 
     private enum RaiderMood
     {
@@ -143,6 +210,12 @@ internal sealed class RaidDirector
 
         /// <summary>Seconds left to reach the store before giving up and going home.</summary>
         public float Patience;
+
+        /// <summary>Where it went in, which is where it comes back out.</summary>
+        public Vector2 Doorway;
+
+        /// <summary>What it went in for, decided on the way in because that is what sets the time.</summary>
+        public Resource Wanted;
     }
 
     /// <summary>
@@ -281,12 +354,21 @@ internal sealed class RaidDirector
         }
 
         ref readonly var store = ref world.Nodes.Get(raider.Target);
-        var reach = store.FootprintRadius + body.Radius + 1.2f;
+        var reach = store.FootprintRadius + body.Radius + LootReach;
         if (Vector2.DistanceSquared(body.Position, store.Position) <= reach * reach)
         {
+            // <b>In it goes.</b> Looting happens inside the building: it cannot be shoved off the door by
+            // the crowd that came to stop it, and it cannot be fought in there either. So the window runs
+            // to completion and the fight is about what comes out — which is a far better shape than a
+            // shoving match at the doorway whose outcome depended on crowd physics.
+            // <b>Decided on the way in, because what it is after is what decides how long it takes.</b>
+            // A thief filling a sack with grain is in there for a while; one picking up logs is not.
+            raider.Wanted = store.Stock.Grain >= store.Stock.Wood ? Resource.Grain : Resource.Wood;
             raider.Mood = RaiderMood.Looting;
-            raider.Timer = settings.LootSeconds;
+            raider.Timer = settings.RummageSecondsFor(raider.Wanted);
+            raider.Doorway = body.Position;
             world.QueueStop(new[] { raider.Body });
+            world.EnterShelter(raider.Body);
             return;
         }
 
@@ -297,16 +379,43 @@ internal sealed class RaidDirector
         }
     }
 
-    /// <summary>Fills its hands, then turns for the edge.</summary>
+    /// <summary>
+    /// Rummages inside for a while, then pops out with everything it can carry and runs.
+    /// </summary>
+    /// <remarks>
+    /// <b>The looting happens indoors, which fixes two things at once.</b> It was a stationary body at the
+    /// door with a countdown, and the countdown was the only part that was checked — so a raider shoved out
+    /// of the yard by the crowd went on emptying the granary from wherever it had been pushed to. Reported
+    /// as looting "without even being near the granary", which is exactly what it was.
+    /// <para>
+    /// Putting it inside is better than re-checking the distance, which was the first fix and made shoving
+    /// a raider off a doorway into an accidental defence mechanic decided by crowd physics. Now the window
+    /// runs to completion and the interesting moment is the one after it: the thing comes out loaded and
+    /// slow, and the people who gathered while it was in there get their chance.
+    /// </para>
+    /// <para>
+    /// The grain is taken on the way <em>out</em> rather than on the way in, which is not a detail — while
+    /// it is in there the units are still in the granary, so the ledger needs no term for goods in
+    /// somebody's pockets inside a building, and a raid interrupted by the store being destroyed cannot
+    /// vanish anything.
+    /// </para>
+    /// </remarks>
     private void Loot(SimulationWorld world, Raider raider, float deltaSeconds)
     {
+        raider.Patience -= deltaSeconds;
         raider.Timer -= deltaSeconds;
         if (raider.Timer > 0f) return;
+
+        // Out it comes, at the door it went in at.
+        world.LeaveShelter(raider.Body, raider.Doorway);
         if (world.Nodes.Contains(raider.Target))
         {
             ref var store = ref world.Nodes.Get(raider.Target);
             ref var body = ref world.Agents.Get(raider.Body);
-            var resource = store.Stock.Grain >= store.Stock.Wood ? Resource.Grain : Resource.Wood;
+            // What it went in for, not whatever is most plentiful now — a granary that was emptied while it
+            // rummaged sends it out with nothing, which is a defence working rather than a case to paper
+            // over.
+            var resource = raider.Wanted;
             var taken = Math.Min(body.CarryCapacity - body.Jobs.CarriedUnits, store.Stock[resource]);
             if (taken > 0)
             {
@@ -316,8 +425,23 @@ internal sealed class RaidDirector
             }
         }
 
+        Laden(world, raider);
         raider.Mood = RaiderMood.Escaping;
         world.QueueMove(new[] { raider.Body }, raider.Exit);
+    }
+
+    /// <summary>Sets a raider's pace to match what it is carrying.</summary>
+    /// <remarks>
+    /// The one place the loaded pace is applied, so an empty raider that dropped its load — killed and
+    /// revived it cannot be, but a store that had nothing in it leaves it empty-handed — walks home at
+    /// full speed rather than limping for no reason.
+    /// </remarks>
+    private void Laden(SimulationWorld world, Raider raider)
+    {
+        if (!world.Agents.Contains(raider.Body)) return;
+        ref var body = ref world.Agents.Get(raider.Body);
+        var share = body.Jobs.CarriedUnits > 0 ? Math.Clamp(settings.LadenShare, 0.1f, 1f) : 1f;
+        body.MaximumSpeed = UnitType.Raider.MaximumSpeed * share;
     }
 
     /// <summary>Runs for the edge it came in at, and is gone when it gets there.</summary>

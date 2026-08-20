@@ -128,6 +128,24 @@ internal struct AgentState
     public NodeId StowInto;
 
     /// <summary>
+    /// Whether this body is inside a building and therefore not in the world at all.
+    /// </summary>
+    /// <remarks>
+    /// <b>A raider looting a granary is in the granary.</b> Which turns out to be the whole mechanic: while
+    /// it is in there it cannot be shoved off the door by the crowd that came to stop it, and it cannot be
+    /// fought either — so looting is a window that runs to completion, and the fight happens when it comes
+    /// out carrying something. That is a far better shape than the alternative, which was a shoving match
+    /// at the door whose outcome depended on crowd physics.
+    /// <para>
+    /// Not drawn, because it is indoors, and not a target and not an obstacle: its four collider proxies are
+    /// disabled rather than removed, so it comes back as the same body with the same handles. It stays in
+    /// the world's roster the entire time, which is deliberate — the settlement can still see that its
+    /// granary is being robbed, and the defence gathers outside while it happens.
+    /// </para>
+    /// </remarks>
+    public bool Sheltered;
+
+    /// <summary>
     /// Whether something outside the simulation is deciding this body's movement.
     /// </summary>
     /// <remarks>

@@ -231,9 +231,14 @@ internal static class SettlementScenarios
                 $"{world.Timings.Format(world.Agents.Count, world.TickNumber).Split("total ")[1].Split(" ms")[0],7}");
         }
 
+        // Raiders killed, spelled out. It was "bodies killed" against "settlers lost" and the difference
+        // had to be done in your head — which is how twenty-four raiders came and went over eight raids
+        // with not one of them killed and nobody noticing for two sessions.
+        var settlersLost = settlers - CountSettlers(world);
         Console.WriteLine(
             $"  {raids.Raids} raids, {raids.Escaped} got away with {raids.Stolen}, " +
-            $"{world.Threat.Killed} bodies killed, {world.Threat.Dealt:F0} body-seconds of harm dealt");
+            $"{world.Threat.Killed - settlersLost} raiders killed, {settlersLost} settlers lost, " +
+            $"{world.Threat.Dealt:F0} body-seconds of harm dealt");
         Console.WriteLine(
             $"  most standing at once {stoodEver}, most fleeing {fledEver}, " +
             $"most who left it to somebody closer {spareEver}, " +
@@ -261,16 +266,22 @@ internal static class SettlementScenarios
 
         // Settlers, not bodies: LiveCount includes the raiders, so a settlement wiped out while nineteen
         // raiders stand about in it reads as a healthy population. That is how this check missed a wipe.
-        var left = 0;
-        foreach (ref readonly var agent in world.Agents.All)
-        {
-            if (agent.IsAlive && agent.Faction.Value == 0) left++;
-        }
-
+        var left = CountSettlers(world);
         if (left == 0) faults.Add($"the settlement was wiped out — {settlers} people, none left");
 
         foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");
         return faults.Count > 0 ? 1 : 0;
+    }
+
+    private static int CountSettlers(SimulationWorld world)
+    {
+        var alive = 0;
+        foreach (ref readonly var agent in world.Agents.All)
+        {
+            if (agent.IsAlive && agent.Faction.Value == 0) alive++;
+        }
+
+        return alive;
     }
 
     /// <summary>

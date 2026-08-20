@@ -74,6 +74,25 @@ internal sealed class ColliderWorld
         agentHashDirty = true;
     }
 
+    /// <summary>
+    /// Takes a proxy out of every query without giving up its id, or puts it back.
+    /// </summary>
+    /// <remarks>
+    /// Unlike <see cref="Remove"/> this is reversible, which is the whole point: a body that is briefly not
+    /// in the world — inside a building, say — has to come back as the same body, with the same four proxies
+    /// and the same id, or every handle anybody was holding is stale. Note that it does not go through
+    /// <c>Contains</c>, because a disabled proxy is exactly what this has to be able to find.
+    /// </remarks>
+    public void SetEnabled(ColliderId id, bool enabled)
+    {
+        if (id.Value < 0 || id.Value >= colliders.Count) return;
+        if (colliders[id.Value].Enabled == enabled) return;
+        colliders[id.Value].Enabled = enabled;
+        partitionsDirty = true;
+        staticHashDirty = true;
+        agentHashDirty = true;
+    }
+
     public void Move(ColliderId id, Vector2 center)
     {
         if (!Contains(id)) return;

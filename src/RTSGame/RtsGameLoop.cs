@@ -2338,7 +2338,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         foreach (ref readonly var agent in simulation.Agents.All)
         {
-            if (!agent.IsAlive) continue;
+            // Indoors, so not drawn. A raider rummaging in the granary is in the granary, and the way you
+            // know it is in there is that it went in and has not come out — see AgentState.Sheltered.
+            if (!agent.IsAlive || agent.Sheltered) continue;
             var position = Vector2.Lerp(agent.PreviousPosition, agent.Position, interpolation);
             var height = simulation.Terrain.SampleHeight(position);
             var selected = selection.Contains(agent.Id);

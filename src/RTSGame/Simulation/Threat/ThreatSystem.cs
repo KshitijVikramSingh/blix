@@ -31,6 +31,21 @@ internal sealed class ThreatSystem
     /// </remarks>
     internal static float ReachShare = 1.1f;
 
+    /// <summary>How far inside a fighter's reach a chase has to settle for the fight to happen.</summary>
+    /// <remarks>
+    /// <b>The two numbers have to agree, and they did not.</b> A chasing body settles at
+    /// <see cref="AgentDefaults.ChaseStopMetres"/> — 0.95 m — and two 0.37 m bodies reached 0.81 m, so a
+    /// defender sent to fight came to a stop a hand's breadth outside striking distance and stood there for
+    /// the rest of the raid. It is the same mistake this project keeps finding: two layers each with their
+    /// own definition of "next to", and the one that happened to be convenient winning.
+    /// <para>
+    /// Written as a floor rather than by raising <see cref="ReachShare"/> until it happened to clear, so
+    /// that the dependency is stated: reach is a body's own business, <em>except</em> that it can never be
+    /// shorter than the distance at which the movement layer will stop bringing bodies together.
+    /// </para>
+    /// </remarks>
+    internal static float ContactSlack = 0.15f;
+
     /// <summary>Bodies killed by hostiles since the world began.</summary>
     public long Killed { get; private set; }
 
@@ -99,17 +114,22 @@ internal sealed class ThreatSystem
         {
             ref var attacker = ref bodies[i];
             if (!attacker.IsAlive || attacker.Strength <= 0f) continue;
+            // Indoors: it can neither reach out nor be reached. See AgentState.Sheltered — this is what
+            // makes looting a window that runs to completion rather than a shoving match at the door.
+            if (attacker.Sheltered) continue;
             for (var j = 0; j < bodies.Length; j++)
             {
                 if (i == j) continue;
                 ref var target = ref bodies[j];
-                if (!target.IsAlive) continue;
+                if (!target.IsAlive || target.Sheltered) continue;
                 if ((factions.Between(attacker.Faction, target.Faction) & RelationMask.Enemy) == 0)
                 {
                     continue;
                 }
 
-                var reach = (attacker.Radius + target.Radius) * ReachShare;
+                var reach = MathF.Max(
+                    (attacker.Radius + target.Radius) * ReachShare,
+                    AgentDefaults.ChaseStopMetres + ContactSlack);
                 if (Vector2.DistanceSquared(attacker.Position, target.Position) > reach * reach) continue;
                 target.Health -= attacker.Strength * deltaSeconds;
                 Dealt += attacker.Strength * deltaSeconds;
@@ -151,6 +171,23 @@ internal sealed class ThreatSystem
     /// fight, and that where the load goes must not be into the fight — hence the danger it is given.
     /// </remarks>
     internal delegate bool Stow(AgentId body, Vector2 danger);
+
+    /// <summary>
+    /// Go at a body rather than at a place, and keep going at it as it moves.
+    /// </summary>
+    /// <remarks>
+    /// <b>A fight is a moving target, and marching to a point cannot catch one.</b> Measured: defenders
+    /// re-aimed every three seconds, which is the commitment window and exactly right for <em>deciding</em>
+    /// — and it meant each one was always walking to where the raider had been. A raider makes four metres
+    /// in three seconds and a villager closes at a third of a metre a second, so the stale gap could never
+    /// be shut: over eight raids, six hundred grain carried off, not one raider killed, and a column of
+    /// villagers a hundred metres from home still following.
+    /// <para>
+    /// Deciding every three seconds and <em>steering</em> every tick are different jobs, and the movement
+    /// layer already owns the second one. So a defender that stands is given the body, not the ground.
+    /// </para>
+    /// </remarks>
+    internal delegate void Charge(AgentId body, AgentId target);
 
     /// <summary>Whether an observer can see a point — the world's sight test, trees and all.</summary>
     internal delegate bool Sees(in AgentState observer, Vector2 target);
@@ -207,7 +244,8 @@ internal sealed class ThreatSystem
         Sees sees,
         March march,
         Halt halt,
-        Stow stow)
+        Stow stow,
+        Charge charge)
     {
         Standing = 0;
         Fleeing = 0;
@@ -216,6 +254,12 @@ internal sealed class ThreatSystem
 
         // Who is hostile to the settlement. Faction-agnostic: gathered once as indices, and each defender
         // asks the relation itself, so this works the same when the hostility is another player's people.
+        //
+        // <b>Sheltered bodies are deliberately in this list.</b> A raider rummaging inside the granary
+        // cannot be fought and cannot be shoved, but it is emphatically still a threat to the granary — so
+        // the alarm holds while it is in there, the defence gathers at the door it went in by, and the
+        // people who gathered are standing there when it comes out. Excluding it here would look like
+        // tidiness and would mean a settlement that goes back to work while it is being robbed.
         hostiles.Clear();
         for (var i = 0; i < bodies.Length; i++)
         {
@@ -230,11 +274,12 @@ internal sealed class ThreatSystem
             // Somebody else is already deciding where this body goes. See AgentState.Directed: the defence
             // is deliberately written against hostility rather than against raiders, and the price of that
             // is that it would run the raiders too if nothing said not to.
-            if (body.Directed) continue;
+            if (body.Directed || body.Sheltered) continue;
             body.Resolve = MathF.Max(0f, body.Resolve - deltaSeconds);
 
             // 1. What can I see that is worth protecting, and is something reaching for it?
-            var threat = NearestThreatSeen(bodies, nodes, factions, sees, in body, out var where, out var at);
+            var threat = NearestThreatSeen(
+                bodies, nodes, factions, sees, in body, out var where, out var at, out var assailant);
             if (threat <= 0f)
             {
                 // Stand down, once, on the tick the danger passes — rather than walking off after the
@@ -304,7 +349,8 @@ internal sealed class ThreatSystem
             // 3. At them, or toward the nearest group bigger than ours.
             if (stand)
             {
-                march(body.Id, at);
+                if (assailant.Value >= 0) charge(body.Id, assailant);
+                else march(body.Id, at);
                 continue;
             }
 
@@ -327,10 +373,12 @@ internal sealed class ThreatSystem
         Sees sees,
         in AgentState body,
         out Vector2 where,
-        out Vector2 at)
+        out Vector2 at,
+        out AgentId assailant)
     {
         where = default;
         at = default;
+        assailant = new AgentId(-1);
         var bestDistance = float.PositiveInfinity;
         var bestThreat = 0f;
 
@@ -346,10 +394,29 @@ internal sealed class ThreatSystem
 
         for (var i = 0; i < bodies.Length; i++)
         {
-            ref readonly var ally = ref bodies[i];
-            if (!ally.IsAlive || ally.Jobs.CarriedUnits <= 0) continue;
-            if ((factions.Between(body.Faction, ally.Faction) & RelationMask.Ally) == 0) continue;
-            guarded.Add(ally.Position);
+            ref readonly var other = ref bodies[i];
+            if (!other.IsAlive || other.Sheltered || other.Jobs.CarriedUnits <= 0) continue;
+            var relation = factions.Between(body.Faction, other.Faction);
+            if ((relation & RelationMask.Ally) != 0)
+            {
+                // A carter on the road is a resource that walks, which is why a loaded one is worth
+                // defending and an empty one is not.
+                guarded.Add(other.Position);
+                continue;
+            }
+
+            // <b>And so is a raider carrying your grain, which is the case that was missing.</b> Question
+            // one asks what would leave with a raider; the raider that is already carrying it is the most
+            // literal answer there is, and without it the numbers said this plainly — over eight raids,
+            // twenty-four raiders, six hundred grain carried off and <em>not one raider killed</em>. The
+            // reason was the stand-down: once a thief was twelve metres from the granary it threatened
+            // nothing, so the defence correctly went back to work and the loot always got home.
+            //
+            // Pursuit is leashed by sight rather than by a distance anybody chose. A defender chases what
+            // it can see; a raider with a big enough head start is gone, and one that is slowed by what it
+            // is carrying is not. That is §7's argument in full — killing it returns the grain rather than
+            // denying it, so the walk home is the window and the loot is what makes the window worth taking.
+            if ((relation & RelationMask.Enemy) != 0) guarded.Add(other.Position);
         }
 
         foreach (var resource in guarded)
@@ -362,6 +429,7 @@ internal sealed class ThreatSystem
             var strength = 0f;
             var nearest = float.PositiveInfinity;
             var attacker = Vector2.Zero;
+            var who = new AgentId(-1);
             foreach (var index in hostiles)
             {
                 ref readonly var hostile = ref bodies[index];
@@ -372,6 +440,9 @@ internal sealed class ThreatSystem
                 if (reach >= nearest) continue;
                 nearest = reach;
                 attacker = hostile.Position;
+                // Named, so a defender can be sent at it rather than at the ground it is standing on.
+                // A body indoors is not something to charge — it is a reason to be waiting at the door.
+                who = hostile.Sheltered ? new AgentId(-1) : hostile.Id;
             }
 
             if (strength <= 0f) continue;
@@ -379,6 +450,7 @@ internal sealed class ThreatSystem
             bestThreat = strength;
             where = resource;
             at = attacker;
+            assailant = who;
         }
 
         return bestThreat;
@@ -436,6 +508,7 @@ internal sealed class ThreatSystem
             // Never the asker: a body must count itself, or a laden villager reads the fight as hopeless
             // and runs from something it could win once its hands were free.
             if (ally.PuttingDown && ally.Id != body.Id) continue;
+            if (ally.Sheltered) continue;
             if (!sees(in ally, where)) continue;
 
             total += ally.Strength;
