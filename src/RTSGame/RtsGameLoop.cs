@@ -1751,7 +1751,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // coordinates, so it is stable across a rebuild and identical between two runs.
             var checker = 1f + ((x + z) % 2 == 0 ? look.CheckerContrast : -look.CheckerContrast) * 0.5f;
             var jitter = 1f + (BlockJitter(x, z) - 0.5f) * look.GroundVariation;
-            var color = TerrainColor(terrain.SampleSurface(center)) * (checker * jitter);
+            var color = BlockColor(terrain, center, block) * (checker * jitter);
             color.W = 1f;
             // Sized exactly to its spacing. An earlier version grew each block by a hair to
             // close sub-pixel cracks and bought a far worse artefact: neighbours then overlap
@@ -1885,6 +1885,50 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         hash = (hash ^ (hash >> 16)) * 0x7FEB352Du;
         hash = (hash ^ (hash >> 15)) * 0x846CA68Bu;
         return ((hash ^ (hash >> 16)) & 0xFFFFFFu) / (float)0x1000000u;
+    }
+
+    /// <summary>
+    /// A ground block's colour, averaged over the block rather than sampled at its centre.
+    /// </summary>
+    /// <remarks>
+    /// <b>The green patches in the woodland, and they are a resolution mismatch rather than a look.</b>
+    /// Forest cover is a fact about <em>navigation cells</em> — <c>RefreshForestCover</c> writes
+    /// <c>TerrainSurface.Forest</c> onto every half-metre cell with two trees crowding it — and a coarse
+    /// ground block is <b>five metres</b>. So a block spans a hundred cells and took its colour from
+    /// <em>one sample at its centre</em>: one cell in a hundred decided the colour of all hundred.
+    /// <para>
+    /// The two colours are far apart — grass at 0.144 green against a forest floor at 0.082, better than
+    /// twice as dark — so in patchy woodland adjacent blocks flipped between them on a coin toss, and what
+    /// that looks like is bright green squares scattered among the trees. Reported as exactly that, and
+    /// dating from the session dense trees arrived, which is when a surface first varied inside a block.
+    /// </para>
+    /// <para>
+    /// Averaging the samples rather than taking a majority, because the honest answer for a block that is
+    /// half wooded is <em>half</em>: it makes a wood's edge a gradient over a few blocks instead of a
+    /// staircase, which is what an edge looks like. Five by five is twenty-five samples of a hundred cells,
+    /// enough that a single stray cell cannot carry a whole block, and this runs only when the terrain
+    /// revision changes.
+    /// </para>
+    /// </remarks>
+    private static Vector4 BlockColor(Simulation.Terrain.TerrainMap terrain, Vector2 center, float block)
+    {
+        const int side = 5;
+        var half = block * 0.5f;
+        var step = block / side;
+        var total = Vector4.Zero;
+        var counted = 0;
+        for (var j = 0; j < side; j++)
+        for (var i = 0; i < side; i++)
+        {
+            var at = center + new Vector2(
+                -half + (i + 0.5f) * step,
+                -half + (j + 0.5f) * step);
+            if (!terrain.Contains(at)) continue;
+            total += TerrainColor(terrain.SampleSurface(at));
+            counted++;
+        }
+
+        return counted == 0 ? TerrainColor(terrain.SampleSurface(center)) : total / counted;
     }
 
     /// <summary>Checker squares across the map, bounded by what one batch can hold.</summary>
