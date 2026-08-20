@@ -161,6 +161,28 @@ internal sealed class LookSettings
     [Tune(0.0, 1.0, Label = "haze glows toward the sun", Group = "sun")]
     public float HazeSunGlow = 0.55f;
 
+    /// <summary>How hard the ground wears where somebody stands, per second.</summary>
+    /// <remarks>
+    /// A body standing still for <c>1 / gain</c> seconds wears its patch fully. At 0.02 that is fifty
+    /// seconds, which is about a shift at a field — so a worked field wears its own edges within a season
+    /// and a road wears where carts actually run, while somebody merely walking past leaves almost nothing.
+    /// </remarks>
+    [Tune(0.0, 0.2, Label = "ground wears (per s)", Group = "ground")]
+    public float WearGain = 0.02f;
+
+    /// <summary>How fast grass grows back, as a rate per second.</summary>
+    /// <remarks>
+    /// The information is in the <em>contrast</em> between where people go and where they used to, so
+    /// without this a settlement ends its first year uniformly trodden and says nothing. At 0.004 a
+    /// disused path is half gone in about three minutes of simulated time.
+    /// </remarks>
+    [Tune(0.0, 0.05, Label = "grass grows back (per s)", Group = "ground")]
+    public float WearFadeRate = 0.004f;
+
+    /// <summary>How much a worn patch changes the ground it is on, from nothing to bare earth.</summary>
+    [Tune(0.0, 1.0, Label = "wear shows", Group = "ground")]
+    public float WearStrength = 0.75f;
+
     /// <summary>How much the far distance washes out toward the sky.</summary>
     [Tune(0.0, 1.0, Label = "aerial perspective", Group = "air")]
     public float FogStrength = 0.72f;

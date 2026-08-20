@@ -697,6 +697,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             Slots: new[]
             {
                 new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                new DescriptorSetSlot(0, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 InstanceBuffer.Slot,
             },
             PushConstants: new[]
@@ -843,6 +844,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.PixelatedRepeat),
             new byte[] { 255, 255, 255, 255 },
             "rts-selection-pixel");
+        // Smooth-sampled, because a path is a smudge and not a grid: at 192 cells over 600 m each is three
+        // metres, and nearest sampling would draw the footfall grid itself rather than the paths in it.
+        wearTexture = graphicsDevice.CreateTexture2D(
+            new TextureDescription(WearCells, WearCells, TextureFormat.R8, SamplerDescription.LinearClamp),
+            wear,
+            "rts-wear");
 
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         mouseX = host.LogicalSize.Width * 0.5f;
@@ -1416,6 +1423,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
 
         var frame = (float)Math.Clamp(time.Delta, 0.0, 0.25);
+        AdvanceWear(frame);
         ApplyWoodlandCover(frame);
         PanCamera(frame);
         UpdateCameraFocus(frame);
@@ -1604,7 +1612,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             look.ShadowPenumbraTexels,
             look.ShadowNormalOffsetTexels);
         var light = new Vector4(look.SunIntensity, look.Ambient, look.TerminatorWrap, 0f);
-        var haze = new Vector4(look.HazeDesaturation, look.HazeSunGlow, 0f, 0f);
+        // z carries the map's own size so the shader can turn a world position into a wear lookup: the map
+        // is centred on the origin, so uv is worldPos.xz / extent + 0.5 and needs no second uniform.
+        var haze = new Vector4(
+            look.HazeDesaturation, look.HazeSunGlow, simulation.ExtentMeters, look.WearStrength);
         var grade = new Vector4(
             look.Exposure, (float)look.Tonemap, look.Saturation, look.Contrast);
         Matrix4x4.Invert(viewProjection, out var inverseViewProjection);
@@ -1672,6 +1683,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var shadowBinding = new[]
         {
             new ShaderTextureBinding("uSunShadowMap", graph.GetDepthTexture(sunShadowHandle), Slot: 0),
+            new ShaderTextureBinding("uWear", wearTexture, Slot: 1),
         };
         graph.Pass(scenePassHandle, scope =>
         {
@@ -2408,6 +2420,74 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 width,
                 SettlementArt.FreeYawOf(cx * 73 + cz * 179)));
         }
+    }
+
+    /// <summary>
+    /// Where people have been walking, accumulated, and painted onto the ground.
+    /// </summary>
+    /// <remarks>
+    /// <b>The one visual system here that is ours rather than borrowed from a reference image.</b> Every
+    /// reference has worn paths between its buildings, and every reference had them <em>painted by hand</em> —
+    /// a still frame cannot have paths that came from anywhere else. We have every body's position thirty
+    /// times a second, so ours can come from where people actually walk: they deepen along a real haul route,
+    /// they fork where a route forks, they appear round a new field the season it is worked, and they fade
+    /// when nobody goes that way any more.
+    /// <para>
+    /// Which makes it more than decoration. The receding wood line, the catchment a house sits outside, the
+    /// route a cart runs — all of those are currently legible only from a panel, and a settlement that wears
+    /// its own history into the ground says them without a single interface element.
+    /// </para>
+    /// <para>
+    /// Cosmetic, so it lives here and not in the simulation: it decides nothing, it is not fingerprinted,
+    /// and it is not saved. A loaded world starts with clean ground and wears it again, which is honest for
+    /// something that is a record of watching rather than a fact about the world.
+    /// </para>
+    /// </remarks>
+    private const int WearCells = 192;
+
+    private readonly byte[] wear = new byte[WearCells * WearCells];
+    private readonly float[] wearAccumulator = new float[WearCells * WearCells];
+    private TextureHandle wearTexture;
+    private int wearUploadCountdown;
+
+    /// <summary>
+    /// Adds this frame's footfall and decays what is there, then uploads if it is time.
+    /// </summary>
+    /// <remarks>
+    /// Decay and upload are both throttled rather than per-frame. Wear changes over minutes — a path is not
+    /// a thing that appears in a frame — so re-uploading a 36 KB texture four times a second is already far
+    /// finer than the phenomenon, and the accumulator carries the fractional part that a byte cannot.
+    /// </remarks>
+    private void AdvanceWear(float deltaSeconds)
+    {
+        var extent = simulation.ExtentMeters;
+        var scale = WearCells / extent;
+        foreach (ref readonly var agent in simulation.Agents.All)
+        {
+            if (!agent.IsAlive || agent.Sheltered) continue;
+            var x = (int)((agent.Position.X + extent * 0.5f) * scale);
+            var z = (int)((agent.Position.Y + extent * 0.5f) * scale);
+            if (x < 0 || z < 0 || x >= WearCells || z >= WearCells) continue;
+            // Per second, so a body standing still wears its own spot at the same rate whatever the frame
+            // rate is — and a body that walks through wears a line rather than a dot.
+            wearAccumulator[z * WearCells + x] =
+                MathF.Min(1f, wearAccumulator[z * WearCells + x] + deltaSeconds * look.WearGain);
+        }
+
+        wearUploadCountdown--;
+        if (wearUploadCountdown > 0) return;
+        wearUploadCountdown = 15;
+
+        // Grass grows back. Without this a settlement ends its first year uniformly trodden, which says
+        // nothing — the information is in the contrast between where people go and where they used to.
+        var keep = MathF.Exp(-look.WearFadeRate * 0.5f);
+        for (var i = 0; i < wearAccumulator.Length; i++)
+        {
+            wearAccumulator[i] *= keep;
+            wear[i] = (byte)(Math.Clamp(wearAccumulator[i], 0f, 1f) * 255f);
+        }
+
+        graphicsDevice.UploadTextureMip(wearTexture, 0, wear);
     }
 
     /// <summary>A stable 0..1 from a cell and a channel, so a stone is always the same stone.</summary>

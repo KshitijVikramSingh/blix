@@ -18,6 +18,9 @@ layout(location = 3) in vec4 vSunShadowCoord;
 layout(location = 0) out vec4 outColor;
 
 layout(set = 0, binding = 0) uniform sampler2D uSunShadowMap;
+// Where people have been walking. One channel, three metres a texel, smooth-sampled — see
+// RtsGameLoop.AdvanceWear for what fills it and why it is not simulation state.
+layout(set = 0, binding = 1) uniform sampler2D uWear;
 
 layout(push_constant) uniform Push {
     mat4 uViewProjection;
@@ -27,7 +30,8 @@ layout(push_constant) uniform Push {
     vec4 uFog;      // x = start (m), y = end (m), z = strength
     vec4 uShadow;   // x = texel as a fraction of the map, y = map size (m), z = penumbra, w = offset
     vec4 uLight;    // x = sun intensity, y = ambient scale, z = terminator wrap
-    vec4 uHaze;     // x = desaturation with distance, y = how much haze glows toward the sun
+    vec4 uHaze;     // x = desaturation with distance, y = haze glow toward the sun,
+                    // z = map extent (m), w = how much wear shows
 };
 
 // The hues stay here and the intensities do not. A colour is a decision about what kind of
@@ -95,6 +99,16 @@ void main() {
         vec3 dry  = albedo * vec3(1.16, 1.10, 0.86);
         vec3 damp = albedo * vec3(0.86, 0.96, 0.90);
         albedo = mix(damp, dry, smoothstep(0.25, 0.78, macro));
+
+        // <b>And where people walk, the grass goes.</b> The map is centred on the origin, so the lookup
+        // needs no second uniform. Toward bare trodden earth rather than simply darker: a path is a
+        // different material, not shaded grass, and the giveaway of a fake one is that it stays green.
+        vec2 wearUv = vWorldPos.xz / uHaze.z + 0.5;
+        float trodden = texture(uWear, wearUv).r * uHaze.w;
+        // Eased so the edges of a path feather instead of ending, since footfall does.
+        trodden = smoothstep(0.05, 0.85, trodden);
+        vec3 bare = vec3(0.20, 0.15, 0.10);
+        albedo = mix(albedo, bare, trodden * 0.8);
     }
 
     // <b>Leaves are not plastic.</b> Foliage is most of the screen and was shaded exactly like a roof tile.
