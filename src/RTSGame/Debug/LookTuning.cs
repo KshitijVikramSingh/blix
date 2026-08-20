@@ -82,6 +82,27 @@ internal sealed class LookSettings
         set => Atmosphere.DayLengthSeconds = value;
     }
 
+    /// <summary>How far a plant leans at a metre above its own root, in metres.</summary>
+    /// <remarks>
+    /// <b>The amplitude of the only thing in this scene that moves without being told to.</b> Small on
+    /// purpose and easy to overdo: at a tenth of a metre an eight-metre pine's crown travels about
+    /// twenty-eight centimetres, which is a lean you notice only once you have seen it stop. The square
+    /// root of height is doing the shape of it — see <c>Shaders/world.vert</c>.
+    /// <para>
+    /// Worth knowing before turning it up: the shadow casters do <em>not</em> lean. The sun's box is 150 m
+    /// across a 2048 map, so a texel is 7 cm and the crown's travel at this amplitude is about four of
+    /// them, softened again by the penumbra — a discrepancy under the resolution of the thing that would
+    /// show it. Past about 0.25 that argument stops holding and the shadows want the same displacement,
+    /// which means the caster's push constants growing to carry the wind.
+    /// </para>
+    /// </remarks>
+    [Tune(0.0, 0.4, Label = "wind sway (m)", Group = "wind")]
+    public float WindSway = 0.10f;
+
+    /// <summary>How fast the gusts come, in radians a simulated second.</summary>
+    [Tune(0.0, 2.0, Label = "gust rate", Group = "wind")]
+    public float WindGustRate = 0.31f;
+
     /// <summary>How much saturation a high sun takes out of the frame.</summary>
     /// <remarks>
     /// A proxy onto <see cref="Atmosphere.MiddaySaturationDrop"/>, which is where the argument for it is

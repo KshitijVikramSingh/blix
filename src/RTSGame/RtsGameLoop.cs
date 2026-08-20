@@ -272,9 +272,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private InstanceBuffer canopyBuffer = null!, canopyCasterBuffer = null!;
 
     // viewProj, camPos, sunDir, sunVP, fog, shadow, light, haze, sunTint, skyAmbient, groundAmbient,
-    // hazeAway, hazeToward. Every one of the last five used to be a constant in world.frag, which is why a
-    // year looked like one afternoon — see Rendering/Atmosphere.cs.
-    private readonly byte[] worldPush = new byte[304];
+    // hazeAway, hazeToward, wind. Every one of the last five palette entries used to be a constant in
+    // world.frag, which is why a year looked like one afternoon — see Rendering/Atmosphere.cs. This length
+    // is also the declared push-constant range, in OnLoad, so the two cannot drift apart.
+    private readonly byte[] worldPush = new byte[320];
     private readonly byte[] skyPush = new byte[128];     // invViewProj, camPos, sunDir, zenith, horizon
     private readonly byte[] shadowPush = new byte[64];   // sun shadow VP
     private readonly byte[] gradePush = new byte[32];    // grade, then the eye's night response
@@ -762,12 +763,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             },
             PushConstants: new[]
             {
-                // <b>Three places agree on this number and all three have to be edited together.</b> The
-                // block is declared in world.vert, again in world.frag, and its size again here — so adding
-                // one vec4 to the fragment shader alone gets you a draw-time payload-length error, and
-                // adding it to both shaders alone gets you the same error with a shorter search. It is the
-                // recurring finding in a fourth costume: one fact, three owners.
-                new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 304),
+                // <b>It was four places, not three, and the fourth is what caught out the wind vec4.</b>
+                // The block is declared in world.vert, again in world.frag, its size again here, and the
+                // payload's own length once more where worldPush is allocated — so editing both shaders and
+                // the buffer still bought a draw-time payload-length error, and the number it complained
+                // about was this one. The recurring finding in a fifth costume: one fact, four owners.
+                //
+                // Two of them are now one: the range is the payload's length, because a range that
+                // disagrees with the array it describes is never the answer to anything. The shaders still
+                // have to be kept in step by hand, since the size lives in their layout.
+                new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, worldPush.Length),
             });
 
         var shaderDirectory = Path.Combine(AppContext.BaseDirectory, "Shaders");
@@ -1784,6 +1789,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         MemoryMarshal.Write(worldPush.AsSpan(256, 16), in groundAmbient);
         MemoryMarshal.Write(worldPush.AsSpan(272, 16), in hazeAway);
         MemoryMarshal.Write(worldPush.AsSpan(288, 16), in hazeToward);
+        // <b>Wind on the same clock as the sun, which is the simulated one.</b> Wall time would be a third
+        // opinion about when it is: at three times compression the people would be hurrying about under
+        // trees stirring at a leisurely real-world rate, and the scene would come apart at exactly the
+        // moment the player asked it to go faster.
+        var wind = new Vector4(
+            look.WindSway, (float)(simulation.TickNumber / 30.0), look.WindGustRate, 0f);
+        MemoryMarshal.Write(worldPush.AsSpan(304, 16), in wind);
         MemoryMarshal.Write(skyPush.AsSpan(0, 64), in inverseViewProjection);
         MemoryMarshal.Write(skyPush.AsSpan(64, 16), in cameraPosition);
         MemoryMarshal.Write(skyPush.AsSpan(80, 16), in sun);

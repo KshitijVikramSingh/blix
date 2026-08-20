@@ -47,6 +47,9 @@
          editing a lib file retriggers the cook. -->
     <GlslInclude Include="..\Blix.Shaders\shadow.glsl" />
     <GlslInclude Include="..\Blix.Shaders\tonemap.glsl" />
+    <GlslInclude Include="..\Blix.Shaders\noise.glsl" />
+    <!-- The game's own shared GLSL, resolved relative to the including file. -->
+    <GlslInclude Include="Shaders\materials.glsl" />
   </ItemGroup>
 
   <Target Name="CompileSpirV"

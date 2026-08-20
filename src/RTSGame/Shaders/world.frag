@@ -41,6 +41,8 @@ layout(push_constant) uniform Push {
     vec4 uGroundAmbient;
     vec4 uHazeAway;
     vec4 uHazeToward;
+    // Declared but unread here, for the reason the vertex stage gives: one block, one layout, every stage.
+    vec4 uWind;
 };
 
 // The hues stay here and the intensities do not. A colour is a decision about what kind of
@@ -57,20 +59,8 @@ layout(push_constant) uniform Push {
 // Value noise and fbm — src/Blix.Shaders/noise.glsl.
 #include "noise.glsl"
 
-// The material classes, matching SettlementArt.MaterialClass. Carried in the instance colour's fourth
-// channel because an opaque pass has no use for alpha, which keeps a material system out of the shared
-// InstanceData struct — see the remarks there.
-const float kTerrain = 0.05;
-const float kCrafted = 0.15;
-const float kPlaster = 0.25;
-const float kRoof    = 0.35;
-const float kTimber  = 0.45;
-const float kStone   = 0.55;
-const float kFoliage = 0.65;
-const float kCrop    = 0.75;
-const float kBody    = 0.85;
-
-bool isClass(float carried, float which) { return abs(carried - which) < 0.05; }
+// The material classes — Shaders/materials.glsl, shared with the vertex stage.
+#include "materials.glsl"
 
 void main() {
     vec3 n = normalize(vNormal);
@@ -120,7 +110,7 @@ void main() {
     // says "leaf" and costs one dot product.
     float wrapExtra = 0.0;
     float through = 0.0;
-    if (isClass(surface, kFoliage) || isClass(surface, kCrop)) {
+    if (isPlant(surface)) {
         wrapExtra = 0.35;
         // Backlight: how much the sun is behind this surface from where we stand.
         vec3 toEye = normalize(uCamPos.xyz - vWorldPos);
@@ -136,8 +126,7 @@ void main() {
     // field, and pulling the whole frame's saturation to fix the field drains the earth and the tiles too.
     // The amount arrives per frame from Atmosphere.MiddayGreenDrop against the sun's height, so it is
     // strongest at a summer noon and effectively absent all winter.
-    if (uLight.w < 0.999 &&
-        (isClass(surface, kFoliage) || isClass(surface, kCrop) || isClass(surface, kTerrain))) {
+    if (uLight.w < 0.999 && (isPlant(surface) || isClass(surface, kTerrain))) {
         float value = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
         albedo = mix(vec3(value) * vec3(1.04, 1.00, 0.92), albedo, uLight.w);
     }

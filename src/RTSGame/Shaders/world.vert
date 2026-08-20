@@ -37,6 +37,10 @@ layout(push_constant) uniform Push {
     vec4 uGroundAmbient;
     vec4 uHazeAway;
     vec4 uHazeToward;
+    // x = how far a plant leans at a metre up, y = the clock in simulated seconds, z = how fast the gusts
+    // come, w = spare. Read here and nowhere else, which is the first thing in this block the vertex stage
+    // owns rather than tolerates.
+    vec4 uWind;
 };
 
 layout(location = 0) out vec3 vNormal;
@@ -49,10 +53,46 @@ layout(location = 3) out vec4 vSunShadowCoord;
 // the already-offset light-space position across a triangle is both cheaper and smoother
 // than offsetting per pixel.
 #include "shadow.glsl"
+// The material classes — Shaders/materials.glsl, shared with the fragment stage.
+#include "materials.glsl"
+
+// <b>Wind, as a lean rather than as an animation.</b> Nothing in this scene has ever moved except the
+// people, which is most of why a still frame of it reads as a diorama: a wood with eleven thousand trees in
+// it and not a leaf stirring is uncanny in a way no amount of shading fixes.
+//
+// Three decisions keep it restrained, which is the whole brief:
+//
+// It hinges at the ground. The displacement is scaled by how far the vertex is above its own instance's
+// origin, so a trunk barely moves, a canopy leans, and nothing detaches from the earth it is planted in.
+// Height enters as a square root rather than linearly, because a tree is stiffer than a blade of grass —
+// linear would put the same degree of tilt on an eight-metre pine as on a hand of wheat, which at a
+// believable amplitude for the pine is imperceptible on the wheat and at a believable one for the wheat
+// throws the pine across the map.
+//
+// It is out of phase with itself. The phase carries a world-space term, so neighbours lean at different
+// moments and a wood ripples instead of pulsing. Two frequencies at right angles, so a leaning plant
+// describes a slow figure of eight rather than sliding along a line.
+//
+// And it gusts, on a slow spatial wave, because steady wind reads as a machine. The gust never reaches
+// zero — dead calm in one patch while the next one moves is a stranger artefact than a little wind
+// everywhere.
+vec3 blix_rts_lean(vec3 worldPos, float baseY, float carried) {
+    if (!isPlant(carried) || uWind.x <= 0.0) return worldPos;
+    float above = max(worldPos.y - baseY, 0.0);
+    float t = uWind.y;
+    // A slow travelling wave, so a gust arrives somewhere before it arrives everywhere.
+    float gust = 0.55 + 0.45 * sin(t * uWind.z + (worldPos.x + worldPos.z * 0.7) * 0.02);
+    float phase = t * 1.7 + worldPos.x * 0.23 + worldPos.z * 0.19;
+    float amount = uWind.x * gust * sqrt(above);
+    return worldPos + vec3(sin(phase), 0.0, cos(phase * 0.83)) * amount;
+}
 
 void main() {
     Instance inst = instances[gl_InstanceIndex];
     vec4 world = inst.model * vec4(inPosition, 1.0);
+    // The instance's own origin is the last column, since the matrix arrives transposed — see the note at
+    // the top of this file. That is where the plant is rooted, whatever the mesh's own pivot happens to be.
+    world.xyz = blix_rts_lean(world.xyz, inst.model[3].y, inst.tint.a);
     gl_Position = uViewProjection * world;
     vec3 normal = normalize(mat3(inst.model) * inNormal);
     vNormal = normal;
