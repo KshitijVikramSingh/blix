@@ -2422,22 +2422,24 @@ internal sealed class SimulationWorld
                     UpdateTargetBehavior(ref agent, stopDistance: 1.45f, flee: false, updatePeriod: 0.35f);
                     break;
                 case AgentLocomotionState.Chase:
-                    // <b>The stop distance is load-bearing and that is not obvious.</b> Removing it was
-                    // tried on the reasoning that a chase is for catching: the body halts at 0.95 m, and
-                    // at an acceleration of 2 m/s² it needs nine tenths of a second to get going again,
-                    // by which time the quarry is a metre further on — so contact ought to be a duty cycle
-                    // rather than a state. Measured over five seeds it was <em>worse</em> (raiders killed
-                    // 4.4 to 3.0, carried off 424 to 480) and body-seconds of fighting did not move at all,
-                    // 244 to 237, which is the part that settles it.
+                    // <b>Straight at it, and re-aimed constantly. Both, or neither works.</b> Measured on
+                    // --fightbench, which is the only instrument that could see it:
                     //
-                    // The reason is that halting at 0.95 m parks the body <em>inside</em> its own 1.10 m
-                    // reach and keeps it there, while pathing at a moving target churns the route and
-                    // tracks it worse. Stopping just short of somebody is how you stay next to them.
-                    UpdateTargetBehavior(
-                        ref agent,
-                        stopDistance: AgentDefaults.ChaseStopMetres,
-                        flee: false,
-                        updatePeriod: 0.22f);
+                    //   stop 0.95 m, re-aim every 0.5 m of drift -> settles 1.92 m off, 0% in reach
+                    //   stop 0.00 m, re-aim every 0.5 m of drift -> settles 0.96 m off, 0% in reach
+                    //   stop 0.95 m, re-aim on any drift         -> settles 1.70 m off, 0% in reach
+                    //   stop 0.00 m, re-aim on any drift         -> closes to 0.00 m, 92% in reach, kills
+                    //
+                    // Neither change alone does anything at all, which is why single changes judged one at
+                    // a time against a six-minute raid found nothing for a whole session: a stop distance
+                    // holds the body off, and a stale goal holds it off by as much again, so removing
+                    // either leaves the other doing the job. Together they are the difference between a
+                    // pursuit that has never once landed a blow and one that catches a quarry going at
+                    // seven tenths of its pace in twenty-two seconds.
+                    //
+                    // Follow keeps both: following somebody about is not the act of running them down, and
+                    // it does not want to end in contact.
+                    UpdateTargetBehavior(ref agent, stopDistance: 0f, flee: false, updatePeriod: 0.22f);
                     break;
                 case AgentLocomotionState.Flee:
                     UpdateTargetBehavior(ref agent, stopDistance: 0f, flee: true, updatePeriod: 0.30f);
@@ -2534,7 +2536,15 @@ internal sealed class SimulationWorld
         var requested = flee
             ? Terrain.ClampPosition(agent.Position - direction * 6f, agent.Radius + BodyFootprint.NavigationMargin)
             : Terrain.ClampPosition(target.Position - direction * stopDistance, agent.Radius + BodyFootprint.NavigationMargin);
-        if (agent.HasDestination && Vector2.DistanceSquared(requested, agent.RequestedDestination) < 0.25f)
+        // <b>How stale the goal may get before it is re-asked, and a chase cannot afford what a follow
+        // can.</b> Half a metre of slack is right for following somebody about; in a chase it is half a
+        // metre of permanent lag, because the body walks to where the quarry was, arrives, halts, and waits
+        // to be re-aimed. Measured on --fightbench: the closest a chase ever got was stop-distance plus a
+        // constant 0.96 m, at every stop distance including zero, and this threshold is where that constant
+        // comes from.
+        var staleness = agent.LocomotionState == AgentLocomotionState.Chase ? 0.04f : 0.25f;
+        if (agent.HasDestination &&
+            Vector2.DistanceSquared(requested, agent.RequestedDestination) < staleness)
         {
             return;
         }

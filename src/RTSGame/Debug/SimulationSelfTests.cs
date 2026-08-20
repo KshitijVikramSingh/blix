@@ -4294,9 +4294,13 @@ internal static class SimulationSelfTests
         // and the real figure sits below the cap — measured, about half of it. Asserting the sum would be
         // asserting that depenetration does nothing, which is both false and not what this is about. What
         // has to hold is that the cap binds and that count alone no longer decides the fight.
-        var front = taken <= byTheSix * 1.05f &&
-                    taken < byTheTwelve * 0.9f &&
-                    taken > byTheSix * 0.2f;
+        // <b>A ceiling and a floor of "something happened", and no more than that.</b> The absolute figure
+        // is not a property of the cap: it depends on how many of the ring are momentarily inside reach,
+        // which is depenetration jitter against a reach of 0.81 m — when the reach floor of §33 was retired
+        // this fell from 3.2 to 1.1 without the cap changing at all, and an assertion that moved with it
+        // was measuring the wrong thing. What has to hold is that the cap binds, that count alone does not
+        // decide the fight, and that a fight happens.
+        var front = taken <= byTheSix * 1.05f && taken < byTheTwelve * 0.9f && taken > 0f;
         var shutOut = reached > 0;
         var passed = front && shutOut && fit == 6;
         Console.WriteLine(

@@ -31,7 +31,23 @@ internal sealed class ThreatSystem
     /// </remarks>
     internal static float ReachShare = 1.1f;
 
-    /// <summary>How far inside a fighter's reach a chase has to settle for the fight to happen.</summary>
+    /// <summary>
+    /// Retired: reach is a body's own business again.
+    /// </summary>
+    /// <remarks>
+    /// <b>§33 made the harm reach a floor of <c>ChaseStopMetres + ContactSlack</c> and that dependency was
+    /// written the wrong way round.</b> The intent was sound — reach must not be shorter than the distance
+    /// at which the movement layer stops bringing bodies together — but tying one to the other means that
+    /// closing the gap by lowering the stop distance lowers the reach with it, and the two can never meet.
+    /// Visible in the sweep: at stop 0 the bodies came within 0.96 m of each other while the floor had just
+    /// shrunk to 0.15, so reach was 0.81 and still short.
+    /// <para>
+    /// A chase now closes to contact, so the constraint is satisfied by the movement layer doing its job
+    /// rather than by the harm rule compensating for it not doing it. Kept as a named number because the
+    /// invariant is still real and worth stating: if a chase ever stops short again, this is where it will
+    /// show up as raiders that cannot be hurt.
+    /// </para>
+    /// </remarks>
     /// <remarks>
     /// <b>The two numbers have to agree, and they did not.</b> A chasing body settles at
     /// <see cref="AgentDefaults.ChaseStopMetres"/> — 0.95 m — and two 0.37 m bodies reached 0.81 m, so a
@@ -197,9 +213,7 @@ internal sealed class ThreatSystem
                     continue;
                 }
 
-                var reach = MathF.Max(
-                    (attacker.Radius + defender.Radius) * ReachShare,
-                    AgentDefaults.ChaseStopMetres + ContactSlack);
+                var reach = (attacker.Radius + defender.Radius) * ReachShare;
                 var gap = Vector2.Distance(attacker.Position, defender.Position);
                 if (gap > reach) continue;
                 engaged.Add((gap, attacker.Id.Value, i));

@@ -4278,3 +4278,75 @@ standing still. The order of work is now:
 2. **Health in question two**, so a defence weighs whether it can outlast rather than only out-hit.
 3. **The cordon**, which is the avoidance layer and the genuinely invasive one — and now has a measurement
    to be judged by rather than a six-minute raid.
+
+## 42. Pursuit works, and it took two changes that each do nothing alone
+
+The benchmark earned itself in one sitting. §41 found that a chase settles at `stop + 0.96 m` against a
+reach of 0.81 m, so pursuit had never landed a blow. Two candidate causes, tested one at a time and then
+together:
+
+| | effective gap | inside reach | catches a 0.7× quarry |
+|---|---|---|---|
+| stop 0.95 m, re-aim on 0.5 m of drift *(shipped)* | 1.92 m | 0% | never |
+| stop **0.00 m**, re-aim on 0.5 m of drift | 0.96 m | 0% | never |
+| stop 0.95 m, **re-aim on any drift** | 1.70 m | 0% | never |
+| stop **0.00 m** and **re-aim on any drift** | **0.00 m** | **92%** | **21.7 s** |
+
+**Neither change does anything alone, and together they are the whole difference.** A stop distance holds
+the body off; a stale goal holds it off by as much again; remove either and the other still does the job.
+Which is exactly why a session of single changes judged against a six-minute raid found nothing — and it is
+worth noticing that *stop 0 was tried and rejected in §39*, on the broken instrument, with the verdict
+"my mechanism story was wrong". The story was incomplete rather than wrong, and there was no way to tell
+the difference without an instrument that could see 0.96 m.
+
+The re-aim threshold is the subtler half. Half a metre of goal staleness is right for following somebody
+about and is *permanent lag* in a chase: the body walks to where the quarry was, arrives, halts, and waits
+to be re-aimed. So `Chase` re-aims on any drift at all and `Follow` keeps the slack, which is the honest
+distinction — following somebody about is not the act of running them down and does not want to end in
+contact.
+
+### The gradient that falls out of it
+
+```
+    quarry pace | caught | inside reach% | gap at end
+       2.06 m/s |     no |            0% |   16.97 m     gets clean away
+       1.79 m/s |     no |            0% |    1.20 m     shadowed, never closed
+       1.61 m/s |     no |           97% |    0.95 m     ground down, survives the minute
+       1.25 m/s | 21.7 s |           94% |    0.00 m     run down
+       1.07 m/s | 21.5 s |           95% |    0.00 m     run down
+```
+
+That is §7's promise as a measured curve: a raider that is faster than you gets away, one at your pace is
+shadowed and harried, and one slowed by what it is carrying is caught. Nothing in it was tuned — it is what
+the speeds and the reach already implied, once the layer stopped holding the pursuer off.
+
+### And §33's floor is retired
+
+`ReachShare` is a body's own business again. §33 made the harm reach a floor of
+`ChaseStopMetres + ContactSlack`, and that dependency was written the wrong way round: closing the gap by
+lowering the stop distance lowered the reach with it, so the two could never meet. The constraint it
+expressed is still real — reach must not be shorter than where the movement layer stops bringing bodies
+together — but it is satisfied now by the movement layer doing its job rather than by the harm rule
+compensating for it not doing so.
+
+Retiring it took the reach from 1.10 m to the honest 0.81 m, which turned the front's self-test red on an
+absolute-damage assertion: 3.2 health a second became 1.1 with the cap unchanged. That assertion was
+measuring depenetration jitter, not the cap, and now asserts what it meant to — the ceiling binds, count
+alone does not decide the fight, and a fight happens.
+
+### In the raid, over ten seeds
+
+| | got home /24 | their dead | **our dead** | stolen | recovered |
+|---|---|---|---|---|---|
+| before | 11.6 ± 1.2 | 3.4 ± 1.2 | **12.6 ± 4.1** | 464 ± 47 | 160 ± 56 |
+| pursuit works | 11.9 ± 1.2 | 3.1 ± 1.3 | **9.4 ± 3.5** | 476 ± 48 | 164 ± 50 |
+
+Ten seeds this time, not five, and pooled across both blocks — §40's lesson applied. **Our dead falls from
+12.6 to 9.4** and everything else is flat inside the noise. Which is the right shape: defenders that can
+actually reach a fight stop trailing behind one getting killed piecemeal. That raiders still get away with
+much the same amount is consistent with the benchmark — a laden raider at 1.44 m/s against a villager's
+1.79 is a 0.8× quarry, and the curve says 0.8× survives the minute.
+
+**The cordon is untouched and still broken**: `1.00x` detour at every N from two to twelve, identical to
+nobody being in the way. That is item three, it is the avoidance layer proper, and it now has a measurement
+to be judged by.
