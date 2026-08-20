@@ -11,6 +11,7 @@ using RTSGame.Simulation.Navigation;
 using RTSGame.Simulation.Persistence;
 using RTSGame.Simulation.Placement;
 using RTSGame.Simulation.Spatial;
+using RTSGame.Simulation.Threat;
 using RTSGame.Simulation.Terrain;
 
 namespace RTSGame.Simulation;
@@ -725,7 +726,10 @@ internal sealed class SimulationWorld
             type.NavigationRadius,
             type.TurningRadius,
             type.CarryCapacity,
-            type.Appetite);
+            type.Appetite,
+            type.SightMetres,
+            type.Strength,
+            type.Health);
 
     public AgentId SpawnAgent(
         Vector2 position,
@@ -736,6 +740,9 @@ internal sealed class SimulationWorld
         float turningRadius = 0f,
         int carryCapacity = 0,
         float appetite = 1f,
+        float sightMetres = 22f,
+        float strength = 1f,
+        float health = 20f,
         bool allowEmbedded = false)
     {
         position = Terrain.ClampPosition(position, radius + BodyFootprint.NavigationMargin);
@@ -746,7 +753,7 @@ internal sealed class SimulationWorld
         var resolvedFaction = faction ?? new FactionId(0);
         var id = Agents.Spawn(
             position, resolvedFaction, radius, maximumSpeed, navigationRadius, turningRadius,
-            carryCapacity, appetite);
+            carryCapacity, appetite, sightMetres, strength, health);
         var owner = ColliderOwner.Agent(id);
         ref var agent = ref Agents.Get(id);
         agent.Colliders = new AgentColliderSet(
@@ -1060,6 +1067,12 @@ internal sealed class SimulationWorld
 
     private readonly List<Vector2> forestNeighbours = new();
 
+    /// <summary>Harm, and shortly the decision to stand or run. See <c>ThreatSystem</c> and §28.</summary>
+    private readonly ThreatSystem threat = new();
+
+    /// <summary>Bodies killed by something hostile, and damage dealt, for the report.</summary>
+    public ThreatSystem Threat => threat;
+
     /// <summary>
     /// Whether anybody could get to a tree, which since Stage E's forest cover is a real question.
     /// </summary>
@@ -1096,6 +1109,42 @@ internal sealed class SimulationWorld
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Whether a body can see a point: within its sight, and not through a wood.
+    /// </summary>
+    /// <remarks>
+    /// <b>Trees block sight and nothing else does</b>, which is deliberate rather than unfinished. A wood is
+    /// the one thing on this map tall enough and deep enough to hide an approach, and it is the half of
+    /// "forest cover" that blocking movement did not give — the gaps a settlement has cut through its own
+    /// woodland are now both the ways in and the only ways it can watch. Buildings are sparse and a
+    /// settlement ought to be able to see across itself; water hides nothing.
+    /// <para>
+    /// Sampled along the ray at raster resolution, and asked <em>per hostile</em> rather than per pair: for
+    /// one raider, which of mine can see it. A handful of raiders against thirty bodies is a few hundred
+    /// samples; per-pair across ten thousand nodes would not be affordable and is not the question anybody
+    /// asks.
+    /// </para>
+    /// </remarks>
+    public bool CanSee(in AgentState observer, Vector2 target)
+    {
+        var toTarget = target - observer.Position;
+        var distance = toTarget.Length();
+        if (distance > observer.SightMetres) return false;
+        if (distance <= NavigationCellSize) return true;
+
+        var step = toTarget / distance * NavigationCellSize;
+        var at = observer.Position;
+        var samples = (int)(distance / NavigationCellSize);
+        for (var i = 1; i < samples; i++)
+        {
+            at += step;
+            if (!Terrain.Transform.TryWorldToCell(at, out var cell)) continue;
+            if (Terrain.Surface(cell) == TerrainSurface.Forest) return false;
+        }
+
+        return true;
     }
 
     public void RebuildTerrainNavigation()
@@ -1152,6 +1201,7 @@ internal sealed class SimulationWorld
         Agents.Write(writer);
         Nodes.Write(writer);
         economy.Write(writer);
+        threat.Write(writer);
         Colliders.Write(writer);
         Congestion.Write(writer);
         paths.Write(writer);
@@ -1197,6 +1247,7 @@ internal sealed class SimulationWorld
         Agents.Read(reader);
         Nodes.Read(reader);
         economy.Read(reader);
+        threat.Read(reader);
         Colliders.Read(reader);
         Congestion.Read(reader);
         paths.Read(reader);
@@ -1273,6 +1324,13 @@ internal sealed class SimulationWorld
         economy.Update(
             Nodes, Agents, Date, deltaSeconds, TryTravelSeconds, BornAt, Emigrate, ReleaseForestCover);
         Timings.Record(SimulationPhase.Economy, Stopwatch.GetTimestamp() - phaseStart);
+
+        phaseStart = Stopwatch.GetTimestamp();
+        // After the economy and before the jobs layer: harm is a fact about where bodies already are, and
+        // the jobs layer is what reacts to it. A body killed this tick should not then be given work.
+        var fallen = threat.Update(Agents, Colliders.Factions, deltaSeconds);
+        if (fallen.Count > 0) DespawnAgents(fallen.ToArray());
+        Timings.Record(SimulationPhase.Threat, Stopwatch.GetTimestamp() - phaseStart);
 
         phaseStart = Stopwatch.GetTimestamp();
         UpdateJobs(deltaSeconds);

@@ -38,7 +38,10 @@ internal sealed class AgentStore
         type.NavigationRadius,
         type.TurningRadius,
         type.CarryCapacity,
-        type.Appetite);
+        type.Appetite,
+        type.SightMetres,
+        type.Strength,
+        type.Health);
 
     public AgentId Spawn(
         Vector2 position,
@@ -48,7 +51,10 @@ internal sealed class AgentStore
         float navigationRadius = 0f,
         float turningRadius = 0f,
         int carryCapacity = 0,
-        float appetite = 1f)
+        float appetite = 1f,
+        float sightMetres = 22f,
+        float strength = 1f,
+        float health = 20f)
     {
         EnsureCapacity(Count + 1);
         var id = new AgentId(Count);
@@ -69,6 +75,9 @@ internal sealed class AgentStore
             TurningRadius = turningRadius,
             CarryCapacity = carryCapacity,
             Appetite = appetite,
+            SightMetres = sightMetres,
+            Strength = strength,
+            Health = health,
             MaximumSpeed = maximumSpeed,
             Acceleration = AgentDefaults.Acceleration,
             Deceleration = AgentDefaults.Deceleration,

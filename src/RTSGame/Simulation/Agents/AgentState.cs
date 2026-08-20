@@ -62,6 +62,26 @@ internal struct AgentState
     public bool HasCart;
     /// <summary>How much this body eats, relative to a villager. See <c>UnitType.Appetite</c>.</summary>
     public float Appetite;
+
+    /// <summary>How far this body can see, in metres. Trees block it; see <c>SimulationWorld.CanSee</c>.</summary>
+    /// <remarks>
+    /// On the body rather than on the building, because a settlement's vision is its people — which is how
+    /// an outpost comes to push detection outward without a radius being attached to a tower. It extends
+    /// your sight exactly as far as the garrison you were willing to take off a field.
+    /// </remarks>
+    public float SightMetres;
+
+    /// <summary>Damage a second this body deals to something hostile it is standing next to.</summary>
+    public float Strength;
+
+    /// <summary>Seconds of damage left in this body. At zero it leaves the world and drops its load.</summary>
+    /// <remarks>
+    /// Health in seconds-of-damage rather than in an abstract pool, so a fight can be read without a combat
+    /// model: five villagers at one damage a second take eight seconds over a forty-health raider, and the
+    /// raider's three take twenty over a villager. Both numbers are on the roster and neither needs a curve.
+    /// </remarks>
+    public float Health;
+
     public float MaximumSpeed;
     public float Acceleration;
     /// <summary>Rate this body sheds speed at; see AgentDefaults.Deceleration.</summary>

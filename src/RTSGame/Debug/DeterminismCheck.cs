@@ -5,6 +5,7 @@ using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Economy;
 using RTSGame.Simulation.Movement;
 using RTSGame.Simulation.Spatial;
+using RTSGame.Simulation.Threat;
 
 namespace RTSGame.Debug;
 
@@ -72,6 +73,7 @@ internal static class DeterminismCheck
         "SimulationWorld.LastCongestionRoot", "SimulationWorld.LastCongestionRepathAgent",
         "SimulationWorld.commands", "SimulationWorld.paths", "SimulationWorld.moveGroups",
         "SimulationWorld.nextMoveGroupId", "SimulationWorld.blockColliders",
+        "ThreatSystem.Killed", "ThreatSystem.Dealt",
         "SimulationWorld.congestionRecoveryCooldown",
         "SimulationWorld.rasterizedTerrainRevision", "SimulationWorld.routePlansThisTick",
         "SimulationWorld.ExtentMeters", "SimulationWorld.Nodes", "SimulationWorld.economy",
@@ -113,9 +115,13 @@ internal static class DeterminismCheck
             "bodies, and those are fingerprinted.",
         ["SimulationWorld.forestNeighbours"] =
             "scratch for one felling's cover decision, gathered from the trees and read within the call.",
+        ["SimulationWorld.threat"] =
+            "the harm system itself, whose fields are censused in their own right below.",
         ["EconomySystem.Readiness"] =
             "recomputed from the stores and the households at the head of every population pass, before " +
             "anything reads it; it is a reported figure rather than a carried one.",
+        ["ThreatSystem.fallen"] =
+            "who died this tick, refilled by every pass and handed straight back to the world.",
         ["EconomySystem.drawnOn"] =
             "rebuilt at the head of every pass of the board from the supply bindings on the houses, " +
             "which are on the nodes and are fingerprinted.",
@@ -139,7 +145,7 @@ internal static class DeterminismCheck
     /// one of these, plain data, or has a line in <see cref="Boundaries"/>.
     /// </summary>
     private static readonly Type[] Censused =
-        { typeof(SimulationWorld), typeof(MoveGroup), typeof(EconomySystem) };
+        { typeof(SimulationWorld), typeof(MoveGroup), typeof(EconomySystem), typeof(ThreatSystem) };
 
     /// <summary>
     /// Subsystems read through a named surface instead of field by field, and what that
@@ -494,6 +500,8 @@ internal static class DeterminismCheck
         sink.Add("Born", world.Economy.Born);
         sink.Add("Emigrated", world.Economy.Emigrated);
         sink.Add("Raised", world.Economy.Raised);
+        sink.Add("Killed", world.Threat.Killed);
+        sink.Add("Dealt", world.Threat.Dealt);
         foreach (var resource in Resources.All)
         {
             sink.Add("Produced", world.Economy.Produced[resource]);

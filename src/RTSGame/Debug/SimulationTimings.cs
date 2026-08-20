@@ -8,6 +8,7 @@ internal enum SimulationPhase
     AgentIndex,
     Commands,
     Economy,
+    Threat,
     Jobs,
     Behaviors,
     NavigationRefresh,
@@ -44,6 +45,7 @@ internal sealed class SimulationTimings
 
     private static string Label(SimulationPhase phase) => phase switch
     {
+        SimulationPhase.Threat => "threat",
         SimulationPhase.Congestion => "congestion",
         SimulationPhase.AgentIndex => "index",
         SimulationPhase.NavigationRefresh => "nav",

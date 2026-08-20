@@ -135,6 +135,7 @@ internal static class SimulationSelfTests
         Check("a building costs timber carried out and hands standing at it", ABuildingCostsLabour());
         Check("housing caps a population and food brakes it", PeopleArriveWhenThereIsRoomAndFood());
         Check("a household that goes hungry loses somebody", PrivationSpendsItselfAsEmigration());
+        Check("a wood hides what walks through it", TreesBlockSight());
         Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
@@ -4047,6 +4048,50 @@ internal static class SimulationSelfTests
             $"    a season of empty stores: {started} -> {world.Agents.LiveCount} people, {lost} left; " +
             $"privation cleared once the granary was filled={recovered}, and nobody else left after=" +
             $"{stayedPut}; drift {drift.Grain}/{drift.Wood}");
+        return passed;
+    }
+
+    /// <summary>
+    /// The second half of forest cover: a wood conceals, and the gaps in it are the only sightlines.
+    /// </summary>
+    /// <remarks>
+    /// Blocking movement gave a settlement constrained approach routes; this is what makes those routes
+    /// worth constraining. The same body at the same range is seen across open ground and not seen through
+    /// trees, so the wood a settlement has been cutting into is both the way in and the only way it can
+    /// watch — and the value of the clearing it has made is that it can see across it.
+    /// </remarks>
+    private static bool TreesBlockSight()
+    {
+        var world = new SimulationWorld(240f);
+        var watcher = world.SpawnAgent(Vector2.Zero, UnitType.Villager);
+        var sight = world.Agents.Get(watcher).SightMetres;
+
+        // A target well inside sight, and open ground between.
+        var target = new Vector2(sight * 0.7f, 0f);
+        var seenAcrossOpenGround = world.CanSee(in world.Agents.Get(watcher), target);
+        var beyondSight = !world.CanSee(in world.Agents.Get(watcher), new Vector2(sight * 1.4f, 0f));
+
+        // Now put a stand of trees between them, dense enough to close the ground.
+        for (var i = 0; i < 40; i++)
+        {
+            var at = new Vector2(sight * 0.35f + i % 4 * 1.2f, (i / 4) * 1.2f - 5.4f);
+            var tree = world.AddNode(NodeKind.Tree, at, capacity: (int)Woodland.WoodPerTree);
+            world.SeedStock(tree, Resource.Wood, (int)Woodland.WoodPerTree);
+        }
+
+        world.RefreshForestCover();
+        world.RebuildTerrainNavigation();
+        var hiddenByTrees = !world.CanSee(in world.Agents.Get(watcher), target);
+
+        // And a target the same distance away, but reached across the clearing beside the wood.
+        var pastTheWood = new Vector2(0f, sight * 0.7f);
+        var seenThroughTheGap = world.CanSee(in world.Agents.Get(watcher), pastTheWood);
+
+        var passed = seenAcrossOpenGround && beyondSight && hiddenByTrees && seenThroughTheGap;
+        Console.WriteLine(
+            $"    sight {sight:F0} m: open ground at {sight * 0.7f:F0} m seen={seenAcrossOpenGround}, " +
+            $"beyond sight refused={beyondSight}, same range through a wood seen={!hiddenByTrees}, " +
+            $"through the clearing beside it seen={seenThroughTheGap}");
         return passed;
     }
 
