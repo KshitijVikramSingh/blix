@@ -42,9 +42,28 @@ const vec3 kSunColor      = vec3(1.00, 0.94, 0.80);
 // atmospheric scattering and most of what makes a low sun read as a time of day.
 const vec3 kHazeAway      = vec3(0.60, 0.70, 0.84);
 const vec3 kHazeToward    = vec3(0.92, 0.82, 0.66);
+// What colour the light in shade is. Sky, essentially, because that is what reaches it.
+const vec3 kShadeTint     = vec3(0.62, 0.74, 0.95);
 
 // Shared sun-shadow technique — src/Blix.Shaders/shadow.glsl.
 #include "shadow.glsl"
+// Value noise and fbm — src/Blix.Shaders/noise.glsl.
+#include "noise.glsl"
+
+// The material classes, matching SettlementArt.MaterialClass. Carried in the instance colour's fourth
+// channel because an opaque pass has no use for alpha, which keeps a material system out of the shared
+// InstanceData struct — see the remarks there.
+const float kTerrain = 0.05;
+const float kCrafted = 0.15;
+const float kPlaster = 0.25;
+const float kRoof    = 0.35;
+const float kTimber  = 0.45;
+const float kStone   = 0.55;
+const float kFoliage = 0.65;
+const float kCrop    = 0.75;
+const float kBody    = 0.85;
+
+bool isClass(float carried, float which) { return abs(carried - which) < 0.05; }
 
 void main() {
     vec3 n = normalize(vNormal);
@@ -59,10 +78,56 @@ void main() {
     // that faces away.
     float wrapped = max((sunDot + uLight.z) / (1.0 + uLight.z), 0.0);
 
+    float surface = vTint.a;
+    vec3 albedo = vTint.rgb;
+
+    // <b>Land, not a lit plane with a tint on it.</b> The single biggest prototype signal left: real ground
+    // varies in hue and value over tens of metres — drier here, greener there, a little warmer where the sun
+    // has been on it — and ours was one flat colour per block. Two octaves in world space at 40 m and 120 m,
+    // deliberately broad: this is not detail, and a repeating grass texture would fight the low-poly art
+    // rather than help it. Kept restrained enough to read as land rather than as camouflage.
+    if (isClass(surface, kTerrain)) {
+        float broad = blix_vnoise2(vWorldPos.xz * 0.0085);
+        float fine  = blix_vnoise2(vWorldPos.xz * 0.025 + 37.0);
+        float macro = broad * 0.68 + fine * 0.32;
+        // Toward dry straw where the noise is high and cool moss where it is low, around the block's own
+        // colour rather than replacing it — so a road stays a road and mud stays mud.
+        vec3 dry  = albedo * vec3(1.16, 1.10, 0.86);
+        vec3 damp = albedo * vec3(0.86, 0.96, 0.90);
+        albedo = mix(damp, dry, smoothstep(0.25, 0.78, macro));
+    }
+
+    // <b>Leaves are not plastic.</b> Foliage is most of the screen and was shaded exactly like a roof tile.
+    // Two cheap corrections: a wider terminator, because a canopy is a thousand leaves and has no single
+    // facet normal worth respecting; and light coming through from behind, which is the thing that actually
+    // says "leaf" and costs one dot product.
+    float wrapExtra = 0.0;
+    float through = 0.0;
+    if (isClass(surface, kFoliage) || isClass(surface, kCrop)) {
+        wrapExtra = 0.35;
+        // Backlight: how much the sun is behind this surface from where we stand.
+        vec3 toEye = normalize(uCamPos.xyz - vWorldPos);
+        through = pow(max(dot(-toEye, normalize(uSunDir.xyz)), 0.0), 2.0) * 0.55;
+    }
+
+    float wrapWide = max((sunDot + uLight.z + wrapExtra) / (1.0 + uLight.z + wrapExtra), 0.0);
+
     // Sky above, warm bounce below: a settlement is read from above, so the roofs and the
     // ground are the two surfaces that have to separate from each other.
     vec3 ambient = mix(kGroundAmbient, kSkyAmbient, n.y * 0.5 + 0.5) * uLight.y;
-    vec3 lit = vTint.rgb * (ambient + kSunColor * uLight.x * wrapped * shadow);
+
+    // <b>Shade is a colour, not a subtraction.</b> Cast shadow only removed the sun term, so shadowed
+    // ground was the same paint at lower value — which is most of what reads as flat. The light that
+    // reaches shade is sky light, so shade goes cool, and that separation is mood rather than exposure.
+    vec3 shadeLift = kShadeTint * (1.0 - shadow) * 0.09 * uLight.y;
+
+    // A gentle top-face bias. A settlement is read from above, so upward faces are the ones carrying the
+    // silhouette, and a touch more light on them makes roofs pop without tipping into cartoon.
+    float upFace = 1.0 + max(n.y, 0.0) * 0.10;
+
+    vec3 lit = albedo * (ambient + shadeLift + kSunColor * uLight.x * wrapWide * shadow * upFace);
+    // Light through the leaf, added rather than multiplied: it is the sun arriving by another route.
+    lit += albedo * kSunColor * uLight.x * through * shadow;
 
     vec3 toFragment = vWorldPos - uCamPos.xyz;
     float dist = length(toFragment);

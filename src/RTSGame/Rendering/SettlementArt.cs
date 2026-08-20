@@ -113,7 +113,11 @@ internal sealed class SettlementArt : IDisposable
     {
         var directory = Path.Combine(AppContext.BaseDirectory, "Assets", "models");
 
-        PropModel Prop(string file, bool casts = true, bool stretchToSquare = false)
+        PropModel Prop(
+            string file,
+            bool casts = true,
+            bool stretchToSquare = false,
+            float surface = MaterialClass.Crafted)
         {
             var path = Path.Combine(directory, file + ".gltf");
             if (!File.Exists(path))
@@ -129,7 +133,10 @@ internal sealed class SettlementArt : IDisposable
             var parts = model.Primitives
                 .Select(prim => (
                     prim.Mesh,
-                    Tint: prim.Material?.BaseColorFactor ?? new Vector4(0.6f, 0.6f, 0.6f, 1f)))
+                    Tint: Classified(
+                        prim.Material?.BaseColorFactor ?? new Vector4(0.6f, 0.6f, 0.6f, 1f),
+                        prim.Material?.Name,
+                        surface)))
                 .ToArray();
             var bounds = parts.Select(part => part.Mesh).CombinedBounds();
             var bake = stretchToSquare
@@ -189,27 +196,27 @@ internal sealed class SettlementArt : IDisposable
                 Prop("Houses_SecondAge_2_Level2"),
                 Prop("Houses_SecondAge_3_Level2"),
             },
-            fieldPlot: Prop("Farm_FirstAge_Level3", casts: false, stretchToSquare: true),
+            fieldPlot: Prop("Farm_FirstAge_Level3", casts: false, stretchToSquare: true, surface: MaterialClass.Terrain),
             crop: new[]
             {
-                Prop("Farm_SecondAge_Level1_Wheat", stretchToSquare: true),
-                Prop("Farm_SecondAge_Level2_Wheat", stretchToSquare: true),
-                Prop("Farm_SecondAge_Level3_Wheat", stretchToSquare: true),
+                Prop("Farm_SecondAge_Level1_Wheat", stretchToSquare: true, surface: MaterialClass.Crop),
+                Prop("Farm_SecondAge_Level2_Wheat", stretchToSquare: true, surface: MaterialClass.Crop),
+                Prop("Farm_SecondAge_Level3_Wheat", stretchToSquare: true, surface: MaterialClass.Crop),
             },
             trees: new[]
             {
-                Prop("Resource_Tree1"),
-                Prop("Resource_Tree2"),
-                Prop("Resource_PineTree"),
+                Prop("Resource_Tree1", surface: MaterialClass.Foliage),
+                Prop("Resource_Tree2", surface: MaterialClass.Foliage),
+                Prop("Resource_PineTree", surface: MaterialClass.Foliage),
             },
-            stumps: Prop("Resource_Tree_Group_Cut", casts: false),
+            stumps: Prop("Resource_Tree_Group_Cut", casts: false, surface: MaterialClass.Timber),
             // <b>One crate, not a stack of them, and the reason is the normalisation.</b> Props are baked to
             // a unit footprint, so a model gets its height from its own proportions — and a stack of crates
             // is 0.12 m across and 0.25 m tall, better than twice as tall as it is wide. A heap of forty
             // units asks for two metres across and therefore got four metres of crates towering over the
             // houses. A single crate is very nearly cubic, so a metre across is a metre tall.
-            grainHeap: Prop("Crate"),
-            woodHeap: Prop("Logs"),
+            grainHeap: Prop("Crate", surface: MaterialClass.Timber),
+            woodHeap: Prop("Logs", surface: MaterialClass.Timber),
             villager: LoadVillager(device, directory, sceneShader, scenePipeline, casterShader, casterPipeline));
         return art;
     }
@@ -246,12 +253,94 @@ internal sealed class SettlementArt : IDisposable
             // Wool and linen, in the pack's range. It was 0.62 — an albedo written against the greybox —
             // which under a sun of two and a bit tonemaps to very nearly white, so seventeen villagers
             // read as seventeen bright specks rather than as people.
-            new[] { (mesh, new Vector4(0.33f, 0.25f, 0.19f, 1f)) },
+            new[] { (mesh, new Vector4(0.33f, 0.25f, 0.19f, MaterialClass.Body)) },
             sceneShader,
             scenePipeline,
             casterShader,
             casterPipeline,
             bake);
+    }
+
+    /// <summary>
+    /// What kind of surface a primitive is, written into the fourth channel of its colour.
+    /// </summary>
+    /// <remarks>
+    /// <b>The missing half of the art direction, and it costs no memory at all.</b> Every surface in the
+    /// scene was shaded by one rule — <c>tint × (ambient + sun × shadow)</c> — so plaster, roof tile, timber,
+    /// leaf, wheat and earth all responded identically and the whole weight of looking like anything fell on
+    /// the base colour. A shader cannot shade a leaf like a leaf if it does not know which of its fragments
+    /// are leaves.
+    /// <para>
+    /// Carried in alpha because an opaque pass has no use for alpha, and because that keeps the change out
+    /// of <c>InstanceData</c>: the geometry primitive still knows only about a matrix and four floats, and
+    /// what the fourth one means is this game's decision. Extending the shared struct would have put a
+    /// material system inside a layer whose whole rule is that it owns geometry and nothing else.
+    /// </para>
+    /// <para>
+    /// Classified from the glTF material's own name, which the pack supplies and which is exactly the
+    /// vocabulary wanted — <c>Walls</c>, <c>Wood</c>, <c>Stone</c>, <c>Fabric</c>, <c>Leaves</c>. So a barn's
+    /// plaster and its beams part company without anybody labelling them by hand, and a model added
+    /// tomorrow classifies itself.
+    /// </para>
+    /// </remarks>
+    internal static class MaterialClass
+    {
+        /// <summary>Ground: land, and the only thing that wants macro variation across the map.</summary>
+        internal const float Terrain = 0.05f;
+
+        /// <summary>Anything built, and the default: crisper, with a little sheen on the top faces.</summary>
+        internal const float Crafted = 0.15f;
+
+        /// <summary>Plaster and render — matte, bright, and the lightest thing in a village.</summary>
+        internal const float Plaster = 0.25f;
+
+        /// <summary>Roof tile — saturated, and the surface a settlement is recognised by from above.</summary>
+        internal const float Roof = 0.35f;
+
+        /// <summary>Sawn and hewn timber, which is most of what a settlement is made of.</summary>
+        internal const float Timber = 0.45f;
+
+        /// <summary>Stone: cooler, flatter, the least interesting light of anything here.</summary>
+        internal const float Stone = 0.55f;
+
+        /// <summary>Leaf: soft, translucent, and most of the screen.</summary>
+        internal const float Foliage = 0.65f;
+
+        /// <summary>Standing crop, which is foliage that catches light along a row.</summary>
+        internal const float Crop = 0.75f;
+
+        /// <summary>A person. Kept separate because people are read as silhouettes, not as surfaces.</summary>
+        internal const float Body = 0.85f;
+    }
+
+    /// <summary>
+    /// Puts a material class in a colour's fourth channel, read off the glTF material's name.
+    /// </summary>
+    /// <remarks>
+    /// Substring matching on purpose. The pack names materials <c>Wood_Light</c>, <c>Stone_Light</c>,
+    /// <c>Walls</c>, <c>Main</c> — variants of a handful of ideas — and a lookup table of exact names would
+    /// need editing every time a model arrives, which is the same as not having one. Anything unrecognised
+    /// falls back to whatever the model asked for, so a new prop is never worse than it was.
+    /// </remarks>
+    private static Vector4 Classified(Vector4 tint, string? material, float fallback)
+    {
+        var name = material?.ToLowerInvariant() ?? string.Empty;
+        var surface = name switch
+        {
+            // The pack calls a canopy "Green" and a trunk "Wood", so a tree splits into leaf and timber for
+            // free — which is the whole argument for classifying off the artist's own names rather than off a
+            // table somebody has to maintain.
+            var n when n.Contains("leaf") || n.Contains("leaves") || n.Contains("foliage") ||
+                       n.Contains("green") => MaterialClass.Foliage,
+            var n when n.Contains("wheat") || n.Contains("crop") => MaterialClass.Crop,
+            var n when n.Contains("wall") || n.Contains("plaster") => MaterialClass.Plaster,
+            var n when n.Contains("roof") || n.Contains("tile") || n.Contains("main") => MaterialClass.Roof,
+            var n when n.Contains("wood") || n.Contains("timber") || n.Contains("log") => MaterialClass.Timber,
+            var n when n.Contains("stone") || n.Contains("rock") || n.Contains("metal") => MaterialClass.Stone,
+            var n when n.Contains("dirt") || n.Contains("soil") || n.Contains("ground") => MaterialClass.Terrain,
+            _ => fallback,
+        };
+        return new Vector4(tint.X, tint.Y, tint.Z, surface);
     }
 
     /// <summary>Centred on its footprint, standing on the ground, exactly one unit tall.</summary>

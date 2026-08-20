@@ -107,7 +107,12 @@ public sealed class PropModel : IDisposable
             var sceneBuffer = new InstanceBuffer(device, sceneShader, $"{name}.{index}.scene");
             var part = new Part
             {
-                Tint = new Vector4(tint.X, tint.Y, tint.Z, 1f),
+                // <b>The caller's fourth channel is the caller's business.</b> This forced it to one, which
+                // is right for a colour and wrong for a channel: an opaque pass has no use for alpha, so a
+                // game is free to put something else there — RTSGame carries a material class in it, which
+                // is how a barn's plaster and a tree's canopy end up shaded differently without this
+                // primitive learning what either of those is. Geometry only; the meaning is the caller's.
+                Tint = tint,
                 SceneBuffer = sceneBuffer,
                 Scene = new InstancedBatch(uploaded, scenePipeline, sceneBuffer),
             };

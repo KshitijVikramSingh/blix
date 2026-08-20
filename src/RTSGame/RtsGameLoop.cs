@@ -1119,8 +1119,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 buffer,
                 new InstancedBatch(mesh, worldPipeline, buffer),
                 // The fine ground's checker is the parity of its own cell, scaled by the same slider.
-                TerrainColor(surface) *
-                (1f + (parity == 0 ? look.CheckerContrast : -look.CheckerContrast) * 0.5f)));
+                // Terrain-classed, like the coarse blocks: both are land and want the same shading.
+                TerrainClassed(
+                    TerrainColor(surface) *
+                    (1f + (parity == 0 ? look.CheckerContrast : -look.CheckerContrast) * 0.5f))));
         }
         renderedTerrain = simulation.Terrain;
         renderedTerrainRevision = simulation.Terrain.Revision;
@@ -1785,7 +1787,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var checker = 1f + ((x + z) % 2 == 0 ? look.CheckerContrast : -look.CheckerContrast) * 0.5f;
             var jitter = 1f + (BlockJitter(x, z) - 0.5f) * look.GroundVariation;
             var color = BlockColor(terrain, center, block) * (checker * jitter);
-            color.W = 1f;
+            color.W = SettlementArt.MaterialClass.Terrain;
             // Sized exactly to its spacing. An earlier version grew each block by a hair to
             // close sub-pixel cracks and bought a far worse artefact: neighbours then overlap
             // in a five-centimetre band of coplanar surface, which z-fights into speckle and
@@ -2526,6 +2528,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// expressed, and it meant the contrast was baked into five pairs of constants that had to be kept in
     /// step with each other; now the checker is one slider applied to every surface the same way.
     /// </remarks>
+    /// <summary>Stamps the terrain material class into a colour, leaving its hue alone.</summary>
+    private static Vector4 TerrainClassed(Vector4 color) =>
+        new(color.X, color.Y, color.Z, SettlementArt.MaterialClass.Terrain);
+
     private static Vector4 TerrainColor(TerrainSurface surface) => surface switch
     {
         TerrainSurface.Road => RoadColor,
