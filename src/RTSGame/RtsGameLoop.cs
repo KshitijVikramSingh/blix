@@ -2560,7 +2560,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private void DrawUndergrowth(in EconomyNode tree, float left)
     {
-        if (art is null || art.Trees.Length < 2) return;
+        if (art is null || art.Undergrowth.Length == 0) return;
         if (undergrowthDrawn >= UndergrowthBudget) return;
         if (Vector2.DistanceSquared(tree.Position, cameraFocus) >
             UndergrowthMetres * UndergrowthMetres)
@@ -2577,7 +2577,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var reach = NodeFootprint.TreeHalfExtent * (1.1f + (id * 13 + i * 7) % 9 / 9f * 0.9f);
             var at = tree.Position + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * reach;
             var width = (0.55f + (id * 19 + i * 23) % 11 / 11f * 0.55f) * MathF.Sqrt(left);
-            art.Trees[(id + i) % 2].Add(SettlementArt.Bush(
+            art.Undergrowth[(id + i) % art.Undergrowth.Length].Add(SettlementArt.Placement(
                 at,
                 simulation.Terrain.SampleHeight(at),
                 width,
@@ -2608,7 +2608,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private void DrawScatter()
     {
-        if (art is null || art.Trees.Length < 2) return;
+        if (art is null || art.Scatter.Length == 0) return;
         var radius = MathF.Sqrt(treeDrawRadiusSquared);
         // One candidate every few metres. Sparse enough that the eye reads them as incidental rather than
         // as a texture, which is the difference between scattered stones and gravel.
@@ -2640,15 +2640,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 continue;
             }
 
-            // The broadleaf trees, squashed flat and sunk to their collars so no trunk shows — see
-            // SettlementArt.Bush. No new asset, no new batch, and already foliage, so it picks up the leaf
-            // shading for free. The pine is skipped: a conifer is a cone whichever way you squash it.
-            var which = ScatterHash(cx, cz, 3) < 0.5f ? 0 : 1;
-            // Wider than the first attempt, because a bush is squashed and sunk rather than shrunk — see
-            // SettlementArt.Bush. Half a metre of tree read as a tiny tree; a metre of squashed, buried
-            // tree reads as a shrub.
-            var width = 0.8f + ScatterHash(cx, cz, 4) * 0.8f;
-            art.Trees[which].Add(SettlementArt.Bush(
+            // Bushes, grass, a flowering plant — six kinds, picked by the cell's own hash.
+            // Real bushes now, so no squashing and no burying: these are shrubs at their own proportions.
+            var which = (int)(ScatterHash(cx, cz, 3) * art.Scatter.Length) % art.Scatter.Length;
+            var width = 0.7f + ScatterHash(cx, cz, 4) * 0.7f;
+            art.Scatter[which].Add(SettlementArt.Placement(
                 at,
                 simulation.Terrain.SampleHeight(at),
                 width,

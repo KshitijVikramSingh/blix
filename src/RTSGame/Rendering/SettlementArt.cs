@@ -47,6 +47,8 @@ internal sealed class SettlementArt : IDisposable
         PropModel[] crop,
         PropModel[] trees,
         PropModel stumps,
+        PropModel[] scatter,
+        PropModel[] undergrowth,
         PropModel grainHeap,
         PropModel woodHeap,
         PropModel? villager)
@@ -58,10 +60,14 @@ internal sealed class SettlementArt : IDisposable
         Crop = crop;
         Trees = trees;
         Stumps = stumps;
+        Scatter = scatter;
+        Undergrowth = undergrowth;
         GrainHeap = grainHeap;
         WoodHeap = woodHeap;
         Villager = villager;
         owned.AddRange(new[] { granary, depot, fieldPlot, stumps, grainHeap, woodHeap });
+        owned.AddRange(scatter);
+        owned.AddRange(undergrowth);
         owned.AddRange(houses);
         owned.AddRange(crop);
         owned.AddRange(trees);
@@ -86,6 +92,30 @@ internal sealed class SettlementArt : IDisposable
 
     /// <summary>What a felled tree leaves behind.</summary>
     public PropModel Stumps { get; }
+
+    /// <summary>
+    /// Things growing on the ground, out in the open and at the foot of a trunk.
+    /// </summary>
+    /// <remarks>
+    /// <b>Real bushes, from Quaternius's Ultimate Nature Pack, which retires the squashed tree.</b> A tree
+    /// flattened and sunk to its collar was a decent stand-in and it was still a tree — and it cost a
+    /// tree's triangles to look like a shrub. These are shrubs: a metre and a bit across, a metre tall,
+    /// and cheaper than the thing they replace.
+    /// <para>
+    /// Same artist as the buildings, which is worth more than the models. The pack names its materials
+    /// <c>Green</c>, <c>DarkGreen</c>, <c>Leaves</c>, <c>Wood</c>, <c>Berry</c> — the same vocabulary the
+    /// glTF pack uses — so every one of these classifies itself through the existing rules and picks up the
+    /// foliage shading with no code at all.
+    /// </para>
+    /// <para>
+    /// Split in two lists because the two jobs want different silhouettes. Out in the open a scatter wants
+    /// variety and some height; at the foot of a trunk it wants low, wide things that hide a join without
+    /// standing in front of the tree.
+    /// </para>
+    /// </remarks>
+    public PropModel[] Scatter { get; }
+
+    public PropModel[] Undergrowth { get; }
 
     /// <summary>
     /// <b>Stone is not scenery.</b>
@@ -129,6 +159,35 @@ internal sealed class SettlementArt : IDisposable
         PipelineHandle casterPipeline)
     {
         var directory = Path.Combine(AppContext.BaseDirectory, "Assets", "models");
+
+        // <b>The OBJ pack, loaded the same way the glTF one is.</b> WavefrontParts splits a file by
+        // material and reads each colour out of the MTL, so the two paths meet at the same shape — a
+        // sequence of mesh-and-colour pairs — and everything downstream is identical, classification
+        // included. Nothing here casts a shadow by default: a shadow-map draw for a tuft of grass costs
+        // what a building's does and buys a smudge.
+        PropModel Nature(
+            string file,
+            bool casts = false,
+            float surface = MaterialClass.Foliage)
+        {
+            var path = Path.Combine(directory, "nature", file + ".obj");
+            if (!File.Exists(path))
+            {
+                throw new FileNotFoundException(
+                    $"The settlement's art is missing 'nature/{file}.obj'. Models live in " +
+                    "src/RTSGame/Assets/models and are copied to the output by the csproj; a missing one " +
+                    "is a build or a rename, not something to draw a box for.", path);
+            }
+
+            var parts = WavefrontParts.Import(path)
+                .Select(part => (part.Mesh, Tint: Classified(part.Color, part.Material, surface)))
+                .ToArray();
+            var bounds = parts.Select(part => part.Mesh).CombinedBounds();
+            return PropModel.Create(
+                device, file, parts, sceneShader, scenePipeline,
+                casts ? casterShader : null, casts ? casterPipeline : null,
+                PropModel.NormaliseToUnitFootprint(bounds));
+        }
 
         PropModel Prop(
             string file,
@@ -226,7 +285,23 @@ internal sealed class SettlementArt : IDisposable
                 Prop("Resource_Tree2", surface: MaterialClass.Foliage),
                 Prop("Resource_PineTree", surface: MaterialClass.Foliage),
             },
-            stumps: Prop("Resource_Tree_Group_Cut", casts: false, surface: MaterialClass.Timber),
+            // A real stump, at last: Resource_Tree_Group_Cut was a cluster of cut trunks standing in for one.
+            stumps: Nature("TreeStump", casts: false, surface: MaterialClass.Timber),
+            scatter: new[]
+            {
+                Nature("Bush_1", casts: false, surface: MaterialClass.Foliage),
+                Nature("Bush_2", casts: false, surface: MaterialClass.Foliage),
+                Nature("BushBerries_1", casts: false, surface: MaterialClass.Foliage),
+                Nature("Plant_3", casts: false, surface: MaterialClass.Foliage),
+                Nature("Grass", casts: false, surface: MaterialClass.Foliage),
+                Nature("Flowers", casts: false, surface: MaterialClass.Foliage),
+            },
+            undergrowth: new[]
+            {
+                Nature("Plant_1", casts: false, surface: MaterialClass.Foliage),
+                Nature("Grass_Short", casts: false, surface: MaterialClass.Foliage),
+                Nature("Bush_2", casts: false, surface: MaterialClass.Foliage),
+            },
 
             // <b>One crate, not a stack of them, and the reason is the normalisation.</b> Props are baked to
             // a unit footprint, so a model gets its height from its own proportions — and a stack of crates
@@ -422,30 +497,6 @@ internal sealed class SettlementArt : IDisposable
         Matrix4x4.CreateScale(widthMetres) *
         Matrix4x4.CreateRotationY(yaw) *
         Matrix4x4.CreateTranslation(position.X, groundHeight, position.Y);
-
-    /// <summary>
-    /// A tree pressed into a bush: squashed flat and sunk to its collar.
-    /// </summary>
-    /// <remarks>
-    /// <b>The pack has no bush, and a tree scaled down is a small tree.</b> Reported exactly that way, and
-    /// the reason is the trunk: a bush is a mound of leaves with no stem showing, so shrinking a tree keeps
-    /// the one feature that says "tree" and shrinks the one that says "shrub".
-    /// <para>
-    /// Two changes fix it without an asset. Squashed, because a bush is wider than it is tall and a
-    /// flattened canopy is a dome. And sunk, so the trunk is under the ground and only the leaves are above
-    /// it — which is exactly what a bush looks like from any angle this camera allows, and costs nothing but
-    /// a different matrix.
-    /// </para>
-    /// </remarks>
-    public static Matrix4x4 Bush(Vector2 position, float groundHeight, float widthMetres, float yaw) =>
-        Matrix4x4.CreateScale(widthMetres, widthMetres * 0.62f, widthMetres) *
-        Matrix4x4.CreateRotationY(yaw) *
-        Matrix4x4.CreateTranslation(
-            position.X,
-            // Down by the height the trunk occupies in the squashed model, so the canopy sits on the ground
-            // and the stem does not exist as far as anyone can see.
-            groundHeight - widthMetres * 0.30f,
-            position.Y);
 
     /// <summary>
     /// A building coming out of the ground: full footprint, a share of its height.
