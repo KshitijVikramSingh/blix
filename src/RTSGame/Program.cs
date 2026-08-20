@@ -70,7 +70,14 @@ public static class Program
             var raidExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
             var raidMinutes = Value(args, "--minutes") is { } span ? float.Parse(span) : 8f;
             var between = Value(args, "--every") is { } gap ? float.Parse(gap) : 60f;
-            Environment.Exit(SettlementScenarios.RunRaids(raidExtent, raidMinutes, between));
+            var health = Value(args, "--health") is { } hp ? float.Parse(hp) : 0f;
+            // <b>One run cannot answer a balance question.</b> A raid is chaotic — change a number and a
+            // different body dies first, which reroutes everything after it — so raider health 15, 16 and
+            // 18 came out non-monotonic on one sample each. Varying the seed is how a sweep gets samples,
+            // and the seed is the only thing that varies: same map, same settlement, same schedule.
+            var seed = Value(args, "--seed") is { } s ? uint.Parse(s) : 0x1B873593u;
+            Environment.Exit(
+                SettlementScenarios.RunRaids(raidExtent, raidMinutes, between, health, seed));
         }
 
         if (args.Contains("--catchment"))

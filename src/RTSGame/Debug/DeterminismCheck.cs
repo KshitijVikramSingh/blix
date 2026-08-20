@@ -127,6 +127,8 @@ internal static class DeterminismCheck
         ["EconomySystem.Readiness"] =
             "recomputed from the stores and the households at the head of every population pass, before " +
             "anything reads it; it is a reported figure rather than a carried one.",
+        ["ThreatSystem.landed"] =
+            "who struck this tick, rebuilt inside the harm pass for whatever is reporting on the fight.",
         ["ThreatSystem.declined"] =
             "scratch for one body's already-covered alarms, cleared at the head of its own decision.",
         ["ThreatSystem.fellWithFaction"] =

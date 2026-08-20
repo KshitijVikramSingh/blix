@@ -38,6 +38,8 @@ internal sealed class RaidLedger
 {
     private readonly FactionId ours;
     private bool[] engagedLastTick = new bool[64];
+    private bool[] everAnswered = new bool[64];
+    private bool[] everFought = new bool[64];
     private float previousStock;
     private bool seenStock;
 
@@ -69,6 +71,19 @@ internal sealed class RaidLedger
     /// <summary>Body-seconds of contact, which is what a fight is made of.</summary>
     public float ContactSeconds { get; private set; }
 
+    /// <summary>
+    /// How many of ours ever committed to a fight, and how many of those were ever in one.
+    /// </summary>
+    /// <remarks>
+    /// <b>The gap between these two has been the answer three times running</b>, so it is measured rather
+    /// than inferred from peaks. A peak cannot distinguish three bodies fighting for a long time from
+    /// thirty for an instant, and "sixteen commit and three fight" is the shape of every finding in this
+    /// arc: the front was never the limiter, arrival was.
+    /// </remarks>
+    public int EverAnswered { get; private set; }
+
+    public int EverFought { get; private set; }
+
     /// <summary>Deaths, by side.</summary>
     public int OursKilled { get; private set; }
 
@@ -99,6 +114,16 @@ internal sealed class RaidLedger
     /// <summary>Stock of ours that left the world, and stock recovered from a body that fell carrying it.</summary>
     public int Recovered { get; private set; }
 
+    /// <summary>
+    /// Total harm dealt by anybody to anybody, so wasted damage can be seen rather than deduced.
+    /// </summary>
+    /// <remarks>
+    /// Harm that killed nothing is the interesting residue: subtract the health of everything that died
+    /// from this and what is left went into bodies that walked away. A large residue means damage is being
+    /// <em>spread</em> rather than concentrated, which is a different problem from not enough of it.
+    /// </remarks>
+    public float HarmDealt { get; private set; }
+
     public void Observe(SimulationWorld world, float deltaSeconds)
     {
         var threat = world.Threat;
@@ -107,7 +132,12 @@ internal sealed class RaidLedger
         var interrupted = 0f;
 
         var bodies = world.Agents.All;
-        if (engagedLastTick.Length < bodies.Length) Array.Resize(ref engagedLastTick, bodies.Length * 2);
+        if (engagedLastTick.Length < bodies.Length)
+        {
+            Array.Resize(ref engagedLastTick, bodies.Length * 2);
+            Array.Resize(ref everAnswered, bodies.Length * 2);
+            Array.Resize(ref everFought, bodies.Length * 2);
+        }
 
         for (var i = 0; i < bodies.Length; i++)
         {
@@ -132,11 +162,17 @@ internal sealed class RaidLedger
                 answering++;
                 interrupted += deltaSeconds;
                 if (!engagedLastTick[i]) Alarms++;
+                if (!everAnswered[i])
+                {
+                    everAnswered[i] = true;
+                    EverAnswered++;
+                }
             }
 
             engagedLastTick[i] = engaged;
         }
 
+        HarmDealt = threat.Dealt;
         if (hostiles > 0) SecondsUnderThreat += deltaSeconds;
         if (answering > 0) SecondsWithTheAlarmUp += deltaSeconds;
         LabourSecondsLost += interrupted;
@@ -144,6 +180,16 @@ internal sealed class RaidLedger
         MostInContact = Math.Max(MostInContact, threat.Attacking);
         MostUnderAttack = Math.Max(MostUnderAttack, threat.UnderAttack);
         ContactSeconds += threat.Contacts * deltaSeconds;
+
+        foreach (var striker in threat.LandedThisTick)
+        {
+            var slot = striker.Value;
+            if (slot < 0 || slot >= everFought.Length) continue;
+            if (!world.Agents.Contains(striker) || world.Agents.Get(striker).Faction != ours) continue;
+            if (everFought[slot]) continue;
+            everFought[slot] = true;
+            EverFought++;
+        }
 
         foreach (var (_, faction) in threat.FellThisTick)
         {
@@ -175,6 +221,16 @@ internal sealed class RaidLedger
         yield return
             $"  alarms raised {Alarms}, most answering at once {MostAnswering}, most ever in contact " +
             $"{MostInContact} — {ContactSeconds:F0} body-seconds of actual fighting";
+        yield return
+            $"  of ours, {EverAnswered} ever left their work for a fight and {EverFought} were ever in " +
+            $"one" +
+            (EverAnswered > 0
+                ? $" — {100f * EverFought / EverAnswered:F0}% of those who went actually got there"
+                : string.Empty);
+        yield return
+            $"  {HarmDealt:F0} body-seconds of harm dealt in all, of which " +
+            $"{OursKilled * 20f + TheirsKilled * 18f:F0} went into something that died — " +
+            $"the rest into bodies that walked away";
         yield return
             $"  killed: {TheirsKilled} of theirs, {OursKilled} of ours" +
             (TheirsKilled > 0 ? $" ({OursKilled / (float)TheirsKilled:F1} of ours per raider)" : "");

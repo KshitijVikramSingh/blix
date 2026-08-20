@@ -92,6 +92,18 @@ internal sealed class RaidSettings
     [Tune(0.3, 1.0, Label = "loaded raider pace", Group = "raids")]
     public float LadenShare = 0.7f;
 
+    /// <summary>
+    /// How much punishment a raider takes, overriding the roster when set above zero.
+    /// </summary>
+    /// <remarks>
+    /// A dial rather than a constant because it is the single number that decides whether a village of
+    /// farmhands can defend itself, and the fight it prices is short: at strength 1 a villager does one a
+    /// second, so this is very nearly "how many villager-seconds of contact does a thief survive" and four
+    /// of them in contact divide it by four. Zero leaves <c>UnitType.Raider</c> alone.
+    /// </remarks>
+    [Tune(0.0, 60.0, Label = "raider health (0 = roster)", Group = "raids")]
+    public float RaiderHealth;
+
     /// <summary>Whether the camera snaps to a raid when it appears.</summary>
     /// <remarks>
     /// A test-bench convenience and no more: watching whether defence is interesting requires being able to
@@ -133,9 +145,10 @@ internal sealed class RaidDirector
     private float untilNext;
     private uint seed = 0x1B873593u;
 
-    public RaidDirector(RaidSettings settings)
+    public RaidDirector(RaidSettings settings, uint seed = 0x1B873593u)
     {
         this.settings = settings;
+        this.seed = seed;
         untilNext = settings.SecondsBetween * 0.4f;
     }
 
@@ -302,6 +315,7 @@ internal sealed class RaidDirector
             // This director owns where these bodies go. Without it they also ran the settlement's own
             // defence — see AgentState.Directed — and marched themselves off after loot they were carrying.
             world.Agents.Get(body).Directed = true;
+            if (settings.RaiderHealth > 0f) world.Agents.Get(body).Health = settings.RaiderHealth;
             party.Add(new Raider
             {
                 Body = body,

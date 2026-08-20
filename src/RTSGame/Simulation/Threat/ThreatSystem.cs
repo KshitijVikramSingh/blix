@@ -114,6 +114,16 @@ internal sealed class ThreatSystem
     /// <summary>Blows that landed this tick — one per assailant that got at somebody.</summary>
     public int Contacts { get; private set; }
 
+    /// <summary>
+    /// Which bodies landed a blow this tick, so a report can ask who ever actually fought.
+    /// </summary>
+    /// <remarks>
+    /// The distinction that keeps mattering: <em>committing</em> to a fight and <em>being in</em> one are
+    /// different, and the gap between them has been the answer three times running. A count of contacts
+    /// cannot tell you whether it was three bodies for a long time or thirty for an instant.
+    /// </remarks>
+    public IReadOnlyList<AgentId> LandedThisTick => landed;
+
     /// <summary>Distinct bodies that were being fought over this tick, and distinct bodies fighting.</summary>
     public int UnderAttack { get; private set; }
 
@@ -137,6 +147,7 @@ internal sealed class ThreatSystem
     private readonly List<(AgentId Body, FactionId Faction)> fellWithFaction = new();
     private readonly List<(float Gap, int Id, int Index)> engaged = new();
     private readonly List<Vector2> declined = new();
+    private readonly List<AgentId> landed = new();
     private readonly List<int> hostiles = new();
     private readonly List<Vector2> guarded = new();
     private readonly List<float> menace = new();
@@ -165,6 +176,7 @@ internal sealed class ThreatSystem
         // settlement at peace does one faction comparison per pair and nothing else.
         Crowded = 0;
         Contacts = 0;
+        landed.Clear();
         UnderAttack = 0;
         Attacking = 0;
         for (var j = 0; j < bodies.Length; j++)
@@ -199,7 +211,7 @@ internal sealed class ThreatSystem
             engaged.Sort();
 
             var room = MathF.Tau;
-            var landed = 0;
+            var struck = 0;
             foreach (var (_, _, index) in engaged)
             {
                 ref readonly var attacker = ref bodies[index];
@@ -208,15 +220,16 @@ internal sealed class ThreatSystem
                 // still fit in what a wide one left — which is what "as many as fit" actually means.
                 if (width > room) continue;
                 room -= width;
-                landed++;
+                struck++;
+                landed.Add(attacker.Id);
                 bodies[j].Health -= attacker.Strength * deltaSeconds;
                 Dealt += attacker.Strength * deltaSeconds;
             }
 
-            Crowded += engaged.Count - landed;
-            Contacts += landed;
-            Attacking += landed;
-            if (landed > 0) UnderAttack++;
+            Crowded += engaged.Count - struck;
+            Contacts += struck;
+            Attacking += struck;
+            if (struck > 0) UnderAttack++;
         }
 
         for (var i = 0; i < bodies.Length; i++)

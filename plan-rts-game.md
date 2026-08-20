@@ -3941,3 +3941,64 @@ over the hill. **Whether to fight is worth holding for three seconds; what to fi
 Two and a half farmhands per thief is a bad trade and no longer an absurd one, and it is bad in the
 direction the design wants: a village of farmhands can stop a raid and should not enjoy it. That is the
 argument for the soldier stated as a number rather than as a preference.
+
+## 37. A raider's health is not the dial, and the sweep is how that was settled
+
+Asked for a test at 15 or 16 against the 18 that had just landed. One run each said 15 was *worse* than 18
+— 3.0 of ours per raider against 2.5 — and 16 worse still at 3.8. Non-monotonic, which is the signature of
+a chaotic process being sampled once: change a number and a different body dies first, and everything after
+that reroutes.
+
+So the seed became an argument (`--raidtest --health H --seed S`), and the seed is the only thing that
+varies — same map, same settlement, same schedule. Five seeds per value, fifteen runs:
+
+| raider health | got home /24 | their dead | our dead | ours per raider | stolen | grain forgone | furthest a settler went |
+|---|---|---|---|---|---|---|---|
+| 15 | 12.2 ± 1.6 | 3.4 ± 1.5 | 9.8 ± 2.9 | 3.24 ± 1.50 | 488 ± 66 | 431 ± 30 | 87 ± 24 m |
+| 16 | 12.0 ± 1.7 | 3.4 ± 2.2 | 10.0 ± 3.9 | 2.44 ± 0.53 | 480 ± 69 | 405 ± 52 | 58 ± 34 m |
+| 18 | 11.8 ± 1.8 | 3.2 ± 1.8 | 12.0 ± 5.0 | 3.25 ± 1.31 | 472 ± 72 | 368 ± 59 | 48 ± 15 m |
+
+**Every difference is inside its own spread.** A seventeen per cent cut in a raider's durability changes
+nothing measurable about how many die, how many get home, or how much they take. The three single runs that
+started this were three draws from one distribution.
+
+That is worth more than a tuned number, because it says **durability is not the binding constraint** — and
+the correct response to a dial that does nothing is to find the one that does rather than to keep turning it.
+
+### Which meant measuring the thing that had been assumed twice
+
+§35 concluded "sixteen commit and three fight — the limiter is arrival, not crowding", from *instantaneous
+peaks*. A peak cannot tell three bodies fighting for a long time from thirty fighting for an instant, so the
+ledger now counts each body once, over the whole run:
+
+```
+of ours, 26 ever left their work for a fight and 23 were ever in one
+                        — 88% of those who went actually got there
+```
+
+Across five seeds: 69–92%. **Arrival is not the limiter either, and §35 was wrong about it** — that
+conclusion was drawn from a peak and should not have been drawn at all.
+
+### What it actually is
+
+```
+387 body-seconds of harm dealt in all, of which 272 went into something that died
+                        — the rest into bodies that walked away
+```
+
+Thirty per cent of all the harm in a raid goes into bodies that survive. Twenty-four raiders take damage and
+four die: the rest leave **wounded and alive**, carrying grain, and heal by virtue of the next raid being a
+fresh party. Damage is being *spread* across many targets and parked just under the threshold on most of
+them — which is precisely why health barely matters, because moving a threshold that nothing is clustered
+against moves nothing.
+
+So the next lever is **concentration**, not durability, arrival, or the front:
+
+- A defender charges the hostile nearest the thing it is guarding, so as a raid scatters the defence
+  scatters with it, four ways at once.
+- Nothing prefers a target that is already engaged, and nothing prefers one that is already hurt.
+- A raider that gets away at one health is a raid that succeeded; a raid that loses two bodies and takes
+  half as much is a different game.
+
+Which is the same shape as §30's finding one level down. §30 was about *who commits*; this is about **what
+they commit to**, and the answer "whatever is nearest" is the convenient layer answering again.

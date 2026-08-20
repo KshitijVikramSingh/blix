@@ -144,15 +144,22 @@ internal static class SettlementScenarios
     /// about at once.</item>
     /// </list>
     /// </remarks>
-    public static int RunRaids(float extentMeters, float minutes, float secondsBetween)
+    public static int RunRaids(
+        float extentMeters,
+        float minutes,
+        float secondsBetween,
+        float raiderHealth = 0f,
+        uint seed = 0x1B873593u,
+        bool quiet = false)
     {
         var world = Build(extentMeters, out var granary);
         var settings = new RaidSettings
         {
             SecondsBetween = secondsBetween,
             CameraJumps = false,
+            RaiderHealth = raiderHealth,
         };
-        var raids = new RaidDirector(settings);
+        var raids = new RaidDirector(settings, seed);
         var ledger = new RaidLedger(new Simulation.Collision.FactionId(0));
         var totalTicks = (int)(minutes * 60f * TicksPerSecond);
         var faults = new List<string>();
@@ -160,7 +167,8 @@ internal static class SettlementScenarios
 
         Console.WriteLine(
             $"RTSGame raids — {world.ExtentMeters:F0} m, {world.Agents.LiveCount} people, " +
-            $"a raid every {secondsBetween:F0} s of {settings.Party}, {minutes:F1} minute(s)");
+            $"a raid every {secondsBetween:F0} s of {settings.Party}, {minutes:F1} minute(s), " +
+            $"raiders at {(raiderHealth > 0f ? raiderHealth : UnitType.Raider.Health):F0} health");
         Console.WriteLine(
             "     min | people | grain | raiders | stood | fled | spare | stow | shut out | killed | " +
             "lost | stolen | piles | furthest | routes | ms/tick");
