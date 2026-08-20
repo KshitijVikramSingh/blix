@@ -113,7 +113,19 @@ internal sealed class LookSettings
     /// exists at all.
     /// </remarks>
     [Tune(40.0, 400.0, Label = "shadow box (m)", Group = "shadows")]
-    public float ShadowExtentMetres = 150f;
+    public float ShadowFloorMetres = 60f;
+
+    /// <summary>
+    /// How far outside the view the sun's box reaches, for casters that are not on screen, in metres.
+    /// </summary>
+    /// <remarks>
+    /// A shadow is <c>1 / tan(elevation)</c> times its caster's height, so at 42° it is 1.11× — and the
+    /// tallest thing in the settlement is a tree at about six metres. Eight covers it. Turn it up if
+    /// something ever casts from off screen and its shadow is clipped at the edge of the view; turn it down
+    /// and every texel that buys goes back into sharpness.
+    /// </remarks>
+    [Tune(0.0, 60.0, Label = "shadow margin (m)", Group = "sun")]
+    public float ShadowMarginMetres = 8f;
 
     /// <summary>How much the far distance washes out toward the sky.</summary>
     [Tune(0.0, 1.0, Label = "aerial perspective", Group = "air")]

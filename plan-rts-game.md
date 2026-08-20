@@ -4619,3 +4619,35 @@ closest zoom the box is **4.8×** the view.
 That is one finding from one line of text on the first run, which is the argument for the overlay rather
 than for any particular fix. The fix is worth measuring next: track the box to the view, and let the tree
 distance fall out of it.
+
+## 48. The shadow box tracks the view — and §47's finding was wrong
+
+**First, the correction.** §47 read the geometry line as saying the shadow box was 3.3× oversized and a
+threefold sharpening was free. That was wrong, and it was wrong because *the line's own terms were not
+commensurable*: it compared the box's **full width** against the camera's **standoff**, which is not a
+radius of anything. A tie-together line whose terms do not commensurate invents mismatches and hides real
+ones, which is worse than not having it.
+
+Written against the visible ground radius — derived from how far back the camera stands, how far down it
+looks, its field of view and the window's aspect — the truth is more interesting:
+
+| zoom | visible ground radius | against a 75 m half-box | |
+|---|---|---|---|
+| closest, 31 m | 43.5 m | **1.73×** | two thirds of the shadow map spent outside the view |
+| default, 46 m | 64.5 m | 1.16× | correct — and this is where 150 m came from |
+| furthest, 78 m | 109.4 m | **0.69×** | **the box is smaller than the view: shadows simply missing** |
+
+The far case is a *visible bug*, not a quality question, and it is what a fixed number guarantees: right at
+the zoom it was tuned for and wrong at both ends. Which is word for word the lesson already written in the
+comment above `camera.FarPlane` — *"a flat 150 m, which is fine at the zoom it was written for and silently
+wrong at any other"*. The same mistake, in the same file, thirty lines apart, with the explanation of it
+sitting in between.
+
+So `SunOrthoExtent` is now `2 × (VisibleGroundRadius + margin)`, floored. Texels go from 7.3 cm to 5.0 cm
+pulled in, and pulled out the shadows exist. The margin is a slider and derived rather than guessed: a
+shadow is `1/tan(elevation)` times its caster's height, 1.11× at 42°, and the tallest thing here is a
+six-metre tree — so eight metres of margin covers anything off screen casting into view.
+
+And `VisibleGroundRadius` is the number everything about seeing distance should have been written against.
+Nothing was. Tree draw distance is still an independent 150 m, which the line now reports as a multiple of
+what can be seen (2.3× at the default zoom) — the next thing to look at, and now legible.

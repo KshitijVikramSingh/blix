@@ -309,7 +309,65 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// is a little wider than the camera can see at full zoom-out. The cost of a small box is that the sun
     /// stops casting outside it, which is why it is a dial: crispness against how far shadows reach.
     /// </remarks>
-    private float SunOrthoExtent => look.ShadowExtentMetres;
+    /// <summary>How far the camera is looking down, shared by the camera and the sun's box.</summary>
+    private const float CameraElevation = 0.82f;
+
+    /// <summary>
+    /// How far from the focus the furthest visible patch of ground is, in metres.
+    /// </summary>
+    /// <remarks>
+    /// Derived rather than chosen, from the four things that actually decide it: how far back the camera
+    /// stands, how far down it looks, how wide its lens is and how wide the window is. The far edge of the
+    /// visible ground sits at <c>h / tan(elevation − halfFov)</c> from the point beneath the eye, the eye is
+    /// <c>cos(elevation) · d</c> from the focus, and the far corner is that distance and the half-width at
+    /// that range in quadrature.
+    /// <para>
+    /// This is the number everything else about seeing distance ought to be written against, and none of it
+    /// was.
+    /// </para>
+    /// </remarks>
+    private float VisibleGroundRadius
+    {
+        get
+        {
+            var (width, height) = host.LogicalSize;
+            var aspect = height > 0 ? width / (float)height : 1.78f;
+            var half = camera.VerticalFieldOfView * 0.5f;
+            var pitch = MathF.Max(half + 0.05f, CameraElevation);
+            var eyeHeight = MathF.Sin(pitch) * cameraDistance;
+            var farAlong = eyeHeight / MathF.Tan(pitch - half) - MathF.Cos(pitch) * cameraDistance;
+            var slant = eyeHeight / MathF.Sin(pitch - half);
+            var halfWidth = slant * MathF.Tan(half) * aspect;
+            return MathF.Sqrt(farAlong * farAlong + halfWidth * halfWidth);
+        }
+    }
+
+    /// <summary>
+    /// The sun's box, sized to what can be seen rather than to a number chosen once.
+    /// </summary>
+    /// <remarks>
+    /// <b>It was a flat 150 m, which is the same bug the far plane already had a comment about.</b> Measured
+    /// against the visible ground radius at the three zooms the camera allows:
+    /// <list type="bullet">
+    /// <item>closest, 31 m back — visible radius 43 m against a 75 m half-box, <b>1.73× oversized</b>, so
+    /// the shadow map spends two thirds of its texels on ground nobody is looking at;</item>
+    /// <item>default, 46 m back — visible radius 64 m, <b>1.16×</b>. Correct, and this is where 150 came
+    /// from;</item>
+    /// <item>furthest, 78 m back — visible radius 109 m against 75, <b>0.69×</b>, so <b>the box is smaller
+    /// than the view and shadows are simply missing at the edges.</b></item>
+    /// </list>
+    /// The last of those is a visible bug rather than a quality question, and it is the one a fixed number
+    /// guarantees: right at the zoom it was tuned for and wrong at both ends. Tracking the view gives 5.0 cm
+    /// texels pulled in and shadows that exist pulled out.
+    /// <para>
+    /// The margin is for casters standing <em>outside</em> the view whose shadows fall into it. At a sun
+    /// elevation of 42° a shadow is 1.11× the caster's height, and the tallest thing here is a tree at
+    /// about six metres, so eight metres covers it with room to spare.
+    /// </para>
+    /// </remarks>
+    private float SunOrthoExtent => MathF.Max(
+        look.ShadowFloorMetres,
+        2f * (VisibleGroundRadius + look.ShadowMarginMetres));
 
     private const float SunDistance = 220f;
 
@@ -1342,7 +1400,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private void UpdateCamera()
     {
-        const float elevation = 0.82f;
+        const float elevation = CameraElevation;
         var horizontal = MathF.Cos(elevation) * cameraDistance;
         var focus = new Vector3(cameraFocus.X, 0f, cameraFocus.Y);
         var eye = focus + new Vector3(
@@ -2612,12 +2670,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private string GeometryLine()
     {
-        var view = cameraDistance;
+        // <b>Against the visible ground radius, not against the camera's standoff.</b> Comparing the box
+        // to <c>cameraDistance</c> was this line's own first bug: it reported the box as 3.3x oversized when
+        // the box is a full width, the standoff is not a radius, and the honest comparison said 1.16x at
+        // that zoom and 0.69x — too small — at the far one. A tie-together line whose terms are not
+        // commensurable invents mismatches and hides real ones.
+        var seen = VisibleGroundRadius;
+        var half = SunOrthoExtent * 0.5f;
         var texelCentimetres = SunOrthoExtent / ShadowMapSize * 100f;
         return
-            $"VIEW {view:F0} m · TREES {look.TreeDrawMetres:F0} m ({look.TreeDrawMetres / view:F1}x) · " +
-            $"SHADOW BOX {SunOrthoExtent:F0} m ({SunOrthoExtent / view:F1}x, texel {texelCentimetres:F1} cm) · " +
-            $"FOG {view * look.FogStartZooms:F0}-{view * MathF.Max(look.FogStartZooms + 0.1f, look.FogEndZooms):F0} m";
+            $"SEES {seen:F0} m · TREES {look.TreeDrawMetres:F0} m ({look.TreeDrawMetres / seen:F1}x) · " +
+            $"SHADOW {half:F0} m ({half / seen:F2}x, texel {texelCentimetres:F1} cm) · " +
+            $"FOG {cameraDistance * look.FogStartZooms:F0}-" +
+            $"{cameraDistance * MathF.Max(look.FogStartZooms + 0.1f, look.FogEndZooms):F0} m";
     }
 
     private void AddColliderDisc(ColliderId id, Vector2 position, float height, Vector4 color)
