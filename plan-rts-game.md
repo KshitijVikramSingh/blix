@@ -3793,3 +3793,51 @@ remembered to, which is the same as not existing — Stage E's whole lesson, one
 
 The one item left open is the one that is not mine to close: the `LookSettings` sliders still hold my
 guesses, and settling them is a judgement about how the game should look.
+
+## 35. Session 7 goes last, and why that is not a slip
+
+§15 recommended `6 → 6.5 → 7 → 8 → 9`, with the soak harness third. It goes **last** now, and the argument
+for moving it is stronger than the argument that put it there:
+
+> refine combat, refine building/enemy placement/maps, at least get the systems in place and behaving —
+> then sketching 7 out makes any sense, else it's going to be a plain rewrite as soon as the other systems
+> flow in.
+
+§13 paired the strategic layer and the soak harness because "they are the same artefact". This applies the
+same reasoning one step further out. **A soak harness is shaped by what it soaks**: it decides what to
+assert, what counts as a regression, what a run is *for*. Written against half the systems it is written
+twice, and the second writing throws the first away.
+
+**The risk being accepted is the one §15 kept because it was real** — an economic regression going a
+session unnoticed. And the mitigation §15 named in the same paragraph, "the one-year gate is four minutes
+and can land well before the harness proper", is `tools/gate-rts-game.sh` as of §34. So the exposure is a
+regression that survives 82 assertions, a simulated year and a settlement under raid, which is a narrower
+gap than the one this trade is closing.
+
+### The order, then
+
+**1. Combat, and it starts with the front rather than the numbers.** §29 said to begin from
+formation-versus-sum and not from balance dials, and §33 ended by pointing at `UnitType.Soldier`. Those are
+in the wrong order: adding soldiers to a model where twelve bodies can all reach one assailant just puts
+more bodies in the pile. The engagement limit comes first, because it is what makes *quality* matter
+instead of *count* — and therefore what makes a soldier worth paying for.
+
+- *An engagement limit that is not a dial.* Only so many bodies physically fit around one, and that is a
+  fact about radii rather than a preference: at contact distance, `2π(R + r) / 2r` of them, which for two
+  0.37 m bodies is six. Twelve villagers on one raider should be six villagers on one raider and six
+  standing behind them.
+- *Then the soldier*, which needs somewhere to come from, a cost, and the appetite it already has —
+  1.35 against a villager's 1. That is the tension the whole design has been waiting for: **soldiers eat
+  the grain that would otherwise have become people.**
+- *Then whether a fight needs facing at all.* Possibly not, once it has a front.
+
+**2. Placement, enemies and maps** — the three are one problem seen from three sides.
+
+- Building placement has been flagged twice by eye and is still a 1.5 m grid with a key per kind.
+- Raids appear on a ride at a fixed radius from the middle of the map, which is scaffolding pretending to
+  be geography. A raid should come *from* somewhere that exists.
+- And the map itself: the settlement sits on a fixed arc, the wood is concentric bands. Terrain that
+  decides something — a chokepoint worth holding, a wood line that is not a ring — is what turns
+  "approaches are knowable" from a sentence in §33 into a thing you can act on.
+
+**3. Session 7's harness**, written against systems that have stopped moving.
