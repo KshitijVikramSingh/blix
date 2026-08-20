@@ -424,6 +424,30 @@ internal sealed class SettlementArt : IDisposable
         Matrix4x4.CreateTranslation(position.X, groundHeight, position.Y);
 
     /// <summary>
+    /// A tree pressed into a bush: squashed flat and sunk to its collar.
+    /// </summary>
+    /// <remarks>
+    /// <b>The pack has no bush, and a tree scaled down is a small tree.</b> Reported exactly that way, and
+    /// the reason is the trunk: a bush is a mound of leaves with no stem showing, so shrinking a tree keeps
+    /// the one feature that says "tree" and shrinks the one that says "shrub".
+    /// <para>
+    /// Two changes fix it without an asset. Squashed, because a bush is wider than it is tall and a
+    /// flattened canopy is a dome. And sunk, so the trunk is under the ground and only the leaves are above
+    /// it — which is exactly what a bush looks like from any angle this camera allows, and costs nothing but
+    /// a different matrix.
+    /// </para>
+    /// </remarks>
+    public static Matrix4x4 Bush(Vector2 position, float groundHeight, float widthMetres, float yaw) =>
+        Matrix4x4.CreateScale(widthMetres, widthMetres * 0.62f, widthMetres) *
+        Matrix4x4.CreateRotationY(yaw) *
+        Matrix4x4.CreateTranslation(
+            position.X,
+            // Down by the height the trunk occupies in the squashed model, so the canopy sits on the ground
+            // and the stem does not exist as far as anyone can see.
+            groundHeight - widthMetres * 0.30f,
+            position.Y);
+
+    /// <summary>
     /// A building coming out of the ground: full footprint, a share of its height.
     /// </summary>
     /// <remarks>

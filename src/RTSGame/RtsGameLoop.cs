@@ -2415,12 +2415,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 continue;
             }
 
-            // The broadleaf trees at a fraction of their size, which reads as scrub and costs nothing: no
-            // new asset, no new batch, and it is already foliage so it picks up the leaf shading. The pine
-            // is skipped — a conifer scaled down is a small conifer, not a bush.
+            // The broadleaf trees, squashed flat and sunk to their collars so no trunk shows — see
+            // SettlementArt.Bush. No new asset, no new batch, and already foliage, so it picks up the leaf
+            // shading for free. The pine is skipped: a conifer is a cone whichever way you squash it.
             var which = ScatterHash(cx, cz, 3) < 0.5f ? 0 : 1;
-            var width = 0.45f + ScatterHash(cx, cz, 4) * 0.55f;
-            art.Trees[which].Add(SettlementArt.Placement(
+            // Wider than the first attempt, because a bush is squashed and sunk rather than shrunk — see
+            // SettlementArt.Bush. Half a metre of tree read as a tiny tree; a metre of squashed, buried
+            // tree reads as a shrub.
+            var width = 0.8f + ScatterHash(cx, cz, 4) * 0.8f;
+            art.Trees[which].Add(SettlementArt.Bush(
                 at,
                 simulation.Terrain.SampleHeight(at),
                 width,
