@@ -95,6 +95,41 @@ internal static class Woodland
         }
     }
 
+    /// <summary>
+    /// How far a tree's crowding reaches, for deciding what is forest interior.
+    /// </summary>
+    /// <remarks>
+    /// A little over the spacing the densest band is scattered at, so a cell in the middle of a stand sees
+    /// its whole immediate neighbourhood and a cell at the edge sees only the half of one that has trees in
+    /// it. Smaller and the interior comes out speckled; larger and the impassable mass swells out past the
+    /// trees that justify it.
+    /// </remarks>
+    internal static float CoverRadius = 2.6f;
+
+    /// <summary>
+    /// Trees within <see cref="CoverRadius"/> that make a patch of ground impassable.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the whole of "a forest is a wall you cut your way into".</b> Individual trunks cannot
+    /// block: measured, the densest band scatters at 2.20 m minimum, which leaves a 1.30 m gap between
+    /// trunks — bodies physically fit through it, but the navigation raster quantises clearance to rungs of
+    /// 0.25/0.75/1.25 and a 1.30 m gap comes out on the 0.25 rung, below the 0.37 every body routes at. Ten
+    /// thousand blocking trunks would be ten thousand unroutable holes. So the <em>interior</em> blocks and
+    /// the fringe does not, which is contiguous, is what the routing hierarchy wants, and means the only
+    /// trees anybody can reach are the ones on the edge.
+    /// <para>
+    /// Which is the mechanic rather than a limitation: <b>you fell the fringe, and the fringe moves in.</b>
+    /// A settlement starts in a clearing and cuts its way out, and the wood line receding is literally the
+    /// passable edge moving outward.
+    /// </para>
+    /// <para>
+    /// Three, against a deep-woodland density of about four trees inside that radius and about two at the
+    /// edge of a stand. It is the threshold that separates those two, and it is why the near band — 46 trees
+    /// at 3.4 m spacing, about two per radius — stays open for the cutters who start there.
+    /// </para>
+    /// </remarks>
+    internal static int CoverTrees = 3;
+
     /// <summary>What a tree would say about itself, for a report that has to say something.</summary>
     public static string StateOf(in EconomyNode tree) => tree.Stock.Wood >= WoodPerTree - 0.5f
         ? "standing"

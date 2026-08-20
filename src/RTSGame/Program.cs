@@ -51,6 +51,12 @@ public static class Program
             Environment.Exit(SettlementScenarios.Run(settlementExtent, years));
         }
 
+        if (args.Contains("--forestcost"))
+        {
+            var forestExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            Environment.Exit(SettlementScenarios.RunForestCost(forestExtent));
+        }
+
         if (args.Contains("--catchment"))
         {
             var catchExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;

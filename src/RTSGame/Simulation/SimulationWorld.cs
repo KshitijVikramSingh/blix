@@ -930,6 +930,165 @@ internal sealed class SimulationWorld
         return placementHits.Count == 0;
     }
 
+    /// <summary>
+    /// Paints the inside of every stand of trees as ground nothing can walk through.
+    /// </summary>
+    /// <remarks>
+    /// <b>Density, not trunks.</b> A cell is forest if <see cref="Woodland.CoverTrees"/> trees stand within
+    /// <see cref="Woodland.CoverRadius"/> of it — so the middle of a stand is a contiguous impassable mass
+    /// and its fringe is open. Blocking individual trunks was measured and is not available: the densest
+    /// band scatters at 2.20 m, leaving 1.30 m between trunks, and the navigation raster quantises
+    /// clearance to rungs of 0.25/0.75/1.25 — so a gap bodies physically fit through lands on the 0.25 rung
+    /// and is refused to everybody. Ten thousand blocking trunks is ten thousand unroutable holes.
+    /// <para>
+    /// Scattered from the trees rather than gathered per cell: each tree increments the cells within its
+    /// radius, and a second pass paints the ones that got enough. Ten thousand trees times eighty-five
+    /// cells is under a million increments, where asking each of six hundred thousand cells which trees are
+    /// near it is a spatial query per cell.
+    /// </para>
+    /// <para>
+    /// <b>Only grass is claimed, and it is released back to grass.</b> Remembering what each cell used to be
+    /// would be another one-byte-per-cell array to save and fingerprint, and the case it buys — a road under
+    /// a forest — is a contradiction anyway. A road that was under trees comes back as grass, which is
+    /// unlikely and harmless.
+    /// </para>
+    /// <para>
+    /// The navigation raster is <em>not</em> rebuilt here. <see cref="Tick"/> already notices a changed
+    /// terrain revision and rebuilds once, so painting a hundred thousand cells costs one rebuild rather
+    /// than a hundred thousand.
+    /// </para>
+    /// </remarks>
+    public void RefreshForestCover()
+    {
+        var transform = Terrain.Transform;
+        var counts = new byte[transform.Width * transform.Height];
+        var reach = (int)MathF.Ceiling(Woodland.CoverRadius / transform.CellSize);
+        var radiusSquared = Woodland.CoverRadius * Woodland.CoverRadius;
+
+        foreach (ref readonly var tree in Nodes.All)
+        {
+            if (!tree.IsAlive || !tree.IsStanding) continue;
+            if (!transform.TryWorldToCell(tree.Position, out var at)) continue;
+            for (var dz = -reach; dz <= reach; dz++)
+            for (var dx = -reach; dx <= reach; dx++)
+            {
+                var cell = new GridCell(at.X + dx, at.Z + dz);
+                if (!transform.Contains(cell)) continue;
+                if (Vector2.DistanceSquared(transform.CellCenter(cell), tree.Position) > radiusSquared)
+                {
+                    continue;
+                }
+
+                var index = cell.Z * transform.Width + cell.X;
+                if (counts[index] < 255) counts[index]++;
+            }
+        }
+
+        for (var z = 0; z < transform.Height; z++)
+        for (var x = 0; x < transform.Width; x++)
+        {
+            var cell = new GridCell(x, z);
+            var covered = counts[z * transform.Width + x] >= Woodland.CoverTrees;
+            var surface = Terrain.Surface(cell);
+            if (covered && surface == TerrainSurface.Grass)
+            {
+                Terrain.SetSurface(cell, TerrainSurface.Forest);
+            }
+            else if (!covered && surface == TerrainSurface.Forest)
+            {
+                Terrain.SetSurface(cell, TerrainSurface.Grass);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Re-decides the cover around a felled tree, which is how the passable edge moves.
+    /// </summary>
+    /// <remarks>
+    /// Only cells within a cover radius of where the tree stood can have changed, so only those are
+    /// re-counted — a full refresh is a million increments and this is a few hundred. The trees that matter
+    /// are those within two radii of the same point, gathered by one scan.
+    /// <para>
+    /// This is the mechanic made mechanical: fell a tree on the fringe and the ground behind it opens, which
+    /// puts the next row of trees in reach. A settlement cuts its way outward, and the wood line receding is
+    /// literally the passable edge moving.
+    /// </para>
+    /// </remarks>
+    public void ReleaseForestCover(Vector2 where)
+    {
+        var transform = Terrain.Transform;
+        var radius = Woodland.CoverRadius;
+        var radiusSquared = radius * radius;
+        var gatherSquared = (radius * 2f) * (radius * 2f);
+
+        forestNeighbours.Clear();
+        foreach (ref readonly var tree in Nodes.All)
+        {
+            if (!tree.IsAlive || !tree.IsStanding) continue;
+            if (Vector2.DistanceSquared(tree.Position, where) <= gatherSquared)
+            {
+                forestNeighbours.Add(tree.Position);
+            }
+        }
+
+        if (!transform.TryWorldToCell(where, out var origin)) return;
+        var reach = (int)MathF.Ceiling(radius / transform.CellSize);
+        for (var dz = -reach; dz <= reach; dz++)
+        for (var dx = -reach; dx <= reach; dx++)
+        {
+            var cell = new GridCell(origin.X + dx, origin.Z + dz);
+            if (!transform.Contains(cell)) continue;
+            var centre = transform.CellCenter(cell);
+            var near = 0;
+            foreach (var trunk in forestNeighbours)
+            {
+                if (Vector2.DistanceSquared(trunk, centre) <= radiusSquared) near++;
+            }
+
+            var covered = near >= Woodland.CoverTrees;
+            var surface = Terrain.Surface(cell);
+            if (covered && surface == TerrainSurface.Grass)
+            {
+                Terrain.SetSurface(cell, TerrainSurface.Forest);
+            }
+            else if (!covered && surface == TerrainSurface.Forest)
+            {
+                Terrain.SetSurface(cell, TerrainSurface.Grass);
+            }
+        }
+    }
+
+    private readonly List<Vector2> forestNeighbours = new();
+
+    /// <summary>
+    /// Whether anybody could get to a tree, which since Stage E's forest cover is a real question.
+    /// </summary>
+    /// <remarks>
+    /// A tree buried in the middle of a stand stands on impassable ground with impassable ground all round
+    /// it, so nobody can reach it and nobody should be sent. The test is the cheap one — is any of the eight
+    /// neighbouring cells walkable — rather than a routing query, because it is asked of every tree in the
+    /// world each time a cutter looks for its next one and there are ten thousand of them. Cheap and
+    /// slightly optimistic: a tree beside a pocket nothing can get into passes, and the jobs layer's polite
+    /// retry handles that the way it handles a workplace somebody walled in.
+    /// </remarks>
+    private bool CanReachTree(Vector2 position)
+    {
+        var transform = Terrain.Transform;
+        if (!transform.TryWorldToCell(position, out var at)) return false;
+        for (var dz = -1; dz <= 1; dz++)
+        for (var dx = -1; dx <= 1; dx++)
+        {
+            if (dx == 0 && dz == 0) continue;
+            var cell = new GridCell(at.X + dx, at.Z + dz);
+            if (transform.Contains(cell) && TerrainSurfaceRules.IsPassable(Terrain.Surface(cell)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public void RebuildTerrainNavigation()
     {
         NavigationRasterizer.Rebuild(Placement, Navigation, Terrain);
@@ -1102,7 +1261,8 @@ internal sealed class SimulationWorld
         phaseStart = Stopwatch.GetTimestamp();
         // Before jobs, so a hauler handed a job this tick starts walking on it this tick, and so
         // production reflects who was standing where at the end of the last one.
-        economy.Update(Nodes, Agents, Date, deltaSeconds, TryTravelSeconds, BornAt, Emigrate);
+        economy.Update(
+            Nodes, Agents, Date, deltaSeconds, TryTravelSeconds, BornAt, Emigrate, ReleaseForestCover);
         Timings.Record(SimulationPhase.Economy, Stopwatch.GetTimestamp() - phaseStart);
 
         phaseStart = Stopwatch.GetTimestamp();
@@ -1598,11 +1758,12 @@ internal sealed class SimulationWorld
                 ? Nodes.Get(assignment.Sink).Position
                 : agent.Position;
             var tree = EconomySystem.NearestTree(
-                Nodes, Agents, from, Woodland.ReachMetres, agent.Id);
+                Nodes, Agents, from, Woodland.ReachMetres, agent.Id, CanReachTree);
             if (!tree.IsValid)
             {
                 var (store, elsewhere) = EconomySystem.NearestBaseWithTrees(
-                    Nodes, Agents, agent.Faction, agent.Position, Woodland.ReachMetres, agent.Id);
+                    Nodes, Agents, agent.Faction, agent.Position, Woodland.ReachMetres, agent.Id,
+                    CanReachTree);
                 if (!elsewhere.IsValid) return false;
                 tree = elsewhere;
                 assignment = assignment with { Sink = store };

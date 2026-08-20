@@ -3063,3 +3063,125 @@ might.
 - **A site is a thing that can be interrupted**, which is what a raid on a half-built granary means.
 - **Buildings can now be lost for a cost that is legible** — a burnt store is eighteen sacks and half a
   year of somebody's time, which is what makes defending one a decision rather than a reflex.
+
+---
+
+## 27. A forest you cut your way into — and the rasteriser cost it exposed
+
+*Foot can still pass through trees, so no forest cover.* True, and it was a decision made in §22 with a
+stated reason that weighed the wrong things. Re-opened, measured, and changed.
+
+### The measurement that ruled out the obvious answer
+
+Three facts, in the order they mattered:
+
+**There is no cheap middle.** The velocity solve does not see static colliders at all — only a
+depenetration pass does, and only for AABBs. Buildings are avoided by *routing*, not by steering. So
+giving trees a collider would not make bodies weave between trunks; it would make them walk into trunks
+and be shoved out, which is precisely the "they get stuck in farms/trees" complaint from Stage A. The
+architecture's position is: **if a thing should be gone around, it belongs in the navigation raster.**
+
+**At the density the map wants, individual trunks cannot enter the raster.** Measured over the scatter:
+
+| nearest neighbour, deep woodland | |
+|---|---|
+| min | **2.20 m** |
+| median | 2.52 m |
+| p95 | 3.46 m |
+
+A 0.45 m trunk leaves a 1.30 m gap at worst. A villager is 0.74 m across and a cart 1.10, so everything
+*physically* fits — but the raster quantises clearance to rungs of 0.25/0.75/1.25, and a 1.30 m gap gives a
+cell-centre clearance of about 0.65, which lands on the 0.25 rung and is refused to a 0.37 m routing
+radius. **Ten thousand blocking trunks is ten thousand unroutable holes.**
+
+**And "forest cover" is two asks.** Bodies not walking through trunks is one thing; a forest *concealing*
+things is another, and needs a vision system that does not exist. Concealment goes with Stage E's raid.
+
+### So the interior blocks and the fringe does not
+
+A cell is forest if three trees stand within 2.6 m of it — about four in the deep woodland and about two at
+the edge of a stand, so the threshold is what separates those. That gives a contiguous impassable mass,
+which is what the routing hierarchy wants, and it means **the only trees anybody can reach are on the
+edge.**
+
+Which is the mechanic rather than a limitation: **you fell the fringe, and the fringe moves in.** A
+settlement starts in a clearing and cuts its way out, and the wood line receding is literally the passable
+edge moving outward. The near band — 46 trees at 3.4 m spacing, about two per radius — stays open by
+construction, which is why the cutters who start there can work at all.
+
+Two supporting decisions:
+
+- **`TerrainSurface.Forest`, not `Impassable`.** Impassable is water, and conflating them would make every
+  question anybody ever asks about water — can a boat cross it, does it put out a fire, does it stop an
+  arrow — answer the same about a wood. Same mistake as a building's size standing in for whether you can
+  walk on it, and a store's fullness standing in for whether anybody can reach what is in it. All three
+  were fixed this session and all three were one enum value short of never happening.
+- **A terrain surface rather than occupied placement cells**, because the terrain grid *is* the navigation
+  grid at half a metre — so painting it blocks routing directly. As placement cells it would have been
+  seventy thousand static colliders describing ground nothing ever touches.
+
+And the cutters had to learn reachability. The nearest tree to a store is very often one buried inside a
+stand; a cutter sent to one walks at it, fails to arrive, retries politely and never cuts anything — so the
+settlement would starve for wood while standing next to a forest.
+
+### The rasteriser was quadratic in obstacle density, and nobody knew
+
+Painting 74,517 impassable cells took one rebuild from 350 ms to **12.7 seconds.** Instrumented: **eleven
+billion box comparisons.**
+
+The cause was that `ObstacleIndex` bucketed at `Reach` — *the clearance ceiling* — so every one of 1.44M
+cells gathered a 96 × 96 m neighbourhood of obstacle boxes to find something usually a metre away. Perfectly
+fine on a map whose obstacles were a pond and a few walls. Three changes:
+
+1. **`Reach` is 6 m, not 32.** Nothing has ever needed a clearance value above about three: a constriction
+   is `radius × 2`, open ground is `radius × 5` — 2.75 m for the widest body in the roster — and a passage
+   axis is only sought below `radius × 3`. Above that the answer is "open", and how open does not matter to
+   anybody.
+2. **Buckets are 2 m, decoupled from `Reach`.** They were never the same thing: one is a clamp on a
+   reported value, the other only has to make a nearest-obstacle search terminate.
+3. **Gather once per 4 × 4 tile, widening only as far as needed.** Sixteen cells share a neighbourhood, and
+   among trees the smallest radius already answers it.
+
+**12,723 ms → 1,043 ms**, with every behavioural benchmark byte-identical: pen 1.33x, gate 1.78x, dead-stops
+0 and 33, red 119.2 and 335.0 agent-seconds.
+
+### Three wrong turns, and what caught each
+
+**An exact Euclidean distance transform**, which was faster still at 620 ms, and was backed out. It
+measures distance to a blocked cell's *centre* where the existing semantics measure distance to its *box* —
+so it over-reports clearance on diagonals by 10 cm, and clearance is the number that decides whether a body
+fits. Three clearance-rung tests failed and were right to. The box distance is not a function of the point
+distance, so no post-hoc correction exists.
+
+**Treating "nothing found, so the map edge is nearest" as settled**, which reports clearance *larger* than
+the truth — the direction that tells a body it fits where it does not. The movement benchmarks caught it as
+a mean clearance that had gone **up** (2.38 → 2.47) rather than down.
+
+**Bailing out of the cell loop on the final pass**, which leaves the rest of a tile never written —
+clearance zero, which reads as solid ground, and on open terrain that is most of the map. **Nineteen tests
+failed at once.** The benchmarks missed this one entirely, because their scenarios are wall-dense and
+almost every cell is near something; it took the general suite.
+
+Worth keeping: *the benchmarks and the suite fail on different things, and neither is a substitute.*
+
+| | |
+|---|---|
+| suite | `--selftest` **79/79** |
+| forest | 9,985 trees close **74,517 of 1.44M cells** — 5.2% of the map, 18,629 m² |
+| one year, compact | 8,049 grain of 8,400 nominal, drift 0, short 0, 4 born, 0 left, 0 faults |
+| cutters | 7 working the fringe all year, wood never short |
+| rasterise | 12,723 → **1,043 ms**; re-opening around one felled tree 0.4 ms |
+| benchmarks | pen 1.33x, gate 1.78x, dead-stops 0/33 — unmoved |
+
+`--forestcost` is the new diagnostic that produced these, and it stays: the cost of an impassable region is
+the thing that decides whether the mechanic is affordable, and it should be measurable rather than
+remembered.
+
+### What Stage E gets
+
+- **Approach routes are constrained**, which is most of what a raid needs from terrain: raiders can only
+  come through the gaps, and the gaps are where the settlement has been cutting.
+- **Concealment is the remaining half**, and it lands with the raid — a vision system that trees occlude,
+  against §7's detection radii of 105 at the settlement and 190 at an outpost.
+- **A settlement can wall itself in**, which is a real strategic position rather than a bug: the forest is
+  a defence until you cut through it, and every path you open is a path in.

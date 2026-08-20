@@ -130,6 +130,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private static readonly Vector4 RoughColor = new(0.230f, 0.190f, 0.115f, 1f);
     private static readonly Vector4 MudColor = new(0.125f, 0.098f, 0.062f, 1f);
     private static readonly Vector4 ImpassableColor = new(0.071f, 0.213f, 0.246f, 1f);
+
+    /// <summary>Ground inside a stand of trees: leaf litter, dark because nothing reaches it.</summary>
+    /// <remarks>
+    /// Distinct from the water this shares its impassability with, and darker than grass, so that the shape
+    /// of the wood is legible from above even where the canopy does not quite close over it. It is the one
+    /// place a player can see where the forest actually ends, which since it is now a wall they have to cut
+    /// through is the thing they most need to see.
+    /// </remarks>
+    private static readonly Vector4 ForestFloorColor = new(0.062f, 0.082f, 0.038f, 1f);
     private static readonly Vector4 AvoidanceColliderColor = new(0.20f, 0.78f, 0.92f, 1f);
     private static readonly Vector4 PlacementColliderColor = new(0.34f, 0.86f, 0.44f, 1f);
     private static readonly Vector4 InteractionColliderColor = new(0.78f, 0.38f, 0.92f, 1f);
@@ -2178,6 +2187,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         TerrainSurface.Rough => RoughColor,
         TerrainSurface.Mud => MudColor,
         TerrainSurface.Impassable => ImpassableColor,
+        TerrainSurface.Forest => ForestFloorColor,
         _ => Grass,
     };
 

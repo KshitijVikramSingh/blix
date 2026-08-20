@@ -3,6 +3,8 @@ using RTSGame.Simulation;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Economy;
 using RTSGame.Simulation.Jobs;
+using RTSGame.Simulation.Spatial;
+using RTSGame.Simulation.Terrain;
 
 namespace RTSGame.Debug;
 
@@ -120,6 +122,93 @@ internal static class SettlementScenarios
 
         foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");
         return faults.Count > 0 ? 1 : 0;
+    }
+
+    /// <summary>
+    /// What forest cover costs: painting it, rasterising it, and re-opening it when a tree comes down.
+    /// </summary>
+    /// <remarks>
+    /// The number that decides whether an impassable forest is affordable at all. Blocking the interior of
+    /// every stand adds tens of thousands of impassable cells to a 1200x1200 raster, and the routing
+    /// hierarchy has to decompose the free space around them — so the question is not whether the paint is
+    /// cheap (it is) but what the <em>rebuild</em> costs, because a felled tree that re-opens ground pays it
+    /// again. A settlement fells about twenty trees a year.
+    /// </remarks>
+    public static int RunForestCost(float extentMeters)
+    {
+        Console.WriteLine($"RTSGame forest cover cost — {extentMeters:F0} m map");
+        var world = new SimulationWorld(extentMeters);
+        var granary = Populate(world, Farms, Woodcutters, Carts, Wagons, ringRadius: 36f);
+
+        var transform = world.Terrain.Transform;
+        var cells = transform.Width * transform.Height;
+        var forest = 0;
+        for (var z = 0; z < transform.Height; z++)
+        for (var x = 0; x < transform.Width; x++)
+        {
+            if (world.Terrain.Surface(new GridCell(x, z)) == TerrainSurface.Forest) forest++;
+        }
+
+        var (standing, trees) = world.Nodes.StandingTimber();
+        Console.WriteLine(
+            $"  {trees:N0} trees closed {forest:N0} of {cells:N0} navigation cells " +
+            $"({forest / (float)cells * 100f:F1}% of the map, {forest * 0.25f:N0} m2)");
+
+        // The raster on its own, so the first tick's cost is attributed rather than guessed at.
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        world.RebuildTerrainNavigation();
+        var raster = clock.Elapsed.TotalMilliseconds;
+
+        clock.Restart();
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        var firstTick = clock.Elapsed.TotalMilliseconds;
+
+        clock.Restart();
+        for (var i = 0; i < 60; i++) world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        var steady = clock.Elapsed.TotalMilliseconds / 60.0;
+
+        // Repainting the whole map, which is what a scenario does once at setup.
+        clock.Restart();
+        world.RefreshForestCover();
+        var repaint = clock.Elapsed.TotalMilliseconds;
+
+        // And the cost a felling actually pays: re-decide the ground around one tree, then the rebuild the
+        // next tick does if anything changed.
+        var fringe = NodeId.None;
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (node.IsAlive && node.IsStanding) fringe = node.Id;
+        }
+
+        var where = world.Nodes.Get(fringe).Position;
+        clock.Restart();
+        world.ReleaseForestCover(where);
+        var release = clock.Elapsed.TotalMilliseconds;
+
+        clock.Restart();
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        var afterFelling = clock.Elapsed.TotalMilliseconds;
+
+        // And the rebuild a change definitely triggers, because the tree above may have opened nothing —
+        // a fringe tree whose neighbours still hold the ground closed changes no cell, and timing that
+        // proves only that nothing happened.
+        transform.TryWorldToCell(where, out var poke);
+        world.Terrain.SetSurface(poke, TerrainSurface.Grass);
+        clock.Restart();
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        var forcedRebuild = clock.Elapsed.TotalMilliseconds;
+
+        Console.WriteLine($"  rasterise on its own:           {raster:F0} ms");
+        Console.WriteLine($"  first tick (raster + the rest):  {firstTick:F0} ms");
+        Console.WriteLine($"  steady tick:                    {steady:F2} ms");
+        Console.WriteLine($"  repaint the whole map:          {repaint:F0} ms");
+        Console.WriteLine($"  re-open around one tree:        {release:F2} ms");
+        Console.WriteLine($"  the tick that follows a felling:{afterFelling,7:F0} ms");
+        Console.WriteLine($"  a tick with a forced rebuild:   {forcedRebuild:F0} ms");
+        Console.WriteLine(
+            "  a felling only costs the rebuild when it actually opens ground; a settlement fells " +
+            "about twenty trees a year");
+        return 0;
     }
 
     /// <summary>
@@ -448,6 +537,11 @@ internal static class SettlementScenarios
         Band(ringRadius * 3f, ringRadius * 7f, trees: 900, spacing: 2.2f, clump: 11);
 
         (SeededTimber, SeededTrees) = world.Nodes.StandingTimber();
+
+        // And close the inside of every stand. Painted once, after the whole woodland is down, because the
+        // navigation raster rebuilds from a changed terrain revision on the next tick — so one refresh over
+        // ten thousand trees costs one rebuild, and doing it per tree would cost ten thousand.
+        world.RefreshForestCover();
     }
 
     /// <summary>Half-width of the ground the fields and the village occupy, which stays clear.</summary>

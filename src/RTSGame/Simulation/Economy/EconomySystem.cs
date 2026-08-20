@@ -349,7 +349,8 @@ internal sealed class EconomySystem
         float deltaSeconds,
         TravelPrice price,
         Birth? born = null,
-        Departure? left = null)
+        Departure? left = null,
+        Felled? felled = null)
     {
         var season = date.Season;
         CountHands(nodes, agents);
@@ -368,7 +369,7 @@ internal sealed class EconomySystem
         boardCooldown -= deltaSeconds;
         if (boardCooldown > 0f) return;
         boardCooldown = BoardIntervalSeconds;
-        SweepSpentNodes(nodes);
+        SweepSpentNodes(nodes, felled);
         RunBoard(nodes, agents, price);
     }
 
@@ -385,6 +386,9 @@ internal sealed class EconomySystem
 
     /// <summary>Takes somebody out of the world, for good.</summary>
     internal delegate void Departure(AgentId body);
+
+    /// <summary>A tree has come down, so the ground around it may have opened.</summary>
+    internal delegate void Felled(Vector2 where);
 
     /// <summary>
     /// Grows the settlement where it can afford to, and loses people where it cannot.
@@ -1067,14 +1071,21 @@ internal sealed class EconomySystem
     /// survives a save landing on the tick the axe went in. A tree at zero is standing dead for at most
     /// two seconds, which nobody can see and nothing depends on.
     /// </remarks>
-    private static void SweepSpentNodes(NodeStore nodes)
+    private static void SweepSpentNodes(NodeStore nodes, Felled? felled)
     {
         for (var slot = 0; slot < nodes.Count; slot++)
         {
             var id = new NodeId(slot);
             if (!nodes.Contains(id)) continue;
             ref readonly var node = ref nodes.Get(id);
-            if ((node.IsPile || node.IsStanding) && node.Stock.Total <= 0) nodes.Remove(id);
+            if (!(node.IsPile || node.IsStanding) || node.Stock.Total > 0) continue;
+            var standing = node.IsStanding;
+            var where = node.Position;
+            nodes.Remove(id);
+            // A felled tree may have been the one holding a patch of ground closed. Told rather than
+            // discovered, because the alternative is re-deciding the whole map's cover every time a heap is
+            // carried away.
+            if (standing) felled?.Invoke(where);
         }
     }
 
@@ -1086,12 +1097,16 @@ internal sealed class EconomySystem
     /// same reason: this is asked once per load per cutter, and paying a routing query to choose between
     /// two trees a cutter can see would cost more than the walk between them.
     /// </remarks>
+    /// <summary>Whether a body could get to a tree at all — see <c>SimulationWorld.CanReachTree</c>.</summary>
+    internal delegate bool Reachable(Vector2 position);
+
     public static NodeId NearestTree(
         NodeStore nodes,
         AgentStore agents,
         Vector2 from,
         float reachMetres,
-        AgentId self)
+        AgentId self,
+        Reachable? reachable)
     {
         var best = NodeId.None;
         var bestDistance = reachMetres * reachMetres;
@@ -1101,6 +1116,7 @@ internal sealed class EconomySystem
             var distance = Vector2.DistanceSquared(node.Position, from);
             if (distance > bestDistance) continue;
             if (IsClaimed(agents, node.Id, self)) continue;
+            if (reachable is not null && !reachable(node.Position)) continue;
             bestDistance = distance;
             best = node.Id;
         }
@@ -1108,11 +1124,22 @@ internal sealed class EconomySystem
         // Everything in reach already has somebody on it. Sharing a trunk is legitimate — two axes fell
         // a tree in half the time — so the claim is a preference and not a lock; without the fallback a
         // seventh cutter with six trees in reach would simply stop.
-        return best.IsValid ? best : NearestTree(nodes, from, reachMetres);
+        return best.IsValid ? best : NearestTree(nodes, from, reachMetres, reachable);
     }
 
-    /// <summary>The nearest tree with wood in it, whoever else is already on it.</summary>
-    public static NodeId NearestTree(NodeStore nodes, Vector2 from, float reachMetres)
+    /// <summary>The nearest reachable tree with wood in it, whoever else is already on it.</summary>
+    /// <remarks>
+    /// <b>Reachability is not optional now that a forest interior is impassable.</b> The nearest tree to a
+    /// store is very often one buried in the middle of a stand, and a cutter sent to one walks at it,
+    /// fails to arrive, retries politely and never cuts anything — so the whole settlement would starve for
+    /// wood while standing next to a forest. Only the fringe can be worked, which is the mechanic: fell the
+    /// edge and the edge moves in.
+    /// </remarks>
+    public static NodeId NearestTree(
+        NodeStore nodes,
+        Vector2 from,
+        float reachMetres,
+        Reachable? reachable = null)
     {
         var best = NodeId.None;
         var bestDistance = reachMetres * reachMetres;
@@ -1121,6 +1148,7 @@ internal sealed class EconomySystem
             if (!node.IsAlive || !node.IsStanding || node.Stock.Wood <= 0) continue;
             var distance = Vector2.DistanceSquared(node.Position, from);
             if (distance > bestDistance) continue;
+            if (reachable is not null && !reachable(node.Position)) continue;
             bestDistance = distance;
             best = node.Id;
         }
@@ -1172,7 +1200,8 @@ internal sealed class EconomySystem
         FactionId faction,
         Vector2 from,
         float reachMetres,
-        AgentId self)
+        AgentId self,
+        Reachable? reachable)
     {
         var bestStore = NodeId.None;
         var bestTree = NodeId.None;
@@ -1181,7 +1210,7 @@ internal sealed class EconomySystem
         {
             if (!store.IsAlive || !store.Stores || store.Faction != faction) continue;
             if (store.RoomFor(Resource.Wood) <= 0) continue;
-            var tree = NearestTree(nodes, agents, store.Position, reachMetres, self);
+            var tree = NearestTree(nodes, agents, store.Position, reachMetres, self, reachable);
             if (!tree.IsValid) continue;
             var distance = Vector2.DistanceSquared(store.Position, from);
             if (distance >= bestDistance) continue;

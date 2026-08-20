@@ -111,6 +111,8 @@ internal static class DeterminismCheck
         ["EconomySystem.idleHaulers"] =
             "rebuilt from the bodies by every pass of the board; who is idle is a fact about the " +
             "bodies, and those are fingerprinted.",
+        ["SimulationWorld.forestNeighbours"] =
+            "scratch for one felling's cover decision, gathered from the trees and read within the call.",
         ["EconomySystem.Readiness"] =
             "recomputed from the stores and the households at the head of every population pass, before " +
             "anything reads it; it is a reported figure rather than a carried one.",

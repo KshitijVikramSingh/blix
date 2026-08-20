@@ -1,7 +1,7 @@
 namespace RTSGame.Simulation.Terrain;
 
 /// <summary>
-/// What the ground is made of. One byte wide, because there are five of them.
+/// What the ground is made of. One byte wide, because there are six of them.
 /// </summary>
 /// <remarks>
 /// The width is not cosmetic at this scale. There is one of these per navigation cell — 1.44M on the
@@ -16,6 +16,25 @@ internal enum TerrainSurface : byte
     Rough,
     Mud,
     Impassable,
+
+    /// <summary>
+    /// The inside of a stand of trees: ground you cannot walk through.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not <see cref="Impassable"/>, though it behaves the same way.</b> Impassable is water, and
+    /// conflating the two would make every question anybody ever asks about water — can a boat cross it,
+    /// does it put out a fire, does it stop an arrow — answer the same about a wood. That is the same
+    /// mistake as a building's size standing in for whether you can walk on it, and as a store's fullness
+    /// standing in for whether anybody can reach what is in it; both were found and fixed this session, and
+    /// both were one enum value short of never happening.
+    /// <para>
+    /// It is a <em>terrain surface</em> rather than an occupied placement cell because the terrain grid
+    /// <b>is</b> the navigation grid — half-metre cells — so painting it blocks routing directly, with no
+    /// collider per cell. A forest as placement cells would have been seventy thousand static colliders
+    /// describing ground nothing ever touches.
+    /// </para>
+    /// </remarks>
+    Forest,
 }
 
 internal static class TerrainSurfaceRules
@@ -24,7 +43,8 @@ internal static class TerrainSurfaceRules
     /// <remarks>Kept in step with the road multiplier below; the two disagreeing is a wrong route.</remarks>
     public const float MinimumPathCost = 1f / 1.45f;
 
-    public static bool IsPassable(TerrainSurface surface) => surface != TerrainSurface.Impassable;
+    public static bool IsPassable(TerrainSurface surface) =>
+        surface is not (TerrainSurface.Impassable or TerrainSurface.Forest);
 
     /// <summary>
     /// Seconds to cross this surface relative to open ground.
