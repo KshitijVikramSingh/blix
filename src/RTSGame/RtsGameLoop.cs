@@ -2362,7 +2362,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     }
 
     /// <summary>
-    /// Stones and scrub, generated from the ground rather than stored anywhere.
+    /// Low scrub, generated from the ground rather than stored anywhere.
     /// </summary>
     /// <remarks>
     /// <b>Derived, not authored, and that is what makes it free.</b> A scatter dense enough to matter is
@@ -2372,14 +2372,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// the cell, and how big" — so the same cell always answers the same way, nothing is stored, nothing is
     /// saved, and a scatter appears and disappears with the camera at no cost but the draw.
     /// <para>
-    /// Kept off worked ground for the reason §22 gave about trees: a stone in a wheat field is not a
+    /// Kept off worked ground for the reason §22 gave about trees: a bush in a wheat field is not a
     /// collision, it is a lie about what that ground is being used for. Placement occupancy answers that for
     /// buildings and fields alike, and the check is one grid lookup.
+    /// </para>
+    /// <para>
+    /// <b>Scrub rather than stones</b>, and see <c>SettlementArt</c> for why: stone is about to be something
+    /// you mine, and scattering it as decoration teaches the player that rocks are nothing to look at.
     /// </para>
     /// </remarks>
     private void DrawScatter()
     {
-        if (art is null || art.Scatter.Length == 0) return;
+        if (art is null || art.Trees.Length < 2) return;
         var radius = MathF.Sqrt(treeDrawRadiusSquared);
         // One candidate every few metres. Sparse enough that the eye reads them as incidental rather than
         // as a texture, which is the difference between scattered stones and gravel.
@@ -2394,7 +2398,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var cz = (int)originZ + dz;
             var roll = ScatterHash(cx, cz, 0);
             // Most cells are empty. A scatter that fills every cell is a gravel pit.
-            if (roll > 0.34f) continue;
+            // Roughly one cell in five. Measured on the way here: a third of a 3.5 m grid put fourteen
+            // hundred bushes inside the draw radius, which is a bush every ten square metres — a meadow
+            // rather than a scatter. A scatter is meant to be noticed without being counted.
+            if (roll > 0.2f) continue;
 
             var at = new Vector2(
                 (cx + 0.15f + ScatterHash(cx, cz, 1) * 0.7f) * spacing,
@@ -2408,13 +2415,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 continue;
             }
 
-            var which = (int)(ScatterHash(cx, cz, 3) * art.Scatter.Length) % art.Scatter.Length;
-            // Rock_Group is a metre and a half across and wants to stay near its own size; the pebbles are
-            // centimetres and want scaling up to be visible at all. One width, varied a little.
-            var width = which == 0
-                ? 1.1f + ScatterHash(cx, cz, 4) * 0.9f
-                : 0.5f + ScatterHash(cx, cz, 4) * 0.7f;
-            art.Scatter[which].Add(SettlementArt.Placement(
+            // The broadleaf trees at a fraction of their size, which reads as scrub and costs nothing: no
+            // new asset, no new batch, and it is already foliage so it picks up the leaf shading. The pine
+            // is skipped — a conifer scaled down is a small conifer, not a bush.
+            var which = ScatterHash(cx, cz, 3) < 0.5f ? 0 : 1;
+            var width = 0.45f + ScatterHash(cx, cz, 4) * 0.55f;
+            art.Trees[which].Add(SettlementArt.Placement(
                 at,
                 simulation.Terrain.SampleHeight(at),
                 width,
