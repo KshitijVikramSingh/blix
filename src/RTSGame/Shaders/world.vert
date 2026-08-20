@@ -38,8 +38,9 @@ layout(push_constant) uniform Push {
     vec4 uHazeAway;
     vec4 uHazeToward;
     // x = how far a plant leans at a metre up, y = the clock in simulated seconds, z = how fast the gusts
-    // come, w = spare. Read here and nowhere else, which is the first thing in this block the vertex stage
-    // owns rather than tolerates.
+    // come, w = the wind's bearing in radians. Read here and nowhere else, which is the first thing in this
+    // block the vertex stage owns rather than tolerates — and the bearing is shared with the smoke, so a
+    // plume and the trees it drifts past agree about which way the wind is going.
     vec4 uWind;
 };
 
@@ -69,22 +70,35 @@ layout(location = 3) out vec4 vSunShadowCoord;
 // believable amplitude for the pine is imperceptible on the wheat and at a believable one for the wheat
 // throws the pine across the map.
 //
-// It is out of phase with itself. The phase carries a world-space term, so neighbours lean at different
-// moments and a wood ripples instead of pulsing. Two frequencies at right angles, so a leaning plant
-// describes a slow figure of eight rather than sliding along a line.
+// <b>It leans downwind, and only breathes across it.</b> The first version put equal amplitude on two
+// axes at right angles, which makes a crown orbit — and an orbit reads as swinging rather than as weather,
+// because nothing in wind goes round. Reported immediately as violent, and it was the shape rather than the
+// size: most of the displacement is now a steady lean along the wind's own bearing, and what oscillates is
+// a fraction of it plus a smaller sway across. A tree that is mostly just *leaning* looks windy while
+// hardly moving at all, which is the cheapest calm there is.
 //
-// And it gusts, on a slow spatial wave, because steady wind reads as a machine. The gust never reaches
-// zero — dead calm in one patch while the next one moves is a stranger artefact than a little wind
-// everywhere.
+// It is out of phase with itself. The phase carries a world-space term, so neighbours lean at different
+// moments and a wood ripples instead of pulsing.
+//
+// It gusts, on a slow spatial wave, because steady wind reads as a machine. The gust never reaches zero —
+// dead calm in one patch while the next one moves is a stranger artefact than a little wind everywhere.
+//
+// And nothing may travel more than a fraction of its own height, which is what the square root alone did
+// not give. Root-of-height makes small plants move relatively *more* than tall ones — 8 cm on a 60 cm tuft
+// is a seventh of it, and a whole field of grass shifting by a seventh shimmers. The cap is the rule a
+// person would state if asked: a plant bends, it does not walk.
 vec3 blix_rts_lean(vec3 worldPos, float baseY, float carried) {
     if (!isPlant(carried) || uWind.x <= 0.0) return worldPos;
     float above = max(worldPos.y - baseY, 0.0);
     float t = uWind.y;
     // A slow travelling wave, so a gust arrives somewhere before it arrives everywhere.
     float gust = 0.55 + 0.45 * sin(t * uWind.z + (worldPos.x + worldPos.z * 0.7) * 0.02);
-    float phase = t * 1.7 + worldPos.x * 0.23 + worldPos.z * 0.19;
-    float amount = uWind.x * gust * sqrt(above);
-    return worldPos + vec3(sin(phase), 0.0, cos(phase * 0.83)) * amount;
+    float phase = t * 0.8 + worldPos.x * 0.23 + worldPos.z * 0.19;
+    float amount = min(uWind.x * gust * sqrt(above), above * 0.07);
+    vec2 downwind = vec2(sin(uWind.w), cos(uWind.w));
+    vec2 across = vec2(downwind.y, -downwind.x);
+    vec2 offset = downwind * (0.62 + 0.38 * sin(phase)) + across * (0.22 * cos(phase * 0.83));
+    return worldPos + vec3(offset.x, 0.0, offset.y) * amount;
 }
 
 void main() {

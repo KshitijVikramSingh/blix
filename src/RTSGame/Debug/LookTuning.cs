@@ -97,11 +97,32 @@ internal sealed class LookSettings
     /// </para>
     /// </remarks>
     [Tune(0.0, 0.4, Label = "wind sway (m)", Group = "wind")]
-    public float WindSway = 0.10f;
+    public float WindSway = 0.045f;
 
     /// <summary>How fast the gusts come, in radians a simulated second.</summary>
     [Tune(0.0, 2.0, Label = "gust rate", Group = "wind")]
     public float WindGustRate = 0.31f;
+
+    /// <summary>How hard the chimneys smoke, over what the season already asked for.</summary>
+    /// <remarks>
+    /// Zero is off, which is worth having: smoke is the only thing in the frame that can hide a building,
+    /// and a judgement about a roof wants it out of the way. The season and the hour decide the rest — see
+    /// <c>Rendering/Hearths.cs</c>, where a winter morning is the smokiest thing in the game.
+    /// </remarks>
+    [Tune(0.0, 2.0, Label = "chimney smoke", Group = "wind")]
+    public float SmokeDensity = 1f;
+
+    /// <summary>How fast smoke is carried downwind, in metres a simulated second.</summary>
+    [Tune(0.0, 3.0, Label = "smoke drift (m/s)", Group = "wind")]
+    public float SmokeDrift = 0.75f;
+
+    /// <summary>Which way the wind is going, in degrees.</summary>
+    /// <remarks>
+    /// Shared by the trees and the smoke, which is the point of having it at all: a plume crossing a wood
+    /// that leans the other way is two effects rather than one piece of weather.
+    /// </remarks>
+    [Tune(0.0, 360.0, Label = "wind bearing (deg)", Group = "wind")]
+    public float WindBearingDegrees = 115f;
 
     /// <summary>How much saturation a high sun takes out of the frame.</summary>
     /// <remarks>

@@ -251,6 +251,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private ShaderProgramHandle casterShader;
     private FullscreenPass fullscreen = null!;
 
+    // <b>Smoke, and the first thing in this scene that is not opaque.</b> Its own pipeline because it needs
+    // two states nothing else here does — alpha blending, and a depth test that does not write — and its
+    // own shader pair because it is the first surface whose fourth colour channel means opacity rather than
+    // which material it is. Drawn last of the solids so it blends over a finished frame.
+    private ShaderProgramHandle smokeShader;
+    private PipelineHandle smokePipeline;
+    private InstanceBuffer smokeBuffer = null!;
+    private InstancedBatch smokeBatch = null!;
+    private readonly Hearths hearths = new();
+    // viewProj, camPos, sunDir, sunLight, skyLight, fog, haze. As with the world block, this length is
+    // also the declared push-constant range, so the two cannot disagree.
+    private readonly byte[] smokePush = new byte[160];
+
     // Solid things: buildings, heaps, hand-built walls, trees. Held as a list rather than
     // batched directly because each one is drawn twice — once lit into the scene and once
     // depth-only into the shadow map — and the two draws must agree exactly or a building
@@ -805,6 +818,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var skyInterface = new ShaderInterface(
             Slots: Array.Empty<DescriptorSetSlot>(),
             PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 128) });
+        var smokeInterface = new ShaderInterface(
+            Slots: new[] { InstanceBuffer.Slot },
+            PushConstants: new[]
+            {
+                new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, smokePush.Length),
+            });
         var presentInterface = new ShaderInterface(
             Slots: new[]
             {
@@ -821,7 +840,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             .ResolveColor(hdrHandle)
             .Depth(sceneDepthHandle, LoadOp.Clear, StoreOp.Store)
             .Read(sunShadowHandle)
-            .Shader(skyInterface, shaderInterface)
+            .Shader(skyInterface, shaderInterface, smokeInterface)
             .Handle;
         graph.Compile();
 
@@ -852,6 +871,23 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 Array.Empty<BlendState>(),
                 RenderTarget: graph.GetPassSurface(shadowPassHandle)),
             "rts-caster");
+        smokeShader = vk.CreateShaderProgramFromSpv(
+            Spv("smoke.vert.spv"), Spv("smoke.frag.spv"), smokeInterface, "rts-smoke");
+        smokePipeline = vk.CreatePipeline(
+            new PipelineDescription(
+                smokeShader,
+                meshLayout,
+                PrimitiveTopology.Triangles,
+                // Tested against the world it drifts through, but writing no depth: a plume is a hundred
+                // overlapping puffs and each one occluding the next is the one way to make smoke look like
+                // a pile of spheres.
+                DepthState.LessEqualNoWrite,
+                // The near hemisphere only. A puff fades at its own silhouette, so the far side of the
+                // sphere contributes a second, brighter copy of the same fade and doubles every edge.
+                RasterizerState.BackFaceCulling,
+                new[] { BlendState.AlphaBlend },
+                RenderTarget: graph.GetPassSurface(scenePassHandle)),
+            "rts-smoke");
         var skyShader = vk.CreateShaderProgramFromSpv(
             Spv("sky.vert.spv"), Spv("sky.frag.spv"), skyInterface, "rts-sky");
         skyPipeline = vk.CreatePipeline(
@@ -899,6 +935,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         unitCaster = new InstancedBatch(cylinderMesh, casterPipeline, unitCasterBuffer);
         canopyBuffer = new InstanceBuffer(vk, worldShader, "rts-canopies");
         canopyBatch = new InstancedBatch(canopyMesh, worldPipeline, canopyBuffer);
+        // The same sphere the greybox canopies use, which is what a puff of smoke wants to be.
+        smokeBuffer = new InstanceBuffer(vk, smokeShader, "rts-smoke");
+        smokeBatch = new InstancedBatch(canopyMesh, smokePipeline, smokeBuffer);
         canopyCasterBuffer = new InstanceBuffer(vk, casterShader, "rts-canopies-caster");
         canopyCaster = new InstancedBatch(canopyMesh, casterPipeline, canopyCasterBuffer);
         art = SettlementArt.Load(vk, worldShader, worldPipeline, casterShader, casterPipeline);
@@ -1794,8 +1833,42 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // trees stirring at a leisurely real-world rate, and the scene would come apart at exactly the
         // moment the player asked it to go faster.
         var wind = new Vector4(
-            look.WindSway, (float)(simulation.TickNumber / 30.0), look.WindGustRate, 0f);
+            look.WindSway,
+            (float)(simulation.TickNumber / 30.0),
+            look.WindGustRate,
+            look.WindBearingDegrees * MathF.PI / 180f);
         MemoryMarshal.Write(worldPush.AsSpan(304, 16), in wind);
+        // Smoke takes the light already resolved into one colour each, because it has no shadow map, no
+        // material class and no wear to look up — it is a thin thing that carries the ambient and a little
+        // of the beam, and packing the palette down to two vec4s keeps its whole layout at 128 bytes.
+        var sunLight = new Vector4(new Vector3(sunTint.X, sunTint.Y, sunTint.Z) * light.X, 0f);
+        var skyLight = new Vector4(new Vector3(skyAmbient.X, skyAmbient.Y, skyAmbient.Z) * light.Y, 0f);
+        MemoryMarshal.Write(smokePush.AsSpan(0, 64), in viewProjection);
+        MemoryMarshal.Write(smokePush.AsSpan(64, 16), in cameraPosition);
+        MemoryMarshal.Write(smokePush.AsSpan(80, 16), in sun);
+        MemoryMarshal.Write(smokePush.AsSpan(96, 16), in sunLight);
+        MemoryMarshal.Write(smokePush.AsSpan(112, 16), in skyLight);
+        MemoryMarshal.Write(smokePush.AsSpan(128, 16), in fog);
+        MemoryMarshal.Write(smokePush.AsSpan(144, 16), in hazeAway);
+
+        // <b>The plumes, which are dressing and therefore derived rather than stepped.</b> Advance only
+        // decides whether a chimney's turn has come round; where a puff has got to is a function of its
+        // age, worked out when it is drawn. See Rendering/Hearths.cs.
+        hearths.Advance(
+            simulation,
+            simulation.Date,
+            sky.HourOfDay,
+            (float)(simulation.TickNumber / 30.0),
+            cameraFocus,
+            DetailRadius,
+            look.SmokeDensity);
+        smokeBatch.Begin(smokePush);
+        hearths.Emit(
+            smokeBatch,
+            (float)(simulation.TickNumber / 30.0),
+            look.WindBearingDegrees * MathF.PI / 180f,
+            look.WindGustRate,
+            look.SmokeDrift);
         MemoryMarshal.Write(skyPush.AsSpan(0, 64), in inverseViewProjection);
         MemoryMarshal.Write(skyPush.AsSpan(64, 16), in cameraPosition);
         MemoryMarshal.Write(skyPush.AsSpan(80, 16), in sun);
@@ -1869,6 +1942,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             unitBatch.End(scope, shadowBinding);
             canopyBatch.End(scope, shadowBinding);
             art?.DrawScene(scope, shadowBinding);
+            // After every opaque thing and before the annotations: smoke blends over a finished frame, and
+            // an overlay is a mark on the picture rather than something in the world for smoke to drift in
+            // front of.
+            smokeBatch.End(scope);
             overlayBatch.End(scope, shadowBinding);
         });
         graph.Execute(commandList);
