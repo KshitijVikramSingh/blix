@@ -1638,6 +1638,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         BuildTerrainInstances();
         BuildAgentInstances((float)time.Total);
+        DrawScatter();
         DrawColliderOverlay();
 
         var props = CollectionsMarshal.AsSpan(propInstances);
@@ -2346,6 +2347,76 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             Matrix4x4.CreateTranslation(
                 tree.Position.X, ground + trunkHeight + canopyHeight * 0.28f, tree.Position.Y),
             Vector4.Lerp(CanopyDarkColor, CanopyLightColor, (tree.Id.Value * 29 % 7) / 7f)));
+    }
+
+    /// <summary>
+    /// Stones and scrub, generated from the ground rather than stored anywhere.
+    /// </summary>
+    /// <remarks>
+    /// <b>Derived, not authored, and that is what makes it free.</b> A scatter dense enough to matter is
+    /// thousands of objects; storing them would be thousands of nodes in the fingerprint, the save file and
+    /// every iteration over the economy, for things that decide nothing. Instead the visible area is walked
+    /// as a grid and each cell hashes its own coordinates into "is there a stone here, which one, where in
+    /// the cell, and how big" — so the same cell always answers the same way, nothing is stored, nothing is
+    /// saved, and a scatter appears and disappears with the camera at no cost but the draw.
+    /// <para>
+    /// Kept off worked ground for the reason §22 gave about trees: a stone in a wheat field is not a
+    /// collision, it is a lie about what that ground is being used for. Placement occupancy answers that for
+    /// buildings and fields alike, and the check is one grid lookup.
+    /// </para>
+    /// </remarks>
+    private void DrawScatter()
+    {
+        if (art is null || art.Scatter.Length == 0) return;
+        var radius = MathF.Sqrt(treeDrawRadiusSquared);
+        // One candidate every few metres. Sparse enough that the eye reads them as incidental rather than
+        // as a texture, which is the difference between scattered stones and gravel.
+        const float spacing = 3.5f;
+        var cells = (int)MathF.Ceiling(radius / spacing);
+        var originX = MathF.Floor(cameraFocus.X / spacing);
+        var originZ = MathF.Floor(cameraFocus.Y / spacing);
+        for (var dz = -cells; dz <= cells; dz++)
+        for (var dx = -cells; dx <= cells; dx++)
+        {
+            var cx = (int)originX + dx;
+            var cz = (int)originZ + dz;
+            var roll = ScatterHash(cx, cz, 0);
+            // Most cells are empty. A scatter that fills every cell is a gravel pit.
+            if (roll > 0.34f) continue;
+
+            var at = new Vector2(
+                (cx + 0.15f + ScatterHash(cx, cz, 1) * 0.7f) * spacing,
+                (cz + 0.15f + ScatterHash(cx, cz, 2) * 0.7f) * spacing);
+            if (Vector2.DistanceSquared(at, cameraFocus) > treeDrawRadiusSquared) continue;
+            if (!simulation.Terrain.Contains(at)) continue;
+            // Not on built or worked ground.
+            if (simulation.TryGetPlacementCell(at, out var cell) &&
+                simulation.Placement.IsOccupied(cell))
+            {
+                continue;
+            }
+
+            var which = (int)(ScatterHash(cx, cz, 3) * art.Scatter.Length) % art.Scatter.Length;
+            // Rock_Group is a metre and a half across and wants to stay near its own size; the pebbles are
+            // centimetres and want scaling up to be visible at all. One width, varied a little.
+            var width = which == 0
+                ? 1.1f + ScatterHash(cx, cz, 4) * 0.9f
+                : 0.5f + ScatterHash(cx, cz, 4) * 0.7f;
+            art.Scatter[which].Add(SettlementArt.Placement(
+                at,
+                simulation.Terrain.SampleHeight(at),
+                width,
+                SettlementArt.FreeYawOf(cx * 73 + cz * 179)));
+        }
+    }
+
+    /// <summary>A stable 0..1 from a cell and a channel, so a stone is always the same stone.</summary>
+    private static float ScatterHash(int x, int z, int channel)
+    {
+        var hash = (uint)(x * 73856093) ^ (uint)(z * 19349663) ^ (uint)(channel * 83492791);
+        hash = (hash ^ (hash >> 16)) * 0x7FEB352Du;
+        hash = (hash ^ (hash >> 15)) * 0x846CA68Bu;
+        return ((hash ^ (hash >> 16)) & 0xFFFFFFu) / (float)0x1000000u;
     }
 
     /// <summary>

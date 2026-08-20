@@ -47,6 +47,7 @@ internal sealed class SettlementArt : IDisposable
         PropModel[] crop,
         PropModel[] trees,
         PropModel stumps,
+        PropModel[] scatter,
         PropModel grainHeap,
         PropModel woodHeap,
         PropModel? villager)
@@ -58,10 +59,12 @@ internal sealed class SettlementArt : IDisposable
         Crop = crop;
         Trees = trees;
         Stumps = stumps;
+        Scatter = scatter;
         GrainHeap = grainHeap;
         WoodHeap = woodHeap;
         Villager = villager;
         owned.AddRange(new[] { granary, depot, fieldPlot, stumps, grainHeap, woodHeap });
+        owned.AddRange(scatter);
         owned.AddRange(houses);
         owned.AddRange(crop);
         owned.AddRange(trees);
@@ -86,6 +89,20 @@ internal sealed class SettlementArt : IDisposable
 
     /// <summary>What a felled tree leaves behind.</summary>
     public PropModel Stumps { get; }
+
+    /// <summary>
+    /// Small things lying about: stones and low scrub, in no particular order.
+    /// </summary>
+    /// <remarks>
+    /// <b>The difference between ground and ground with things on it, and no shader gives it to you.</b> The
+    /// references are full of stones, tufts and scrub; ours was an unbroken surface with buildings standing
+    /// on it, and however well the land is shaded an empty plane still reads as a plane. The pack has shipped
+    /// rocks since the first import and nothing had ever drawn one.
+    /// <para>
+    /// Three sizes, so a scatter has some variety without needing three decisions per instance.
+    /// </para>
+    /// </remarks>
+    public PropModel[] Scatter { get; }
 
     public PropModel GrainHeap { get; }
 
@@ -210,6 +227,15 @@ internal sealed class SettlementArt : IDisposable
                 Prop("Resource_PineTree", surface: MaterialClass.Foliage),
             },
             stumps: Prop("Resource_Tree_Group_Cut", casts: false, surface: MaterialClass.Timber),
+            scatter: new[]
+            {
+                // A cluster of stones lies flat and reads as a patch of ground rather than an object, which
+                // is what most of a scatter wants to be. Casts nothing: a 12 cm pebble's shadow costs a
+                // shadow-map draw and buys a pixel.
+                Prop("Rock_Group", casts: false, surface: MaterialClass.Stone),
+                Prop("Resource_Rock_3", casts: false, surface: MaterialClass.Stone),
+                Prop("Rock", casts: false, surface: MaterialClass.Stone),
+            },
             // <b>One crate, not a stack of them, and the reason is the normalisation.</b> Props are baked to
             // a unit footprint, so a model gets its height from its own proportions — and a stack of crates
             // is 0.12 m across and 0.25 m tall, better than twice as tall as it is wide. A heap of forty
