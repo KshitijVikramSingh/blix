@@ -109,13 +109,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     // silhouette read; a single tint on a cube reads as a cube whatever the tint is.
     private static readonly Vector4 GranaryColor = new(0.72f, 0.58f, 0.36f, 1f);
 
-    /// <summary>A store with somebody in it, in the one colour nothing else in the settlement is.</summary>
-    /// <remarks>
-    /// Bright and warm and well above the pack's range, which tops out around 0.4 linear — under a sun of
-    /// three this tonemaps to something no field, roof or barn can be mistaken for, at any zoom, without
-    /// having to be pointed at.
-    /// </remarks>
-    private static readonly Vector4 RansackedColor = new(0.85f, 0.22f, 0.10f, 1f);
     private static readonly Vector4 GranaryRoofColor = new(0.40f, 0.26f, 0.16f, 1f);
     private static readonly Vector4 DepotColor = new(0.56f, 0.49f, 0.38f, 1f);
     private static readonly Vector4 DepotRoofColor = new(0.31f, 0.25f, 0.19f, 1f);
@@ -1967,23 +1960,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 }
 
                 var placement = SettlementArt.Placement(node.Position, ground, width, yaw);
-
-                // <b>A store with somebody in it says so.</b> A raider looting a granary is inside it and
-                // therefore not drawn, which is the mechanic working exactly as §33 intended — and was
-                // reported as assailants "disappearing into thin air behind the granary", because a body
-                // that vanishes with no explanation is a glitch whatever the reason for it. The building is
-                // the only thing that can account for where they went, so while it has intruders it is
-                // drawn in one alarm colour rather than in its own materials.
-                //
-                // Losing a barn's seven materials for the six seconds somebody is rummaging in it is a
-                // trade worth making: for those six seconds the one thing worth knowing about that building
-                // is not what it is made of.
-                if (node.Stores && simulation.IntrudersInside(node.Id) > 0)
-                {
-                    var robbed = node.Kind == NodeKind.Granary ? art.Granary : art.Depot;
-                    robbed.Add(placement, RansackedColor);
-                    continue;
-                }
 
                 switch (node.Kind)
                 {

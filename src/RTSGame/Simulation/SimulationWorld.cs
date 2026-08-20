@@ -588,35 +588,6 @@ internal sealed class SimulationWorld
         }
     }
 
-    /// <summary>
-    /// How many hostile bodies are inside this building right now.
-    /// </summary>
-    /// <remarks>
-    /// So that something can be drawn about it. A raider looting a granary is genuinely inside it and
-    /// genuinely not drawn — which is the mechanic working, and which was reported as assailants
-    /// "disappearing into thin air behind the granary", because a body that vanishes with no explanation is
-    /// a glitch whatever the reason for it. The building has to say what is happening to it.
-    /// </remarks>
-    internal int IntrudersInside(NodeId id)
-    {
-        if (!Nodes.Contains(id)) return 0;
-        ref readonly var node = ref Nodes.Get(id);
-        var reach = node.FootprintRadius + 1.6f;
-        var inside = 0;
-        foreach (ref readonly var agent in Agents.All)
-        {
-            if (!agent.IsAlive || !agent.Sheltered) continue;
-            if ((Colliders.Factions.Between(node.Faction, agent.Faction) & RelationMask.Enemy) == 0)
-            {
-                continue;
-            }
-
-            if (Vector2.DistanceSquared(agent.Position, node.Position) <= reach * reach) inside++;
-        }
-
-        return inside;
-    }
-
     /// <summary>How many bodies are carrying a load out of harm's way right now.</summary>
     /// <remarks>
     /// Counted rather than kept, so it needs no place in the fingerprint's ledger: the state it reads is

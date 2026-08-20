@@ -4385,9 +4385,26 @@ better than a farmhand should a thief be?** Two obvious readings, and they are d
   the raid is the reason to pay for one. That is the roster's own position — `UnitType.Soldier` at strength
   3 and health 45 exists and cannot be built — and it is the answer §33 predicted the numbers would ask for.
 
-**The second is the better game and the numbers now say so out loud.** Note what the peer table also shows:
-even losing decisively, three peers still cost the settlement 409 grain of interrupted work and six lives.
-A raid you win is still expensive, which is the design working.
+### Correction: there is no thief in this game, and there never was going to be
+
+The paragraph above asked "how much better than a farmhand should a thief be?" and that is the wrong
+question twice over. **The game will have no thieves and no raids at all** — flagged in §28 and restated
+plainly: *this was just a stepping stone.* The raid is a fixture, not content, and tuning a raider is
+tuning a test rig.
+
+So the peer result is not a balance finding to act on. Its value is narrower and better: **it says the
+defence mechanics work against a peer adversary**, which is exactly what the real adversary is — another
+player's villagers, not a scripted burglar with a strength bonus. Twenty peers see off three peers, they pay
+409 grain of interrupted work for it, and nothing in the layer needed a special case to make that happen.
+That is the whole thing the scaffolding was built to find out.
+
+Which also means the strength-3 thief has no claim to be the default. It is a stress setting — useful for
+asking "what if the thing over the hill is much better than us", worthless as a statement about balance —
+and the representative case is peers. `--raidtest --peers` is the run to read; the other is a knob.
+
+**And what the scaffolding actually bought**, now that it is finished: the ledger, the front, sticky
+targets, and above all the discovery that pursuit had never once worked. None of those are about thieves.
+Every one of them will still be true when the thing over the hill is a person.
 
 ### And the granary, twice reported
 
