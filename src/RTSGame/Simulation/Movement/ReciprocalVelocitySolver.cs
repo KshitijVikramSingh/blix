@@ -241,6 +241,7 @@ internal sealed class ReciprocalVelocitySolver
                               LookaheadFor(agent.MaximumSpeed, other.MaximumSpeed);
                 if (distanceSquared > horizon * horizon) continue;
                 if (IsShovableAlly(agent, other)) continue;
+                if (HoldsGroundAgainst(agent, other)) continue;
                 // Movers that have not chosen yet are handled when their own turn
                 // comes and they see this agent's committed velocity.
                 if (other.HasDestination && !velocityChosen[otherIndex]) continue;
@@ -340,6 +341,41 @@ internal sealed class ReciprocalVelocitySolver
         agent.Faction == other.Faction;
 
 
+
+    /// <summary>
+    /// A body standing still does not step aside for an enemy walking at it.
+    /// </summary>
+    /// <remarks>
+    /// <b>The cordon bug, and it was one rule applied to the wrong people.</b> Measured on
+    /// <c>--fightbench</c>: a raider crossed a line of twelve enemies standing shoulder to shoulder in
+    /// 9.6 s with a detour of <b>1.00x</b> — the straight line, at full speed, as though nobody were there
+    /// — and identically at every count from two to twelve.
+    /// <para>
+    /// The cause is <see cref="HasHigherPriority"/>: a mover outranks a settled body, so the settled body
+    /// takes full responsibility for the pair and gets out of the way. That is exactly right among one's
+    /// own people — it is what <see cref="IsShovableAlly"/> exists to make efficient, and a settlement
+    /// where a carter has to negotiate with everybody standing about is a settlement that never gets
+    /// anywhere. It is exactly wrong across a border. Nothing in the rule asked whose side anybody was on,
+    /// so <em>the defenders politely made way for the thief.</em>
+    /// </para>
+    /// <para>
+    /// Asymmetric on purpose, and the asymmetry is the whole point: the body holding its ground drops its
+    /// constraint and does not dodge, while the mover keeps its own and must solve the problem alone. So a
+    /// line of bodies becomes something to go round rather than something to walk through. It does not stop
+    /// anybody by itself — going round is still allowed, and should be — it makes going round cost what
+    /// going round costs.
+    /// </para>
+    /// <para>
+    /// Only against a body that is actually travelling. Two stationary enemies have no contest to resolve,
+    /// and the contact solve already keeps them out of each other.
+    /// </para>
+    /// </remarks>
+    private static bool HoldsGroundAgainst(in AgentState agent, in AgentState other) =>
+        !agent.HasDestination &&
+        other.HasDestination &&
+        agent.Faction != other.Faction &&
+        agent.Faction.Value >= 0 &&
+        other.Faction.Value >= 0;
 
     private static bool HasHigherPriority(
         ReadOnlySpan<AgentState> agents,

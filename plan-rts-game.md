@@ -4422,3 +4422,79 @@ is a glitch whatever the reason, and the panel saying "1 INSIDE YOUR STORES" is 
 looking. So a store with intruders in it is now drawn in a single alarm colour instead of its own materials
 — losing a barn's seven materials for the six seconds somebody is rummaging in it, on the grounds that for
 those six seconds the one thing worth knowing about that building is not what it is made of.
+
+## 44. The cordon: one rule applied to the wrong people
+
+A raider crossed a line of twelve enemies standing shoulder to shoulder in 9.6 s with a detour of
+**1.00×** — the straight line, at full speed, as though nobody were there — and identically at every count
+from two to twelve. The cause was one rule, and it was not in the avoidance mathematics at all.
+
+`HasHigherPriority`: **a mover outranks a settled body**, so the settled body takes full responsibility for
+the pair and gets out of the way. That is exactly right among one's own people — it is what
+`IsShovableAlly` exists to make efficient, and a settlement where a carter negotiates with everybody
+standing about is one that never gets anywhere. It is exactly wrong across a border. Nothing in the rule
+asked whose side anybody was on, so **the defenders politely made way for the thief.**
+
+`HoldsGroundAgainst`: a body with no destination does not dodge an enemy that has one. Asymmetric on
+purpose, and the asymmetry is the point — the one holding its ground drops its constraint, the mover keeps
+its own and must solve the problem alone.
+
+| N in the line | before | | after | |
+|---|---|---|---|---|
+| | seconds | detour | seconds | detour |
+| 2 | 9.6 | 1.00× | 15.5 | 1.21× |
+| 4 | 9.6 | 1.00× | 15.2 | 1.20× |
+| 6 | 9.6 | 1.00× | 15.4 | 1.25× |
+| 8 | 9.6 | 1.00× | 15.9 | 1.30× |
+| 12 | 9.6 | 1.00× | 16.8 | **1.43×** |
+
+**The detour now grows with the width of the line**, which is the property that was entirely absent — before,
+twelve bodies cost exactly what none did. Crossing takes 60–75% longer and the body spends 5.6 s below half
+pace instead of 1.4 s, and 1.4 s was its own acceleration ramp with nobody there at all.
+
+It still gets through, and that is right: a picket line should be something you go *round*, not an invisible
+wall. What changed is that going round now costs what going round costs.
+
+**No regression anywhere else**, and for a structural reason rather than luck: the rule fires only across
+factions, so every single-faction crowd metric is untouched — pen escape 1.33× walked/optimal and 0
+dead-stops, one-cell gate 1.78× and 33, both identical to the figures before the change. The suite passes.
+
+And the raid is **flat inside the noise** (peers, ten seeds: their dead 12.9 → 11.7, stolen 93 → 117). That
+is not a disappointment, it is the diagnosis: **nothing in the current scenario deliberately blocks
+anybody.** Defenders are usually walking *toward* a threat, and the rule needs a body that has chosen to
+stand still. The fix matters for holding a line on purpose, which nothing can be told to do yet.
+
+## 45. What is actually being built, restated
+
+Recorded because the plan has been reading like a game about farms with a burglar in it, and that is a
+demo rather than the game:
+
+> soldiers, armies — militia, ranged units, spears, swords, horses — all are on the table. We're only
+> BEGINNING to build this. Cordon, then more sims/tests focused on navigation, combat, holding, defending,
+> chasing, with different unit types and their interactions. We've built the eco and basic game loop demo,
+> then we extend this side with buildings, upgrades, repairs, mining for stone.
+
+So the economy, the calendar, the jobs model, the raid and everything §20–§44 measured are **the first
+half of a foundation**, not a game with content to be balanced. Two consequences worth writing down:
+
+- **The raid is finished as a subject.** It was scaffolding, it did its job, and what it bought is
+  permanent: the ledger, the front, `--fightbench`, and the discovery that pursuit had never worked. §44's
+  cordon fix is the last thing it needed to surface.
+- **§44's flat raid result is the shape of everything that comes next.** A layer built for units that can
+  be *told to hold* cannot be judged by a scenario in which nobody holds anything. The next instruments
+  have to come with the mechanics they measure, not after them.
+
+### The order
+
+1. **More sims, and this time per mechanic and per unit type** — navigation, combat, holding, defending,
+   chasing, and the interactions between kinds. `--fightbench` is the pattern and it has three scenarios;
+   this wants a dozen. Crucially, holding and defending need something that can be *ordered to hold*, which
+   is why they come with the roster rather than before it.
+2. **The roster, and it is a roster rather than a soldier.** Militia, spears, swords, bows, horses. The
+   interesting content is not any one of them but the interactions — reach against pace, a wall of spears
+   against a charge, a bow that does not want contact at all. Note what already exists to build on: the
+   front is derived from radii so a wide body already crowds out more of its own side and reaches further,
+   and `--fightbench`'s chase curve already prices a speed advantage.
+3. **The other half of the settlement**: more buildings, upgrades, repairs, and stone from mines. Stone is
+   a third commodity and the first one that is *mined* rather than grown or felled, so it tests the economy's
+   generality — everything in §17's ledger was written for two.
