@@ -4002,3 +4002,56 @@ So the next lever is **concentration**, not durability, arrival, or the front:
 
 Which is the same shape as §30's finding one level down. §30 was about *who commits*; this is about **what
 they commit to**, and the answer "whatever is nearest" is the convenient layer answering again.
+
+## 38. Concentration: one hypothesis rejected, one kept
+
+§37 found that a third of all the harm in a raid goes into bodies that walk away wounded, and named
+concentration as the lever. Two ways of getting it were tried. **The elegant one lost.**
+
+### Global triage, rejected on measurement
+
+Score every fight by how soon it would be over if I joined it — `arrival + health / strength already on
+it` — so a wounded thief with three people on it beats a fresh one standing nearer. No focus flag, no new
+state, every defender scoring the same fights from the same public facts, converging without being told to.
+It has the same shape as question two's leaderlessness and it reads beautifully.
+
+It was worse on every metric over ten runs: their dead 3.2 → 2.4, stolen 472 → 504, harm wasted up by half
+again. Two reasons, both obvious afterwards:
+
+- **It sends people walking instead of fighting.** A distant engaged fight outscores a near fresh one, so
+  the defence spends its time in transit. `furthest a settler went` went 48 m → 76 m.
+- **It thrashes.** Joining a target makes that target more attractive, which re-scores it for *everybody*
+  at once, so the whole defence oscillates between fights. A rule whose inputs change because of how
+  people respond to the rule is a feedback loop, not a policy.
+
+The first version also priced a sheltered raider at "settles instantly", which made a granary doorway the
+most valuable place on the map to everyone simultaneously — the exact behaviour the rule was meant to end.
+Fixing that did not save it.
+
+### Concentration by commitment, kept
+
+`AgentState.Quarry`: stay on the body you are already fighting while it lives and is reachable, and
+otherwise take the nearest. One identity comparison, and **it cannot thrash, because nothing about my
+target changes when somebody else picks theirs.**
+
+| | got home /24 | their dead | stolen | % harm wasted | ours per raider |
+|---|---|---|---|---|---|
+| nearest, no memory | 11.8 ± 1.8 | 3.2 ± 1.8 | 472 ± 72 | — | 3.25 ± 1.31 |
+| global triage *(rejected)* | 12.6 ± 0.9 | 2.4 ± 0.9 | 504 ± 36 | 46.5 | 4.20 ± 0.77 |
+| **sticky quarry** | **10.6 ± 0.5** | **4.4 ± 0.5** | **424 ± 22** | **28.4** | 3.07 ± 0.46 |
+
+Harm wasted from 46% to 28%; a third more raiders killed; a tenth less carried off. And — worth as much
+as the means — **every spread collapsed.** Raiders killed went from ±1.8 to ±0.5, stolen from ±72 to ±22.
+A mechanism that works makes outcomes consistent; the wide spreads were the defence being lucky or unlucky
+rather than competent, which is also why the health sweep in §37 could not measure anything.
+
+### The method note, because it is the transferable part
+
+§37's health sweep and §38's two hypotheses are the same lesson twice. **A single run of a chaotic
+simulation cannot distinguish a mechanism from a coin flip**, and the tell is the spread rather than the
+mean: 3.2 ± 1.8 raiders killed is not a measurement of anything. Five seeds per variant, and the seed the
+only thing varying, is what made both answers legible — including the one that said "this dial does
+nothing" and the one that said "this elegant idea is worse".
+
+`--raidtest --seed S` exists for that, and the next balance question should start there rather than end
+there.

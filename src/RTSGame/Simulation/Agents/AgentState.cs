@@ -146,6 +146,22 @@ internal struct AgentState
     public bool Sheltered;
 
     /// <summary>
+    /// The body this one is fighting, while <see cref="HasQuarry"/> holds.
+    /// </summary>
+    /// <remarks>
+    /// <b>Concentration by commitment.</b> A third of all the harm in a raid was going into thieves that
+    /// walked away wounded, because a defender re-chose its target every few seconds and took whatever was
+    /// nearest — so a raid that scattered scattered the damage with it and left every raider just under the
+    /// threshold, which is why changing a raider's health by a sixth changed nothing measurable.
+    /// <para>
+    /// A flag beside the id again, because <c>default(AgentId)</c> is body zero and body zero is somebody.
+    /// </para>
+    /// </remarks>
+    public AgentId Quarry;
+
+    public bool HasQuarry;
+
+    /// <summary>
     /// Whether something outside the simulation is deciding this body's movement.
     /// </summary>
     /// <remarks>
