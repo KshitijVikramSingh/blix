@@ -3841,3 +3841,31 @@ instead of *count* — and therefore what makes a soldier worth paying for.
   "approaches are knowable" from a sentence in §33 into a thing you can act on.
 
 **3. Session 7's harness**, written against systems that have stopped moving.
+
+### The front, and what measuring it found instead
+
+The engagement limit is in, and it is a derivation rather than a dial. A body of radius `a` in contact
+with one of radius `t` stands on a ring of radius `t + a` and takes up `2·asin(a / (t + a))` of it; sum
+those until the ring is full and you have how many can physically get at it. **For two 0.37 m bodies,
+exactly six.** Mixed radii fall out for free — a wide body takes more of the ring and so crowds out more
+of its own side, and it also reaches further, both of which a flat count would have to be told.
+
+Asserted, and the assertion is a *ceiling* rather than an equality, which is the interesting part: twelve
+villagers packed onto one raider took **3.2 health in a second**, against 6 for the six that fit and 12
+for all twelve. Not equality, because the twelve are also shoving each other and several drift out of
+reach — asserting the arithmetic sum would be asserting that depenetration does nothing.
+
+**And then the raid scenario said `most shut out of a fight they had reached: 0`.** The cap never binds.
+Over eight raids, not once did a seventh body reach a raider that six were already on.
+
+That is worth more than the feature. **The mob was never mechanically a mob.** "Twelve people surround one
+guy and push each other around" was an accurate description of what it *looked* like and not of what was
+happening: avoidance already held the crowd at a spacing where only three or four were ever in contact, so
+the fight was being decided by a handful of bodies while the rest milled. The front is correct, it is
+tested, and it will bind the moment bodies are wider or a formation packs them deliberately — but it is
+not today's limiter.
+
+Today's limiter is the opposite of the one expected: **not too many piling in, but too few arriving.**
+Sixteen commit and three fight. Which sharpens the case for the soldier rather than weakening it — if only
+three or four can ever be in contact, then three or four *good* bodies is the entire answer, and quality is
+not an improvement on numbers, it is the only lever there is.

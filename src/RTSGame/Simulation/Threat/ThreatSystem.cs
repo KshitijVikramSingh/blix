@@ -85,7 +85,41 @@ internal sealed class ThreatSystem
     /// <summary>Seconds a body holds a decision to stand or run before asking again.</summary>
     internal static float ResolveSeconds = 3f;
 
+    /// <summary>
+    /// How wide an assailant is, in radians of the ring it has to stand on to reach a body.
+    /// </summary>
+    /// <remarks>
+    /// <b>The engagement limit, and it is a derivation rather than a dial.</b> A body of radius <c>a</c>
+    /// standing in contact with one of radius <c>t</c> has its centre on a circle of radius
+    /// <c>t + a</c> and occupies an arc of <c>2·asin(a / (t + a))</c> of it. Sum those until the ring is
+    /// full and you have how many can physically get at it — for two 0.37 m bodies, exactly six.
+    /// <para>
+    /// Which is the answer to "surround them and kill them with body heat". Twelve villagers on one raider
+    /// were twelve villagers' worth of damage, so a fight was decided by <em>count</em> and nothing else,
+    /// and no unit could ever be worth more than a warm body. Six of them fit; the other six are standing
+    /// behind and doing nothing, which is what makes it worth having better ones rather than more.
+    /// </para>
+    /// <para>
+    /// Mixed radii fall out of it for free: a wide body takes more of the ring and therefore crowds out
+    /// more of its own side, and it reaches further, both of which a flat count would have to be told.
+    /// </para>
+    /// </remarks>
+    internal static float ContactArc(float targetRadius, float attackerRadius)
+    {
+        var ring = targetRadius + attackerRadius;
+        if (ring <= 1e-4f) return MathF.Tau;
+        return 2f * MathF.Asin(Math.Clamp(attackerRadius / ring, 0f, 1f));
+    }
+
+    /// <summary>How many assailants were in reach this tick but could not get at their target.</summary>
+    /// <remarks>
+    /// The number that says the front is doing something. It was structurally zero before, because there
+    /// was no front: everyone in reach landed a blow.
+    /// </remarks>
+    public int Crowded { get; private set; }
+
     private readonly List<AgentId> fallen = new();
+    private readonly List<(float Gap, int Id, int Index)> engaged = new();
     private readonly List<int> hostiles = new();
     private readonly List<Vector2> guarded = new();
     private readonly List<float> menace = new();
@@ -107,33 +141,58 @@ internal sealed class ThreatSystem
         fallen.Clear();
         var bodies = agents.MutableSpan();
 
-        // One pass to find who is hurting whom. Quadratic in bodies, which is affordable only because it
-        // early-outs on hostility: a settlement at peace does one faction comparison per pair and nothing
-        // else, and there is only ever a handful of hostiles on the map.
-        for (var i = 0; i < bodies.Length; i++)
+        // One pass per body being fought over, rather than per attacker: the number of assailants that
+        // can reach one body at once is capped, and a cap has to be applied where the thing being capped
+        // is — see Engaged. Quadratic in bodies, affordable only because it early-outs on hostility: a
+        // settlement at peace does one faction comparison per pair and nothing else.
+        Crowded = 0;
+        for (var j = 0; j < bodies.Length; j++)
         {
-            ref var attacker = ref bodies[i];
-            if (!attacker.IsAlive || attacker.Strength <= 0f) continue;
+            ref readonly var defender = ref bodies[j];
             // Indoors: it can neither reach out nor be reached. See AgentState.Sheltered — this is what
             // makes looting a window that runs to completion rather than a shoving match at the door.
-            if (attacker.Sheltered) continue;
-            for (var j = 0; j < bodies.Length; j++)
+            if (!defender.IsAlive || defender.Sheltered) continue;
+
+            engaged.Clear();
+            for (var i = 0; i < bodies.Length; i++)
             {
                 if (i == j) continue;
-                ref var target = ref bodies[j];
-                if (!target.IsAlive || target.Sheltered) continue;
-                if ((factions.Between(attacker.Faction, target.Faction) & RelationMask.Enemy) == 0)
+                ref readonly var attacker = ref bodies[i];
+                if (!attacker.IsAlive || attacker.Sheltered || attacker.Strength <= 0f) continue;
+                if ((factions.Between(attacker.Faction, defender.Faction) & RelationMask.Enemy) == 0)
                 {
                     continue;
                 }
 
                 var reach = MathF.Max(
-                    (attacker.Radius + target.Radius) * ReachShare,
+                    (attacker.Radius + defender.Radius) * ReachShare,
                     AgentDefaults.ChaseStopMetres + ContactSlack);
-                if (Vector2.DistanceSquared(attacker.Position, target.Position) > reach * reach) continue;
-                target.Health -= attacker.Strength * deltaSeconds;
+                var gap = Vector2.Distance(attacker.Position, defender.Position);
+                if (gap > reach) continue;
+                engaged.Add((gap, attacker.Id.Value, i));
+            }
+
+            if (engaged.Count == 0) continue;
+
+            // Nearest first, ties by id — so two runs of one fight admit the same people in the same order.
+            engaged.Sort();
+
+            var room = MathF.Tau;
+            var landed = 0;
+            foreach (var (_, _, index) in engaged)
+            {
+                ref readonly var attacker = ref bodies[index];
+                var width = ContactArc(defender.Radius, attacker.Radius);
+                // Squeezed out. Continue rather than break, because a narrower body further back may
+                // still fit in what a wide one left — which is what "as many as fit" actually means.
+                if (width > room) continue;
+                room -= width;
+                landed++;
+                bodies[j].Health -= attacker.Strength * deltaSeconds;
                 Dealt += attacker.Strength * deltaSeconds;
             }
+
+            Crowded += engaged.Count - landed;
         }
 
         for (var i = 0; i < bodies.Length; i++)

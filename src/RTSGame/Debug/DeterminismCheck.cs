@@ -74,7 +74,7 @@ internal static class DeterminismCheck
         "SimulationWorld.commands", "SimulationWorld.paths", "SimulationWorld.moveGroups",
         "SimulationWorld.nextMoveGroupId", "SimulationWorld.blockColliders",
         "ThreatSystem.Killed", "ThreatSystem.Dealt",
-        "ThreatSystem.Standing", "ThreatSystem.Fleeing", "ThreatSystem.Surplus",
+        "ThreatSystem.Standing", "ThreatSystem.Fleeing", "ThreatSystem.Surplus", "ThreatSystem.Crowded",
         "SimulationWorld.congestionRecoveryCooldown",
         "SimulationWorld.rasterizedTerrainRevision", "SimulationWorld.routePlansThisTick",
         "SimulationWorld.ExtentMeters", "SimulationWorld.Nodes", "SimulationWorld.economy",
@@ -126,6 +126,8 @@ internal static class DeterminismCheck
         ["EconomySystem.Readiness"] =
             "recomputed from the stores and the households at the head of every population pass, before " +
             "anything reads it; it is a reported figure rather than a carried one.",
+        ["ThreatSystem.engaged"] =
+            "scratch for one body's assailants, cleared and refilled inside the harm pass.",
         ["ThreatSystem.hostiles"] =
             "who can do harm, gathered at the head of every defence pass from the bodies themselves.",
         ["ThreatSystem.guarded"] =
@@ -516,6 +518,7 @@ internal static class DeterminismCheck
         sink.Add("Dealt", world.Threat.Dealt);
         sink.Add("Standing", world.Threat.Standing);
         sink.Add("Surplus", world.Threat.Surplus);
+        sink.Add("Crowded", world.Threat.Crowded);
         sink.Add("Fleeing", world.Threat.Fleeing);
         foreach (var resource in Resources.All)
         {

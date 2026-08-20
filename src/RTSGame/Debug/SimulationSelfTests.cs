@@ -140,6 +140,7 @@ internal static class SimulationSelfTests
             "only as many defend as the fight needs, and the nearest ones go",
             OnlyTheNeededDefend());
         Check("a defender puts its load down before it joins", HandsAreFreedBeforeAFight());
+        Check("only as many can fight a body as fit around it", AFightHasAFront());
         Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
@@ -4234,6 +4235,74 @@ internal static class SimulationSelfTests
             $"    {load} grain and a raid at the granary: stowed={stowed}, into the depot " +
             $"{intoTheDepot}, never carried into reach={!carriedIntoTheFight}, shift intact={shiftIntact}; " +
             $"with nowhere safe, {onTheGround} left on the ground; drift {drift.Grain}/{bareDrift.Grain}");
+        return passed;
+    }
+
+    /// <summary>
+    /// Twelve bodies pressed onto one, and only the six that fit do any harm.
+    /// </summary>
+    /// <remarks>
+    /// <b>The front, and it is a derivation rather than a dial.</b> A body of radius <c>a</c> in contact
+    /// with one of radius <c>t</c> stands on a ring of radius <c>t + a</c> and takes up
+    /// <c>2·asin(a / (t + a))</c> of it, so for two 0.37 m bodies exactly six fit and the seventh onwards
+    /// is standing behind somebody. Without it a fight was decided by count alone — twelve villagers on one
+    /// raider did twelve villagers' worth of damage — and no unit could ever be worth more than a warm
+    /// body, which is the same thing as saying there is no reason to build a soldier.
+    /// <para>
+    /// Measured against the arithmetic rather than against a remembered number: the harm taken in one
+    /// second has to be the six nearest strengths and not the twelve present ones.
+    /// </para>
+    /// </remarks>
+    private static bool AFightHasAFront()
+    {
+        var world = new SimulationWorld(120f);
+        var victim = world.SpawnAgent(Vector2.Zero, UnitType.Raider, new FactionId(1));
+        world.Agents.Get(victim).Directed = true;
+        var health = world.Agents.Get(victim).Health;
+
+        // Twelve villagers packed onto it, close enough that every one of them is in reach.
+        var ring = UnitType.Raider.Radius + UnitType.Villager.Radius;
+        var mob = new List<AgentId>();
+        for (var i = 0; i < 12; i++)
+        {
+            var angle = i / 12f * MathF.Tau;
+            mob.Add(world.SpawnAgent(
+                new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * ring * 1.05f,
+                UnitType.Villager,
+                new FactionId(0)));
+        }
+
+        // How many actually fit, from the geometry and nothing else.
+        var fit = (int)MathF.Floor(
+            MathF.Tau / Simulation.Threat.ThreatSystem.ContactArc(
+                UnitType.Raider.Radius, UnitType.Villager.Radius));
+
+        // One second of it, applied a tick at a time.
+        var reached = 0;
+        for (var tick = 0; tick < 30; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            reached = Math.Max(reached, world.Threat.Crowded);
+        }
+
+        var taken = health - world.Agents.Get(victim).Health;
+        var byTheSix = fit * UnitType.Villager.Strength;
+        var byTheTwelve = mob.Count * UnitType.Villager.Strength;
+
+        // <b>A ceiling, not an equality, and that distinction is the assertion.</b> The arithmetic says six
+        // villagers do six a second; the twelve are also shoving each other, so several drift out of reach
+        // and the real figure sits below the cap — measured, about half of it. Asserting the sum would be
+        // asserting that depenetration does nothing, which is both false and not what this is about. What
+        // has to hold is that the cap binds and that count alone no longer decides the fight.
+        var front = taken <= byTheSix * 1.05f &&
+                    taken < byTheTwelve * 0.9f &&
+                    taken > byTheSix * 0.2f;
+        var shutOut = reached > 0;
+        var passed = front && shutOut && fit == 6;
+        Console.WriteLine(
+            $"    12 villagers on one raider: {fit} fit by geometry, {reached} shut out at once; " +
+            $"one second took {taken:F1} health, at or under the {byTheSix:F0} the six that fit could do " +
+            $"and well under the {byTheTwelve:F0} all twelve would have");
         return passed;
     }
 

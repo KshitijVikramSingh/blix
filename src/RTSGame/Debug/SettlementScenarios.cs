@@ -161,8 +161,8 @@ internal static class SettlementScenarios
             $"RTSGame raids — {world.ExtentMeters:F0} m, {world.Agents.LiveCount} people, " +
             $"a raid every {secondsBetween:F0} s of {settings.Party}, {minutes:F1} minute(s)");
         Console.WriteLine(
-            "     min | people | grain | raiders | stood | fled | spare | stow | killed | lost | " +
-            "stolen | piles | furthest | routes | ms/tick");
+            "     min | people | grain | raiders | stood | fled | spare | stow | shut out | killed | " +
+            "lost | stolen | piles | furthest | routes | ms/tick");
 
         var settlers = world.Agents.LiveCount;
         var furthestEver = 0f;
@@ -170,6 +170,7 @@ internal static class SettlementScenarios
         var fledEver = 0;
         var spareEver = 0;
         var stowEver = 0;
+        var crowdedEver = 0;
         var longestRaider = 0f;
         var raiderAge = new Dictionary<int, float>();
         var reported = 0;
@@ -212,6 +213,7 @@ internal static class SettlementScenarios
             fledEver = Math.Max(fledEver, world.Threat.Fleeing);
             spareEver = Math.Max(spareEver, world.Threat.Surplus);
             stowEver = Math.Max(stowEver, world.PuttingDownCount);
+            crowdedEver = Math.Max(crowdedEver, world.Threat.Crowded);
 
             var minute = tick / (60 * TicksPerSecond);
             if (minute == reported) continue;
@@ -225,7 +227,7 @@ internal static class SettlementScenarios
             Console.WriteLine(
                 $"  {minute,6} | {alive,6} | {world.Nodes.Get(granary).Stock.Grain,5} | " +
                 $"{raids.Alive,7} | {stoodEver,5} | {fledEver,4} | {spareEver,5} | {stowEver,4} | " +
-                $"{world.Threat.Killed,6} | " +
+                $"{crowdedEver,8} | {world.Threat.Killed,6} | " +
                 $"{settlers - alive,4} | {raids.Stolen,6} | {piles,5} | {furthest,7:F0} m | " +
                 $"{world.RoutePlansThisTick,6} | " +
                 $"{world.Timings.Format(world.Agents.Count, world.TickNumber).Split("total ")[1].Split(" ms")[0],7}");
@@ -243,6 +245,7 @@ internal static class SettlementScenarios
             $"  most standing at once {stoodEver}, most fleeing {fledEver}, " +
             $"most who left it to somebody closer {spareEver}, " +
             $"most putting a load down first {stowEver}, " +
+            $"most shut out of a fight they had reached {crowdedEver}, " +
             $"furthest a settler went {furthestEver:F0} m, longest a raider lived {longestRaider:F0} s");
 
         // A settler two hundred metres from its granary is not defending anything. The settlement is
