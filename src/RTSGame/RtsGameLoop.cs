@@ -2732,7 +2732,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// something that is a record of watching rather than a fact about the world.
     /// </para>
     /// </remarks>
-    private const int WearCells = 192;
+    private const int WearCells = 320;
 
     private readonly byte[] wear = new byte[WearCells * WearCells];
     private readonly float[] wearAccumulator = new float[WearCells * WearCells];
@@ -2757,10 +2757,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var x = (int)((agent.Position.X + extent * 0.5f) * scale);
             var z = (int)((agent.Position.Y + extent * 0.5f) * scale);
             if (x < 0 || z < 0 || x >= WearCells || z >= WearCells) continue;
-            // Per second, so a body standing still wears its own spot at the same rate whatever the frame
-            // rate is — and a body that walks through wears a line rather than a dot.
-            wearAccumulator[z * WearCells + x] =
-                MathF.Min(1f, wearAccumulator[z * WearCells + x] + deltaSeconds * look.WearGain);
+            // <b>Spread across the four cells it stands between, not dumped into one.</b> A body deposited
+            // into whichever cell contained it, so a walk laid down a chain of hard two-metre squares and a
+            // route read as a dotted line of blocks rather than as a path. Weighting by how near the body is
+            // to each of its neighbours makes the deposit continuous in position, so the same walk leaves a
+            // smooth smear — and it costs three more multiplies.
+            var fx = (agent.Position.X + extent * 0.5f) * scale - x;
+            var fz = (agent.Position.Y + extent * 0.5f) * scale - z;
+            var gain = deltaSeconds * look.WearGain;
+            Deposit(x, z, (1f - fx) * (1f - fz) * gain);
+            Deposit(x + 1, z, fx * (1f - fz) * gain);
+            Deposit(x, z + 1, (1f - fx) * fz * gain);
+            Deposit(x + 1, z + 1, fx * fz * gain);
         }
 
         wearUploadCountdown--;
@@ -2770,10 +2778,32 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Grass grows back. Without this a settlement ends its first year uniformly trodden, which says
         // nothing — the information is in the contrast between where people go and where they used to.
         var keep = MathF.Exp(-look.WearFadeRate * 0.5f);
-        for (var i = 0; i < wearAccumulator.Length; i++)
+        for (var i = 0; i < wearAccumulator.Length; i++) wearAccumulator[i] *= keep;
+
+        // <b>Blurred into the texture, never back into the accumulator.</b> A path wants soft edges — real
+        // ground does not end at a line — and a three-tap blur each way gives that for a couple of hundred
+        // microseconds. But blurring the accumulator would compound: every upload would diffuse the record
+        // a little further until, after a few minutes, there were no paths left to see, only a warm patch
+        // over the whole settlement. So the accumulator stays the sharp truth and the texture is a smoothed
+        // view of it.
+        for (var z = 0; z < WearCells; z++)
+        for (var x = 0; x < WearCells; x++)
         {
-            wearAccumulator[i] *= keep;
-            wear[i] = (byte)(Math.Clamp(wearAccumulator[i], 0f, 1f) * 255f);
+            var total = 0f;
+            var weight = 0f;
+            for (var dz = -1; dz <= 1; dz++)
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                var sx = x + dx;
+                var sz = z + dz;
+                if (sx < 0 || sz < 0 || sx >= WearCells || sz >= WearCells) continue;
+                // A small Gaussian: four in the middle, two on the edges, one on the corners.
+                var w = dx == 0 && dz == 0 ? 4f : dx == 0 || dz == 0 ? 2f : 1f;
+                total += wearAccumulator[sz * WearCells + sx] * w;
+                weight += w;
+            }
+
+            wear[z * WearCells + x] = (byte)(Math.Clamp(total / weight, 0f, 1f) * 255f);
         }
 
         graphicsDevice.UploadTextureMip(wearTexture, 0, wear);
@@ -2786,6 +2816,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// missed, so it is the one that gets a hard cap.
     /// </remarks>
     private const int ScatterBudget = 5200;
+
+    /// <summary>Adds wear to one cell, ignoring anything off the map.</summary>
+    private void Deposit(int x, int z, float amount)
+    {
+        if (x < 0 || z < 0 || x >= WearCells || z >= WearCells || amount <= 0f) return;
+        var at = z * WearCells + x;
+        wearAccumulator[at] = MathF.Min(1f, wearAccumulator[at] + amount);
+    }
 
     /// <summary>A stable 0..1 from a cell and a channel, so a stone is always the same stone.</summary>
     private static float ScatterHash(int x, int z, int channel)
