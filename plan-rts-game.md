@@ -3230,3 +3230,88 @@ scenario rasterises explicitly before posting anybody.
 
 Both are the same shape as the day's other findings: a question answered by the layer that happened to be
 convenient rather than the layer that owns it.
+
+---
+
+## 28. Stage E — the raid, and defence as something nobody has to ask for
+
+### What is scaffolding and what is the game
+
+**Thieves and pressure-that-grows-with-wealth are playtesting scaffolding, not mechanics.** In the real game
+the thing that comes over the hill is another player. They exist so that a single-player session has
+something that punishes inattention — which §15 argues is the only way the thesis can be *felt* — and they
+must never become the thing the design is about.
+
+That distinction has consequences for the code, not just the prose:
+
+- The **raider** lives in `Debug/` beside the scenarios, not in `Simulation/`. It is a scripted adversary of
+  the same kind as the pen-escape crowd: a fixture that exercises the world.
+- The **pressure schedule** — when a raid comes and how big — is scenario configuration with a slider, not a
+  simulation rule. Nothing in the economy may come to depend on raids arriving on a curve.
+- **Defence is the opposite.** It is a real mechanic, it belongs in the simulation, and it has to work
+  against anything hostile — a scripted thief today, another player's warband later — because it is written
+  against *hostility* and not against thieves.
+
+The test of whether the line held: deleting the raider should leave a settlement that still works and a
+defence layer with nothing to do, and it should not require touching the economy.
+
+### Defence is not an order
+
+**Civilians defend as an interrupt, always. Protecting your own food should not need asking.** That is the
+thing the interrupt layer was invented for, long before it was ever a manual order — an interrupt overrides
+the activity and expires, and never touches the assignment, so a villager who fights goes back to the field
+afterwards with its shift intact and nothing to re-issue.
+
+The decision is three questions, in order:
+
+**1. What are the resources I want to protect, that I can see?**
+
+Stores with stock in them, heaps on the ground, and bodies carrying a load — anything that would leave with
+a raider. *Seen* is load-bearing and it is where the forest's second half arrives: a detection radius per
+body, occluded by trees, so an approach through a wood is not noticed until it is close and the gaps a
+settlement has cut are the ways in it can watch.
+
+**2. Can I protect them?**
+
+Strength of the assailants against the strength of **the group that can see the same thing.** Not the
+individual's own strength, which is the whole point: everybody who can see the threatened granary is weighing
+the same sum and reaching the same answer, so they act together with no leader, no rally order and no
+formation. Five villagers facing two thieves fight; two villagers facing a warband do not.
+
+**3. Fight, or flee toward the nearest larger group of your own.**
+
+Fleeing *toward* rather than merely away, and toward a group **larger than yours**, is what makes a
+settlement ball up under threat without anybody authoring a rally point — and the ball, once formed, may be
+strong enough that question 2 answers differently. A retreat that aggregates is a retreat that can turn.
+
+### The hazards, named before they are written
+
+- **Oscillation.** Group composition changes every tick, so a body on the margin will flip between fight
+  and flee forever. The answer is a commitment window, the same shape as the interrupt grace that already
+  stops a player's orders fighting a unit's own job.
+- **Determinism.** "The largest nearby group" and "the nearest one larger than mine" both need a tie-break
+  by id, or two runs of the same raid diverge. The fingerprint will say so, several thousand ticks later and
+  somewhere unrelated.
+- **What "seen" costs.** Line of sight is per hostile rather than per pair: for each hostile, which of mine
+  can see it. With a handful of raiders against thirty bodies that is a few hundred ray samples every few
+  ticks, which is affordable; per-pair over ten thousand nodes would not be.
+- **Death, and what it drops.** The machinery exists and is exercised every run — emigration already
+  removes a body and leaves what it carried on the ground, which is exactly what killing a loaded raider
+  has to do. §7's whole argument for interception is that killing a loaded raider *returns* the grain
+  rather than denying it, and the return trip is the defender's window precisely because the loot is
+  recoverable.
+
+### Order of work
+
+1. **Vision.** A detection radius, occluded by forest. Verifiable on its own: a body in the open is seen
+   at range, the same body behind trees is not.
+2. **Hostility and harm.** Strength on the roster, health on the body, contact does damage, death drops the
+   load. Small, and it is what makes the rest measurable.
+3. **The three questions**, as one interrupt. The mechanic.
+4. **The raider**, in `Debug/`. Walks in at an edge, takes what it can carry from a store, runs for the
+   nearest edge. Slower loaded than empty, which is what makes the return trip the window.
+5. **Pressure**, on a slider, scenario-side.
+
+And one piece of interface that is not polish: **a key that selects the spare hands.** Answering a raid *is*
+reallocating labour under time pressure, and if that takes four drag-selects it is a chore rather than a
+decision — which would confound the only thing this stage exists to find out.
