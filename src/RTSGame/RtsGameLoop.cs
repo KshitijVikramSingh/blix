@@ -271,6 +271,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private InstanceBuffer smokeBuffer = null!;
     private InstancedBatch smokeBatch = null!;
     private readonly Hearths hearths = new();
+    // <b>What was actually sent, so the geometry line cannot describe a frame that was not drawn.</b> It
+    // recomputed the fog range from the dial, which stopped being the whole story the moment the mist
+    // started multiplying it — and a diagnostic that recomputes a value instead of reporting it is a
+    // diagnostic that will eventually disagree with the shader. §51's recurring finding, in the instrument.
+    private Vector4 sentFog;
+    private readonly Vector4[] hearthLights = new Vector4[Hearths.MaximumLights];
+    private int hearthLightCount;
     private int habitationLights;
     // viewProj, camPos, sunDir, sunLight, skyLight, fog, haze. As with the world block, this length is
     // also the declared push-constant range, so the two cannot disagree.
@@ -297,10 +304,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private InstanceBuffer canopyBuffer = null!, canopyCasterBuffer = null!;
 
     // viewProj, camPos, sunDir, sunVP, fog, shadow, light, haze, sunTint, skyAmbient, groundAmbient,
-    // hazeAway, hazeToward, wind, hearth. Every one of the last five palette entries used to be a constant in
+    // hazeAway, hazeToward, wind, hearth, then a vec4 per fire in the village. Every one of the five palette
+    // entries used to be a constant in
     // world.frag, which is why a year looked like one afternoon — see Rendering/Atmosphere.cs. This length
     // is also the declared push-constant range, in OnLoad, so the two cannot drift apart.
-    private readonly byte[] worldPush = new byte[336];
+    private readonly byte[] worldPush = new byte[336 + Hearths.MaximumLights * 16];
     private readonly byte[] skyPush = new byte[128];     // invViewProj, camPos, sunDir, zenith, horizon
     private readonly byte[] shadowPush = new byte[64];   // sun shadow VP
     private readonly byte[] gradePush = new byte[32];    // grade, then the eye's night response
@@ -784,7 +792,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             {
                 new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 new DescriptorSetSlot(0, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(0, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 InstanceBuffer.Slot,
             },
             PushConstants: new[]
@@ -980,11 +987,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             "rts-selection-pixel");
         // Smooth-sampled, because a path is a smudge and not a grid: at 192 cells over 600 m each is three
         // metres, and nearest sampling would draw the footfall grid itself rather than the paths in it.
-        hearthTexture = graphicsDevice.CreateTexture2D(
-            new TextureDescription(
-                HearthCells, HearthCells, TextureFormat.R8, SamplerDescription.LinearClamp),
-            hearthField,
-            "rts-hearth-light");
         wearTexture = graphicsDevice.CreateTexture2D(
             new TextureDescription(WearCells, WearCells, TextureFormat.R8, SamplerDescription.LinearClamp),
             wear,
@@ -1575,7 +1577,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             look.SunBearingDegrees,
             look.Seasonality);
         AdvanceWear(frame);
-        AdvanceHearths();
         ApplyWoodlandCover(frame);
         TurnAndZoom(frame);
         PanCamera(frame);
@@ -1808,13 +1809,23 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Aerial perspective sized to the camera rather than to the map: what it is for is
         // separating the near ground from the far ground, and how far away the far ground is
         // depends on how far back the camera is standing.
+        // <b>How much air there is tonight.</b> The season, the night and the morning, multiplied — see
+        // Atmosphere.Haze, where the foggiest hour of the year comes out as a winter dawn without anybody
+        // writing that down. Both the strength and where it starts: a mist that only deepens in the
+        // distance is a mist that begins at the same place a clear day does, and half of what a foggy
+        // morning does is close the middle distance in.
+        var mist = look.SunFollowsTheYear ? sky.Haze : 1f;
         var fog = new Vector4(
             // <b>Against the detail radius, not the camera's standoff.</b> Haze exists here to hide the
             // edge where the world stops being drawn, and it cannot do that if it is measured against
             // something else — tied to the zoom it started four hundred metres past a cull at two hundred.
-            DetailRadius * look.FogStartShare,
+            // The square root, because the strength saturates and the start does not: past about a quarter
+            // more air than a clear day the far distance is already fully hazed, so everything a thicker
+            // morning has left to say it says by closing the middle distance — and dividing the start by
+            // the whole of a threefold mist puts the wall thirty metres from the camera.
+            DetailRadius * look.FogStartShare / MathF.Max(1f, MathF.Sqrt(mist)),
             DetailRadius,
-            look.FogStrength,
+            MathF.Min(1f, look.FogStrength * mist),
             0f);
         // What the shaders need about the shadow map's geometry — a texel as a fraction of the map, and
         // how many metres the map covers — plus the two biases, which are a look and not geometry.
@@ -1856,6 +1867,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         MemoryMarshal.Write(worldPush.AsSpan(64, 16), in cameraPosition);
         MemoryMarshal.Write(worldPush.AsSpan(80, 16), in sun);
         MemoryMarshal.Write(worldPush.AsSpan(96, 64), in sunViewProjection);
+        sentFog = fog;
         MemoryMarshal.Write(worldPush.AsSpan(160, 16), in fog);
         MemoryMarshal.Write(worldPush.AsSpan(176, 16), in shadow);
         MemoryMarshal.Write(worldPush.AsSpan(192, 16), in light);
@@ -1879,9 +1891,29 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // both the windows and their pools, and it is the sun's height rather than the clock — so the
         // village comes up over the same twilight in which the palette goes blue, and neither can be seen
         // to switch.
+        var nightness = following ? sky.Nightness : 0f;
+        hearthLightCount = nightness < 0.02f
+            ? 0
+            : hearths.CollectLights(
+                simulation,
+                simulation.Date,
+                sky.HourOfDay,
+                (float)(simulation.TickNumber / 30.0),
+                cameraFocus,
+                DetailRadius,
+                look.HearthSpill,
+                hearthLights);
         var hearth = new Vector4(
-            following ? sky.Nightness : 0f, look.HearthSpill, look.HearthSpark, 0f);
+            nightness, look.HearthReach, look.HearthSpark, hearthLightCount);
         MemoryMarshal.Write(worldPush.AsSpan(320, 16), in hearth);
+        for (var i = 0; i < Hearths.MaximumLights; i++)
+        {
+            // The tail is zeroed rather than left stale: the count bounds the loop, but a light left in the
+            // buffer from a frame when there were more of them is a light that comes back when the count
+            // rises again, in the wrong place.
+            var fire = i < hearthLightCount ? hearthLights[i] : Vector4.Zero;
+            MemoryMarshal.Write(worldPush.AsSpan(336 + i * 16, 16), in fire);
+        }
         // Smoke takes the light already resolved into one colour each, because it has no shadow map, no
         // material class and no wear to look up — it is a thin thing that carries the ambient and a little
         // of the beam, and packing the palette down to two vec4s keeps its whole layout at 128 bytes.
@@ -1976,7 +2008,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         {
             new ShaderTextureBinding("uSunShadowMap", graph.GetDepthTexture(sunShadowHandle), Slot: 0),
             new ShaderTextureBinding("uWear", wearTexture, Slot: 1),
-            new ShaderTextureBinding("uHearthLight", hearthTexture, Slot: 2),
         };
         graph.Pass(scenePassHandle, scope =>
         {
@@ -3001,28 +3032,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// something that is a record of watching rather than a fact about the world.
     /// </para>
     /// </remarks>
-    /// <summary>
-    /// Where the settlement's own light falls, as a field over the map.
-    /// </summary>
-    /// <remarks>
-    /// <b>A field rather than a light list, for the same reason the wear is one.</b> Every fire in the
-    /// village splats into it and the shader reads it once by world position, so the cost of lighting the
-    /// place does not depend on how many fires are in it — no loop, no per-light bound, no sorting the
-    /// nearest eight and popping when the ninth becomes the eighth. What it gives up is shape: a pool has no
-    /// direction and cannot be occluded by the wall it is beside, which is the right trade for something
-    /// whose whole job is a soft warm patch on the ground.
-    /// <para>
-    /// Finer than the wear at about a metre and a quarter a texel, because a lantern's pool is metres across
-    /// where a footpath is tens. Rebuilt whole rather than accumulated — there is nothing to remember, since
-    /// a fire is either lit tonight or it is not.
-    /// </para>
-    /// </remarks>
-    private const int HearthCells = 512;
-
-    private readonly byte[] hearthField = new byte[HearthCells * HearthCells];
-    private TextureHandle hearthTexture;
-    private int hearthUploadCountdown;
-
     private const int WearCells = 320;
 
     private readonly byte[] wear = new byte[WearCells * WearCells];
@@ -3038,95 +3047,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// a thing that appears in a frame — so re-uploading a 36 KB texture four times a second is already far
     /// finer than the phenomenon, and the accumulator carries the fractional part that a byte cannot.
     /// </remarks>
-    /// <summary>
-    /// Rebuilds the field of light the settlement casts on its own ground.
-    /// </summary>
-    /// <remarks>
-    /// <b>Skipped entirely by day</b>, because the shader multiplies the whole field by how far into the
-    /// night it is — so at noon there is nothing to compute and nothing to upload, and the cost of this
-    /// feature is zero for two thirds of the cycle. Every sixth frame otherwise, which is often enough for
-    /// a flicker that breathes rather than strobes.
-    /// <para>
-    /// Three kinds of fire, and each one is a fact about the village rather than a decoration on it: a
-    /// house is lit if somebody lives in it, the granary keeps a lantern at its door, and a building site
-    /// has a brazier while it is being worked. A dark house is therefore <em>information</em> — it is the
-    /// housing the settlement built and has nobody to put in.
-    /// </para>
-    /// </remarks>
-    private void AdvanceHearths()
-    {
-        if (!look.SunFollowsTheYear || sky.Nightness < 0.02f || look.HearthSpill <= 0f) return;
-        if (--hearthUploadCountdown > 0) return;
-        hearthUploadCountdown = 6;
-
-        Array.Clear(hearthField);
-        var seconds = (float)(simulation.TickNumber / 30.0);
-        var radiusSquared = DetailRadius * DetailRadius;
-        foreach (ref readonly var node in simulation.Nodes.All)
-        {
-            if (!node.IsAlive || node.IsStanding || node.IsPile) continue;
-            if (Vector2.DistanceSquared(node.Position, cameraFocus) > radiusSquared) continue;
-
-            var width = node.HalfExtent * 2f;
-            var yaw = SettlementArt.SquareYawOf(node.Id.Value);
-            var at = SettlementArt.LitFace(node.Position, width, yaw);
-            // A slow breath rather than a candle's flutter. Sampled every sixth frame, so anything faster
-            // than about a cycle a second would alias into a strobe; and a hearth seen through a window is
-            // a large slow fire rather than a flame anyway.
-            var flicker = 0.88f + 0.12f * MathF.Sin(seconds * 2.3f + node.Id.Value * 1.7f);
-            if (node.IsUnderConstruction)
-            {
-                Splat(at, width * 1.1f, 0.55f * flicker);
-                continue;
-            }
-
-            if (node.IsSink)
-            {
-                if (node.Occupants <= 0) continue;
-                // <b>Tighter than it was, because a wide pool is a street lamp.</b> Light escaping a
-                // doorway falls in front of the doorway; a six-metre wash around a cottage says there is
-                // something on a pole outside it. Still brighter for a fuller house — with the panes gone
-                // this is the only thing left that says how many live there.
-                Splat(at, width * 0.95f, (0.60f + 0.16f * MathF.Min(3, node.Occupants)) * flicker);
-                continue;
-            }
-
-            if (node.Kind == NodeKind.Granary) Splat(at, width * 1.05f, 0.95f * flicker);
-        }
-
-        graphicsDevice.UploadTextureMip(hearthTexture, 0, hearthField);
-    }
-
-    /// <summary>Stamps one soft pool of light into the field.</summary>
-    /// <remarks>
-    /// Added rather than maximised, so two fires near each other are brighter than one — and clamped, since
-    /// the field is a byte. The falloff is a squared cosine bump: zero value <em>and</em> zero slope at the
-    /// rim, which is what keeps a pool from ending in a visible circle the way a linear falloff does.
-    /// </remarks>
-    private void Splat(Vector2 centre, float radiusMetres, float strength)
-    {
-        var extent = simulation.ExtentMeters;
-        var scale = HearthCells / extent;
-        var cx = (centre.X + extent * 0.5f) * scale;
-        var cz = (centre.Y + extent * 0.5f) * scale;
-        var reach = radiusMetres * scale;
-        var from = (int)MathF.Floor(-reach);
-        var to = (int)MathF.Ceiling(reach);
-        for (var dz = from; dz <= to; dz++)
-        for (var dx = from; dx <= to; dx++)
-        {
-            var x = (int)cx + dx;
-            var z = (int)cz + dz;
-            if (x < 0 || z < 0 || x >= HearthCells || z >= HearthCells) continue;
-            var distance = MathF.Sqrt(dx * dx + dz * dz) / MathF.Max(0.001f, reach);
-            if (distance >= 1f) continue;
-            var bump = 1f - distance * distance;
-            var value = strength * bump * bump;
-            var at = z * HearthCells + x;
-            hearthField[at] = (byte)Math.Clamp(hearthField[at] + value * 255f, 0f, 255f);
-        }
-    }
-
     private void AdvanceWear(float deltaSeconds)
     {
         var extent = simulation.ExtentMeters;
@@ -3636,7 +3556,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         return
             $"SEES {seen:F0} m · DETAIL {DetailRadius:F0} m ({DetailRadius / seen:F2}x) · " +
             $"SHADOW {half:F0} m (texel {texelCentimetres:F1} cm) · " +
-            $"FOG {DetailRadius * look.FogStartShare:F0}-{DetailRadius:F0} m · " +
+            $"FOG {sentFog.X:F0}-{sentFog.Y:F0} m at {sentFog.Z:F2} · " +
             // What the dressing is spending, on the same line as what can be seen, because both of the
             // questions they answer are "is this frame drawing more than it needs to".
             $"NIGHT {sky.Nightness:F2} (lights {habitationLights}) · " +

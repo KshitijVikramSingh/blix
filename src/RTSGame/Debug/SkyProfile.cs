@@ -39,7 +39,7 @@ internal static class SkyProfile
             $"{Atmosphere.MiddaySaturationDrop:F2}, midday green drop {Atmosphere.MiddayGreenDrop:F2}");
         Console.WriteLine();
         Console.WriteLine(
-            "  season  |  hour |   sun |  what it is | warmth | strength | expose | satur | green");
+            "  season  |  hour |   sun |  what it is | warmth | strength | expose | satur | green |  air");
 
         var faults = new List<string>();
         foreach (var season in new[] { Season.Spring, Season.Summer, Season.Harvest, Season.Winter })
@@ -51,7 +51,8 @@ internal static class SkyProfile
                     $"  {season,-7} | {hour,4:F0}h | {sky.SunElevationDegrees,4:F0}° | " +
                     $"{sky.Description,-11} | {Warmth(sky.SunColor),6:F3} | " +
                     $"{sky.SunIntensity,8:F2} | {sky.Grade.Exposure,6:F2} | " +
-                    $"{sky.Grade.Saturation,5:F2} | {sky.Grade.FoliageChroma,5:F2}");
+                    $"{sky.Grade.Saturation,5:F2} | {sky.Grade.FoliageChroma,5:F2} | " +
+                    $"{sky.Haze,4:F2}");
             }
 
             Console.WriteLine();
@@ -135,6 +136,45 @@ internal static class SkyProfile
             faults.Add(
                 $"the midday pull-back is not seasonal — summer takes {summerPull:F3} and winter " +
                 $"{winterPull:F3}, so it is being applied by the clock rather than by the sun's height");
+        }
+
+        // <b>The foggiest hour of the year has to be a winter morning</b>, and it has to come out of the
+        // arithmetic rather than being written down — the season holds the base, the night adds to it and
+        // the morning adds most, all multiplied. If a summer afternoon ever wins this, the three terms have
+        // stopped compounding.
+        var thickest = 0f;
+        var thickestWhen = string.Empty;
+        var clearest = 99f;
+        var clearestWhen = string.Empty;
+        foreach (var season in new[] { Season.Spring, Season.Summer, Season.Harvest, Season.Winter })
+        {
+            for (var hour = 0f; hour < 24f; hour += 0.5f)
+            {
+                var air = At(season, hour, bearingDegrees, seasonality).Haze;
+                if (air > thickest)
+                {
+                    thickest = air;
+                    thickestWhen = $"{season} at {hour:F0}h";
+                }
+
+                if (air >= clearest) continue;
+                clearest = air;
+                clearestWhen = $"{season} at {hour:F0}h";
+            }
+        }
+
+        Console.WriteLine(
+            $"  the air runs from {clearest:F2} ({clearestWhen}) to {thickest:F2} ({thickestWhen})");
+        if (!thickestWhen.StartsWith("Winter", StringComparison.Ordinal))
+        {
+            faults.Add(
+                $"the foggiest hour of the year is {thickestWhen} — it should be a winter morning, and " +
+                "if it is not then the season, the night and the morning have stopped compounding");
+        }
+
+        if (!clearestWhen.StartsWith("Summer", StringComparison.Ordinal))
+        {
+            faults.Add($"the clearest air of the year is {clearestWhen}, and it should be a summer day");
         }
 
         // <b>The property the whole seasonal palette is for.</b> Take the light at the same hour in four

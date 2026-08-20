@@ -44,6 +44,7 @@ layout(push_constant) uniform Push {
     vec4 uWind;
     // Declared but unread here: one block, one layout, every stage.
     vec4 uHearth;
+    vec4 uHearths[12];
 };
 
 layout(location = 0) out vec3 vNormal;

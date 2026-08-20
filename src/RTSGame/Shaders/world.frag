@@ -21,10 +21,6 @@ layout(set = 0, binding = 0) uniform sampler2D uSunShadowMap;
 // Where people have been walking. One channel, three metres a texel, smooth-sampled — see
 // RtsGameLoop.AdvanceWear for what fills it and why it is not simulation state.
 layout(set = 0, binding = 1) uniform sampler2D uWear;
-// Where the settlement's own light falls. One channel, about a metre a texel, smooth-sampled — see
-// RtsGameLoop.AdvanceHearths. Like the wear, it is an observational field the renderer keeps to itself:
-// no decision reads it and a loaded save rebuilds it from where the buildings are.
-layout(set = 0, binding = 2) uniform sampler2D uHearthLight;
 
 layout(push_constant) uniform Push {
     mat4 uViewProjection;
@@ -47,8 +43,12 @@ layout(push_constant) uniform Push {
     vec4 uHazeToward;
     // Declared but unread here, for the reason the vertex stage gives: one block, one layout, every stage.
     vec4 uWind;
-    vec4 uHearth;   // x = how far into the night it is, y = how much light spills on the ground,
-                    // z = how brightly a window burns
+    vec4 uHearth;   // x = how far into the night it is, y = how far a hearth reaches (m),
+                    // z = how brightly the fire itself shows, w = how many fires are lit
+    // <b>The settlement's own fires, as point lights rather than as a field.</b> Position and strength; the
+    // colour is shared and stays below with the other hues. Twelve of them, nearest first — see
+    // Hearths.CollectLights for why that cannot pop.
+    vec4 uHearths[12];
 };
 
 // The hues stay here and the intensities do not. A colour is a decision about what kind of
@@ -180,23 +180,33 @@ void main() {
     // silhouette, and a touch more light on them makes roofs pop without tipping into cartoon.
     float upFace = 1.0 + max(n.y, 0.0) * 0.10;
 
-    // <b>What the settlement lights of itself.</b> Sampled by world position out of a field the renderer
-    // splats the hearths into, so it costs one texture read whatever the village's size and needs no light
-    // list, no loop and no bound on how many fires there are. Multiplied by the night, so it is absent by
-    // day rather than washing the ground out at noon.
+    // <b>What the settlement lights of itself, and the whole point of it being a light rather than a
+    // field is the dot product.</b> A field had no direction, so it brightened the ground, the wall and the
+    // barrel beside it by the same amount — and light with no direction is a stain rather than a source.
+    // With a position, the wall facing the doorway is lit and the one facing away is not.
     //
-    // The height falloff is the honest approximation here: it fades with height above <em>zero</em> rather
-    // than above the ground, which is exact while the village is flat and wants revisiting the day relief
-    // is generated. Without it a lit doorway would put its pool on the roof as well.
+    // The falloff is the inverse square with a metre of softening, which is what stops a fragment a
+    // handspan from the fire going to white, multiplied by a smooth window that reaches zero at the reach.
+    // The window is what makes twelve lights safe: a fire dropped from the set was already contributing
+    // nothing at the distance it was dropped.
     //
-    // Tightened to hug the ground, and that is what makes it read as firelight rather than as a lamp post:
-    // a fire is on the floor, so what it lights is the floor and the bottom of the wall beside it, and the
-    // eaves stay dark. Over about two metres there is nothing left of it.
-    float spill = texture(uHearthLight, vWorldPos.xz / uHaze.z + 0.5).r *
-                  uHearth.y * uHearth.x * exp(-max(vWorldPos.y, 0.0) / 1.55);
+    // A generous wrap, because a hearth is not a point. What escapes a doorway has bounced around a room
+    // first, so it arrives as a wide soft source, and straight N.L on a wide source puts a hard terminator
+    // where there is none.
+    vec3 hearth = vec3(0.0);
+    float reach = max(uHearth.y, 0.5);
+    int fires = int(uHearth.w);
+    for (int i = 0; i < fires; i++) {
+        vec3 toFire = uHearths[i].xyz - vWorldPos;
+        float away = dot(toFire, toFire);
+        float window = clamp(1.0 - away / (reach * reach), 0.0, 1.0);
+        float falloff = window * window / (1.0 + away);
+        float facing = (max(dot(n, normalize(toFire)), 0.0) + 0.35) / 1.35;
+        hearth += kHearthColor * (uHearths[i].w * falloff * facing);
+    }
 
     vec3 lit = albedo * (ambient + shadeLift + uSunTint.rgb * uLight.x * wrapWide * shadow * upFace);
-    lit += albedo * kHearthColor * spill;
+    lit += albedo * hearth * uHearth.x;
     // Light through the leaf, added rather than multiplied: it is the sun arriving by another route.
     lit += albedo * uSunTint.rgb * uLight.x * through * shadow;
 

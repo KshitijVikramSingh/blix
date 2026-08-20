@@ -72,6 +72,18 @@ internal sealed class Hearths
         public readonly float Seed;
     }
 
+    /// <summary>
+    /// How many fires may light the scene at once.
+    /// </summary>
+    /// <remarks>
+    /// <b>A real bound, where the field it replaced had none — and it is affordable because of how fast
+    /// light falls off.</b> Twelve covers a whole village and then some; past that the nearest twelve are
+    /// kept, and the thirteenth nearest is by construction dimmer than every one of them. Combined with a
+    /// hard cutoff at the reach, nothing can pop: a fire that leaves the set was already contributing
+    /// nothing when it left.
+    /// </remarks>
+    internal const int MaximumLights = 12;
+
     private readonly Puff[] puffs = new Puff[Capacity];
     private int next;
     private float lastSeconds = float.NaN;
@@ -140,6 +152,93 @@ internal sealed class Hearths
                 chimney, ground + width * ridge * 0.96f, simSeconds, Hash01((uint)next * 747796405u));
             next = (next + 1) % Capacity;
         }
+    }
+
+    /// <summary>
+    /// The fires that are lit tonight, nearest first, as a point light each.
+    /// </summary>
+    /// <remarks>
+    /// <b>Real point lights, where this was a field splatted into a texture.</b> The field was the right
+    /// first answer — one lookup whatever the village's size — and it gave up the one thing that turns a
+    /// warm patch into a fire: <em>direction</em>. A field has none, so it brightened the ground and the
+    /// wall and the barrel beside it all by the same amount, and a light with no direction is a stain
+    /// rather than a source. With a position, the wall facing the doorway is lit and the one facing away is
+    /// not, the ground falls off as the inverse square, and the same amount of light suddenly has a shape.
+    /// <para>
+    /// The rule for which buildings are lit lives here now, and it used to live in two places — the pools
+    /// and the sparks were deciding it separately, which is exactly the arrangement where one of them grows
+    /// a case the other does not have.
+    /// </para>
+    /// </remarks>
+    internal int CollectLights(
+        SimulationWorld world,
+        CalendarDate date,
+        float hourOfDay,
+        float simSeconds,
+        Vector2 focus,
+        float reachMetres,
+        float strength,
+        Span<Vector4> into)
+    {
+        var count = 0;
+        Span<float> distances = stackalloc float[MaximumLights];
+        if (strength <= 0f || into.Length == 0) return 0;
+
+        // The hearths burn harder in the season that needs them, exactly as the smoke does — same function,
+        // so a village that is smoking hard is a village that is glowing hard.
+        var banked = 0.55f + 0.45f * MathF.Min(1f, Activity(date.Season, hourOfDay));
+        var reachSquared = reachMetres * reachMetres;
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (!node.IsAlive || node.IsStanding || node.IsPile) continue;
+            var toFocus = Vector2.DistanceSquared(node.Position, focus);
+            if (toFocus > reachSquared) continue;
+
+            var lit = node.IsUnderConstruction
+                ? 0.70f
+                : node.IsSink
+                    ? node.Occupants <= 0 ? 0f : 0.62f + 0.15f * MathF.Min(3, node.Occupants)
+                    : node.Kind == NodeKind.Granary ? 1.0f : 0f;
+            if (lit <= 0f) continue;
+
+            var width = node.HalfExtent * 2f;
+            var yaw = SettlementArt.SquareYawOf(node.Id.Value);
+            var at = SettlementArt.LitFace(node.Position, width, yaw);
+            // A slow breath, and per light rather than per field: a fire that is not quite steady is most
+            // of what separates one from a bulb, and it was previously being sampled every sixth frame.
+            var flicker = 0.86f + 0.14f * MathF.Sin(simSeconds * 2.9f + node.Id.Value * 1.7f) +
+                          0.05f * MathF.Sin(simSeconds * 7.3f + node.Id.Value * 4.1f);
+            var light = new Vector4(
+                at.X,
+                // Knee height. A fire is on the floor, but what escapes a doorway has bounced off the room
+                // first, so the effective source sits a little above the threshold — and a light exactly on
+                // the ground plane lights the ground it stands on at a grazing angle and almost nothing
+                // else.
+                world.Terrain.SampleHeight(node.Position) + width * 0.14f,
+                at.Y,
+                strength * lit * banked * flicker);
+
+            // Nearest first, by insertion — twelve entries, so this is cheaper than sorting and it drops
+            // the far ones for free.
+            var slot = count;
+            while (slot > 0 && distances[slot - 1] > toFocus)
+            {
+                if (slot < into.Length)
+                {
+                    into[slot] = into[slot - 1];
+                    distances[slot] = distances[slot - 1];
+                }
+
+                slot--;
+            }
+
+            if (slot >= into.Length) continue;
+            into[slot] = light;
+            distances[slot] = toFocus;
+            if (count < into.Length) count++;
+        }
+
+        return count;
     }
 
     /// <summary>

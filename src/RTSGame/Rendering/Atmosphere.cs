@@ -52,6 +52,20 @@ internal readonly record struct Atmosphere(
     Vector3 HazeToward,
     float SunElevationDegrees,
     float HourOfDay,
+    /// <summary>How much air there is, as a multiplier on whatever the fog dial asks for.</summary>
+    /// <remarks>
+    /// <b>Three things multiplied, because mist is three things at once.</b> The season holds the base —
+    /// winter air is cold and wet and still, a summer afternoon is the clearest of the year. Night adds to
+    /// it, since air cools and what is in it condenses. And the morning adds most, because that is the end
+    /// of a whole night of cooling and the sun has not yet burned any of it off: mist is a thing you find
+    /// at dawn and lose by ten.
+    /// <para>
+    /// Multiplied rather than added so the extremes compound the way they do in the world — the foggiest
+    /// hour of the year is a winter dawn by a wide margin, and it falls out of the arithmetic rather than
+    /// being written down anywhere.
+    /// </para>
+    /// </remarks>
+    float Haze,
     /// <summary>How far into the night it is: 0 in full daylight, 1 once the sun is well down.</summary>
     /// <remarks>
     /// The same ramp everything else in this file hangs off, exposed because the settlement's own lights
@@ -154,6 +168,9 @@ internal readonly record struct Atmosphere(
         // winter night is colder and — because there is snow and no leaves — brighter than a summer one.
         Vector3 NightTint,
         float NightScale,
+        // How much air this season has in it, before the time of day has its say. Cold, wet, still seasons
+        // hold mist; a hot summer afternoon has the clearest air of the year.
+        float HazeAmount,
         // What the camera does with this light, as distinct from what the light is. Exposure, saturation
         // and contrast are the season's own, so the grade is part of the palette rather than a global.
         float Exposure,
@@ -178,6 +195,8 @@ internal readonly record struct Atmosphere(
         HazeToward: new Vector3(0.92f, 0.90f, 0.80f),
         NightTint: new Vector3(0.98f, 1.00f, 1.04f),
         NightScale: 1.00f,
+        // Wet ground and cold nights: the mistiest season bar winter.
+        HazeAmount: 1.10f,
         Exposure: 1.00f,
         Saturation: 1.00f,
         Contrast: 1.00f);
@@ -198,6 +217,8 @@ internal readonly record struct Atmosphere(
         // A summer night is warm, short and never quite dark at this latitude.
         NightTint: new Vector3(1.06f, 1.00f, 0.94f),
         NightScale: 1.10f,
+        // The clearest air of the year, which is most of why a summer noon reads as far-seeing.
+        HazeAmount: 0.80f,
         // Bright and hard, but not lurid: the midday chroma pull below takes the green down, and it takes
         // the most out of summer precisely because summer is the season that reaches a high sun.
         Exposure: 1.02f,
@@ -219,6 +240,8 @@ internal readonly record struct Atmosphere(
         HazeToward: new Vector3(1.00f, 0.84f, 0.58f),
         NightTint: new Vector3(1.02f, 0.99f, 0.96f),
         NightScale: 0.96f,
+        // Mist over cut fields in the morning, and dust in the afternoon.
+        HazeAmount: 1.05f,
         Exposure: 0.98f,
         Saturation: 1.08f,
         Contrast: 1.02f);
@@ -244,6 +267,8 @@ internal readonly record struct Atmosphere(
         // Colder and brighter: bare ground, no canopy, and a clear sky that carries starlight.
         NightTint: new Vector3(0.90f, 0.96f, 1.12f),
         NightScale: 1.18f,
+        // The season that changes how far you can see: cold, wet and still.
+        HazeAmount: 1.50f,
         // Drained and flat, which is the strongest single seasonal signal the grade has. A winter frame
         // should look like it was shot on a duller day, not like a summer frame with blue in it.
         Exposure: 0.94f,
@@ -290,6 +315,8 @@ internal readonly record struct Atmosphere(
         // Night does not tint itself — the season does that to it, in Tinted below.
         NightTint: Vector3.One,
         NightScale: 1.00f,
+        // Night's own contribution is applied separately, against the sun's height.
+        HazeAmount: 1.00f,
         // More exposure, because a dim scene wants to sit where the curve still has slope — that is what
         // keeps a darker night legible rather than merely dark, and it is a different control from how much
         // light is in the scene. Contrast above one now, which it was not: the point of a night with warm
@@ -402,6 +429,13 @@ internal readonly record struct Atmosphere(
         // stays near zero all winter without a palette having to say so.
         var high = above * Smoothstep(26f, 56f, elevation);
 
+        // <b>The season's own air, taken before the night blend can overwrite it.</b> Caught by the profile
+        // printing a winter night as hazier than a summer one by less than a winter noon was: everything
+        // else in this palette is a colour and night is entitled to replace those, but how much water is in
+        // the air is a fact about the month rather than about the hour. Blending it toward a shared night
+        // value threw away the strongest half of the signal.
+        var seasonalAir = look.HazeAmount;
+
         // Night is the same palette with the moon in it, faded in by how far the sun is down — and wearing
         // this season's cold. See Tinted.
         look = Mix(look, Tinted(Nightfall, look.NightTint, look.NightScale), 1f - above);
@@ -439,6 +473,14 @@ internal readonly record struct Atmosphere(
         // scaled by the sun's height, which is what makes time of day a smaller oscillation than the season
         // rather than a competing one: the amount of the pull is itself a seasonal quantity, since only
         // summer ever gets high enough to receive much of it.
+        // <b>Mist: the season, the night, and the morning.</b> The morning term is a window on the clock
+        // rather than on the sun's height, because "before the sun has burned it off" is what it means and
+        // that is a time of day; it is then gated by darkness so it cannot put fog into a bright winter
+        // noon, which at this latitude is only a few degrees above the horizon anyway.
+        var dark = 1f - above;
+        var morning = Window(hour, 5.5f, 5.5f);
+        var haze = seasonalAir * (1f + 0.40f * dark) * (1f + 0.45f * morning * MathF.Max(dark, 0.35f));
+
         var grade = new SkyGrade(
             look.Exposure,
             look.Saturation * (1f - MiddaySaturationDrop * high),
@@ -458,6 +500,7 @@ internal readonly record struct Atmosphere(
             hazeToward,
             elevation,
             hour,
+            haze,
             1f - above,
             grade,
             Describe(elevation, low));
@@ -472,6 +515,13 @@ internal readonly record struct Atmosphere(
             MathF.Sin(azimuth) * horizontal,
             MathF.Sin(radians),
             MathF.Cos(azimuth) * horizontal));
+    }
+
+    /// <summary>A soft window round an hour of the day, zero outside it and one at its middle.</summary>
+    private static float Window(float hour, float centre, float halfWidth)
+    {
+        var distance = MathF.Abs(hour - centre) / MathF.Max(0.001f, halfWidth);
+        return distance >= 1f ? 0f : 1f - distance * distance;
     }
 
     private static float Smoothstep(float from, float to, float at)
@@ -537,6 +587,7 @@ internal readonly record struct Atmosphere(
         Vector3.Lerp(a.HazeToward, b.HazeToward, t),
         Vector3.Lerp(a.NightTint, b.NightTint, t),
         float.Lerp(a.NightScale, b.NightScale, t),
+        float.Lerp(a.HazeAmount, b.HazeAmount, t),
         float.Lerp(a.Exposure, b.Exposure, t),
         float.Lerp(a.Saturation, b.Saturation, t),
         float.Lerp(a.Contrast, b.Contrast, t));

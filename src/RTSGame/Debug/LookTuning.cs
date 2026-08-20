@@ -122,8 +122,18 @@ internal sealed class LookSettings
     /// is in — which is why it can be right about all three where a quad could not be right about any.
     /// Turning it off leaves only the sparks, which is what you want when judging the night palette itself.
     /// </remarks>
-    [Tune(0.0, 2.0, Label = "hearth spill", Group = "night")]
-    public float HearthSpill = 1.30f;
+    [Tune(0.0, 6.0, Label = "hearth spill", Group = "night")]
+    public float HearthSpill = 2.4f;
+
+    /// <summary>How far a hearth's light carries, in metres.</summary>
+    /// <remarks>
+    /// A hard cutoff rather than a fade to nothing, and it is what makes a bounded set of lights safe: a
+    /// fire dropped from the nearest twelve was already contributing nothing at the distance it was
+    /// dropped. It is also a look — a short reach is a hearth in a doorway and a long one is a bonfire in
+    /// the square.
+    /// </remarks>
+    [Tune(2.0, 30.0, Label = "hearth reach (m)", Group = "night")]
+    public float HearthReach = 11f;
 
     /// <summary>How hard the chimneys smoke, over what the season already asked for.</summary>
     /// <remarks>
