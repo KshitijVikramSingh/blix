@@ -174,9 +174,15 @@ internal sealed class SettlementArt : IDisposable
         //
         // So: the big barn at 7.5 m and the small one at 4.5 m, same family, and the size is the read. Which
         // is also true — they are both stores, and one is bigger.
+        //
+        // <b>And stretched to the square, because the ground is square.</b> Reported twice: the barn is
+        // 1.81 x 1.43, so normalised to a 7.5 m footprint it drew 7.5 x 5.93 and left a metre and a half of
+        // blocked ground with nothing standing on it. A footprint the player cannot see is a footprint they
+        // walk into. The cost is a 26% stretch in depth on a barn, which is a barn slightly the wrong shape
+        // — much the cheaper of the two lies.
         var art = new SettlementArt(
-            granary: Prop("Storage_SecondAge_Level3"),
-            depot: Prop("Storage_SecondAge_Level1"),
+            granary: Prop("Storage_SecondAge_Level3", stretchToSquare: true),
+            depot: Prop("Storage_SecondAge_Level1", stretchToSquare: true),
             houses: new[]
             {
                 Prop("Houses_SecondAge_1_Level2"),

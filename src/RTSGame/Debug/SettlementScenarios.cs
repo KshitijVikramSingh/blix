@@ -150,7 +150,7 @@ internal static class SettlementScenarios
         float secondsBetween,
         float raiderHealth = 0f,
         uint seed = 0x1B873593u,
-        bool quiet = false)
+        bool peers = false)
     {
         var world = Build(extentMeters, out var granary);
         var settings = new RaidSettings
@@ -158,6 +158,7 @@ internal static class SettlementScenarios
             SecondsBetween = secondsBetween,
             CameraJumps = false,
             RaiderHealth = raiderHealth,
+            PeerRaiders = peers,
         };
         var raids = new RaidDirector(settings, seed);
         var ledger = new RaidLedger(new Simulation.Collision.FactionId(0));
@@ -168,7 +169,8 @@ internal static class SettlementScenarios
         Console.WriteLine(
             $"RTSGame raids — {world.ExtentMeters:F0} m, {world.Agents.LiveCount} people, " +
             $"a raid every {secondsBetween:F0} s of {settings.Party}, {minutes:F1} minute(s), " +
-            $"raiders at {(raiderHealth > 0f ? raiderHealth : UnitType.Raider.Health):F0} health");
+            $"raiders at {(raiderHealth > 0f ? raiderHealth : (peers ? UnitType.Villager : UnitType.Raider).Health):F0} " +
+            $"health{(peers ? ", and villagers in every other respect too" : string.Empty)}");
         Console.WriteLine(
             "     min | people | grain | raiders | stood | fled | spare | stow | shut out | killed | " +
             "lost | stolen | piles | furthest | routes | ms/tick");

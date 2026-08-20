@@ -4350,3 +4350,58 @@ much the same amount is consistent with the benchmark — a laden raider at 1.44
 **The cordon is untouched and still broken**: `1.00x` detour at every N from two to twelve, identical to
 nobody being in the way. That is item three, it is the avoidance layer proper, and it now has a measurement
 to be judged by.
+
+## 43. Three peers cannot rob twenty, and a raider is not a peer
+
+The design objection, and it is correct: *with 15-20 people around, I shouldn't be able to let 3 guys walk
+in and steal that much of my stuff.* Followed by the right experiment — **what would it look like if the
+assailants were also numerically villagers?**
+
+That question separates the only two possible explanations. Either a thief is individually much better
+than the people it is robbing, or the settlement has no working way to stop anybody at all. `--peers`
+answers it: same strength, same health, same pace, hostile faction, nothing else changed. Ten seeds each.
+
+| | got home /24 | their dead | our dead | **stolen** | recovered |
+|---|---|---|---|---|---|
+| raider — 3 strength, 18 health, 2.05 m/s | 11.9 ± 1.2 | 3.1 ± 1.3 | 9.4 ± 3.5 | **476 ± 48** | 164 ± 50 |
+| peer — 1 strength, 20 health, 1.79 m/s | **3.1 ± 1.5** | **12.9 ± 2.8** | 6.2 ± 1.9 | **93 ± 46** | 418 ± 86 |
+
+**Twenty villagers comfortably see off three of their own kind.** Three of twenty-four get home, thirteen
+die, and 93 grain leaves the map instead of 476 — most of what is picked up is dropped again and recovered.
+Our own losses fall too, from 9.4 to 6.2.
+
+So **the mechanics are exonerated.** The settlement can stop people. The 476 grain is not a broken defence,
+it is a statement about how good a raider is: at three times a villager's strength it is worth about three
+farmhands in a fight, so three of them are worth nine — against twenty who fight badly on purpose, arrive
+in ones and twos, and can only fit five or six around a body at a time.
+
+Which turns the objection into a design question with a number attached, rather than a bug hunt: **how much
+better than a farmhand should a thief be?** Two obvious readings, and they are different games:
+
+- *A thief is a peer with bad intentions.* Then a settlement defends itself by existing, and the interesting
+  pressure is the interruption cost — 409 grain of work not done even in the peer runs, which is four times
+  what was actually stolen.
+- *A thief is a fighter and a farmhand is not.* Then a settlement needs somebody whose job is fighting, and
+  the raid is the reason to pay for one. That is the roster's own position — `UnitType.Soldier` at strength
+  3 and health 45 exists and cannot be built — and it is the answer §33 predicted the numbers would ask for.
+
+**The second is the better game and the numbers now say so out loud.** Note what the peer table also shows:
+even losing decisively, three peers still cost the settlement 409 grain of interrupted work and six lives.
+A raid you win is still expensive, which is the design working.
+
+### And the granary, twice reported
+
+Two separate things, both real.
+
+**The footprint still did not match the model.** The barn is 1.81 × 1.43, so normalised to a 7.5 m square
+footprint it drew 7.5 × 5.93 and left a metre and a half of blocked ground with nothing standing on it. Both
+stores are stretched to their square now. The cost is a 26% stretch in depth — a barn slightly the wrong
+shape, which is much the cheaper of the two lies, because a footprint the player cannot see is one they walk
+into.
+
+**And assailants vanished behind it.** That one is §33's mechanic working exactly as designed: a raider
+looting a granary *is inside it* and is therefore not drawn. But a body that disappears with no explanation
+is a glitch whatever the reason, and the panel saying "1 INSIDE YOUR STORES" is not where the player is
+looking. So a store with intruders in it is now drawn in a single alarm colour instead of its own materials
+— losing a barn's seven materials for the six seconds somebody is rummaging in it, on the grounds that for
+those six seconds the one thing worth knowing about that building is not what it is made of.

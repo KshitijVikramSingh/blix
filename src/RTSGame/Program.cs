@@ -81,8 +81,8 @@ public static class Program
             // 18 came out non-monotonic on one sample each. Varying the seed is how a sweep gets samples,
             // and the seed is the only thing that varies: same map, same settlement, same schedule.
             var seed = Value(args, "--seed") is { } s ? uint.Parse(s) : 0x1B873593u;
-            Environment.Exit(
-                SettlementScenarios.RunRaids(raidExtent, raidMinutes, between, health, seed));
+            Environment.Exit(SettlementScenarios.RunRaids(
+                raidExtent, raidMinutes, between, health, seed, args.Contains("--peers")));
         }
 
         if (args.Contains("--catchment"))

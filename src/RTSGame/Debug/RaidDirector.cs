@@ -104,6 +104,24 @@ internal sealed class RaidSettings
     [Tune(0.0, 60.0, Label = "raider health (0 = roster)", Group = "raids")]
     public float RaiderHealth;
 
+    /// <summary>
+    /// Whether the raiders are villagers in every respect but which side they are on.
+    /// </summary>
+    /// <remarks>
+    /// <b>A diagnostic, and the sharpest one available for the question "is this balance or is it
+    /// broken?"</b> A settlement of twenty should not lose four hundred grain to three thieves, and there
+    /// are only two possible reasons: the thieves are individually much better than the people they are
+    /// robbing, or the settlement has no working way to stop anybody at all. Making the raiders
+    /// <em>peers</em> — same strength, same health, same pace, no advantage of any kind — separates those.
+    /// <para>
+    /// If twenty peers comfortably see off three, what remains is a balance question about how good a
+    /// raider ought to be. If they do not, no amount of tuning a raider's numbers will help, because the
+    /// settlement is not being beaten by the raiders' qualities.
+    /// </para>
+    /// </remarks>
+    [Tune(Label = "raiders are just villagers", Group = "raids")]
+    public bool PeerRaiders;
+
     /// <summary>Whether the camera snaps to a raid when it appears.</summary>
     /// <remarks>
     /// A test-bench convenience and no more: watching whether defence is interesting requires being able to
@@ -135,6 +153,9 @@ internal sealed class RaidDirector
     private readonly RaidSettings settings;
     private readonly List<Raider> party = new();
     private readonly FactionId enemy = new(1);
+
+    /// <summary>What a raider is made of, which the peer diagnostic can swap for a villager.</summary>
+    private UnitType Kind => settings.PeerRaiders ? UnitType.Villager : UnitType.Raider;
 
     /// <summary>How far past a store's wall a raider can still get in at it, in metres.</summary>
     /// <remarks>
@@ -311,7 +332,7 @@ internal sealed class RaidDirector
             var along = Vector2.Normalize(arrival);
             var at = arrival - along * (i * 2.2f) +
                      new Vector2(-along.Y, along.X) * (Next() * 4f - 2f);
-            var body = world.SpawnAgent(world.Terrain.ClampPosition(at), UnitType.Raider, enemy);
+            var body = world.SpawnAgent(world.Terrain.ClampPosition(at), Kind, enemy);
             // This director owns where these bodies go. Without it they also ran the settlement's own
             // defence — see AgentState.Directed — and marched themselves off after loot they were carrying.
             world.Agents.Get(body).Directed = true;
@@ -323,7 +344,7 @@ internal sealed class RaidDirector
                 Exit = arrival,
                 // Generous, but finite: about the time it takes to walk in from the far edge at raider pace,
                 // so a raid that cannot find its way home rather than standing on the map forever.
-                Patience = world.ExtentMeters / UnitType.Raider.MaximumSpeed,
+                Patience = world.ExtentMeters / Kind.MaximumSpeed,
             });
             started++;
         }
@@ -459,7 +480,7 @@ internal sealed class RaidDirector
         if (!world.Agents.Contains(raider.Body)) return;
         ref var body = ref world.Agents.Get(raider.Body);
         var share = body.Jobs.CarriedUnits > 0 ? Math.Clamp(settings.LadenShare, 0.1f, 1f) : 1f;
-        body.MaximumSpeed = UnitType.Raider.MaximumSpeed * share;
+        body.MaximumSpeed = Kind.MaximumSpeed * share;
     }
 
     /// <summary>Runs for the edge it came in at, and is gone when it gets there.</summary>
