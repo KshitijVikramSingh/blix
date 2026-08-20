@@ -159,6 +159,7 @@ internal sealed class SettlementArt : IDisposable
         PipelineHandle casterPipeline)
     {
         var directory = Path.Combine(AppContext.BaseDirectory, "Assets", "models");
+        var measured = new List<(PropModel Model, Bounds3 Walls)>();
 
         // <b>The OBJ pack, loaded the same way the glTF one is.</b> WavefrontParts splits a file by
         // material and reads each colour out of the MTL, so the two paths meet at the same shape — a
@@ -218,9 +219,13 @@ internal sealed class SettlementArt : IDisposable
             var bake = stretchToSquare
                 ? StretchToUnitSquare(bounds)
                 : PropModel.NormaliseToUnitFootprint(bounds);
-            return PropModel.Create(
+            var built = PropModel.Create(
                 device, file, parts, sceneShader, scenePipeline,
                 casts ? casterShader : null, casts ? casterPipeline : null, bake);
+            // What anything hung on this building has to be placed against, rather than its bounding box.
+            // See WallsOf: the widest part of a cottage is its roof.
+            measured.Add((built, LowerExtent(parts.Select(part => part.Mesh), bounds, bake)));
+            return built;
         }
 
         // <b>Both stretched to the square, so the crop and the dirt it grows in are the same rectangle.</b>
@@ -317,6 +322,7 @@ internal sealed class SettlementArt : IDisposable
             grainHeap: Prop("Crate", surface: MaterialClass.Timber),
             woodHeap: Prop("Logs", surface: MaterialClass.Timber),
             villager: LoadVillager(device, directory, sceneShader, scenePipeline, casterShader, casterPipeline));
+        foreach (var (model, extent) in measured) art.walls[model] = extent;
         return art;
     }
 
@@ -543,6 +549,75 @@ internal sealed class SettlementArt : IDisposable
 
     /// <summary>Any angle at all, for a tree or a heap, which nobody aligned to anything.</summary>
     public static float FreeYawOf(int id) => (id * 47 % 360) * MathF.PI / 180f;
+
+    /// <summary>
+    /// The footprint of a model's <em>walls</em>, which is not the footprint of its roof.
+    /// </summary>
+    /// <remarks>
+    /// <b>Written to explain lit windows that looked like they were floating, and it disproved its own
+    /// hypothesis — which is the reason to measure rather than reason about a model.</b> The theory was
+    /// overhanging eaves: a cottage's widest point would be its roof, so a window at the bounding box would
+    /// hang under the overhang with nothing behind it. Measured, the overhang is <b>zero</b> — the walls
+    /// reach 0.47 of the footprint where the roof reaches 0.47, and 0.45 against 0.50 on the other axis.
+    /// The floating was a different fault entirely (an emissive bright enough to clip spreading through the
+    /// MSAA resolve, so a 40 cm box read as a metre and a half of white card).
+    /// <para>
+    /// Kept anyway, and not out of sentiment: it is five centimetres per metre of footprint on one axis of
+    /// the cottage, it is the difference between flush and floating at this scale, and the next pack of
+    /// models will not have the same answer. Anything that puts something <em>on</em> a building asks for
+    /// these; the full bounds remain the right answer for the ridge a chimney comes out of.
+    /// </para>
+    /// </remarks>
+    public Bounds3 WallsOf(PropModel model) =>
+        walls.TryGetValue(model, out var measured) ? measured : model.Bounds;
+
+    private readonly Dictionary<PropModel, Bounds3> walls = new();
+
+    /// <summary>
+    /// The extent of whatever sits in the bottom share of a model, in the model's own space.
+    /// </summary>
+    /// <remarks>
+    /// A third of the height, which is under the eaves of everything in this pack and above the plinth of
+    /// all of it. Measured off the source geometry and then carried through the fitting transform — legal
+    /// because the fit is a translation and a uniform scale, so it takes an axis-aligned box to an
+    /// axis-aligned box, and it saves transforming every vertex a second time.
+    /// </remarks>
+    private static Bounds3 LowerExtent(IEnumerable<MeshData> meshes, Bounds3 whole, Matrix4x4 fit)
+    {
+        var cut = whole.Min.Y + (whole.Max.Y - whole.Min.Y) * 0.34f;
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+        foreach (var mesh in meshes)
+        {
+            var stride = mesh.Layout.Stride;
+            if (stride < 12) continue;
+            for (var v = 0; v < mesh.VertexCount; v++)
+            {
+                var at = v * stride;
+                var position = new Vector3(
+                    BitConverter.ToSingle(mesh.VertexBytes, at),
+                    BitConverter.ToSingle(mesh.VertexBytes, at + 4),
+                    BitConverter.ToSingle(mesh.VertexBytes, at + 8));
+                if (position.Y > cut) continue;
+                min = Vector3.Min(min, position);
+                max = Vector3.Max(max, position);
+            }
+        }
+
+        if (min.X > max.X) return new Bounds3(
+            Vector3.Transform(whole.Min, fit), Vector3.Transform(whole.Max, fit));
+        return new Bounds3(Vector3.Transform(min, fit), Vector3.Transform(max, fit));
+    }
+
+    /// <summary>
+    /// The cottage a given house is drawn as, which is decided by its id and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// One owner for the rule, because there are now four callers of it — the house itself, the site it
+    /// rises on, its lit windows and its chimney — and the last two need the model in order to ask it how
+    /// big it is. Picked by id rather than at random so it survives a save and a reload as the same village.
+    /// </remarks>
+    public PropModel HouseFor(int id) => Houses[id % Houses.Length];
 
     /// <summary>
     /// Which way a building's front faces, given the turn it was placed with.

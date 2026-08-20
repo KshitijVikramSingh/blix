@@ -268,27 +268,37 @@ internal readonly record struct Atmosphere(
     /// </para>
     /// </remarks>
     private static readonly SeasonLook Nightfall = new(
-        SunColor: new Vector3(0.66f, 0.76f, 1.00f),
-        SunStrength: 0.70f,
+        // <b>Colder and a third darker than the first version, because the settlement's own light arrived
+        // and changed what night is for.</b> When nothing in the scene was warm, a night had to carry the
+        // whole frame on its own and the safe choice was to keep it bright enough to read comfortably. Now
+        // there are hearths in it, and the contrast between a cool wash and a few warm doorways <em>is</em>
+        // the picture — so the wash goes down and further into the blue, and what you look at is the
+        // village. The floor on legibility is the moon, which is unchanged in kind: it still throws a real
+        // direction, so roofs and walls keep their shape rather than going to silhouette.
+        SunColor: new Vector3(0.58f, 0.70f, 1.00f),
+        SunStrength: 0.52f,
         // The low ramp is zero once the sun is down, so these only matter through the twilight blend.
-        LowSunColor: new Vector3(0.66f, 0.76f, 1.00f),
-        LowGlow: new Vector3(0.18f, 0.19f, 0.26f),
-        SkyZenith: new Vector3(0.055f, 0.075f, 0.155f),
-        SkyHorizon: new Vector3(0.13f, 0.16f, 0.26f),
-        SkyAmbient: new Vector3(0.30f, 0.36f, 0.52f),
-        GroundAmbient: new Vector3(0.16f, 0.18f, 0.24f),
-        AmbientStrength: 1.00f,
-        HazeAway: new Vector3(0.10f, 0.13f, 0.22f),
-        HazeToward: new Vector3(0.18f, 0.19f, 0.26f),
+        LowSunColor: new Vector3(0.58f, 0.70f, 1.00f),
+        LowGlow: new Vector3(0.13f, 0.15f, 0.24f),
+        SkyZenith: new Vector3(0.030f, 0.045f, 0.115f),
+        SkyHorizon: new Vector3(0.085f, 0.110f, 0.215f),
+        SkyAmbient: new Vector3(0.19f, 0.25f, 0.46f),
+        GroundAmbient: new Vector3(0.085f, 0.100f, 0.165f),
+        AmbientStrength: 0.86f,
+        HazeAway: new Vector3(0.065f, 0.085f, 0.170f),
+        HazeToward: new Vector3(0.115f, 0.130f, 0.215f),
         // Night does not tint itself — the season does that to it, in Tinted below.
         NightTint: Vector3.One,
         NightScale: 1.00f,
-        // A little more exposure, because a dim scene wants to sit where the curve still has slope, and a
-        // little less chroma — but only a little, since the Purkinje shift in the present pass is already
-        // draining colour out of the dark parts and two drains make a grey night.
-        Exposure: 1.14f,
-        Saturation: 0.94f,
-        Contrast: 0.96f);
+        // More exposure, because a dim scene wants to sit where the curve still has slope — that is what
+        // keeps a darker night legible rather than merely dark, and it is a different control from how much
+        // light is in the scene. Contrast above one now, which it was not: the point of a night with warm
+        // points in it is the separation between them and the wash, and contrast is the dial that is
+        // actually about separation. Chroma still comes down only a little, since the Purkinje shift in the
+        // present pass is already draining colour out of the dark parts and two drains make a grey night.
+        Exposure: 1.26f,
+        Saturation: 0.90f,
+        Contrast: 1.04f);
 
     /// <summary>Where the settlement is, in degrees north, which is what decides the sun's habits.</summary>
     /// <remarks>

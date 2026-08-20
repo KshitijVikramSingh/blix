@@ -127,12 +127,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     // so a heap and a load read as the same substance in two places.
     /// <summary>The colour of a lit window from outside, which is a hue and so belongs beside the others.</summary>
     /// <remarks>
-    /// Paler and yellower than the fire itself. What a window shows is the <em>source</em>, and a source
-    /// bright enough to clip reads by its hue at the edges rather than at its centre; the pool it throws on
-    /// the ground is the deep amber, and that one lives in the shader with the rest of the hues.
+    /// <b>Deeper than the first version, which was 1.00/0.74/0.44 at a glow of 3.2 and clipped to pure
+    /// white.</b> That is what made these read as floating cards rather than as windows: a blown-out
+    /// emissive loses its hue, and the scene resolves from a 4x target, so the white spread and a
+    /// forty-centimetre pane looked like a metre and a half of paper. A source is recognised by its colour
+    /// at the edges, so the colour has to survive the top of the curve.
     /// </remarks>
     private static readonly Vector4 EmberTint =
-        new(1.00f, 0.74f, 0.44f, SettlementArt.MaterialClass.Ember);
+        new(1.00f, 0.50f, 0.19f, SettlementArt.MaterialClass.Ember);
 
     private static readonly Vector4 HouseColor = new(0.68f, 0.58f, 0.46f, 1f);
     private static readonly Vector4 HouseRoofColor = new(0.44f, 0.22f, 0.16f, 1f);
@@ -952,6 +954,23 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         canopyCasterBuffer = new InstanceBuffer(vk, casterShader, "rts-canopies-caster");
         canopyCaster = new InstancedBatch(canopyMesh, casterPipeline, canopyCasterBuffer);
         art = SettlementArt.Load(vk, worldShader, worldPipeline, casterShader, casterPipeline);
+        // <b>What the buildings measured, because two bugs came out of assuming it.</b> A fitted model's
+        // bounding box is its roof and its height is whatever its proportions gave it — so anything hung on
+        // a building (a lit window, a lantern, a chimney) has to be placed against numbers from the asset
+        // rather than against a unit cube. Printed once at load: it is four lines, and it is the difference
+        // between "the lights float" and knowing why.
+        foreach (var (name, model) in new[]
+                 {
+                     ("house", art.HouseFor(0)), ("granary", art.Granary), ("depot", art.Depot),
+                 })
+        {
+            var roof = model.Bounds;
+            var wall = art.WallsOf(model);
+            Console.WriteLine(
+                $"  {name}: roof to {roof.Max.X:F2} x {roof.Max.Z:F2}, ridge {roof.Max.Y:F2}, " +
+                $"walls to {wall.Max.X:F2} x {wall.Max.Z:F2} — an overhang of " +
+                $"{(roof.Max.X - wall.Max.X) * 100f:F0} cm on a metre of footprint");
+        }
         RebuildTerrainSurfaceLayers();
         selectionUi = new SpriteBatch(vk);
         hud = SettlementHud.Load(vk);
@@ -1881,6 +1900,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // age, worked out when it is drawn. See Rendering/Hearths.cs.
         hearths.Advance(
             simulation,
+            art,
             simulation.Date,
             sky.HourOfDay,
             (float)(simulation.TickNumber / 30.0),
@@ -2162,8 +2182,24 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             model = Matrix4x4.CreateScale(width, 1f, depth) * model;
             detailInstances.Add(new InstanceData(
                 model,
-                TerrainColor(patch.Surface) *
-                (1f + (light ? look.CheckerContrast : -look.CheckerContrast) * 0.5f)));
+                // <b>Terrain-classed, and the one place that had been forgetting to be.</b> Two bugs in
+                // one line, and the second was hiding until an emissive class existed to expose it.
+                //
+                // Multiplying a <c>Vector4</c> by the checker factor scales the fourth channel too, and
+                // that channel is the material class. <c>TerrainColor</c> returns an alpha of one, so a
+                // patch on the dark parity came out at 0.985 — which matched nothing at all until
+                // <c>kEmber</c> was added at 0.95 with a tolerance of 0.05, at which point every
+                // dark-parity detail patch on the map became a surface that makes its own light: black by
+                // day, because the glow is scaled by how dark it is, and glaringly bright at night.
+                //
+                // The older bug is what that revealed. A class of 0.985 matched <em>no</em> class, so
+                // these patches were never getting the terrain treatment at all — no macro colour
+                // variation, no wear. Every path anyone has ever walked stopped at the edge of a detail
+                // patch and nobody noticed, because what it looked like was a path stopping at the edge
+                // of a piece of ground.
+                TerrainClassed(
+                    TerrainColor(patch.Surface) *
+                    (1f + (light ? look.CheckerContrast : -look.CheckerContrast) * 0.5f))));
         }
     }
 
@@ -2422,9 +2458,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                         art.Granary.Add(placement);
                         continue;
                     case NodeKind.House:
-                        // A village of one cottage repeated is a village nobody believes. Picked by id
-                        // rather than at random so it survives a save and a reload as the same village.
-                        art.Houses[node.Id.Value % art.Houses.Length].Add(placement);
+                        // A village of one cottage repeated is a village nobody believes — see HouseFor,
+                        // which owns the id-to-cottage rule for all four callers of it.
+                        art.HouseFor(node.Id.Value).Add(placement);
                         continue;
                     default:
                         art.Depot.Add(placement);
@@ -2462,49 +2498,64 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private void DrawHabitationLights(in EconomyNode node, float ground, float width, float yaw)
     {
-        if (!look.SunFollowsTheYear || sky.Nightness < 0.02f || look.WindowGlow <= 0f) return;
+        if (art is null || !look.SunFollowsTheYear || sky.Nightness < 0.02f || look.WindowGlow <= 0f) return;
+
+        // <b>Measured off the model, not off an assumed unit box — which is what had the lights floating in
+        // the air.</b> NormaliseToUnitFootprint makes the <em>longer</em> horizontal axis one and scales the
+        // other two to match, so a cottage that is 1.0 by 0.7 has walls at ±0.5 on one axis and ±0.35 on
+        // the other, and its ridge is wherever its height happens to land. Placing a window at 0.5 therefore
+        // hung it half a metre off the side of the building on one axis out of two, and at a height that
+        // was above the roof of anything squat. The bounds are baked, so they are exactly the extents the
+        // placement will scale.
+        var model = node.Kind == NodeKind.Granary
+            ? art.Granary
+            : node.IsSink ? art.HouseFor(node.Id.Value) : art.Depot;
+        // The walls, measured at load rather than assumed from the bounding box — which for this pack turns
+        // out to be nearly the same thing on one axis and five centimetres per metre out on the other. See
+        // WallsOf, including what measuring disproved.
+        var box = art.WallsOf(model);
+        var eaves = model.Bounds.Max.Y - model.Bounds.Min.Y;
+
         // Counted for the geometry line, which is where every other "how much of this is on screen"
         // number in this file already lives.
         habitationLights++;
 
         if (node.IsUnderConstruction)
         {
-            // A brazier on the ground at the edge of the footprint, which is where you would actually put
-            // one: in the middle is where the walls are going.
-            AddEmber(node.Position, ground, width, yaw, new Vector3(0.58f, 0.07f, 0f), new Vector3(0.07f));
+            // A brazier on the ground clear of the footprint, which is where you would actually put one:
+            // the middle is where the walls are going.
+            AddEmber(
+                node.Position, ground, width, yaw,
+                new Vector3(box.Max.X + 0.10f, 0.05f, 0f), new Vector3(0.06f));
             return;
         }
+
+        // <b>A hearth showing through a doorway, not a lamp in a window — and the difference is height.</b>
+        // Reported as reading like modern lighting, and it was: three bright panes at two-fifths of the wall
+        // are electric light, because that is where a room's lamp goes. A fire is on the floor. So what
+        // escapes a building is a low, wide, dim slot of light at the door, spilling onto the ground in
+        // front of it — and the pool the field throws is doing most of the work rather than the source.
+        //
+        // It costs the "count the windows to count the household" read, which was a nice idea and the wrong
+        // one to spend brightness on. A dark house is still an empty house, and that was the load-bearing
+        // half.
+        var door = new Vector3(0.018f, eaves * 0.115f, box.Max.Z * 0.30f);
+        var sill = box.Min.Y + eaves * 0.055f;
 
         if (node.IsSink)
         {
             if (node.Occupants <= 0) return;
-            // One window, then a second, then one round the side. Three is the most a cottage this size can
-            // carry before it reads as a lantern shop rather than a house.
-            AddEmber(
-                node.Position, ground, width, yaw,
-                new Vector3(0.502f, 0.34f, 0.13f), new Vector3(0.018f, 0.105f, 0.085f));
-            if (node.Occupants >= 2)
-            {
-                AddEmber(
-                    node.Position, ground, width, yaw,
-                    new Vector3(0.502f, 0.34f, -0.17f), new Vector3(0.018f, 0.105f, 0.085f));
-            }
-
-            if (node.Occupants >= 3)
-            {
-                AddEmber(
-                    node.Position, ground, width, yaw,
-                    new Vector3(0.10f, 0.34f, 0.502f), new Vector3(0.085f, 0.105f, 0.018f));
-            }
-
+            AddEmber(node.Position, ground, width, yaw, new Vector3(box.Max.X, sill, 0f), door);
             return;
         }
 
         if (node.Kind == NodeKind.Granary)
         {
+            // Wider, because it is the biggest doorway in the village and the one somebody is always at.
             AddEmber(
                 node.Position, ground, width, yaw,
-                new Vector3(0.505f, 0.26f, 0f), new Vector3(0.030f, 0.055f, 0.055f));
+                new Vector3(box.Max.X, sill, 0f),
+                new Vector3(door.X, door.Y * 1.15f, door.Z * 1.25f));
         }
     }
 
@@ -2563,7 +2614,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var model = site.Kind switch
         {
             NodeKind.Granary => art!.Granary,
-            NodeKind.House => art!.Houses[site.Id.Value % art.Houses.Length],
+            NodeKind.House => art!.HouseFor(site.Id.Value),
             _ => art!.Depot,
         };
         model.Add(rising);

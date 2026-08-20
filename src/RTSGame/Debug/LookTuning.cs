@@ -111,8 +111,8 @@ internal sealed class LookSettings
     /// inside a cool landscape is what says people live there, and the failure mode is pools of orange
     /// everywhere rather than one window being too bright.
     /// </remarks>
-    [Tune(0.0, 8.0, Label = "window glow", Group = "night")]
-    public float WindowGlow = 3.2f;
+    [Tune(0.0, 8.0, Label = "doorway glow", Group = "night")]
+    public float WindowGlow = 1.25f;
 
     /// <summary>How much of that light lands on the ground and the walls around it.</summary>
     /// <remarks>
@@ -121,7 +121,7 @@ internal sealed class LookSettings
     /// alone, which is what you want when judging whether the settlement reads at strategic height.
     /// </remarks>
     [Tune(0.0, 2.0, Label = "hearth spill", Group = "night")]
-    public float HearthSpill = 0.75f;
+    public float HearthSpill = 0.95f;
 
     /// <summary>How hard the chimneys smoke, over what the season already asked for.</summary>
     /// <remarks>

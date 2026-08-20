@@ -32,20 +32,29 @@ internal sealed class Hearths
     /// of thing that looks fine at ten houses and costs a frame at two hundred. At the default rate and
     /// lifetime a chimney carries about eight puffs, so this is room for forty smoking houses and no more.
     /// </remarks>
-    private const int Capacity = 320;
+    private const int Capacity = 448;
 
     /// <summary>How long a puff lasts, in simulated seconds.</summary>
-    private const float LifeSeconds = 7.5f;
+    private const float LifeSeconds = 9f;
 
     /// <summary>How fast smoke climbs, in metres a simulated second.</summary>
     private const float RiseMetresPerSecond = 1.15f;
 
     /// <summary>A puff's radius when it leaves the chimney, and how fast it swells.</summary>
-    private const float BirthRadius = 0.30f;
-    private const float GrowthPerSecond = 0.34f;
+    /// <remarks>
+    /// Smaller at birth and swelling faster than the first version. A wisp is a thing that comes out thin
+    /// and spreads until it is gone; a puff that starts fat and grows slowly is a bubble that drifts.
+    /// </remarks>
+    private const float BirthRadius = 0.22f;
+    private const float GrowthPerSecond = 0.52f;
 
     /// <summary>Puffs a second from one lit chimney, before the season has its say.</summary>
-    private const float PuffsPerSecond = 1.1f;
+    /// <remarks>
+    /// Twice the first rate, which is the other half of making smoke wispy: each puff now carries about a
+    /// third of the opacity it did, so a plume that still reads has to be built out of more of them. The
+    /// two changes together are the same total density arranged as a stream rather than as a chain.
+    /// </remarks>
+    private const float PuffsPerSecond = 2.3f;
 
     private readonly struct Puff
     {
@@ -83,7 +92,7 @@ internal sealed class Hearths
     /// trick the tree models and yaws use, and it is why this class has three fields rather than a table.
     /// </remarks>
     internal void Advance(
-        SimulationWorld world, CalendarDate date, float hourOfDay, float simSeconds,
+        SimulationWorld world, SettlementArt? art, CalendarDate date, float hourOfDay, float simSeconds,
         Vector2 focus, float radiusMeters, float density)
     {
         var previous = float.IsNaN(lastSeconds) ? simSeconds : lastSeconds;
@@ -115,11 +124,20 @@ internal sealed class Hearths
             // stays on the same corner of the same cottage for the life of the village.
             var yaw = SettlementArt.SquareYawOf(node.Id.Value);
             var along = SettlementArt.FaceDirection(yaw);
-            var chimney = node.Position + along * (width * 0.26f) +
-                          new Vector2(-along.Y, along.X) * (width * 0.20f);
-            // Models are fitted to the footprint the simulation enforces, so the ridge is a little above
-            // the width — which is a fact about the fit rather than about any one cottage.
-            puffs[next] = new Puff(chimney, ground + width * 1.02f, simSeconds, Hash01((uint)next * 747796405u));
+            // <b>Off the model's own bounds, because a fitted model is not a unit cube.</b> Normalising to
+            // a unit footprint makes the longer horizontal axis one and leaves the other two wherever they
+            // fall, so "the ridge is about a width up" is wrong for anything but a cottage as tall as it is
+            // wide — and smoke starting above the roof of one is smoke coming out of the air.
+            var model = art?.HouseFor(node.Id.Value);
+            var ridge = model is null ? 1f : model.Bounds.Max.Y;
+            // Off the walls rather than the roof, so a chimney comes out of the ridge and not of the eaves.
+            var reach = model is null || art is null
+                ? 0.5f
+                : MathF.Min(art.WallsOf(model).Max.X, art.WallsOf(model).Max.Z);
+            var chimney = node.Position + along * (width * reach * 0.52f) +
+                          new Vector2(-along.Y, along.X) * (width * reach * 0.40f);
+            puffs[next] = new Puff(
+                chimney, ground + width * ridge * 0.96f, simSeconds, Hash01((uint)next * 747796405u));
             next = (next + 1) % Capacity;
         }
     }
@@ -156,12 +174,21 @@ internal sealed class Hearths
             var radius = BirthRadius + GrowthPerSecond * age;
             // In fast, out slow: smoke appears at the chimney mouth and thins away over the whole of the
             // rest of its life. Fading in as slowly as it fades out puts a gap above every chimney.
-            var opacity = 0.20f * MathF.Min(1f, life / 0.12f) * MathF.Pow(1f - life, 1.5f);
-            // Dark and dense at the mouth, pale and thin once it has mixed with air.
-            var tone = Vector3.Lerp(new Vector3(0.26f, 0.24f, 0.23f), new Vector3(0.68f, 0.68f, 0.70f), life);
+            // A third of what it was, because the shader now shows only a small cap of each puff and the
+            // density comes from their number instead — see PuffsPerSecond.
+            var opacity = 0.075f * MathF.Min(1f, life / 0.10f) * MathF.Pow(1f - life, 1.5f);
+            // <b>Not a sphere, and no two the same shape.</b> A round puff is a bubble however softly it is
+            // shaded, so each one is a lumpy ellipsoid: its own proportions from its own seed, and stretched
+            // upward as it ages, because a column of rising air pulls what is in it into streaks. This is
+            // most of what separates smoke from soap.
+            var lumpX = 0.62f + puff.Seed * 0.70f;
+            var lumpZ = 0.62f + (1f - puff.Seed) * 0.70f;
+            var drawn = Vector3.Lerp(new Vector3(0.26f, 0.24f, 0.23f), new Vector3(0.68f, 0.68f, 0.70f), life);
             batch.Add(
-                Matrix4x4.CreateScale(radius) * Matrix4x4.CreateTranslation(at),
-                new Vector4(tone.X, tone.Y, tone.Z, opacity));
+                Matrix4x4.CreateScale(
+                    radius * lumpX, radius * (1.0f + 1.5f * life), radius * lumpZ) *
+                Matrix4x4.CreateTranslation(at),
+                new Vector4(drawn.X, drawn.Y, drawn.Z, opacity));
             Drawn++;
         }
     }

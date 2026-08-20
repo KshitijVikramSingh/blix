@@ -2,11 +2,17 @@
 
 // A puff of smoke, which is a sphere pretending not to have an edge.
 //
-// <b>The one trick that makes this work is fading the alpha at the silhouette.</b> A translucent sphere
-// drawn plainly reads as a bubble: it is at its most opaque exactly where its outline is, because that is
-// where the eye finds a hard boundary. Real smoke is a volume, and a volume seen edge-on is thin — so
-// opacity falls off with how far the surface is turned away from the viewer, and the puff has no rim at
-// all. Ten of them at low opacity then stack into a plume rather than into a bunch of grapes.
+// <b>The one trick that makes this work is fading the alpha at the silhouette</b>, and how hard it fades is
+// the difference between bubbly and wispy. A translucent sphere drawn plainly reads as a bubble: it is at
+// its most opaque exactly where its outline is, because that is where the eye finds a hard boundary. Real
+// smoke is a volume, and a volume seen edge-on is thin — so opacity falls off with how far the surface is
+// turned away from the viewer.
+//
+// The first version faded over the outer half of the sphere, which removed the hard rim and still left a
+// recognisable ball. Reported as bubbly, correctly. It now fades over nearly all of it and squares the
+// result, so only a small cap facing the viewer carries any opacity at all and the edges go to nothing over
+// a long way — which is what a wisp is. The visible mass of a puff drops by most of itself, so the plume
+// gets it back from more puffs at lower opacity rather than from fewer solid ones.
 //
 // Lit by the sky rather than by the sun, because that is what smoke does: it is optically thin, so it
 // carries the ambient light of the whole hemisphere and only a little of the direct beam. The exception is
@@ -35,8 +41,9 @@ void main() {
     vec3 toEye = normalize(uCamPos.xyz - vWorldPos);
     vec3 toSun = normalize(uSunDir.xyz);
 
-    // Thin at the silhouette, thick through the middle.
-    float soft = smoothstep(0.0, 0.58, dot(n, toEye));
+    // Thin over nearly all of it, with only a small cap facing the viewer carrying any weight.
+    float soft = smoothstep(0.0, 0.92, dot(n, toEye));
+    soft *= soft;
 
     // Sky light, a little of the beam, and the glow of a sun behind it.
     float wrapped = 0.5 + 0.5 * dot(n, toSun);
