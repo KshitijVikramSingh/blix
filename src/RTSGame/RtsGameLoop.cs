@@ -277,7 +277,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private readonly byte[] worldPush = new byte[304];
     private readonly byte[] skyPush = new byte[128];     // invViewProj, camPos, sunDir, zenith, horizon
     private readonly byte[] shadowPush = new byte[64];   // sun shadow VP
-    private readonly byte[] gradePush = new byte[16];    // exposure, tonemap mode, saturation, contrast
+    private readonly byte[] gradePush = new byte[32];    // grade, then the eye's night response
 
     /// <summary>How far from the camera's focus a tree is still drawn, squared.</summary>
     private float treeDrawRadiusSquared = 1f;
@@ -791,7 +791,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             {
                 new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
             },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 16) });
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 32) });
 
         shadowPassHandle = graph.GraphicsPass("sun-shadow")
             .Depth(sunShadowHandle, LoadOp.Clear, StoreOp.Store)
@@ -1742,6 +1742,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         MemoryMarshal.Write(skyPush.AsSpan(112, 16), in horizon);
         MemoryMarshal.Write(shadowPush.AsSpan(0, 64), in sunViewProjection);
         MemoryMarshal.Write(gradePush.AsSpan(0, 16), in grade);
+        var night = new Vector4(look.ScotopicShift, 0f, 0f, 0f);
+        MemoryMarshal.Write(gradePush.AsSpan(16, 16), in night);
 
         // <b>Exactly the shadow box, because that is the honest answer and it was two numbers before.</b>
         // A tree matters if it can be seen or if its shadow can, and the sun's box is already sized to

@@ -244,7 +244,11 @@ internal readonly record struct Atmosphere(
 
         // <b>One continuous ramp, and everything hangs off it.</b> Civil twilight is about six degrees, so
         // the sun's contribution fades in over the band either side of the horizon rather than switching on.
-        var above = Smoothstep(-6f, 7f, elevation);
+        // Wider than civil twilight on purpose. Six degrees is what the atlas says and it is about a
+        // second of a twenty-second day, which is not a transition anybody can watch — twelve either side
+        // gives dawn and dusk a couple of seconds each, which at this pace is the difference between a
+        // change and a cut.
+        var above = Smoothstep(-12f, 13f, elevation);
         // How near the horizon it is while up, which is what makes light golden — and it stays golden all
         // afternoon in winter because in winter the sun never gets far from the horizon.
         var low = above * (1f - Smoothstep(4f, 26f, elevation));
@@ -252,22 +256,17 @@ internal readonly record struct Atmosphere(
         // Night is the same palette with the moon in it, faded in by how far the sun is down.
         look = Mix(look, Nightfall, 1f - above);
 
-        // Below the horizon the light comes from the moon, which is opposite the sun and much lower — and
-        // it must never be at zero elevation or the shadow box reaches for infinity.
-        var lightElevation = MathF.Max(6f, elevation);
-        var lightAzimuth = azimuth;
-        if (elevation < 0f)
-        {
-            lightAzimuth += MathF.PI;
-            lightElevation = MathF.Max(12f, -elevation * 0.6f);
-        }
-
-        var lightRadians = lightElevation * MathF.PI / 180f;
-        var horizontal = MathF.Cos(lightRadians);
-        var direction = Vector3.Normalize(new Vector3(
-            MathF.Sin(lightAzimuth) * horizontal,
-            MathF.Sin(lightRadians),
-            MathF.Cos(lightAzimuth) * horizontal));
+        // <b>Two directions blended, not one direction switched — and the switch was the choppiness.</b>
+        // The moon is roughly opposite the sun, so a branch at elevation zero swung the light through a
+        // hundred and eighty degrees in a single frame: every shadow in the settlement pivoted end to end
+        // at sunset and again at dawn. Smoothing the palette could never have hidden that, because it was
+        // the geometry jumping and not the colour.
+        //
+        // Both are unit vectors, so a lerp and a normalise walks the short way round between them and the
+        // light swings across the sky over the whole of twilight instead of in one frame.
+        var sunward = Skyward(azimuth, MathF.Max(6f, elevation));
+        var moonward = Skyward(azimuth + MathF.PI, MathF.Max(14f, 34f + elevation * 0.5f));
+        var direction = Vector3.Normalize(Vector3.Lerp(moonward, sunward, above));
 
         var sunColor = Vector3.Lerp(look.SunColor, new Vector3(1.00f, 0.62f, 0.34f), low * 0.7f);
         // <b>Two terms, because one multiplied by "how far up the sun is" goes to nothing at night.</b> That
@@ -300,6 +299,17 @@ internal readonly record struct Atmosphere(
             elevation,
             hour,
             Describe(elevation, low));
+    }
+
+    /// <summary>A unit vector from a bearing and an elevation, both in the convention the shaders use.</summary>
+    private static Vector3 Skyward(float azimuth, float elevationDegrees)
+    {
+        var radians = elevationDegrees * MathF.PI / 180f;
+        var horizontal = MathF.Cos(radians);
+        return Vector3.Normalize(new Vector3(
+            MathF.Sin(azimuth) * horizontal,
+            MathF.Sin(radians),
+            MathF.Cos(azimuth) * horizontal));
     }
 
     private static float Smoothstep(float from, float to, float at)

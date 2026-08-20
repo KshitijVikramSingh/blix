@@ -248,6 +248,17 @@ internal sealed class LookSettings
     [Tune(0.1, 4.0, Label = "exposure", Group = "grade")]
     public float Exposure = 0.85f;
 
+    /// <summary>How far the eye is allowed to go colourblind in the dark, from not at all to fully.</summary>
+    /// <remarks>
+    /// The Purkinje shift, applied per pixel in the present pass — see <c>blix_scotopic</c>. It is a
+    /// correction to the <em>observer</em> rather than to the light: rods have no colour and peak further
+    /// into the blue, which is why a moonlit field reads blue-grey under light that is nearly white, and why
+    /// deep shadow at noon reads blue too. Turning it off gives a night that is merely dim, which is what a
+    /// renderer does and not what seeing does.
+    /// </remarks>
+    [Tune(0.0, 1.0, Label = "night vision (Purkinje)", Group = "grade")]
+    public float ScotopicShift = 0.8f;
+
     [Tune(Label = "tonemap", Group = "grade")]
     public TonemapCurve Tonemap = TonemapCurve.Aces;
 
