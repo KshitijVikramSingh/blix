@@ -3167,7 +3167,7 @@ Worth keeping: *the benchmarks and the suite fail on different things, and neith
 | | |
 |---|---|
 | suite | `--selftest` **79/79** |
-| forest | 9,985 trees close **74,517 of 1.44M cells** — 5.2% of the map, 18,629 m² |
+| forest | 9,985 trees close **270,327 of 1.44M cells** — 18.8% of the map, 67,582 m² |
 | one year, compact | 8,049 grain of 8,400 nominal, drift 0, short 0, 4 born, 0 left, 0 faults |
 | cutters | 7 working the fringe all year, wood never short |
 | rasterise | 12,723 → **1,043 ms**; re-opening around one felled tree 0.4 ms |
@@ -3185,3 +3185,48 @@ remembered.
   against §7's detection radii of 105 at the settlement and 190 at an outpost.
 - **A settlement can wall itself in**, which is a real strategic position rather than a bug: the forest is
   a defence until you cut through it, and every path you open is a path in.
+
+### The density is a dial, and the sweep settled its default
+
+Looked at with the navigation overlay on, the first cut read wrong: the trees were dense and the
+**obstacle** was not — 5.2% of the map closed, in speckled patches rather than masses. So `CoverTrees` and
+`CoverRadius` are sliders now (`WoodlandSettings`), applied a third of a second *after* the value stops
+moving, because a repaint is 80 ms and the rebuild behind it is a second — a slider dragged across its
+range would fire fifty of them.
+
+`--forestcost` prints the sweep, and the default came out of it:
+
+| trees | reach | closed | in reach | cuttable |
+|---|---|---|---|---|
+| 2 | 2.2 | 10.5% | 34 | 9,919 |
+| **2** | **2.6** | **18.8%** | **34** | **8,444** |
+| 2 | 3.0 | 25.6% | 34 | 4,859 |
+| 3 | 2.6 | 5.2% | 34 | 9,929 |
+| 4 | 3.4 | 8.5% | 34 | 8,779 |
+
+**The column that mattered was not the closed share.** It was *in reach* — how many trees a cutter based at
+the granary can still get to — and it holds at 34 across every setting from two trees at 2.2 m to four at
+3.4. The failure that would have been fatal, a settlement's own thinned stragglers sealing over its
+starting supply, does not happen: the near band is scattered at a 3.4 m floor and a tree on a small closed
+patch still has open ground beside it. Worth having measured rather than assumed.
+
+*Cuttable* is the breadth of the fringe rather than a cap on the resource — the fringe advances as it is
+cut, so a low number means a thin working edge, not a sealed forest.
+
+### And the density exposed two more, both about asking the wrong layer
+
+**Spawning only checked for buildings.** `NudgeOutOfBuildings` asked whether a position was clear of
+placement obstacles, which was the whole question while the only impassable things were buildings and is
+not the question at all once terrain can refuse ground. It asks the router's own question now — does the
+raster admit a body of this radius here — which covers surfaces, buildings and clearance at once and cannot
+disagree with the thing that will later be asked to route out of there.
+
+**And the scenario was reading a raster from before the forest existed.** `RefreshForestCover` only bumps
+the terrain revision; the rebuild happens on the next tick, which is exactly right for the running game and
+wrong for setup code about to ask the raster questions. So choosing which trees a cutter could reach, and
+nudging a spawn off unwalkable ground, both consulted a map with no forest in it, were told everything was
+open, and posted a woodcutter inside a wood it could not leave — **236 route requests and no wood.** The
+scenario rasterises explicitly before posting anybody.
+
+Both are the same shape as the day's other findings: a question answered by the layer that happened to be
+convenient rather than the layer that owns it.

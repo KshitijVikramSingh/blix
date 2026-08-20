@@ -104,7 +104,7 @@ internal static class Woodland
     /// it. Smaller and the interior comes out speckled; larger and the impassable mass swells out past the
     /// trees that justify it.
     /// </remarks>
-    internal static float CoverRadius = 2.6f;
+    internal static float CoverRadius = 2.6f;   // a slider — see WoodlandSettings
 
     /// <summary>
     /// Trees within <see cref="CoverRadius"/> that make a patch of ground impassable.
@@ -123,12 +123,21 @@ internal static class Woodland
     /// passable edge moving outward.
     /// </para>
     /// <para>
-    /// Three, against a deep-woodland density of about four trees inside that radius and about two at the
-    /// edge of a stand. It is the threshold that separates those two, and it is why the near band — 46 trees
-    /// at 3.4 m spacing, about two per radius — stays open for the cutters who start there.
+    /// <b>Two, and it was three, and the difference is measured rather than felt.</b> Three closed 5.2% of
+    /// the map, which looked from above like a dense wood with speckled patches of wall in it rather than a
+    /// wood you have to go round — the trees were dense and the <em>obstacle</em> was not. Two closes 18.8%,
+    /// which is about a third of the wooded ground, and reads as forest.
+    /// </para>
+    /// <para>
+    /// The sweep is in <c>--forestcost</c>, and the column that matters is not the closed share but
+    /// <em>in reach</em>: how many trees a cutter based at the granary can still get to. It holds at 34 for
+    /// every setting from two trees at 2.2 m to four at 3.4, because the near band is scattered at a 3.4 m
+    /// spacing floor and a tree on a small closed patch still has open ground beside it. The thing that
+    /// would have broken — a settlement whose own thinned stragglers sealed over — does not, and that is
+    /// worth having measured rather than assumed.
     /// </para>
     /// </remarks>
-    internal static int CoverTrees = 3;
+    internal static int CoverTrees = 2;
 
     /// <summary>What a tree would say about itself, for a report that has to say something.</summary>
     public static string StateOf(in EconomyNode tree) => tree.Stock.Wood >= WoodPerTree - 0.5f

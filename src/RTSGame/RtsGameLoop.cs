@@ -59,6 +59,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private readonly BodyFeelSettings bodyFeel = new();
     private readonly ClockSettings clock = new();
     private readonly LookSettings look = new();
+    private readonly WoodlandSettings woodland = new();
     // The world this session is judging the body on. Session 2 exists because a body cannot
     // be judged on a 30 m square and then assumed to feel the same crossing a kilometre.
     private readonly float worldExtentMeters;
@@ -401,6 +402,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             bodyFeel,
             clock,
             look,
+            woodland,
             new WallSettings(),
             new RoutingSettings(),
             new GroupSettings());
@@ -1246,6 +1248,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
 
         var frame = (float)Math.Clamp(time.Delta, 0.0, 0.25);
+        ApplyWoodlandCover(frame);
         PanCamera(frame);
         UpdateCameraFocus(frame);
         UpdateCamera();
@@ -1268,6 +1271,58 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // sky when you are close. Four times the standoff plus a margin covers the ground behind the focus
         // at this elevation at every zoom.
         camera.FarPlane = cameraDistance * 4f + 120f;
+    }
+
+    /// <summary>
+    /// Repaints forest cover when its dials have stopped moving.
+    /// </summary>
+    /// <remarks>
+    /// Debounced rather than applied on change, because a repaint is 80 ms and the navigation rebuild that
+    /// follows it is about a second on a 600 m map with ten thousand trees — so a slider dragged across its
+    /// range would fire fifty of them and the game would stop. Waiting for the value to hold still for a
+    /// third of a second gives one repaint per adjustment, which is what a person dragging a slider
+    /// actually wants.
+    /// <para>
+    /// The raster rebuild itself is not triggered here: painting bumps the terrain revision and
+    /// <c>Tick</c> notices, so a hundred thousand changed cells still cost one rebuild.
+    /// </para>
+    /// </remarks>
+    private void ApplyWoodlandCover(float deltaSeconds)
+    {
+        var current = new Vector2(Woodland.CoverTrees, Woodland.CoverRadius);
+        if (current != woodlandRequested)
+        {
+            woodlandRequested = current;
+            woodlandSettle = 0.33f;
+            return;
+        }
+
+        if (woodlandRequested == woodlandApplied) return;
+        woodlandSettle -= deltaSeconds;
+        if (woodlandSettle > 0f) return;
+        woodlandApplied = woodlandRequested;
+        simulation.RefreshForestCover();
+        Console.WriteLine(
+            $"  woodland: {Woodland.CoverTrees} trees within {Woodland.CoverRadius:F1} m closes ground " +
+            $"— {ClosedGroundShare(simulation) * 100f:F1}% of the map is now wood");
+    }
+
+    private Vector2 woodlandRequested = new(-1f, -1f);
+    private Vector2 woodlandApplied = new(-1f, -1f);
+    private float woodlandSettle;
+
+    /// <summary>Share of the map that is impassable wood, which is what the dials are judged on.</summary>
+    private static float ClosedGroundShare(SimulationWorld world)
+    {
+        var transform = world.Terrain.Transform;
+        var closed = 0;
+        for (var z = 0; z < transform.Height; z++)
+        for (var x = 0; x < transform.Width; x++)
+        {
+            if (world.Terrain.Surface(new GridCell(x, z)) == TerrainSurface.Forest) closed++;
+        }
+
+        return closed / (float)MathF.Max(1, transform.Width * transform.Height);
     }
 
     /// <summary>

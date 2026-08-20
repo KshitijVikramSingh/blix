@@ -137,6 +137,7 @@ internal static class SettlementScenarios
     public static int RunForestCost(float extentMeters)
     {
         Console.WriteLine($"RTSGame forest cover cost — {extentMeters:F0} m map");
+        SweepCover(extentMeters);
         var world = new SimulationWorld(extentMeters);
         var granary = Populate(world, Farms, Woodcutters, Carts, Wagons, ringRadius: 36f);
 
@@ -209,6 +210,57 @@ internal static class SettlementScenarios
             "  a felling only costs the rebuild when it actually opens ground; a settlement fells " +
             "about twenty trees a year");
         return 0;
+    }
+
+    /// <summary>
+    /// What each setting of the cover dials actually produces, so the default comes from a measurement.
+    /// </summary>
+    /// <remarks>
+    /// Three numbers per setting and they are three different failure modes. <b>Closed</b> is how much of
+    /// the map is wall, which is the thing being tuned. <b>In reach</b> is how many trees a cutter based at
+    /// the granary can still get to — and if that hits zero the settlement cannot cut wood at all, because
+    /// the near band it starts on has closed over its own stragglers. <b>Cuttable</b> is how many of the
+    /// whole forest have open ground beside them, which is the supply the settlement can ever reach without
+    /// building outward.
+    /// </remarks>
+    private static void SweepCover(float extentMeters)
+    {
+        var trees = Woodland.CoverTrees;
+        var radius = Woodland.CoverRadius;
+        Console.WriteLine("  trees  reach   closed   in reach   cuttable");
+        foreach (var count in new[] { 2, 3, 4 })
+        foreach (var reach in new[] { 2.2f, 2.6f, 3.0f, 3.4f })
+        {
+            Woodland.CoverTrees = count;
+            Woodland.CoverRadius = reach;
+            var probe = new SimulationWorld(extentMeters);
+            var store = Populate(probe, Farms, Woodcutters, Carts, Wagons, ringRadius: 36f);
+            var transform = probe.Terrain.Transform;
+            var closed = 0;
+            for (var z = 0; z < transform.Height; z++)
+            for (var x = 0; x < transform.Width; x++)
+            {
+                if (probe.Terrain.Surface(new GridCell(x, z)) == TerrainSurface.Forest) closed++;
+            }
+
+            var from = probe.Nodes.Get(store).Position;
+            var inReach = 0;
+            var cuttable = 0;
+            foreach (ref readonly var node in probe.Nodes.All)
+            {
+                if (!node.IsAlive || !node.IsStanding) continue;
+                if (!probe.CanReachTree(node.Position)) continue;
+                cuttable++;
+                if (Vector2.Distance(node.Position, from) <= Woodland.ReachMetres) inReach++;
+            }
+
+            Console.WriteLine(
+                $"  {count,5}  {reach,5:F1}   {closed / (float)(transform.Width * transform.Height) * 100f,5:F1}%" +
+                $"   {inReach,8}   {cuttable,8}");
+        }
+
+        Woodland.CoverTrees = trees;
+        Woodland.CoverRadius = radius;
     }
 
     /// <summary>
@@ -405,6 +457,10 @@ internal static class SettlementScenarios
         foreach (ref readonly var node in world.Nodes.All)
         {
             if (!node.IsAlive || !node.IsStanding || claimed.Contains(node.Id.Value)) continue;
+            // Reachable, which since the interior of a wood is impassable is a real question: the nearest
+            // tree to the granary is often one the near band closed over, and a cutter posted on it stands
+            // beside it forever.
+            if (!world.CanReachTree(node.Position)) continue;
             var distance = Vector2.DistanceSquared(node.Position, from);
             if (distance > bestDistance) continue;
             bestDistance = distance;
@@ -542,6 +598,14 @@ internal static class SettlementScenarios
         // navigation raster rebuilds from a changed terrain revision on the next tick — so one refresh over
         // ten thousand trees costs one rebuild, and doing it per tree would cost ten thousand.
         world.RefreshForestCover();
+        // <b>And rasterise it now, before anybody is posted.</b> Painting only bumps the terrain revision;
+        // the rebuild happens on the next tick, which is exactly right for the running game and wrong for a
+        // scenario that is about to ask the raster questions. Without this, everything that follows —
+        // choosing which trees a cutter can reach, nudging a spawn off unwalkable ground — consults a
+        // raster from before the forest existed, gets told the whole map is open, and posts a woodcutter
+        // inside a wood it cannot leave. Measured: one cutter, two hundred and thirty-six route requests,
+        // no wood.
+        world.RebuildTerrainNavigation();
     }
 
     /// <summary>Half-width of the ground the fields and the village occupy, which stays clear.</summary>

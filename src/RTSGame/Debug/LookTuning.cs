@@ -1,4 +1,5 @@
 using Blix.Diagnostics;
+using RTSGame.Simulation.Economy;
 
 namespace RTSGame.Debug;
 
@@ -179,4 +180,51 @@ internal sealed class LookSettings
     /// </remarks>
     [Tune(40.0, 600.0, Label = "tree draw distance (m)", Group = "ground")]
     public float TreeDrawMetres = 150f;
+}
+
+/// <summary>
+/// How solid a wood is: the two numbers that decide which ground a stand of trees closes.
+/// </summary>
+/// <remarks>
+/// Sliders because there is no measurement that settles them. The <em>routing</em> consequence is
+/// measured and hard — a gap narrower than 1.5 m is refused to every body, which is why individual trunks
+/// cannot block — but how much of a wood should be wall and how much should be walkable fringe is a
+/// question about what the map plays like, and the honest place for that is a dial next to the thing it
+/// changes.
+/// <para>
+/// Changing either repaints the cover and rebuilds the navigation raster, which takes about a second on a
+/// 600 m map with ten thousand trees. So it is applied a moment <em>after</em> the value stops moving
+/// rather than on every frame of a drag — see <c>RtsGameLoop.ApplyWoodlandCover</c>. That is the only
+/// reason these are not in <see cref="LookSettings"/>: a look dial is free to change and these are not.
+/// </para>
+/// </remarks>
+internal sealed class WoodlandSettings
+{
+    /// <summary>Trees within the radius below that make a patch of ground impassable.</summary>
+    /// <remarks>
+    /// The lower this is the more solid a wood becomes. Two is nearly everything inside a stand; four
+    /// leaves lanes through all but the thickest. It also decides whether the <em>near</em> band stays
+    /// walkable — the thinned stragglers a settlement's first cutters work — because a band scattered at a
+    /// spacing floor of <c>s</c> can never put three trees inside a circle of radius less than
+    /// <c>s / sqrt(3)</c>, and if it does close, the cutters who start there have nothing they can reach.
+    /// </remarks>
+    [Tune(1.0, 8.0, Label = "trees that close ground", Group = "woodland")]
+    public int CoverTrees
+    {
+        get => Woodland.CoverTrees;
+        set => Woodland.CoverTrees = value;
+    }
+
+    /// <summary>How far a tree's crowding reaches, in metres.</summary>
+    /// <remarks>
+    /// Bigger makes a wood both more solid and <em>larger</em> than the trees that justify it, because the
+    /// impassable mass swells past the trunks — past about a metre and a half over the scatter spacing it
+    /// starts closing ground with no tree visibly on it, which reads as an invisible wall.
+    /// </remarks>
+    [Tune(1.0, 6.0, Label = "crowding reach (m)", Group = "woodland")]
+    public float CoverRadius
+    {
+        get => Woodland.CoverRadius;
+        set => Woodland.CoverRadius = value;
+    }
 }

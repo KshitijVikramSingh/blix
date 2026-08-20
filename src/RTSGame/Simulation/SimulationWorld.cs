@@ -1071,16 +1071,25 @@ internal sealed class SimulationWorld
     /// slightly optimistic: a tree beside a pocket nothing can get into passes, and the jobs layer's polite
     /// retry handles that the way it handles a workplace somebody walled in.
     /// </remarks>
-    private bool CanReachTree(Vector2 position)
+    internal bool CanReachTree(Vector2 position)
     {
-        var transform = Terrain.Transform;
-        if (!transform.TryWorldToCell(position, out var at)) return false;
-        for (var dz = -1; dz <= 1; dz++)
-        for (var dx = -1; dx <= 1; dx++)
+        if (!Navigation.TryWorldToCell(position, out var at)) return false;
+        // Two cells out, because a body stands off a trunk by its own radius and a bit rather than in the
+        // cell next to it — and asked of the <em>raster</em> rather than of the terrain surface, because
+        // "passable ground" and "ground a body of this width may occupy" are different questions and it is
+        // the second that decides whether anybody can get here. A tree with nothing but a diagonal sliver
+        // beside it passed the first test and failed the second, and the cutter posted on it asked for a
+        // route two hundred and thirty-six times and never cut anything.
+        // Three cells is a metre and a half, which covers the stand-off a body actually takes from a
+        // trunk — its own radius plus the touch slack put the failing case 1.61 m out, past a two-cell
+        // test that had said yes.
+        const int reach = 3;
+        for (var dz = -reach; dz <= reach; dz++)
+        for (var dx = -reach; dx <= reach; dx++)
         {
             if (dx == 0 && dz == 0) continue;
             var cell = new GridCell(at.X + dx, at.Z + dz);
-            if (transform.Contains(cell) && TerrainSurfaceRules.IsPassable(Terrain.Surface(cell)))
+            if (Navigation.Contains(cell) && Navigation.IsWalkable(cell, AgentDefaults.RoutingRadius))
             {
                 return true;
             }
