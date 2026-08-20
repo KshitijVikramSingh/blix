@@ -383,9 +383,28 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
     }
 
-    private float SunOrthoExtent => MathF.Max(
-        look.ShadowFloorMetres,
-        2f * (VisibleGroundRadius + ShadowReachMetres));
+    /// <summary>
+    /// How far out the world is drawn in full: trees, shadows and where the haze finishes.
+    /// </summary>
+    /// <remarks>
+    /// <b>One radius, because three numbers that must agree cannot each be chosen separately.</b> Reported
+    /// as the tree cull "misaligning with the camera", and it was: the zoom pulls back to 240 m, at which
+    /// the visible ground reaches 337 m — while trees were culled at a ceiling of 220 m and the haze did not
+    /// start until <c>cameraDistance × 1.8</c>, which is 432 m. So the world ended in a hard circle a
+    /// hundred metres inside the view with nothing to hide it.
+    /// <para>
+    /// Everything about seeing distance now derives from this: the shadow box is twice it, trees and scrub
+    /// are culled at it, and the haze reaches full strength <em>at</em> it — so the edge where detail stops
+    /// is the edge where there is nothing left to see through. Which is also what makes the ceiling
+    /// affordable: pulled all the way out the shadow map is spread over 480 m and its texels are coarse, and
+    /// it does not matter, because the fog got there first.
+    /// </para>
+    /// </remarks>
+    private float DetailRadius => MathF.Min(
+        look.DetailCeilingMetres,
+        MathF.Max(look.ShadowFloorMetres * 0.5f, VisibleGroundRadius + ShadowReachMetres));
+
+    private float SunOrthoExtent => 2f * DetailRadius;
 
     private const float SunDistance = 220f;
 
@@ -1600,8 +1619,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // separating the near ground from the far ground, and how far away the far ground is
         // depends on how far back the camera is standing.
         var fog = new Vector4(
-            cameraDistance * look.FogStartZooms,
-            cameraDistance * MathF.Max(look.FogStartZooms + 0.1f, look.FogEndZooms),
+            // <b>Against the detail radius, not the camera's standoff.</b> Haze exists here to hide the
+            // edge where the world stops being drawn, and it cannot do that if it is measured against
+            // something else — tied to the zoom it started four hundred metres past a cull at two hundred.
+            DetailRadius * look.FogStartShare,
+            DetailRadius,
             look.FogStrength,
             0f);
         // What the shaders need about the shadow map's geometry — a texel as a fraction of the map, and
@@ -1644,7 +1666,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // drew trees to 150 m against 64 m of visible ground — <b>2.3× as far as anybody can see</b>, and
         // more than twice as far as the box that decides whether they cast anything. Pulled in it is now
         // 73 m, which is the same picture for a quarter of the trees.
-        var treeDrawRadius = MathF.Min(look.TreeDrawMetres, SunOrthoExtent * 0.5f);
+        var treeDrawRadius = DetailRadius;
         treeDrawRadiusSquared = treeDrawRadius * treeDrawRadius;
 
         BuildTerrainInstances();
@@ -2928,11 +2950,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var half = SunOrthoExtent * 0.5f;
         var texelCentimetres = SunOrthoExtent / ShadowMapSize * 100f;
         return
-            $"SEES {seen:F0} m · TREES {MathF.Sqrt(treeDrawRadiusSquared):F0} m " +
-            $"({MathF.Sqrt(treeDrawRadiusSquared) / seen:F2}x) · " +
-            $"SHADOW {half:F0} m ({half / seen:F2}x, texel {texelCentimetres:F1} cm) · " +
-            $"FOG {cameraDistance * look.FogStartZooms:F0}-" +
-            $"{cameraDistance * MathF.Max(look.FogStartZooms + 0.1f, look.FogEndZooms):F0} m";
+            $"SEES {seen:F0} m · DETAIL {DetailRadius:F0} m ({DetailRadius / seen:F2}x) · " +
+            $"SHADOW {half:F0} m (texel {texelCentimetres:F1} cm) · " +
+            $"FOG {DetailRadius * look.FogStartShare:F0}-{DetailRadius:F0} m";
     }
 
     private void AddColliderDisc(ColliderId id, Vector2 position, float height, Vector4 color)

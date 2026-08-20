@@ -187,16 +187,16 @@ internal sealed class LookSettings
     [Tune(0.0, 1.0, Label = "aerial perspective", Group = "air")]
     public float FogStrength = 0.72f;
 
-    /// <summary>Where the wash begins, as a multiple of how far back the camera is standing.</summary>
+    /// <summary>Where the haze begins, as a share of the detail radius.</summary>
     /// <remarks>
-    /// A multiple rather than a distance, because what the fog is for is separating near ground from far
-    /// ground, and how far away the far ground is depends on the zoom.
+    /// <b>A share rather than a multiple of the zoom, because haze exists to hide the edge of detail.</b> It
+    /// was a multiple of the camera's standoff and therefore unrelated to the thing it was hiding: at the
+    /// widest zoom the haze began four hundred metres past a tree cull at two hundred, so the world ended in
+    /// a hard circle in plain sight. It reaches full strength at the detail radius by construction — there is
+    /// no separate end, because the end is where detail stops.
     /// </remarks>
-    [Tune(0.2, 8.0, Label = "fog start (x zoom)", Group = "air")]
-    public float FogStartZooms = 1.8f;
-
-    [Tune(1.0, 30.0, Label = "fog end (x zoom)", Group = "air")]
-    public float FogEndZooms = 7f;
+    [Tune(0.05, 0.95, Label = "haze starts at", Group = "sun")]
+    public float FogStartShare = 0.45f;
 
     /// <summary>Stops of exposure applied before the tonemap curve.</summary>
     /// <remarks>
@@ -255,8 +255,8 @@ internal sealed class LookSettings
     /// way out on a dense map is thousands of models and the frame is allowed to give up before the
     /// simulation does.
     /// </remarks>
-    [Tune(40.0, 600.0, Label = "tree draw ceiling (m)", Group = "ground")]
-    public float TreeDrawMetres = 220f;
+    [Tune(60.0, 600.0, Label = "detail radius ceiling (m)", Group = "ground")]
+    public float DetailCeilingMetres = 240f;
 
     /// <summary>How much brighter tilled soil is drawn than the pack authored it.</summary>
     /// <remarks>
