@@ -97,6 +97,17 @@ internal struct AgentState
     public bool Standing;
 
     /// <summary>
+    /// The place this body has committed to defend, while <see cref="Standing"/> holds.
+    /// </summary>
+    /// <remarks>
+    /// So that a body already answering one alarm is not also counted as available for the next. Without
+    /// it, every threat on the map is weighed against the same settlement-wide total, and a defence that
+    /// has already been raised gets counted twice — which is how two raiders at opposite ends of a village
+    /// both look answerable by everybody and neither is actually answered.
+    /// </remarks>
+    public Vector2 Guarding;
+
+    /// <summary>
     /// Whether something outside the simulation is deciding this body's movement.
     /// </summary>
     /// <remarks>

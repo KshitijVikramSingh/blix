@@ -151,6 +151,15 @@ internal sealed class ThreatSystem
     public int Fleeing { get; private set; }
 
     /// <summary>
+    /// Bodies that saw a threat this tick and concluded somebody closer had it.
+    /// </summary>
+    /// <remarks>
+    /// The number that says whether question two is doing its job. It was structurally zero before, because
+    /// there was no such answer to give: twenty-six people saw one alarm and twenty-six people answered it.
+    /// </remarks>
+    public int Surplus { get; private set; }
+
+    /// <summary>
     /// Civilians decide, without being asked, whether to defend what they can see or run for help.
     /// </summary>
     /// <remarks>
@@ -163,11 +172,18 @@ internal sealed class ThreatSystem
     /// ground, or an ally carrying a load — anything that would leave with a raider. <em>Seen</em> is
     /// load-bearing: sight is occluded by trees, so an approach through a wood is not answered until it
     /// clears the trees.</item>
-    /// <item><b>Can I protect it?</b> The assailants' strength against the strength of everyone who can see
-    /// the same thing <em>and could reach it in time</em>. Not my own strength, which is the point:
-    /// everybody looking at the same threatened granary is weighing the same sum and reaching the same
-    /// answer, so they act together with no leader and no rally order. And distance is in the sum, because
-    /// strength that cannot arrive before the fight is decided is not strength.</item>
+    /// <item><b>Am I needed?</b> Which is a sharper question than "can we take them", and the difference is
+    /// the whole of what the first version got wrong. Everyone who can see the threatened thing and could
+    /// reach it in time is ordered by <em>when they would arrive</em>, and a body stands only if the people
+    /// arriving ahead of it are not already enough. Three answers rather than two: <b>needed</b> — stand;
+    /// <b>surplus</b> — it is being handled by people closer than me, go back to work; <b>hopeless</b> —
+    /// even everybody is not enough, run. Distance is in the sum twice over, because strength that cannot
+    /// arrive before the fight is decided is not strength, and because who is nearest decides who goes.
+    /// <para>
+    /// Still no leader and no rally order: the candidate set is an objective fact — every ally that can see
+    /// the place and reach it — so every observer builds the same ordered list and reads its own name in the
+    /// same position. Ties break by id, or two runs of one raid disagree about who went.
+    /// </para></item>
     /// <item><b>Fight, or run toward the nearest group bigger than mine.</b> Toward rather than away, which
     /// balls a settlement up under threat without anybody authoring a rally point — and the ball, once
     /// formed, may be strong enough that question two answers differently next time it is asked.</item>
@@ -184,6 +200,7 @@ internal sealed class ThreatSystem
     {
         Standing = 0;
         Fleeing = 0;
+        Surplus = 0;
         var bodies = agents.MutableSpan();
 
         // Who is hostile to the settlement. Faction-agnostic: gathered once as indices, and each defender
@@ -222,9 +239,29 @@ internal sealed class ThreatSystem
                 continue;
             }
 
-            // 2. Can we? Everyone who sees the same thing and could get there in time.
-            var ours = FriendlyStrengthAt(bodies, factions, sees, in body, where);
-            var stand = ours >= threat * StandMargin;
+            // 2. Am I needed? Everyone who can see the same thing and get there in time, ordered by when
+            // they would arrive — and how much of that strength is ahead of me in the queue.
+            Muster(bodies, factions, sees, in body, where, out var ours, out var ahead);
+            var required = threat * StandMargin;
+
+            // Being handled, by people closer to it than I am. This is the answer that stops twenty
+            // villagers surrounding one raider and shoving each other about while his friends empty the
+            // granary — the surplus goes back to work, and is still standing in the fields to answer
+            // whatever the rest of the party reaches next.
+            if (ahead >= required)
+            {
+                Surplus++;
+                if (body.Resolve > 0f)
+                {
+                    body.Resolve = 0f;
+                    halt(body.Id);
+                }
+
+                body.Standing = false;
+                continue;
+            }
+
+            var stand = ours >= required;
 
             if (stand) Standing++;
             else Fleeing++;
@@ -233,6 +270,7 @@ internal sealed class ThreatSystem
             if (body.Resolve > 0f && body.Standing == stand) continue;
             body.Resolve = ResolveSeconds;
             body.Standing = stand;
+            body.Guarding = where;
 
             // 3. At them, or toward the nearest group bigger than ours.
             if (stand)
@@ -318,30 +356,66 @@ internal sealed class ThreatSystem
     }
 
     /// <summary>
-    /// Strength that can see a place and could reach it before the fight there is decided.
+    /// How much help a place can get, and how much of it arrives ahead of this body.
     /// </summary>
-    private float FriendlyStrengthAt(
+    /// <remarks>
+    /// One walk of the roster answers both halves of question two. <c>total</c> is everyone who could be
+    /// there in time, which decides whether the fight is winnable at all; <c>ahead</c> is the part of that
+    /// which arrives before this body does, which decides whether this body is wanted.
+    /// <para>
+    /// Ordered by <em>seconds</em> rather than metres, so a body that is far but quick counts as nearer than
+    /// one that is close and slow, and ties break by id so two runs of the same raid send the same people.
+    /// </para>
+    /// <para>
+    /// An ally already committed somewhere else is not available here. Without that, a settlement's whole
+    /// strength is counted against every alarm on the map at once — so two raiders at opposite ends of a
+    /// village each look answerable by everybody, the same people are notionally sent to both, and neither
+    /// gets answered.
+    /// </para>
+    /// </remarks>
+    private void Muster(
         Span<AgentState> bodies,
         FactionRelations factions,
         Sees sees,
         in AgentState body,
-        Vector2 where)
+        Vector2 where,
+        out float total,
+        out float ahead)
     {
-        var total = 0f;
+        total = 0f;
+        ahead = 0f;
+        var mine = ArrivalSeconds(in body, where);
         for (var i = 0; i < bodies.Length; i++)
         {
             ref readonly var ally = ref bodies[i];
-            if (!ally.IsAlive || ally.Strength <= 0f) continue;
+            if (!ally.IsAlive || ally.Strength <= 0f || ally.Directed) continue;
             if ((factions.Between(body.Faction, ally.Faction) & RelationMask.Ally) == 0) continue;
+
             // Distance is in the sum, in seconds of walking rather than metres, because what decides
             // whether help is help is whether it arrives.
-            if (Vector2.Distance(ally.Position, where) > ally.MaximumSpeed * RallySeconds) continue;
-            if (!sees(in ally, where)) continue;
-            total += ally.Strength;
-        }
+            var theirs = ArrivalSeconds(in ally, where);
+            if (theirs > RallySeconds) continue;
 
-        return total;
+            // Busy elsewhere, and it stays busy: the commitment window is what makes this stable rather
+            // than a settlement that re-allocates itself every tick.
+            if (ally.Standing && Vector2.DistanceSquared(ally.Guarding, where) > ElsewhereSquared) continue;
+            if (!sees(in ally, where)) continue;
+
+            total += ally.Strength;
+            if (theirs < mine || (theirs == mine && ally.Id.Value < body.Id.Value)) ahead += ally.Strength;
+        }
     }
+
+    /// <summary>How long this body would take to walk to a place, at its own best pace.</summary>
+    private static float ArrivalSeconds(in AgentState body, Vector2 where) =>
+        body.MaximumSpeed > 0.01f ? Vector2.Distance(body.Position, where) / body.MaximumSpeed : 1e9f;
+
+    /// <summary>How far apart two threatened places have to be to count as different alarms.</summary>
+    /// <remarks>
+    /// A granary and the heap beside it are one fight, not two, and a defender committed to either should
+    /// count toward both. Loose enough to cover a building and its yard.
+    /// </remarks>
+    private static float ElsewhereSquared => 8f * 8f;
 
     /// <summary>
     /// Where to run: toward the nearest ally standing in a bigger group than this one.

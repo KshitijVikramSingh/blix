@@ -74,7 +74,7 @@ internal static class DeterminismCheck
         "SimulationWorld.commands", "SimulationWorld.paths", "SimulationWorld.moveGroups",
         "SimulationWorld.nextMoveGroupId", "SimulationWorld.blockColliders",
         "ThreatSystem.Killed", "ThreatSystem.Dealt",
-        "ThreatSystem.Standing", "ThreatSystem.Fleeing",
+        "ThreatSystem.Standing", "ThreatSystem.Fleeing", "ThreatSystem.Surplus",
         "SimulationWorld.congestionRecoveryCooldown",
         "SimulationWorld.rasterizedTerrainRevision", "SimulationWorld.routePlansThisTick",
         "SimulationWorld.ExtentMeters", "SimulationWorld.Nodes", "SimulationWorld.economy",
@@ -510,6 +510,7 @@ internal static class DeterminismCheck
         sink.Add("Killed", world.Threat.Killed);
         sink.Add("Dealt", world.Threat.Dealt);
         sink.Add("Standing", world.Threat.Standing);
+        sink.Add("Surplus", world.Threat.Surplus);
         sink.Add("Fleeing", world.Threat.Fleeing);
         foreach (var resource in Resources.All)
         {

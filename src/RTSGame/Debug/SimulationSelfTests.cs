@@ -136,6 +136,9 @@ internal static class SimulationSelfTests
         Check("housing caps a population and food brakes it", PeopleArriveWhenThereIsRoomAndFood());
         Check("a household that goes hungry loses somebody", PrivationSpendsItselfAsEmigration());
         Check("a wood hides what walks through it", TreesBlockSight());
+        Check(
+            "only as many defend as the fight needs, and the nearest ones go",
+            OnlyTheNeededDefend());
         Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
@@ -4060,6 +4063,78 @@ internal static class SimulationSelfTests
     /// trees, so the wood a settlement has been cutting into is both the way in and the only way it can
     /// watch — and the value of the clearing it has made is that it can see across it.
     /// </remarks>
+    /// <summary>
+    /// A raider at a full granary, and a queue of villagers at increasing distance from it.
+    /// </summary>
+    /// <remarks>
+    /// <b>The thing Stage E shipped without.</b> Everything the defence got wrong was visible in a number
+    /// and invisible on screen, and the sharpest of them was that question two asked "can we take them"
+    /// rather than "am I needed" — so twenty-six people answered one alarm, arrived one at a time, and were
+    /// killed one at a time while the rest of the raid emptied the stores. What this pins down:
+    /// <list type="bullet">
+    /// <item><b>Enough go.</b> The committed strength covers the assailants with the margin, so the
+    /// settlement is not sending a defence it knows will lose.</item>
+    /// <item><b>No more than enough go.</b> Given a strength ratio, a fixed number is wanted; everybody
+    /// else is surplus and says so. That is the answer that did not exist before.</item>
+    /// <item><b>The nearest go.</b> Not an arbitrary subset — the ones who would arrive first, which is
+    /// both the ones who arrive in time and the ones whose fields are least disrupted by going.</item>
+    /// </list>
+    /// </remarks>
+    private static bool OnlyTheNeededDefend()
+    {
+        var world = new SimulationWorld(240f);
+        var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 2000);
+        world.SeedStock(granary, Resource.Grain, 900);
+
+        // Twenty villagers in a line running away from the granary, a metre and a half apart, all of them
+        // inside sight of it and inside the rally window.
+        var line = new List<AgentId>();
+        for (var i = 0; i < 20; i++)
+        {
+            line.Add(world.SpawnAgent(new Vector2(4f + i * 1.5f, 0f), UnitType.Villager));
+        }
+
+        // One hostile at the granary door.
+        var raider = world.SpawnAgent(new Vector2(2.2f, 0f), UnitType.Raider, new FactionId(1));
+        world.Agents.Get(raider).Directed = true;
+        var menace = world.Agents.Get(raider).Strength;
+        Tick(world, 2);
+
+        var standing = new List<int>();
+        for (var i = 0; i < line.Count; i++)
+        {
+            if (world.Agents.Get(line[i]).Standing) standing.Add(i);
+        }
+
+        var committed = 0f;
+        foreach (var i in standing) committed += world.Agents.Get(line[i]).Strength;
+
+        // Enough, and the margin is respected.
+        var wanted = menace * Simulation.Threat.ThreatSystem.StandMargin;
+        var enough = committed >= wanted;
+
+        // Not everybody. One villager's strength short of the requirement would not have been enough, so
+        // this is the tightest the prefix can be without under-committing.
+        var lean = standing.Count < line.Count &&
+                   committed - world.Agents.Get(line[standing[^1]]).Strength < wanted;
+
+        // And it is a prefix of the line, which is what "the nearest ones go" means when the line is
+        // ordered by distance.
+        var nearestWent = true;
+        for (var i = 0; i < standing.Count; i++)
+        {
+            if (standing[i] != i) nearestWent = false;
+        }
+
+        var spare = world.Threat.Surplus;
+        var passed = enough && lean && nearestWent && spare > 0;
+        Console.WriteLine(
+            $"    one raider of strength {menace:F0} wants {wanted:F1}: {standing.Count} of {line.Count} " +
+            $"stood for {committed:F0}, a prefix of the line={nearestWent}, one fewer would not do={lean}, " +
+            $"{spare} left it to somebody closer");
+        return passed;
+    }
+
     private static bool TreesBlockSight()
     {
         var world = new SimulationWorld(240f);

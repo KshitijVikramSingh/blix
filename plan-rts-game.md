@@ -3432,3 +3432,88 @@ front to it: two bodies within reach hurt each other, per second, at their stren
 "surround them and kill them with body heat" the literal description of the mechanic.
 
 That is where combat begins, and it should begin there rather than with numbers to tune.
+
+## 30. "Am I needed?" is a sharper question than "can we take them?"
+
+The playtest note, verbatim, because it is the design: *"else 20 people will surround 1 guy, push each
+other around while others loot freely and these fools get killed."* That is question two's flaw stated
+better than §29 stated it, and it comes with the fix in it — *are others in the same set closer and
+numerous enough to take them without me, plus some buffer.*
+
+### The change
+
+Question two was **can we take them**: sum the strength of everyone who can see the threatened thing and
+reach it inside the rally window, stand if the sum beats the assailants with a margin. Every villager
+computes the same sum, so every villager reaches the same answer, so every villager goes. Correct, and
+useless — the sum is a property of the settlement, not of the asker.
+
+It is now **am I needed**, which asks about the asker. The same candidate set, ordered by *when each would
+arrive*, and a body stands only if the people ahead of it in that queue are not already enough:
+
+```
+required = threat × StandMargin
+ahead    = strength of candidates arriving strictly before me
+total    = strength of all candidates
+
+ahead >= required  →  surplus   — being handled, and by people closer than me. Back to work.
+total >= required  →  needed    — stand.
+otherwise          →  hopeless  — even everybody is not enough. Run.
+```
+
+Three answers where there were two, and the new one is the whole point. Ordered by **seconds** rather than
+metres, so a body that is far but quick counts as nearer than one that is close and slow; ties break by id,
+or two runs of one raid disagree about who went.
+
+**It is still leaderless, and that property was worth protecting.** The candidate set is an objective fact
+— every ally that can see the place and could reach it — so every observer builds the same ordered list and
+finds its own name in the same position. Nobody is told to go and nobody is told to stay; twelve people
+independently work out that they are the twelve.
+
+### One more thing had to be stored
+
+`AgentState.Guarding`: the place a body has committed to, while its commitment holds. Without it a
+settlement's entire strength is counted against every alarm on the map at once, so two raiders at opposite
+ends of a village each look answerable by everybody, the same people are notionally sent to both, and
+neither is actually answered. A defence that has been raised has to stop being available.
+
+Places within 8 m count as the same alarm, so a granary and the heap beside it are one fight and a
+defender committed to either counts toward both.
+
+### Measured, at a raid every 45 s
+
+| | stood, peak | left it to somebody closer | settlers lost | survived |
+|---|---|---|---|---|
+| can we take them | **26 of 26** | 0, structurally | 14 of 26 | 12 |
+| am I needed | 19 across ~3 fights | up to 22 | 10 of 26 | 16 |
+
+`spare` was zero before, and not because nothing was surplus — because there was no such answer to give.
+Peak `stood` of 19 is not 19 people on one raider: it is three overlapping raids drawing about six each,
+which is what one or two raiders at strength 3 costs at the current ratio. And `fled` rising to 24 is
+right, not wrong: a lone villager whose neighbours are all committed elsewhere correctly concludes that
+nothing is coming.
+
+### The self-test Stage E should have had
+
+`only as many defend as the fight needs, and the nearest ones go` — one raider at a full granary, twenty
+villagers in a line running away from it at a metre and a half apart. It asserts three things, and the
+middle one is the new behaviour:
+
+- **Enough go**, covering the assailant with the margin, so the settlement is not sending a defence it
+  knows will lose.
+- **No more than enough go** — one fewer than the standing set would have been short of the requirement,
+  which is the tightest a prefix can be without under-committing.
+- **The nearest go** — the standing set is a *prefix* of the line, not an arbitrary subset of it.
+
+Measured: `one raider of strength 3 wants 3.8: 4 of 20 stood for 4, a prefix of the line=True, one fewer
+would not do=True, 9 left it to somebody closer`. Four went, nine decided they were not wanted, and the
+remaining seven never saw it — the line runs from 4 m to 32 m and sight is 22 m.
+
+That third assertion is the one that would have caught the old rule instantly: under "can we take them"
+the standing set was the whole line.
+
+### Still parked for the combat arc
+
+This fixes who commits. It does not give the fight a front — bodies within reach still hurt each other per
+second with no facing and no engagement limit, so what a committed defence *does* on arrival is unchanged.
+The two remaining questions belong to that arc: how many bodies can actually be brought to bear on one
+assailant at once, and what a defence being *formed* means beyond being *chosen*.

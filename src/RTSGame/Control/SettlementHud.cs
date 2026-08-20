@@ -141,6 +141,19 @@ internal sealed class SettlementHud : IDisposable
             // Top of the screen, not the bottom, because it is the one thing that is worth interrupting
             // whatever you were doing — and in red when it is happening rather than pending.
             lines.Add((raid.ToUpperInvariant(), raid.Contains("RAIDERS") ? Warning : Body));
+
+            // What the settlement decided to do about it, which is otherwise invisible: nobody is ordered
+            // to defend, so without this the only way to tell a defence from a crowd is to watch where
+            // people walk. "Left it to somebody closer" is the answer worth showing — it is the one that
+            // says the settlement is answering the raid with a party rather than with everybody.
+            var threat = world.Threat;
+            if (threat.Standing + threat.Fleeing + threat.Surplus > 0)
+            {
+                lines.Add((
+                    $"{threat.Standing} DEFENDING · {threat.Fleeing} RUNNING · " +
+                    $"{threat.Surplus} LEFT IT TO SOMEBODY CLOSER",
+                    threat.Standing > 0 ? Action : Warning));
+            }
         }
 
         Block(size, new Vector2(pad, pad), step);
