@@ -91,6 +91,7 @@ internal sealed class SettlementHud : IDisposable
         bool additive,
         NodeId? routeSource,
         string? raid,
+        string? light,
         string? geometry,
         int width,
         int height)
@@ -109,7 +110,13 @@ internal sealed class SettlementHud : IDisposable
         // and seasons-until-empty tells you whether to do something.
         lines.Clear();
         var date = world.Date;
-        lines.Add(($"YEAR {date.Year + 1} · {date.Season.ToString().ToUpperInvariant()} · DAY {date.Day}", Heading));
+        // The light's own name on the date line, because the season is now readable from the light and the
+        // time of day is not readable from anything else — a dark frame should say "dusk" rather than leave
+        // you wondering whether something is broken.
+        var when = light is null ? string.Empty : $" · {light.ToUpperInvariant()}";
+        lines.Add((
+            $"YEAR {date.Year + 1} · {date.Season.ToString().ToUpperInvariant()} · DAY {date.Day}{when}",
+            Heading));
         foreach (var resource in Resources.All)
         {
             var outlook = world.Economy.Outlook(resource, world.Nodes, world.Agents, date.Season);

@@ -271,8 +271,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private InstanceBuffer propBuffer = null!, propCasterBuffer = null!, unitCasterBuffer = null!;
     private InstanceBuffer canopyBuffer = null!, canopyCasterBuffer = null!;
 
-    private readonly byte[] worldPush = new byte[224];   // viewProj, camPos, sunDir, sunVP, fog, shadow, light, haze
-    private readonly byte[] skyPush = new byte[96];      // invViewProj + camPos + sunDir
+    // viewProj, camPos, sunDir, sunVP, fog, shadow, light, haze, sunTint, skyAmbient, groundAmbient,
+    // hazeAway, hazeToward. Every one of the last five used to be a constant in world.frag, which is why a
+    // year looked like one afternoon — see Rendering/Atmosphere.cs.
+    private readonly byte[] worldPush = new byte[304];
+    private readonly byte[] skyPush = new byte[128];     // invViewProj, camPos, sunDir, zenith, horizon
     private readonly byte[] shadowPush = new byte[64];   // sun shadow VP
     private readonly byte[] gradePush = new byte[16];    // exposure, tonemap mode, saturation, contrast
 
@@ -378,7 +381,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     {
         get
         {
-            var elevation = MathF.Max(0.05f, look.SunElevationDegrees * MathF.PI / 180f);
+            var degrees = look.SunFollowsTheYear ? sky.SunElevationDegrees : look.SunElevationDegrees;
+            var elevation = MathF.Max(4f, degrees) * MathF.PI / 180f;
             return MathF.Max(look.ShadowMarginMetres, look.TallestCasterMetres / MathF.Tan(elevation));
         }
     }
@@ -415,10 +419,22 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// Two angles rather than a vector, because those are the two things somebody adjusting the light
     /// actually wants to say — how high and from where — and a normalised triple is neither.
     /// </remarks>
+    /// <summary>
+    /// The light, worked out once a frame from the date and the sun's own cycle.
+    /// </summary>
+    /// <remarks>
+    /// Cached per frame rather than recomputed per use, because the shadow box, the sky, the world shader
+    /// and the panel all ask for it and they must every one of them get the same answer — a sun that moved
+    /// between the shadow pass and the scene pass would light the world from one place and shadow it from
+    /// another.
+    /// </remarks>
+    private Atmosphere sky = Atmosphere.For(default, 0.0, 37f, 1f);
+
     private Vector3 SunDirection
     {
         get
         {
+            if (look.SunFollowsTheYear) return sky.SunDirection;
             var elevation = look.SunElevationDegrees * MathF.PI / 180f;
             var bearing = look.SunBearingDegrees * MathF.PI / 180f;
             var horizontal = MathF.Cos(elevation);
@@ -726,7 +742,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 // one vec4 to the fragment shader alone gets you a draw-time payload-length error, and
                 // adding it to both shaders alone gets you the same error with a shorter search. It is the
                 // recurring finding in a fourth costume: one fact, three owners.
-                new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 224),
+                new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 304),
             });
 
         var shaderDirectory = Path.Combine(AppContext.BaseDirectory, "Shaders");
@@ -758,7 +774,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
         var skyInterface = new ShaderInterface(
             Slots: Array.Empty<DescriptorSetSlot>(),
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 96) });
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 128) });
         var presentInterface = new ShaderInterface(
             Slots: new[]
             {
@@ -1442,6 +1458,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
 
         var frame = (float)Math.Clamp(time.Delta, 0.0, 0.25);
+        // Before anything that reads the light: the shadow box, the sky and the world shader all take their
+        // sun from here and a disagreement between them is a scene lit from one place and shadowed from
+        // another.
+        sky = Atmosphere.For(
+            simulation.Date, time.Total, look.SunBearingDegrees, look.Seasonality);
         AdvanceWear(frame);
         ApplyWoodlandCover(frame);
         PanCamera(frame);
@@ -1633,7 +1654,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             SunOrthoExtent,
             look.ShadowPenumbraTexels,
             look.ShadowNormalOffsetTexels);
-        var light = new Vector4(look.SunIntensity, look.Ambient, look.TerminatorWrap, 0f);
+        var following = look.SunFollowsTheYear;
+        var light = new Vector4(
+            (following ? sky.SunIntensity : look.SunIntensity) * look.SunScale,
+            (following ? sky.AmbientScale : look.Ambient) * look.AmbientScale,
+            look.TerminatorWrap,
+            0f);
+        var sunTint = new Vector4(following ? sky.SunColor : new Vector3(1.00f, 0.94f, 0.80f), 0f);
+        var skyAmbient = new Vector4(following ? sky.SkyAmbient : new Vector3(0.36f, 0.44f, 0.55f), 0f);
+        var groundAmbient = new Vector4(
+            following ? sky.GroundAmbient : new Vector3(0.24f, 0.20f, 0.15f), 0f);
+        var hazeAway = new Vector4(following ? sky.HazeAway : new Vector3(0.60f, 0.70f, 0.84f), 0f);
+        var hazeToward = new Vector4(following ? sky.HazeToward : new Vector3(0.92f, 0.82f, 0.66f), 0f);
         // z carries the map's own size so the shader can turn a world position into a wear lookup: the map
         // is centred on the origin, so uv is worldPos.xz / extent + 0.5 and needs no second uniform.
         var haze = new Vector4(
@@ -1650,9 +1682,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         MemoryMarshal.Write(worldPush.AsSpan(176, 16), in shadow);
         MemoryMarshal.Write(worldPush.AsSpan(192, 16), in light);
         MemoryMarshal.Write(worldPush.AsSpan(208, 16), in haze);
+        MemoryMarshal.Write(worldPush.AsSpan(224, 16), in sunTint);
+        MemoryMarshal.Write(worldPush.AsSpan(240, 16), in skyAmbient);
+        MemoryMarshal.Write(worldPush.AsSpan(256, 16), in groundAmbient);
+        MemoryMarshal.Write(worldPush.AsSpan(272, 16), in hazeAway);
+        MemoryMarshal.Write(worldPush.AsSpan(288, 16), in hazeToward);
         MemoryMarshal.Write(skyPush.AsSpan(0, 64), in inverseViewProjection);
         MemoryMarshal.Write(skyPush.AsSpan(64, 16), in cameraPosition);
         MemoryMarshal.Write(skyPush.AsSpan(80, 16), in sun);
+        var zenith = new Vector4(following ? sky.SkyZenith : new Vector3(0.16f, 0.38f, 0.80f), 0f);
+        var horizon = new Vector4(following ? sky.SkyHorizon : new Vector3(0.64f, 0.78f, 0.92f), 0f);
+        MemoryMarshal.Write(skyPush.AsSpan(96, 16), in zenith);
+        MemoryMarshal.Write(skyPush.AsSpan(112, 16), in horizon);
         MemoryMarshal.Write(shadowPush.AsSpan(0, 64), in sunViewProjection);
         MemoryMarshal.Write(gradePush.AsSpan(0, 16), in grade);
 
@@ -1746,6 +1787,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                     additiveSelection,
                     routeSource,
                     raiders?.Status,
+                    look.SunFollowsTheYear ? sky.Description : null,
                     colliderOverlay > 0 ? GeometryLine() : null,
                     frame.Width,
                     frame.Height);

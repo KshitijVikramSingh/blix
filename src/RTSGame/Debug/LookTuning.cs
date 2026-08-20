@@ -1,4 +1,5 @@
 using Blix.Diagnostics;
+using RTSGame.Rendering;
 using RTSGame.Simulation;
 using RTSGame.Simulation.Economy;
 using RTSGame.Simulation.Threat;
@@ -49,6 +50,45 @@ internal sealed class LookSettings
     /// is as long as the thing is tall at 45°, twice as long at 27°, and hidden underneath it near the
     /// zenith. Low is dramatic and long-shadowed; high flattens everything.
     /// </remarks>
+    /// <summary>
+    /// Whether the light comes from the calendar and the sun's own cycle rather than from these dials.
+    /// </summary>
+    /// <remarks>
+    /// <b>On, because a year that looks like one afternoon is the flattest thing about this scene.</b> The
+    /// season is the most important state in this economy — a field's three windows, a winter's fuel, a
+    /// harvest that arrives or does not — and the only thing that ever said what month it was, was a line of
+    /// text. See <c>Rendering/Atmosphere.cs</c>.
+    /// <para>
+    /// Turning it off pins the sun where the two dials below put it, which is what you want when judging a
+    /// material or a shadow rather than a mood: a moving sun makes two screenshots incomparable.
+    /// </para>
+    /// </remarks>
+    [Tune(Label = "sun follows the year", Group = "sun")]
+    public bool SunFollowsTheYear = true;
+
+    /// <summary>How much the year is allowed to change the light, from a fixed look to full swing.</summary>
+    [Tune(0.0, 1.0, Label = "seasonality", Group = "sun")]
+    public float Seasonality = 1f;
+
+    /// <summary>Seconds in one sun cycle: dawn, day, dusk, night.</summary>
+    /// <remarks>
+    /// Its own period rather than the calendar's day, which is twenty seconds because a day is the unit a
+    /// ration is measured in. The dissonance is deliberate and named in <c>Atmosphere.DayLengthSeconds</c>.
+    /// </remarks>
+    [Tune(60.0, 1800.0, Label = "sun cycle (s)", Group = "sun")]
+    public float DayLengthSeconds
+    {
+        get => Atmosphere.DayLengthSeconds;
+        set => Atmosphere.DayLengthSeconds = value;
+    }
+
+    /// <summary>Multipliers over whatever the season asked for, for taste.</summary>
+    [Tune(0.2, 3.0, Label = "sun scale", Group = "sun")]
+    public float SunScale = 1f;
+
+    [Tune(0.2, 3.0, Label = "ambient scale", Group = "sun")]
+    public float AmbientScale = 1f;
+
     [Tune(8.0, 88.0, Label = "sun elevation (deg)", Group = "sun")]
     public float SunElevationDegrees = 22f;
 

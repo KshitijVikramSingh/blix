@@ -32,22 +32,24 @@ layout(push_constant) uniform Push {
     vec4 uLight;    // x = sun intensity, y = ambient scale, z = terminator wrap
     vec4 uHaze;     // x = desaturation with distance, y = haze glow toward the sun,
                     // z = map extent (m), w = how much wear shows
+    // <b>The palette, which used to be constants in this file.</b> A year looked like one afternoon
+    // because these were decisions taken once at compile time; they come from Rendering/Atmosphere.cs now,
+    // which derives them from the date and where the sun is in its cycle.
+    vec4 uSunTint;
+    vec4 uSkyAmbient;
+    vec4 uGroundAmbient;
+    vec4 uHazeAway;
+    vec4 uHazeToward;
 };
 
 // The hues stay here and the intensities do not. A colour is a decision about what kind of
 // day it is and reads the same at any exposure; a magnitude is a dial nobody can measure, so
 // it arrives on a slider — see RTSGame/Debug/LookTuning.cs.
-const vec3 kSkyAmbient    = vec3(0.36, 0.44, 0.55);
-const vec3 kGroundAmbient = vec3(0.24, 0.20, 0.15);
-const vec3 kSunColor      = vec3(1.00, 0.94, 0.80);
 // Two haze colours rather than one, because air lit from behind and air lit from in front are not the
 // same colour. Away from the sun it is the cold scatter of the sky; toward it, the warm glow of the same
 // air with the sun behind it. One dot product picks between them, which is the cheapest half of real
-// atmospheric scattering and most of what makes a low sun read as a time of day.
-const vec3 kHazeAway      = vec3(0.60, 0.70, 0.84);
-const vec3 kHazeToward    = vec3(0.92, 0.82, 0.66);
-// What colour the light in shade is. Sky, essentially, because that is what reaches it.
-const vec3 kShadeTint     = vec3(0.62, 0.74, 0.95);
+// atmospheric scattering and most of what makes a low sun read as a time of day. Both now arrive per
+// frame, so dusk is a colour the whole scene shares rather than a curve applied to it.
 
 // Shared sun-shadow technique — src/Blix.Shaders/shadow.glsl.
 #include "shadow.glsl"
@@ -128,20 +130,20 @@ void main() {
 
     // Sky above, warm bounce below: a settlement is read from above, so the roofs and the
     // ground are the two surfaces that have to separate from each other.
-    vec3 ambient = mix(kGroundAmbient, kSkyAmbient, n.y * 0.5 + 0.5) * uLight.y;
+    vec3 ambient = mix(uGroundAmbient.rgb, uSkyAmbient.rgb, n.y * 0.5 + 0.5) * uLight.y;
 
     // <b>Shade is a colour, not a subtraction.</b> Cast shadow only removed the sun term, so shadowed
     // ground was the same paint at lower value — which is most of what reads as flat. The light that
     // reaches shade is sky light, so shade goes cool, and that separation is mood rather than exposure.
-    vec3 shadeLift = kShadeTint * (1.0 - shadow) * 0.09 * uLight.y;
+    vec3 shadeLift = uSkyAmbient.rgb * 1.6 * (1.0 - shadow) * 0.09 * uLight.y;
 
     // A gentle top-face bias. A settlement is read from above, so upward faces are the ones carrying the
     // silhouette, and a touch more light on them makes roofs pop without tipping into cartoon.
     float upFace = 1.0 + max(n.y, 0.0) * 0.10;
 
-    vec3 lit = albedo * (ambient + shadeLift + kSunColor * uLight.x * wrapWide * shadow * upFace);
+    vec3 lit = albedo * (ambient + shadeLift + uSunTint.rgb * uLight.x * wrapWide * shadow * upFace);
     // Light through the leaf, added rather than multiplied: it is the sun arriving by another route.
-    lit += albedo * kSunColor * uLight.x * through * shadow;
+    lit += albedo * uSunTint.rgb * uLight.x * through * shadow;
 
     vec3 toFragment = vWorldPos - uCamPos.xyz;
     float dist = length(toFragment);
@@ -159,7 +161,7 @@ void main() {
     // Which way the haze is lit. Looking toward the sun the air between here and there glows; looking away
     // it is the cold scatter of the sky.
     float towardSun = max(dot(normalize(toFragment), normalize(uSunDir.xyz)), 0.0);
-    vec3 hazeColor = mix(kHazeAway, kHazeToward, towardSun * uHaze.y);
+    vec3 hazeColor = mix(uHazeAway.rgb, uHazeToward.rgb, towardSun * uHaze.y);
 
     outColor = vec4(mix(lit, hazeColor, fog), vTint.a);
 }

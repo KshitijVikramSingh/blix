@@ -31,6 +31,12 @@ layout(push_constant) uniform Push {
     // about how big the block is — and the mismatch surfaces as a draw-time payload-length error rather than
     // as a compile error, which is a long way from the line that caused it.
     vec4 uHaze;     // x = desaturation with distance, y = how much haze glows toward the sun
+    // Declared but unread here, for the reason above: one block, one layout, every stage.
+    vec4 uSunTint;
+    vec4 uSkyAmbient;
+    vec4 uGroundAmbient;
+    vec4 uHazeAway;
+    vec4 uHazeToward;
 };
 
 layout(location = 0) out vec3 vNormal;

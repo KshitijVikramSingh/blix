@@ -15,6 +15,10 @@ layout(push_constant) uniform Push {
     mat4 uInvViewProj;
     vec4 uCamPos;     // xyz = camera world position
     vec4 uSunDir;     // xyz = direction TOWARD the sun (normalized)
+    // <b>The sky's own colours, per frame.</b> They were two constants, which is a fine sky and only one
+    // sky — and this game runs through a year in ninety minutes. See Rendering/Atmosphere.cs.
+    vec4 uZenith;
+    vec4 uHorizon;
 };
 
 void main() {
@@ -22,18 +26,23 @@ void main() {
     vec3 world = farPoint.xyz / farPoint.w;
     vec3 ray = normalize(world - uCamPos.xyz);
 
-    const vec3 zenith  = vec3(0.16, 0.38, 0.80);
-    const vec3 horizon = vec3(0.64, 0.78, 0.92);
-    const vec3 ground  = vec3(0.36, 0.38, 0.34);
+    vec3 zenith  = uZenith.rgb;
+    vec3 horizon = uHorizon.rgb;
+    // Below the horizon is the ground seen through air, so it borrows from the horizon rather than being
+    // its own colour — which keeps a night sky from having a daylit floor under it.
+    vec3 ground  = horizon * 0.45;
 
     vec3 col = ray.y >= 0.0
         ? mix(horizon, zenith, pow(clamp(ray.y, 0.0, 1.0), 0.50))
         : mix(horizon, ground, clamp(-ray.y * 3.0, 0.0, 1.0));
 
+    // How bright the sun's own contribution is, from how bright the sky is: at night the zenith is a
+    // fortieth of its daylight value, and a full-strength disc hanging in it would be a hole in the screen.
+    float daylight = clamp(dot(zenith, vec3(0.3333)) * 4.0, 0.06, 1.0);
     float s = max(dot(ray, normalize(uSunDir.xyz)), 0.0);
-    col += vec3(1.00, 0.95, 0.80) * pow(s, 160.0) * 4.0;   // disc
-    col += vec3(1.00, 0.86, 0.62) * pow(s, 6.0)  * 0.50;   // glow
-    col += vec3(1.00, 0.90, 0.72) * pow(s, 1.3)  * 0.12;   // broad warmth
+    col += vec3(1.00, 0.95, 0.80) * pow(s, 160.0) * 4.0 * daylight;   // disc
+    col += horizon * pow(s, 6.0)  * 0.70 * daylight;                  // glow, in the sky's own colour
+    col += horizon * pow(s, 1.3)  * 0.16 * daylight;                  // broad warmth
 
     outColor = vec4(col, 1.0);
 }
