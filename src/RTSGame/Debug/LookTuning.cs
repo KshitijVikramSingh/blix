@@ -180,6 +180,19 @@ internal sealed class LookSettings
     /// </remarks>
     [Tune(40.0, 600.0, Label = "tree draw distance (m)", Group = "ground")]
     public float TreeDrawMetres = 150f;
+
+    /// <summary>How much brighter tilled soil is drawn than the pack authored it.</summary>
+    /// <remarks>
+    /// <b>The field's stripes are a contrast problem, not an alignment one.</b> The plot and the crop line
+    /// up now, and the fields still read as ribbons — because the pack's dirt is 0.09 linear and its wheat
+    /// is 0.38, so a crop that covers its plot in rows puts four-to-one contrast between every row and the
+    /// gap beside it, and twelve fields tiled edge to edge turn that into forty-metre stripes. Lifting the
+    /// soil is the cheap half of the fix (the other half is that neighbouring plots now run crosswise), and
+    /// it is a dial because the right amount is a judgement about the whole frame: too far and the fields
+    /// stop being distinct from the grass they are cut out of.
+    /// </remarks>
+    [Tune(1.0, 3.0, Label = "tilled soil brightness", Group = "ground")]
+    public float SoilBrightness = 1.85f;
 }
 
 /// <summary>

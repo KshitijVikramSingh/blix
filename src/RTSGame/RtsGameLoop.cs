@@ -60,6 +60,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private readonly ClockSettings clock = new();
     private readonly LookSettings look = new();
     private readonly WoodlandSettings woodland = new();
+    private readonly RaidSettings raids = new();
+
+    /// <summary>
+    /// The scripted adversary. Scaffolding, driven from outside the simulation on purpose.
+    /// </summary>
+    /// <remarks>
+    /// §28: in the real game the thing over the hill is another player, so the thief is a fixture of the
+    /// same kind as the pen-escape crowd and none of the simulation may come to depend on it. It drives the
+    /// world through the same queued orders a player uses, which is also the honest test that those are
+    /// enough to play with.
+    /// </remarks>
+    private RaidDirector? raiders;
     // The world this session is judging the body on. Session 2 exists because a body cannot
     // be judged on a 30 m square and then assumed to feel the same crossing a kilometre.
     private readonly float worldExtentMeters;
@@ -87,6 +99,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private static readonly Vector4 Grass = new(0.144f, 0.195f, 0.075f, 1f);
     private static readonly Vector4 UnitColor = new(0.74f, 0.40f, 0.18f, 1f);
     private static readonly Vector4 SelectedUnitColor = new(0.98f, 0.72f, 0.24f, 1f);
+    private static readonly Vector4 RaiderColor = new(0.62f, 0.10f, 0.09f, 1f);
     private static readonly Vector4 SelectionColor = new(0.26f, 0.86f, 0.94f, 1f);
     private static readonly Vector4 DestinationColor = new(0.98f, 0.82f, 0.32f, 1f);
     private static readonly Vector4 ObstacleColor = new(0.33f, 0.35f, 0.37f, 1f);
@@ -413,6 +426,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             clock,
             look,
             woodland,
+            raids,
             new WallSettings(),
             new RoutingSettings(),
             new GroupSettings());
@@ -429,6 +443,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
         simulation = new SimulationWorld(worldExtentMeters);
         cameraFocus = Vector2.Zero;
+        if (startVillage) raiders = new RaidDirector(raids);
         if (startVillage)
         {
             LoadSettlementScenario();
@@ -1247,6 +1262,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         while (simulationAccumulator >= SimulationWorld.FixedDeltaSeconds)
         {
             simulation.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            // Inside the fixed step, so a raid arrives at the same moment whatever the time compression is
+            // and a watched run sees what a headless one would.
+            raiders?.Update(simulation, (float)SimulationWorld.FixedDeltaSeconds);
+            // Look at the raid when it appears. A test-bench convenience: finding out whether defence is
+            // interesting requires being able to see the fight.
+            if (raiders?.TakeLookAt() is { } lookAt) cameraFocus = lookAt;
             movementTrace?.Observe(simulation, (float)SimulationWorld.FixedDeltaSeconds);
             simulationAccumulator -= SimulationWorld.FixedDeltaSeconds;
         }
@@ -1542,6 +1563,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                     pointerOnTerrain,
                     additiveSelection,
                     routeSource,
+                    raiders?.Status,
                     frame.Width,
                     frame.Height);
             });
@@ -2022,6 +2044,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// <summary>How far a tilled plot sits above the ground it is drawn on, to break the tie.</summary>
     private const float FieldPlotLift = 0.02f;
 
+    /// <summary>The pack's own dirt, which <see cref="LookSettings.SoilBrightness"/> scales.</summary>
+    private static readonly Vector3 TilledEarth = new(0.0946f, 0.0740f, 0.0289f);
+
     private void DrawField(in EconomyNode field)
     {
         var ground = simulation.Terrain.SampleHeight(field.Position);
@@ -2050,8 +2075,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // was not visible at all where it should have been most obvious. Two centimetres is well
             // inside the depth buffer's precision at this range and invisible from any camera angle the
             // game allows.
-            var placement = SettlementArt.Placement(field.Position, ground + FieldPlotLift, width, 0f);
-            art.FieldPlot.Add(placement);
+            // <b>Neighbouring plots run crosswise, which is what makes a block of fields a patchwork.</b>
+            // Every field kept the same orientation, so twelve of them tiled edge to edge lined their
+            // furrows up into continuous forty-metre rows and the whole block read as ribbons rather than
+            // as fields. A quarter turn on a checkerboard of the plot's own position breaks the rows at
+            // every boundary while keeping each field square to the grid — the plot and its crop share the
+            // yaw, so the wheat still grows along the furrows it is planted in.
+            var parity = (int)MathF.Floor(field.Position.X / 1.5f) +
+                         (int)MathF.Floor(field.Position.Y / 1.5f);
+            var yaw = (parity & 1) == 0 ? 0f : MathF.PI * 0.5f;
+            var placement = SettlementArt.Placement(field.Position, ground + FieldPlotLift, width, yaw);
+            // Tilled earth, lifted off the pack's near-black dirt. See LookSettings.SoilBrightness: the
+            // stripes were the contrast between 0.09 soil and 0.38 wheat, not a misalignment.
+            art.FieldPlot.Add(placement, new Vector4(TilledEarth * look.SoilBrightness, 1f));
             if (standing > 0.02f)
             {
                 var stage = standing >= 0.66f ? 2 : standing >= 0.33f ? 1 : 0;
@@ -2135,7 +2171,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             if (units <= 0) continue;
             // A heap of forty is a cart's worth and about a metre across; bigger heaps spread rather than
             // tower, because a pile of sacks does.
-            var spread = 0.9f + MathF.Sqrt(units / 40f) * 1.1f;
+            // <b>Capped, because a prop's height comes from its own proportions.</b> A heap of a hundred
+            // and twenty asked for nearly three metres across and got a crate three metres tall standing
+            // over the houses — reported, accurately, as "the largest crates in existence". A cart's worth
+            // is about a metre; more than that spreads a little and then stops.
+            var spread = 0.55f + MathF.Min(0.75f, MathF.Sqrt(units / 40f) * 0.45f);
             if (art is not null)
             {
                 var model = resource == Resource.Grain ? art.GrainHeap : art.WoodHeap;
@@ -2345,7 +2385,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 // Selection has to survive the art pass. The ring under the feet says which bodies are
                 // selected; tinting the body too is what makes one picked out of a crowd of twenty
                 // findable at a glance, which is the thing the greybox did for free by being one colour.
-                if (selected) person.Add(placement, SelectedUnitColor);
+                // Hostile bodies in a hostile colour, which is the one thing about a body that has to be
+                // readable before anything else on the screen is.
+                if (agent.Faction.Value != 0) person.Add(placement, RaiderColor);
+                else if (selected) person.Add(placement, SelectedUnitColor);
                 else person.Add(placement);
 
                 // The cart, drawn behind them, because a carter has to be findable in a crowd. A wider

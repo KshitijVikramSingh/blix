@@ -3315,3 +3315,120 @@ strong enough that question 2 answers differently. A retreat that aggregates is 
 And one piece of interface that is not polish: **a key that selects the spare hands.** Answering a raid *is*
 reallocating labour under time pressure, and if that takes four drag-selects it is a chore rather than a
 decision — which would confound the only thing this stage exists to find out.
+
+## 29. Watching it, and the two things nobody had told the raiders
+
+Four reports off one session, and they sort cleanly into two kinds: things drawn wrong, and things
+*owned* wrong. The second kind is the one worth keeping.
+
+### The granary was a monument
+
+It was the pack's `TownCenter_SecondAge_Level3` — at level three, a stone plaza with a fountain, a
+reflecting pool and a bronze of two stags. Handsome, and the wrong building entirely: the one place the
+whole settlement carries its food to read as a civic ornament, so nothing on screen said where the grain
+was. The report was that it "does look rather odd", which was generous.
+
+A **windmill** says grain without a label on it. A **timber barn** says goods. They are different
+silhouettes at different heights — 5.4 m against 2.2 m at the same footprint — which is the entire job a
+building model has here. The town centre is out of the settlement altogether.
+
+This is the same mistake as the FirstAge houses reading as tables, and it has the same shape: a model
+was picked because the pack's naming suggested it, not because of what it looks like from the one camera
+angle this game has. **The pack's names describe a tech tree we do not have.** Pick by silhouette.
+
+### Fields were striped because of contrast, not alignment
+
+The plot and the crop line up now, and the block still read as ribbons. The alignment was never the
+whole problem:
+
+- The pack's dirt is **0.09** linear and its wheat is **0.38**. A crop that covers its plot in rows puts
+  four-to-one contrast between every row and the bare gap beside it.
+- Every field carried the same orientation, so twelve of them tiled edge to edge lined their furrows up
+  into **continuous forty-metre rows** across the whole block.
+
+Two fixes, one per cause. Neighbouring plots now take a quarter turn on a checkerboard of their own
+position, so the rows break at every field boundary while each field stays square to the grid — which is
+what makes a block of fields a patchwork rather than a corduroy. And tilled soil is lifted off the pack's
+near-black dirt by `LookSettings.SoilBrightness`, a dial because the right amount is a judgement about the
+whole frame: too far and the fields stop reading as cut out of the grass.
+
+### "The largest crates in existence"
+
+Exactly right, and the cause is the normalisation rather than the number. Props are baked to a **unit
+footprint**, so a model takes its height from its own proportions — and `Crate_Stack2` is 0.12 m across
+and 0.25 m tall, better than twice as tall as it is wide. A heap of 120 units asked for nearly three
+metres across and therefore got **three metres of crate** standing over the houses.
+
+A single `Crate` is very nearly cubic, so a metre across is a metre tall, and the spread is capped: a
+cart's worth is about a metre, and more than that spreads a little and then stops. The general lesson is
+that *normalise to a footprint* silently makes height a property of the source model, which is fine for
+buildings authored to sit on a tile and wrong for anything that scales with a quantity.
+
+### The two ownership bugs
+
+Both are the recurring finding again — *a question answered by the layer that happened to be convenient
+rather than the layer that owns it* — and this makes five.
+
+**The raiders were running the settlement's defence.** The civilian defence is written against
+hostility rather than against raiders, which is the line §28 draws and the right one. The price of that
+line is that nothing stopped it running on the raiders too: a raider standing over a heap sees loot worth
+protecting and villagers reaching for it, answers the three questions, and gets marched somewhere its own
+director never sent it. A raid dissolved into a milling crowd that walked its own way home. Watched, that
+is precisely the "they surround the raiders as if to harass them" report — except that half the milling
+was the raiders doing it to themselves.
+
+The fix is *not* to teach the defence what a raider is. It is `AgentState.Directed`: a body already under
+orders from elsewhere does not also make its own decisions. That is a true statement about ownership, and
+it stays true when the thing over the hill is another player — *their* people run their own interrupt
+layer in their own world, not ours.
+
+**The interrupt only ever started things.** An interrupt that never stands down leaves its last order
+standing: a defender marched at a raider, the raider ran, question one stopped finding anything worth
+protecting — and the defender kept walking to where the raider *had been*, in a straight line, until it
+got there. That is the column of villagers filing across the map after nothing at all. Standing down is
+an action and has to be taken, so `Halt` is now half of the defence delegate pair, fired once on the tick
+the danger passes and only for a body that actually had a commitment to drop.
+
+### `--raidtest`, and what it measured
+
+Stage E shipped without a test, and every single thing it got wrong was a thing a test would have said
+out loud. So the defence now gets the same three questions asked of it, headless, at a raid every 45 s:
+
+| | conservation | settlers lost | raiders alive | longest a raider lived | furthest a settler went |
+|---|---|---|---|---|---|
+| before | exact | **26 of 26** | 19 | **342 s** | 65 m |
+| after | exact | 14 of 26 | 9 | 137 s | 47 m |
+
+The round trip a raider is allowed is `3 × arrival / pace + loot` = 182 s, so 342 s was a raider that had
+stopped walking and 137 s is one that went home. Both faults the harness raised on the first run were
+real; both are gone.
+
+Two details of the harness that are worth more than the harness:
+
+- **`LiveCount` includes the raiders.** The wipe check read "nobody left alive at all" against the whole
+  agent store, so a settlement annihilated while nineteen raiders stood about in it reported a healthy
+  population. It is the HUD's "82 people" bug a second time, in a test this time — which is the argument
+  for the test.
+- **The furthest settler from its granary is the pursuit metric.** A defence that chases to the map edge
+  is not a defence, and as a number in the hundreds it is impossible to miss, where on screen you have to
+  happen to be looking.
+
+### Combat is its own arc, and here is the question it opens with
+
+Parked deliberately, at the point where the harness stops being about correctness and starts being about
+design. What it measured, and what a combat pass has to answer:
+
+**Everybody always stands.** `stood` peaked at 26 out of 26, every raid, without exception. Question two
+sums the strength of everyone who can see the threatened thing and could reach it inside the rally
+window — 26 villagers at strength 1 against 3 raiders at strength 3 is 26 against 9, so the answer is
+always "we can take them". And then they arrive **one at a time**, down whatever lane the crowd allows,
+and are killed individually by a raider that only ever fights one of them. Fourteen died proving it.
+
+So: *strength that can arrive is not the same as strength that arrives together*. The sum is a potential
+and the fight consumes it serially. That is not a bug in the three questions — the questions are right,
+and a defence that gathers before it commits is exactly the emergent behaviour §28 wanted. It is that
+there is no notion of a defence being *formed* rather than merely *summed*, and no fight model with any
+front to it: two bodies within reach hurt each other, per second, at their strength, which is what makes
+"surround them and kill them with body heat" the literal description of the mechanic.
+
+That is where combat begins, and it should begin there rather than with numbers to tune.

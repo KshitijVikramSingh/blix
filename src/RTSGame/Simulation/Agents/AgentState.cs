@@ -82,6 +82,38 @@ internal struct AgentState
     /// </remarks>
     public float Health;
 
+    /// <summary>
+    /// Seconds left of this body's commitment to standing or running.
+    /// </summary>
+    /// <remarks>
+    /// A commitment window, and it is not optional. Group composition changes every tick, so a body on the
+    /// margin of "can we win this" would flip between fighting and fleeing forever and do neither — the same
+    /// hazard the interrupt grace already exists to stop a player's orders creating. Once decided, a body
+    /// holds the decision for a few seconds and then asks again.
+    /// </remarks>
+    public float Resolve;
+
+    /// <summary>Whether this body's current commitment is to fight rather than to run.</summary>
+    public bool Standing;
+
+    /// <summary>
+    /// Whether something outside the simulation is deciding this body's movement.
+    /// </summary>
+    /// <remarks>
+    /// <b>Set on bodies a script drives, and the interrupt layer leaves them alone.</b> Found by watching:
+    /// the civilian defence is written against hostility rather than against raiders, which is the right
+    /// line — and it meant the raiders ran it too. A raider standing over a heap sees loot worth protecting
+    /// and villagers reaching for it, decides to stand or run, and gets marched somewhere its own director
+    /// did not send it, so a raid dissolved into a milling crowd that walked its own way home.
+    /// <para>
+    /// The fix is not to teach the defence what a raider is. It is to say that a body already under orders
+    /// from elsewhere does not also make its own decisions, which is a true statement about ownership and
+    /// stays true when the thing over the hill is another player: <em>their</em> people run their own
+    /// interrupt layer in their own world, not ours.
+    /// </para>
+    /// </remarks>
+    public bool Directed;
+
     public float MaximumSpeed;
     public float Acceleration;
     /// <summary>Rate this body sheds speed at; see AgentDefaults.Deceleration.</summary>

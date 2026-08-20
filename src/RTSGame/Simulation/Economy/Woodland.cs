@@ -1,3 +1,4 @@
+using System.Numerics;
 using RTSGame.Simulation.Agents;
 
 namespace RTSGame.Simulation.Economy;
@@ -138,6 +139,54 @@ internal static class Woodland
     /// </para>
     /// </remarks>
     internal static int CoverTrees = 2;
+
+    /// <summary>
+    /// Radial lanes left clear through the wood, and how wide.
+    /// </summary>
+    /// <remarks>
+    /// <b>A wood that seals a settlement in is a wood nothing can come out of.</b> Which sounds like safety
+    /// and is actually the end of the game: an impassable ring means no raid can reach the granary, so the
+    /// one thing Stage E exists to test cannot happen. Tuning the density down until the ring happens to
+    /// have a hole in it would work and would be the wrong kind of answer — a property the map needs should
+    /// be built rather than hoped for.
+    /// <para>
+    /// So the scatter leaves <em>rides</em>: straight lanes out from the settlement where no tree is
+    /// planted, the way a managed wood has drove roads and firebreaks through it. They give the raid defined
+    /// approaches and the defence something to watch, which is the tactical shaping that blocking movement
+    /// was for in the first place — and they are the reason a settlement can reach the rest of the map at
+    /// all.
+    /// </para>
+    /// <para>
+    /// Ten metres, because cover reaches <see cref="CoverRadius"/> in from the trees on either side and a
+    /// lane has to survive that with enough left to route through: ten less two lots of 2.6 leaves about
+    /// five metres of open ground, against the 1.5 m the clearance rungs need. Narrower closes over.
+    /// </para>
+    /// </remarks>
+    internal static int Rides = 4;
+
+    internal static float RideWidth = 10f;
+
+    /// <summary>Whether a point lies in one of the rides, and so should stay clear of trees.</summary>
+    /// <remarks>
+    /// Perpendicular distance to each ride's centre line, which for a ray from the settlement is the
+    /// component of the offset across the ride's bearing. Only outward — the sign check stops a ride's
+    /// mirror image on the far side counting, so four rides are four lanes rather than two.
+    /// </remarks>
+    public static bool OnARide(Vector2 offset)
+    {
+        if (Rides <= 0) return false;
+        var half = RideWidth * 0.5f;
+        for (var i = 0; i < Rides; i++)
+        {
+            var angle = i / (float)Rides * MathF.Tau;
+            var along = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
+            if (Vector2.Dot(offset, along) <= 0f) continue;
+            var across = MathF.Abs(offset.X * -along.Y + offset.Y * along.X);
+            if (across <= half) return true;
+        }
+
+        return false;
+    }
 
     /// <summary>What a tree would say about itself, for a report that has to say something.</summary>
     public static string StateOf(in EconomyNode tree) => tree.Stock.Wood >= WoodPerTree - 0.5f

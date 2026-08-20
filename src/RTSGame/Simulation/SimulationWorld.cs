@@ -394,6 +394,43 @@ internal sealed class SimulationWorld
         agent.Home.RebindSeconds = EconomySystem.RebindSeconds;
     }
 
+    /// <summary>
+    /// Books a body's load as gone from the world, and clears its hands.
+    /// </summary>
+    /// <remarks>
+    /// For the one case where goods leave without being eaten and without being dropped: carried over the
+    /// edge of the map. From the settlement's books that is indistinguishable from being eaten — the units
+    /// are gone — so it goes through the same door as a loaf rather than getting a term of its own, which
+    /// would be a hole in the conservation identity dressed up as bookkeeping.
+    /// <para>
+    /// It is separate from despawning on purpose: a body <em>killed</em> drops what it was carrying, which
+    /// is the whole of why intercepting a loaded raider is worth doing. Only a body that got away takes it.
+    /// </para>
+    /// </remarks>
+    public void TakeOutOfTheWorld(AgentId body)
+    {
+        if (!Agents.Contains(body)) return;
+        ref var agent = ref Agents.Get(body);
+        if (agent.Jobs.CarriedUnits <= 0) return;
+        economy.RecordConsumed(agent.Jobs.Carrying, agent.Jobs.CarriedUnits);
+        agent.Jobs.CarriedUnits = 0;
+    }
+
+    /// <summary>
+    /// Sends one body somewhere because of a threat, as an interrupt rather than a new job.
+    /// </summary>
+    /// <remarks>
+    /// Queued rather than applied, so it lands next tick through the same path a player's right-click takes
+    /// — which is what makes the assignment survive it. It is also the honest test of whether those orders
+    /// are enough to play the game with: if defence needs a private channel into the movement layer, so
+    /// would a player.
+    /// </remarks>
+    private void MarchAgainstThreat(AgentId body, Vector2 toward) =>
+        QueueMove(new[] { body }, Terrain.ClampPosition(toward));
+
+    /// <summary>The danger has passed: drop the walk, and let the jobs layer have the body back.</summary>
+    private void StandDown(AgentId body) => QueueStop(new[] { body });
+
     /// <summary>Somebody leaves for good, because their household went hungry too long.</summary>
     /// <remarks>
     /// The ordinary carrying-capacity correction, and reversible in the sense that matters: the settlement
@@ -1330,6 +1367,12 @@ internal sealed class SimulationWorld
         // the jobs layer is what reacts to it. A body killed this tick should not then be given work.
         var fallen = threat.Update(Agents, Colliders.Factions, deltaSeconds);
         if (fallen.Count > 0) DespawnAgents(fallen.ToArray());
+        // And then the decision, which nobody has to give: see what you want to protect, weigh whether the
+        // people who can see the same thing could hold it, and either stand or run toward help. It marches
+        // through QueueMove — the same door a player's order goes through — so the assignment is suspended
+        // and never rewritten, and a villager who fights goes back to its field afterwards.
+        threat.Defend(
+            Agents, Nodes, Colliders.Factions, deltaSeconds, CanSee, MarchAgainstThreat, StandDown);
         Timings.Record(SimulationPhase.Threat, Stopwatch.GetTimestamp() - phaseStart);
 
         phaseStart = Stopwatch.GetTimestamp();

@@ -57,6 +57,14 @@ public static class Program
             Environment.Exit(SettlementScenarios.RunForestCost(forestExtent));
         }
 
+        if (args.Contains("--raidtest"))
+        {
+            var raidExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var raidMinutes = Value(args, "--minutes") is { } span ? float.Parse(span) : 8f;
+            var between = Value(args, "--every") is { } gap ? float.Parse(gap) : 60f;
+            Environment.Exit(SettlementScenarios.RunRaids(raidExtent, raidMinutes, between));
+        }
+
         if (args.Contains("--catchment"))
         {
             var catchExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;

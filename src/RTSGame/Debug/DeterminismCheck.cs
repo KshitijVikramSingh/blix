@@ -74,6 +74,7 @@ internal static class DeterminismCheck
         "SimulationWorld.commands", "SimulationWorld.paths", "SimulationWorld.moveGroups",
         "SimulationWorld.nextMoveGroupId", "SimulationWorld.blockColliders",
         "ThreatSystem.Killed", "ThreatSystem.Dealt",
+        "ThreatSystem.Standing", "ThreatSystem.Fleeing",
         "SimulationWorld.congestionRecoveryCooldown",
         "SimulationWorld.rasterizedTerrainRevision", "SimulationWorld.routePlansThisTick",
         "SimulationWorld.ExtentMeters", "SimulationWorld.Nodes", "SimulationWorld.economy",
@@ -120,6 +121,12 @@ internal static class DeterminismCheck
         ["EconomySystem.Readiness"] =
             "recomputed from the stores and the households at the head of every population pass, before " +
             "anything reads it; it is a reported figure rather than a carried one.",
+        ["ThreatSystem.hostiles"] =
+            "who can do harm, gathered at the head of every defence pass from the bodies themselves.",
+        ["ThreatSystem.guarded"] =
+            "what is worth protecting, rebuilt per body from the nodes and the loads on backs.",
+        ["ThreatSystem.menace"] =
+            "scratch for one body's weighing of a threat, refilled before it is read.",
         ["ThreatSystem.fallen"] =
             "who died this tick, refilled by every pass and handed straight back to the world.",
         ["EconomySystem.drawnOn"] =
@@ -502,6 +509,8 @@ internal static class DeterminismCheck
         sink.Add("Raised", world.Economy.Raised);
         sink.Add("Killed", world.Threat.Killed);
         sink.Add("Dealt", world.Threat.Dealt);
+        sink.Add("Standing", world.Threat.Standing);
+        sink.Add("Fleeing", world.Threat.Fleeing);
         foreach (var resource in Resources.All)
         {
             sink.Add("Produced", world.Economy.Produced[resource]);

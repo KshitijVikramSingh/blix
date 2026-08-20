@@ -90,6 +90,7 @@ internal sealed class SettlementHud : IDisposable
         bool pointerOnTerrain,
         bool additive,
         NodeId? routeSource,
+        string? raid,
         int width,
         int height)
     {
@@ -118,16 +119,30 @@ internal sealed class SettlementHud : IDisposable
             lines.Add(($"{resource.ToString().ToUpperInvariant()} {outlook.Stored:N0} · {lasts}", colour));
         }
 
+        // <b>Mine, not everybody's.</b> This counted every live body in the world, which is fine right up
+        // until something hostile is standing on the map — and then the settlement appears to have eighty-two
+        // people when it has twenty-six and there are fifty-six raiders walking in. A headcount that includes
+        // the people robbing you is not a headcount.
+        var people = 0;
         var spare = 0;
         foreach (ref readonly var body in world.Agents.All)
         {
-            if (!body.IsAlive || body.CarryCapacity <= 0) continue;
+            if (!body.IsAlive || body.Faction.Value != 0) continue;
+            people++;
+            if (body.CarryCapacity <= 0) continue;
             if (!body.Jobs.HasAssignment && !body.Jobs.IsInterrupted) spare++;
         }
 
         lines.Add((
-            $"{world.Agents.LiveCount} PEOPLE · {spare} SPARE · {world.Economy.Readiness * 100f:F0}% FED",
+            $"{people} PEOPLE · {spare} SPARE · {world.Economy.Readiness * 100f:F0}% FED",
             spare > 0 ? Action : Body));
+        if (raid is not null)
+        {
+            // Top of the screen, not the bottom, because it is the one thing that is worth interrupting
+            // whatever you were doing — and in red when it is happening rather than pending.
+            lines.Add((raid.ToUpperInvariant(), raid.Contains("RAIDERS") ? Warning : Body));
+        }
+
         Block(size, new Vector2(pad, pad), step);
 
         // Bottom left: what is selected, what is under the pointer, and what to press.

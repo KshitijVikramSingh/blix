@@ -140,27 +140,49 @@ internal sealed class SettlementArt : IDisposable
                 casts ? casterShader : null, casts ? casterPipeline : null, bake);
         }
 
-        // The plot is stretched to fill its square footprint, so a dozen fields tile edge to edge with
-        // no grass showing between them. <b>The crop is not,</b> and that was measured by looking:
-        // stretching a field of wheat smears every individual stalk along the stretched axis, and a
-        // hundred stalks smeared the same way stop being stalks and become long continuous ribbons
-        // running across the settlement. A plot is flat, so distorting it is invisible; a crop stands
-        // up, so distorting it is the only thing you can see.
+        // <b>Both stretched to the square, so the crop and the dirt it grows in are the same rectangle.</b>
+        // The crop was left unstretched for a while, on the reasoning that distorting standing wheat is
+        // visible where distorting flat ground is not — true, and it produced a worse problem: a 1.72 x 1.45
+        // crop uniform-scaled into a square plot covers 84% of it, so every field had the wheat sitting
+        // inset from its own soil with a margin of bare dirt on two sides. Aligning them matters more than
+        // the last few per cent of stalk shape, and the SecondAge crop is nearly square anyway, so the
+        // stretch it now takes is about three per cent.
+        // <b>SecondAge throughout, and it is purely a look.</b> The pack ships two ages and three levels of
+        // most buildings; we have no age or upgrade mechanism of our own and are not acquiring one, so this
+        // is the same choice as picking a colour. The FirstAge buildings are open-frame shelters — four
+        // posts and a roof — which from a top-down camera read as tables, and a player who cannot recognise
+        // a house cannot tell whether their population is capped by housing. Measured: nine houses with room
+        // for thirty-six, and the report was "there just aren't any houses".
+        //
+        // <b>Except the field's plot, which stays FirstAge because the SecondAge farm is not a plot.</b> It
+        // is a 1.84 m farmstead building with seven materials, and a field is ground — the decision §21
+        // settled and the reason a dozen of them tile into a patchwork instead of standing about as crates.
+        // The crop does move up an age, and gains from it: the SecondAge wheat is very nearly square
+        // (1.51 x 1.46 against 1.72 x 1.45), so stretching it to fill a square plot barely distorts it,
+        // which is what fixes the crop sitting inset from the dirt it grows in.
+        //
+        // <b>The granary is a windmill and the depot is a barn, because a store has to look like a store.</b>
+        // It was the pack's town centre, which at level three is a stone plaza with a fountain, a pool and a
+        // bronze of two stags — a fine landmark and a terrible granary. The report was that it "looks rather
+        // odd", and it was worse than odd: the one building the whole settlement carries its food to read as
+        // a monument, so nothing on screen said where the grain was. A windmill says grain without a label
+        // on it, and a timber barn says goods; they are different silhouettes and different sizes, which is
+        // the whole job.
         var art = new SettlementArt(
-            granary: Prop("TownCenter_FirstAge_Level3"),
-            depot: Prop("Storage_FirstAge_Level2"),
+            granary: Prop("Windmill_SecondAge"),
+            depot: Prop("Storage_SecondAge_Level3"),
             houses: new[]
             {
-                Prop("Houses_FirstAge_1_Level2"),
-                Prop("Houses_FirstAge_2_Level2"),
-                Prop("Houses_FirstAge_3_Level2"),
+                Prop("Houses_SecondAge_1_Level2"),
+                Prop("Houses_SecondAge_2_Level2"),
+                Prop("Houses_SecondAge_3_Level2"),
             },
             fieldPlot: Prop("Farm_FirstAge_Level3", casts: false, stretchToSquare: true),
             crop: new[]
             {
-                Prop("Farm_FirstAge_Level1_Wheat"),
-                Prop("Farm_FirstAge_Level2_Wheat"),
-                Prop("Farm_FirstAge_Level3_Wheat"),
+                Prop("Farm_SecondAge_Level1_Wheat", stretchToSquare: true),
+                Prop("Farm_SecondAge_Level2_Wheat", stretchToSquare: true),
+                Prop("Farm_SecondAge_Level3_Wheat", stretchToSquare: true),
             },
             trees: new[]
             {
@@ -169,7 +191,12 @@ internal sealed class SettlementArt : IDisposable
                 Prop("Resource_PineTree"),
             },
             stumps: Prop("Resource_Tree_Group_Cut", casts: false),
-            grainHeap: Prop("Crate_Stack2"),
+            // <b>One crate, not a stack of them, and the reason is the normalisation.</b> Props are baked to
+            // a unit footprint, so a model gets its height from its own proportions — and a stack of crates
+            // is 0.12 m across and 0.25 m tall, better than twice as tall as it is wide. A heap of forty
+            // units asks for two metres across and therefore got four metres of crates towering over the
+            // houses. A single crate is very nearly cubic, so a metre across is a metre tall.
+            grainHeap: Prop("Crate"),
             woodHeap: Prop("Logs"),
             villager: LoadVillager(device, directory, sceneShader, scenePipeline, casterShader, casterPipeline));
         return art;

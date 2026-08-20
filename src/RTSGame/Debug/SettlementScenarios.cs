@@ -125,6 +125,148 @@ internal static class SettlementScenarios
     }
 
     /// <summary>
+    /// A settlement under raid, headless: does the defence decision behave, and does anything go missing?
+    /// </summary>
+    /// <remarks>
+    /// <b>Stage E had no test, and everything it got wrong was a thing a test would have said out loud.</b>
+    /// Watching a raid tells you whether it is interesting; it does not tell you that a hundred and forty
+    /// route requests went out in a second, or that a villager is nine hundred metres from home, or which
+    /// tick a unit of grain disappeared on. So the same three questions the defence asks get asked of it:
+    /// <list type="bullet">
+    /// <item><b>Does the ledger still balance?</b> Checked every tick. Killing a loaded raider drops its
+    /// cargo on the ground, and a raider that gets away takes it out of the world — two paths that both
+    /// move units between terms of the identity, which is exactly where conservation breaks quietly.</item>
+    /// <item><b>Does anybody come home?</b> The distance of the furthest settler from the granary is the
+    /// pursuit metric. A defence that chases a raider to the map edge is not a defence, and it shows up
+    /// here as a number in the hundreds rather than as a thing you have to notice on screen.</item>
+    /// <item><b>Does the raid end?</b> A raider alive far longer than the walk in and out again means
+    /// something scripted has stopped walking, which is the failure that had fifty-six of them standing
+    /// about at once.</item>
+    /// </list>
+    /// </remarks>
+    public static int RunRaids(float extentMeters, float minutes, float secondsBetween)
+    {
+        var world = Build(extentMeters, out var granary);
+        var settings = new RaidSettings
+        {
+            SecondsBetween = secondsBetween,
+            CameraJumps = false,
+        };
+        var raids = new RaidDirector(settings);
+        var totalTicks = (int)(minutes * 60f * TicksPerSecond);
+        var faults = new List<string>();
+        var centre = world.Nodes.Get(granary).Position;
+
+        Console.WriteLine(
+            $"RTSGame raids — {world.ExtentMeters:F0} m, {world.Agents.LiveCount} people, " +
+            $"a raid every {secondsBetween:F0} s of {settings.Party}, {minutes:F1} minute(s)");
+        Console.WriteLine(
+            "     min | people | grain | raiders | stood | fled | killed | lost | stolen | " +
+            "piles | furthest | routes | ms/tick");
+
+        var settlers = world.Agents.LiveCount;
+        var furthestEver = 0f;
+        var stoodEver = 0;
+        var fledEver = 0;
+        var longestRaider = 0f;
+        var raiderAge = new Dictionary<int, float>();
+        var reported = 0;
+        for (var tick = 1; tick <= totalTicks; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            raids.Update(world, (float)SimulationWorld.FixedDeltaSeconds);
+
+            var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (drift.Grain != 0 || drift.Wood != 0)
+            {
+                faults.Add(
+                    $"conservation broke on tick {tick} ({world.Date}): " +
+                    $"{drift.Grain:+#;-#;0} grain, {drift.Wood:+#;-#;0} wood unaccounted for");
+                break;
+            }
+
+            // How far the furthest settler is from its granary. This is the pursuit metric, and it is the
+            // one that caught defenders following a raider off the edge of the settlement entirely.
+            var furthest = 0f;
+            var alive = 0;
+            foreach (ref readonly var agent in world.Agents.All)
+            {
+                if (!agent.IsAlive) continue;
+                if (agent.Faction.Value != 0)
+                {
+                    var age = raiderAge.TryGetValue(agent.Id.Value, out var had) ? had : 0f;
+                    age += (float)SimulationWorld.FixedDeltaSeconds;
+                    raiderAge[agent.Id.Value] = age;
+                    longestRaider = MathF.Max(longestRaider, age);
+                    continue;
+                }
+
+                alive++;
+                furthest = MathF.Max(furthest, Vector2.Distance(agent.Position, centre));
+            }
+
+            furthestEver = MathF.Max(furthestEver, furthest);
+            stoodEver = Math.Max(stoodEver, world.Threat.Standing);
+            fledEver = Math.Max(fledEver, world.Threat.Fleeing);
+
+            var minute = tick / (60 * TicksPerSecond);
+            if (minute == reported) continue;
+            reported = minute;
+            var piles = 0;
+            foreach (ref readonly var node in world.Nodes.All)
+            {
+                if (node.IsAlive && node.IsPile) piles++;
+            }
+
+            Console.WriteLine(
+                $"  {minute,6} | {alive,6} | {world.Nodes.Get(granary).Stock.Grain,5} | " +
+                $"{raids.Alive,7} | {stoodEver,5} | {fledEver,4} | {world.Threat.Killed,6} | " +
+                $"{settlers - alive,4} | {raids.Stolen,6} | {piles,5} | {furthest,7:F0} m | " +
+                $"{world.RoutePlansThisTick,6} | " +
+                $"{world.Timings.Format(world.Agents.Count, world.TickNumber).Split("total ")[1].Split(" ms")[0],7}");
+        }
+
+        Console.WriteLine(
+            $"  {raids.Raids} raids, {raids.Escaped} got away with {raids.Stolen}, " +
+            $"{world.Threat.Killed} bodies killed, {world.Threat.Dealt:F0} body-seconds of harm dealt");
+        Console.WriteLine(
+            $"  most standing at once {stoodEver}, most fleeing {fledEver}, " +
+            $"furthest a settler went {furthestEver:F0} m, longest a raider lived {longestRaider:F0} s");
+
+        // A settler two hundred metres from its granary is not defending anything. The settlement is
+        // 36 m across and the raid arrives at 120 m, so anything past the arrival ring is a pursuit that
+        // should have ended when the thing being protected stopped being in danger.
+        if (furthestEver > settings.ArrivesAt)
+        {
+            faults.Add(
+                $"a settler went {furthestEver:F0} m from home, past the {settings.ArrivesAt:F0} m a raid " +
+                "even arrives at — defenders are chasing rather than defending");
+        }
+
+        // Walk in, loot, walk out, with a wide allowance for a crowded lane.
+        var round = 3f * settings.ArrivesAt / UnitType.Raider.MaximumSpeed + settings.LootSeconds;
+        if (longestRaider > round)
+        {
+            faults.Add(
+                $"a raider lived {longestRaider:F0} s against a round trip of {round:F0} s — " +
+                "something scripted to walk has stopped walking");
+        }
+
+        // Settlers, not bodies: LiveCount includes the raiders, so a settlement wiped out while nineteen
+        // raiders stand about in it reads as a healthy population. That is how this check missed a wipe.
+        var left = 0;
+        foreach (ref readonly var agent in world.Agents.All)
+        {
+            if (agent.IsAlive && agent.Faction.Value == 0) left++;
+        }
+
+        if (left == 0) faults.Add($"the settlement was wiped out — {settlers} people, none left");
+
+        foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");
+        return faults.Count > 0 ? 1 : 0;
+    }
+
+    /// <summary>
     /// What forest cover costs: painting it, rasterising it, and re-opening it when a tree comes down.
     /// </summary>
     /// <remarks>
@@ -154,6 +296,8 @@ internal static class SettlementScenarios
         Console.WriteLine(
             $"  {trees:N0} trees closed {forest:N0} of {cells:N0} navigation cells " +
             $"({forest / (float)cells * 100f:F1}% of the map, {forest * 0.25f:N0} m2)");
+        Console.WriteLine($"  {ApproachReport(world, granary)}");
+        Console.WriteLine($"  {BuildingReport(world)}");
 
         // The raster on its own, so the first tick's cost is attributed rather than guessed at.
         var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -210,6 +354,65 @@ internal static class SettlementScenarios
             "  a felling only costs the rebuild when it actually opens ground; a settlement fells " +
             "about twenty trees a year");
         return 0;
+    }
+
+    /// <summary>What buildings the settlement actually has, and where, since that is easy to doubt.</summary>
+    private static string BuildingReport(SimulationWorld world)
+    {
+        var counts = new Dictionary<NodeKind, int>();
+        var housing = 0;
+        var nearest = float.PositiveInfinity;
+        var furthest = 0f;
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (!node.IsAlive || node.IsStanding || node.IsPile) continue;
+            counts[node.Kind] = counts.GetValueOrDefault(node.Kind) + 1;
+            if (node.Kind != NodeKind.House) continue;
+            housing += node.Occupancy;
+            var distance = node.Position.Length();
+            nearest = MathF.Min(nearest, distance);
+            furthest = MathF.Max(furthest, distance);
+        }
+
+        var parts = counts.OrderBy(entry => entry.Key.ToString())
+            .Select(entry => $"{entry.Value} {entry.Key.ToString().ToLowerInvariant()}");
+        return $"buildings: {string.Join(", ", parts)} — housing for {housing}, " +
+               $"houses {nearest:F0}–{furthest:F0} m from the granary";
+    }
+
+    /// <summary>
+    /// Whether anything can actually get from the edge of the map to the granary.
+    /// </summary>
+    /// <remarks>
+    /// <b>The check the forest most needs and the one it is easiest to forget.</b> An impassable ring around
+    /// a settlement reads as a defensible position and is in fact the end of the game: no raid can reach the
+    /// granary, so the whole of Stage E becomes untestable, and nothing about the economy would ever notice.
+    /// Priced in route seconds from eight bearings, because "is there a path" and "is there a path a raid
+    /// would take" are the same question asked with and without a number.
+    /// </remarks>
+    private static string ApproachReport(SimulationWorld world, NodeId granary)
+    {
+        var target = world.Nodes.Get(granary).Position;
+        var edge = world.ExtentMeters * 0.48f;
+        var open = 0;
+        var quickest = float.PositiveInfinity;
+        for (var bearing = 0; bearing < 8; bearing++)
+        {
+            var angle = bearing / 8f * MathF.Tau;
+            var from = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * edge;
+            if (!world.TryTravelSeconds(from, target, AgentDefaults.RoutingRadius, out var seconds))
+            {
+                continue;
+            }
+
+            open++;
+            quickest = MathF.Min(quickest, seconds);
+        }
+
+        return open == 0
+            ? "APPROACHES: none — the wood has sealed the settlement in and no raid can reach it"
+            : $"approaches: {open} of 8 bearings reach the granary, quickest {quickest:F0} route-seconds " +
+              $"({Woodland.Rides} rides {Woodland.RideWidth:F0} m wide)";
     }
 
     /// <summary>
@@ -319,13 +522,28 @@ internal static class SettlementScenarios
         // settlement reports a readiness figure and no births. You build a house before you need it.
         var households = (people + Occupancy - 1) / Occupancy + 2;
         var houseWidth = NodeFootprint.HalfExtentOf(NodeKind.House) * 2f;
+
+        // <b>The houses have to have gaps between them or they are not houses.</b> They were spread over a
+        // half-circle whose arc length was, measured, 52.8 m for 52.6 m of building — nine 4.5 m houses
+        // shoulder to shoulder with two centimetres to spare. From above that reads as one continuous wall,
+        // and the report of the day was "there just aren't any houses" about a settlement that had nine of
+        // them with room for thirty-six.
+        //
+        // So the arc is sized from the buildings rather than the buildings crammed into the arc: each house
+        // gets its own width plus two thirds of one as a gap, and the ring grows until they fit. And it
+        // skips the sector the fields are in, which is what leaves two thirds of a turn to spread over
+        // instead of a half.
+        const float houseGapShare = 1.65f;
+        var fieldSector = MathF.PI * 0.55f;
+        var houseSweep = MathF.Tau - fieldSector;
         var houseArc = MathF.Max(
             NodeFootprint.HalfExtentOf(NodeKind.Granary) + houseWidth * 0.5f + 1.5f,
-            households * houseWidth * 1.3f / MathF.PI);
+            households * houseWidth * houseGapShare / houseSweep);
         for (var i = 0; i < households; i++)
         {
-            // Half a turn, centred on west, so the village sits on one side and the fields on the other.
-            var angle = MathF.PI * (0.5f + (i + 0.5f) / households);
+            // Starting clear of the fields and sweeping the long way round, so the village wraps the
+            // settlement on three sides and the fields have the fourth.
+            var angle = fieldSector * 0.5f + (i + 0.5f) / households * houseSweep;
             world.AddNode(
                 NodeKind.House,
                 centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * houseArc,
@@ -543,6 +761,10 @@ internal static class SettlementScenarios
                 return false;
             }
 
+            // And not in a ride. Four lanes out from the settlement, kept clear, because a wood that seals
+            // the settlement in is a wood no raid can come out of — and the one thing this stage exists to
+            // test could then never happen.
+            if (Woodland.OnARide(at - centre)) return false;
             if (TooClose(at, spacing)) return false;
             var node = world.AddNode(NodeKind.Tree, at, capacity: (int)Woodland.WoodPerTree);
             world.SeedStock(node, Resource.Wood, (int)Woodland.WoodPerTree);
