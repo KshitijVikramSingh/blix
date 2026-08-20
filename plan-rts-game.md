@@ -4707,3 +4707,52 @@ Today's bugs, in one sentence each:
 Every one is a number that is correct in the layer that owns it and wrong where it meets another, and every
 one was invisible until something put the two quantities side by side. That is the argument for the
 overlay, the geometry line and the benchmarks — not for any of the individual fixes.
+
+## 50. The map gets a near side and a far side
+
+> not a covering woodline but player placed corner-ish, and trees are concentrated in dense forests on some
+> sides, some sides might be open/patchy — and in the forests I'd dial up the density even further.
+
+**A settlement in the exact centre of a square map has no geography.** Every direction is the same
+direction: the same distance to the edge, the same amount of forest, the same everything. So nothing about
+*where you are* can matter and "which way do I expand" has no answer. Two changes give the map a shape, and
+both are cheap.
+
+**The site is corner-ish** — a quarter of the extent out on both axes, 150 m on a 600 m map. Far enough that
+the corner is close and the interior is open; near enough that the settlement is not pressed against the
+border with half its catchment off the map.
+
+**The woodland is shaped by bearing, and the shape comes from the site rather than from a choice.** Since
+the settlement sits off a corner there is a direction with a country in it and a direction with a border in
+it, so `inland` is just the bearing back toward the middle. Two deep masses either side of inland, an open
+run toward the corner, and a floor of stragglers everywhere so that no side is a bald patch with a straight
+edge. Rejected rather than relocated: nudging a refused anchor somewhere acceptable would pile the rejects
+along the edge of the open sector and draw a wall exactly where the gap is meant to be. Off the map is a
+refusal too — clamping would stack every out-of-bounds tree onto the border as a hedge, which is precisely
+the artefact a corner-ish site invites.
+
+**Denser in the forests**, as asked: spacing 2.2 m to 1.6 m is about twice the trunks per hectare, and the
+anchor counts are up because shaping refuses most of what it is offered — the same anchors over a third of
+the compass would have *thinned* the forest rather than concentrated it. 9,650 trees to **11,177**.
+
+### One band is exempt, and it is not an oversight
+
+The near band — 46 trees inside a cutter's reach — is **unshaped**. §22 wrote down why before this came up:
+everything the economy gate measures depends on how much wood stands within reach, so that band is an
+economic constant rather than scenery, and thinning it by bearing would have halved the settlement's
+starting fuel as a side effect of a decision about how the map *looks*. It also happens to be true of
+settlements: you found the place because there was wood round it.
+
+### It costs nothing
+
+| | before | after |
+|---|---|---|
+| trees | 9,650 | 11,177 |
+| rasterise the woodland | 1,043 ms | **960 ms** |
+| steady tick | — | 4.41 ms |
+| a year: grain and wood per person | 270 / 126 | 270 / 126 |
+| people alive after a year | 30 | 30 |
+
+**Cheaper with a sixth more trees**, because shaping empties a third of the compass and the rasteriser's
+cost is in the impassable area rather than the trunk count. The year gate is unchanged to the digit, which
+is what exempting the near band was for. Suite passes.

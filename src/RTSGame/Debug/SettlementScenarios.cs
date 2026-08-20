@@ -645,7 +645,8 @@ internal static class SettlementScenarios
     private static SimulationWorld Build(float extentMeters, out NodeId granary)
     {
         var world = new SimulationWorld(extentMeters);
-        granary = Populate(world, Farms, Woodcutters, Carts, Wagons, ringRadius: 36f);
+        granary = Populate(
+            world, Farms, Woodcutters, Carts, Wagons, ringRadius: 36f, centre: CornerSite(extentMeters));
         return world;
     }
 
@@ -941,13 +942,49 @@ internal static class SettlementScenarios
             return true;
         }
 
-        void Band(float inner, float outer, int trees, float spacing, int clump)
+        // <b>Which way the map is, from here.</b> The settlement sits off toward a corner, so there is a
+        // direction with a country in it and a direction with a border in it — and that is enough to shape a
+        // woodland without inventing anything: the deep forest goes where the land is, and the open side is
+        // the one that runs out.
+        var inland = centre.LengthSquared() > 1f
+            ? MathF.Atan2(-centre.Y, -centre.X)
+            : 0f;
+
+        // How much woodland belongs on this bearing, from bare to solid.
+        float Shaped(Vector2 offset)
+        {
+            if (offset.LengthSquared() < 1f) return 1f;
+            var bearing = MathF.Atan2(offset.Y, offset.X);
+
+            float Lobe(float towards, float halfWidth)
+            {
+                var delta = MathF.Abs(MathF.IEEERemainder(bearing - towards, MathF.Tau));
+                return delta >= halfWidth
+                    ? 0f
+                    : MathF.Cos(delta / halfWidth * MathF.PI * 0.5f);
+            }
+
+            // Two deep masses either side of inland, an open run toward the corner, and a floor of
+            // stragglers everywhere so no side is a bald patch with a straight edge.
+            var forest = MathF.Max(Lobe(inland - 0.55f, 1.05f), Lobe(inland + 0.6f, 0.95f));
+            var open = Lobe(inland + MathF.PI, 1.15f);
+            return Math.Clamp(0.14f + forest - open * 0.55f, 0.02f, 1f);
+        }
+
+        void Band(float inner, float outer, int trees, float spacing, int clump, bool shape = true)
         {
             for (var i = 0; i < trees; i++)
             {
                 // A clump is one draw for the centre and the rest scattered around it, which is what
                 // makes a canopy read as a canopy rather than as evenly spread noise.
                 var anchor = centre + Polar(Next(), inner, outer, Next());
+                // Shaped by bearing, and rejected rather than moved: nudging a refused anchor somewhere
+                // acceptable would pile the rejects along the edge of the open sector and draw a wall
+                // exactly where the gap is supposed to be.
+                if (shape && Next() > Shaped(anchor - centre)) continue;
+                // Off the map is a refusal too. Clamping instead would stack every out-of-bounds tree onto
+                // the border as a hedge, which is the artefact a corner-ish settlement invites.
+                if (!world.Terrain.Contains(anchor)) continue;
                 for (var k = 0; k < clump; k++)
                 {
                     var at = clump == 1
@@ -967,18 +1004,27 @@ internal static class SettlementScenarios
         // years of this settlement's burning, so a one-year run never runs out and a two-year one only
         // just does. Change 46 and the numbers in §22 change with it. Everything past reach is the map
         // the player expands into, and its density is free to be whatever reads best.
-        Band(FieldKeepOut + 3f, Woodland.ReachMetres, trees: 46, spacing: 3.4f, clump: 1);
+        // <b>Unshaped, and that is not an oversight.</b> §22: everything the economy gate measures depends
+        // on how much wood stands within a cutter's reach, so this band is an economic constant rather than
+        // scenery — thinning it by bearing would cut the settlement's starting fuel roughly in half as a
+        // side effect of a decision about how the map looks. It is also true of settlements: you found the
+        // place because there was wood round it.
+        Band(FieldKeepOut + 3f, Woodland.ReachMetres, trees: 46, spacing: 3.4f, clump: 1, shape: false);
         // Canopies: clumps just beyond reach, which is where the tree line currently sits. Started clear
         // of the reach radius rather than at it, because a clump scatters its members several metres
         // around its anchor and the ones that landed inward pushed the in-reach count from 46 to 66 —
         // half a settlement's annual fuel, arriving as a side effect of a density change.
-        Band(Woodland.ReachMetres + 8f, ringRadius * 1.5f, trees: 120, spacing: 2.6f, clump: 6);
+        Band(Woodland.ReachMetres + 8f, ringRadius * 1.5f, trees: 260, spacing: 2.2f, clump: 6);
         // Closing up: the transition from a thinned edge to woodland proper.
-        Band(ringRadius * 1.5f, ringRadius * 3f, trees: 260, spacing: 2.4f, clump: 9);
+        Band(ringRadius * 1.5f, ringRadius * 3f, trees: 620, spacing: 1.9f, clump: 9);
         // Continuous forest, and the reason a settlement expands rather than starves. Out to a bit under
         // half the map, because a 600 m world whose outer half is bare plain does not read as a world with
         // a forest in it — it reads as a diorama with a hedge round it.
-        Band(ringRadius * 3f, ringRadius * 7f, trees: 900, spacing: 2.2f, clump: 11);
+        // <b>Denser, by request, and the density is why a forest reads as one.</b> Spacing 2.2 to 1.6 is
+        // roughly twice the trunks per hectare, and the anchor count is up because bearing shaping refuses
+        // most of what it is offered — the same number of anchors over a third of the compass would have
+        // thinned the forest rather than concentrated it.
+        Band(ringRadius * 3f, ringRadius * 8f, trees: 2600, spacing: 1.6f, clump: 11);
 
         (SeededTimber, SeededTrees) = world.Nodes.StandingTimber();
 
@@ -997,6 +1043,23 @@ internal static class SettlementScenarios
     }
 
     /// <summary>Half-width of the ground the fields and the village occupy, which stays clear.</summary>
+    /// <summary>
+    /// Where a settlement starts: off toward a corner, not in the middle of everything.
+    /// </summary>
+    /// <remarks>
+    /// <b>A settlement in the exact centre of a square map has no geography.</b> Every direction is the
+    /// same direction — the same distance to the edge, the same amount of forest, the same everything — so
+    /// nothing about where you are can matter, and "which way do I expand" has no answer. Corner-ish gives
+    /// the map a near side and a far side for free, and that is the cheapest geography there is.
+    /// <para>
+    /// A quarter of the extent out on both axes, which on a 600 m map is 150 m: far enough that the corner
+    /// is close and the interior is open, near enough that a settlement is not pressed against the border
+    /// with half its catchment off the map.
+    /// </para>
+    /// </remarks>
+    private static Vector2 CornerSite(float extentMeters) =>
+        new(-extentMeters * 0.25f, -extentMeters * 0.22f);
+
     private const float FieldKeepOut = 16f;
 
     /// <summary>What the woodland held when it was seeded, so felling can be reported against it.</summary>
