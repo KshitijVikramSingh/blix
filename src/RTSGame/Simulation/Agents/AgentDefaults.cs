@@ -76,7 +76,7 @@ internal static class AgentDefaults
     /// striking distance and stayed there. Twenty-four raiders walked home with six hundred grain and not
     /// one of them was ever hurt enough to notice.
     /// </remarks>
-    public const float ChaseStopMetres = 0.95f;
+    public static float ChaseStopMetres = 0.95f;
 
     /// <summary>How hard a body picks up speed, in metres per second squared.</summary>
     /// <remarks>

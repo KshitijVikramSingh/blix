@@ -4185,3 +4185,96 @@ configurations rather than five, because nothing in it costs six minutes.
 The two audit findings above are the first candidates to put through it. Until then the honest position is
 that **sticky quarry is unproven rather than good**, and it stays only because it is cheap, principled and
 has not been shown to hurt.
+
+## 41. `--fightbench`, and pursuit has never worked
+
+The instrument §40 called for. Three scenarios, one mechanism each, open ground, no economy, seconds to
+run: **a ring** (N bodies on one that cannot run), **a chase** (one pursuer, one quarry, a speed ratio), and
+**a cordon** (one body crossing a line of enemies). It found four things on its first full run, and the
+first one voids the premise of everything this session tried.
+
+### A chase cannot make contact. At any speed ratio. Ever.
+
+```
+    quarry pace | caught | inside reach% | gap at end | closing m/s
+       1.79 m/s |     no |            0% |    2.53 m |   -0.022
+       1.43 m/s |     no |            0% |    2.05 m |   -0.014
+       1.07 m/s |     no |            0% |    1.80 m |   -0.010
+```
+
+A pursuer at 1.79 m/s against a quarry at **1.07** ends the run 1.8 m behind it, having spent **none** of
+the chase inside its own reach, and *losing* ground. Then the sweep on the stop distance:
+
+| stop distance asked for | effective gap | inside reach% |
+|---|---|---|
+| 0.95 m | 1.92 m | 0% |
+| 0.60 m | 1.56 m | 0% |
+| 0.30 m | 1.26 m | 0% |
+| 0.00 m | **0.96 m** | 0% |
+
+**There is a fixed 0.96 m standoff on top of whatever the behaviour asks for** — the column is exactly
+`stop + 0.96` at every row — and it does not go away at zero. That is path-arrival tolerance: a body is
+"there" when it is within a raster cell and a touch of slack of the point it was sent to, which is correct
+for walking to a granary and fatal for walking at a person.
+
+Against an intrinsic harm reach of `(0.37 + 0.37) × 1.1 = 0.81 m`, a chase settles outside striking
+distance **by construction**. So: **all fight contact in this game has come from stationary encounters** —
+a raider looting, a raider blocked, a raider that stopped because the crowd around it stopped. Pursuit has
+never once landed a blow. Which is precisely the report: *my people kept trying to do some retaliation but
+couldn't turn that into anything.*
+
+And it exposes a mistake of my own. §33 wrote the harm reach as a floor of `ChaseStopMetres + ContactSlack`
+so that reach could never be shorter than where a chase stops. **That coupling is self-defeating**: lower
+the stop distance to close the gap and the reach falls with it, so the two can never meet. Visible in the
+table above — at stop 0.00 the gap is 0.96 m, which is inside the *old* 1.10 m floor and outside the 0.81 m
+the floor had just shrunk to. A dependency written the wrong way round, which is the recurring finding
+wearing a fourth hat.
+
+### Three villagers refuse a fight they would win
+
+```
+    N | killed in | contact% | landed/N
+     3 |     never |       0% |    0/3
+     4 |     4.8 s |      94% |    5/4
+```
+
+One, two and three never engage at all: `StandMargin` 1.25 × a raider's strength 3 wants 3.75, and three
+villagers muster 3.0, so they flee. But three villagers carry **60 health against 18** and deal 3 a second
+— they would kill it in six seconds and lose at most one of their number.
+
+**Question two compares strength and ignores health entirely.** It is asking "can we out-hit them" when the
+question is "can we outlast them", and the two differ by exactly the ratio the roster puts between a
+farmhand and a thief. Four is the threshold only because 4 × 1 clears 3.75; nothing in the decision knows
+that a villager takes twenty seconds of punishment.
+
+### The front binds, and crowding costs
+
+`4.8 s` at N = 4, 6 and 8, `5.3 s` at N = 12, with **five** distinct bodies ever landing a blow whatever N
+is. So the engagement limit works as designed, more than four is worth nothing at all, and twelve is
+*worse* than four — the twelfth villager's contribution is to slow the other eleven down. §38's guess that
+concentration was the lever had the right target and no way to see it.
+
+### A cordon of twelve costs a raider nothing
+
+```
+    N | crossed | seconds | detour | held below half pace for
+     2 |     yes |     9.6 |   1.00x |    1.4 s
+    12 |     yes |     9.6 |   1.00x |    1.4 s
+```
+
+Identical at every N. It walks the straight line, at full speed, through twelve bodies standing shoulder to
+shoulder across its path — the 1.4 s below half pace is its own acceleration ramp at each end, present with
+nobody in the way at all. **The reported bug, measured, and completely independent of how many people are
+standing there.**
+
+### What this changes
+
+The five hypotheses of §39–§40 were all trying to make a fight last longer or concentrate better. None of
+them could have worked, because **contact was never happening in the first place** outside of a body
+standing still. The order of work is now:
+
+1. **The arrival standoff**, which is one number in the wrong place and the cause of the headline. A body
+   sent *at another body* wants a different arrival test from one sent *to a place*.
+2. **Health in question two**, so a defence weighs whether it can outlast rather than only out-hit.
+3. **The cordon**, which is the avoidance layer and the genuinely invasive one — and now has a measurement
+   to be judged by rather than a six-minute raid.

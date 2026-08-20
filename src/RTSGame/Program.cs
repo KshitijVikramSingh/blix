@@ -20,6 +20,11 @@ public static class Program
             Environment.Exit(SimulationSelfTests.Run());
         }
 
+        if (args.Contains("--fightbench"))
+        {
+            Environment.Exit(FightBenchmarks.Run());
+        }
+
         if (args.Contains("--benchmark"))
         {
             Environment.Exit(MovementBenchmarks.Run());
