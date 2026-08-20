@@ -50,7 +50,7 @@ internal sealed class LookSettings
     /// zenith. Low is dramatic and long-shadowed; high flattens everything.
     /// </remarks>
     [Tune(8.0, 88.0, Label = "sun elevation (deg)", Group = "sun")]
-    public float SunElevationDegrees = 42f;
+    public float SunElevationDegrees = 22f;
 
     /// <summary>Compass bearing the light comes from, in degrees.</summary>
     [Tune(0.0, 360.0, Label = "sun bearing (deg)", Group = "sun")]
@@ -126,6 +126,40 @@ internal sealed class LookSettings
     /// </remarks>
     [Tune(0.0, 60.0, Label = "shadow margin (m)", Group = "sun")]
     public float ShadowMarginMetres = 8f;
+
+    /// <summary>The tallest thing expected to cast a shadow, in metres.</summary>
+    /// <remarks>
+    /// <b>Not a look dial — the term that keeps the shadow margin honest when the sun moves.</b> A shadow is
+    /// <c>height / tan(elevation)</c> long, so the eight metres of margin that covered a six-metre tree at
+    /// 42° covers only a two-and-a-bit-metre one at 22°, and dropping the sun would have silently clipped
+    /// every tree shadow reaching in from off screen. The margin is floored by this instead, so lowering the
+    /// sun widens the box by itself.
+    /// </remarks>
+    [Tune(1.0, 20.0, Label = "tallest caster (m)", Group = "sun")]
+    public float TallestCasterMetres = 7f;
+
+    /// <summary>How much colour distance takes out of the world, from none to all of it.</summary>
+    /// <remarks>
+    /// <b>Aerial perspective, and it is the half of haze that was missing.</b> Fog was a straight mix toward
+    /// one colour, which fades a scene evenly and flattens it: a distant forest went pale and stayed just as
+    /// green. Air scatters short wavelengths and takes <em>saturation</em> before it takes value, which is
+    /// why a far hillside reads as grey-blue rather than as bright green seen through milk — and why doing
+    /// this makes a settlement pop out of its own landscape without touching the settlement.
+    /// </remarks>
+    [Tune(0.0, 1.0, Label = "distance drains colour", Group = "sun")]
+    public float HazeDesaturation = 0.7f;
+
+    /// <summary>
+    /// How much the haze warms when looking toward the sun, from none to fully.
+    /// </summary>
+    /// <remarks>
+    /// The cheapest half of real atmospheric scattering: air lit from behind glows, air lit from in front
+    /// stays cold. One dot product between the view ray and the sun, and it turns a single fog colour into
+    /// a sky that has a direction in it — which at a low sun is most of what makes the light feel like a
+    /// time of day rather than a setting.
+    /// </remarks>
+    [Tune(0.0, 1.0, Label = "haze glows toward the sun", Group = "sun")]
+    public float HazeSunGlow = 0.55f;
 
     /// <summary>How much the far distance washes out toward the sky.</summary>
     [Tune(0.0, 1.0, Label = "aerial perspective", Group = "air")]

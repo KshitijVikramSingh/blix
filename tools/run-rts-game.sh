@@ -22,6 +22,14 @@ if [ -d "$prefix/opt/dotnet@8/bin" ]; then
     export PATH="$prefix/opt/dotnet@8/bin:$PATH"
 fi
 
+# <b>Build first, because the shader copy below trusts the build directory.</b> The publish compiles its
+# own SPIR-V and then those files are overwritten from bin/Debug — which is correct for the reason in the
+# comment below, and silently wrong if bin/Debug is stale. Editing a shader and running only this script
+# then launches the previous shader, and the way that surfaces is a push-constant payload-length mismatch at
+# draw time: a number from a file you did not think you were using.
+echo "Building (so the shader copy below is not stale) ..."
+dotnet build "$PROJECT" -c Debug --nologo -v:q || exit 1
+
 echo "Publishing self-contained ($RID) ..."
 dotnet publish "$PROJECT" -c Debug -r "$RID" --self-contained true -o "$PUBLISH_DIR" --nologo -v:q
 

@@ -26,6 +26,11 @@ layout(push_constant) uniform Push {
     vec4 uFog;      // x = start (m), y = end (m), z = strength
     vec4 uShadow;   // x = texel as a fraction of the map, y = map size (m), z = penumbra, w = offset
     vec4 uLight;    // x = sun intensity, y = ambient scale, z = terminator wrap
+    // Declared here although the vertex stage never reads it. A push-constant block is one layout shared by
+    // every stage of a pipeline, so a member added to the fragment shader alone leaves the two disagreeing
+    // about how big the block is — and the mismatch surfaces as a draw-time payload-length error rather than
+    // as a compile error, which is a long way from the line that caused it.
+    vec4 uHaze;     // x = desaturation with distance, y = how much haze glows toward the sun
 };
 
 layout(location = 0) out vec3 vNormal;

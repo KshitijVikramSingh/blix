@@ -27,6 +27,7 @@ layout(push_constant) uniform Push {
     vec4 uFog;      // x = start (m), y = end (m), z = strength
     vec4 uShadow;   // x = texel as a fraction of the map, y = map size (m), z = penumbra, w = offset
     vec4 uLight;    // x = sun intensity, y = ambient scale, z = terminator wrap
+    vec4 uHaze;     // x = desaturation with distance, y = how much haze glows toward the sun
 };
 
 // The hues stay here and the intensities do not. A colour is a decision about what kind of
@@ -35,7 +36,12 @@ layout(push_constant) uniform Push {
 const vec3 kSkyAmbient    = vec3(0.36, 0.44, 0.55);
 const vec3 kGroundAmbient = vec3(0.24, 0.20, 0.15);
 const vec3 kSunColor      = vec3(1.00, 0.94, 0.80);
-const vec3 kFogColor      = vec3(0.62, 0.74, 0.88);
+// Two haze colours rather than one, because air lit from behind and air lit from in front are not the
+// same colour. Away from the sun it is the cold scatter of the sky; toward it, the warm glow of the same
+// air with the sun behind it. One dot product picks between them, which is the cheapest half of real
+// atmospheric scattering and most of what makes a low sun read as a time of day.
+const vec3 kHazeAway      = vec3(0.60, 0.70, 0.84);
+const vec3 kHazeToward    = vec3(0.92, 0.82, 0.66);
 
 // Shared sun-shadow technique — src/Blix.Shaders/shadow.glsl.
 #include "shadow.glsl"
@@ -58,7 +64,23 @@ void main() {
     vec3 ambient = mix(kGroundAmbient, kSkyAmbient, n.y * 0.5 + 0.5) * uLight.y;
     vec3 lit = vTint.rgb * (ambient + kSunColor * uLight.x * wrapped * shadow);
 
-    float dist = length(vWorldPos - uCamPos.xyz);
+    vec3 toFragment = vWorldPos - uCamPos.xyz;
+    float dist = length(toFragment);
     float fog = smoothstep(uFog.x, uFog.y, dist) * uFog.z;
-    outColor = vec4(mix(lit, kFogColor, fog), vTint.a);
+
+    // <b>Distance takes colour before it takes value.</b> A straight mix toward one colour fades a scene
+    // evenly, which flattens it — a far forest went pale and stayed just as green. Air scatters short
+    // wavelengths and drains saturation first, which is why a distant hillside reads grey-blue rather than
+    // as bright green seen through milk, and why draining it here makes the settlement stand out of its own
+    // landscape without touching the settlement.
+    float drained = fog * uHaze.x;
+    float luma = dot(lit, vec3(0.2126, 0.7152, 0.0722));
+    lit = mix(lit, vec3(luma), drained);
+
+    // Which way the haze is lit. Looking toward the sun the air between here and there glows; looking away
+    // it is the cold scatter of the sky.
+    float towardSun = max(dot(normalize(toFragment), normalize(uSunDir.xyz)), 0.0);
+    vec3 hazeColor = mix(kHazeAway, kHazeToward, towardSun * uHaze.y);
+
+    outColor = vec4(mix(lit, hazeColor, fog), vTint.a);
 }

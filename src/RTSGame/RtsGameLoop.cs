@@ -271,7 +271,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private InstanceBuffer propBuffer = null!, propCasterBuffer = null!, unitCasterBuffer = null!;
     private InstanceBuffer canopyBuffer = null!, canopyCasterBuffer = null!;
 
-    private readonly byte[] worldPush = new byte[208];   // viewProj, camPos, sunDir, sunVP, fog, shadow, light
+    private readonly byte[] worldPush = new byte[224];   // viewProj, camPos, sunDir, sunVP, fog, shadow, light, haze
     private readonly byte[] skyPush = new byte[96];      // invViewProj + camPos + sunDir
     private readonly byte[] shadowPush = new byte[64];   // sun shadow VP
     private readonly byte[] gradePush = new byte[16];    // exposure, tonemap mode, saturation, contrast
@@ -365,9 +365,27 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// about six metres, so eight metres covers it with room to spare.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// How far outside the view a caster can stand and still reach into it, in metres.
+    /// </summary>
+    /// <remarks>
+    /// <c>height / tan(elevation)</c>, which is the length of a shadow — so this grows as the sun drops and
+    /// the margin never has to be re-guessed. At 42° a seven-metre tree throws 7.8 m; at 22° it throws 17.3.
+    /// The slider is a floor under it rather than the value, because a number that is correct at one sun
+    /// angle and silently wrong at every other is the mistake this file has now made three times.
+    /// </remarks>
+    private float ShadowReachMetres
+    {
+        get
+        {
+            var elevation = MathF.Max(0.05f, look.SunElevationDegrees * MathF.PI / 180f);
+            return MathF.Max(look.ShadowMarginMetres, look.TallestCasterMetres / MathF.Tan(elevation));
+        }
+    }
+
     private float SunOrthoExtent => MathF.Max(
         look.ShadowFloorMetres,
-        2f * (VisibleGroundRadius + look.ShadowMarginMetres));
+        2f * (VisibleGroundRadius + ShadowReachMetres));
 
     private const float SunDistance = 220f;
 
@@ -683,7 +701,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             },
             PushConstants: new[]
             {
-                new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 208),
+                // <b>Three places agree on this number and all three have to be edited together.</b> The
+                // block is declared in world.vert, again in world.frag, and its size again here — so adding
+                // one vec4 to the fragment shader alone gets you a draw-time payload-length error, and
+                // adding it to both shaders alone gets you the same error with a shorter search. It is the
+                // recurring finding in a fourth costume: one fact, three owners.
+                new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 224),
             });
 
         var shaderDirectory = Path.Combine(AppContext.BaseDirectory, "Shaders");
@@ -1579,6 +1602,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             look.ShadowPenumbraTexels,
             look.ShadowNormalOffsetTexels);
         var light = new Vector4(look.SunIntensity, look.Ambient, look.TerminatorWrap, 0f);
+        var haze = new Vector4(look.HazeDesaturation, look.HazeSunGlow, 0f, 0f);
         var grade = new Vector4(
             look.Exposure, (float)look.Tonemap, look.Saturation, look.Contrast);
         Matrix4x4.Invert(viewProjection, out var inverseViewProjection);
@@ -1590,6 +1614,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         MemoryMarshal.Write(worldPush.AsSpan(160, 16), in fog);
         MemoryMarshal.Write(worldPush.AsSpan(176, 16), in shadow);
         MemoryMarshal.Write(worldPush.AsSpan(192, 16), in light);
+        MemoryMarshal.Write(worldPush.AsSpan(208, 16), in haze);
         MemoryMarshal.Write(skyPush.AsSpan(0, 64), in inverseViewProjection);
         MemoryMarshal.Write(skyPush.AsSpan(64, 16), in cameraPosition);
         MemoryMarshal.Write(skyPush.AsSpan(80, 16), in sun);
