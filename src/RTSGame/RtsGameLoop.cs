@@ -1913,6 +1913,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         unitInstances.Clear();
         canopyInstances.Clear();
         art?.Begin();
+        // Before the nodes are built, because that is what draws the trees and therefore their skirts.
+        undergrowthDrawn = 0;
         BuildObstacleInstances();
         BuildNodeInstances();
         BuildNavigationOverlay();
@@ -2499,6 +2501,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             art.Trees[tree.Id.Value % art.Trees.Length].Add(
                 SettlementArt.Placement(
                     tree.Position, ground, width, SettlementArt.FreeYawOf(tree.Id.Value)));
+            DrawUndergrowth(in tree, left);
             return;
         }
 
@@ -2515,6 +2518,72 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             Matrix4x4.CreateTranslation(
                 tree.Position.X, ground + trunkHeight + canopyHeight * 0.28f, tree.Position.Y),
             Vector4.Lerp(CanopyDarkColor, CanopyLightColor, (tree.Id.Value * 29 % 7) / 7f)));
+    }
+
+    /// <summary>
+    /// Scrub round the foot of a tree, which is what stops a trunk looking pushed into the floor.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reported as too flat and straight up where the trunk meets the ground</b>, with the ask being for
+    /// something to blend the two. Undergrowth is that something, and it is better than a decal: a trunk
+    /// meeting bare ground at ninety degrees looks wrong because in a real wood it never does — there is
+    /// always litter and scrub in the way, and the eye is not looking for a soft gradient so much as for the
+    /// mess that hides the join.
+    /// <para>
+    /// Which is also the second half of the ask — denser shrubs under trees, to fill a forest out — so one
+    /// mechanism does both, with no alpha blending, no decal pass and no new asset. Two or three squashed
+    /// bushes per trunk, placed from the tree's own id so they never move and survive a save.
+    /// </para>
+    /// <para>
+    /// Scaled by how much of the tree is left, so a trunk being cut down takes its undergrowth with it
+    /// rather than leaving a ring of bushes round nothing.
+    /// </para>
+    /// </remarks>
+    /// <summary>How far out undergrowth is drawn, and how much of it, per frame.</summary>
+    /// <remarks>
+    /// <b>Both learnt by overflowing the instance ceiling: 17,439 against a limit of 16,384.</b> The forest
+    /// is scattered at 1.6 m now, so the detail radius holds thousands of trunks, and two or three bushes
+    /// each is more instances than one batch can hold — the primitive is right to refuse rather than to
+    /// quietly drop them.
+    /// <para>
+    /// Thirty metres, because this is a close-up effect: it exists to hide the join where a trunk meets the
+    /// ground, and at seventy metres there is no join to see. And a hard budget on top, so a walk into the
+    /// thickest part of a wood cannot find a density the batch cannot hold — the far trees lose their skirts
+    /// first, which is exactly the right thing to lose.
+    /// </para>
+    /// </remarks>
+    private const float UndergrowthMetres = 30f;
+
+    private const int UndergrowthBudget = 2400;
+
+    private int undergrowthDrawn;
+
+    private void DrawUndergrowth(in EconomyNode tree, float left)
+    {
+        if (art is null || art.Trees.Length < 2) return;
+        if (undergrowthDrawn >= UndergrowthBudget) return;
+        if (Vector2.DistanceSquared(tree.Position, cameraFocus) >
+            UndergrowthMetres * UndergrowthMetres)
+        {
+            return;
+        }
+
+        var id = tree.Id.Value;
+        var clumps = 1 + id * 31 % 2;
+        for (var i = 0; i < clumps; i++)
+        {
+            var angle = (id * 47 + i * 137) % 360 * MathF.PI / 180f;
+            // Just outside the trunk, so a bush sits against it rather than inside it.
+            var reach = NodeFootprint.TreeHalfExtent * (1.1f + (id * 13 + i * 7) % 9 / 9f * 0.9f);
+            var at = tree.Position + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * reach;
+            var width = (0.55f + (id * 19 + i * 23) % 11 / 11f * 0.55f) * MathF.Sqrt(left);
+            art.Trees[(id + i) % 2].Add(SettlementArt.Bush(
+                at,
+                simulation.Terrain.SampleHeight(at),
+                width,
+                SettlementArt.FreeYawOf(id * 7 + i)));
+            undergrowthDrawn++;
+        }
     }
 
     /// <summary>
