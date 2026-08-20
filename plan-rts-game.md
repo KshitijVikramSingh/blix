@@ -4916,3 +4916,170 @@ Tuned as asked, and the reasoning is worth keeping because it generalises:
 4. **Dressing follows the ground it dresses.** Once relief exists, cover wants to thin on slopes and
    gather in hollows — which is the moment the two layers start informing each other rather than merely
    stacking.
+
+## 53. Tone: the season decides the grade, and the village lights itself
+
+> the things about color, sun tone, grading profile, foliage motion/smoke etc effects, and then a stab into
+> night time lighting
+
+Two items of the list this came with were already done in §52 — the wear around the settlement and the macro
+terrain colour — so this is the other four, in the order asked for. What it is really about is **composition
+over the cycle**, which the user named and which is worth writing down because it reframes what the light is
+for:
+
+| | what the frame is about |
+|---|---|
+| day | terrain and economy: the ground and what is on it |
+| golden hour | architecture and topology, because the shadows are what describe them |
+| night | the settlement itself, because the surrounding territory recedes |
+
+Three pictures out of one cycle. Nothing mechanical depends on it and it is still the strongest thing in the
+session, because it means the same map is worth looking at three times.
+
+### The two bugs in the light, and why neither was findable by looking
+
+**The low-sun colour was one fixed copper for the whole year.** The ramp that reaches it is a function of the
+sun's height alone, and at fifty degrees north the midwinter sun never clears seventeen degrees — so the ramp
+was pinned all day and **winter noon was being painted as an autumn sunset**. The one season that should be
+unmistakable was wearing another season's light, and it had been doing so since the palette was written.
+
+**And the calendar's year and the sun's year did not start in the same place.** The calendar begins at spring;
+the declination formula begins on the first of January; nothing had ever reconciled them. The light ran about
+six weeks early all year, so the season called spring was lit as February — noon sun 25° against harvest's
+50°, which is a spring dimmer than an autumn. Thirty days of offset lands all four season middles on their
+solar counterparts at once: summer's on the June solstice, harvest's on the September equinox, winter's within
+a day of December's, spring's in the second week of March. That it fits all four is what makes it an offset
+rather than a taste.
+
+Both were found by printing the year, not by watching it. Which is the point of the new instrument.
+
+### `--skyprofile`, and the property it exists to check
+
+A palette is the one part of this scene nobody can judge from a screenshot: two frames in two seasons look
+different, and whether the difference is *the season* or merely the hour the shot was taken is a question
+about numbers. So it prints the sun's height, the light's warmth and the grade at six watches of the day in
+all four seasons, and then checks four properties. The load-bearing one is a comparison of two spreads:
+
+> **the season has to move the light further than the hour does.**
+
+Take the light at noon in four seasons — that is what a season is worth. Take it at five daylight hours
+within one season — that is what an hour is worth. The first must be larger, or "glance at the frame and know
+the month" is a wish rather than a description. It currently reads **2.71 to one**.
+
+Two of its own first assertions were wrong, and both mistakes are worth keeping in the file because they are
+the same mistake in two costumes — *comparing a quantity against something that is not the thing it names*.
+It checked a season's midpoint against the atlas figure for a solstice, which no season's midpoint is; and it
+read "seven in the evening" as dusk in seasons where the sun has already set, so what it actually measured was
+the night palette. §51's recurring finding again: a number correct in the layer that owns it and wrong where
+it meets another.
+
+### The grade belongs to the season
+
+Exposure, saturation and contrast were one global setting, which meant the palette could change every hue in
+the scene and never change how the frame was *shot* — and a winter photograph is recognisable as much by
+being flat and drained as by being blue. They are per-season now and the sliders are multipliers over them:
+winter 0.94/0.80/0.93 against summer 1.02/1.02/1.06.
+
+**Midday is pulled back against the sun's height rather than the clock**, which is what keeps time of day a
+small oscillation inside the season rather than a competitor to it: only summer ever reaches a high sun, so
+summer's noon gives up 0.22 of green's chroma and winter's gives up none. Green has its own dial because the
+present pass cannot tell a green roof from a green field, and pulling the whole frame's saturation to fix the
+field drains the earth and the tiles with it.
+
+`NoonElevation` is gone from the palettes: authored five times, blended every frame, read by nothing since
+the sun started coming from real solar geometry. A palette field that looks like a decision and changes
+nothing is worse than a missing one.
+
+### Wind, and the shape mattering more than the size
+
+Plants lean in the vertex stage. It hinges at the ground, height enters as a square root because a tree is
+stiffer than a blade of wheat, the phase carries a world-space term so a wood ripples rather than pulses, and
+the gust is a travelling wave that never reaches zero.
+
+**Reported immediately as too violent, and the cause was the shape rather than the amplitude.** Equal
+amplitude on two axes at right angles makes a crown *orbit*, and an orbit reads as swinging because nothing
+in wind goes round. Most of the displacement is now a steady lean along the wind's bearing with a fraction of
+it oscillating and a smaller sway across — a tree that is mostly just leaning looks windy while hardly moving
+at all, which is the cheapest calm there is. Amplitude also came down and the frequency halved: the moving
+part of an eight-metre crown went from about ±28 cm at 0.4 Hz to ±5 cm at 0.13 Hz.
+
+And a cap that the square root alone did not give: nothing may travel more than seven per cent of its own
+height. Root-of-height makes small plants move relatively *more* than tall ones — 8 cm on a 60 cm tuft is a
+seventh of it, and a field of grass shifting by a seventh shimmers.
+
+The shadow casters do not lean, and that is measured rather than hoped: the sun's box is 150 m across a 2048
+map, so a texel is about 12 cm and the crown's travel is under half of one. Past a sway of about 0.25 the
+argument stops holding and the caster's push constants want the wind too.
+
+### Smoke, which turned out to be a second channel for the season
+
+A fire is lit for two reasons with two different shapes. **Heating is a season** — constant through a winter
+day, absent in summer. **Cooking is an hour** — twice a day, every day of the year. Added rather than chosen
+between, so a winter morning is the smokiest thing in the game and a summer village still looks lived in. One
+function of the date and the hour, no state, and a glance at the village says the month even in flat light.
+
+Dressing by §52's test: a puff is a position, a birth time and a seed, and everything else about it is a
+function of its age worked out when it is drawn. Each chimney's turn comes round on its own id hashed into
+the interval, so the houses are evenly staggered with no timer and no table, and identically after a reload.
+
+The one trick that makes a sphere read as smoke is **fading its opacity at the silhouette**. A translucent
+sphere drawn plainly is a bubble, because it is most opaque exactly where its outline is; a volume seen
+edge-on is thin. With the rim gone, ten puffs at a fifth opacity stack into a plume instead of a bunch of
+grapes. Lit by the sky rather than the sun, since smoke is optically thin — with one exception worth its two
+lines, which is that a plume with a low sun behind it glows.
+
+It is the first thing in this scene that is not opaque, so it brought a pipeline of its own: alpha blending, a
+depth test that does not write, near-hemisphere culling, and its own shader pair — because it is also the
+first surface whose fourth colour channel means opacity rather than which material it is.
+
+### Night: small warm signals, and each one a fact
+
+Lit windows, a lantern at the granary door, a brazier at a site, and the pools they throw. Every one of them
+is information rather than decoration:
+
+- **A house is lit if somebody lives in it and dark if nobody does.** So the cottages a settlement built and
+  cannot fill are visibly empty — one of the questions §51 wanted the interface to answer, answered with no
+  text at all.
+- **The number of lit windows is how many live there.**
+- The granary keeps a lantern because it is the building somebody is always at; a site has a brazier only
+  while it is being built.
+
+The spill is a **field**, not a light list, for the same reason the wear is one: every fire splats into it and
+the shader reads it once by world position, so lighting the village costs the same at four hearths or forty —
+no loop, no per-light bound, no popping when the ninth nearest becomes the eighth. What it gives up is shape,
+which is the right trade for a soft warm patch on the ground. Rebuilt every sixth frame, skipped entirely by
+day, so the feature is free for two thirds of the cycle.
+
+Restraint is the whole brief here, and the failure mode is not one window being too bright — it is pools of
+orange everywhere, at which point the settlement stops being a warm island in a cool landscape and the
+composition is gone. So the glow is hot and small and the spill is dim and wide, on two separate dials
+because they fail in opposite directions.
+
+### Found on the way, and worth keeping
+
+- **The push-constant block had four owners, not the three its own comment claimed**: two shaders, the
+  declared range, and the payload's own length. The wind vec4 went into three of them and the draw-time error
+  named the fourth. The range is the payload's length now, so those two cannot drift again.
+- **The material classes moved to `Shaders/materials.glsl`**, shared by both stages, because the vertex stage
+  has to know what a plant is and a second copy of a table of magic constants is a table that will drift.
+- **One owner for which wall is the front.** Three callers need to agree — the windows, their pools and the
+  chimney — and three copies of a rotation are three chances to hang the lantern on the back of the house.
+- **The geometry line grew a dressing section**: `NIGHT` with its light count, `SMOKE` with its plumes.
+
+### The handoff
+
+Ordered by what the session actually left undone rather than by size:
+
+1. **The seasonal models**, still. §52 called this the single biggest remaining win in the visual pass and it
+   remains untouched: the pack ships `_Autumn`, `_Snow` and `_Dead` of every tree plus `Bush_Snow`,
+   `Rock_Moss` and `TreeStump_Snow`, and the classifier already handles all of them. Everything this session
+   did to the light makes the case stronger, not weaker — grading a summer canopy toward autumn is a poor
+   substitute for an autumn canopy.
+2. **Contact grounding**, the last item from the reference list: a tight darkening where an object meets the
+   ground. The hearth field is a working precedent for how to do it cheaply — a field, sampled by position.
+3. **Bloom**, which the emissive class now argues for. A window that clips is doing the right thing and there
+   is nothing to spread it, and the shared library already has `bloom.glsl` and a `FullscreenPass` to hang
+   it on.
+4. **Wind that the shadows agree with**, if the sway ever wants to be stronger than 0.25.
+5. And still carried, still unfixed: **the red raid gate leg** — 21 of 24 raiders stuck since the map was
+   reshaped in §50.
