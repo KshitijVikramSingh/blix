@@ -4498,3 +4498,24 @@ half of a foundation**, not a game with content to be balanced. Two consequences
 3. **The other half of the settlement**: more buildings, upgrades, repairs, and stone from mines. Stone is
    a third commodity and the first one that is *mined* rather than grown or felled, so it tests the economy's
    generality — everything in §17's ledger was written for two.
+
+### Amended immediately, and for a good reason: combat is blocked on being able to see it
+
+> without visuals the combat is just already too throwing off, as I discovered with the raider/thief test —
+> we'll refine what we already have working placeholders for, the economy layer, and the combat scenario and
+> modelling I'll find more assets for.
+
+This is the §21 finding one level up. There, a field drawn as a grey block made the *economy* impossible to
+read; here, a fight between two identical white cylinders with no weapons, no facing and no animation makes
+**combat impossible to judge** — and this session proved it expensively. Five hypotheses were argued from
+watching, and every one was wrong, because what was being watched carried almost no information. It took
+`--fightbench` to say anything true at all.
+
+So combat waits on assets rather than the reverse, and that is the right dependency: **a mechanic you cannot
+see is a mechanic you cannot playtest**, and playtesting is how every real finding in §29–§44 arrived. The
+benchmarks are not a substitute for looking — they are what tells you *which* looking was misleading.
+
+**The work therefore reorders to: refine what already has working placeholders — the economy — first.** It
+is the half with legible visuals, so judgement about it is reliable. Stone and new buildings are *additions*
+to that half and can wait behind polishing what is there; the roster waits on the art that makes it
+readable.
