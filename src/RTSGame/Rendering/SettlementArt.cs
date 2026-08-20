@@ -410,6 +410,13 @@ internal sealed class SettlementArt : IDisposable
 
         /// <summary>A person. Kept separate because people are read as silhouettes, not as surfaces.</summary>
         internal const float Body = 0.85f;
+
+        /// <summary>Anything that makes its own light: a lit window, a lantern, embers at a work site.</summary>
+        /// <remarks>
+        /// The only class the sun has no opinion about. Shaded by nothing, lit by nothing, and scaled by how
+        /// far into the night it is — see <c>kEmber</c> in <c>Shaders/materials.glsl</c>.
+        /// </remarks>
+        internal const float Ember = 0.95f;
     }
 
     /// <summary>
@@ -536,6 +543,29 @@ internal sealed class SettlementArt : IDisposable
 
     /// <summary>Any angle at all, for a tree or a heap, which nobody aligned to anything.</summary>
     public static float FreeYawOf(int id) => (id * 47 % 360) * MathF.PI / 180f;
+
+    /// <summary>
+    /// Which way a building's front faces, given the turn it was placed with.
+    /// </summary>
+    /// <remarks>
+    /// One owner for the sign, because there are now three callers that need to agree about which wall is
+    /// the front — the lit windows, the pool of light they cast, and the chimney the smoke comes out of —
+    /// and three copies of a rotation are three chances to put the lantern on the back of the house. These
+    /// matrices are the row-vector System.Numerics form, so local +x lands on (cos, −sin) in world x/z.
+    /// </remarks>
+    public static Vector2 FaceDirection(float yaw) => new(MathF.Cos(yaw), -MathF.Sin(yaw));
+
+    /// <summary>
+    /// The point just outside a building's front, where its lantern hangs and its light falls.
+    /// </summary>
+    /// <remarks>
+    /// Outside rather than at the centre, and that is the whole reason this exists: a pool of light centred
+    /// on a building is a pool underneath a building, which is to say invisible. Models are fitted to the
+    /// footprint the simulation enforces and span half a width either side of their node, so a little past
+    /// six tenths puts the light on the ground in front of the door.
+    /// </remarks>
+    public static Vector2 LitFace(Vector2 position, float widthMetres, float yaw) =>
+        position + FaceDirection(yaw) * (widthMetres * 0.62f);
 
     public void Dispose()
     {

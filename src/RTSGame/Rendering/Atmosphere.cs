@@ -52,6 +52,14 @@ internal readonly record struct Atmosphere(
     Vector3 HazeToward,
     float SunElevationDegrees,
     float HourOfDay,
+    /// <summary>How far into the night it is: 0 in full daylight, 1 once the sun is well down.</summary>
+    /// <remarks>
+    /// The same ramp everything else in this file hangs off, exposed because the settlement's own lights
+    /// need it — a window is lit because it is dark, and "is it dark" is a question about the sun's height
+    /// rather than about the clock. Twilight therefore brings the windows up gradually and over the same
+    /// seconds the palette is turning blue, which is the only way the two can agree.
+    /// </remarks>
+    float Nightness,
     SkyGrade Grade,
     string Description)
 {
@@ -440,6 +448,7 @@ internal readonly record struct Atmosphere(
             hazeToward,
             elevation,
             hour,
+            1f - above,
             grade,
             Describe(elevation, low));
     }

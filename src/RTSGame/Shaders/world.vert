@@ -42,6 +42,8 @@ layout(push_constant) uniform Push {
     // block the vertex stage owns rather than tolerates — and the bearing is shared with the smoke, so a
     // plume and the trees it drifts past agree about which way the wind is going.
     vec4 uWind;
+    // Declared but unread here: one block, one layout, every stage.
+    vec4 uHearth;
 };
 
 layout(location = 0) out vec3 vNormal;

@@ -114,7 +114,7 @@ internal sealed class Hearths
             // The chimney rather than the middle of the roof, placed against the model's own yaw so it
             // stays on the same corner of the same cottage for the life of the village.
             var yaw = SettlementArt.SquareYawOf(node.Id.Value);
-            var along = new Vector2(MathF.Cos(yaw), MathF.Sin(yaw));
+            var along = SettlementArt.FaceDirection(yaw);
             var chimney = node.Position + along * (width * 0.26f) +
                           new Vector2(-along.Y, along.X) * (width * 0.20f);
             // Models are fitted to the footprint the simulation enforces, so the ridge is a little above

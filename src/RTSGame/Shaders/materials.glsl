@@ -20,6 +20,9 @@ const float kStone   = 0.55;
 const float kFoliage = 0.65;
 const float kCrop    = 0.75;
 const float kBody    = 0.85;
+// Anything that makes its own light: a lit window, a lantern at a doorway, embers at a work site. The
+// only class the sun is not allowed to have an opinion about.
+const float kEmber   = 0.95;
 
 bool isClass(float carried, float which) { return abs(carried - which) < 0.05; }
 

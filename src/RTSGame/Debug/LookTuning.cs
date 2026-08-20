@@ -103,6 +103,26 @@ internal sealed class LookSettings
     [Tune(0.0, 2.0, Label = "gust rate", Group = "wind")]
     public float WindGustRate = 0.31f;
 
+    /// <summary>How brightly a lit window burns, against an albedo of one.</summary>
+    /// <remarks>
+    /// <b>Above one because it is a light and not a surface</b> — the scene is HDR and a window is meant to
+    /// clip the curve, which is what makes it read as a source rather than as a bright square of paint. The
+    /// restraint that matters here is not the brightness but the <em>area</em>: a handful of small windows
+    /// inside a cool landscape is what says people live there, and the failure mode is pools of orange
+    /// everywhere rather than one window being too bright.
+    /// </remarks>
+    [Tune(0.0, 8.0, Label = "window glow", Group = "night")]
+    public float WindowGlow = 3.2f;
+
+    /// <summary>How much of that light lands on the ground and the walls around it.</summary>
+    /// <remarks>
+    /// Separate from the glow on purpose, because they fail in opposite directions: the window wants to be
+    /// hot and small, and the spill wants to be dim and wide. Turning the spill off leaves the lit windows
+    /// alone, which is what you want when judging whether the settlement reads at strategic height.
+    /// </remarks>
+    [Tune(0.0, 2.0, Label = "hearth spill", Group = "night")]
+    public float HearthSpill = 0.75f;
+
     /// <summary>How hard the chimneys smoke, over what the season already asked for.</summary>
     /// <remarks>
     /// Zero is off, which is worth having: smoke is the only thing in the frame that can hide a building,

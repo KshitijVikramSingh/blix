@@ -125,6 +125,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private static readonly Vector4 CanopyLightColor = new(0.25f, 0.42f, 0.19f, 1f);
     // Goods, wherever they are: on a cart's back or lying in the road. The same two colours for both,
     // so a heap and a load read as the same substance in two places.
+    /// <summary>The colour of a lit window from outside, which is a hue and so belongs beside the others.</summary>
+    /// <remarks>
+    /// Paler and yellower than the fire itself. What a window shows is the <em>source</em>, and a source
+    /// bright enough to clip reads by its hue at the edges rather than at its centre; the pool it throws on
+    /// the ground is the deep amber, and that one lives in the shader with the rest of the hues.
+    /// </remarks>
+    private static readonly Vector4 EmberTint =
+        new(1.00f, 0.74f, 0.44f, SettlementArt.MaterialClass.Ember);
+
     private static readonly Vector4 HouseColor = new(0.68f, 0.58f, 0.46f, 1f);
     private static readonly Vector4 HouseRoofColor = new(0.44f, 0.22f, 0.16f, 1f);
     // The pack's own Wheat (0.384, 0.300, 0.065) and Wood (0.246, 0.144, 0.054), so a load on a
@@ -260,6 +269,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private InstanceBuffer smokeBuffer = null!;
     private InstancedBatch smokeBatch = null!;
     private readonly Hearths hearths = new();
+    private int habitationLights;
     // viewProj, camPos, sunDir, sunLight, skyLight, fog, haze. As with the world block, this length is
     // also the declared push-constant range, so the two cannot disagree.
     private readonly byte[] smokePush = new byte[160];
@@ -285,10 +295,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private InstanceBuffer canopyBuffer = null!, canopyCasterBuffer = null!;
 
     // viewProj, camPos, sunDir, sunVP, fog, shadow, light, haze, sunTint, skyAmbient, groundAmbient,
-    // hazeAway, hazeToward, wind. Every one of the last five palette entries used to be a constant in
+    // hazeAway, hazeToward, wind, hearth. Every one of the last five palette entries used to be a constant in
     // world.frag, which is why a year looked like one afternoon — see Rendering/Atmosphere.cs. This length
     // is also the declared push-constant range, in OnLoad, so the two cannot drift apart.
-    private readonly byte[] worldPush = new byte[320];
+    private readonly byte[] worldPush = new byte[336];
     private readonly byte[] skyPush = new byte[128];     // invViewProj, camPos, sunDir, zenith, horizon
     private readonly byte[] shadowPush = new byte[64];   // sun shadow VP
     private readonly byte[] gradePush = new byte[32];    // grade, then the eye's night response
@@ -772,6 +782,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             {
                 new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 new DescriptorSetSlot(0, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                new DescriptorSetSlot(0, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 InstanceBuffer.Slot,
             },
             PushConstants: new[]
@@ -950,6 +961,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             "rts-selection-pixel");
         // Smooth-sampled, because a path is a smudge and not a grid: at 192 cells over 600 m each is three
         // metres, and nearest sampling would draw the footfall grid itself rather than the paths in it.
+        hearthTexture = graphicsDevice.CreateTexture2D(
+            new TextureDescription(
+                HearthCells, HearthCells, TextureFormat.R8, SamplerDescription.LinearClamp),
+            hearthField,
+            "rts-hearth-light");
         wearTexture = graphicsDevice.CreateTexture2D(
             new TextureDescription(WearCells, WearCells, TextureFormat.R8, SamplerDescription.LinearClamp),
             wear,
@@ -1523,6 +1539,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (timingDebug && time.Total >= nextTimingReport)
         {
             Console.WriteLine($"  {simulation.Timings.Format(simulation.Agents.Count, simulation.TickNumber)}");
+            Console.WriteLine($"  DRESSING {GeometryLine()}");
             nextTimingReport = time.Total + 1.0;
         }
 
@@ -1539,6 +1556,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             look.SunBearingDegrees,
             look.Seasonality);
         AdvanceWear(frame);
+        AdvanceHearths();
         ApplyWoodlandCover(frame);
         TurnAndZoom(frame);
         PanCamera(frame);
@@ -1838,6 +1856,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             look.WindGustRate,
             look.WindBearingDegrees * MathF.PI / 180f);
         MemoryMarshal.Write(worldPush.AsSpan(304, 16), in wind);
+        // <b>What the settlement lights of itself, and how far into the night it is.</b> One ramp decides
+        // both the windows and their pools, and it is the sun's height rather than the clock — so the
+        // village comes up over the same twilight in which the palette goes blue, and neither can be seen
+        // to switch.
+        var hearth = new Vector4(
+            following ? sky.Nightness : 0f, look.HearthSpill, look.WindowGlow, 0f);
+        MemoryMarshal.Write(worldPush.AsSpan(320, 16), in hearth);
         // Smoke takes the light already resolved into one colour each, because it has no shadow map, no
         // material class and no wear to look up — it is a thin thing that carries the ambient and a little
         // of the beam, and packing the palette down to two vec4s keeps its whole layout at 128 bytes.
@@ -1931,6 +1956,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         {
             new ShaderTextureBinding("uSunShadowMap", graph.GetDepthTexture(sunShadowHandle), Slot: 0),
             new ShaderTextureBinding("uWear", wearTexture, Slot: 1),
+            new ShaderTextureBinding("uHearthLight", hearthTexture, Slot: 2),
         };
         graph.Pass(scenePassHandle, scope =>
         {
@@ -2013,6 +2039,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         art?.Begin();
         // Before the nodes are built, because that is what draws the trees and therefore their skirts.
         undergrowthDrawn = 0;
+        habitationLights = 0;
         BuildObstacleInstances();
         BuildNodeInstances();
         BuildNavigationOverlay();
@@ -2380,6 +2407,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 // model: a granary is 7.5 m because NodeFootprint says it occupies five placement cells
                 // and bodies route around exactly that square. The art fits the game, not the reverse.
                 var yaw = SettlementArt.SquareYawOf(node.Id.Value);
+                DrawHabitationLights(in node, ground, width, yaw);
                 if (node.IsUnderConstruction)
                 {
                     DrawSite(in node, ground, width, yaw);
@@ -2406,6 +2434,98 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
             DrawGreyboxBuilding(in node, ground, width);
         }
+    }
+
+    /// <summary>
+    /// The small warm signals that say people live here: lit windows, a lantern, embers at a site.
+    /// </summary>
+    /// <remarks>
+    /// <b>The cheapest thing in this whole visual pass and probably the strongest.</b> A landscape at night
+    /// recedes — the palette goes blue, the colour drains out of it, the distance disappears into haze — and
+    /// a settlement with a dozen warm pixels in it becomes the only thing in the frame the eye will look at.
+    /// That is a composition the day cannot produce at any price: at noon the terrain is the subject, at
+    /// golden hour the architecture is, and at night it is the village. Three different pictures out of one
+    /// cycle, for the cost of some boxes and a texture read.
+    /// <para>
+    /// Each of them is a fact rather than a decoration, which is the rule the wear and the stumps follow
+    /// too. <b>A house is lit if somebody lives in it and dark if nobody does</b> — so an unhoused
+    /// settlement's empty cottages are visibly empty, which is a thing §51 wanted the interface to say and
+    /// this says without a word of text. The number of lit windows is how many live there. The granary
+    /// keeps a lantern at its door because it is the building somebody is always at. A site has a brazier
+    /// while it is being built and none once it is finished.
+    /// </para>
+    /// <para>
+    /// Kept small deliberately. The failure mode of night lighting is not one window being too bright but
+    /// pools of orange everywhere, at which point the settlement stops being a warm island in a cool
+    /// landscape and the whole composition is gone.
+    /// </para>
+    /// </remarks>
+    private void DrawHabitationLights(in EconomyNode node, float ground, float width, float yaw)
+    {
+        if (!look.SunFollowsTheYear || sky.Nightness < 0.02f || look.WindowGlow <= 0f) return;
+        // Counted for the geometry line, which is where every other "how much of this is on screen"
+        // number in this file already lives.
+        habitationLights++;
+
+        if (node.IsUnderConstruction)
+        {
+            // A brazier on the ground at the edge of the footprint, which is where you would actually put
+            // one: in the middle is where the walls are going.
+            AddEmber(node.Position, ground, width, yaw, new Vector3(0.58f, 0.07f, 0f), new Vector3(0.07f));
+            return;
+        }
+
+        if (node.IsSink)
+        {
+            if (node.Occupants <= 0) return;
+            // One window, then a second, then one round the side. Three is the most a cottage this size can
+            // carry before it reads as a lantern shop rather than a house.
+            AddEmber(
+                node.Position, ground, width, yaw,
+                new Vector3(0.502f, 0.34f, 0.13f), new Vector3(0.018f, 0.105f, 0.085f));
+            if (node.Occupants >= 2)
+            {
+                AddEmber(
+                    node.Position, ground, width, yaw,
+                    new Vector3(0.502f, 0.34f, -0.17f), new Vector3(0.018f, 0.105f, 0.085f));
+            }
+
+            if (node.Occupants >= 3)
+            {
+                AddEmber(
+                    node.Position, ground, width, yaw,
+                    new Vector3(0.10f, 0.34f, 0.502f), new Vector3(0.085f, 0.105f, 0.018f));
+            }
+
+            return;
+        }
+
+        if (node.Kind == NodeKind.Granary)
+        {
+            AddEmber(
+                node.Position, ground, width, yaw,
+                new Vector3(0.505f, 0.26f, 0f), new Vector3(0.030f, 0.055f, 0.055f));
+        }
+    }
+
+    /// <summary>
+    /// One small self-lit box, placed in a building's own frame rather than the world's.
+    /// </summary>
+    /// <remarks>
+    /// Everything is given as a share of the footprint's width, because that is what the models are fitted
+    /// to — so a window sits on the wall of a cottage and of a granary without either number being about
+    /// any one building. Scale, then the offset within the model, then the building's turn, then the world:
+    /// the order matters, and getting it wrong puts the window on the ground beside the house.
+    /// </remarks>
+    private void AddEmber(
+        Vector2 position, float ground, float width, float yaw, Vector3 local, Vector3 size)
+    {
+        propInstances.Add(new InstanceData(
+            Matrix4x4.CreateScale(size * width) *
+            Matrix4x4.CreateTranslation(local * width) *
+            Matrix4x4.CreateRotationY(yaw) *
+            Matrix4x4.CreateTranslation(position.X, ground, position.Y),
+            EmberTint));
     }
 
     /// <summary>
@@ -2830,6 +2950,28 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// something that is a record of watching rather than a fact about the world.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Where the settlement's own light falls, as a field over the map.
+    /// </summary>
+    /// <remarks>
+    /// <b>A field rather than a light list, for the same reason the wear is one.</b> Every fire in the
+    /// village splats into it and the shader reads it once by world position, so the cost of lighting the
+    /// place does not depend on how many fires are in it — no loop, no per-light bound, no sorting the
+    /// nearest eight and popping when the ninth becomes the eighth. What it gives up is shape: a pool has no
+    /// direction and cannot be occluded by the wall it is beside, which is the right trade for something
+    /// whose whole job is a soft warm patch on the ground.
+    /// <para>
+    /// Finer than the wear at about a metre and a quarter a texel, because a lantern's pool is metres across
+    /// where a footpath is tens. Rebuilt whole rather than accumulated — there is nothing to remember, since
+    /// a fire is either lit tonight or it is not.
+    /// </para>
+    /// </remarks>
+    private const int HearthCells = 512;
+
+    private readonly byte[] hearthField = new byte[HearthCells * HearthCells];
+    private TextureHandle hearthTexture;
+    private int hearthUploadCountdown;
+
     private const int WearCells = 320;
 
     private readonly byte[] wear = new byte[WearCells * WearCells];
@@ -2845,6 +2987,92 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// a thing that appears in a frame — so re-uploading a 36 KB texture four times a second is already far
     /// finer than the phenomenon, and the accumulator carries the fractional part that a byte cannot.
     /// </remarks>
+    /// <summary>
+    /// Rebuilds the field of light the settlement casts on its own ground.
+    /// </summary>
+    /// <remarks>
+    /// <b>Skipped entirely by day</b>, because the shader multiplies the whole field by how far into the
+    /// night it is — so at noon there is nothing to compute and nothing to upload, and the cost of this
+    /// feature is zero for two thirds of the cycle. Every sixth frame otherwise, which is often enough for
+    /// a flicker that breathes rather than strobes.
+    /// <para>
+    /// Three kinds of fire, and each one is a fact about the village rather than a decoration on it: a
+    /// house is lit if somebody lives in it, the granary keeps a lantern at its door, and a building site
+    /// has a brazier while it is being worked. A dark house is therefore <em>information</em> — it is the
+    /// housing the settlement built and has nobody to put in.
+    /// </para>
+    /// </remarks>
+    private void AdvanceHearths()
+    {
+        if (!look.SunFollowsTheYear || sky.Nightness < 0.02f || look.HearthSpill <= 0f) return;
+        if (--hearthUploadCountdown > 0) return;
+        hearthUploadCountdown = 6;
+
+        Array.Clear(hearthField);
+        var seconds = (float)(simulation.TickNumber / 30.0);
+        var radiusSquared = DetailRadius * DetailRadius;
+        foreach (ref readonly var node in simulation.Nodes.All)
+        {
+            if (!node.IsAlive || node.IsStanding || node.IsPile) continue;
+            if (Vector2.DistanceSquared(node.Position, cameraFocus) > radiusSquared) continue;
+
+            var width = node.HalfExtent * 2f;
+            var yaw = SettlementArt.SquareYawOf(node.Id.Value);
+            var at = SettlementArt.LitFace(node.Position, width, yaw);
+            // A slow breath rather than a candle's flutter. Sampled every sixth frame, so anything faster
+            // than about a cycle a second would alias into a strobe; and a hearth seen through a window is
+            // a large slow fire rather than a flame anyway.
+            var flicker = 0.88f + 0.12f * MathF.Sin(seconds * 2.3f + node.Id.Value * 1.7f);
+            if (node.IsUnderConstruction)
+            {
+                Splat(at, width * 1.1f, 0.55f * flicker);
+                continue;
+            }
+
+            if (node.IsSink)
+            {
+                if (node.Occupants <= 0) continue;
+                // Brighter for a fuller house, because that is what the windows are saying too.
+                Splat(at, width * 1.35f, (0.55f + 0.15f * MathF.Min(3, node.Occupants)) * flicker);
+                continue;
+            }
+
+            if (node.Kind == NodeKind.Granary) Splat(at, width * 1.5f, 0.85f * flicker);
+        }
+
+        graphicsDevice.UploadTextureMip(hearthTexture, 0, hearthField);
+    }
+
+    /// <summary>Stamps one soft pool of light into the field.</summary>
+    /// <remarks>
+    /// Added rather than maximised, so two fires near each other are brighter than one — and clamped, since
+    /// the field is a byte. The falloff is a squared cosine bump: zero value <em>and</em> zero slope at the
+    /// rim, which is what keeps a pool from ending in a visible circle the way a linear falloff does.
+    /// </remarks>
+    private void Splat(Vector2 centre, float radiusMetres, float strength)
+    {
+        var extent = simulation.ExtentMeters;
+        var scale = HearthCells / extent;
+        var cx = (centre.X + extent * 0.5f) * scale;
+        var cz = (centre.Y + extent * 0.5f) * scale;
+        var reach = radiusMetres * scale;
+        var from = (int)MathF.Floor(-reach);
+        var to = (int)MathF.Ceiling(reach);
+        for (var dz = from; dz <= to; dz++)
+        for (var dx = from; dx <= to; dx++)
+        {
+            var x = (int)cx + dx;
+            var z = (int)cz + dz;
+            if (x < 0 || z < 0 || x >= HearthCells || z >= HearthCells) continue;
+            var distance = MathF.Sqrt(dx * dx + dz * dz) / MathF.Max(0.001f, reach);
+            if (distance >= 1f) continue;
+            var bump = 1f - distance * distance;
+            var value = strength * bump * bump;
+            var at = z * HearthCells + x;
+            hearthField[at] = (byte)Math.Clamp(hearthField[at] + value * 255f, 0f, 255f);
+        }
+    }
+
     private void AdvanceWear(float deltaSeconds)
     {
         var extent = simulation.ExtentMeters;
@@ -3354,7 +3582,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         return
             $"SEES {seen:F0} m · DETAIL {DetailRadius:F0} m ({DetailRadius / seen:F2}x) · " +
             $"SHADOW {half:F0} m (texel {texelCentimetres:F1} cm) · " +
-            $"FOG {DetailRadius * look.FogStartShare:F0}-{DetailRadius:F0} m";
+            $"FOG {DetailRadius * look.FogStartShare:F0}-{DetailRadius:F0} m · " +
+            // What the dressing is spending, on the same line as what can be seen, because both of the
+            // questions they answer are "is this frame drawing more than it needs to".
+            $"NIGHT {sky.Nightness:F2} (lights {habitationLights}) · " +
+            $"SMOKE {hearths.Drawn} from {hearths.Chimneys}";
     }
 
     private void AddColliderDisc(ColliderId id, Vector2 position, float height, Vector4 color)

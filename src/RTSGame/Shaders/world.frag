@@ -21,6 +21,10 @@ layout(set = 0, binding = 0) uniform sampler2D uSunShadowMap;
 // Where people have been walking. One channel, three metres a texel, smooth-sampled — see
 // RtsGameLoop.AdvanceWear for what fills it and why it is not simulation state.
 layout(set = 0, binding = 1) uniform sampler2D uWear;
+// Where the settlement's own light falls. One channel, about a metre a texel, smooth-sampled — see
+// RtsGameLoop.AdvanceHearths. Like the wear, it is an observational field the renderer keeps to itself:
+// no decision reads it and a loaded save rebuilds it from where the buildings are.
+layout(set = 0, binding = 2) uniform sampler2D uHearthLight;
 
 layout(push_constant) uniform Push {
     mat4 uViewProjection;
@@ -43,6 +47,8 @@ layout(push_constant) uniform Push {
     vec4 uHazeToward;
     // Declared but unread here, for the reason the vertex stage gives: one block, one layout, every stage.
     vec4 uWind;
+    vec4 uHearth;   // x = how far into the night it is, y = how much light spills on the ground,
+                    // z = how brightly a window burns
 };
 
 // The hues stay here and the intensities do not. A colour is a decision about what kind of
@@ -62,6 +68,12 @@ layout(push_constant) uniform Push {
 // The material classes — Shaders/materials.glsl, shared with the vertex stage.
 #include "materials.glsl"
 
+// The colour of a wood fire seen at night, which is a hue and therefore stays in the shader — the
+// intensities are on sliders and these are not. Deep amber rather than the orange a torch is usually drawn
+// as: a hearth seen through a small window is mostly the red end of what the fire is doing, and the tell of
+// a fake one is that it is the colour of a traffic cone.
+const vec3 kHearthColor = vec3(1.00, 0.52, 0.20);
+
 void main() {
     vec3 n = normalize(vNormal);
     float sunDot = dot(n, normalize(uSunDir.xyz));
@@ -77,6 +89,23 @@ void main() {
 
     float surface = vTint.a;
     vec3 albedo = vTint.rgb;
+
+    vec3 toFragment = vWorldPos - uCamPos.xyz;
+    float distance = length(toFragment);
+    float haze = smoothstep(uFog.x, uFog.y, distance) * uFog.z;
+
+    // <b>A lit window is not a surface the sun falls on.</b> It is a hole with a fire behind it, so it
+    // takes no ambient, no shadow and no terminator — only the night, which is what decides whether
+    // anybody has lit it. Still hazed, because a window a hundred metres off is behind the same air as
+    // everything else, and a light that ignores distance is the thing that makes a night scene read as a
+    // sprite layer over a photograph.
+    if (isClass(surface, kEmber)) {
+        vec3 glow = albedo * uHearth.z * uHearth.x;
+        float towardSunlit = max(dot(normalize(toFragment), normalize(uSunDir.xyz)), 0.0);
+        vec3 hazeLit = mix(uHazeAway.rgb, uHazeToward.rgb, towardSunlit * uHaze.y);
+        outColor = vec4(mix(glow, hazeLit, haze), vTint.a);
+        return;
+    }
 
     // <b>Land, not a lit plane with a tint on it.</b> The single biggest prototype signal left: real ground
     // varies in hue and value over tens of metres — drier here, greener there, a little warmer where the sun
@@ -146,13 +175,23 @@ void main() {
     // silhouette, and a touch more light on them makes roofs pop without tipping into cartoon.
     float upFace = 1.0 + max(n.y, 0.0) * 0.10;
 
+    // <b>What the settlement lights of itself.</b> Sampled by world position out of a field the renderer
+    // splats the hearths into, so it costs one texture read whatever the village's size and needs no light
+    // list, no loop and no bound on how many fires there are. Multiplied by the night, so it is absent by
+    // day rather than washing the ground out at noon.
+    //
+    // The height falloff is the honest approximation here: it fades with height above <em>zero</em> rather
+    // than above the ground, which is exact while the village is flat and wants revisiting the day relief
+    // is generated. Without it a lit doorway would put its pool on the roof as well.
+    float spill = texture(uHearthLight, vWorldPos.xz / uHaze.z + 0.5).r *
+                  uHearth.y * uHearth.x * exp(-max(vWorldPos.y, 0.0) / 3.0);
+
     vec3 lit = albedo * (ambient + shadeLift + uSunTint.rgb * uLight.x * wrapWide * shadow * upFace);
+    lit += albedo * kHearthColor * spill;
     // Light through the leaf, added rather than multiplied: it is the sun arriving by another route.
     lit += albedo * uSunTint.rgb * uLight.x * through * shadow;
 
-    vec3 toFragment = vWorldPos - uCamPos.xyz;
-    float dist = length(toFragment);
-    float fog = smoothstep(uFog.x, uFog.y, dist) * uFog.z;
+    float fog = haze;
 
     // <b>Distance takes colour before it takes value.</b> A straight mix toward one colour fades a scene
     // evenly, which flattens it — a far forest went pale and stayed just as green. Air scatters short
