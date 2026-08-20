@@ -17,8 +17,15 @@ namespace RTSGame.Debug;
 /// </remarks>
 internal sealed class RaidSettings
 {
+    /// <remarks>
+    /// <b>Off by default now that the raid has finished being useful.</b> §45: the game will have no thieves
+    /// and no raids, and this was scaffolding — it bought the ledger, the front, <c>--fightbench</c> and the
+    /// discovery that pursuit had never worked, and then it was done. It stays because
+    /// <c>--raidtest</c> is still the gate's third leg and the only exercise the threat layer gets, and
+    /// because the next adversary will be a person walking in through the same code.
+    /// </remarks>
     [Tune(Label = "raids on", Group = "raids")]
-    public bool Enabled = true;
+    public bool Enabled;
 
     /// <summary>Sim seconds between raids.</summary>
     /// <remarks>

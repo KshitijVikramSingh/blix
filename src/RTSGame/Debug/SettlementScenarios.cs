@@ -155,6 +155,9 @@ internal static class SettlementScenarios
         var world = Build(extentMeters, out var granary);
         var settings = new RaidSettings
         {
+            // Explicit, because the shipped default is off — see RaidSettings.Enabled. This scenario exists
+            // to raid, so it says so rather than relying on a default that has already changed once.
+            Enabled = true,
             SecondsBetween = secondsBetween,
             CameraJumps = false,
             RaiderHealth = raiderHealth,

@@ -4756,3 +4756,70 @@ settlements: you found the place because there was wood round it.
 **Cheaper with a sixth more trees**, because shaping empties a third of the compass and the rasteriser's
 cost is in the impassable area rather than the trunk count. The year gate is unchanged to the digit, which
 is what exempting the near band was for. Suite passes.
+
+## 51. Checkpoint — raids off, and what the next session is for
+
+Raids are **off by default**. §45 settled that the game will have no thieves and no raids; the raid was
+scaffolding, it bought the ledger, the front, `--fightbench` and the discovery that pursuit had never
+worked, and then it was finished. It stays in the code because `--raidtest` is the gate's third leg and the
+only exercise the threat layer gets — and because the next adversary is a person walking in through the same
+code.
+
+### What a fresh session should know about the instruments before touching anything
+
+This is the transferable part, and it cost most of a session to learn.
+
+- **`tools/gate-rts-game.sh`** — three headless runs before anything lands: `--selftest` (a broken rule),
+  `--settlement --years 1` (an economy that stops feeding itself, which is a property of a year and not of a
+  tick), `--raidtest` (a defence that stops defending). Conservation is checked every tick of all three.
+- **`--fightbench`** — a ring, a chase, a cordon. One mechanic each, open ground, seconds to run. Built
+  because five locomotion changes were judged by `--raidtest` and **all five verdicts were wrong**.
+- **`--placementcheck`** — is the village one anybody can work in. It counts *and names*, which is what
+  turned "one body is stuck" into a diagnosis in one run.
+- **`C`** — cycles the collider overlay to *everything*, drawn from each proxy's own numbers, plus the
+  geometry line: what can be seen, how far trees are drawn, the shadow box and its texel.
+- **`--raidtest --seed S`** — because **a single run of a chaotic simulation cannot distinguish a mechanism
+  from a coin flip**, and the tell is the spread rather than the mean. §40: the same unchanged build gave
+  4.4 or 2.4 raiders killed depending on which five seeds were drawn, and a whole section's conclusion had
+  to be withdrawn.
+
+**And the recurring finding, which showed up five times in one day:** every bug was a number correct in the
+layer that owns it and wrong where it meets another — harm reach against chase distance, shadow box against
+visible ground, bias in texels against bias in metres, cell colour against block colour, building-free
+against walkable. Each was invisible until something put the two quantities side by side. When something
+feels wrong and cannot be found, the question to ask is *which two layers is this number crossing.*
+
+### The next session: the economic machinery coming to life
+
+> bring the interface in and polish the gameplay layer and build it out on the economic development,
+> building, repairing, and unit training side, hauling mechanisms, multiple settlement points — the actual
+> economic machinery coming to life.
+
+The half with legible visuals, which §45 established is the half where judgement is reliable. Ordered by
+what unblocks what rather than by size:
+
+1. **Hauling, first, because it is currently invisible.** A simulated year of the default village reports
+   `0 carts built, 0 board jobs given out, 0 standing routes run dry`. Three mechanics that exist and are
+   unit-tested — the cart as a bought role (§24), the forward depot, the hauling board's stranded-stock
+   trigger (§6) — have never once been seen in a session. The cause is that the near band puts wood inside
+   every cutter's reach for the whole year, so nothing is ever stranded. Either push the wood line out at
+   founding or add a scenario that starts stripped; the wood line as a thing you look at was Stage B's whole
+   interface.
+2. **Tree grain size**, which is the other half of the same problem. A 90-unit tree is **fifteen
+   cutter-minutes**, so 39 trees fall a year out of 11,177 and a player sees about one per session.
+   `WoodPerTree` does not touch the annual economy at all — a hand cuts 500 a year whatever a tree holds —
+   so it is nearly a free legibility dial. The one real cost is walking, since `CutterWalkShare = 0.10` was
+   chosen against 90-unit trees; sweep it against the year gate rather than guessing.
+3. **Multiple settlement points**, which is what the corner-ish site and the shaped woodland were for.
+   Note what already exists: catchments, forward depots, the hauling board, and a granary that is just a
+   node. What does not exist is a second *centre* — anything that makes a place a place rather than a store.
+4. **Building, repair and training**, which all want the same thing first: a **build queue and a cost the
+   player can see**. Construction already works as timber carried out plus hands standing at it (§26); what
+   is missing is the interface to commit to it and the feedback that says what it is waiting for.
+5. **Interface**, threaded through all of the above rather than done once. The contextual HUD exists; what it
+   does not do is tell you *why nothing is happening*, which is the question this economy generates most
+   often — a house with nobody in it, a field outside every catchment, a cart nobody can afford.
+
+Two loose ends carried forward, both small: the `LookSettings` values are still my guesses rather than
+anybody's judgement, and stone is unstarted — the first commodity that is mined rather than grown or felled,
+and therefore the real test of whether a ledger written for two generalises.
