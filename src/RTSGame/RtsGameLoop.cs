@@ -2499,7 +2499,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         TerrainSurface.Rough => RoughColor,
         TerrainSurface.Mud => MudColor,
         TerrainSurface.Impassable => ImpassableColor,
-        TerrainSurface.Forest => ForestFloorColor,
+        // <b>Forest cover is not a colour, and this is why the woodland had patches in it.</b> Cover is a
+        // navigation fact — cells with two trees crowding them are closed — written into the surface channel
+        // because that is where the raster reads terrain from. It was never meant to be seen: what you see
+        // under a wood is trees, and the ground between them is the same ground. Averaging the block helped
+        // and did not fix it, because the honest fix is that this colour should not exist. Grass, and the
+        // canopy above it does the work.
+        TerrainSurface.Forest => Grass,
         _ => Grass,
     };
 

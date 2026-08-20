@@ -767,9 +767,30 @@ internal sealed class SimulationWorld
     /// spirals outward by half a metre at a time and gives up rather than looping, because a body with
     /// nowhere legal to go is a scenario worth failing loudly.
     /// </remarks>
+    /// <summary>
+    /// Moves a body off ground it cannot legally stand on, which is not only ground with a building on it.
+    /// </summary>
+    /// <remarks>
+    /// <b>"One villager pops in blocked by a tree every single run", diagnosed.</b> Named by
+    /// <c>--placementcheck</c>: body 13 at (-18.2, 9.4), on <em>grass</em>, with no trunk within 1.61 m,
+    /// and legal ground half a metre away. Nothing was on top of it. It was standing on a cell whose
+    /// <em>clearance rung</em> is 0.25 m against a body that needs 0.37 — the raster quantises clearance to
+    /// 0.25, 0.75 and 1.25, so a cell just inside the skirt of an impassable patch admits nobody, and the
+    /// impassable patches here are forest cover rather than trunks.
+    /// <para>
+    /// And this only ever asked <c>IsPositionFreeOfPlacement</c> — is there a <em>building</em> here. Free
+    /// of buildings and walkable are different questions, and the recurring one: a check that answers the
+    /// question the layer it was written in happens to own rather than the question being asked. A body
+    /// needs somewhere it can stand, and standing is the navigation layer's word.
+    /// </para>
+    /// <para>
+    /// Both conditions now, on the candidate as well as the original — a ring search that accepts a
+    /// building-free cell it still cannot walk on has only moved the problem.
+    /// </para>
+    /// </remarks>
     private Vector2 NudgeOutOfBuildings(Vector2 position, float radius)
     {
-        if (pathService.IsPositionFreeOfPlacement(position, radius)) return position;
+        if (CanStandAt(position, radius)) return position;
         for (var ring = 1; ring <= 24; ring++)
         {
             var distance = ring * NavigationCellSize;
@@ -779,11 +800,21 @@ internal sealed class SimulationWorld
                 var candidate = Terrain.ClampPosition(
                     position + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * distance,
                     radius + BodyFootprint.NavigationMargin);
-                if (pathService.IsPositionFreeOfPlacement(candidate, radius)) return candidate;
+                if (CanStandAt(candidate, radius)) return candidate;
             }
         }
 
         return position;
+    }
+
+    /// <summary>Free of buildings <em>and</em> ground the router will let a body of this size occupy.</summary>
+    private bool CanStandAt(Vector2 position, float radius)
+    {
+        if (!pathService.IsPositionFreeOfPlacement(position, radius)) return false;
+        if (!Navigation.Transform.TryWorldToCell(position, out var cell)) return false;
+        // Outside the raster is not a verdict: the caller clamps into the world and the terrain check above
+        // has already had its say, so an unrasterised edge cell is accepted rather than refused forever.
+        return !Navigation.Contains(cell) || Navigation.IsWalkable(cell, AgentDefaults.RoutingRadius);
     }
 
     /// <summary>

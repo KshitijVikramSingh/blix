@@ -362,6 +362,38 @@ internal static class SettlementScenarios
                 !world.Navigation.IsWalkable(navCell, agent.NavigationRadius))
             {
                 stuck++;
+                // Named, not counted. "One body is stuck" is where this started and it is not enough to
+                // find it with: which body, what it was told to do, what is on top of it, and how far the
+                // nearest ground it could legally stand on is.
+                var nearestTree = float.PositiveInfinity;
+                foreach (ref readonly var node in world.Nodes.All)
+                {
+                    if (!node.IsAlive || !node.IsStanding) continue;
+                    nearestTree = MathF.Min(
+                        nearestTree, Vector2.Distance(agent.Position, node.Position));
+                }
+
+                var out_ = float.PositiveInfinity;
+                for (var ring = 1; ring <= 40 && float.IsPositiveInfinity(out_); ring++)
+                {
+                    for (var step = 0; step < ring * 8; step++)
+                    {
+                        var angle = step / (float)(ring * 8) * MathF.Tau;
+                        var probe = agent.Position +
+                                    new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * (ring * 0.5f);
+                        if (!world.Navigation.Transform.TryWorldToCell(probe, out var cell)) continue;
+                        if (!world.Navigation.Contains(cell)) continue;
+                        if (!world.Navigation.IsWalkable(cell, agent.NavigationRadius)) continue;
+                        out_ = ring * 0.5f;
+                        break;
+                    }
+                }
+
+                Console.WriteLine(
+                    $"    stuck: body {agent.Id.Value} at ({agent.Position.X:F1}, {agent.Position.Y:F1}), " +
+                    $"radius {agent.NavigationRadius:F2}, doing {agent.Jobs.Assignment.Kind}, " +
+                    $"surface {world.Terrain.Surface(navCell)}, nearest trunk {nearestTree:F2} m, " +
+                    $"nearest legal ground {(float.IsPositiveInfinity(out_) ? "none within 20 m" : $"{out_:F1} m")}");
             }
 
             // Overlapping something solid, which is a different failure: the raster may say the cell is

@@ -4651,3 +4651,59 @@ six-metre tree — so eight metres of margin covers anything off screen casting 
 And `VisibleGroundRadius` is the number everything about seeing distance should have been written against.
 Nothing was. Tree draw distance is still an independent 150 m, which the line now reports as a multiple of
 what can be seen (2.3× at the default zoom) — the next thing to look at, and now legible.
+
+## 49. The blocked villager, named and fixed — and the patches removed outright
+
+### The patches
+
+Averaging the block helped and did not fix it, so the honest answer is that the colour should not exist.
+**Forest cover is a navigation fact, not a ground material.** Cells with two trees crowding them are closed,
+and that lives in the surface channel because the surface channel is where the raster reads terrain from —
+it was never meant to be *seen*. What you see under a wood is trees; the ground between them is the same
+ground. `TerrainSurface.Forest` draws as grass now and the canopy above does the work.
+
+The averaging stays, because it is right for its own reasons: a block that is half road or half mud should
+be half-coloured, and a boundary drawn from one sample at a block's centre is a staircase where an edge
+should be a gradient.
+
+### The villager
+
+`--placementcheck` was extended from counting to naming, which took it from "one body is stuck" to a
+diagnosis in one run:
+
+```
+stuck: body 13 at (-18.2, 9.4), radius 0.37, doing None, surface Grass,
+       nearest trunk 1.61 m, nearest legal ground 0.5 m
+```
+
+**Nothing was on top of it.** Grass, no trunk within a metre and a half, and legal ground half a metre away.
+It was standing on a cell whose **clearance rung is 0.25 m** against a body needing 0.37 — the raster
+quantises clearance to 0.25, 0.75 and 1.25, so a cell just inside the skirt of an impassable patch admits
+nobody at all, and the impassable patches out there are *forest cover* rather than trunks. Which is why it
+read as "blocked by a tree": it is blocked by the wood, one cell short of the ground it could have stood on.
+
+And the cause is the recurring finding for the fourth time today. `NudgeOutOfBuildings` asked exactly one
+question — `IsPositionFreeOfPlacement`, *is there a building here* — and **free of buildings and walkable are
+different questions.** A body needs somewhere it can stand, and standing is the navigation layer's word, not
+the placement layer's. It now asks both, of the candidate as well as of the original, because a ring search
+that accepts a building-free cell it cannot walk on has only moved the problem.
+
+`0 standing on unwalkable ground` at tick zero and after a minute. Suite passes, and the crowd benchmarks
+are identical to the figure — pen escape 1.33× and 0 dead-stops, one-cell gate 1.78× and 33 — which
+matters, because every spawn in the game goes through that nudge.
+
+### The tally, because four is a pattern rather than a coincidence
+
+Today's bugs, in one sentence each:
+
+| | the question asked | the question that mattered |
+|---|---|---|
+| §41 | how far does harm reach | how close does a chase actually get |
+| §48 | how wide should the shadow box be | how much ground can be seen |
+| §48b | how many texels of bias | how many *metres* of bias |
+| §49a | what colour is this cell | what colour is this five-metre block |
+| §49b | is there a building here | can a body stand here |
+
+Every one is a number that is correct in the layer that owns it and wrong where it meets another, and every
+one was invisible until something put the two quantities side by side. That is the argument for the
+overlay, the geometry line and the benchmarks — not for any of the individual fixes.
