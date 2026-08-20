@@ -77,11 +77,24 @@ internal sealed class EconomySystem
 
     /// <summary>Seconds a hauler spends loading or unloading at a node.</summary>
     /// <remarks>
-    /// Not zero, because a hauling network with instant transfer has no reason to want more haulers
-    /// than routes, and the queue at a busy granary is one of the things the congestion field exists to
-    /// price. Four seconds against a leg of sixty is a tenth of the round trip.
+    /// <b>Very nearly nothing, and it was four seconds.</b> The argument for four is written down because
+    /// it is a real one and it lost: a hauling network with instant transfer has no reason to want more
+    /// haulers than routes, and the queue at a busy granary is one of the things the congestion field
+    /// exists to price. Four seconds against a leg of sixty is only a tenth of the round trip.
+    /// <para>
+    /// What beat it is what a settlement <em>looks like</em>. Every transfer pays this, several times a
+    /// round trip, at a farm, at a tree, at a granary, at a depot, and at a building site — so watching
+    /// the settlement work meant watching people stand still at the exact moments they were supposed to be
+    /// getting something done. A tenth of a round trip spent motionless is a tenth of the game.
+    /// </para>
+    /// <para>
+    /// Not exactly zero: one tick is 33 ms and a transfer that completes on the tick of arrival makes the
+    /// arrival itself unobservable, which matters for anything watching a body's state. A quarter of a
+    /// second is under the eye's threshold and still a distinct step in the trace. On a slider, so the
+    /// queues can be brought back — see <c>SettlementSettings</c>.
+    /// </para>
     /// </remarks>
-    internal static float HandoverSeconds = 4f;
+    internal static float HandoverSeconds = 0.25f;
 
     /// <summary>
     /// How near a body has to be to a building's wall to be working it, as a multiple of its radius.

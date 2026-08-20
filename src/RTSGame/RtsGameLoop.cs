@@ -426,6 +426,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             clock,
             look,
             woodland,
+            new SettlementSettings(),
             raids,
             new WallSettings(),
             new RoutingSettings(),

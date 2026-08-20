@@ -1,5 +1,7 @@
 using Blix.Diagnostics;
+using RTSGame.Simulation;
 using RTSGame.Simulation.Economy;
+using RTSGame.Simulation.Threat;
 
 namespace RTSGame.Debug;
 
@@ -239,5 +241,70 @@ internal sealed class WoodlandSettings
     {
         get => Woodland.CoverRadius;
         set => Woodland.CoverRadius = value;
+    }
+}
+
+/// <summary>
+/// The settlement's own dials: how long a transfer takes, and how a defence makes up its mind.
+/// </summary>
+/// <remarks>
+/// Same proxy pattern as <see cref="WoodlandSettings"/> — the numbers live where they are used and this
+/// exposes them, so nothing is duplicated and a headless run reads the same constants a watched one does.
+/// These are here because none of them is derivable from another and every one of them changes how the
+/// game <em>feels</em> rather than only how it performs, which is the test for whether something earns a
+/// slider.
+/// </remarks>
+internal sealed class SettlementSettings
+{
+    /// <summary>Seconds a body spends handing a load over or picking one up.</summary>
+    /// <remarks>
+    /// <b>Very nearly nothing, by decision, and it was four seconds.</b> The argument for four was real —
+    /// a hauling network with instant transfer has no reason to want more haulers than routes, and the
+    /// queue at a busy granary is one of the things the congestion field exists to price — and it lost to
+    /// the thing that matters more: it reads as villagers standing about. Every transfer in the settlement
+    /// pays it, several times per round trip, and watching a settlement is watching people fetch and carry.
+    /// Turn it back up and the queues come back.
+    /// </remarks>
+    [Tune(0.0, 8.0, Label = "handover (s)", Group = "settlement")]
+    public float HandoverSeconds
+    {
+        get => EconomySystem.HandoverSeconds;
+        set => EconomySystem.HandoverSeconds = value;
+    }
+
+    /// <summary>How much stronger than the assailants a defence wants to be before it stands.</summary>
+    [Tune(1.0, 3.0, Label = "defence margin", Group = "settlement")]
+    public float StandMargin
+    {
+        get => ThreatSystem.StandMargin;
+        set => ThreatSystem.StandMargin = value;
+    }
+
+    /// <summary>Seconds a defender may be away and still count toward whether the fight is winnable.</summary>
+    /// <remarks>
+    /// The width of a defence, in effect: longer gathers a bigger party from further away and gets it
+    /// there later, which is the trade the whole three-question decision is built around.
+    /// </remarks>
+    [Tune(2.0, 30.0, Label = "rally window (s)", Group = "settlement")]
+    public float RallySeconds
+    {
+        get => ThreatSystem.RallySeconds;
+        set => ThreatSystem.RallySeconds = value;
+    }
+
+    /// <summary>How near a hostile has to be to something to be threatening it, in metres.</summary>
+    [Tune(4.0, 40.0, Label = "threat reach (m)", Group = "settlement")]
+    public float ThreatMetres
+    {
+        get => ThreatSystem.ThreatMetres;
+        set => ThreatSystem.ThreatMetres = value;
+    }
+
+    /// <summary>How far a body will carry a load to put it somewhere safe, in metres.</summary>
+    [Tune(0.0, 120.0, Label = "carry a load to safety (m)", Group = "settlement")]
+    public float HavenMetres
+    {
+        get => SimulationWorld.HavenMetres;
+        set => SimulationWorld.HavenMetres = value;
     }
 }

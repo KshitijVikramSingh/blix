@@ -3793,14 +3793,21 @@ internal static class SimulationSelfTests
     private static bool ACartIsAJobAndNotAUnit()
     {
         var world = new SimulationWorld();
-        var granary = world.AddNode(NodeKind.Granary, new Vector2(-9f, 0f), capacity: 400);
-        var depot = world.AddNode(NodeKind.ForwardDepot, new Vector2(9f, 0f), capacity: 400);
+        var granary = world.AddNode(NodeKind.Granary, new Vector2(-9f, 0f), capacity: 4000);
+        var depot = world.AddNode(NodeKind.ForwardDepot, new Vector2(9f, 0f), capacity: 4000);
         world.SeedStock(granary, Resource.Wood, SimulationWorld.CartTimber);
-        // Enough that the route is still running when the order arrives. A route that has already drained
-        // its source has ended, and an ended route has no cart to test — which is what the first version
-        // of this measured: 120 grain, all of it moved, and LegsCompleted read as zero because the
-        // assignment had been cleared before the assertion looked at it.
-        world.SeedStock(depot, Resource.Grain, 400);
+        // Enough that the route is still running when the order arrives, with room to spare at both ends.
+        // A route that has drained its source or filled its sink has ended — correctly — and an ended route
+        // has no cart to test. The first version of this had 120 grain and measured exactly that: all of it
+        // moved, and LegsCompleted read as zero because the assignment had been cleared before the
+        // assertion looked at it.
+        //
+        // <b>Sized ten times over, because the second time it happened the fixture was not what changed.</b>
+        // 400 units was comfortable at a four-second handover — twenty legs of forty is 800, but the dwell
+        // ate half the window — and dropping the handover to a quarter of a second let the same route move
+        // the lot inside the same 240 s. A fixture whose margin depends on how long a transfer takes is
+        // measuring the transfer, not the cart.
+        world.SeedStock(depot, Resource.Grain, 4000);
 
         var villager = world.SpawnAgent(new Vector2(0f, 4f), UnitType.Villager);
         var pauper = world.SpawnAgent(new Vector2(0f, -4f), UnitType.Villager);

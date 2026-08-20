@@ -3601,3 +3601,54 @@ Never within a raider's reach with its hands still full, checked every tick rath
 shift is unchanged. And with the granary as the only store — so the only store is the one being raided —
 all forty units are on the ground and the ledger still balances, which is the assertion that matters: what
 must never happen is a load quietly ceasing to exist because the code found nowhere tidy to put it.
+
+## 32. The handover was a tenth of the game spent standing still
+
+*Putting loads down in this context and while storing/hauling/dropping is too slow — if there's a timer,
+snap it to 0 or almost 0 for a while and try again.*
+
+`EconomySystem.HandoverSeconds`, four seconds, now a quarter of one. The argument for four is worth
+keeping written down because it was a real argument and it lost:
+
+> a hauling network with instant transfer has no reason to want more haulers than routes, and the queue at
+> a busy granary is one of the things the congestion field exists to price. Four seconds against a leg of
+> sixty is a tenth of the round trip.
+
+All true. What beats it is what a settlement *looks like*. Every transfer in the game pays this, several
+times per round trip — at a farm, at a tree, at a granary, at a depot, at a building site — so watching
+the settlement work meant watching people stand still at exactly the moments they were supposed to be
+getting something done. **A tenth of a round trip spent motionless is a tenth of the game**, and a game
+about fetching and carrying cannot spend a tenth of itself on people not moving.
+
+Not exactly zero: a tick is 33 ms, and a transfer that completes on the tick of arrival makes the arrival
+unobservable to anything reading a body's state. A quarter-second is under the eye's threshold and still a
+distinct step in the trace. On a slider, so the queues can be brought back.
+
+### `SettlementSettings`
+
+Five dials, same proxy pattern as `WoodlandSettings` — the constants stay where they are used and this
+exposes them, so a headless run reads the same numbers a watched one does. Handover, defence margin, rally
+window, threat reach, and how far a body will carry a load to safety. None is derivable from another, and
+every one changes how the game *feels* rather than only how it performs, which is the test for earning a
+slider.
+
+### What it cost the economy: nothing measurable
+
+A year, before and after, at the season boundaries: **2,647 grain and 1,126 wood at midsummer against
+2,647 and 1,125; 306 grain at the harvest crunch against 307.** The settlement's throughput is set by
+field labour and walking, not by dwell — this scenario's trees are at hand, so there is no hauling to speed
+up, and the work handover at the granary is a small share of a 45-second shift. The hauler-demand argument
+would show up in a scenario with a receding wood line, and it is worth re-measuring there before deciding
+the slider's home.
+
+### And it broke a test, for the second time, the same way
+
+`a cart is a job a villager takes, and pays for` went red: `route ran 20 legs, moved 400 grain, still
+standing=False`. Not a regression — the route drained its source inside the test's 240-second window and
+ended, **correctly**, because a standing route that has run its source dry is a route ending as designed.
+
+The comment above that fixture already recorded this exact lesson from its first version, which had 120
+grain and measured an ended route. 400 was comfortable at a four-second handover because the dwell ate
+half the window; a quarter-second let the same cart move the lot. So the fixture is sized ten times over
+now, with the reason written down: **a fixture whose margin depends on how long a transfer takes is
+measuring the transfer, not the cart.** 22 legs, 440 grain, still standing.
