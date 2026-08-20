@@ -382,7 +382,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         get
         {
             var degrees = look.SunFollowsTheYear ? sky.SunElevationDegrees : look.SunElevationDegrees;
-            var elevation = MathF.Max(4f, degrees) * MathF.PI / 180f;
+            // <b>Clamped, or the box breathes and the shadows pop.</b> A shadow's length is
+            // height / tan(elevation), which runs away near the horizon: at six degrees a seven-metre tree
+            // throws sixty-six metres. Letting the box follow that means it swells and shrinks every dawn
+            // and dusk, and since the box's size sets the texel size, every shadow in the scene changes
+            // resolution as the sun moves — which is a good part of what still read as choppy.
+            //
+            // Twenty degrees is the floor: below it the margin stops growing and shadows from casters
+            // further out than that are simply missing, which nobody can see at a raking sun because the
+            // things casting them are edge-on and tiny.
+            var elevation = MathF.Max(20f, degrees) * MathF.PI / 180f;
             return MathF.Max(look.ShadowMarginMetres, look.TallestCasterMetres / MathF.Tan(elevation));
         }
     }
@@ -478,7 +487,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// times 1.35 — eight hundred metres — which is a viewpoint from which a villager is a subpixel and
     /// which, with a fixed far plane, showed nothing at all.
     /// </remarks>
-    private const float CameraFurthestDistance = 240f;
+    // Reported as still slightly too far. Past this the settlement is a smudge in the middle of a green
+    // field and the shadow map is spread so thin that everything it draws is a suggestion.
+    private const float CameraFurthestDistance = 170f;
 
     /// <summary>Metres a second the arrow keys pan, as a share of how far back the camera is.</summary>
     /// <remarks>
@@ -1556,10 +1567,31 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// first time somebody presses Q.
     /// </para>
     /// </remarks>
+    /// <summary>How near an edge the pointer has to be to start pushing the camera, in pixels.</summary>
+    /// <remarks>
+    /// A band rather than the last pixel, because the last pixel is unreachable on a trackpad and because
+    /// the camera should start moving <em>before</em> the thing you are chasing has left the screen. Twelve
+    /// is about a finger's width of slop at this scale and does not trigger while reading the panels, which
+    /// sit inside it.
+    /// </remarks>
+    private const float EdgePanBand = 12f;
+
     private void PanCamera(float deltaSeconds)
     {
         var x = (panRight ? 1f : 0f) - (panLeft ? 1f : 0f);
         var z = (panUp ? 1f : 0f) - (panDown ? 1f : 0f);
+
+        // <b>And the pointer against an edge pushes too</b>, which is how every game of this shape has
+        // worked for thirty years and is the only way to pan while dragging a selection. Proportional
+        // within the band rather than on or off: a pointer just inside the edge nudges and one hard against
+        // it moves at full speed, so a small correction does not fling the camera.
+        var (width, height) = host.LogicalSize;
+        if (width > 0 && height > 0 && !selection.IsPointerDown)
+        {
+            x += EdgePush(mouseX, width);
+            z -= EdgePush(mouseY, height);
+        }
+
         if (x == 0f && z == 0f) return;
         // Screen right and screen "into the distance", on the ground plane, at the current yaw.
         var forward = new Vector2(MathF.Sin(cameraYaw), MathF.Cos(cameraYaw));
@@ -1568,6 +1600,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (move.LengthSquared() > 1f) move = Vector2.Normalize(move);
         cameraFocus = simulation.Terrain.ClampPosition(
             cameraFocus + move * (cameraDistance * CameraPanSharePerSecond * deltaSeconds));
+    }
+
+    /// <summary>How hard the pointer is pushing against one axis, from -1 to 1.</summary>
+    private static float EdgePush(float at, float extent)
+    {
+        if (at <= EdgePanBand) return -(1f - MathF.Max(0f, at) / EdgePanBand);
+        if (at >= extent - EdgePanBand) return 1f - MathF.Max(0f, extent - at) / EdgePanBand;
+        return 0f;
     }
 
     /// <summary>

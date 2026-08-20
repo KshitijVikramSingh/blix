@@ -96,7 +96,7 @@ internal readonly record struct Atmosphere(
         SkyHorizon: new Vector3(0.70f, 0.84f, 0.95f),
         SkyAmbient: new Vector3(0.38f, 0.48f, 0.60f),
         GroundAmbient: new Vector3(0.22f, 0.24f, 0.16f),
-        AmbientStrength: 0.90f,
+        AmbientStrength: 1.15f,
         HazeAway: new Vector3(0.64f, 0.76f, 0.88f),
         HazeToward: new Vector3(0.92f, 0.90f, 0.80f));
 
@@ -108,7 +108,7 @@ internal readonly record struct Atmosphere(
         SkyHorizon: new Vector3(0.62f, 0.80f, 0.96f),
         SkyAmbient: new Vector3(0.34f, 0.46f, 0.62f),
         GroundAmbient: new Vector3(0.26f, 0.24f, 0.14f),
-        AmbientStrength: 0.85f,
+        AmbientStrength: 1.10f,
         HazeAway: new Vector3(0.60f, 0.74f, 0.90f),
         HazeToward: new Vector3(0.96f, 0.90f, 0.74f));
 
@@ -120,7 +120,7 @@ internal readonly record struct Atmosphere(
         SkyHorizon: new Vector3(0.86f, 0.80f, 0.66f),
         SkyAmbient: new Vector3(0.40f, 0.42f, 0.46f),
         GroundAmbient: new Vector3(0.32f, 0.26f, 0.14f),
-        AmbientStrength: 0.92f,
+        AmbientStrength: 1.18f,
         HazeAway: new Vector3(0.80f, 0.76f, 0.66f),
         HazeToward: new Vector3(1.00f, 0.84f, 0.58f));
 
@@ -132,26 +132,36 @@ internal readonly record struct Atmosphere(
         SkyHorizon: new Vector3(0.80f, 0.85f, 0.92f),
         SkyAmbient: new Vector3(0.46f, 0.52f, 0.62f),
         GroundAmbient: new Vector3(0.24f, 0.26f, 0.28f),
-        AmbientStrength: 1.05f,
+        AmbientStrength: 1.30f,
         HazeAway: new Vector3(0.82f, 0.87f, 0.94f),
         HazeToward: new Vector3(0.92f, 0.93f, 0.96f));
 
-    /// <summary>Night, which is not a season but behaves like one for a couple of hours.</summary>
+    /// <summary>
+    /// Night, which is a convention rather than a measurement.
+    /// </summary>
     /// <remarks>
-    /// Moonlight is sunlight twice reflected, so it is the same colour arriving from the same place and
-    /// merely far weaker and much bluer. Ambient carries almost all of it: at night there is no direction
-    /// worth speaking of, which is exactly why a night scene reads as flat unless the ambient is doing the
-    /// work.
+    /// <b>Reported as pitch black and entirely invisible, which is what physical night is and not what a
+    /// playable one is.</b> A real moonlit field is about a hundred-thousandth of a sunlit one; a night
+    /// somebody is expected to keep playing through is perhaps a tenth of one, blue, with the shapes
+    /// legible and the colour drained out of them. That is the convention every game of this kind uses and
+    /// it is not a compromise — moonlight <em>is</em> what your eyes have adapted to, so a night that looks
+    /// like this is closer to the experience than a correct one would be.
+    /// <para>
+    /// Ambient carries most of it, because at night there is no direction worth speaking of — which is why
+    /// a night scene reads flat unless the ambient is doing the work. But not all of it: the moon is a real
+    /// directional light and without it every roof and every wall shades identically and the settlement
+    /// goes to silhouette. Weak, blue, and enough to keep an edge on things.
+    /// </para>
     /// </remarks>
     private static readonly SeasonLook Nightfall = new(
         NoonElevation: 0f,
-        SunColor: new Vector3(0.62f, 0.72f, 1.00f),
-        SunStrength: 0.28f,
-        SkyZenith: new Vector3(0.020f, 0.035f, 0.085f),
-        SkyHorizon: new Vector3(0.075f, 0.095f, 0.16f),
-        SkyAmbient: new Vector3(0.12f, 0.16f, 0.26f),
-        GroundAmbient: new Vector3(0.05f, 0.06f, 0.09f),
-        AmbientStrength: 0.55f,
+        SunColor: new Vector3(0.66f, 0.76f, 1.00f),
+        SunStrength: 0.70f,
+        SkyZenith: new Vector3(0.055f, 0.075f, 0.155f),
+        SkyHorizon: new Vector3(0.13f, 0.16f, 0.26f),
+        SkyAmbient: new Vector3(0.30f, 0.36f, 0.52f),
+        GroundAmbient: new Vector3(0.16f, 0.18f, 0.24f),
+        AmbientStrength: 1.00f,
         HazeAway: new Vector3(0.10f, 0.13f, 0.22f),
         HazeToward: new Vector3(0.18f, 0.19f, 0.26f));
 
@@ -250,7 +260,13 @@ internal readonly record struct Atmosphere(
             MathF.Cos(lightAzimuth) * horizontal));
 
         var sunColor = Vector3.Lerp(look.SunColor, new Vector3(1.00f, 0.62f, 0.34f), low * 0.7f);
-        var strength = look.SunStrength * above * (1f - low * 0.45f);
+        // <b>Two terms, because one multiplied by "how far up the sun is" goes to nothing at night.</b> That
+        // was the bug behind the pitch-black report: the whole directional contribution was scaled by the
+        // sun's height, so below the horizon the scene had ambient and nothing else, and a scene lit only by
+        // ambient has no shape in it at all. The moon is its own light and it does not care where the sun is.
+        var daySun = look.SunStrength * above * (1f - low * 0.45f);
+        var moon = Nightfall.SunStrength * (1f - above);
+        var strength = daySun + moon;
 
         // <b>Haze is the sky seen edge-on, so it is the sky's own colour rather than two more constants.</b>
         // Which is both physically the case — aerial perspective tends toward the sky's radiance — and the
