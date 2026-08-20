@@ -92,6 +92,13 @@ public static class Program
                 raidExtent, raidMinutes, between, health, seed, args.Contains("--peers")));
         }
 
+        if (args.Contains("--skyprofile"))
+        {
+            var bearing = Value(args, "--bearing") is { } b ? float.Parse(b) : 37f;
+            var seasonality = Value(args, "--seasonality") is { } q ? float.Parse(q) : 1f;
+            Environment.Exit(SkyProfile.Run(bearing, seasonality));
+        }
+
         if (args.Contains("--catchment"))
         {
             var catchExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;

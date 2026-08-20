@@ -1747,7 +1747,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             (following ? sky.SunIntensity : look.SunIntensity) * look.SunScale,
             (following ? sky.AmbientScale : look.Ambient) * look.AmbientScale,
             look.TerminatorWrap,
-            0f);
+            // How chromatic green is allowed to be under this sun. One when the light is pinned, because
+            // pinning the sun is for judging a material and a hidden chroma pull would be lying about it.
+            following ? sky.Grade.FoliageChroma : 1f);
         var sunTint = new Vector4(following ? sky.SunColor : new Vector3(1.00f, 0.94f, 0.80f), 0f);
         var skyAmbient = new Vector4(following ? sky.SkyAmbient : new Vector3(0.36f, 0.44f, 0.55f), 0f);
         var groundAmbient = new Vector4(
@@ -1758,8 +1760,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // is centred on the origin, so uv is worldPos.xz / extent + 0.5 and needs no second uniform.
         var haze = new Vector4(
             look.HazeDesaturation, look.HazeSunGlow, simulation.ExtentMeters, look.WearStrength);
+        // <b>The grade is the season's, and the sliders are multipliers over it.</b> One exposure and one
+        // saturation for the whole year meant the palette could change every hue in the scene and never
+        // change how the frame was shot — and a winter photograph is recognisable as much by being flat and
+        // drained as by being blue. See SkyGrade.
         var grade = new Vector4(
-            look.Exposure, (float)look.Tonemap, look.Saturation, look.Contrast);
+            look.Exposure * (following ? sky.Grade.Exposure : 1f),
+            (float)look.Tonemap,
+            look.Saturation * (following ? sky.Grade.Saturation : 1f),
+            look.Contrast * (following ? sky.Grade.Contrast : 1f));
         Matrix4x4.Invert(viewProjection, out var inverseViewProjection);
 
         MemoryMarshal.Write(worldPush.AsSpan(0, 64), in viewProjection);

@@ -82,6 +82,27 @@ internal sealed class LookSettings
         set => Atmosphere.DayLengthSeconds = value;
     }
 
+    /// <summary>How much saturation a high sun takes out of the frame.</summary>
+    /// <remarks>
+    /// A proxy onto <see cref="Atmosphere.MiddaySaturationDrop"/>, which is where the argument for it is
+    /// written. On a slider because "how much is too colourful" is a judgement and not a measurement — and
+    /// because at zero you can see what was being complained about.
+    /// </remarks>
+    [Tune(0.0, 0.5, Label = "midday saturation drop", Group = "sun")]
+    public float MiddaySaturationDrop
+    {
+        get => Atmosphere.MiddaySaturationDrop;
+        set => Atmosphere.MiddaySaturationDrop = value;
+    }
+
+    /// <summary>How much chroma a high sun takes out of green specifically.</summary>
+    [Tune(0.0, 0.6, Label = "midday green drop", Group = "sun")]
+    public float MiddayGreenDrop
+    {
+        get => Atmosphere.MiddayGreenDrop;
+        set => Atmosphere.MiddayGreenDrop = value;
+    }
+
     /// <summary>Multipliers over whatever the season asked for, for taste.</summary>
     [Tune(0.2, 3.0, Label = "sun scale", Group = "sun")]
     public float SunScale = 1f;

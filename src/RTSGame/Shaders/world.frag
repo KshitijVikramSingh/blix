@@ -29,7 +29,8 @@ layout(push_constant) uniform Push {
     mat4 uSunShadowVP;
     vec4 uFog;      // x = start (m), y = end (m), z = strength
     vec4 uShadow;   // x = texel as a fraction of the map, y = map size (m), z = penumbra, w = offset
-    vec4 uLight;    // x = sun intensity, y = ambient scale, z = terminator wrap
+    vec4 uLight;    // x = sun intensity, y = ambient scale, z = terminator wrap,
+                    // w = how chromatic green is allowed to be under this sun (1 = untouched)
     vec4 uHaze;     // x = desaturation with distance, y = haze glow toward the sun,
                     // z = map extent (m), w = how much wear shows
     // <b>The palette, which used to be constants in this file.</b> A year looked like one afternoon
@@ -124,6 +125,21 @@ void main() {
         // Backlight: how much the sun is behind this surface from where we stand.
         vec3 toEye = normalize(uCamPos.xyz - vWorldPos);
         through = pow(max(dot(-toEye, normalize(uSunDir.xyz)), 0.0), 2.0) * 0.55;
+    }
+
+    // <b>A high sun does not make grass greener.</b> Reported as midday reading over-saturated, and green
+    // is the specific offender because canopy and ground are most of the screen — so their chroma is the
+    // frame's mood rather than one hue among many. Pulled toward a warm grey of the same luminance, which
+    // takes the colour out without taking the light out: real grass at noon goes to straw and olive.
+    //
+    // Here and not in the present pass because the present pass cannot tell a green roof from a green
+    // field, and pulling the whole frame's saturation to fix the field drains the earth and the tiles too.
+    // The amount arrives per frame from Atmosphere.MiddayGreenDrop against the sun's height, so it is
+    // strongest at a summer noon and effectively absent all winter.
+    if (uLight.w < 0.999 &&
+        (isClass(surface, kFoliage) || isClass(surface, kCrop) || isClass(surface, kTerrain))) {
+        float value = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+        albedo = mix(vec3(value) * vec3(1.04, 1.00, 0.92), albedo, uLight.w);
     }
 
     float wrapWide = max((sunDot + uLight.z + wrapExtra) / (1.0 + uLight.z + wrapExtra), 0.0);

@@ -18,6 +18,27 @@ namespace RTSGame.Rendering;
 /// and that is the one honest compromise in this file — see <see cref="DayLengthSeconds"/>.
 /// </para>
 /// </remarks>
+/// <summary>
+/// What the camera does with this light, as opposed to what the light is.
+/// </summary>
+/// <remarks>
+/// <b>Grading belongs to the season, not to a global slider.</b> Exposure, saturation and contrast were one
+/// setting for the whole year, which meant the year's palette could shift the hues around and never change
+/// how the frame was <em>shot</em> — and how a frame is shot is most of what makes a winter photograph
+/// unmistakable. The sliders remain, as multipliers over whatever the season asked for.
+/// <para>
+/// <c>FoliageChroma</c> is the odd one out: it is a multiplier on how chromatic green surfaces are allowed
+/// to be, applied in the world shader rather than at present time, because it is aimed at one thing — the
+/// green intensity of ground and canopy under a high sun — and pulling the whole frame's saturation to fix
+/// it would take the colour out of the roofs and the earth as well.
+/// </para>
+/// </remarks>
+internal readonly record struct SkyGrade(
+    float Exposure,
+    float Saturation,
+    float Contrast,
+    float FoliageChroma);
+
 internal readonly record struct Atmosphere(
     Vector3 SunDirection,
     Vector3 SunColor,
@@ -31,8 +52,30 @@ internal readonly record struct Atmosphere(
     Vector3 HazeToward,
     float SunElevationDegrees,
     float HourOfDay,
+    SkyGrade Grade,
     string Description)
 {
+    /// <summary>
+    /// How much of the frame's saturation a high sun takes away.
+    /// </summary>
+    /// <remarks>
+    /// <b>Bright light is not more colourful light.</b> Reported as midday reading over-saturated, and it
+    /// is: a strong sun raises every albedo in the scene toward the top of the curve, film desaturates as it
+    /// rolls off, and the eye's own adaptation to a bright field pulls chroma down too — so a rendered noon
+    /// that keeps the same saturation as a rendered dusk looks painted. Applied against the sun's height
+    /// rather than the clock, so it takes the most out of a summer noon and almost nothing out of a winter
+    /// one, which reinforces the season instead of averaging it.
+    /// </remarks>
+    internal static float MiddaySaturationDrop = 0.14f;
+
+    /// <summary>How much of green's chroma a high sun takes away, on top of the frame's.</summary>
+    /// <remarks>
+    /// The specific complaint, and it deserves its own dial because green is not just another hue here: the
+    /// canopy and the ground are most of the screen, so their saturation <em>is</em> the frame's mood. Real
+    /// grass at noon goes toward straw and olive, not toward emerald.
+    /// </remarks>
+    internal static float MiddayGreenDrop = 0.22f;
+
     /// <summary>
     /// How long a sun cycle takes, in simulated seconds. The calendar's own day, by default.
     /// </summary>
@@ -79,68 +122,125 @@ internal readonly record struct Atmosphere(
     /// is most itself: the blend then carries you through an autumn that is half harvest and half winter,
     /// which is what late autumn is.
     /// </remarks>
+    /// <remarks>
+    /// <b><c>NoonElevation</c> is gone, and it had been dead for six commits.</b> It was authored for all
+    /// five palettes, blended every frame and read by nothing — the sun's height comes from declination and
+    /// latitude now, which is why winter's noon is low whether or not a palette says so. A palette field
+    /// that looks like a decision and changes nothing is worse than a missing one.
+    /// </remarks>
     private readonly record struct SeasonLook(
-        float NoonElevation,
         Vector3 SunColor,
         float SunStrength,
+        // What the sun goes to as it nears the horizon, and what the air toward it glows. Per season,
+        // because a single copper for the whole year is what made winter noon look like an autumn sunset.
+        Vector3 LowSunColor,
+        Vector3 LowGlow,
         Vector3 SkyZenith,
         Vector3 SkyHorizon,
         Vector3 SkyAmbient,
         Vector3 GroundAmbient,
         float AmbientStrength,
         Vector3 HazeAway,
-        Vector3 HazeToward);
+        Vector3 HazeToward,
+        // The season's night: a tint over the shared night palette and a multiplier on its strength. A
+        // winter night is colder and — because there is snow and no leaves — brighter than a summer one.
+        Vector3 NightTint,
+        float NightScale,
+        // What the camera does with this light, as distinct from what the light is. Exposure, saturation
+        // and contrast are the season's own, so the grade is part of the palette rather than a global.
+        float Exposure,
+        float Saturation,
+        float Contrast);
 
     // Spring: a high clean light and a lot of air in it. Summer: the sun overhead, deep sky, little haze.
     // Harvest: lower, golden, dusty — the season this whole game is about. Winter: barely clears the trees,
     // cold and pale, and the light itself is the thing that tells you the year is running out.
     private static readonly SeasonLook Spring = new(
-        NoonElevation: 44f,
         SunColor: new Vector3(1.00f, 0.96f, 0.88f),
         SunStrength: 2.9f,
+        // A spring low sun is clean and pale gold: the air is washed rather than dusty.
+        LowSunColor: new Vector3(1.00f, 0.80f, 0.58f),
+        LowGlow: new Vector3(1.00f, 0.80f, 0.56f),
         SkyZenith: new Vector3(0.20f, 0.44f, 0.84f),
         SkyHorizon: new Vector3(0.70f, 0.84f, 0.95f),
         SkyAmbient: new Vector3(0.38f, 0.48f, 0.60f),
         GroundAmbient: new Vector3(0.22f, 0.24f, 0.16f),
         AmbientStrength: 1.15f,
         HazeAway: new Vector3(0.64f, 0.76f, 0.88f),
-        HazeToward: new Vector3(0.92f, 0.90f, 0.80f));
+        HazeToward: new Vector3(0.92f, 0.90f, 0.80f),
+        NightTint: new Vector3(0.98f, 1.00f, 1.04f),
+        NightScale: 1.00f,
+        Exposure: 1.00f,
+        Saturation: 1.00f,
+        Contrast: 1.00f);
 
     private static readonly SeasonLook Summer = new(
-        NoonElevation: 58f,
         SunColor: new Vector3(1.00f, 0.97f, 0.86f),
         SunStrength: 3.4f,
+        // Hot amber, and the shortest golden hour of the year because the sun drops steeply.
+        LowSunColor: new Vector3(1.00f, 0.70f, 0.42f),
+        LowGlow: new Vector3(1.00f, 0.68f, 0.38f),
         SkyZenith: new Vector3(0.12f, 0.34f, 0.82f),
         SkyHorizon: new Vector3(0.62f, 0.80f, 0.96f),
         SkyAmbient: new Vector3(0.34f, 0.46f, 0.62f),
         GroundAmbient: new Vector3(0.26f, 0.24f, 0.14f),
         AmbientStrength: 1.10f,
         HazeAway: new Vector3(0.60f, 0.74f, 0.90f),
-        HazeToward: new Vector3(0.96f, 0.90f, 0.74f));
+        HazeToward: new Vector3(0.96f, 0.90f, 0.74f),
+        // A summer night is warm, short and never quite dark at this latitude.
+        NightTint: new Vector3(1.06f, 1.00f, 0.94f),
+        NightScale: 1.10f,
+        // Bright and hard, but not lurid: the midday chroma pull below takes the green down, and it takes
+        // the most out of summer precisely because summer is the season that reaches a high sun.
+        Exposure: 1.02f,
+        Saturation: 1.02f,
+        Contrast: 1.06f);
 
     private static readonly SeasonLook Harvest = new(
-        NoonElevation: 34f,
         SunColor: new Vector3(1.00f, 0.88f, 0.64f),
         SunStrength: 3.0f,
+        // The coppery one, and the season this game is about. Deepest low sun of the year.
+        LowSunColor: new Vector3(1.00f, 0.56f, 0.26f),
+        LowGlow: new Vector3(1.00f, 0.54f, 0.24f),
         SkyZenith: new Vector3(0.22f, 0.40f, 0.70f),
         SkyHorizon: new Vector3(0.86f, 0.80f, 0.66f),
         SkyAmbient: new Vector3(0.40f, 0.42f, 0.46f),
         GroundAmbient: new Vector3(0.32f, 0.26f, 0.14f),
         AmbientStrength: 1.18f,
         HazeAway: new Vector3(0.80f, 0.76f, 0.66f),
-        HazeToward: new Vector3(1.00f, 0.84f, 0.58f));
+        HazeToward: new Vector3(1.00f, 0.84f, 0.58f),
+        NightTint: new Vector3(1.02f, 0.99f, 0.96f),
+        NightScale: 0.96f,
+        Exposure: 0.98f,
+        Saturation: 1.08f,
+        Contrast: 1.02f);
 
     private static readonly SeasonLook Winter = new(
-        NoonElevation: 19f,
         SunColor: new Vector3(0.92f, 0.94f, 1.00f),
         SunStrength: 2.1f,
+        // <b>Pale rose, not copper — and this is the change that makes winter read as winter.</b> The low
+        // sun colour was one fixed orange for the whole year, and the ramp that reaches it is a function of
+        // the sun's height alone. At fifty north the midwinter sun never clears seventeen degrees, so the
+        // ramp was pinned all day and winter noon was being painted as an autumn sunset: the one season
+        // that should be unmistakable was wearing another season's light. A winter sun near the horizon is
+        // weak and pink-white, because the light is thin rather than dusty.
+        LowSunColor: new Vector3(0.98f, 0.85f, 0.80f),
+        LowGlow: new Vector3(0.95f, 0.87f, 0.88f),
         SkyZenith: new Vector3(0.30f, 0.44f, 0.66f),
         SkyHorizon: new Vector3(0.80f, 0.85f, 0.92f),
         SkyAmbient: new Vector3(0.46f, 0.52f, 0.62f),
         GroundAmbient: new Vector3(0.24f, 0.26f, 0.28f),
         AmbientStrength: 1.30f,
         HazeAway: new Vector3(0.82f, 0.87f, 0.94f),
-        HazeToward: new Vector3(0.92f, 0.93f, 0.96f));
+        HazeToward: new Vector3(0.92f, 0.93f, 0.96f),
+        // Colder and brighter: bare ground, no canopy, and a clear sky that carries starlight.
+        NightTint: new Vector3(0.90f, 0.96f, 1.12f),
+        NightScale: 1.18f,
+        // Drained and flat, which is the strongest single seasonal signal the grade has. A winter frame
+        // should look like it was shot on a duller day, not like a summer frame with blue in it.
+        Exposure: 0.94f,
+        Saturation: 0.80f,
+        Contrast: 0.93f);
 
     /// <summary>
     /// Night, which is a convention rather than a measurement.
@@ -160,16 +260,27 @@ internal readonly record struct Atmosphere(
     /// </para>
     /// </remarks>
     private static readonly SeasonLook Nightfall = new(
-        NoonElevation: 0f,
         SunColor: new Vector3(0.66f, 0.76f, 1.00f),
         SunStrength: 0.70f,
+        // The low ramp is zero once the sun is down, so these only matter through the twilight blend.
+        LowSunColor: new Vector3(0.66f, 0.76f, 1.00f),
+        LowGlow: new Vector3(0.18f, 0.19f, 0.26f),
         SkyZenith: new Vector3(0.055f, 0.075f, 0.155f),
         SkyHorizon: new Vector3(0.13f, 0.16f, 0.26f),
         SkyAmbient: new Vector3(0.30f, 0.36f, 0.52f),
         GroundAmbient: new Vector3(0.16f, 0.18f, 0.24f),
         AmbientStrength: 1.00f,
         HazeAway: new Vector3(0.10f, 0.13f, 0.22f),
-        HazeToward: new Vector3(0.18f, 0.19f, 0.26f));
+        HazeToward: new Vector3(0.18f, 0.19f, 0.26f),
+        // Night does not tint itself — the season does that to it, in Tinted below.
+        NightTint: Vector3.One,
+        NightScale: 1.00f,
+        // A little more exposure, because a dim scene wants to sit where the curve still has slope, and a
+        // little less chroma — but only a little, since the Purkinje shift in the present pass is already
+        // draining colour out of the dark parts and two drains make a grey night.
+        Exposure: 1.14f,
+        Saturation: 0.94f,
+        Contrast: 0.96f);
 
     /// <summary>Where the settlement is, in degrees north, which is what decides the sun's habits.</summary>
     /// <remarks>
@@ -213,7 +324,21 @@ internal readonly record struct Atmosphere(
         // <b>The day of the year from the calendar, not from a fraction of it.</b> The date already knows
         // which day it is, and 270 game days map onto 365 real ones for the declination formula's sake —
         // which is a scaling, not an approximation, since the formula only cares where in the cycle it is.
-        var dayOfYear = date.Day / (float)WorldCalendar.DaysPerYear * 365f;
+        //
+        // <b>Plus an offset, because the two years did not start in the same place.</b> Found by printing
+        // the profile rather than by looking at it: the calendar's year begins at spring and the
+        // declination formula's begins on the first of January, and nothing had ever reconciled them — so
+        // the light ran about six weeks early all year and the season called spring was being lit as
+        // February, at a noon sun of 25° against harvest's 50°. A spring dimmer than an autumn is not a
+        // subtle error and no amount of watching had caught it.
+        //
+        // Thirty days is not a taste: it is the offset that lands all four season middles on their solar
+        // counterparts at once, which is as close as an unequal four-season year can get to a symmetric
+        // solar one. Summer's middle falls on the June solstice, harvest's on the September equinox,
+        // winter's within a day of the December solstice, and spring's in the second week of March.
+        const float solarDayOffset = 30f;
+        var dayOfYear =
+            (date.Day / (float)WorldCalendar.DaysPerYear * 365f + solarDayOffset) % 365f;
         // Phase 0 is midnight. Fed simulated seconds rather than wall time, so the sun keeps step with the
         // calendar at any time compression — at three times speed the days were passing three times faster
         // than the sun, which is its own reason the two rhythms would not read.
@@ -253,8 +378,15 @@ internal readonly record struct Atmosphere(
         // afternoon in winter because in winter the sun never gets far from the horizon.
         var low = above * (1f - Smoothstep(4f, 26f, elevation));
 
-        // Night is the same palette with the moon in it, faded in by how far the sun is down.
-        look = Mix(look, Nightfall, 1f - above);
+        // <b>How far up the sun is when it is properly up</b>, which is the other half of the low ramp and
+        // the thing the midday pull-backs hang off. Season-independent by construction, because it is
+        // geometry: a summer noon reaches 63 degrees and a winter one 17, so this is near one in July and
+        // stays near zero all winter without a palette having to say so.
+        var high = above * Smoothstep(26f, 56f, elevation);
+
+        // Night is the same palette with the moon in it, faded in by how far the sun is down — and wearing
+        // this season's cold. See Tinted.
+        look = Mix(look, Tinted(Nightfall, look.NightTint, look.NightScale), 1f - above);
 
         // <b>Two directions blended, not one direction switched — and the switch was the choppiness.</b>
         // The moon is roughly opposite the sun, so a branch at elevation zero swung the light through a
@@ -268,7 +400,8 @@ internal readonly record struct Atmosphere(
         var moonward = Skyward(azimuth + MathF.PI, MathF.Max(14f, 34f + elevation * 0.5f));
         var direction = Vector3.Normalize(Vector3.Lerp(moonward, sunward, above));
 
-        var sunColor = Vector3.Lerp(look.SunColor, new Vector3(1.00f, 0.62f, 0.34f), low * 0.7f);
+        // Toward the season's own low sun rather than toward one copper for the whole year.
+        var sunColor = Vector3.Lerp(look.SunColor, look.LowSunColor, low * 0.7f);
         // <b>Two terms, because one multiplied by "how far up the sun is" goes to nothing at night.</b> That
         // was the bug behind the pitch-black report: the whole directional contribution was scaled by the
         // sun's height, so below the horizon the scene had ambient and nothing else, and a scene lit only by
@@ -282,8 +415,17 @@ internal readonly record struct Atmosphere(
         // fix for the reported milkiness: pale constants under a bright sun turned the distance into a
         // white wall no matter what the sky was doing.
         var hazeAway = look.SkyHorizon * 0.62f + look.SkyZenith * 0.18f;
-        var hazeToward = Vector3.Lerp(
-            look.SkyHorizon * 0.85f, new Vector3(1.00f, 0.66f, 0.36f), low * 0.55f);
+        var hazeToward = Vector3.Lerp(look.SkyHorizon * 0.85f, look.LowGlow, low * 0.55f);
+
+        // <b>The grade the season asks for, with midday pulled back inside it.</b> Both pull-backs are
+        // scaled by the sun's height, which is what makes time of day a smaller oscillation than the season
+        // rather than a competing one: the amount of the pull is itself a seasonal quantity, since only
+        // summer ever gets high enough to receive much of it.
+        var grade = new SkyGrade(
+            look.Exposure,
+            look.Saturation * (1f - MiddaySaturationDrop * high),
+            look.Contrast,
+            1f - MiddayGreenDrop * high);
 
         return new Atmosphere(
             direction,
@@ -298,6 +440,7 @@ internal readonly record struct Atmosphere(
             hazeToward,
             elevation,
             hour,
+            grade,
             Describe(elevation, low));
     }
 
@@ -362,14 +505,42 @@ internal readonly record struct Atmosphere(
     }
 
     private static SeasonLook Mix(SeasonLook a, SeasonLook b, float t) => new(
-        float.Lerp(a.NoonElevation, b.NoonElevation, t),
         Vector3.Lerp(a.SunColor, b.SunColor, t),
         float.Lerp(a.SunStrength, b.SunStrength, t),
+        Vector3.Lerp(a.LowSunColor, b.LowSunColor, t),
+        Vector3.Lerp(a.LowGlow, b.LowGlow, t),
         Vector3.Lerp(a.SkyZenith, b.SkyZenith, t),
         Vector3.Lerp(a.SkyHorizon, b.SkyHorizon, t),
         Vector3.Lerp(a.SkyAmbient, b.SkyAmbient, t),
         Vector3.Lerp(a.GroundAmbient, b.GroundAmbient, t),
         float.Lerp(a.AmbientStrength, b.AmbientStrength, t),
         Vector3.Lerp(a.HazeAway, b.HazeAway, t),
-        Vector3.Lerp(a.HazeToward, b.HazeToward, t));
+        Vector3.Lerp(a.HazeToward, b.HazeToward, t),
+        Vector3.Lerp(a.NightTint, b.NightTint, t),
+        float.Lerp(a.NightScale, b.NightScale, t),
+        float.Lerp(a.Exposure, b.Exposure, t),
+        float.Lerp(a.Saturation, b.Saturation, t),
+        float.Lerp(a.Contrast, b.Contrast, t));
+
+    /// <summary>The shared night palette wearing one season's colour.</summary>
+    /// <remarks>
+    /// A tint on the colours and a scale on the two strengths, rather than four more authored night
+    /// palettes. Night is the same convention whatever the month — a legible tenth of daylight, blue, with
+    /// the colour drained out of it — and what changes with the season is how cold it is and how much of it
+    /// there is. Two numbers say that; twenty would say it less clearly and drift out of step.
+    /// </remarks>
+    private static SeasonLook Tinted(SeasonLook night, Vector3 tint, float scale) => night with
+    {
+        SunColor = night.SunColor * tint,
+        SunStrength = night.SunStrength * scale,
+        LowSunColor = night.LowSunColor * tint,
+        LowGlow = night.LowGlow * tint,
+        SkyZenith = night.SkyZenith * tint,
+        SkyHorizon = night.SkyHorizon * tint,
+        SkyAmbient = night.SkyAmbient * tint,
+        GroundAmbient = night.GroundAmbient * tint,
+        AmbientStrength = night.AmbientStrength * scale,
+        HazeAway = night.HazeAway * tint,
+        HazeToward = night.HazeToward * tint,
+    };
 }
