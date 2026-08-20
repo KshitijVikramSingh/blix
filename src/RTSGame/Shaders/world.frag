@@ -69,10 +69,15 @@ layout(push_constant) uniform Push {
 #include "materials.glsl"
 
 // The colour of a wood fire seen at night, which is a hue and therefore stays in the shader — the
-// intensities are on sliders and these are not. Deep amber rather than the orange a torch is usually drawn
-// as: a hearth seen through a small window is mostly the red end of what the fire is doing, and the tell of
-// a fake one is that it is the colour of a traffic cone.
-const vec3 kHearthColor = vec3(1.00, 0.52, 0.20);
+// intensities are on sliders and these are not.
+//
+// <b>Twice too yellow, and each time the report was "that is a lamp".</b> The instinct is to reach for the
+// colour of a flame, and a flame is nearly white at its middle — but what leaves a room through a doorway is
+// not the flame, it is what the flame has bounced off, and hot coals and the underside of a thatch are much
+// further into the red than the fire that made them. Green at a third of red and blue at a tenth is a colour
+// no fixture ever made; the tell of the yellow version is that it reads as tungsten, because tungsten is
+// exactly what it is.
+const vec3 kHearthColor = vec3(1.00, 0.36, 0.11);
 
 void main() {
     vec3 n = normalize(vNormal);
@@ -183,8 +188,12 @@ void main() {
     // The height falloff is the honest approximation here: it fades with height above <em>zero</em> rather
     // than above the ground, which is exact while the village is flat and wants revisiting the day relief
     // is generated. Without it a lit doorway would put its pool on the roof as well.
+    //
+    // Tightened to hug the ground, and that is what makes it read as firelight rather than as a lamp post:
+    // a fire is on the floor, so what it lights is the floor and the bottom of the wall beside it, and the
+    // eaves stay dark. Over about two metres there is nothing left of it.
     float spill = texture(uHearthLight, vWorldPos.xz / uHaze.z + 0.5).r *
-                  uHearth.y * uHearth.x * exp(-max(vWorldPos.y, 0.0) / 3.0);
+                  uHearth.y * uHearth.x * exp(-max(vWorldPos.y, 0.0) / 1.55);
 
     vec3 lit = albedo * (ambient + shadeLift + uSunTint.rgb * uLight.x * wrapWide * shadow * upFace);
     lit += albedo * kHearthColor * spill;

@@ -134,7 +134,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// at the edges, so the colour has to survive the top of the curve.
     /// </remarks>
     private static readonly Vector4 EmberTint =
-        new(1.00f, 0.50f, 0.19f, SettlementArt.MaterialClass.Ember);
+        new(1.00f, 0.34f, 0.10f, SettlementArt.MaterialClass.Ember);
 
     private static readonly Vector4 HouseColor = new(0.68f, 0.58f, 0.46f, 1f);
     private static readonly Vector4 HouseRoofColor = new(0.44f, 0.22f, 0.16f, 1f);
@@ -1880,7 +1880,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // village comes up over the same twilight in which the palette goes blue, and neither can be seen
         // to switch.
         var hearth = new Vector4(
-            following ? sky.Nightness : 0f, look.HearthSpill, look.WindowGlow, 0f);
+            following ? sky.Nightness : 0f, look.HearthSpill, look.HearthSpark, 0f);
         MemoryMarshal.Write(worldPush.AsSpan(320, 16), in hearth);
         // Smoke takes the light already resolved into one colour each, because it has no shadow map, no
         // material class and no wear to look up — it is a thin thing that carries the ambient and a little
@@ -2486,19 +2486,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// Each of them is a fact rather than a decoration, which is the rule the wear and the stumps follow
     /// too. <b>A house is lit if somebody lives in it and dark if nobody does</b> — so an unhoused
     /// settlement's empty cottages are visibly empty, which is a thing §51 wanted the interface to say and
-    /// this says without a word of text. The number of lit windows is how many live there. The granary
-    /// keeps a lantern at its door because it is the building somebody is always at. A site has a brazier
-    /// while it is being built and none once it is finished.
+    /// this says without a word of text. A fuller house throws a stronger pool. A site has a brazier while
+    /// it is being built and none once it is finished.
     /// </para>
     /// <para>
-    /// Kept small deliberately. The failure mode of night lighting is not one window being too bright but
-    /// pools of orange everywhere, at which point the settlement stops being a warm island in a cool
-    /// landscape and the whole composition is gone.
+    /// Kept small deliberately, and smaller twice over: the failure mode of night lighting is not one
+    /// source being too bright, it is pools of orange everywhere, at which point the settlement stops being
+    /// a warm island in a cool landscape and the whole composition is gone.
     /// </para>
     /// </remarks>
     private void DrawHabitationLights(in EconomyNode node, float ground, float width, float yaw)
     {
-        if (art is null || !look.SunFollowsTheYear || sky.Nightness < 0.02f || look.WindowGlow <= 0f) return;
+        if (art is null || !look.SunFollowsTheYear || sky.Nightness < 0.02f || look.HearthSpark <= 0f) return;
 
         // <b>Measured off the model, not off an assumed unit box — which is what had the lights floating in
         // the air.</b> NormaliseToUnitFootprint makes the <em>longer</em> horizontal axis one and scales the
@@ -2530,32 +2529,33 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             return;
         }
 
-        // <b>A hearth showing through a doorway, not a lamp in a window — and the difference is height.</b>
-        // Reported as reading like modern lighting, and it was: three bright panes at two-fifths of the wall
-        // are electric light, because that is where a room's lamp goes. A fire is on the floor. So what
-        // escapes a building is a low, wide, dim slot of light at the door, spilling onto the ground in
-        // front of it — and the pool the field throws is doing most of the work rather than the source.
+        // <b>The visible source is gone, and that is the fix rather than a retreat from one.</b> Twice now
+        // a lit rectangle on a wall has been reported as modern lighting, and lowering it and re-tinting it
+        // did not help, because the problem is not where it is or what colour it is: <em>a flat quad of
+        // uniform brightness is a lamp</em>. It has an edge, it has an even face, and nothing about a fire
+        // is even. Worse, it has to be put on a particular face of the model, and the door of a cottage in
+        // this pack is not reliably on the axis the fitting happens to call +x — so half of them were
+        // glowing out of a blank wall.
         //
-        // It costs the "count the windows to count the household" read, which was a nice idea and the wrong
-        // one to spend brightness on. A dark house is still an empty house, and that was the load-bearing
-        // half.
-        var door = new Vector3(0.018f, eaves * 0.115f, box.Max.Z * 0.30f);
-        var sill = box.Min.Y + eaves * 0.055f;
+        // What is left is a spark you can only see up close and the pool of light on the ground outside,
+        // which is what "a hearth showing faintly through a door" actually looks like from any distance
+        // worth drawing it at: not a bright shape, a warm patch. The pool has no edge, no orientation and
+        // no opinion about which wall the door is in, which is why it can be right about all three.
+        var spark = new Vector3(0.020f);
+        var hearthFloor = box.Min.Y + eaves * 0.035f;
 
         if (node.IsSink)
         {
             if (node.Occupants <= 0) return;
-            AddEmber(node.Position, ground, width, yaw, new Vector3(box.Max.X, sill, 0f), door);
+            AddEmber(node.Position, ground, width, yaw, new Vector3(box.Max.X, hearthFloor, 0f), spark);
             return;
         }
 
         if (node.Kind == NodeKind.Granary)
         {
-            // Wider, because it is the biggest doorway in the village and the one somebody is always at.
             AddEmber(
                 node.Position, ground, width, yaw,
-                new Vector3(box.Max.X, sill, 0f),
-                new Vector3(door.X, door.Y * 1.15f, door.Z * 1.25f));
+                new Vector3(box.Max.X, hearthFloor, 0f), spark * 1.3f);
         }
     }
 
@@ -3083,12 +3083,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             if (node.IsSink)
             {
                 if (node.Occupants <= 0) continue;
-                // Brighter for a fuller house, because that is what the windows are saying too.
-                Splat(at, width * 1.35f, (0.55f + 0.15f * MathF.Min(3, node.Occupants)) * flicker);
+                // <b>Tighter than it was, because a wide pool is a street lamp.</b> Light escaping a
+                // doorway falls in front of the doorway; a six-metre wash around a cottage says there is
+                // something on a pole outside it. Still brighter for a fuller house — with the panes gone
+                // this is the only thing left that says how many live there.
+                Splat(at, width * 0.95f, (0.60f + 0.16f * MathF.Min(3, node.Occupants)) * flicker);
                 continue;
             }
 
-            if (node.Kind == NodeKind.Granary) Splat(at, width * 1.5f, 0.85f * flicker);
+            if (node.Kind == NodeKind.Granary) Splat(at, width * 1.05f, 0.95f * flicker);
         }
 
         graphicsDevice.UploadTextureMip(hearthTexture, 0, hearthField);
