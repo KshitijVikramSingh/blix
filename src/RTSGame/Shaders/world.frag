@@ -76,7 +76,7 @@ void main() {
     float sunDot = dot(n, normalize(uSunDir.xyz));
     float ndotl = max(sunDot, 0.0);
     float shadow = blix_sun_shadow_soft(
-        uSunShadowMap, vSunShadowCoord, ndotl, uShadow.x, uShadow.z);
+        uSunShadowMap, vSunShadowCoord, ndotl, uShadow.x, uShadow.z, gl_FragCoord.xy);
 
     // A wrapped terminator. Straight N.L puts a hard line across every curved surface at
     // exactly the angle the sun grazes it, which on low-poly geometry lands on a facet

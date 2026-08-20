@@ -136,7 +136,11 @@ internal sealed class LookSettings
     /// blotches — a shadow that is blurrier and dirtier at once. Narrow is clean.
     /// </remarks>
     [Tune(0.2, 6.0, Label = "shadow penumbra (texels)", Group = "shadows")]
-    public float ShadowPenumbraTexels = 1.5f;
+    // Wider than it was, because it can be now. The old kernel's banding got worse the further it spread,
+    // so 1.5 was a compromise with the artefact rather than a choice about softness; with the disc rotated
+    // per pixel the structure is gone and the only thing width costs is a slightly softer edge, which is
+    // the thing we were after.
+    public float ShadowPenumbraTexels = 3.2f;
 
     /// <summary>How far off its own surface a fragment is moved before the shadow lookup, in texels.</summary>
     /// <remarks>

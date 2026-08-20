@@ -30,14 +30,19 @@ float blix_sun_shadow(sampler2D shadowMap, vec4 coord, float ndotl) {
 //
 // Manual taps against a plain sampler2D rather than hardware comparison against a
 // sampler2DShadow: the compare-mode sampler is faster and smoother, and it needs a
-// different sampler at the descriptor layer, so the drop-in version is this one. A
-// 4x4 kernel is enough to hide a staircase without turning a wall's shadow to mush.
+// different sampler at the descriptor layer, so the drop-in version is this one.
+//
+// A rotated Vogel disc rather than a grid, which is what makes sixteen binary taps look
+// like a penumbra instead of like seventeen bands. See the remarks in the body.
 //
 // `texelSize` is 1.0 / shadow map side. Pass it in rather than assuming it — a
 // hardcoded constant here silently changes the penumbra width when the map is
 // resized, which is exactly the kind of coupling this library exists to avoid.
+// `pixel` is the fragment's screen coordinate — gl_FragCoord.xy at the call site. Taken as a parameter
+// rather than read directly, because this header is included by vertex shaders too and gl_FragCoord does
+// not exist there: a built-in referenced inside a function nobody calls still fails the compile.
 float blix_sun_shadow_soft(
-        sampler2D shadowMap, vec4 coord, float ndotl, float texelSize, float radiusTexels) {
+        sampler2D shadowMap, vec4 coord, float ndotl, float texelSize, float radiusTexels, vec2 pixel) {
     vec3 ndc = coord.xyz / coord.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
     float current = ndc.z;
@@ -48,21 +53,38 @@ float blix_sun_shadow_soft(
     // own surface already. A large depth bias on top of a normal offset buys nothing but
     // peter-panning — shadows that float free of the thing casting them.
     float bias = mix(0.0012, 0.0002, ndotl);
-    // Half-texel steps, so the sixteen taps span a little over two texels rather than six.
-    // A wide kernel of binary comparisons is not soft, it is mottled: sixteen yes/no answers
-    // spread over half a metre of ground quantise into visible blotches, which is most of what
-    // reads as "dirty".
-    float step = radiusTexels * texelSize * 0.34;
+
+    // <b>Rotated per pixel, which is what breaks the tradeoff the old comment was stuck in.</b> A grid of
+    // binary comparisons has only as many outcomes as it has taps — seventeen, for sixteen taps — and every
+    // fragment on a given surface samples the same offsets, so those seventeen values lie down in bands.
+    // Widening the kernel spreads the bands out and makes them mottling; narrowing it hides them by giving
+    // up the softness. Neither is a fix, because the artefact is the *shared* pattern, not its size.
+    //
+    // Turning the pattern by a different angle at every pixel converts the banding into high-frequency
+    // noise, which the eye reads as softness rather than as structure — and once the structure is gone the
+    // kernel is free to be as wide as the look wants. Interleaved gradient noise (Jimenez) is the rotation:
+    // one dot product and a fract, stable per pixel, and spectrally far better behaved than a hash.
+    float ign = fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
+    float rotation = ign * 6.2831853;
+    float cosine = cos(rotation);
+    float sine = sin(rotation);
+
+    // A Vogel disc rather than a square: sqrt spacing on the golden angle puts the samples at even density
+    // over a circle, so a penumbra is round. A square kernel makes a round shadow's edge subtly square, and
+    // on a low sun with long shadows that is exactly where the eye is looking.
+    const int taps = 16;
     float lit = 0.0;
-    for (int y = -2; y <= 1; ++y) {
-        for (int x = -2; x <= 1; ++x) {
-            // Half-texel offsets so the four inner taps straddle the fragment rather
-            // than one of them landing exactly on it and dominating the average.
-            vec2 at = uv + vec2(float(x) + 0.5, float(y) + 0.5) * step;
-            lit += (current - bias > texture(shadowMap, at).r) ? 0.0 : 1.0;
-        }
+    for (int i = 0; i < taps; ++i) {
+        float radius = sqrt((float(i) + 0.5) / float(taps));
+        float theta = float(i) * 2.39996323;
+        vec2 unit = vec2(cos(theta), sin(theta)) * radius;
+        // Rotate the whole disc by this pixel's angle.
+        vec2 turned = vec2(unit.x * cosine - unit.y * sine, unit.x * sine + unit.y * cosine);
+        vec2 at = uv + turned * radiusTexels * texelSize;
+        lit += (current - bias > texture(shadowMap, at).r) ? 0.0 : 1.0;
     }
-    return lit * (1.0 / 16.0);
+
+    return lit * (1.0 / float(taps));
 }
 
 // World-space offset to apply to a position BEFORE projecting it into the light's
