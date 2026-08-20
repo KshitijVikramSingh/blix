@@ -118,9 +118,30 @@ internal sealed record UnitType(
     /// grain rather than denying it. The loaded pace is applied by the raider's own behaviour, since
     /// carrying is a state rather than a kind of unit.
     /// </remarks>
+    /// <summary>
+    /// A thief, and priced as one rather than as a soldier.
+    /// </summary>
+    /// <remarks>
+    /// <b>Health 18, and it was 40, which made a raid unbeatable by the people it was raiding.</b> Measured
+    /// over eight raids: twenty-four raiders, one killed, and <em>eight villagers dead per raider</em>. At
+    /// strength 1 a villager needed forty seconds of contact to bring one down and died in under seven, so
+    /// a defence was a queue of people taking turns to lose.
+    /// <para>
+    /// Eighteen is set by the fight it should lose. Three or four villagers on one raider kill it in four
+    /// or five seconds and it takes rather less than one of them with it; two of them trade one for one;
+    /// one of them dies. That is the shape a settlement defending itself should have — <em>numbers work,
+    /// but only just, and only together</em> — and it leaves a villager still fighting badly on purpose,
+    /// which is the roster's intended ordering and is measured against the soldier at health 45 rather than
+    /// against a thief.
+    /// </para>
+    /// <para>
+    /// Strength stays at 3. A raider losing to four farmhands and killing any one of them it can get alone
+    /// are both wanted, and it is strength that carries the second.
+    /// </para>
+    /// </remarks>
     public static readonly UnitType Raider =
         new("raider", AgentDefaults.Radius, 2.05f, 0f, 40, Appetite: 0f, SightMetres: 26f,
-            Strength: 3f, Health: 40f);
+            Strength: 3f, Health: 18f);
 
     public static readonly UnitType HaulerCart =
         new("hauler cart", 0.55f, 1.10f, 0f, 40);

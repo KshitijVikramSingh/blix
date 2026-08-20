@@ -144,6 +144,9 @@ internal sealed class RaidDirector
 
     public int Escaped { get; private set; }
 
+    /// <summary>Bodies sent, which is not raids times party size once a spawn can be refused.</summary>
+    public int Sent { get; private set; }
+
     public int Stolen { get; private set; }
 
     public int Alive => party.Count;
@@ -313,6 +316,7 @@ internal sealed class RaidDirector
 
         if (started == 0) return;
         Raids++;
+        Sent += started;
         if (settings.CameraJumps) LookAt = arrival;
         Console.WriteLine(
             $"  RAID {Raids}: {started} raiders {edge:F0} m out at " +

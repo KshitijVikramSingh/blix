@@ -153,6 +153,7 @@ internal static class SettlementScenarios
             CameraJumps = false,
         };
         var raids = new RaidDirector(settings);
+        var ledger = new RaidLedger(new Simulation.Collision.FactionId(0));
         var totalTicks = (int)(minutes * 60f * TicksPerSecond);
         var faults = new List<string>();
         var centre = world.Nodes.Get(granary).Position;
@@ -178,6 +179,7 @@ internal static class SettlementScenarios
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             raids.Update(world, (float)SimulationWorld.FixedDeltaSeconds);
+            ledger.Observe(world, (float)SimulationWorld.FixedDeltaSeconds);
 
             var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
             if (drift.Grain != 0 || drift.Wood != 0)
@@ -233,14 +235,13 @@ internal static class SettlementScenarios
                 $"{world.Timings.Format(world.Agents.Count, world.TickNumber).Split("total ")[1].Split(" ms")[0],7}");
         }
 
-        // Raiders killed, spelled out. It was "bodies killed" against "settlers lost" and the difference
-        // had to be done in your head — which is how twenty-four raiders came and went over eight raids
-        // with not one of them killed and nobody noticing for two sessions.
-        var settlersLost = settlers - CountSettlers(world);
-        Console.WriteLine(
-            $"  {raids.Raids} raids, {raids.Escaped} got away with {raids.Stolen}, " +
-            $"{world.Threat.Killed - settlersLost} raiders killed, {settlersLost} settlers lost, " +
-            $"{world.Threat.Dealt:F0} body-seconds of harm dealt");
+        // The whole transaction, on both sides. It was "bodies killed" against "settlers lost", with the
+        // difference to be done in your head — which is how twenty-four raiders came and went over eight
+        // raids with not one killed and nobody noticing for two sessions. See RaidLedger.
+        foreach (var line in ledger.Lines(raids.Raids, raids.Sent, raids.Escaped, raids.Stolen))
+        {
+            Console.WriteLine(line);
+        }
         Console.WriteLine(
             $"  most standing at once {stoodEver}, most fleeing {fledEver}, " +
             $"most who left it to somebody closer {spareEver}, " +

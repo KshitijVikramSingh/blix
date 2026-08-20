@@ -111,6 +111,21 @@ internal sealed class ThreatSystem
         return 2f * MathF.Asin(Math.Clamp(attackerRadius / ring, 0f, 1f));
     }
 
+    /// <summary>Blows that landed this tick — one per assailant that got at somebody.</summary>
+    public int Contacts { get; private set; }
+
+    /// <summary>Distinct bodies that were being fought over this tick, and distinct bodies fighting.</summary>
+    public int UnderAttack { get; private set; }
+
+    public int Attacking { get; private set; }
+
+    /// <summary>Who died this tick and whose they were, so a report can take sides.</summary>
+    /// <remarks>
+    /// Faction is carried out with the id because by the time anybody reads this the body is gone from the
+    /// roster — "how many of ours died" cannot be answered after the fact, only recorded as it happens.
+    /// </remarks>
+    public IReadOnlyList<(AgentId Body, FactionId Faction)> FellThisTick => fellWithFaction;
+
     /// <summary>How many assailants were in reach this tick but could not get at their target.</summary>
     /// <remarks>
     /// The number that says the front is doing something. It was structurally zero before, because there
@@ -119,7 +134,9 @@ internal sealed class ThreatSystem
     public int Crowded { get; private set; }
 
     private readonly List<AgentId> fallen = new();
+    private readonly List<(AgentId Body, FactionId Faction)> fellWithFaction = new();
     private readonly List<(float Gap, int Id, int Index)> engaged = new();
+    private readonly List<Vector2> declined = new();
     private readonly List<int> hostiles = new();
     private readonly List<Vector2> guarded = new();
     private readonly List<float> menace = new();
@@ -139,6 +156,7 @@ internal sealed class ThreatSystem
     public IReadOnlyList<AgentId> Update(AgentStore agents, FactionRelations factions, float deltaSeconds)
     {
         fallen.Clear();
+        fellWithFaction.Clear();
         var bodies = agents.MutableSpan();
 
         // One pass per body being fought over, rather than per attacker: the number of assailants that
@@ -146,6 +164,9 @@ internal sealed class ThreatSystem
         // is — see Engaged. Quadratic in bodies, affordable only because it early-outs on hostility: a
         // settlement at peace does one faction comparison per pair and nothing else.
         Crowded = 0;
+        Contacts = 0;
+        UnderAttack = 0;
+        Attacking = 0;
         for (var j = 0; j < bodies.Length; j++)
         {
             ref readonly var defender = ref bodies[j];
@@ -193,6 +214,9 @@ internal sealed class ThreatSystem
             }
 
             Crowded += engaged.Count - landed;
+            Contacts += landed;
+            Attacking += landed;
+            if (landed > 0) UnderAttack++;
         }
 
         for (var i = 0; i < bodies.Length; i++)
@@ -200,6 +224,7 @@ internal sealed class ThreatSystem
             ref readonly var body = ref bodies[i];
             if (!body.IsAlive || body.Health > 0f) continue;
             fallen.Add(body.Id);
+            fellWithFaction.Add((body.Id, body.Faction));
             Killed++;
         }
 
@@ -337,13 +362,48 @@ internal sealed class ThreatSystem
             body.Resolve = MathF.Max(0f, body.Resolve - deltaSeconds);
 
             // 1. What can I see that is worth protecting, and is something reaching for it?
-            var threat = NearestThreatSeen(
-                bodies, nodes, factions, sees, in body, out var where, out var at, out var assailant);
-            if (threat <= 0f)
+            //
+            // <b>Asked repeatedly, nearest first, until one of them wants me.</b> One threat and one
+            // answer was the shape, and it wasted the surplus: if six can already get at the raider at
+            // the granary I am not needed there — which is not the same as not being needed. The rest of
+            // its party is elsewhere, and a body that has already left its field should go where it can
+            // do something rather than turn round. So being surplus at the nearest alarm is a reason to
+            // look at the next one, and only when every alarm in sight is covered is the answer "back to
+            // work".
+            declined.Clear();
+            var threat = 0f;
+            var where = Vector2.Zero;
+            var at = Vector2.Zero;
+            var assailant = new AgentId(-1);
+            var ours = 0f;
+            var stand = false;
+            var needed = false;
+            while (true)
             {
-                // Stand down, once, on the tick the danger passes — rather than walking off after the
-                // memory of it. A body with no commitment to drop was never engaged and is left alone,
-                // which is what keeps this off the twenty-five people who are simply working.
+                threat = NearestThreatSeen(
+                    bodies, nodes, factions, sees, in body, out where, out at, out assailant);
+                if (threat <= 0f) break;
+
+                Muster(bodies, factions, sees, in body, where, out ours, out var ahead);
+                if (ahead < threat * StandMargin)
+                {
+                    needed = true;
+                    stand = ours >= threat * StandMargin;
+                    break;
+                }
+
+                // Covered by people closer than me. Try the next thing I can see.
+                declined.Add(where);
+            }
+
+            if (!needed)
+            {
+                // Nothing wants me: either there is no alarm at all, or every one I can see is already
+                // covered by people closer to it. Both end the same way — back to work — and both stand
+                // down once, on the tick it becomes true, rather than walking off after the memory of a
+                // raider. A body with no commitment to drop was never engaged and is left alone, which is
+                // what keeps this off the twenty-five people who are simply working.
+                if (declined.Count > 0) Surplus++;
                 if (body.Resolve > 0f)
                 {
                     body.Resolve = 0f;
@@ -353,30 +413,6 @@ internal sealed class ThreatSystem
                 body.Standing = false;
                 continue;
             }
-
-            // 2. Am I needed? Everyone who can see the same thing and get there in time, ordered by when
-            // they would arrive — and how much of that strength is ahead of me in the queue.
-            Muster(bodies, factions, sees, in body, where, out var ours, out var ahead);
-            var required = threat * StandMargin;
-
-            // Being handled, by people closer to it than I am. This is the answer that stops twenty
-            // villagers surrounding one raider and shoving each other about while his friends empty the
-            // granary — the surplus goes back to work, and is still standing in the fields to answer
-            // whatever the rest of the party reaches next.
-            if (ahead >= required)
-            {
-                Surplus++;
-                if (body.Resolve > 0f)
-                {
-                    body.Resolve = 0f;
-                    halt(body.Id);
-                }
-
-                body.Standing = false;
-                continue;
-            }
-
-            var stand = ours >= required;
 
             // <b>Hands first.</b> A villager who runs at a raider with forty grain on its back is carrying
             // the raider's prize into its reach: it loses the fight, the goods change hands on the spot,
@@ -399,8 +435,17 @@ internal sealed class ThreatSystem
             if (stand) Standing++;
             else Fleeing++;
 
-            // Held for a few seconds, or a body on the margin flips forever and does neither.
-            if (body.Resolve > 0f && body.Standing == stand) continue;
+            // Held for a few seconds, or a body on the margin flips forever and does neither — but the
+            // hold is on the <em>decision</em>, not on the target.
+            //
+            // <b>Conflating those two cost fourteen of twenty-four raiders their escape.</b> A body
+            // committed to the granary while a thief was inside it kept that commitment when the thief came
+            // out and ran, because "still standing" looked like nothing had changed: same answer, resolve
+            // unexpired, so no new order. It walked to a doorway with nobody in it while the loot went over
+            // the hill. Whether to fight is worth holding for three seconds; <em>what to fight</em> is not,
+            // and a fight whose subject has moved on is a different fight.
+            var elsewhere = Vector2.DistanceSquared(body.Guarding, where) > ElsewhereSquared;
+            if (body.Resolve > 0f && body.Standing == stand && !elsewhere) continue;
             body.Resolve = ResolveSeconds;
             body.Standing = stand;
             body.Guarding = where;
@@ -482,6 +527,7 @@ internal sealed class ThreatSystem
         {
             var distance = Vector2.Distance(body.Position, resource);
             if (distance >= bestDistance || distance > body.SightMetres) continue;
+            if (AlreadyDeclined(resource)) continue;
             if (!sees(in body, resource)) continue;
 
             // Anything hostile close enough to be reaching for it.
@@ -578,6 +624,17 @@ internal sealed class ThreatSystem
     /// <summary>How long this body would take to walk to a place, at its own best pace.</summary>
     private static float ArrivalSeconds(in AgentState body, Vector2 where) =>
         body.MaximumSpeed > 0.01f ? Vector2.Distance(body.Position, where) / body.MaximumSpeed : 1e9f;
+
+    /// <summary>Whether this body has already found itself surplus to a place this tick.</summary>
+    private bool AlreadyDeclined(Vector2 resource)
+    {
+        foreach (var seen in declined)
+        {
+            if (Vector2.DistanceSquared(seen, resource) <= ElsewhereSquared) return true;
+        }
+
+        return false;
+    }
 
     /// <summary>How far apart two threatened places have to be to count as different alarms.</summary>
     /// <remarks>

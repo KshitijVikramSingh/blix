@@ -3869,3 +3869,75 @@ Today's limiter is the opposite of the one expected: **not too many piling in, b
 Sixteen commit and three fight. Which sharpens the case for the soldier rather than weakening it — if only
 three or four can ever be in contact, then three or four *good* bodies is the entire answer, and quality is
 not an improvement on numbers, it is the only lever there is.
+
+## 36. A ledger for the raid, and three things it immediately found
+
+Asked for, and it earned itself inside one run:
+
+> we need to distinctly count how many were triggered, how many engaged with how many, how many were
+> stopped, for how long, how many on each side were killed, how much was stolen, how much was effectively
+> lost considering simple projected output × time interrupted for.
+
+**Three sessions of watching raids produced three wrong conclusions.** "They surround them and push each
+other around" was a crowd held apart by avoidance with three bodies in contact. "They don't die even
+surrounded" was a chase settling 0.14 m outside striking distance. Watching tells you something is wrong;
+only counting tells you what. So `RaidLedger` counts the whole transaction, on both sides — observational,
+in `Debug/`, writing nothing to the world.
+
+The term nobody counts is the interesting one. **What the interruption cost**, because a raid that takes
+nothing and stops twenty people working for a minute has still done damage. Grain here is per *farm* per
+year, not per hand — hands only decide whether a crop's three windows are met — so "hands × a rate" is
+the wrong arithmetic. What is countable is **labour-seconds withheld**, projected at the margin: twelve
+farms yield `GrainPerFarmPerYear` each for about a hand-year of attention each, so a labour-second is
+worth `700 / year` grain. It over-states whenever the window would have been met anyway, and that is
+stated rather than corrected — the over-statement is a ceiling, which is the useful direction for a cost.
+
+### What it found, first run
+
+```
+raids 8, raiders sent 24, of whom 14 got home and 10 did not
+alarms raised 220, most answering at once 26, most ever in contact 12 — 197 body-seconds of fighting
+killed: 1 of theirs, 8 of ours (8.0 of ours per raider)
+stock: 560 carried off the map, 117 dropped and recoverable
+interruption: 342 s with something on the map, 256 s with the alarm up,
+             3456 labour-seconds withheld — about 448 grain of work not done
+```
+
+**The interruption cost is the same size as the theft.** 448 grain of work not done against 560 carried
+off, and nothing in the game had been saying so. That reframes what a raid *is*: not a tax on your stores
+but a tax on your year, and the second is the one a player would never have deduced.
+
+**Eight of ours per raider.** A defence was a queue of people taking turns to lose.
+
+### The three fixes it made obvious
+
+**A surplus body tries the next alarm before going back to work.** From the note — *if only 3-4 can
+surround this one guy, better surround the other(s), or not leave my work at all.* One threat and one
+answer was the shape, and it wasted the surplus: being unneeded at the nearest alarm is not the same as
+being unneeded. So question one is now asked repeatedly, nearest first, until one of them wants this body;
+only when every alarm in sight is covered is the answer "back to work". Bodies ever in contact went 12 → 18.
+
+**A raider is priced as a thief, not as a soldier.** Health 40 → 18, set by the fight it should lose:
+three or four villagers kill it in four or five seconds and it takes rather less than one of them with it;
+two trade one for one; one dies. *Numbers work, but only just, and only together.* Strength stays at 3,
+because a raider losing to four farmhands and killing any one it catches alone are both wanted, and
+strength carries the second. A villager still fights badly on purpose — measured against the soldier at
+health 45, not against a thief.
+
+**Hold the decision, not the target.** This one cost fourteen of twenty-four raiders their escape and is
+the recurring finding again in a new costume. A body committed to the granary while a thief was *inside*
+it kept that commitment when the thief came out and ran, because "still standing" looked like nothing had
+changed — same answer, resolve unexpired, no new order. It walked to an empty doorway while the loot went
+over the hill. **Whether to fight is worth holding for three seconds; what to fight is not.**
+
+### Measured, one at a time
+
+| | got home | raiders killed | ours per raider | stolen | furthest a settler went |
+|---|---|---|---|---|---|
+| as instrumented | 14 of 24 | 1 | **8.0** | 560 | 81 m |
+| + a thief's health | 14 of 24 | 3 | 3.0 | 560 | 111 m |
+| + hold the decision, not the target | **11 of 24** | 4 | **2.5** | **440** | **48 m** |
+
+Two and a half farmhands per thief is a bad trade and no longer an absurd one, and it is bad in the
+direction the design wants: a village of farmhands can stop a raid and should not enjoy it. That is the
+argument for the soldier stated as a number rather than as a preference.
