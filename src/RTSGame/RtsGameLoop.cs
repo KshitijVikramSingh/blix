@@ -1472,8 +1472,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Before anything that reads the light: the shadow box, the sky and the world shader all take their
         // sun from here and a disagreement between them is a scene lit from one place and shadowed from
         // another.
+        // Simulated seconds, not wall time: the calendar runs on the tick count, so anything meant to keep
+        // step with it has to read the same clock. At three times compression the wall clock advances a
+        // third as fast as the date does.
         sky = Atmosphere.For(
-            simulation.Date, time.Total, look.SunBearingDegrees, look.Seasonality);
+            simulation.Date,
+            simulation.TickNumber / 30.0,
+            look.SunBearingDegrees,
+            look.Seasonality);
         AdvanceWear(frame);
         ApplyWoodlandCover(frame);
         PanCamera(frame);
@@ -1827,7 +1833,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                     additiveSelection,
                     routeSource,
                     raiders?.Status,
-                    look.SunFollowsTheYear ? sky.Description : null,
+                    look.SunFollowsTheYear
+                        ? $"{(int)sky.HourOfDay:00}:{(int)(sky.HourOfDay % 1f * 60f):00} {sky.Description}"
+                        : null,
                     colliderOverlay > 0 ? GeometryLine() : null,
                     frame.Width,
                     frame.Height);

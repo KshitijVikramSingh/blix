@@ -30,24 +30,30 @@ internal readonly record struct Atmosphere(
     Vector3 HazeAway,
     Vector3 HazeToward,
     float SunElevationDegrees,
+    float HourOfDay,
     string Description)
 {
     /// <summary>
-    /// How long a sun cycle takes, in simulated seconds.
+    /// How long a sun cycle takes, in simulated seconds. The calendar's own day, by default.
     /// </summary>
     /// <remarks>
-    /// <b>Not the calendar's day, and that is a decision rather than an oversight.</b>
-    /// <c>WorldCalendar.DaySeconds</c> is twenty seconds, because a day is the unit a <em>ration</em> is
-    /// measured in — one villager eats one unit a day, and that is what makes the year's arithmetic work.
-    /// A sun going round every twenty seconds is a strobe, not a time of day.
+    /// <b>Synced to the calendar, and the argument I made for not doing so was wrong.</b> I had it at seven
+    /// simulated minutes on the grounds that <c>WorldCalendar.DaySeconds</c> is twenty seconds and a sun
+    /// going round every twenty seconds is a strobe. What that produced was thirteen sun cycles in a year of
+    /// ninety — a daily rhythm and an annual one on comparable timescales — and reported exactly as it
+    /// should have been: <em>hard to tell annual rotation from daily.</em> Two slow signals of similar
+    /// period are far harder to read than one fast and one slow.
     /// <para>
-    /// So the light has its own period. The dissonance is real and worth naming: the panel will say day 245
-    /// while the sun has been round a dozen times. The alternative is either a strobing sky or an economy
-    /// whose ration is five minutes long, and of the three prices this is the one nobody looking at the
-    /// screen will notice.
+    /// At the calendar's day there are two hundred and seventy cycles in a year, so the daily one is
+    /// unmistakably rapid and the seasonal drift unmistakably gradual, and the two stop being confusable.
+    /// The panel's day number now means what it says, which removes the one dissonance this file had.
+    /// </para>
+    /// <para>
+    /// Still a slider, because twenty seconds is brisk and somebody may want a longer, cosier day at the
+    /// cost of the calendar agreeing with the sky.
     /// </para>
     /// </remarks>
-    internal static float DayLengthSeconds = 420f;
+    internal static float DayLengthSeconds = WorldCalendar.DaySeconds;
 
     /// <summary>How far through the year, 0 at the start of spring and 1 at the end of winter.</summary>
     /// <remarks>
@@ -204,10 +210,14 @@ internal readonly record struct Atmosphere(
         var year = YearProgress(date);
         var look = Blend(year, Math.Clamp(seasonality, 0f, 1f));
 
-        // Day of the year, and the hour of the day from the sun's own cycle. Phase 0 is midnight, so a
-        // session that starts at zero starts at dawn a quarter of a cycle later rather than in the dark.
-        var dayOfYear = year * 365f;
-        var hour = (float)(totalSeconds / MathF.Max(30f, DayLengthSeconds) % 1.0) * 24f;
+        // <b>The day of the year from the calendar, not from a fraction of it.</b> The date already knows
+        // which day it is, and 270 game days map onto 365 real ones for the declination formula's sake —
+        // which is a scaling, not an approximation, since the formula only cares where in the cycle it is.
+        var dayOfYear = date.Day / (float)WorldCalendar.DaysPerYear * 365f;
+        // Phase 0 is midnight. Fed simulated seconds rather than wall time, so the sun keeps step with the
+        // calendar at any time compression — at three times speed the days were passing three times faster
+        // than the sun, which is its own reason the two rhythms would not read.
+        var hour = (float)(totalSeconds / MathF.Max(1f, DayLengthSeconds) % 1.0) * 24f;
 
         var latitude = LatitudeDegrees * MathF.PI / 180f;
         // Declination: how far the sun's own circle is tilted this time of year. The 284 and the 365 are
@@ -288,6 +298,7 @@ internal readonly record struct Atmosphere(
             hazeAway,
             hazeToward,
             elevation,
+            hour,
             Describe(elevation, low));
     }
 
