@@ -161,6 +161,8 @@ internal struct AgentState
 
     public bool HasQuarry;
 
+
+
     /// <summary>
     /// Whether something outside the simulation is deciding this body's movement.
     /// </summary>

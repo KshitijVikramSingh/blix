@@ -161,16 +161,22 @@ internal sealed class SettlementArt : IDisposable
         // (1.51 x 1.46 against 1.72 x 1.45), so stretching it to fill a square plot barely distorts it,
         // which is what fixes the crop sitting inset from the dirt it grows in.
         //
-        // <b>The granary is a windmill and the depot is a barn, because a store has to look like a store.</b>
-        // It was the pack's town centre, which at level three is a stone plaza with a fountain, a pool and a
-        // bronze of two stags — a fine landmark and a terrible granary. The report was that it "looks rather
-        // odd", and it was worse than odd: the one building the whole settlement carries its food to read as
-        // a monument, so nothing on screen said where the grain was. A windmill says grain without a label
-        // on it, and a timber barn says goods; they are different silhouettes and different sizes, which is
-        // the whole job.
+        // <b>Both stores are barns, at the two sizes the game actually has.</b> Two wrong answers came
+        // before this one and both are worth keeping. The pack's town centre, which at level three is a
+        // stone plaza with a fountain and a bronze of two stags — a fine landmark and a terrible granary,
+        // because the one building the settlement carries its food to read as a monument. Then a windmill,
+        // which says grain without needing a label and <em>still</em> failed, for a reason that is the more
+        // useful lesson: <b>a granary is five placement cells, 7.5 m of ground, and a windmill's bounding
+        // box is mostly sails.</b> Normalised to that footprint it drew a slim tower in the middle of a
+        // large square, and the report was that the granary "doesn't match the area of its visual model".
+        // Exactly right — the model has to fill the ground it occupies, or the footprint is a lie the player
+        // walks into.
+        //
+        // So: the big barn at 7.5 m and the small one at 4.5 m, same family, and the size is the read. Which
+        // is also true — they are both stores, and one is bigger.
         var art = new SettlementArt(
-            granary: Prop("Windmill_SecondAge"),
-            depot: Prop("Storage_SecondAge_Level3"),
+            granary: Prop("Storage_SecondAge_Level3"),
+            depot: Prop("Storage_SecondAge_Level1"),
             houses: new[]
             {
                 Prop("Houses_SecondAge_1_Level2"),

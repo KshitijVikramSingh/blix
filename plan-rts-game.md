@@ -4055,3 +4055,57 @@ nothing" and the one that said "this elegant idea is worse".
 
 `--raidtest --seed S` exists for that, and the next balance question should start there rather than end
 there.
+
+## 39. The granary has to fill its own ground, and being surrounded still costs nothing
+
+### The granary was the third wrong answer, and the reason is reusable
+
+Reported: the granary is too big and does not match the area of its visual model. Exactly right, and the
+cause is worth stating as a rule. **A granary is five placement cells — 7.5 m of ground — and a windmill's
+bounding box is mostly sails.** Normalised to that footprint it drew a slim tower in the middle of a large
+square, so the ground the player cannot walk on was much larger than the thing they could see.
+
+Three models, three lessons, each different:
+
+- **Town centre**: reads as a monument, so nothing on screen said where the grain was.
+- **Windmill**: reads as grain, and *fails the footprint test* — its silhouette is thin and its box is not.
+- **Barn**: fills its box, and says goods.
+
+So both stores are barns now, at the two sizes the game actually has — 7.5 m and 4.5 m — same family, with
+size as the read. Which is also true: they are both stores and one is bigger. The rule: **a model has to
+fill the ground it occupies, or the footprint is a lie the player walks into.**
+
+### Being surrounded still costs nothing, and two attempts to fix it both made things worse
+
+Reported, and it is the sharpest description of the problem yet: *the enemies slid in, got surrounded, got
+wounded a little, reached the granary, picked the loot and more or less walked away while my people kept
+trying to do some retaliation but couldn't turn that into anything.*
+
+The diagnosis is right. Contact feeds the harm pass and **nothing else** — the avoidance solve treats an
+enemy exactly like a neighbour to slide past, so a ring of villagers is scenery. Two ways of giving it
+weight were tried, both derived from the ring the engagement limit already computes, and **both measured
+worse than doing nothing:**
+
+| | got home /24 | their dead | stolen | recovered | furthest | % harm wasted |
+|---|---|---|---|---|---|---|
+| **sticky quarry** (§38) | **10.6 ± 0.5** | **4.4 ± 0.5** | **424 ± 22** | **202 ± 13** | 52 ± 28 m | **28.4** |
+| + held all ways | 11.8 ± 2.3 | 3.2 ± 2.3 | 472 ± 91 | 149 ± 74 | 65 ± 42 m | 37.5 |
+| + held only when leaving | 12.4 ± 0.5 | 3.0 ± 1.2 | 496 ± 22 | 144 ± 54 | 81 ± 27 m | 34.9 |
+
+**Held all ways** is symmetric and that is its flaw: a defender in contact with the thief it is chasing is
+slowed *by the very contact it wanted*, falls out of reach, and the fight oscillates.
+
+**Held only when leaving** fixes that asymmetry — push into a fight freely, cannot slide out of one, which
+is both honest physics and the thing that should make a ring worth forming. It is still worse. And the
+spreads went back up, which by §38's own test means the defence went back to being lucky rather than
+competent.
+
+Both are backed out. The likely cause is that this is the **locomotion layer's** business and a speed
+multiplier bolted onto the preferred velocity fights it: ORCA is reciprocal, so a body that suddenly wants
+to move slowly changes every neighbour's velocity obstacle, and the crowd resolves by flowing *around* the
+held body rather than pressing on it. That is the same class of mistake as §27's exact distance transform —
+a correct-sounding change to a delicate layer, measured, and reverted.
+
+**So the report stands unfixed and it is now the clearest open question in the arc:** a body should not be
+able to walk through people who are fighting it, and the mechanism belongs inside the avoidance solve —
+where an enemy is not a neighbour to be politely avoided — rather than in a multiplier outside it.
