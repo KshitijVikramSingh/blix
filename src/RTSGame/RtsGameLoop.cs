@@ -2608,48 +2608,107 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private void DrawScatter()
     {
-        if (art is null || art.Scatter.Length == 0) return;
+        if (art is null || art.Scatter.Length < 4) return;
         var radius = MathF.Sqrt(treeDrawRadiusSquared);
-        // One candidate every few metres. Sparse enough that the eye reads them as incidental rather than
-        // as a texture, which is the difference between scattered stones and gravel.
-        const float spacing = 3.5f;
+        // Tighter than the trees, because a tuft of grass is a few centimetres and stops being a tuft well
+        // before a trunk stops being a trunk.
+        const float spacing = 2.4f;
         var cells = (int)MathF.Ceiling(radius / spacing);
         var originX = MathF.Floor(cameraFocus.X / spacing);
         var originZ = MathF.Floor(cameraFocus.Y / spacing);
+        var placed = 0;
         for (var dz = -cells; dz <= cells; dz++)
         for (var dx = -cells; dx <= cells; dx++)
         {
+            if (placed >= ScatterBudget) return;
             var cx = (int)originX + dx;
             var cz = (int)originZ + dz;
-            var roll = ScatterHash(cx, cz, 0);
-            // Most cells are empty. A scatter that fills every cell is a gravel pit.
-            // Roughly one cell in five. Measured on the way here: a third of a 3.5 m grid put fourteen
-            // hundred bushes inside the draw radius, which is a bush every ten square metres — a meadow
-            // rather than a scatter. A scatter is meant to be noticed without being counted.
-            if (roll > 0.2f) continue;
 
             var at = new Vector2(
                 (cx + 0.15f + ScatterHash(cx, cz, 1) * 0.7f) * spacing,
                 (cz + 0.15f + ScatterHash(cx, cz, 2) * 0.7f) * spacing);
             if (Vector2.DistanceSquared(at, cameraFocus) > treeDrawRadiusSquared) continue;
             if (!simulation.Terrain.Contains(at)) continue;
-            // Not on built or worked ground.
             if (simulation.TryGetPlacementCell(at, out var cell) &&
                 simulation.Placement.IsOccupied(cell))
             {
                 continue;
             }
 
-            // Bushes, grass, a flowering plant — six kinds, picked by the cell's own hash.
-            // Real bushes now, so no squashing and no burying: these are shrubs at their own proportions.
-            var which = (int)(ScatterHash(cx, cz, 3) * art.Scatter.Length) % art.Scatter.Length;
-            var width = 0.7f + ScatterHash(cx, cz, 4) * 0.7f;
-            art.Scatter[which].Add(SettlementArt.Placement(
+            // <b>Patches, not a per-cell coin toss.</b> A uniform probability spreads vegetation evenly at
+            // whatever rate it is given, and evenly is the one thing ground cover never is — it grows in
+            // runs and drifts, thick here and bare a few metres away. Two octaves of lattice noise give
+            // that for nothing: the coarse one decides where a patch is at all and the finer one varies
+            // its density inside itself, so a patch has a length and an edge that nobody authored.
+            var patch = PatchDensity(at);
+            if (patch <= 0.04f) continue;
+
+            // Denser under trees, which the terrain already knows: forest cover marks every cell with two
+            // trees crowding it, so "am I in a wood" is a lookup rather than a spatial query.
+            var wooded = simulation.Terrain.Contains(at) &&
+                         simulation.Terrain.SampleSurface(at) == TerrainSurface.Forest;
+
+            var roll = ScatterHash(cx, cz, 0);
+            var kind = -1;
+            var width = 1f;
+            if (roll < patch * (wooded ? 0.72f : 0.34f))
+            {
+                // The base layer. Short grass in sustained patches, and most of what gets drawn.
+                kind = 0;
+                width = 0.5f + ScatterHash(cx, cz, 4) * 0.5f;
+            }
+            else if (roll < patch * (wooded ? 0.95f : 0.44f))
+            {
+                // Tall grass, thick in woodland and occasional in the open.
+                kind = ScatterHash(cx, cz, 5) < 0.5f ? 1 : 2;
+                width = 0.55f + ScatterHash(cx, cz, 4) * 0.55f;
+            }
+            else if (!wooded && roll > 0.985f)
+            {
+                // Flowers, rare and never under a canopy.
+                kind = 3;
+                width = 0.4f + ScatterHash(cx, cz, 4) * 0.3f;
+            }
+
+            if (kind < 0) continue;
+            art.Scatter[kind].Add(SettlementArt.Placement(
                 at,
                 simulation.Terrain.SampleHeight(at),
                 width,
                 SettlementArt.FreeYawOf(cx * 73 + cz * 179)));
+            placed++;
         }
+    }
+
+    /// <summary>How much ground cover belongs at a point, from bare to thick.</summary>
+    /// <remarks>
+    /// Two octaves of value noise on a lattice, smoothstep-interpolated: about thirty metres for where a
+    /// patch is and about eleven for how it varies inside itself. The same idea as the terrain's macro
+    /// variation in the shader, on the CPU because placement is a CPU decision — and deliberately the same
+    /// <em>kind</em> of idea, so that dressing and ground colour drift together rather than arguing.
+    /// </remarks>
+    private static float PatchDensity(Vector2 at)
+    {
+        var broad = LatticeNoise(at * (1f / 31f));
+        var fine = LatticeNoise(at * (1f / 11f) + new Vector2(17.3f, 5.1f));
+        // Skewed low, so most of the map is thin and the thick parts are worth noticing.
+        var combined = broad * 0.7f + fine * 0.3f;
+        return Math.Clamp((combined - 0.34f) / 0.5f, 0f, 1f);
+    }
+
+    private static float LatticeNoise(Vector2 at)
+    {
+        var x0 = (int)MathF.Floor(at.X);
+        var z0 = (int)MathF.Floor(at.Y);
+        var fx = at.X - x0;
+        var fz = at.Y - z0;
+        fx = fx * fx * (3f - 2f * fx);
+        fz = fz * fz * (3f - 2f * fz);
+        var a = ScatterHash(x0, z0, 11);
+        var b = ScatterHash(x0 + 1, z0, 11);
+        var c = ScatterHash(x0, z0 + 1, 11);
+        var d = ScatterHash(x0 + 1, z0 + 1, 11);
+        return float.Lerp(float.Lerp(a, b, fx), float.Lerp(c, d, fx), fz);
     }
 
     /// <summary>
@@ -2719,6 +2778,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         graphicsDevice.UploadTextureMip(wearTexture, 0, wear);
     }
+
+    /// <summary>How many pieces of ground cover one frame may draw.</summary>
+    /// <remarks>
+    /// A ceiling learnt the hard way once already — the instanced batch refuses past 16,384 and the trees,
+    /// their skirts and this all share it. Grass is the most numerous thing in the scene and the least
+    /// missed, so it is the one that gets a hard cap.
+    /// </remarks>
+    private const int ScatterBudget = 5200;
 
     /// <summary>A stable 0..1 from a cell and a channel, so a stone is always the same stone.</summary>
     private static float ScatterHash(int x, int z, int channel)

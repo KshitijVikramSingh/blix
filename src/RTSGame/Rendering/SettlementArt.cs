@@ -287,13 +287,19 @@ internal sealed class SettlementArt : IDisposable
             },
             // A real stump, at last: Resource_Tree_Group_Cut was a cluster of cut trunks standing in for one.
             stumps: Nature("TreeStump", casts: false, surface: MaterialClass.Timber),
+            // <b>Grass, not bushes.</b> The round shrubs are out of the open scatter entirely: at any
+            // density they read as objects placed on a lawn rather than as ground cover, and a map dotted
+            // evenly with them looks arranged. They still do the job they are good at, which is hiding the
+            // foot of a trunk — see Undergrowth.
+            //
+            // Ordered, because DrawScatter picks by index and the meaning of each slot is the point: the
+            // short grass is the base layer that goes everywhere in patches, the tall grass thickens in
+            // woodland, and the flowers are rare and only in the open.
             scatter: new[]
             {
-                Nature("Bush_1", casts: false, surface: MaterialClass.Foliage),
-                Nature("Bush_2", casts: false, surface: MaterialClass.Foliage),
-                Nature("BushBerries_1", casts: false, surface: MaterialClass.Foliage),
-                Nature("Plant_3", casts: false, surface: MaterialClass.Foliage),
+                Nature("Grass_Short", casts: false, surface: MaterialClass.Foliage),
                 Nature("Grass", casts: false, surface: MaterialClass.Foliage),
+                Nature("Grass_2", casts: false, surface: MaterialClass.Foliage),
                 Nature("Flowers", casts: false, surface: MaterialClass.Foliage),
             },
             undergrowth: new[]

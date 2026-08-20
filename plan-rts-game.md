@@ -4823,3 +4823,96 @@ what unblocks what rather than by size:
 Two loose ends carried forward, both small: the `LookSettings` values are still my guesses rather than
 anybody's judgement, and stone is unstarted — the first commodity that is mined rather than grown or felled,
 and therefore the real test of whether a ledger written for two generalises.
+
+## 52. Two systems that were one: terrain generation, and terrain dressing
+
+> I think we're getting into terrain dressing stuff, which should come atop a layer of terrain generation,
+> which we sort of have in a primitive way — let's name and classify the systems as such.
+
+Right, and worth naming precisely, because the two have been tangled in `SettlementScenarios` and
+`RtsGameLoop` since §50 and the tangle is starting to cost. They answer different questions, they live at
+different layers, and — the test that settles it — **one of them the simulation must agree with, and the
+other it must never see.**
+
+### Terrain generation: what the land *is*
+
+**The simulation's own truth.** Heights, surfaces, what is passable, where the woodland stands, where the
+settlement was founded. Every one of these is a fact the economy and the navigation raster read: a cell's
+surface decides its path cost, forest cover closes ground, a tree is a node holding ninety units of wood.
+Change any of it and the year's arithmetic changes.
+
+What exists, and it is more than "primitive" in one respect and less in another:
+
+| | |
+|---|---|
+| heights and surfaces | `TerrainMap` over a 0.5 m grid, five surfaces, one byte each |
+| woodland | `ScatterWoodland` — bands by radius, shaped by bearing, an anchor band left unshaped for the economy's sake (§50) |
+| the site | corner-ish, and the woodland's shape is derived *from* it |
+| features | a lake and a road exist in the terrain lab and **nothing generates them in the village** |
+| rivers, hills, cliffs, ore | none |
+
+So: the *representation* is real and load-bearing, and the *generator* is one function that scatters trees.
+That is the honest state.
+
+### Terrain dressing: what the land *looks like*
+
+**Cosmetic, derived, and never read by a decision.** Ground colour, macro variation, the wear that footfall
+leaves, the grass and flowers, the skirt of undergrowth at a trunk, the stumps where trees came down.
+
+The rule that makes this a layer rather than a pile: **nothing here is allowed to be state.** Not
+fingerprinted, not saved, not iterated over by the economy. Everything is either a function of a world
+position (so the same place always answers the same way, no storage) or a bounded ring of recent events
+(fellings) or an observational field the renderer keeps for itself (wear). A loaded save has no stumps and
+no paths and grows them again, which is honest for a record of watching rather than a fact about the world.
+
+| | how it is derived | where |
+|---|---|---|
+| ground colour | terrain surface, averaged over the 5 m block, plus two octaves of world-space noise in the shader | `BuildCoarseGround`, `world.frag` |
+| wear paths | footfall accumulated per tick into a 192-cell field, decayed, sampled by world position | `AdvanceWear`, `world.frag` |
+| ground cover | patch density from two octaves of lattice noise, thickened where the terrain says woodland | `DrawScatter`, `PatchDensity` |
+| undergrowth | one or two low plants per trunk, from the tree's own id | `DrawUndergrowth` |
+| stumps | a bounded ring of felling sites | `RecentFellings`, `DrawStumps` |
+
+### And the dressing pass this note came out of
+
+Tuned as asked, and the reasoning is worth keeping because it generalises:
+
+- **The round bushes are out of the open scatter entirely.** At any density they read as objects placed on
+  a lawn rather than as ground cover, and a map dotted evenly with them looks *arranged*. They keep the job
+  they are good at, which is hiding the foot of a trunk.
+- **Patches, not a per-cell coin toss.** A uniform probability spreads cover evenly at whatever rate it is
+  given, and evenly is the one thing ground cover never is: it grows in runs and drifts, thick here and bare
+  a few metres away. Two octaves of lattice noise give a patch a length and an edge nobody authored.
+- **Thicker in woodland**, and the terrain already knew — forest cover marks every cell with two trees
+  crowding it, so "am I in a wood" is a lookup rather than a spatial query. Tall grass goes from occasional
+  in the open to thick under a canopy on that one test.
+- **Flowers are rare and never under a canopy**, because the thing that makes a flower read as a flower is
+  that there is not another one next to it.
+- And a hard budget, because grass is the most numerous thing in the scene and the least missed. The
+  instanced batch refuses past 16,384 and the trees, their skirts and the cover all share it.
+
+### The handoff
+
+**Generation** is the layer with more missing, and it gates the interesting parts of the economy:
+
+1. **Rivers and water.** The one feature that changes movement rather than decorating it — a crossing is a
+   chokepoint, and §33's "approaches are knowable" becomes geography rather than a note about rides.
+2. **Relief that means something.** Heights exist and nothing generates them in the village, so the map is
+   flat and slope costs nothing. Hills give a settlement a back to defend and a reason to prefer one site.
+3. **Deposits.** Stone is the next commodity and it must come *from somewhere on the map* — which makes
+   generation and economy the same conversation, and is the first time where a resource *is* will matter.
+4. **More than one biome**, once the above exist, because the seasonal palette already varies and a map
+   with two kinds of country in it is what makes a second settlement site a decision.
+
+**Dressing** is the layer that is nearly done and wants finishing rather than building:
+
+1. **Seasonal models.** The pack ships `_Autumn`, `_Snow` and `_Dead` of every tree, plus `Rock_Moss`,
+   `Bush_Snow`, `TreeStump_Snow`. Swapping the *model* by season is a far stronger read than grading the
+   light, and the material classifier already handles all of them. This is the single biggest remaining win
+   in the whole visual pass.
+3. **Contact grounding.** The last item from the reference list that has not been done: a tight darkening
+   where any object meets the ground. Undergrowth does it for trees; buildings and heaps still float
+   slightly.
+4. **Dressing follows the ground it dresses.** Once relief exists, cover wants to thin on slopes and
+   gather in hollows — which is the moment the two layers start informing each other rather than merely
+   stacking.
