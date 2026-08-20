@@ -473,6 +473,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private float cameraYaw = MathF.PI * 0.25f;
     private float cameraDistance = 31f;
 
+    /// <summary>Where the wheel has asked the camera to be; <c>cameraDistance</c> eases toward it.</summary>
+    private float cameraDistanceTarget = 31f;
+
     /// <summary>How close the camera may come. Near enough to read one body.</summary>
     /// <remarks>
     /// Eight metres rather than nineteen. Nineteen was the floor for a session about how a crowd moves,
@@ -500,6 +503,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private const float CameraPanSharePerSecond = 1.1f;
 
     private bool panLeft, panRight, panUp, panDown;
+    private bool turnLeft, turnRight;
+
+    /// <summary>How fast Q and E swing the camera, in degrees a second.</summary>
+    /// <remarks>
+    /// Continuous rather than a quarter turn a press. The snap was defensible while the buildings were
+    /// greybox cubes square to the grid — a quarter turn kept them square — and it is not now: the thing you
+    /// turn the camera for is to see round a wood or behind a barn, and that wants the angle you want rather
+    /// than the nearest of four. A hundred and ten degrees a second is a little over three seconds for a
+    /// full turn, which is quick enough not to wait for and slow enough to stop where you meant.
+    /// </remarks>
+    private const float CameraTurnDegreesPerSecond = 110f;
     private bool draggingCamera;
     private float mouseX;
     private float mouseY;
@@ -552,7 +566,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // A camera sized for a thirty-metre square shows a kilometre map as a patch of
         // ground, which is the one thing this session must not do — the body has to be
         // watched crossing real distances as well as stepping round a doorway.
-        cameraDistance = 46f;
+        cameraDistance = cameraDistanceTarget = 46f;
         camera.FarPlane = MathF.Max(150f, extentMeters * 3f);
         // What is left on the panel is what is still a question. Everything the locomotion
         // work settled — solver relaxation, congestion decay, contact yielding, the recovery
@@ -658,7 +672,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         SettlementScenarios.Populate(
             simulation, farms: 8, woodcutters: 4, carts: 5, wagons: 0, ringRadius: 30f);
         cameraFocus = Vector2.Zero;
-        cameraDistance = 78f;
+        cameraDistance = cameraDistanceTarget = 78f;
         Console.WriteLine(
             $"  settlement: {simulation.Nodes.LiveCount} nodes, {simulation.Agents.LiveCount} people, " +
             $"{simulation.Date}");
@@ -1482,6 +1496,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             look.Seasonality);
         AdvanceWear(frame);
         ApplyWoodlandCover(frame);
+        TurnAndZoom(frame);
         PanCamera(frame);
         UpdateCameraFocus(frame);
         UpdateCamera();
@@ -1582,6 +1597,27 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private const float EdgePanBand = 12f;
 
+    /// <summary>Swings the camera while Q or E is held, and eases the zoom toward where the wheel put it.</summary>
+    /// <remarks>
+    /// <b>Both are the same complaint: a camera that arrives instead of moving.</b> The wheel used to set the
+    /// distance outright, so every notch was a jump — which at a proportional step is a jump that gets
+    /// bigger the further out you are. Easing it costs one lerp and turns a series of jumps into a motion,
+    /// and because the target is still set instantly the control stays as responsive as it was.
+    /// </remarks>
+    private void TurnAndZoom(float deltaSeconds)
+    {
+        var turn = (turnRight ? 1f : 0f) - (turnLeft ? 1f : 0f);
+        if (turn != 0f)
+        {
+            cameraYaw += turn * CameraTurnDegreesPerSecond * MathF.PI / 180f * deltaSeconds;
+        }
+
+        // Exponential ease, so it is frame-rate independent and has no overshoot: a spring would wobble at
+        // the end of every notch, which on a zoom reads as the ground breathing.
+        var follow = 1f - MathF.Exp(-deltaSeconds * 14f);
+        cameraDistance += (cameraDistanceTarget - cameraDistance) * follow;
+    }
+
     private void PanCamera(float deltaSeconds)
     {
         var x = (panRight ? 1f : 0f) - (panLeft ? 1f : 0f);
@@ -1600,8 +1636,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         if (x == 0f && z == 0f) return;
         // Screen right and screen "into the distance", on the ground plane, at the current yaw.
+        //
+        // <b>Right was left.</b> Reported, and it had been wrong since the arrows were wired: rotating the
+        // forward vector the other way round the Y axis gives the vector that points off the left of the
+        // screen, so every sideways pan and now every edge push went the opposite way from the key or the
+        // pointer that asked for it. The only reason it survived is that a symmetrical control is still
+        // usable while being exactly wrong.
         var forward = new Vector2(MathF.Sin(cameraYaw), MathF.Cos(cameraYaw));
-        var right = new Vector2(-forward.Y, forward.X);
+        var right = new Vector2(forward.Y, -forward.X);
         var move = right * x - forward * z;
         if (move.LengthSquared() > 1f) move = Vector2.Normalize(move);
         cameraFocus = simulation.Terrain.ClampPosition(
@@ -3119,9 +3161,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     {
         // Zoom steps proportionally, so pulling back over a kilometre does not take a
         // hundred notches of wheel that were sized for a thirty-metre square.
-        var step = MathF.Max(2f, cameraDistance * 0.12f);
-        cameraDistance = Math.Clamp(
-            cameraDistance - offsetY * step,
+        var step = MathF.Max(2f, cameraDistanceTarget * 0.12f);
+        cameraDistanceTarget = Math.Clamp(
+            cameraDistanceTarget - offsetY * step,
             CameraNearestDistance,
             CameraFurthestDistance);
     }
@@ -3290,10 +3332,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // Rotation is Q and E; the arrows pan. They used to do both, which meant there was no way to
             // move the camera sideways at all and pressing Left to look left spun the world instead.
             case Key.Q:
-                cameraYaw -= MathF.PI * 0.5f;
+                turnLeft = true;
                 break;
             case Key.E:
-                cameraYaw += MathF.PI * 0.5f;
+                turnRight = true;
                 break;
             case Key.Left:
                 panLeft = true;
@@ -3319,6 +3361,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (key == Key.Right) panRight = false;
         if (key == Key.Up) panUp = false;
         if (key == Key.Down) panDown = false;
+        if (key == Key.Q) turnLeft = false;
+        if (key == Key.E) turnRight = false;
     }
 
     public void Dispose()
