@@ -1,0 +1,323 @@
+using System.Numerics;
+using Blix.Assets;
+using Blix.Graphics;
+using Blix.Graphics.Vulkan;
+using Blix.Render;
+using RTSGame.Simulation;
+using RTSGame.Simulation.Agents;
+using RTSGame.Simulation.Economy;
+using RTSGame.Simulation.Jobs;
+
+namespace RTSGame.Control;
+
+/// <summary>
+/// What is selected, what is under the pointer, and which key does something about it.
+/// </summary>
+/// <remarks>
+/// <b>Contextual rather than a key list.</b> There is a twenty-line reference printed to the console at
+/// startup and it is no use at all while playing: the question a player has is never "what are all the
+/// keys", it is "I have clicked this thing, now what" — and the answer depends on what is selected and what
+/// is under the cursor. So the prompts are computed from exactly those two, and only the ones that would
+/// currently <em>do</em> something are shown.
+/// <para>
+/// Which also makes it a place where a mechanic can announce itself. A field says what the crop cycle
+/// thinks of it, a site says whether it is short of timber or short of hands, and a tree says how much wood
+/// is left in it — each in the words the simulation already uses, because those were written to be read.
+/// The alternative is a player who has to infer three stages of economy from the colour of the ground.
+/// </para>
+/// <para>
+/// Terse on purpose. The only font in the repo is a heavy display face, which is legible at a glance and
+/// ruinous for paragraphs, so every line here is a handful of words. That is the right constraint anyway:
+/// a heads-up display that needs reading is not heads-up.
+/// </para>
+/// </remarks>
+internal sealed class SettlementHud : IDisposable
+{
+    private readonly SpriteBatch batch;
+    private readonly Font? font;
+    private TextureHandle plate = new(-1);
+    private readonly List<(string Text, GraphicsColor Colour)> lines = new();
+
+    private static readonly GraphicsColor Heading = new(0.96f, 0.93f, 0.82f, 1f);
+    private static readonly GraphicsColor Body = new(0.86f, 0.90f, 0.94f, 1f);
+    private static readonly GraphicsColor Action = new(0.98f, 0.82f, 0.34f, 1f);
+    private static readonly GraphicsColor Warning = new(0.97f, 0.51f, 0.36f, 1f);
+    private static readonly GraphicsColor Shadow = new(0.02f, 0.03f, 0.04f, 0.82f);
+
+    private SettlementHud(SpriteBatch batch, Font? font)
+    {
+        this.batch = batch;
+        this.font = font;
+    }
+
+    /// <summary>Whether text will actually appear. False if the font could not be loaded.</summary>
+    public bool HasFont => font is not null;
+
+    /// <summary>
+    /// Loads the HUD, or returns one that draws nothing if the font is missing.
+    /// </summary>
+    /// <remarks>
+    /// Best-effort, unlike the settlement's art. A missing model means half the settlement silently
+    /// becomes boxes and nobody notices for a week, which is worth failing over; a missing font means the
+    /// prompts are absent and it is obvious on the first frame.
+    /// </remarks>
+    public static SettlementHud Load(VulkanGraphicsDevice device)
+    {
+        var batch = new SpriteBatch(device);
+        try
+        {
+            var assets = new AssetDatabase()
+                .RegisterImporter(new FontImporter())
+                .LoadManifest(Path.Combine(AppContext.BaseDirectory, "Assets", "manifest.json"));
+            return new SettlementHud(batch, Font.Upload(device, assets.Load<FontData>(AssetId.Parse("fonts/hud"))));
+        }
+        catch (Exception failure)
+        {
+            Console.WriteLine($"  no HUD font, on-screen prompts are off: {failure.Message}");
+            return new SettlementHud(batch, null);
+        }
+    }
+
+    /// <summary>
+    /// Draws the state of the settlement, of the selection, and of whatever is being pointed at.
+    /// </summary>
+    public void Draw(
+        RenderPassBuilder pass,
+        TextureHandle pixel,
+        SimulationWorld world,
+        IReadOnlyCollection<AgentId> selected,
+        Vector2 pointer,
+        bool pointerOnTerrain,
+        bool additive,
+        NodeId? routeSource,
+        int width,
+        int height)
+    {
+        if (font is null) return;
+        plate = pixel;
+        var ortho = GraphicsMatrices.CreateOrthographicOffCenterVulkan(0f, width, height, 0f, -1f, 1f);
+        batch.Begin(ortho);
+
+        var size = MathF.Max(11f, height * 0.019f);
+        var step = size * 1.45f;
+        var pad = size * 1.2f;
+
+        // Top left: the two questions the low-attention mode is about — what time of year is it, and how
+        // long will the stores last. Seasons rather than stock levels, because a number tells you a number
+        // and seasons-until-empty tells you whether to do something.
+        lines.Clear();
+        var date = world.Date;
+        lines.Add(($"YEAR {date.Year + 1} · {date.Season.ToString().ToUpperInvariant()} · DAY {date.Day}", Heading));
+        foreach (var resource in Resources.All)
+        {
+            var outlook = world.Economy.Outlook(resource, world.Nodes, world.Agents, date.Season);
+            var lasts = float.IsPositiveInfinity(outlook.Seasons)
+                ? "growing"
+                : $"{outlook.Seasons:F1} seasons";
+            var colour = outlook.Seasons < 1f ? Warning : Body;
+            lines.Add(($"{resource.ToString().ToUpperInvariant()} {outlook.Stored:N0} · {lasts}", colour));
+        }
+
+        var spare = 0;
+        foreach (ref readonly var body in world.Agents.All)
+        {
+            if (!body.IsAlive || body.CarryCapacity <= 0) continue;
+            if (!body.Jobs.HasAssignment && !body.Jobs.IsInterrupted) spare++;
+        }
+
+        lines.Add((
+            $"{world.Agents.LiveCount} PEOPLE · {spare} SPARE · {world.Economy.Readiness * 100f:F0}% FED",
+            spare > 0 ? Action : Body));
+        Block(size, new Vector2(pad, pad), step);
+
+        // Bottom left: what is selected, what is under the pointer, and what to press.
+        lines.Clear();
+        Describe(world, selected);
+        var hovered = pointerOnTerrain
+            ? EconomySystem.NodeAt(world.Nodes, pointer, PickRadius)
+            : NodeId.None;
+        if (world.Nodes.Contains(hovered)) DescribeNode(world, hovered);
+        Prompts(world, selected, hovered, additive, routeSource);
+
+        var blockHeight = lines.Count * step;
+        Block(size, new Vector2(pad, height - pad - blockHeight), step);
+        batch.End(pass);
+    }
+
+    /// <summary>How near the pointer counts as pointing at a node. Matches the route key's reach.</summary>
+    private const float PickRadius = 6f;
+
+    private void Describe(SimulationWorld world, IReadOnlyCollection<AgentId> selected)
+    {
+        if (selected.Count == 0)
+        {
+            lines.Add(("NOTHING SELECTED", Body));
+            return;
+        }
+
+        var farming = 0;
+        var cutting = 0;
+        var carting = 0;
+        var building = 0;
+        var idle = 0;
+        var carried = 0;
+        var carts = 0;
+        foreach (var id in selected)
+        {
+            if (!world.Agents.Contains(id)) continue;
+            ref readonly var body = ref world.Agents.Get(id);
+            if (!body.IsAlive) continue;
+            carried += body.Jobs.CarriedUnits;
+            if (body.HasCart) carts++;
+            switch (body.Jobs.Assignment.Kind)
+            {
+                case AssignmentKind.Work when body.Jobs.Assignment.Cargo == Resource.Wood:
+                    cutting++;
+                    break;
+                case AssignmentKind.Work:
+                    farming++;
+                    break;
+                case AssignmentKind.Haul:
+                case AssignmentKind.Carry:
+                    carting++;
+                    break;
+                case AssignmentKind.Hold:
+                    building++;
+                    break;
+                default:
+                    idle++;
+                    break;
+            }
+        }
+
+        var doing = new List<string>();
+        if (farming > 0) doing.Add($"{farming} farming");
+        if (cutting > 0) doing.Add($"{cutting} cutting");
+        if (carting > 0) doing.Add($"{carting} carting");
+        if (building > 0) doing.Add($"{building} posted");
+        if (idle > 0) doing.Add($"{idle} idle");
+        var summary = $"{selected.Count} SELECTED";
+        if (doing.Count > 0) summary += " · " + string.Join(", ", doing);
+        if (carts > 0) summary += $" · {carts} with carts";
+        if (carried > 0) summary += $" · carrying {carried}";
+        lines.Add((summary, Heading));
+    }
+
+    /// <summary>
+    /// What the thing under the pointer would say about itself.
+    /// </summary>
+    /// <remarks>
+    /// In the simulation's own words — <see cref="CropCycle.StateOf"/>, <see cref="Construction.StateOf"/>,
+    /// <see cref="Woodland.StateOf"/> — because those were written to be read by somebody and until now the
+    /// only thing reading them was a console table nobody sees while playing.
+    /// </remarks>
+    private void DescribeNode(SimulationWorld world, NodeId id)
+    {
+        ref readonly var node = ref world.Nodes.Get(id);
+        var name = node.Kind switch
+        {
+            NodeKind.Granary => "GRANARY",
+            NodeKind.ForwardDepot => "DEPOT",
+            NodeKind.Farm => "FIELD",
+            NodeKind.House => "HOUSE",
+            NodeKind.Tree => "TREE",
+            _ => "HEAP",
+        };
+
+        if (node.IsUnderConstruction)
+        {
+            lines.Add((
+                $"{name} SITE · {Construction.StateOf(in node)}",
+                node.TimberWanted > 0 ? Warning : Action));
+            return;
+        }
+
+        var says = node.Kind switch
+        {
+            NodeKind.Farm => CropCycle.StateOf(in node, world.Date.Season),
+            NodeKind.Tree => $"{Woodland.StateOf(in node)}, {node.Stock.Wood} wood",
+            NodeKind.House => $"{node.Occupants}/{node.Occupancy} living here" +
+                              (node.Privation > 0.5f ? " · GOING HUNGRY" : string.Empty),
+            NodeKind.Pile => $"{node.Stock.Grain + node.Stock.Wood} lying on the ground",
+            _ => $"{node.Stock.Grain:N0} grain, {node.Stock.Wood:N0} wood",
+        };
+
+        var hands = node.Hands > 0 ? $" · {node.Hands} at work" : string.Empty;
+        var hungry = node.IsSink && node.Privation > 0.5f;
+        lines.Add(($"{name} · {says}{hands}", hungry ? Warning : Body));
+    }
+
+    /// <summary>
+    /// The keys that would do something right now, and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// The whole point of the panel. What a player wants after clicking a villager is not the twenty keys
+    /// the game has, it is the two that apply to a villager standing next to a tree — so a prompt appears
+    /// only when its precondition holds, and it says what it will <em>do</em> rather than what it is called.
+    /// "U — CUT THIS TREE" rather than "U: post".
+    /// </remarks>
+    private void Prompts(
+        SimulationWorld world,
+        IReadOnlyCollection<AgentId> selected,
+        NodeId hovered,
+        bool additive,
+        NodeId? routeSource)
+    {
+        if (selected.Count == 0)
+        {
+            lines.Add(("DRAG TO SELECT · D GRANARY · A FIELD · CTRL+A HOUSE · W DEPOT", Action));
+            return;
+        }
+
+        if (world.Nodes.Contains(hovered))
+        {
+            ref readonly var node = ref world.Nodes.Get(hovered);
+            if (node.IsUnderConstruction) lines.Add(("U — BUILD THIS", Action));
+            else if (node.Kind == NodeKind.Farm) lines.Add(("U — WORK THIS FIELD", Action));
+            else if (node.Kind == NodeKind.Tree) lines.Add(("U — CUT THIS TREE", Action));
+
+            var haulable = node.Stores || node.IsPile || node.TimberWanted > 0;
+            if (haulable)
+            {
+                lines.Add((
+                    routeSource is null
+                        ? $"CTRL+O — HAUL FROM HERE ({SimulationWorld.CartTimber} WOOD A CART)"
+                        : "CTRL+O — DELIVER HERE",
+                    Action));
+            }
+        }
+        else
+        {
+            lines.Add(("U — POST HERE · RIGHT-CLICK TO MOVE", Action));
+        }
+
+        lines.Add(("S STOP · Y OFF WORK · Z FOLLOW CAMERA", Body));
+        if (additive) lines.Add(("CTRL HELD — ADDING TO SELECTION", Body));
+    }
+
+    /// <summary>
+    /// Draws the staged lines, each over a dark plate so it reads on any ground.
+    /// </summary>
+    /// <remarks>
+    /// A plate rather than an outline. This is white-ish text over a scene whose brightness ranges from
+    /// sunlit wheat to the inside of a wood, and there is no single text colour that survives both — the
+    /// cheapest thing that always works is to stop the scene showing through.
+    /// </remarks>
+    private void Block(float size, Vector2 at, float step)
+    {
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var (text, colour) = lines[i];
+            var position = at + new Vector2(0f, i * step);
+            var measured = SpriteBatchUiExtensions.MeasureText(font!, size, text);
+            batch.DrawSolidRect(
+                plate,
+                new Rect(position.X - size * 0.35f, position.Y - size * 0.2f,
+                    measured.X + size * 0.7f, measured.Y + size * 0.35f),
+                Shadow);
+            batch.DrawText(font!, size, text, position, colour);
+        }
+    }
+
+    public void Dispose() => batch.Dispose();
+}

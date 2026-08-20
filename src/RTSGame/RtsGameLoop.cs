@@ -319,6 +319,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private SpriteBatch selectionUi = null!;
     private TextureHandle selectionPixel = new(-1);
 
+    /// <summary>
+    /// On-screen prompts: what is selected, what is under the pointer, and which key does something.
+    /// </summary>
+    /// <remarks>
+    /// The twenty-line key reference printed at startup is no use while playing. The question a player has
+    /// is never "what are all the keys", it is "I have clicked this thing, now what" — and that depends on
+    /// what is selected and what is under the cursor, so it is computed from those two.
+    /// </remarks>
+    private SettlementHud? hud;
+
     private double simulationAccumulator;
     private float aspect = 16f / 9f;
     private float cameraYaw = MathF.PI * 0.25f;
@@ -679,6 +689,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         art = SettlementArt.Load(vk, worldShader, worldPipeline, casterShader, casterPipeline);
         RebuildTerrainSurfaceLayers();
         selectionUi = new SpriteBatch(vk);
+        hud = SettlementHud.Load(vk);
         selectionPixel = graphicsDevice.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.PixelatedRepeat),
             new byte[] { 255, 255, 255, 255 },
@@ -1522,6 +1533,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                     new[] { new ShaderTextureBinding("uHdr", hdr, Slot: 0) },
                     gradePush);
                 DrawSelectionMarquee(pass);
+                hud?.Draw(
+                    pass,
+                    selectionPixel,
+                    simulation,
+                    selection.Selected,
+                    pointerWorld,
+                    pointerOnTerrain,
+                    additiveSelection,
+                    routeSource,
+                    frame.Width,
+                    frame.Height);
             });
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames)
@@ -2659,6 +2681,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void Dispose()
     {
+        hud?.Dispose();
         selectionUi?.Dispose();
         if (selectionPixel.Id >= 0) graphicsDevice?.DestroyTexture(selectionPixel);
         overlayBuffer?.Dispose();
