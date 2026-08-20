@@ -91,6 +91,7 @@ internal sealed class SettlementHud : IDisposable
         bool additive,
         NodeId? routeSource,
         string? raid,
+        string? geometry,
         int width,
         int height)
     {
@@ -156,6 +157,12 @@ internal sealed class SettlementHud : IDisposable
                     threat.Standing > 0 ? Action : Warning));
             }
         }
+
+        // <b>The distances that are supposed to agree, while the overlay is up.</b> Four numbers picked
+        // independently — how far the camera is, how far trees are drawn, how wide the shadow box is, where
+        // fog starts — and "geometries that should tie together don't" cannot be checked without seeing
+        // them next to each other.
+        if (geometry is not null) lines.Add((geometry.ToUpperInvariant(), Body));
 
         Block(size, new Vector2(pad, pad), step);
 

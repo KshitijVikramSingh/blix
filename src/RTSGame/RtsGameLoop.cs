@@ -158,6 +158,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private static readonly Vector4 PlacementColliderColor = new(0.34f, 0.86f, 0.44f, 1f);
     private static readonly Vector4 InteractionColliderColor = new(0.78f, 0.38f, 0.92f, 1f);
     private static readonly Vector4 MovementColliderColor = new(0.20f, 0.42f, 0.96f, 1f);
+
+    /// <summary>Ground nothing walks through, ground nothing builds on, in the overlay.</summary>
+    private static readonly Vector4 SolidColliderColor = new(0.95f, 0.30f, 0.22f, 1f);
+
+    private static readonly Vector4 BlockerColliderColor = new(0.95f, 0.72f, 0.18f, 1f);
     private static readonly Vector4 PreferredVelocityColor = new(0.22f, 0.92f, 0.66f, 1f);
     private static readonly Vector4 ResolvedVelocityColor = new(0.96f, 0.30f, 0.72f, 1f);
     private static readonly Vector4 StuckUnitColor = new(0.86f, 0.18f, 0.22f, 1f);
@@ -381,7 +386,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private bool additiveSelection;
     private bool obstacleEditMode;
     private int navigationDebugMode;
-    private bool colliderDebug;
+    /// <summary>
+    /// Nothing, then a selected body's own four proxies, then <b>every collider in the world</b>.
+    /// </summary>
+    /// <remarks>
+    /// <b>The third setting is the one that did not exist, and it is the one everything was doubted
+    /// against.</b> This overlay drew the four discs of a selected agent and nothing else — no tree, no
+    /// building, no wall, no impassable cell — so the alignment anybody actually suspected, whether a
+    /// trunk's collider matches the trunk that is drawn, had never once been visible.
+    /// <para>
+    /// Everything it draws is read from the collider itself: its own centre, its own shape, its own size.
+    /// Nothing is recomputed from the drawing code, because a disc drawn from the same numbers as the mesh
+    /// would agree with the mesh by construction and prove nothing at all.
+    /// </para>
+    /// </remarks>
+    private int colliderOverlay;
     private bool velocityDebug;
     private bool pathDebug;
     private bool stateDebug;
@@ -437,7 +456,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (debugAll)
         {
             timingDebug = true;
-            colliderDebug = true;
+            colliderOverlay = 2;
             velocityDebug = true;
             pathDebug = true;
             stateDebug = true;
@@ -1526,6 +1545,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         BuildTerrainInstances();
         BuildAgentInstances((float)time.Total);
+        DrawColliderOverlay();
 
         var props = CollectionsMarshal.AsSpan(propInstances);
         var units = CollectionsMarshal.AsSpan(unitInstances);
@@ -1598,6 +1618,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                     additiveSelection,
                     routeSource,
                     raiders?.Status,
+                    colliderOverlay > 0 ? GeometryLine() : null,
                     frame.Width,
                     frame.Height);
             });
@@ -2417,7 +2438,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var selected = selection.Contains(agent.Id);
             var bodyScale = agent.Radius / AgentDefaults.Radius;
 
-            if (selected && colliderDebug)
+            if (selected && colliderOverlay > 0)
             {
                 AddColliderDisc(agent.Colliders.Avoidance, position, height + 0.012f, AvoidanceColliderColor);
                 AddColliderDisc(agent.Colliders.Placement, position, height + 0.022f, PlacementColliderColor);
@@ -2530,6 +2551,74 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         AgentLocomotionState.Flee => FleeStateColor,
         _ => UnitColor,
     };
+
+    /// <summary>
+    /// Every collider in the world, drawn from its own numbers, so a mismatch with the art is visible.
+    /// </summary>
+    /// <remarks>
+    /// Read from <c>ColliderWorld.All</c> and nothing else — a proxy's own centre, kind and size — because
+    /// the whole value of the overlay is that it is <em>not</em> derived from what the renderer decided to
+    /// draw. A tree whose disc sits half a metre from its trunk, a barn whose box is wider than its walls,
+    /// a placement blocker with nothing standing on it: all of those are invisible until something draws
+    /// the collider rather than the model.
+    /// <para>
+    /// Colour says what a thing does rather than what it is, because that is the question being asked of
+    /// it: solid ground you cannot walk through, ground you cannot build on, and something you can reach.
+    /// Disabled proxies are drawn too, dimmed — a body indoors keeps its four proxies dark, and "where did
+    /// that collider go" is exactly the kind of thing this exists to answer.
+    /// </para>
+    /// <para>
+    /// Culled to the tree draw radius. There are nine and a half thousand trunks on a 600 m map and each is
+    /// a proxy; drawing all of them would replace the frame budget with an overlay.
+    /// </para>
+    /// </remarks>
+    private void DrawColliderOverlay()
+    {
+        if (colliderOverlay < 2) return;
+        foreach (var proxy in simulation.Colliders.All)
+        {
+            // Bodies already draw their own four, in their own colours, when selected.
+            if ((proxy.Layer & ColliderLayer.Agent) != 0) continue;
+            if (Vector2.DistanceSquared(proxy.Center, cameraFocus) > treeDrawRadiusSquared) continue;
+
+            var role = (proxy.Roles & ColliderRole.MovementSolid) != 0
+                ? SolidColliderColor
+                : (proxy.Roles & ColliderRole.PlacementBlocker) != 0
+                    ? BlockerColliderColor
+                    : InteractionColliderColor;
+            if (!proxy.Enabled) role *= new Vector4(0.35f, 0.35f, 0.35f, 1f);
+
+            var ground = simulation.Terrain.SampleHeight(proxy.Center) + 0.06f;
+            var extent = proxy.Shape.Kind == ColliderShapeKind.Circle
+                ? new Vector2(proxy.Shape.Radius)
+                : proxy.Shape.HalfExtents;
+            propInstances.Add(new InstanceData(
+                Matrix4x4.CreateScale(extent.X * 2f, 0.03f, extent.Y * 2f) *
+                Matrix4x4.CreateTranslation(proxy.Center.X, ground, proxy.Center.Y),
+                role));
+        }
+    }
+
+    /// <summary>
+    /// The distances that are supposed to agree with each other, on one line.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because "geometries that should tie together don't" is a feeling until it is arithmetic.</b> Four
+    /// numbers describe how far this game can see, and each is chosen independently: how far the camera is
+    /// from the ground, how far out trees are drawn, how wide the sun's shadow box is, and where the fog
+    /// starts. A tree drawn beyond the shadow box casts nothing; a shadow box far wider than the view
+    /// spends its texels on ground nobody is looking at, and the texel size is what shadow quality
+    /// <em>is</em>. Printed together, a mismatch is a number rather than a suspicion.
+    /// </remarks>
+    private string GeometryLine()
+    {
+        var view = cameraDistance;
+        var texelCentimetres = SunOrthoExtent / ShadowMapSize * 100f;
+        return
+            $"VIEW {view:F0} m · TREES {look.TreeDrawMetres:F0} m ({look.TreeDrawMetres / view:F1}x) · " +
+            $"SHADOW BOX {SunOrthoExtent:F0} m ({SunOrthoExtent / view:F1}x, texel {texelCentimetres:F1} cm) · " +
+            $"FOG {view * look.FogStartZooms:F0}-{view * MathF.Max(look.FogStartZooms + 0.1f, look.FogEndZooms):F0} m";
+    }
 
     private void AddColliderDisc(ColliderId id, Vector2 position, float height, Vector4 color)
     {
@@ -2665,8 +2754,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 Console.WriteLine($"  terrain overlay: {navigationDebugMode switch { 1 => "navigation", 2 => "surface cost", 3 => "slope", 4 => "congestion pressure", _ => "off" }}");
                 break;
             case Key.C:
-                colliderDebug = !colliderDebug;
-                Console.WriteLine($"  collider debug: {(colliderDebug ? "ON" : "OFF")}");
+                colliderOverlay = (colliderOverlay + 1) % 3;
+                Console.WriteLine(
+                    "  collider overlay: " + colliderOverlay switch
+                    {
+                        1 => "selected bodies",
+                        2 => "everything — trees, buildings, walls and bodies, drawn from their colliders",
+                        _ => "off",
+                    });
                 break;
             case Key.V:
                 velocityDebug = !velocityDebug;

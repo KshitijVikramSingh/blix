@@ -4578,3 +4578,44 @@ That is the same shape as §41: the instrument for the thing being doubted does 
 cannot resolve. It is the next piece of work, and it wants to draw structure colliders and navigation
 cells against the meshes they belong to, and to print the tie-together numbers on one line where a
 mismatch is arithmetic rather than a feeling.
+
+## 47. The collider overlay, and what its first line said
+
+`C` now cycles three ways: off, a selected body's own four proxies, and **everything** — every collider in
+the world drawn from its own numbers. That third setting is the one that did not exist, and it is the one
+every suspicion has been about: the overlay drew a selected agent's discs and nothing else, so *no tree, no
+building, no wall and no impassable cell had ever been visible*, and "does a trunk's collider match the
+trunk that is drawn" could not be answered by looking.
+
+Everything it draws comes from `ColliderWorld.All` — a proxy's own centre, kind and size — and deliberately
+not from the drawing code, because a disc computed from the same numbers as the mesh would agree with the
+mesh by construction and prove nothing. Colour says what a thing *does* rather than what it is, since that
+is the question: solid ground, ground you cannot build on, something you can reach. **Disabled proxies are
+drawn dimmed**, because "where did that collider go" is exactly what a body indoors makes you ask. Culled to
+the tree draw radius, since nine and a half thousand trunks each have one.
+
+Cost, measured: 50k triangles to 64k with everything on. Fine for a debug view.
+
+### And the numbers that are supposed to agree, on one line
+
+*"Geometries that should tie together don't"* is a feeling until it is arithmetic, so the HUD prints the
+four distances that describe how far this game can see whenever the overlay is up. At the default zoom:
+
+```
+VIEW 46 m · TREES 150 m (3.3x) · SHADOW BOX 150 m (3.3x, texel 7.3 cm) · FOG 83-138 m
+```
+
+**The shadow box is 3.3× wider than anything you can see, so about nine tenths of the shadow map is spent on
+ground nobody is looking at** — and the texel is what shadow quality *is*: 150 m over 2048 texels is 7.3 cm.
+A box sized to the view with a margin for off-screen casters would be nearer 2.5 cm, which is a threefold
+sharpening for nothing.
+
+Note the half that *is* tied, because it explains how this survived: `treeDrawRadius` is
+`max(TreeDrawMetres, SunOrthoExtent × 0.75)`, so trees follow the shadow box to guarantee that anything
+casting into view exists. The dependency runs the wrong way round — the box is a fixed 150 m unrelated to a
+`cameraDistance` that ranges 31 to 78 m, and the draw distance obeys the box rather than the eye. At the
+closest zoom the box is **4.8×** the view.
+
+That is one finding from one line of text on the first run, which is the argument for the overlay rather
+than for any particular fix. The fix is worth measuring next: track the box to the view, and let the tree
+distance fall out of it.
