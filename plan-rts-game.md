@@ -3746,3 +3746,50 @@ Which means the thing the numbers are now asking for is not a tuning pass, it is
 strength 3, health 45, already on the roster and with no way to make one. That is the combat arc's
 business and it is the right place for it to start: the mechanics are all working end to end now, and what
 they reveal is a missing unit rather than a wrong number.
+
+## 34. The four loose ends, and a gate to run before anything lands
+
+Small things, all of them known and none of them blocking, closed out together because the list itself
+had started to be the problem.
+
+**Numbers are printed the same everywhere.** The forest line read `8,65,710 wood` — correct for this
+machine's digit grouping and useless in a report you compare against yesterday's. `InvariantCulture` on
+the way in to `Main`, which also means two machines' traces diff cleanly. That last part matters more than
+the cosmetics for a project whose main tool is a determinism check.
+
+**A felled tree leaves a stump.** `Resource_Tree_Group_Cut` had been loaded and never drawn, and the gap
+it left was bigger than it sounds: cutting is otherwise *invisible in hindsight*. A tree shrinks while it
+is felled and then simply is not there, so a decade of work on the wood line left the ground looking as
+though nobody had ever been — and the receding wood line is Stage B's entire interface.
+
+A stump cannot be a node. A felled tree's node is removed outright because nothing in the simulation has
+any further use for it, and keeping thousands of dead ones alive would put them in the fingerprint, the
+save file and every iteration over the economy, forever, to be looked at. So it is a **ring of the last
+384 felling sites** — about a decade of a settlement's cutting — argued away in the census rather than
+fingerprinted, on the grounds that no decision anywhere reads it. Deliberately not saved either: a loaded
+world has no stumps until something is felled. Both are honest for a thing that decides nothing, and both
+are cheaper than the alternative by a wide margin.
+
+**Tab selects the spare hands.** The panel had been saying "5 SPARE" with no way to get at them, which is
+a strange thing to have shipped: spare labour is what a new field is staffed from, what a cart is bought
+for and what a building site is finished by, so telling somebody they have five and making them hunt for
+which five is most of the friction in playing this. Idle is defined in exactly the same terms the HUD
+counts it in — no assignment, not mid-interrupt — because two definitions of spare would drift and the
+number on screen is the promise the key has to keep. Tab because every letter on the board is taken twice
+over, which is its own signal about the interface.
+
+**`tools/gate-rts-game.sh`** runs the three headless checks that have to be green. They cover different
+failure modes and none subsumes another:
+
+| | catches |
+|---|---|
+| `--selftest` | a broken rule — 82 assertions, seconds each |
+| `--settlement --years 1` | an economy that no longer feeds itself, which no assertion can, because "starves in the fourth season" is a property of a year rather than of a tick |
+| `--raidtest` | a defence that stops defending |
+
+Conservation is checked every tick of all three, so a unit of grain going missing fails whichever run was
+unlucky enough to be holding it. `--raidtest` in particular existed but was only ever run when somebody
+remembered to, which is the same as not existing — Stage E's whole lesson, one level up.
+
+The one item left open is the one that is not mine to close: the `LookSettings` sliders still hold my
+guesses, and settling them is a judgement about how the game should look.

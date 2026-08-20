@@ -114,6 +114,11 @@ internal static class DeterminismCheck
         ["EconomySystem.idleHaulers"] =
             "rebuilt from the bodies by every pass of the board; who is idle is a fact about the " +
             "bodies, and those are fingerprinted.",
+        ["SimulationWorld.fellings"] =
+            "a ring of where trees lately came down, so a stump can be drawn there. Cosmetic: no " +
+            "decision anywhere reads it, and it is deliberately not saved either.",
+        ["SimulationWorld.fellingCount"] =
+            "how far round the fellings ring we are, which is part of the same cosmetic record.",
         ["SimulationWorld.forestNeighbours"] =
             "scratch for one felling's cover decision, gathered from the trees and read within the call.",
         ["SimulationWorld.threat"] =

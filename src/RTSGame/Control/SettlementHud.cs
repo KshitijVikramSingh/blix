@@ -294,7 +294,11 @@ internal sealed class SettlementHud : IDisposable
     {
         if (selected.Count == 0)
         {
-            lines.Add(("DRAG TO SELECT · D GRANARY · A FIELD · CTRL+A HOUSE · W DEPOT", Action));
+            // Tab first, because it is the answer to the question the panel above just raised by saying
+            // how many people are spare.
+            lines.Add((
+                "TAB SPARE HANDS · DRAG TO SELECT · D GRANARY · A FIELD · CTRL+A HOUSE · W DEPOT",
+                Action));
             return;
         }
 

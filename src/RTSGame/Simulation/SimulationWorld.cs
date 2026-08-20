@@ -1277,8 +1277,26 @@ internal sealed class SimulationWorld
     /// literally the passable edge moving.
     /// </para>
     /// </remarks>
+    /// <summary>Where trees have lately come down, for whatever wants to draw a stump there.</summary>
+    /// <remarks>
+    /// <b>Cosmetic, bounded and not saved, and each of those is a decision.</b> A felled tree's node is
+    /// removed outright — nothing in the simulation has any further use for it — so a stump cannot be a
+    /// node without keeping thousands of dead ones alive forever in the fingerprint, the save file and
+    /// every iteration over the economy. It is a ring of the last few hundred sites instead, which is
+    /// about a decade of a settlement's cutting, and when it wraps the oldest clearing loses its stumps.
+    /// Nothing reads it but the renderer, which is why it is argued away in the census rather than
+    /// fingerprinted, and why a loaded save shows no stumps until somebody fells something.
+    /// </remarks>
+    internal ReadOnlySpan<Vector2> RecentFellings =>
+        new(fellings, 0, Math.Min(fellingCount, fellings.Length));
+
+    private readonly Vector2[] fellings = new Vector2[384];
+    private int fellingCount;
+
     public void ReleaseForestCover(Vector2 where)
     {
+        fellings[fellingCount % fellings.Length] = where;
+        fellingCount++;
         var transform = Terrain.Transform;
         var radius = Woodland.CoverRadius;
         var radiusSquared = radius * radius;

@@ -7,6 +7,14 @@ public static class Program
 {
     public static void Main(string[] args)
     {
+        // <b>Every number this program prints is a measurement, so it is printed the same everywhere.</b>
+        // Without this the machine's own digit grouping gets in: the forest line read "8,65,710 wood" on
+        // this one, which is correct for the local convention and useless in a report you compare against
+        // yesterday's. It also means two machines' traces diff cleanly, which is the whole point of having
+        // a determinism check.
+        System.Globalization.CultureInfo.DefaultThreadCurrentCulture =
+            System.Globalization.CultureInfo.InvariantCulture;
+
         if (args.Contains("--selftest"))
         {
             Environment.Exit(SimulationSelfTests.Run());

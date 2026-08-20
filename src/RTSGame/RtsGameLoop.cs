@@ -461,6 +461,38 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (debugAll) Console.WriteLine("  all overlays ON: congestion, colliders, velocity, paths, states, timings");
     }
 
+    /// <summary>
+    /// Selects everybody with nothing to do, which is who the HUD has been counting all along.
+    /// </summary>
+    /// <remarks>
+    /// <b>The panel said "5 SPARE" and there was no way to get at them.</b> Spare labour is the one thing
+    /// a settlement always has some of and the one thing a player is always looking for — it is what a new
+    /// farm is staffed from, what a cart is bought for, and what a building site is finished by — so
+    /// telling somebody they have five and making them hunt for which five is a strange thing to have
+    /// shipped. Tab, because every letter on the board was taken twice over.
+    /// <para>
+    /// Idle is defined here exactly as the HUD defines it — no assignment and not mid-interrupt — because
+    /// two definitions of spare would drift and the number on screen is the promise this has to keep.
+    /// </para>
+    /// </remarks>
+    private void SelectSpareHands()
+    {
+        var spare = new List<AgentId>();
+        if (additiveSelection) spare.AddRange(selection.Selected);
+        foreach (ref readonly var agent in simulation.Agents.All)
+        {
+            if (!agent.IsAlive || agent.Faction.Value != 0) continue;
+            if (agent.Jobs.HasAssignment || agent.Jobs.IsInterrupted) continue;
+            spare.Add(agent.Id);
+        }
+
+        selection.ReplaceWith(spare);
+        Console.WriteLine(
+            selection.Selected.Count == 0
+                ? "  nobody spare — everybody has a job"
+                : $"  {selection.Selected.Count} unit(s) selected");
+    }
+
     private void SpawnScenarioAgents(int count)
     {
         MovementStressScenarios.Populate(simulation, count, issueGroupMove: false);
@@ -1884,6 +1916,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private void BuildNodeInstances()
     {
+        DrawStumps();
         foreach (ref readonly var node in simulation.Nodes.All)
         {
             if (!node.IsAlive) continue;
@@ -2153,6 +2186,42 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             Matrix4x4.CreateTranslation(
                 tree.Position.X, ground + trunkHeight + canopyHeight * 0.28f, tree.Position.Y),
             Vector4.Lerp(CanopyDarkColor, CanopyLightColor, (tree.Id.Value * 29 % 7) / 7f)));
+    }
+
+    /// <summary>
+    /// What is left where a tree came down.
+    /// </summary>
+    /// <remarks>
+    /// The one visible record that a wood used to be bigger than it is. Cutting is otherwise invisible in
+    /// hindsight: a tree shrinks while it is being felled and then simply is not there, so a decade of a
+    /// settlement's work on its wood line left the ground looking as though nobody had ever been. Stumps
+    /// are what make a cleared band read as cleared rather than as a wood that happens to start further
+    /// out — which matters, because the receding wood line is Stage B's entire interface.
+    /// <para>
+    /// Drawn from <c>SimulationWorld.RecentFellings</c>, which is cosmetic and bounded: the oldest
+    /// clearing loses its stumps when the ring wraps, and a loaded save has none until something is felled.
+    /// Both are honest for a thing that decides nothing.
+    /// </para>
+    /// </remarks>
+    private void DrawStumps()
+    {
+        if (art is null) return;
+        foreach (var where in simulation.RecentFellings)
+        {
+            if (Vector2.DistanceSquared(where, cameraFocus) > treeDrawRadiusSquared) continue;
+            var ground = simulation.Terrain.SampleHeight(where);
+            // Small: a stump is what is left of a trunk, not what is left of a canopy, so it is sized off
+            // the footprint the simulation routed bodies around rather than off the tree that was drawn.
+            var width = NodeFootprint.TreeHalfExtent * 2f * 1.15f;
+            art.Stumps.Add(SettlementArt.Placement(where, ground, width, StumpYawOf(where)));
+        }
+    }
+
+    /// <summary>A turn taken from the ground itself, so a stump does not spin between frames.</summary>
+    private static float StumpYawOf(Vector2 where)
+    {
+        var hash = (int)(where.X * 7.3f) * 73856093 ^ (int)(where.Y * 7.3f) * 19349663;
+        return (hash & 0x7FFFFFFF) % 360 * MathF.PI / 180f;
     }
 
     /// <summary>
@@ -2686,6 +2755,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 // is a store, and the reason it works is that nobody lives near it — so the wood in it
                 // is stranded, and stranded stock is what the hauling board collects.
                 Build(NodeKind.ForwardDepot, capacity: 400, Resource.Wood);
+                break;
+            case Key.Tab:
+                SelectSpareHands();
                 break;
             case Key.LeftControl:
             case Key.RightControl:
