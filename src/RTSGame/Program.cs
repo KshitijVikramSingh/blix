@@ -64,6 +64,13 @@ public static class Program
             Environment.Exit(SettlementScenarios.Run(settlementExtent, years));
         }
 
+        if (args.Contains("--placementcheck"))
+        {
+            var pcExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var pcMinutes = Value(args, "--minutes") is { } span ? float.Parse(span) : 3f;
+            Environment.Exit(SettlementScenarios.RunPlacementCheck(pcExtent, pcMinutes));
+        }
+
         if (args.Contains("--forestcost"))
         {
             var forestExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;

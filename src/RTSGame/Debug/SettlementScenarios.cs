@@ -287,6 +287,108 @@ internal static class SettlementScenarios
         return faults.Count > 0 ? 1 : 0;
     }
 
+    /// <summary>
+    /// Whether the village it lays down is a village anybody can actually work in.
+    /// </summary>
+    /// <remarks>
+    /// <b>Two reports that are cheaper to measure than to watch for.</b> "One of our villagers pops in
+    /// blocked by a tree every single run" is a spawn-placement claim, and "trees don't actually fell" is a
+    /// claim about the wood economy — both of them are numbers, and both were being judged by eye against a
+    /// scene where thirty-one trees come down a year out of nine and a half thousand.
+    /// <para>
+    /// So this reports the state of the village at tick zero and again after a few minutes: who is standing
+    /// somewhere they cannot walk, who is overlapping something solid, how many cutters have a tree they can
+    /// reach, and how many trees actually came down.
+    /// </para>
+    /// </remarks>
+    public static int RunPlacementCheck(float extentMeters, float minutes)
+    {
+        var world = Build(extentMeters, out _);
+        Console.WriteLine(
+            $"RTSGame placement check — {world.ExtentMeters:F0} m, {world.Agents.LiveCount} people, " +
+            $"{world.Nodes.LiveCount} nodes");
+
+        var faults = new List<string>();
+        Report(world, "at tick 0", faults);
+
+        var treesBefore = StandingTrees(world);
+        var ticks = (int)(minutes * 60f * TicksPerSecond);
+        for (var tick = 1; tick <= ticks; tick++) world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        Report(world, $"after {minutes:F0} min", faults);
+
+        var treesAfter = StandingTrees(world);
+        var wood = 0;
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (node.IsAlive && node.Stores) wood += node.Stock.Wood;
+        }
+
+        Console.WriteLine(
+            $"  trees {treesBefore} -> {treesAfter} ({treesBefore - treesAfter} felled), " +
+            $"{wood} wood in stores");
+        if (treesBefore - treesAfter == 0)
+        {
+            faults.Add($"no tree came down in {minutes:F0} minutes of {Woodcutters} cutters working");
+        }
+
+        foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");
+        return faults.Count > 0 ? 1 : 0;
+    }
+
+    private static int StandingTrees(SimulationWorld world)
+    {
+        var trees = 0;
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (node.IsAlive && node.IsStanding) trees++;
+        }
+
+        return trees;
+    }
+
+    private static void Report(SimulationWorld world, string when, List<string> faults)
+    {
+        var stuck = 0;
+        var embedded = 0;
+        var cutters = 0;
+        var cuttersWithATree = 0;
+        foreach (ref readonly var agent in world.Agents.All)
+        {
+            if (!agent.IsAlive || agent.Sheltered) continue;
+            // Standing on ground the router says nobody may occupy.
+            if (world.Placement.Transform.TryWorldToCell(agent.Position, out _) &&
+                world.Navigation.Transform.TryWorldToCell(agent.Position, out var navCell) &&
+                world.Navigation.Contains(navCell) &&
+                !world.Navigation.IsWalkable(navCell, agent.NavigationRadius))
+            {
+                stuck++;
+            }
+
+            // Overlapping something solid, which is a different failure: the raster may say the cell is
+            // fine while a trunk or a wall is physically on top of the body.
+            foreach (ref readonly var node in world.Nodes.All)
+            {
+                if (!node.IsAlive || !NodeFootprint.Blocks(node.Kind)) continue;
+                var gap = node.FootprintRadius + agent.Radius;
+                if (Vector2.DistanceSquared(agent.Position, node.Position) < gap * gap * 0.9f)
+                {
+                    embedded++;
+                    break;
+                }
+            }
+
+            if (agent.Jobs.Assignment.Kind != AssignmentKind.Work) continue;
+            cutters++;
+            if (world.CanReachTree(agent.Position)) cuttersWithATree++;
+        }
+
+        Console.WriteLine(
+            $"  {when}: {stuck} standing on unwalkable ground, {embedded} overlapping something solid, " +
+            $"{cuttersWithATree}/{cutters} workers with a tree in reach");
+        if (stuck > 0) faults.Add($"{when}: {stuck} bodies on ground the router forbids");
+        if (embedded > 0) faults.Add($"{when}: {embedded} bodies inside something solid");
+    }
+
     private static int CountSettlers(SimulationWorld world)
     {
         var alive = 0;

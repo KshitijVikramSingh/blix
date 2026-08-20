@@ -4519,3 +4519,62 @@ benchmarks are not a substitute for looking — they are what tells you *which* 
 is the half with legible visuals, so judgement about it is reliable. Stone and new buildings are *additions*
 to that half and can wait behind polishing what is there; the roster waits on the art that makes it
 readable.
+
+## 46. Two reported bugs, both confirmed by measuring instead of watching
+
+`--placementcheck` builds the village, reports its state at tick zero, runs it, and reports again. Both
+reports were exactly right, and one of them is not a bug at all.
+
+```
+  at tick 0:     1 standing on unwalkable ground, 0 overlapping something solid,  0/0  workers with a tree in reach
+  after 3 min:   1 standing on unwalkable ground, 0 overlapping something solid, 19/19 workers with a tree in reach
+  trees 9650 -> 9650 (0 felled), 942 wood in stores
+```
+
+### "One of our villagers pops in blocked by a tree every single run"
+
+**Exactly one, every run, and still stuck three minutes later.** Deterministic, reproducible, and now
+asserted rather than noticed. Not diagnosed yet — the candidates are the spawn nudge, which searches twelve
+metres for open ground and cannot escape the interior of a stand, and the posting of cutters against a
+raster that is rebuilt after forest cover is painted. It is one body out of twenty-six, which is why it has
+survived this long: it is invisible unless you happen to watch that villager.
+
+### "Trees don't actually fell" — true, and not a bug
+
+Zero trees came down in three minutes with seven cutters at work, and the arithmetic says that is correct:
+
+| wood per tree | cutter-minutes to fell one | trees a cutter fells in a year | trees a year for 7 cutters |
+|---|---|---|---|
+| **90 (shipped)** | **14.6** | 5.6 | **39** |
+| 45 | 7.3 | 11.1 | 78 |
+| 25 | 4.0 | 20.0 | 140 |
+| 12 | 1.9 | 41.7 | 292 |
+
+A cutter chops `WoodPerHandPerYear / (year × (1 − walkShare))` = **0.103 wood a second**, so a 90-unit tree
+is **fifteen minutes of one cutter's life**. Thirty-nine trees a year out of nine and a half thousand. At
+1.5× compression a session is perhaps ten minutes of simulated time, so **a player sees about one tree fall
+per session, if they happen to be looking at it.**
+
+Nothing is broken. **The tree is the wrong grain size**, and §22 said what that costs before it happened:
+*"the wood line as a thing you look at"* was supposed to be Stage B's entire interface. An interface that
+updates once a session is not one.
+
+And the dial is nearly free. `WoodPerTree` does not touch the annual economy at all — a hand still cuts 500
+wood a year whatever a tree holds — so it changes only *how granular felling is*. The one real cost is
+walking: `CutterWalkShare = 0.10` was chosen against 90-unit trees, and smaller trees mean more trips
+between them, so the effective rate falls. That is measurable with `--settlement --years 1` and is the next
+thing to measure rather than guess.
+
+### And the tools this argues for
+
+The reports also asked for the full set — shader, collider, and the rest — and named the specific
+suspicions: collider against mesh against renderer, and *geometries that should tie together and do not*
+(tree draw distance against camera zoom against shadow frustum extent). Worth noting what the collider
+overlay does today: it draws the four discs of a **selected agent** and nothing else. **No tree, no
+building, no wall, no impassable cell.** So the one alignment anybody has actually doubted — does a trunk's
+collider match the trunk that is drawn — has never been visible at all.
+
+That is the same shape as §41: the instrument for the thing being doubted does not exist, so the doubt
+cannot resolve. It is the next piece of work, and it wants to draw structure colliders and navigation
+cells against the meshes they belong to, and to print the tie-together numbers on one line where a
+mismatch is arithmetic rather than a feeling.
