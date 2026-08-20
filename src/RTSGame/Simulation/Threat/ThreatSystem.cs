@@ -142,6 +142,16 @@ internal sealed class ThreatSystem
     /// </remarks>
     internal delegate void Halt(AgentId body);
 
+    /// <summary>
+    /// Deal with what this body is carrying before it goes anywhere, and say if it is still busy.
+    /// </summary>
+    /// <remarks>
+    /// The world owns the answer, because the answer is about stores, room and routes and none of those
+    /// are the defence's business. All this layer knows is that a body with its hands full is not ready to
+    /// fight, and that where the load goes must not be into the fight — hence the danger it is given.
+    /// </remarks>
+    internal delegate bool Stow(AgentId body, Vector2 danger);
+
     /// <summary>Whether an observer can see a point — the world's sight test, trees and all.</summary>
     internal delegate bool Sees(in AgentState observer, Vector2 target);
 
@@ -196,7 +206,8 @@ internal sealed class ThreatSystem
         float deltaSeconds,
         Sees sees,
         March march,
-        Halt halt)
+        Halt halt,
+        Stow stow)
     {
         Standing = 0;
         Fleeing = 0;
@@ -262,6 +273,24 @@ internal sealed class ThreatSystem
             }
 
             var stand = ours >= required;
+
+            // <b>Hands first.</b> A villager who runs at a raider with forty grain on its back is carrying
+            // the raider's prize into its reach: it loses the fight, the goods change hands on the spot,
+            // and the raid is paid for by the defence. So a defender that has decided to fight stows its
+            // load first — into a store out of the trouble if there is one, on the ground if not — and
+            // joins with its hands free. Which store, and whether there is one, is the world's question.
+            //
+            // Note what this is *not*: it does not touch the assignment. The villager goes back to the
+            // same field afterwards, and the units it was carrying are still in the ledger the whole time.
+            if (stand && body.Jobs.CarriedUnits > 0 && stow(body.Id, at))
+            {
+                // Decided again next tick rather than held, so that the instant its hands are empty it
+                // goes — a commitment window here would leave it standing about having just put a sack
+                // down while the fight it committed to happens without it.
+                body.Standing = false;
+                body.Resolve = 0f;
+                continue;
+            }
 
             if (stand) Standing++;
             else Fleeing++;
@@ -399,6 +428,14 @@ internal sealed class ThreatSystem
             // Busy elsewhere, and it stays busy: the commitment window is what makes this stable rather
             // than a settlement that re-allocates itself every tick.
             if (ally.Standing && Vector2.DistanceSquared(ally.Guarding, where) > ElsewhereSquared) continue;
+
+            // <b>Hands full is not available, and this one was measured.</b> A body walking a load to a
+            // store still sorts by where it is standing, so the people behind it in the queue read it as
+            // covering the fight while it is in fact off delivering grain — and the defence arrives two
+            // bodies short of what it committed to. Excluded, so the next of the surplus steps up instead.
+            // Never the asker: a body must count itself, or a laden villager reads the fight as hopeless
+            // and runs from something it could win once its hands were free.
+            if (ally.PuttingDown && ally.Id != body.Id) continue;
             if (!sees(in ally, where)) continue;
 
             total += ally.Strength;

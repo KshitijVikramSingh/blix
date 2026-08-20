@@ -3517,3 +3517,87 @@ This fixes who commits. It does not give the fight a front — bodies within rea
 second with no facing and no engagement limit, so what a committed defence *does* on arrival is unchanged.
 The two remaining questions belong to that arc: how many bodies can actually be brought to bear on one
 assailant at once, and what a defence being *formed* means beyond being *chosen*.
+
+## 31. Hands first
+
+Another playtest note, and another one that is about the decision rather than the fight: *my people who
+have resources should try to place them in a resource point around the encounter before joining in, or
+drop resources where they were and then join the fight — rushing to fight while carrying resources is a
+sure fire way to get villagers killed, resources stolen and no raiders killed.*
+
+Exactly right, and the mechanism is worth stating: **the load is the prize.** A villager who runs at a
+raider with forty grain on its back is carrying the raider's prize into its reach. It loses the fight, the
+goods change hands on the spot without the raider walking anywhere, and the raid is paid for by the
+defence that came to stop it.
+
+### The order of preference
+
+A defender that has answered "needed" and has its hands full does not go to the fight. It deals with the
+load first:
+
+1. **A store away from the trouble**, if one is within a settlement's width — and *away* is load-bearing:
+   a store inside the reach of whatever is causing this is not somewhere to stow anything, because getting
+   there means walking the load into the fight.
+2. **The ground where it stands**, otherwise, which is instant. A heap in the open can be looted and that
+   is the honest cost of the choice; a heap is at least stationary, and nobody has to die holding it.
+
+Handing a load into a store is a **physical act** here rather than a delivery. Deliveries belong to an
+assignment's legs, and this is an interrupt — an interrupt that rewrote an assignment in order to borrow
+the haul machinery would break the jobs model's one prohibition. So the units move, the shift is left
+exactly as it was, and the villager goes back to the same field afterwards.
+
+### Two things this got wrong first, both instructive
+
+**An errand has to outlive the reason for it.** The first version was driven from the defence's own
+decision each tick: if the body could see a threatened thing, ask the world to stow. So a body that
+carried its load *out of sight of the raid* stopped being asked to finish — and walked to the depot, and
+stood in the yard holding forty grain for the rest of the session. `AgentState.PuttingDown` plus
+`StowInto` now hold the errand, and `SimulationWorld.AdvanceStowing` runs it to completion whether or not
+the raid is still there. Every way it can fail ends with the load on the ground rather than on the body:
+the store was destroyed, or filled while the load was walking to it, or took only part of what was
+offered.
+
+A flag beside the id rather than a sentinel in it, because `default(NodeId)` is zero and node zero is a
+real node — usually the granary. That trap has been walked into once already, when a default assignment
+pointed every idle body at node zero.
+
+**The bound was a rally window, and that had the priorities backwards.** "Don't spend the whole raid
+walking" sounds right and made a depot nineteen metres away too far to bother with, so the villager put
+its grain on the ground *beside the raid* rather than carrying it to a store. The load's safety outranks
+this body's arrival, and it can afford to, precisely because the surplus rule means somebody closer is
+already on their way. `HavenMetres` is a settlement's width: past that you are not stowing a load, you
+are leaving with it.
+
+### And one thing the measurement caught
+
+Adding the stow made the settlement do **worse** — settlers lost went 10 of 26 to 14 of 26. Not variance;
+the simulation is deterministic. The cause: a body walking a load to a store still sorts by where it is
+*standing*, so the people behind it in the arrival queue read it as covering the fight while it was in
+fact off delivering grain. The defence arrived two bodies short of what it had committed to.
+
+So `PuttingDown` now excludes an ally from the muster — hands full is not available strength, on the same
+principle as `Guarding`: committed elsewhere is not available. Never the asker, though, or a laden
+villager reads the fight as hopeless and runs from something it could win the moment its hands were free.
+
+| at a raid every 45 s | peak stood | putting loads down | settlers lost | furthest a settler went |
+|---|---|---|---|---|
+| no stowing | 19 | — | 10 of 26 | 40 m |
+| stowing, counted as available | 16 | 2 | **14 of 26** | 23 m |
+| stowing, and busy is busy | 14 | 3 | 12 of 26 | 23 m |
+
+Two of the fatalities did not come back, and that is honest rather than tuned: stowing delays arrival, and
+delayed arrival is worse in a fight that consumes its defenders **serially** — which is §29's parked
+finding making itself felt. The benefit shows in the last column instead. Nobody hauls goods toward a raid
+any more, and the furthest anyone strays from home fell from 40 m to 23 m.
+
+### The self-test
+
+`a defender puts its load down before it joins` pins both branches, and the second is the interesting one:
+
+> `40 grain and a raid at the granary: stowed=True, into the depot 40, never carried into reach=True,
+> shift intact=True; with nowhere safe, 40 left on the ground; drift 0/0`
+
+Never within a raider's reach with its hands still full, checked every tick rather than at the end. The
+shift is unchanged. And with the granary as the only store — so the only store is the one being raided —
+all forty units are on the ground and the ledger still balances, which is the assertion that matters: what
+must never happen is a load quietly ceasing to exist because the code found nowhere tidy to put it.

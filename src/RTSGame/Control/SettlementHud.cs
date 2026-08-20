@@ -147,11 +147,12 @@ internal sealed class SettlementHud : IDisposable
             // people walk. "Left it to somebody closer" is the answer worth showing — it is the one that
             // says the settlement is answering the raid with a party rather than with everybody.
             var threat = world.Threat;
-            if (threat.Standing + threat.Fleeing + threat.Surplus > 0)
+            var stowing = world.PuttingDownCount;
+            if (threat.Standing + threat.Fleeing + threat.Surplus + stowing > 0)
             {
                 lines.Add((
-                    $"{threat.Standing} DEFENDING · {threat.Fleeing} RUNNING · " +
-                    $"{threat.Surplus} LEFT IT TO SOMEBODY CLOSER",
+                    $"{threat.Standing} DEFENDING · {stowing} PUTTING LOADS DOWN · " +
+                    $"{threat.Fleeing} RUNNING · {threat.Surplus} LEFT IT TO SOMEBODY CLOSER",
                     threat.Standing > 0 ? Action : Warning));
             }
         }

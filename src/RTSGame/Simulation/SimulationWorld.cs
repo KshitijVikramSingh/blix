@@ -431,6 +431,161 @@ internal sealed class SimulationWorld
     /// <summary>The danger has passed: drop the walk, and let the jobs layer have the body back.</summary>
     private void StandDown(AgentId body) => QueueStop(new[] { body });
 
+    /// <summary>
+    /// Starts an errand to put a load somewhere before its carrier goes to fight.
+    /// </summary>
+    /// <remarks>
+    /// <b>Hands first, and it is not a courtesy.</b> A villager who runs at a raider with forty grain on
+    /// its back is carrying the raider's prize into its reach: it loses the fight, the goods change hands
+    /// on the spot, and the raid is paid for by the defence. So a defender with a load deals with it and
+    /// then joins, in one order of preference:
+    /// <list type="number">
+    /// <item><b>A store away from the trouble</b>, if one is within a settlement's width. Not just any
+    /// store — one outside the reach of whatever is causing this, or stowing walks the load into the
+    /// fight.</item>
+    /// <item><b>The ground where it stands</b>, otherwise, which is instant. A heap in the open can be
+    /// looted and that is the honest cost of the choice; a heap is at least stationary and nobody has to
+    /// die holding it.</item>
+    /// </list>
+    /// <para>
+    /// Handing a load into a store is a physical act here rather than a delivery, deliberately: deliveries
+    /// belong to an assignment's legs, and this is an interrupt. An interrupt that rewrote an assignment to
+    /// borrow its machinery would break the jobs model's one prohibition, so the units move and the shift
+    /// is left exactly as it was — the villager goes back to the same field afterwards.
+    /// </para>
+    /// <para>
+    /// Returns true while the body still has a load to deal with, which is the defence's signal not to send
+    /// it anywhere yet. The errand itself is run by <see cref="AdvanceStowing"/>, not from here.
+    /// </para>
+    /// </remarks>
+    private bool StowBeforeFighting(AgentId body, Vector2 danger)
+    {
+        if (!Agents.Contains(body)) return false;
+        ref var agent = ref Agents.Get(body);
+        if (agent.Jobs.CarriedUnits <= 0) return false;
+        if (agent.PuttingDown) return true;
+
+        var haven = HavenFor(in agent, danger);
+        if (!Nodes.Contains(haven))
+        {
+            // Nowhere to put it that is not into the raid's hands. Drop it where you stand and go.
+            DropCargo(ref agent);
+            return false;
+        }
+
+        agent.PuttingDown = true;
+        agent.StowInto = haven;
+        return true;
+    }
+
+    /// <summary>
+    /// Runs the errand: walk to the store, hand the load in, and be done with it.
+    /// </summary>
+    /// <remarks>
+    /// Owned here rather than by whatever started it, because it has to finish whether or not the reason
+    /// still applies — a raid that moves on, or a defender that walks out of sight of it, must not leave
+    /// somebody standing in a yard holding a sack. Every way it can fail ends with the load on the ground
+    /// rather than on the body: the store was destroyed, or filled while the load was walking to it, or
+    /// took only part of what was offered.
+    /// </remarks>
+    private void AdvanceStowing()
+    {
+        foreach (ref var agent in Agents.MutableSpan())
+        {
+            if (!agent.IsAlive || !agent.PuttingDown) continue;
+            if (agent.Jobs.CarriedUnits <= 0)
+            {
+                agent.PuttingDown = false;
+                continue;
+            }
+
+            if (!Nodes.Contains(agent.StowInto))
+            {
+                DropCargo(ref agent);
+                agent.PuttingDown = false;
+                continue;
+            }
+
+            ref var store = ref Nodes.Get(agent.StowInto);
+            var carrying = agent.Jobs.Carrying;
+            if (!store.IsAlive || store.RoomFor(carrying) <= 0)
+            {
+                DropCargo(ref agent);
+                agent.PuttingDown = false;
+                continue;
+            }
+
+            // Reaching a building means reaching its wall, on the same terms the jobs layer uses.
+            var reach = store.FootprintRadius + agent.Radius +
+                        JobDefaults.TouchSlack + JobDefaults.RasterReach;
+            if (Vector2.DistanceSquared(agent.Position, store.Position) > reach * reach)
+            {
+                // Asked again only when it is not already walking, or a body re-plans every tick.
+                if (!agent.HasDestination) QueueMove(new[] { agent.Id }, store.Position);
+                continue;
+            }
+
+            var delivered = Math.Min(agent.Jobs.CarriedUnits, store.RoomFor(carrying));
+            store.Stock.Add(carrying, delivered);
+            agent.Jobs.CarriedUnits -= delivered;
+            if (agent.Jobs.CarriedUnits > 0) DropCargo(ref agent);
+            agent.PuttingDown = false;
+        }
+    }
+
+    /// <summary>How many bodies are carrying a load out of harm's way right now.</summary>
+    /// <remarks>
+    /// Counted rather than kept, so it needs no place in the fingerprint's ledger: the state it reads is
+    /// <c>AgentState.PuttingDown</c>, which the body schema already walks.
+    /// </remarks>
+    internal int PuttingDownCount
+    {
+        get
+        {
+            var busy = 0;
+            foreach (ref readonly var agent in Agents.All)
+            {
+                if (agent.IsAlive && agent.PuttingDown) busy++;
+            }
+
+            return busy;
+        }
+    }
+
+    /// <summary>
+    /// How far a body will carry a load to put it somewhere safe, in metres.
+    /// </summary>
+    /// <remarks>
+    /// <b>The settlement's own width, and it was a rally window first — which was wrong.</b> Bounding the
+    /// walk by how long the fight lasts sounds right and gets the priorities backwards: it made a depot
+    /// nineteen metres away too far to bother with, so the villager put forty grain on the ground beside
+    /// the raid instead of carrying it to a store. The load's safety outranks this body's arrival, and it
+    /// can afford to, because the surplus rule means somebody closer is already on their way. Past a
+    /// settlement's width you are not stowing a load, you are leaving with it.
+    /// </remarks>
+    internal static float HavenMetres = 40f;
+
+    /// <summary>The nearest store that will take this load and is not itself in the trouble.</summary>
+    private NodeId HavenFor(in AgentState agent, Vector2 danger)
+    {
+        var best = NodeId.None;
+        var bestDistance = HavenMetres;
+        foreach (ref readonly var node in Nodes.All)
+        {
+            if (!node.IsAlive || !node.AcceptsDeliveries) continue;
+            if (node.Faction != agent.Faction) continue;
+            if (node.RoomFor(agent.Jobs.Carrying) <= 0) continue;
+            // Outside the reach of whatever is causing this, or stowing walks the load into the fight.
+            if (Vector2.Distance(node.Position, danger) <= ThreatSystem.ThreatMetres) continue;
+            var distance = Vector2.Distance(node.Position, agent.Position);
+            if (distance >= bestDistance) continue;
+            bestDistance = distance;
+            best = node.Id;
+        }
+
+        return best;
+    }
+
     /// <summary>Somebody leaves for good, because their household went hungry too long.</summary>
     /// <remarks>
     /// The ordinary carrying-capacity correction, and reversible in the sense that matters: the settlement
@@ -1372,7 +1527,16 @@ internal sealed class SimulationWorld
         // through QueueMove — the same door a player's order goes through — so the assignment is suspended
         // and never rewritten, and a villager who fights goes back to its field afterwards.
         threat.Defend(
-            Agents, Nodes, Colliders.Factions, deltaSeconds, CanSee, MarchAgainstThreat, StandDown);
+            Agents,
+            Nodes,
+            Colliders.Factions,
+            deltaSeconds,
+            CanSee,
+            MarchAgainstThreat,
+            StandDown,
+            StowBeforeFighting);
+        // The errand outlives the reason for it, so it is advanced whatever the defence decided this tick.
+        AdvanceStowing();
         Timings.Record(SimulationPhase.Threat, Stopwatch.GetTimestamp() - phaseStart);
 
         phaseStart = Stopwatch.GetTimestamp();

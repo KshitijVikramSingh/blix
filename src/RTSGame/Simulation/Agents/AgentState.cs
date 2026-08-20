@@ -108,6 +108,26 @@ internal struct AgentState
     public Vector2 Guarding;
 
     /// <summary>
+    /// Whether this body is on its way to put a load down before it does anything else.
+    /// </summary>
+    /// <remarks>
+    /// <b>A flag beside the id rather than a sentinel in it</b>, because <c>default(NodeId)</c> is zero and
+    /// node zero is a real node — usually the granary. That trap has been walked into once already, when
+    /// a default assignment pointed every idle body at node zero, and a bool that defaults to false cannot
+    /// be walked into at all.
+    /// <para>
+    /// It exists because a stow has to outlive the reason for it. The first version was driven from the
+    /// defence's own decision each tick, so a body that carried its load out of sight of the raid stopped
+    /// being asked to finish — it walked to the depot and stood there holding forty grain for the rest of
+    /// the session. An errand needs somewhere to live while it is being run.
+    /// </para>
+    /// </remarks>
+    public bool PuttingDown;
+
+    /// <summary>Where the load is going, while <see cref="PuttingDown"/> holds.</summary>
+    public NodeId StowInto;
+
+    /// <summary>
     /// Whether something outside the simulation is deciding this body's movement.
     /// </summary>
     /// <remarks>

@@ -139,6 +139,7 @@ internal static class SimulationSelfTests
         Check(
             "only as many defend as the fight needs, and the nearest ones go",
             OnlyTheNeededDefend());
+        Check("a defender puts its load down before it joins", HandsAreFreedBeforeAFight());
         Check("a world full of standing assignments runs identically twice", JobsRunsIdenticallyTwice());
         Console.WriteLine($"  simulation self-test: {(failed == 0 ? "all passed" : $"{failed} FAILED")}");
         return failed;
@@ -4132,6 +4133,100 @@ internal static class SimulationSelfTests
             $"    one raider of strength {menace:F0} wants {wanted:F1}: {standing.Count} of {line.Count} " +
             $"stood for {committed:F0}, a prefix of the line={nearestWent}, one fewer would not do={lean}, " +
             $"{spare} left it to somebody closer");
+        return passed;
+    }
+
+    /// <summary>
+    /// A loaded villager decides to defend, and does something with the load first.
+    /// </summary>
+    /// <remarks>
+    /// <b>Rushing to a fight with your hands full loses the fight and the goods in one move</b> — the load
+    /// is the prize, and carrying it into the raider's reach hands it over without the raider having to
+    /// walk anywhere. Both branches of the answer are pinned here, because the interesting one is the
+    /// second:
+    /// <list type="bullet">
+    /// <item><b>A store out of the trouble</b> gets the load, and the units are in it rather than
+    /// anywhere else — the ledger is watched across the whole thing.</item>
+    /// <item><b>With nowhere safe to put it, the ground.</b> A heap in the open can be looted and that is
+    /// the honest cost; what must not happen is a body walking into a fight still holding it, or the
+    /// units quietly ceasing to exist.</item>
+    /// </list>
+    /// And in neither case does the shift change: an interrupt that rewrote an assignment to borrow the
+    /// haul machinery would break the jobs model's one prohibition.
+    /// </remarks>
+    private static bool HandsAreFreedBeforeAFight()
+    {
+        // A raided granary, and a depot far enough away to be out of the trouble.
+        var world = new SimulationWorld(240f);
+        var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 2000);
+        world.SeedStock(granary, Resource.Grain, 600);
+        var depot = world.AddNode(NodeKind.ForwardDepot, new Vector2(0f, 26f), capacity: 500);
+
+        var carrier = world.SpawnAgent(new Vector2(6f, 8f), UnitType.Villager);
+        var shift = world.Agents.Get(carrier).Jobs.Assignment;
+        world.SeedStock(granary, Resource.Grain, 0);
+        // Forty grain on its back, taken out of the granary so the books balance.
+        const int load = 40;
+        ref var body = ref world.Agents.Get(carrier);
+        world.Nodes.Get(granary).Stock.Add(Resource.Grain, -load);
+        body.Jobs.Carrying = Resource.Grain;
+        body.Jobs.CarriedUnits = load;
+
+        // Enough neighbours that the fight is worth joining, and one raider at the granary door.
+        for (var i = 0; i < 8; i++) world.SpawnAgent(new Vector2(3f + i * 1.2f, 2f), UnitType.Villager);
+        var raider = world.SpawnAgent(new Vector2(2.2f, 0f), UnitType.Raider, new FactionId(1));
+        world.Agents.Get(raider).Directed = true;
+
+        var carriedIntoTheFight = false;
+        var stowed = false;
+        for (var tick = 0; tick < 30 * 40 && !stowed; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            ref readonly var it = ref world.Agents.Get(carrier);
+            if (!it.IsAlive) break;
+            if (it.Jobs.CarriedUnits <= 0) stowed = true;
+            // Never within a raider's reach with its hands still full.
+            else if (Vector2.Distance(it.Position, world.Agents.Get(raider).Position) < 2f)
+            {
+                carriedIntoTheFight = true;
+            }
+        }
+
+        var intoTheDepot = world.Nodes.Get(depot).Stock.Grain;
+        var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+        var shiftIntact = world.Agents.Get(carrier).Jobs.Assignment.Kind == shift.Kind;
+
+        // Now the same thing with nowhere to put it: the only store is the one being raided.
+        var bare = new SimulationWorld(240f);
+        var only = bare.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 2000);
+        bare.SeedStock(only, Resource.Grain, 600);
+        var stuck = bare.SpawnAgent(new Vector2(6f, 8f), UnitType.Villager);
+        ref var held = ref bare.Agents.Get(stuck);
+        bare.Nodes.Get(only).Stock.Add(Resource.Grain, -load);
+        held.Jobs.Carrying = Resource.Grain;
+        held.Jobs.CarriedUnits = load;
+        for (var i = 0; i < 8; i++) bare.SpawnAgent(new Vector2(3f + i * 1.2f, 2f), UnitType.Villager);
+        var thief = bare.SpawnAgent(new Vector2(2.2f, 0f), UnitType.Raider, new FactionId(1));
+        bare.Agents.Get(thief).Directed = true;
+        for (var tick = 0; tick < 30 * 10; tick++)
+        {
+            bare.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            if (bare.Agents.Get(stuck).Jobs.CarriedUnits <= 0) break;
+        }
+
+        var onTheGround = 0;
+        foreach (ref readonly var node in bare.Nodes.All)
+        {
+            if (node.IsAlive && node.IsPile) onTheGround += node.Stock.Grain;
+        }
+
+        var bareDrift = bare.Economy.Discrepancy(bare.Nodes, bare.Agents);
+        var passed = stowed && !carriedIntoTheFight && intoTheDepot == load && shiftIntact &&
+                     drift.Grain == 0 && onTheGround == load && bareDrift.Grain == 0;
+        Console.WriteLine(
+            $"    {load} grain and a raid at the granary: stowed={stowed}, into the depot " +
+            $"{intoTheDepot}, never carried into reach={!carriedIntoTheFight}, shift intact={shiftIntact}; " +
+            $"with nowhere safe, {onTheGround} left on the ground; drift {drift.Grain}/{bareDrift.Grain}");
         return passed;
     }
 
