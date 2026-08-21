@@ -9,8 +9,8 @@ internal sealed class TerrainMap
 {
     private readonly float[] vertexHeights;
     private readonly TerrainSurface[] surfaces;
-    private readonly Dictionary<int, bool[]> levelNeighborhoods = new();
-    private int levelNeighborhoodRevision = -1;
+    private readonly Dictionary<int, bool[]> walkableNeighborhoods = new();
+    private int walkableNeighborhoodRevision = -1;
 
     public const float MaximumTraversableGrade = 0.82f;
     public const float MaximumStepHeight = 0.46f;
@@ -118,7 +118,7 @@ internal sealed class TerrainMap
         var revision = reader.Int();
         reader.Blob<float>(vertexHeights);
         reader.Blob<TerrainSurface>(surfaces);
-        levelNeighborhoodRevision = -1;
+        walkableNeighborhoodRevision = -1;
         RestoreRevision(revision);
     }
 
@@ -183,21 +183,19 @@ internal sealed class TerrainMap
     /// answer one question, asked per sample of every swept step and per candidate
     /// of the solver's terrain fallback.
     /// <para>
-    /// Over level ground the answer is knowable without looking: if every vertex
-    /// the outline's grade probes could reach carries the same height and every
-    /// cell it covers is passable, the grade is exactly zero everywhere on it and
-    /// the only remaining question is whether the body is inside the map — which
-    /// the bounds test above has already answered. Most of any map is like that,
-    /// including all of a flat one, so <see cref="LevelNeighborhood"/> precomputes
-    /// where it holds and the outline is only walked near genuine relief. This is a
-    /// memo, not an approximation: where it answers, it answers identically.
+    /// Most of the time the answer is knowable without looking: if every cell the outline's probes could
+    /// reach is passable, and none of them is steep enough for a probe to refuse, the outline cannot fail
+    /// and the only remaining question is whether the body is inside the map — which the bounds test above
+    /// has already answered. <see cref="WalkableNeighborhood"/> precomputes where that holds, so the
+    /// outline is only walked near ground steep enough to be in doubt. This is a memo, not an
+    /// approximation: where it answers, it answers identically.
     /// </para>
     /// </remarks>
     public bool IsBodyTraversable(Vector2 center, float radius)
     {
         if (!Contains(center, radius + BodyFootprint.NavigationMargin)) return false;
         if (Transform.TryWorldToCell(center, out var bodyCell) &&
-            LevelNeighborhood(NeighborhoodCells(radius))[Transform.Index(bodyCell)])
+            WalkableNeighborhood(NeighborhoodCells(radius))[Transform.Index(bodyCell)])
         {
             return true;
         }
@@ -230,30 +228,53 @@ internal sealed class TerrainMap
         (int)MathF.Ceiling((radius + Transform.CellSize) / Transform.CellSize) + 1;
 
     /// <summary>
-    /// Cells whose surroundings, out to <paramref name="radiusCells"/>, are all
-    /// passable and all at one single height.
+    /// Cells whose surroundings, out to <paramref name="radiusCells"/>, are all passable and all gentle
+    /// enough that no probe inside them can refuse.
     /// </summary>
     /// <remarks>
-    /// Built by dilating per-cell passability and height extremes separably, so it
-    /// costs one pass per axis over the map rather than a neighbourhood scan per
-    /// cell. Rebuilt when the terrain revision moves, which is the same signal the
-    /// navigation raster keys on.
+    /// <b>It used to ask whether the neighbourhood was at one single height, and that is a proxy that only
+    /// ever answered on flat ground.</b> The question it exists to shortcut is "could any grade probe
+    /// inside this body's outline exceed the traversable limit", and a map that rolls gently cannot answer
+    /// that with a height comparison — every neighbourhood on it spans some height, so the memo declined
+    /// everywhere and every query walked nine outline samples of four bilinear height reads each, about a
+    /// hundred and fifty vertex fetches to answer a question whose answer was obviously yes. Measured: a
+    /// stress of two hundred bodies converging cost 13 ms a tick on the flat and 23 ms with relief, the
+    /// same 1.75x at every amplitude — which is the signature of a fast path that has stopped firing rather
+    /// than of work that scales with the ground.
+    /// <para>
+    /// So the memo bounds the grade instead. A cell's own four vertices bound the steepest gradient
+    /// anywhere inside it: <c>sqrt(maxDx² + maxDz²) / cellSize</c>, where each term is the larger of the
+    /// cell's two opposite edges. <see cref="SampleGrade"/> is a central difference over one cell's width,
+    /// so it straddles at most a cell in each direction — dilating the bound by one extra cell covers every
+    /// window a probe can read, and dilating it by the body's reach covers every probe the outline can
+    /// place.
+    /// </para>
+    /// <para>
+    /// It remains a memo and not an approximation, which is the property worth protecting: where it answers
+    /// true, every probe the long path would take is provably under the limit, so the two cannot disagree.
+    /// And on ground at one height the bound is zero, so a flat map takes the fast path exactly as before.
+    /// </para>
+    /// <para>
+    /// Built by dilating passability and the slope bound separably — one pass per axis over the map rather
+    /// than a neighbourhood scan per cell — and rebuilt when the terrain revision moves, which is the same
+    /// signal the navigation raster keys on.
+    /// </para>
     /// </remarks>
-    private bool[] LevelNeighborhood(int radiusCells)
+    private bool[] WalkableNeighborhood(int radiusCells)
     {
-        if (levelNeighborhoodRevision != Revision)
+        if (walkableNeighborhoodRevision != Revision)
         {
-            levelNeighborhoods.Clear();
-            levelNeighborhoodRevision = Revision;
+            walkableNeighborhoods.Clear();
+            walkableNeighborhoodRevision = Revision;
         }
-        if (levelNeighborhoods.TryGetValue(radiusCells, out var cached)) return cached;
+        if (walkableNeighborhoods.TryGetValue(radiusCells, out var cached)) return cached;
 
         var width = Transform.Width;
         var height = Transform.Height;
         var count = width * height;
         var passable = new bool[count];
-        var minimum = new float[count];
-        var maximum = new float[count];
+        var slope = new float[count];
+        var cellSize = Transform.CellSize;
         for (var z = 0; z < height; z++)
         for (var x = 0; x < width; x++)
         {
@@ -263,34 +284,38 @@ internal sealed class TerrainMap
             var h10 = VertexHeight(x + 1, z);
             var h01 = VertexHeight(x, z + 1);
             var h11 = VertexHeight(x + 1, z + 1);
-            minimum[index] = MathF.Min(MathF.Min(h00, h10), MathF.Min(h01, h11));
-            maximum[index] = MathF.Max(MathF.Max(h00, h10), MathF.Max(h01, h11));
+            // The steepest this cell gets on each axis is the larger of its two opposite edges, and the two
+            // combine as a gradient does. Exact for the bilinear patch the height sampler interpolates.
+            var acrossX = MathF.Max(MathF.Abs(h10 - h00), MathF.Abs(h11 - h01));
+            var acrossZ = MathF.Max(MathF.Abs(h01 - h00), MathF.Abs(h11 - h10));
+            slope[index] = MathF.Sqrt(acrossX * acrossX + acrossZ * acrossZ) / cellSize;
         }
 
-        // Cells outside the map are treated as impassable so a body near the edge
-        // never takes the fast path on the strength of ground that does not exist.
+        // One extra cell, because a grade probe is a central difference and reads half a cell either side
+        // of wherever the outline put it.
+        var reach = radiusCells + 1;
+
+        // Cells outside the map are treated as impassable so a body near the edge never takes the fast
+        // path on the strength of ground that does not exist.
         var rowPassable = new bool[count];
-        var rowMinimum = new float[count];
-        var rowMaximum = new float[count];
+        var rowSlope = new float[count];
         for (var z = 0; z < height; z++)
         for (var x = 0; x < width; x++)
         {
             var all = true;
-            var low = float.PositiveInfinity;
-            var high = float.NegativeInfinity;
-            for (var offset = -radiusCells; offset <= radiusCells; offset++)
+            var steepest = 0f;
+            for (var offset = -reach; offset <= reach; offset++)
             {
                 var sample = x + offset;
                 if (sample < 0 || sample >= width) { all = false; break; }
                 var index = z * width + sample;
                 all &= passable[index];
-                low = MathF.Min(low, minimum[index]);
-                high = MathF.Max(high, maximum[index]);
+                steepest = MathF.Max(steepest, slope[index]);
             }
+
             var target = z * width + x;
             rowPassable[target] = all;
-            rowMinimum[target] = low;
-            rowMaximum[target] = high;
+            rowSlope[target] = steepest;
         }
 
         var result = new bool[count];
@@ -298,22 +323,41 @@ internal sealed class TerrainMap
         for (var x = 0; x < width; x++)
         {
             var all = true;
-            var low = float.PositiveInfinity;
-            var high = float.NegativeInfinity;
-            for (var offset = -radiusCells; offset <= radiusCells; offset++)
+            var steepest = 0f;
+            for (var offset = -reach; offset <= reach; offset++)
             {
                 var sample = z + offset;
                 if (sample < 0 || sample >= height) { all = false; break; }
                 var index = sample * width + x;
                 all &= rowPassable[index];
-                low = MathF.Min(low, rowMinimum[index]);
-                high = MathF.Max(high, rowMaximum[index]);
+                steepest = MathF.Max(steepest, rowSlope[index]);
             }
-            result[z * width + x] = all && high - low <= 0.00001f;
+
+            result[z * width + x] = all && steepest <= MaximumTraversableGrade;
         }
 
-        levelNeighborhoods[radiusCells] = result;
+        walkableNeighborhoods[radiusCells] = result;
         return result;
+    }
+
+    /// <summary>
+    /// What share of the map the body-traversal memo can answer without walking an outline.
+    /// </summary>
+    /// <remarks>
+    /// The number that says whether the fast path is firing, which is not the same question as whether the
+    /// tick got faster — a memo can be repaired and the time still be somewhere else, which is exactly what
+    /// happened when this one was. Reported by the relief sweep per amplitude.
+    /// </remarks>
+    internal float NeighborhoodCoverage(float radius)
+    {
+        var memo = WalkableNeighborhood(NeighborhoodCells(radius));
+        var answered = 0;
+        foreach (var cell in memo)
+        {
+            if (cell) answered++;
+        }
+
+        return memo.Length == 0 ? 0f : answered / (float)memo.Length;
     }
 
     public bool CanPlace(Vector2 center, Vector2 halfExtents)

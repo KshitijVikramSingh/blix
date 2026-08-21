@@ -62,7 +62,7 @@ internal static class ReliefScenarios
             $"traversable to a grade of {TerrainMap.MaximumTraversableGrade:F2}");
         Console.WriteLine(
             "  amp (m) | shapes | steepest | closed | chunked | nav MB | raster ms | rects | " +
-            "crossings | bands % | route mean | p99 | worst | ms/tick");
+            "crossings | bands % | memo | route mean | p99 | worst | ms/tick");
 
         var faults = new List<string>();
         var baseline = new Row();
@@ -74,7 +74,7 @@ internal static class ReliefScenarios
                 $"  {amplitude,7:F1} | {row.Shapes,6} | {row.Steepest,8:F2} | " +
                 $"{row.ClosedShare * 100f,5:F1}% | {row.Chunked,7} | {row.NavigationBytes / 1048576f,6:F1} | " +
                 $"{row.RasterMilliseconds,9:F0} | {row.Rectangles,5:N0} | {row.Crossings,9:N0} | " +
-                $"{row.Bands,-18} | {row.MeanRatio,10:F3} | {row.NinetyNinthRatio,5:F2} | " +
+                $"{row.Bands,-18} | {row.MemoCoverage * 100f,4:F0}% | {row.MeanRatio,10:F3} | {row.NinetyNinthRatio,5:F2} | " +
                 $"{row.WorstRatio,5:F2} | {row.MillisecondsPerTick,7:F2}");
         }
 
@@ -118,6 +118,7 @@ internal static class ReliefScenarios
         public int Crossings { get; init; }
         public int Walkers { get; init; }
         public string Bands { get; init; }
+        public float MemoCoverage { get; init; }
         public float MeanRatio { get; init; }
         public float NinetyNinthRatio { get; init; }
         public float WorstRatio { get; init; }
@@ -165,6 +166,7 @@ internal static class ReliefScenarios
         }
 
         var sampled = bands.Sum();
+        var memo = world.Terrain.NeighborhoodCoverage(AgentDefaults.Radius);
         var mesh = world.RouteMesh(AgentDefaults.Radius);
         var fidelity = world.MeasureRectangleFidelity(Vector2.Zero, AgentDefaults.Radius);
 
@@ -184,6 +186,12 @@ internal static class ReliefScenarios
         var ticks = 90;
         for (var tick = 0; tick < ticks; tick++) world.Tick((float)SimulationWorld.FixedDeltaSeconds);
         var perTick = clock.Elapsed.TotalMilliseconds / ticks;
+        // <b>The phase breakdown, because guessing where relief costs its time has now been wrong twice.</b>
+        // First the router was blamed and the partition turned out to be the cause; then the body-traversal
+        // memo was blamed and fixing it changed nothing. A fixed multiplier at every amplitude says the cost
+        // is a fast path that has stopped firing rather than work proportional to the ground — and there is
+        // more than one of those.
+        Console.WriteLine($"    {amplitude,5:F1} m: {world.Timings.Format(walkers.Count, world.TickNumber)}");
 
         if (amplitude > 0.001f && plan.Landforms.Count == 0)
         {
@@ -201,6 +209,7 @@ internal static class ReliefScenarios
             Rectangles = mesh.Rectangles,
             Crossings = mesh.Crossings,
             Walkers = walkers.Count,
+            MemoCoverage = memo,
             Bands = string.Join(
                 "/",
                 bands.Select(count => $"{(sampled == 0 ? 0f : count * 100f / sampled):F0}")),
