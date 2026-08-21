@@ -324,7 +324,7 @@ internal sealed class LookSettings
 
     /// <summary>How much the far distance washes out toward the sky.</summary>
     [Tune(0.0, 1.0, Label = "aerial perspective", Group = "air")]
-    public float FogStrength = 0.12f;
+    public float FogStrength = 0.20f;
 
     /// <summary>Where the haze begins, as a share of the detail radius.</summary>
     /// <remarks>
@@ -335,7 +335,7 @@ internal sealed class LookSettings
     /// no separate end, because the end is where detail stops.
     /// </remarks>
     [Tune(0.05, 0.95, Label = "haze starts at", Group = "sun")]
-    public float FogStartShare = 0.74f;
+    public float FogStartShare = 0.52f;
 
     /// <summary>Stops of exposure applied before the tonemap curve.</summary>
     /// <remarks>

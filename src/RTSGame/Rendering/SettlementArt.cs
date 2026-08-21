@@ -379,16 +379,20 @@ internal sealed class SettlementArt : IDisposable
             // conifer high and steep, twisted scrub on exposed poor ground, dead in the wet bottoms.
             trees: new[]
             {
-                Kit("CommonTree_1", casts: true),
-                Kit("CommonTree_2", casts: true),
-                Kit("CommonTree_3", casts: true),
-                Kit("Pine_1", casts: true),
-                Kit("Pine_2", casts: true),
-                Kit("Pine_3", casts: true),
-                Kit("TwistedTree_1", casts: true),
-                Kit("TwistedTree_2", casts: true),
-                Kit("DeadTree_1", casts: true),
-                Kit("DeadTree_2", casts: true),
+                // <b>None of them casts.</b> A tree's shadow is drawn from its far stand-in instead — see
+                // DrawTree. The sun's map is 2048 texels over a couple of hundred metres, so a leaf-card
+                // model and a faceted blob cast the same shadow to well within a texel, and casting the
+                // model means drawing six thousand triangles twice for a result nobody can tell apart.
+                Kit("CommonTree_1"),
+                Kit("CommonTree_2"),
+                Kit("CommonTree_3"),
+                Kit("Pine_1"),
+                Kit("Pine_2"),
+                Kit("Pine_3"),
+                Kit("TwistedTree_1"),
+                Kit("TwistedTree_2"),
+                Kit("DeadTree_1"),
+                Kit("DeadTree_2"),
             },
             // A real stump, at last: Resource_Tree_Group_Cut was a cluster of cut trunks standing in for one.
             stumps: Nature("TreeStump", casts: false, surface: MaterialClass.Timber),

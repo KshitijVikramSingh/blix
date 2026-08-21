@@ -290,6 +290,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private InstancedBatch crossCaster = null!;
     private readonly List<InstanceData> crossInstances = new();
 
+    /// <summary>
+    /// The stand-ins every tree casts its shadow from, near ones included.
+    /// </summary>
+    /// <remarks>
+    /// <b>A tree was being drawn twice: once as itself and once into the shadow map.</b> Measured, the near
+    /// band was 8.4M triangles in the scene pass and the same again in the sun's — and the sun's map is 2048
+    /// texels over a couple of hundred metres, so a nine-centimetre texel cannot tell a leaf-card canopy
+    /// from a faceted blob. Casting the stand-in halves the cost of every tree in view for a difference
+    /// nobody can see.
+    /// </remarks>
+    private readonly List<InstanceData> casterBlobs = new();
+
     private readonly List<InstanceData> contactInstances = new();
     private readonly byte[] contactPush = new byte[96];   // viewProj, fade range, camera
 
@@ -550,7 +562,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     // Reported as still slightly too far. Past this the settlement is a smudge in the middle of a green
     // field and the shadow map is spread so thin that everything it draws is a suggestion.
-    private const float CameraFurthestDistance = 170f;
+    /// <remarks>
+    /// <b>Pulled in from a hundred and seventy, because the far end of the zoom was a viewpoint nothing was
+    /// built to serve.</b> At a hundred and seventy the camera sees two hundred and thirty-eight metres of
+    /// ground, which is nine thousand trees, and every one of them either costs six thousand triangles or
+    /// gets swapped for something cheap that the player can see is cheap. A hundred and eighteen sees about
+    /// a hundred and sixty-five — the settlement, its fields, its tree line and the shoulder of the nearest
+    /// high ground, which is everything a decision is made against.
+    /// </remarks>
+    private const float CameraFurthestDistance = 118f;
 
     /// <summary>Metres a second the arrow keys pan, as a share of how far back the camera is.</summary>
     /// <remarks>
@@ -1052,7 +1072,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         canopyBuffer = new InstanceBuffer(vk, worldShader, "rts-canopies");
         canopyBatch = new InstancedBatch(canopyMesh, worldPipeline, canopyBuffer);
         // The same sphere the greybox canopies use, which is what a puff of smoke wants to be.
-        var crossMesh = CreateMesh(vk, "foliage-cross", FoliageCross.Vertices, FoliageCross.Indices);
+        var crossMesh = CreateMesh(vk, "far-canopy", Icosahedron.Vertices, Icosahedron.Indices);
         crossBuffer = new InstanceBuffer(vk, worldShader, "rts-far-trees");
         crossBatch = new InstancedBatch(crossMesh, worldPipeline, crossBuffer);
         crossCasterBuffer = new InstanceBuffer(vk, casterShader, "rts-far-trees-caster");
@@ -2262,11 +2282,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         unitCaster.SetInstances(units);
         canopyCaster.Begin(shadowPush);
         canopyCaster.SetInstances(canopies);
-        var crosses = CollectionsMarshal.AsSpan(crossInstances);
         crossBatch.Begin(worldPush);
-        crossBatch.SetInstances(crosses);
+        crossBatch.SetInstances(CollectionsMarshal.AsSpan(crossInstances));
         crossCaster.Begin(shadowPush);
-        crossCaster.SetInstances(crosses);
+        crossCaster.SetInstances(CollectionsMarshal.AsSpan(casterBlobs));
         art?.Stage(worldPush, shadowPush);
 
         // Shadow depth: only the solids. The ground is a receiver and not a caster — a large
@@ -2396,6 +2415,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         undergrowthDrawn = 0;
         treesDrawn = 0;
         crossInstances.Clear();
+        casterBlobs.Clear();
         habitationLights = 0;
         contactInstances.Clear();
         BuildObstacleInstances();
@@ -3120,6 +3140,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                     tree.Position, ground, width, SettlementArt.FreeYawOf(tree.Id.Value)));
             // Sized to the canopy rather than the trunk, because what shades the ground is the canopy.
             AddContactShadow(tree.Position, width * 0.42f, 0.55f);
+            AddTreeStandIn(in tree, ground, width, TreeKindAt(tree.Position, tree.Id.Value), casting: true);
             treesDrawn++;
             DrawUndergrowth(in tree, left);
             return;
@@ -3127,19 +3148,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         if (art is not null)
         {
-            // <b>Far trees are a cross of quads, and this is the whole of the fix.</b> A full model past a
-            // hundred metres is six thousand triangles describing something forty pixels tall; eight
-            // triangles describe it as well and the difference is a factor of seven hundred and forty. The
-            // canopy colour comes from the same broadleaf-or-conifer question the near models answer, so a
-            // wood does not change species at the transition — only how many triangles it spends saying so.
-            var kind = TreeKindAt(tree.Position, tree.Id.Value);
-            var far = NodeFootprint.TreeHalfExtent * 2f * 3.1f * spread * MathF.Sqrt(left);
-            var tall = far * (kind >= Conifer.First && kind < Conifer.First + Conifer.Count ? 1.9f : 1.35f);
-            crossInstances.Add(new InstanceData(
-                Matrix4x4.CreateScale(far, tall, far) *
-                Matrix4x4.CreateRotationY(SettlementArt.FreeYawOf(tree.Id.Value)) *
-                Matrix4x4.CreateTranslation(tree.Position.X, ground, tree.Position.Y),
-                FarCanopyColour(kind, tree.Id.Value)));
+            // <b>Far trees are a trunk and a twenty-triangle blob, and the shape matters as much as the
+            // count.</b> The first version was a cross of quads at eight triangles, which is cheaper still
+            // and was reported as a "tree magnifying glass": two flat planes seen from above are a shard,
+            // and a wood of them reads as broken glass rather than as canopy. A faceted blob on a stick is
+            // thirty-two triangles and reads as a tree, which is the whole job — at this distance nobody is
+            // counting leaves, they are reading a silhouette and a mass.
+            //
+            // Decimation is not an option here and it is worth writing down why: a tree model is a few
+            // thousand disconnected leaf cards, so an edge-collapse simplifier has nothing to collapse.
+            // Measured through the cook tool, a 4,345-triangle tree reduced to 3,975 and stopped. Distant
+            // foliage needs a substitute, not a reduction — which is what the cook tool means by leaving
+            // foliage whole "for the impostor track to own".
+            AddTreeStandIn(
+                in tree, ground, NodeFootprint.TreeHalfExtent * 2f * 3.1f * spread * MathF.Sqrt(left),
+                TreeKindAt(tree.Position, tree.Id.Value), casting: false);
             treesDrawn++;
             return;
         }
@@ -3420,9 +3443,57 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// cover's, so the near band is the band where everything else is detailed too.
     /// </para>
     /// </remarks>
-    private const float TreeModelRadiusMetres = 55f;
+    private const float TreeModelRadiusMetres = 62f;
 
-    /// <summary>The colour a far tree's cross is drawn in, by species.</summary>
+    /// <summary>
+    /// The cheap tree: a trunk and a twenty-triangle blob, drawn in the scene, cast into the sun's map, or
+    /// both.
+    /// </summary>
+    /// <remarks>
+    /// <b>The shape matters as much as the count.</b> The first version of this was a cross of quads at eight
+    /// triangles, cheaper still, and it was reported as a "tree magnifying glass" — two flat planes seen
+    /// from above are a shard, and a wood of them reads as broken glass rather than as canopy. Thirty-two
+    /// triangles buys a mass with a silhouette, which at this distance is the whole of what a tree is.
+    /// <para>
+    /// And decimation is not the alternative, which is worth writing down because it is the obvious thought.
+    /// A tree model is a few thousand disconnected leaf cards, so an edge-collapse simplifier has nothing to
+    /// collapse: measured through the cook tool, a 4,345-triangle tree reduced to 3,975 and stopped.
+    /// Distant foliage needs a substitute, not a reduction — which is what the cook tool means when it
+    /// leaves foliage whole "for the impostor track to own".
+    /// </para>
+    /// <para>
+    /// <c>casting</c> distinguishes a near tree, which draws its real model and only needs the stand-in for
+    /// its shadow, from a far one, which is the stand-in and casts from it.
+    /// </para>
+    /// </remarks>
+    private void AddTreeStandIn(in EconomyNode tree, float ground, float width, int kind, bool casting)
+    {
+        var conifer = kind >= Conifer.First && kind < Conifer.First + Conifer.Count;
+        var trunkTall = width * (conifer ? 0.55f : 0.75f);
+        var trunkWide = NodeFootprint.TreeHalfExtent * 0.55f;
+        var trunk = new InstanceData(
+            Matrix4x4.CreateScale(trunkWide, trunkTall, trunkWide) *
+            Matrix4x4.CreateTranslation(tree.Position.X, ground + trunkTall * 0.5f, tree.Position.Y),
+            new Vector4(0.085f, 0.058f, 0.038f, SettlementArt.MaterialClass.Timber));
+        // A conifer is tall and narrow, a broadleaf round and wide.
+        var blobWide = width * (conifer ? 0.62f : 0.92f);
+        var blobTall = width * (conifer ? 1.55f : 0.95f);
+        var blob = new InstanceData(
+            Matrix4x4.CreateScale(blobWide, blobTall, blobWide) *
+            Matrix4x4.CreateRotationY(SettlementArt.FreeYawOf(tree.Id.Value)) *
+            Matrix4x4.CreateTranslation(
+                tree.Position.X, ground + trunkTall + blobTall * 0.34f, tree.Position.Y),
+            FarCanopyColour(kind, tree.Id.Value));
+
+        // The canopy casts and the trunk does not: a trunk's shadow is a line a few centimetres wide that
+        // falls inside the canopy's own shadow, so at a nine-centimetre texel it contributes nothing.
+        casterBlobs.Add(blob);
+        if (casting) return;
+        unitInstances.Add(trunk);
+        crossInstances.Add(blob);
+    }
+
+    /// <summary>The colour a far tree's stand-in is drawn in, by species.</summary>
     /// <remarks>
     /// Matched to the kit's own leaf colours rather than to the old greybox canopy, so the transition is a
     /// change of shape and not of palette — and varied a little per trunk, because a wood of one flat green
