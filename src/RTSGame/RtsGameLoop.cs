@@ -1387,6 +1387,23 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         foreach (var chunk in groundChunks.Keys.ToArray()) DisposeGroundChunk(chunk);
         renderedTerrain = simulation.Terrain;
         renderedTerrainRevision = simulation.Terrain.Revision;
+
+        // What the map's height range is, for anything that wants "how high is this, relative to here" —
+        // the treeline, for one. A hundred and one samples a side against a terrain that has just changed
+        // shape, which is a fraction of what the chunks about to be rebuilt will cost.
+        var lowest = float.MaxValue;
+        var highest = float.MinValue;
+        for (var z = 0; z <= 100; z++)
+        for (var x = 0; x <= 100; x++)
+        {
+            var at = new Vector2(x / 100f - 0.5f, z / 100f - 0.5f) * simulation.ExtentMeters * 0.98f;
+            var height = simulation.Terrain.SampleHeight(at);
+            lowest = MathF.Min(lowest, height);
+            highest = MathF.Max(highest, height);
+        }
+
+        reliefFloor = lowest;
+        reliefSpan = highest - lowest;
     }
 
     private static (VertexPosition3NormalTexture[] Vertices, ushort[] Indices) BuildTerrainSurfaceMesh(
@@ -2694,6 +2711,47 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// have been cutting for years, closing up into unbroken canopy further out. A part-cut tree standing
     /// smaller means felling is visible while it happens rather than as a tree that is suddenly absent.
     /// </remarks>
+    /// <summary>Which model in the tree list is the conifer. Last, by construction — see SettlementArt.</summary>
+    private const int ConiferSlot = 2;
+
+    /// <summary>
+    /// Which kind of tree stands here, from what the ground is doing rather than from the tree's id.
+    /// </summary>
+    /// <remarks>
+    /// <b>Conifer on the steep and the high, broadleaf on the level.</b> The same rule that decides where
+    /// woodland survives at all decides what kind it is, and for the same reason: the ground people can
+    /// plough is the ground they clear, and what is left on the slopes and the tops is the poorer, colder
+    /// stand. It costs one grade sample per drawn tree and it is the difference between a forest painted
+    /// over a landscape and a forest that belongs to it.
+    /// <para>
+    /// The boundary is jittered per tree rather than sharp, which is the whole trick: a clean line between
+    /// two species follows a contour and reads as a stencil. A threshold that moves a little from trunk to
+    /// trunk gives a band of mixed wood tens of metres deep, which is what a treeline looks like.
+    /// </para>
+    /// <para>
+    /// Dressing by §52's test — a function of a world position and an id, holding no state, and read by no
+    /// decision. The simulation's trees are all the same tree.
+    /// </para>
+    /// </remarks>
+    private int TreeKindAt(Vector2 at, int id)
+    {
+        if (art is null || art.Trees.Length <= ConiferSlot) return 0;
+        var span = MathF.Max(1f, reliefSpan);
+        var above = Math.Clamp((simulation.Terrain.SampleHeight(at) - reliefFloor) / span, 0f, 1f);
+        var steep = MathF.Min(1f, simulation.Terrain.SampleGrade(at) / 0.22f);
+        var conifer = 0.66f * steep + 0.42f * above;
+        // A stable threshold per trunk, so the treeline is ragged and does not move when anything else does.
+        var hash = (uint)(id * 2654435761u);
+        hash = (hash ^ (hash >> 15)) * 2246822519u;
+        var jitter = ((hash ^ (hash >> 13)) & 0xFFFFu) / (float)0x10000u;
+        if (conifer > 0.30f + jitter * 0.55f) return ConiferSlot;
+        return id % ConiferSlot;
+    }
+
+    /// <summary>How much height the map has, and where its floor is. Recomputed when the terrain moves.</summary>
+    private float reliefSpan;
+    private float reliefFloor;
+
     private void DrawTree(in EconomyNode tree)
     {
         var ground = simulation.Terrain.SampleHeight(tree.Position);
@@ -2705,7 +2763,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // A tree is drawn wider than the trunk it is routed around, because a canopy overhangs and
             // nothing walks into a canopy. Its footprint in the simulation is the trunk.
             var width = NodeFootprint.TreeHalfExtent * 2f * 3.1f * spread * MathF.Sqrt(left);
-            art.Trees[tree.Id.Value % art.Trees.Length].Add(
+            art.Trees[TreeKindAt(tree.Position, tree.Id.Value)].Add(
                 SettlementArt.Placement(
                     tree.Position, ground, width, SettlementArt.FreeYawOf(tree.Id.Value)));
             DrawUndergrowth(in tree, left);
@@ -2847,7 +2905,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // runs and drifts, thick here and bare a few metres away. Two octaves of lattice noise give
             // that for nothing: the coarse one decides where a patch is at all and the finer one varies
             // its density inside itself, so a patch has a length and an edge that nobody authored.
-            var patch = PatchDensity(at);
+            var patch = PatchDensity(at) * GroundCoverRelief(at, out var hollow);
             if (patch <= 0.04f) continue;
 
             // Denser under trees, which the terrain already knows: forest cover marks every cell with two
@@ -2855,24 +2913,31 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var wooded = simulation.Terrain.Contains(at) &&
                          simulation.Terrain.SampleSurface(at) == TerrainSurface.Forest;
 
+            // <b>Tall where the water goes.</b> A hollow collects moisture and a shoulder sheds it, so the
+            // same signal that thins the cover on a slope decides what kind grows where it is thick. It
+            // stacks with the canopy rather than replacing it: rank growth is under trees <em>and</em> in
+            // the bottoms, which between them is where a person walking would actually find it.
+            var rank = Math.Clamp((wooded ? 0.95f : 0.44f) + hollow * 0.30f, 0.1f, 1.2f);
+            var basal = Math.Clamp((wooded ? 0.72f : 0.34f) - hollow * 0.10f, 0.05f, 1f);
+
             var roll = ScatterHash(cx, cz, 0);
             var kind = -1;
             var width = 1f;
-            if (roll < patch * (wooded ? 0.72f : 0.34f))
+            if (roll < patch * basal)
             {
                 // The base layer. Short grass in sustained patches, and most of what gets drawn.
                 kind = 0;
                 width = 0.5f + ScatterHash(cx, cz, 4) * 0.5f;
             }
-            else if (roll < patch * (wooded ? 0.95f : 0.44f))
+            else if (roll < patch * rank)
             {
-                // Tall grass, thick in woodland and occasional in the open.
+                // Tall grass, thick in woodland and in the hollows, occasional on open level ground.
                 kind = ScatterHash(cx, cz, 5) < 0.5f ? 1 : 2;
-                width = 0.55f + ScatterHash(cx, cz, 4) * 0.55f;
+                width = (0.55f + ScatterHash(cx, cz, 4) * 0.55f) * (1f + hollow * 0.18f);
             }
-            else if (!wooded && roll > 0.985f)
+            else if (!wooded && roll > 0.985f - hollow * 0.004f)
             {
-                // Flowers, rare and never under a canopy.
+                // Flowers, rare, never under a canopy, and a little likelier in a damp bottom.
                 kind = 3;
                 width = 0.4f + ScatterHash(cx, cz, 4) * 0.3f;
             }
@@ -2885,6 +2950,46 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 SettlementArt.FreeYawOf(cx * 73 + cz * 179)));
             placed++;
         }
+    }
+
+    /// <summary>
+    /// What the shape of the ground does to the cover on it: thin on the steep, rank in the hollows.
+    /// </summary>
+    /// <remarks>
+    /// <b>§52 asked for this by name</b> — "once relief exists, cover wants to thin on slopes and gather in
+    /// hollows, which is the moment the two layers start informing each other rather than merely stacking".
+    /// Two signals, both cheap, and both about water rather than about looks: a slope sheds its soil and its
+    /// rain, so cover is sparse and short on one; a hollow collects both, so it is thick and rank in one.
+    /// <para>
+    /// The hollow is a four-sample Laplacian — this point against the mean of its neighbours eight metres
+    /// out — which is negative on a knoll and positive in a bottom. Eight metres because that is the scale
+    /// a patch of ground cover has; the same measurement at a landform's scale would say "you are on a hill"
+    /// rather than "you are in a dip", which is a different question and belongs to the woodland.
+    /// </para>
+    /// <para>
+    /// Faded out where the map has no relief, so flat ground keeps exactly the cover it had — the same
+    /// guarantee the woodland's coupling makes, for the same reason.
+    /// </para>
+    /// </remarks>
+    private float GroundCoverRelief(Vector2 at, out float hollow)
+    {
+        hollow = 0f;
+        var strength = Math.Clamp(reliefSpan / 8f, 0f, 1f);
+        if (strength <= 0f) return 1f;
+
+        const float reach = 8f;
+        var terrain = simulation.Terrain;
+        var here = terrain.SampleHeight(at);
+        var around = (terrain.SampleHeight(at + new Vector2(reach, 0f)) +
+                      terrain.SampleHeight(at - new Vector2(reach, 0f)) +
+                      terrain.SampleHeight(at + new Vector2(0f, reach)) +
+                      terrain.SampleHeight(at - new Vector2(0f, reach))) * 0.25f;
+        // Normalised by the drop a slope of a tenth would give over the same reach, so this is "how much of
+        // a dip is this" rather than a number of metres — and clamped, because a quarry is not a meadow.
+        hollow = Math.Clamp((around - here) / (reach * 0.10f), -1f, 1f) * strength;
+
+        var slope = MathF.Min(1f, terrain.SampleGrade(at) / 0.24f);
+        return Math.Clamp(1f + strength * (0.34f * hollow - 0.55f * slope), 0.12f, 1.4f);
     }
 
     /// <summary>How much ground cover belongs at a point, from bare to thick.</summary>

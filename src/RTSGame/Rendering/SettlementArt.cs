@@ -284,6 +284,10 @@ internal sealed class SettlementArt : IDisposable
                 Prop("Farm_SecondAge_Level2_Wheat", stretchToSquare: true, surface: MaterialClass.Crop),
                 Prop("Farm_SecondAge_Level3_Wheat", stretchToSquare: true, surface: MaterialClass.Crop),
             },
+            // <b>Ordered, and the order is the meaning: broadleaf first, conifer last.</b> DrawTree picks
+            // between them by what the ground under the trunk is doing rather than by the tree's id —
+            // conifer on the steep and the high, broadleaf on the level — so which slot is which matters.
+            // See ConiferSlot.
             trees: new[]
             {
                 Prop("Resource_Tree1", surface: MaterialClass.Foliage),

@@ -974,6 +974,38 @@ internal static class SettlementScenarios
             return Math.Clamp(0.14f + forest - open * 0.55f, 0.02f, 1f);
         }
 
+        // <b>Where the wood is, given what the ground is doing.</b> The bearing shaping above gives a map a
+        // near side and a far side; this gives it a reason. Until now the woodland and the relief were two
+        // systems generated into the same space with no knowledge of each other, which is why the map read
+        // as two things stacked rather than as one place.
+        //
+        // Slope is what decides it, and the mechanism is human rather than botanical: a slope is hard to
+        // plough, so forest survives on it and the flat ground gets cleared. That single rule is worth more
+        // than any amount of density tuning, because of what it does to the economy — <b>wood ends up
+        // uphill and farmland on the level</b>, so a site is a trade between the two rather than a place
+        // with the same resources in every direction. Height adds a little on top: higher is cooler and
+        // poorer, and keeps its trees.
+        //
+        // Multiplicative with the bearing, and never zero, so it thins and thickens rather than deciding.
+        //
+        // <b>And scaled by how much relief the map actually has, which is the migration guarantee applied
+        // here.</b> The first version returned 0.42 on level ground, so it halved the woodland on <em>every</em>
+        // map — 11,177 trees became 5,294 on the flat, which is §22's economic constant cut in half by a
+        // decision about terrain on a map with no terrain in it. Written as a modulation around one and
+        // faded out as the height range goes to nothing, flat ground comes out at exactly the density it
+        // always had and nothing calibrated moves until somebody generates relief on purpose.
+        var span = ReliefSpan(world);
+        var strength = Math.Clamp(span / 8f, 0f, 1f);
+        float Relief(Vector2 at)
+        {
+            if (strength <= 0f) return 1f;
+            var slope = Smoothstep(0.04f, 0.26f, world.Terrain.SampleGrade(at));
+            var above = Math.Clamp(world.Terrain.SampleHeight(at) / MathF.Max(1f, span), 0f, 1f);
+            // Around one: the level ground loses some, the slopes and the tops gain more, and the total is
+            // roughly redistributed rather than reduced.
+            return Math.Clamp(1f + strength * (0.85f * slope + 0.30f * above - 0.35f), 0.15f, 1.7f);
+        }
+
         void Band(float inner, float outer, int trees, float spacing, int clump, bool shape = true)
         {
             for (var i = 0; i < trees; i++)
@@ -984,7 +1016,14 @@ internal static class SettlementScenarios
                 // Shaped by bearing, and rejected rather than moved: nudging a refused anchor somewhere
                 // acceptable would pile the rejects along the edge of the open sector and draw a wall
                 // exactly where the gap is supposed to be.
-                if (shape && Next() > Shaped(anchor - centre)) continue;
+                // Shaped by bearing and by what the ground is doing, and rejected rather than moved: nudging
+                // a refused anchor somewhere acceptable would pile the rejects along the edge of the open
+                // sector and draw a wall exactly where the gap is supposed to be.
+                //
+                // The near band is exempt from both, for §22's reason: it is an economic constant rather
+                // than scenery, and thinning it because the settlement happens to have been founded on the
+                // flat would cut the year's starting fuel as a side effect of a decision about terrain.
+                if (shape && Next() > Shaped(anchor - centre) * Relief(anchor)) continue;
                 // Off the map is a refusal too. Clamping instead would stack every out-of-bounds tree onto
                 // the border as a hedge, which is the artefact a corner-ish settlement invites.
                 if (!world.Terrain.Contains(anchor)) continue;
@@ -1043,6 +1082,38 @@ internal static class SettlementScenarios
         // inside a wood it cannot leave. Measured: one cutter, two hundred and thirty-six route requests,
         // no wood.
         world.RebuildTerrainNavigation();
+    }
+
+    /// <summary>
+    /// How much height this map has in it, for turning an elevation into a share of the whole.
+    /// </summary>
+    /// <remarks>
+    /// Sampled coarsely — a hundred and one points a side is ten thousand height reads against a scatter
+    /// that is about to do a hundred thousand — and floored, so a flat map divides by one rather than by
+    /// nothing and every position comes out at the bottom of the range.
+    /// </remarks>
+    private static float ReliefSpan(SimulationWorld world)
+    {
+        var terrain = world.Terrain;
+        var lowest = float.MaxValue;
+        var highest = float.MinValue;
+        var extent = world.ExtentMeters;
+        for (var z = 0; z <= 100; z++)
+        for (var x = 0; x <= 100; x++)
+        {
+            var at = new Vector2(x / 100f - 0.5f, z / 100f - 0.5f) * extent * 0.98f;
+            var height = terrain.SampleHeight(at);
+            lowest = MathF.Min(lowest, height);
+            highest = MathF.Max(highest, height);
+        }
+
+        return highest - lowest;
+    }
+
+    private static float Smoothstep(float from, float to, float at)
+    {
+        var t = Math.Clamp((at - from) / MathF.Max(0.0001f, to - from), 0f, 1f);
+        return t * t * (3f - 2f * t);
     }
 
     /// <summary>Half-width of the ground the fields and the village occupy, which stays clear.</summary>
