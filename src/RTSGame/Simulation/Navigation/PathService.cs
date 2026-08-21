@@ -201,6 +201,18 @@ internal sealed partial class PathService
     /// </remarks>
     private float CongestionSecondsPerPressure => CongestionCellsPerPressure * SecondsPerCell;
     /// <summary>Extra seconds charged per metre of climb.</summary>
+    /// <remarks>
+    /// <b>This is where slope costs, and it is the only place it does.</b> Charged per edge on the fine
+    /// field, against the height actually climbed, so it is path-dependent in the way that matters: a route
+    /// along a contour pays almost nothing where a direct climb pays the lot, and a switchback is therefore
+    /// cheaper than going straight up without anybody modelling switchbacks. A slope cost held per cell
+    /// cannot express that at all, which is why one was added to the rasteriser during §54's first
+    /// milestone and taken straight back out again — see the note there.
+    /// <para>
+    /// At the constants in force it is a 30% penalty on a tenth grade and 63% on a fifth, which is steeper
+    /// than a hiker's rule of thumb and appropriate for people carrying things.
+    /// </para>
+    /// </remarks>
     internal static float ClimbSecondsPerMetre = 1.68f;
     /// <summary>
     /// Nominal turn rate, in radians per second, that route cost prices turning at.
@@ -215,6 +227,56 @@ internal sealed partial class PathService
     internal static float ReferenceTurnSpeed = 3.03f;
     /// <summary>Seconds to cross one cell of open ground at the reference speed.</summary>
     private float SecondsPerCell => grid.Transform.CellSize / ReferenceSpeed;
+
+    /// <summary>
+    /// Seconds of climbing along a straight leg, sampled, or nothing at all on ground with no relief.
+    /// </summary>
+    /// <remarks>
+    /// <b>The term the hierarchy was missing, and the measurement that found it is worth keeping.</b> The
+    /// fine field charges climb per edge; a rectangle crossing was priced as a straight line on the flat.
+    /// With relief that made the abstract layer cheaper than the routes it was abstracting — measured
+    /// against the exact field at 0.977 of it at three metres of amplitude, 0.955 at six, 0.915 at twelve
+    /// and 0.845 at twenty-four. <see cref="RectangleFlowField.Expand"/> already states the invariant that
+    /// breaks: an over-estimate is the safe direction, and this layer must never claim a route is cheaper
+    /// than it is, or a body sets off toward a shortcut that does not exist.
+    /// <para>
+    /// Sampled rather than taken end to end, because a leg over a hill climbs and then descends and its
+    /// endpoints can be at the same height: end-to-end would charge a summit crossing nothing. A sample
+    /// every few cells catches the shape of it, and the cost is only paid where there is relief to pay it
+    /// on — flat ground returns without a single height read, which is what keeps every calibrated
+    /// scenario in the suite bit-identical.
+    /// </para>
+    /// </remarks>
+    internal float ClimbSecondsAlong(float fromX, float fromZ, float toX, float toZ)
+    {
+        if (!grid.HasRelief) return 0f;
+        var dx = toX - fromX;
+        var dz = toZ - fromZ;
+        var cells = MathF.Sqrt(dx * dx + dz * dz);
+        if (cells < 0.5f) return 0f;
+        // One sample every four cells — two metres at the half-metre grid — which resolves a landform
+        // hundreds of metres across many times over, and capped so a leg the width of the map is bounded.
+        var samples = Math.Clamp((int)MathF.Ceiling(cells / 4f), 1, 48);
+        var climbed = 0f;
+        var last = HeightAtPoint(fromX, fromZ);
+        for (var i = 1; i <= samples; i++)
+        {
+            var t = i / (float)samples;
+            var here = HeightAtPoint(fromX + dx * t, fromZ + dz * t);
+            climbed += MathF.Abs(here - last);
+            last = here;
+        }
+
+        return climbed * ClimbSecondsPerMetre;
+    }
+
+    private float HeightAtPoint(float x, float z)
+    {
+        var cell = new GridCell(
+            Math.Clamp((int)MathF.Floor(x), 0, grid.Width - 1),
+            Math.Clamp((int)MathF.Floor(z), 0, grid.Height - 1));
+        return grid.HeightAt(cell);
+    }
     /// <summary>Travel time an unreachable cell reports when sampling the flow field.</summary>
     /// <remarks>
     /// Not a predicted cost but a boundary condition: it exists so bilinear sampling of

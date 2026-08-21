@@ -33,6 +33,27 @@ internal static class ReliefScenarios
 {
     private const int TicksPerSecond = 30;
 
+    /// <summary>
+    /// Grade buckets, for describing a map rather than for pricing one.
+    /// </summary>
+    /// <remarks>
+    /// This reporter's own bucketing and nothing else's — the simulation charges slope per edge as
+    /// <c>|height change| x ClimbSecondsPerMetre</c>, continuously, and never asks which band a cell is in.
+    /// The buckets are here so a map can be described in a line: how much of it is level, how much is
+    /// walking uphill, and how much is a scramble.
+    /// </remarks>
+    private static readonly float[] GradeBands = { 0.06f, 0.15f, 0.27f, 0.42f, float.MaxValue };
+
+    private static int BandOf(float grade)
+    {
+        for (var band = 0; band < GradeBands.Length; band++)
+        {
+            if (grade <= GradeBands[band]) return band;
+        }
+
+        return GradeBands.Length - 1;
+    }
+
     public static int Run(float extentMeters, float[] amplitudes, uint seed)
     {
         Console.WriteLine(
@@ -135,12 +156,12 @@ internal static class ReliefScenarios
         // partition survived because the banding worked" from "the partition survived because the whole map
         // landed in one band and slope is costing nothing at all" — which are the same number and opposite
         // conclusions.
-        var bands = new int[SlopeRules.Bands];
+        var bands = new int[GradeBands.Length];
         for (var z = 0; z < grid.Height; z += 2)
         for (var x = 0; x < grid.Width; x += 2)
         {
             var at = grid.Origin + new Vector2(x + 0.5f, z + 0.5f) * grid.CellSize;
-            bands[SlopeRules.BandOf(world.Terrain.SampleGrade(at))]++;
+            bands[BandOf(world.Terrain.SampleGrade(at))]++;
         }
 
         var sampled = bands.Sum();

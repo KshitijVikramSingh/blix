@@ -145,7 +145,6 @@ internal static class NavigationRasterizer
         var heights = new float[blocked.Length];
         var traversalCosts = new float[blocked.Length];
         var speedMultipliers = new float[blocked.Length];
-        var surfacePace = new float[blocked.Length];
         var obstacleBounds = GatherObstacleBounds(placement);
 
         for (var z = 0; z < navigation.Height; z++)
@@ -156,7 +155,8 @@ internal static class NavigationRasterizer
             var center = navigation.CellCenter(cell);
             var surface = terrain.SampleSurface(center);
             heights[index] = terrain.SampleHeight(center);
-            surfacePace[index] = TerrainSurfaceRules.SpeedMultiplier(surface);
+            traversalCosts[index] = TerrainSurfaceRules.PathCost(surface);
+            speedMultipliers[index] = TerrainSurfaceRules.SpeedMultiplier(surface);
             if (!TerrainSurfaceRules.IsPassable(surface))
             {
                 blocked[index] = true;
@@ -165,38 +165,21 @@ internal static class NavigationRasterizer
             }
         }
 
-        // <b>Slope costs, in bands, and computed from the heights this pass already has.</b> The obvious
-        // way to write it is one <c>SampleGrade</c> per cell in the loop above — and that is a normal, four
-        // clamped vertex fetches and a square root, 1.44M times, which measured as <b>a full extra second
-        // on every rasterise</b>. A rebuild happens every time a tree comes down, so that is a second
-        // charged to felling.
+        // <b>Slope's cost is not here, and putting it here was a mistake worth recording.</b> A slope band
+        // per cell was added to this pass, folded into the traversal cost, on the reasoning that the router
+        // could not otherwise see that a hill is slow. It could: PathService.FlowStepCost has charged
+        // |height change| x ClimbSecondsPerMetre on every edge since long before there was any relief to
+        // charge it on, which at the constants in force is a 30% penalty at a tenth grade and 63% at a
+        // fifth — steeper than the band table it was being stacked on top of.
         //
-        // The heights of the four neighbours are already in an array by now, so a central difference is
-        // four array reads and no trigonometry, and it is the same quantity: the grade of the plane through
-        // the neighbouring cell centres. Bands, rather than a smooth cost, because the router's partition
-        // is rectangles of cells that agree — see SlopeRules.
-        var cellSize = navigation.Transform.CellSize;
-        for (var z = 0; z < navigation.Height; z++)
-        for (var x = 0; x < navigation.Width; x++)
-        {
-            var index = navigation.Transform.Index(new GridCell(x, z));
-            var pace = surfacePace[index];
-            if (pace > 0f)
-            {
-                var west = navigation.Transform.Index(new GridCell(Math.Max(x - 1, 0), z));
-                var east = navigation.Transform.Index(new GridCell(Math.Min(x + 1, navigation.Width - 1), z));
-                var north = navigation.Transform.Index(new GridCell(x, Math.Max(z - 1, 0)));
-                var south = navigation.Transform.Index(new GridCell(x, Math.Min(z + 1, navigation.Height - 1)));
-                var slopeX = (heights[east] - heights[west]) / (2f * cellSize);
-                var slopeZ = (heights[south] - heights[north]) / (2f * cellSize);
-                var grade = MathF.Sqrt(slopeX * slopeX + slopeZ * slopeZ);
-                pace *= SlopeRules.SpeedMultiplier(SlopeRules.BandOf(grade));
-            }
-
-            speedMultipliers[index] = pace;
-            traversalCosts[index] = pace <= 0f ? float.PositiveInfinity : 1f / pace;
-        }
-
+        // So the band was a second source of truth for how fast ground is, which is the exact mistake this
+        // file's own surface table records having made once and fixed. Worse, the edge term is the better
+        // model: it is path-dependent, so a contour route pays almost nothing where a direct climb pays the
+        // lot, and a band per cell cannot express that at all — a switchback and a straight climb would
+        // cost the same.
+        //
+        // What was actually wrong is one layer up, in what the <em>hierarchy</em> charges: see
+        // RectangleFlowField, which prices a crossing as a straight line and knew nothing about climbing.
         // A cliff is an obstacle boundary even though both cells on either side
         // may have passable surface paint. Include those edges in clearance so
         // A* keeps the agent's body—not merely its center—away from ramp corners.

@@ -314,7 +314,11 @@ internal sealed class RectangleFlowField
     {
         var dx = MathF.Abs(fromX - toX);
         var dz = MathF.Abs(fromZ - toZ);
-        var seconds = Leg(dx, dz, traversalCost);
+        // Climb, on the same terms the fine field charges it. Without this the abstract layer is cheaper
+        // than the ground it abstracts wherever the ground rolls, which breaks the invariant Expand is
+        // written around — see PathService.ClimbSecondsAlong.
+        var seconds = Leg(dx, dz, traversalCost) +
+                      owner.ClimbSecondsAlong(fromX, fromZ, toX, toZ);
         if (!anyPressure || !pressured[rectangle]) return seconds;
 
         var cells = Cells(dx, dz);

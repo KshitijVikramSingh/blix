@@ -33,6 +33,19 @@ internal sealed class NavigationGrid
     public int Height => Transform.Height;
     public int Revision { get; private set; }
 
+    /// <summary>
+    /// Whether any two cells on this map differ in height.
+    /// </summary>
+    /// <remarks>
+    /// One bool, filled by the pass that already walks every cell, and it exists so that ground with no
+    /// relief in it pays nothing at all for the machinery that prices relief. That is not an optimisation
+    /// so much as the migration guarantee: every scenario in the suite is calibrated on the flat, and a
+    /// climb term that is skipped rather than evaluated-to-zero cannot move any of those numbers even in
+    /// the last bit — which matters, because a different number in the last bit is a different route out of
+    /// a Dijkstra.
+    /// </remarks>
+    public bool HasRelief { get; private set; }
+
     public NavigationGrid(GridTransform transform)
     {
         Transform = transform;
@@ -156,6 +169,14 @@ internal sealed class NavigationGrid
             newSpeedMultipliers.Length != cells)
         {
             throw new ArgumentException("Navigation raster dimensions do not match the grid.");
+        }
+
+        HasRelief = false;
+        for (var index = 1; index < newHeights.Length; index++)
+        {
+            if (newHeights[index] == newHeights[0]) continue;
+            HasRelief = true;
+            break;
         }
 
         for (var region = 0; region < partition.Count; region++)
