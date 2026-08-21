@@ -102,7 +102,16 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 // cook step.
                 // UV offset comes from the cooked layout (32-byte → 24,
                 // 48-byte tangent → 40), not hardcoded.
-                var uvAttr = cooked.Layout.Attributes.First(a => a.Location == 3);
+                //
+                // <b>Found by the first cooked mesh in this engine without tangents.</b> This looked the UV
+                // up by location 3, which is the texture coordinate in the 48-byte tangent layout and the
+                // <em>tangent</em> in nothing — in the 32-byte layout the texture coordinate is location 2
+                // and there is no location 3 at all, so First threw and a cooked non-tangent mesh could not
+                // be loaded. Every cooked asset so far came from VulkanSponza, which cooks with --tangents,
+                // so the path had never been walked. Matched by format instead: the texture coordinate is
+                // the only Float2 in either layout.
+                var uvAttr = cooked.Layout.Attributes.First(
+                    a => a.Format == VertexAttributeFormat.Float2);
                 SanitizePackedUVs(p.VertexBytes, p.VertexCount, stride: cooked.Layout.Stride, uvOffset: uvAttr.Offset, p.Name);
                 // LOD0 is the default index buffer; the full chain rides along
                 // in Lods for the demo's distance-based selection.

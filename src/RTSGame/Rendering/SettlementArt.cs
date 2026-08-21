@@ -46,6 +46,8 @@ internal sealed class SettlementArt : IDisposable
         PropModel fieldPlot,
         PropModel[] crop,
         PropModel[] trees,
+        PropModel[] treesMid,
+        PropModel[] treesFar,
         PropModel stumps,
         PropModel[] rocks,
         PropModel[] scatter,
@@ -60,6 +62,8 @@ internal sealed class SettlementArt : IDisposable
         FieldPlot = fieldPlot;
         Crop = crop;
         Trees = trees;
+        TreesMid = treesMid;
+        TreesFar = treesFar;
         Stumps = stumps;
         Rocks = rocks;
         Scatter = scatter;
@@ -74,8 +78,16 @@ internal sealed class SettlementArt : IDisposable
         owned.AddRange(houses);
         owned.AddRange(crop);
         owned.AddRange(trees);
+        owned.AddRange(treesMid);
+        owned.AddRange(treesFar);
         if (villager is not null) owned.Add(villager);
     }
+
+    /// <summary>The same species at a middling level of detail, for the band past the near one.</summary>
+    public PropModel[] TreesMid { get; private init; } = Array.Empty<PropModel>();
+
+    /// <summary>The same species again, coarsest, for the band past that.</summary>
+    public PropModel[] TreesFar { get; private init; } = Array.Empty<PropModel>();
 
     /// <summary>Loose stone: an outcrop on scree, and the one piece of ground cover that is not alive.</summary>
     public PropModel[] Rocks { get; private init; } = Array.Empty<PropModel>();
@@ -251,7 +263,15 @@ internal sealed class SettlementArt : IDisposable
             _ => new Vector4(0.6f, 0.6f, 0.6f, surface),
         };
 
-        PropModel Kit(string file, bool casts = false, float surface = MaterialClass.Foliage)
+        /// <remarks>
+        /// <b>lod picks a level out of the cooked chain</b>, which is the whole of the distance story for
+        /// this art: the models are solid low-poly geometry rather than alpha-cut cards, so they decimate —
+        /// a tree goes 4,345 / 2,076 / 972 / 454 triangles once the cook is allowed to prune components —
+        /// and a decimated tree still reads as a tree where an impostor reads as a shard. Levels past the
+        /// end of a chain clamp to the coarsest, so a model that would not decimate simply repeats itself
+        /// rather than failing.
+        /// </remarks>
+        PropModel Kit(string file, bool casts = false, float surface = MaterialClass.Foliage, int lod = 0)
         {
             var path = Path.Combine(directory, "kit", file + ".gltf");
             if (!File.Exists(path))
@@ -264,7 +284,7 @@ internal sealed class SettlementArt : IDisposable
             var model = new GltfStaticImporter().Import(
                 new AssetImportContext(AssetId.Parse(file), path));
             var parts = model.Primitives
-                .Select(prim => (prim.Mesh, Tint: KitColour(prim.Material?.Name, surface)))
+                .Select(prim => (Mesh: AtLevel(prim.Mesh, lod), Tint: KitColour(prim.Material?.Name, surface)))
                 .ToArray();
             var bounds = parts.Select(part => part.Mesh).CombinedBounds();
             var bake = PropModel.NormaliseToUnitFootprint(bounds);
@@ -377,22 +397,45 @@ internal sealed class SettlementArt : IDisposable
             // by what the ground is — see TreeKindAt — and an index inside it from the tree's id, so which
             // slot is which matters as much as it does for the scatter. Broadleaf on good level ground,
             // conifer high and steep, twisted scrub on exposed poor ground, dead in the wet bottoms.
+            // <b>Three levels of the same ten species, picked by distance.</b> Not three sets of models:
+            // the same cooked chain read at level 0, 2 and 3, sharing one vertex buffer each, so the middle
+            // and far bands cost index lists and nothing else.
+            treesMid: new[]
+            {
+                Kit("CommonTree_1", casts: true, lod: 2), Kit("CommonTree_2", casts: true, lod: 2),
+                Kit("CommonTree_3", casts: true, lod: 2), Kit("Pine_1", casts: true, lod: 2),
+                Kit("Pine_2", casts: true, lod: 2), Kit("Pine_3", casts: true, lod: 2),
+                Kit("TwistedTree_1", casts: true, lod: 2), Kit("TwistedTree_2", casts: true, lod: 2),
+                Kit("DeadTree_1", casts: true, lod: 2), Kit("DeadTree_2", casts: true, lod: 2),
+            },
+            treesFar: new[]
+            {
+                // <b>The far band does not cast.</b> It begins past ninety-five metres and the haze begins
+                // at about seventy-seven, so its shadows fall on ground the fog has already taken — and it
+                // is four thousand trees, which is most of the sun's pass for a contribution nobody can
+                // see. The near and middle bands cast their own geometry, which is already decimated, so
+                // the shadow map gets the same level of detail the scene does for nothing.
+                Kit("CommonTree_1", lod: 3), Kit("CommonTree_2", lod: 3),
+                Kit("CommonTree_3", lod: 3), Kit("Pine_1", lod: 3),
+                Kit("Pine_2", lod: 3), Kit("Pine_3", lod: 3),
+                Kit("TwistedTree_1", lod: 3), Kit("TwistedTree_2", lod: 3),
+                Kit("DeadTree_1", lod: 3), Kit("DeadTree_2", lod: 3),
+            },
             trees: new[]
             {
-                // <b>None of them casts.</b> A tree's shadow is drawn from its far stand-in instead — see
-                // DrawTree. The sun's map is 2048 texels over a couple of hundred metres, so a leaf-card
-                // model and a faceted blob cast the same shadow to well within a texel, and casting the
-                // model means drawing six thousand triangles twice for a result nobody can tell apart.
-                Kit("CommonTree_1"),
-                Kit("CommonTree_2"),
-                Kit("CommonTree_3"),
-                Kit("Pine_1"),
-                Kit("Pine_2"),
-                Kit("Pine_3"),
-                Kit("TwistedTree_1"),
-                Kit("TwistedTree_2"),
-                Kit("DeadTree_1"),
-                Kit("DeadTree_2"),
+                // <b>Each level casts its own shadow.</b> The blob substitution that stood in for this is
+                // gone: a tier already costs what its own level of detail costs, so the sun's pass gets the
+                // decimated geometry for free and there is nothing left for a stand-in to save.
+                Kit("CommonTree_1", casts: true),
+                Kit("CommonTree_2", casts: true),
+                Kit("CommonTree_3", casts: true),
+                Kit("Pine_1", casts: true),
+                Kit("Pine_2", casts: true),
+                Kit("Pine_3", casts: true),
+                Kit("TwistedTree_1", casts: true),
+                Kit("TwistedTree_2", casts: true),
+                Kit("DeadTree_1", casts: true),
+                Kit("DeadTree_2", casts: true),
             },
             // A real stump, at last: Resource_Tree_Group_Cut was a cluster of cut trunks standing in for one.
             stumps: Nature("TreeStump", casts: false, surface: MaterialClass.Timber),
@@ -672,6 +715,27 @@ internal sealed class SettlementArt : IDisposable
 
     /// <summary>Any angle at all, for a tree or a heap, which nobody aligned to anything.</summary>
     public static float FreeYawOf(int id) => (id * 47 % 360) * MathF.PI / 180f;
+
+    /// <summary>
+    /// One level out of a cooked LOD chain, as a mesh in its own right.
+    /// </summary>
+    /// <remarks>
+    /// All levels index the same vertex buffer, so a coarser level is a different index list over the same
+    /// vertices — which is why a decimated model costs nothing extra in memory and why building one is a
+    /// record copy rather than a re-import. The chain rides along in <c>MeshData.Lods</c> whenever a cooked
+    /// .blixmesh sits beside the glTF; without one there is a single level and every request clamps to it.
+    /// </remarks>
+    private static MeshData AtLevel(MeshData mesh, int lod)
+    {
+        if (lod <= 0 || mesh.Lods is not { Count: > 1 } chain) return mesh;
+        var level = chain[Math.Min(lod, chain.Count - 1)];
+        return mesh with
+        {
+            Indices = level.Indices16 ?? Array.Empty<ushort>(),
+            Indices32 = level.Indices32,
+            Lods = null,
+        };
+    }
 
     /// <summary>
     /// The footprint of a model's <em>walls</em>, which is not the footprint of its roof.

@@ -288,6 +288,10 @@ public static class Program
         var startTerrainLab = args.Contains("--terrain-lab");
         var startVillage = args.Contains("--village");
         var debugAll = args.Contains("--debug-all");
+        // <b>Timings without the overlays.</b> --debug-all turns on the collider overlay too, which draws a
+        // disc per body and per tree — 17 ms of it with five thousand trees in view — so a frame measured
+        // that way is measuring the instrument. This asks for the numbers and nothing else.
+        var timingsOnly = args.Contains("--timings");
         var extent = Value(args, "--extent") is { } raw
             ? float.Parse(raw)
             : RtsGameLoop.DefaultWorldExtentMeters;
@@ -307,6 +311,7 @@ public static class Program
             traceMovement,
             startTerrainLab,
             debugAll,
+            timingsOnly,
             extent,
             compression,
             startVillage);
