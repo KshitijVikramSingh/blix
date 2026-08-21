@@ -715,7 +715,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // that scatters shapes over a map says nothing about whether any of them is near the place the
             // player will be looking at, and "the ground looks flat" is the same observation as "the site
             // landed on the plain" until somebody prints both.
-            var site = SettlementScenarios.CornerSite(worldExtentMeters);
+            var site = SettlementScenarios.ChooseSite(simulation, worldExtentMeters);
             foreach (var landform in plan.Landforms)
             {
                 Console.WriteLine(
@@ -732,9 +732,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 $"grade {simulation.Terrain.SampleGrade(site):F3}");
         }
 
+        // <b>The land first, then a place in it.</b> The village used to be laid at the origin whatever the
+        // ground was doing; it is now founded where the terrain says to found — level enough to lay a field,
+        // with slope inside a cutter's reach and something at its back. On a map with no relief that is the
+        // same corner it always was, to the metre.
+        var founded = SettlementScenarios.ChooseSite(simulation, worldExtentMeters);
         SettlementScenarios.Populate(
-            simulation, farms: 8, woodcutters: 4, carts: 5, wagons: 0, ringRadius: 30f);
-        cameraFocus = Vector2.Zero;
+            simulation, farms: 8, woodcutters: 4, carts: 5, wagons: 0, ringRadius: 30f, centre: founded);
+        cameraFocus = founded;
         cameraDistance = cameraDistanceTarget = 78f;
         Console.WriteLine(
             $"  settlement: {simulation.Nodes.LiveCount} nodes, {simulation.Agents.LiveCount} people, " +

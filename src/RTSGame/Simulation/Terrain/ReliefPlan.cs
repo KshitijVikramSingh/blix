@@ -217,23 +217,6 @@ internal readonly record struct Landform(
 /// </remarks>
 internal sealed class ReliefPlan
 {
-    /// <summary>
-    /// How much of the map high ground covers, before the landforms are allowed to overlap.
-    /// </summary>
-    /// <remarks>
-    /// Higher than the two fifths this started at, and the reason is measurable rather than aesthetic: at
-    /// two fifths on a 600 m map the five landforms sat 176 to 459 m from the settlement, so the nearest
-    /// high ground was beyond the detail radius and the played map was a plain with hills rumoured beyond
-    /// the fog. A map wants both a landscape and a plain in it, but the plain has to be a place <em>in</em>
-    /// the landscape rather than the whole of it.
-    /// <para>
-    /// This is a stopgap for the same reason the number is arbitrary: §54's founding milestone chooses a
-    /// site <em>against</em> the terrain, and once it does, whether high ground is near the settlement stops
-    /// being luck and becomes the player's decision.
-    /// </para>
-    /// </remarks>
-    private const float Coverage = 0.55f;
-
     /// <summary>Radius of a landform, in metres, and the reason it is this and not a share of the map.</summary>
     /// <remarks>
     /// §54 derives it from the clock: a raid arrives from 120 m in about 59 s at raider pace, and walking
@@ -263,14 +246,32 @@ internal sealed class ReliefPlan
     public static ReliefPlan Flat { get; } = new() { Downhill = Vector2.UnitX };
 
     /// <summary>
-    /// Works out the land for a map: a few big shapes, spaced, and a tilt.
+    /// Composes the land for a map: a range, a plain beside it, foothills, and a knoll or two.
     /// </summary>
     /// <remarks>
-    /// The count comes from the coverage and the feature size rather than being chosen, so it follows the
-    /// extent by itself: about five on a 600 m map and about nineteen on a 1200 m one. Placement is
-    /// rejection-sampled against the ones already placed so that landforms are neighbours rather than a
-    /// pile — an overlap of more than half a radius merges two features into one shapeless mass, which is
-    /// the one outcome that would defeat the whole point of generating shapes rather than noise.
+    /// <b>Composed rather than scattered, and the difference is that a scattered map has no answer to
+    /// "which way do I expand".</b> Rejection-sampled hills produce a landscape — the previous version did,
+    /// and it looked like one — but every direction out of a settlement is then much like every other, so
+    /// nothing about <em>where</em> you are can matter. That is the argument §50 made for shaping the
+    /// woodland by bearing, applied to the ground the woodland grows on.
+    /// <para>
+    /// The structure is four things, and it deliberately knows nothing about where anybody will settle. A
+    /// generator composed around a predetermined site would be answering §54's founding question on the
+    /// player's behalf; the job here is to make a map that <em>has</em> good and bad sites in it and let
+    /// the choosing find them.
+    /// </para>
+    /// <list type="bullet">
+    /// <item><b>A range</b>, off-centre: three to five landforms chained along one bearing with their
+    /// skirts overlapping, so they merge into a ridge rather than standing as separate mounds — and the
+    /// gaps between their summits become saddles, which are the passes through it. Each is stretched along
+    /// the chain, so it reads as a length of ridge and not a bead on a string.</item>
+    /// <item><b>A plain</b> on the far side, which is not placed but <em>kept</em>: nothing else is allowed
+    /// to land there. A map with no open ground in it has nowhere to build.</item>
+    /// <item><b>Foothills</b> on the range's own side, lower and smaller, so the high country has a
+    /// shoulder rather than an edge.</item>
+    /// <item><b>A knoll or two</b> out in the plain, because a plain with nothing in it is a table — and
+    /// because an isolated piece of high ground in open country is the most valuable site on a map.</item>
+    /// </list>
     /// </remarks>
     public static ReliefPlan For(
         float extentMeters,
@@ -294,89 +295,137 @@ internal sealed class ReliefPlan
             Downhill = Deterministic.OnACircle(random.Next()),
         };
 
-        var area = extentMeters * extentMeters;
-        var each = MathF.PI * radiusMetres * radiusMetres;
-        var wanted = Math.Max(1, (int)MathF.Round(Coverage * area / each));
-        // A generous number of attempts rather than a guarantee: a map that cannot fit its last landform
-        // gets one fewer, which is a landscape with a bigger plain in it and not a failure.
-        var attempts = wanted * 12;
         var half = extentMeters * 0.5f;
-        for (var attempt = 0; attempt < attempts && plan.landforms.Count < wanted; attempt++)
+        // The range's bearing and the direction across it. Everything else is placed relative to these, so
+        // a seed produces a map with a grain to it rather than a distribution.
+        var along = Deterministic.OnACircle(random.Next());
+        var across = new Vector2(-along.Y, along.X);
+        // Off-centre, so one side of the map is high country and the other is open. Dead centre gives a map
+        // with two identical halves, which is the same failure as a settlement in the middle of everything.
+        var toOneSide = (0.10f + random.Next() * 0.16f) * extentMeters *
+                        (random.Next() < 0.5f ? -1f : 1f);
+        var spine = across * toOneSide;
+        // Which way the plain is: away from the range.
+        var plainward = toOneSide > 0f ? -1f : 1f;
+
+        var members = 3 + (int)MathF.Round(extentMeters / 600f);
+        // <b>The chain has to fit, or its ends are the ones that pay.</b> First measurement of a composed
+        // map: a range of four with its ends at 52 m from the border, where the fit-inside-the-map rule cut
+        // them from about 12 m tall to 3.7 and 3.2 — so the taper that was meant to give a range shoulders
+        // instead gave it two stubs. Half the chain plus a landform's own footprint has to stay inside the
+        // half extent, and the length is what gives.
+        var reach = MathF.Min(radiusMetres * (members - 1) * 0.72f, half - radiusMetres * 1.35f);
+        for (var i = 0; i < members; i++)
         {
-            var at = new Vector2(
-                (random.Next() * 2f - 1f) * half,
-                (random.Next() * 2f - 1f) * half);
-            // Varied, because a landscape of identical hills reads as a pattern however it is placed.
-            var radius = radiusMetres * (0.72f + random.Next() * 0.62f);
-            var tooClose = false;
-            foreach (var placed in plan.landforms)
-            {
-                if (Vector2.Distance(placed.Centre, at) >= (placed.BaseRadius + radius) * 0.55f) continue;
-                tooClose = true;
-                break;
-            }
-
-            if (tooClose) continue;
-            // <b>The height and the grade are chosen, and the flank's width follows.</b> Round the other way
-            // — a height and a radius, with the grade falling out — is what produced landforms invisible at
-            // any amplitude: a tall shape spread over a wide radius has no slope in it anywhere.
-            var tall = amplitudeMetres * (0.55f + random.Next() * 0.90f);
-            // <b>Whatever is built has to fit inside the map.</b> Centres were drawn from the whole extent,
-            // so a landform near the border had its flank cut off by the edge of the world — which is a
-            // wall of terrain where a hillside should be, and reads exactly as sharp and wrong as it
-            // sounds. The height comes down until the base radius fits the room available, and a landform
-            // with no room left is not placed at all: a flat rim round a map is honest, and a truncated
-            // hill is not.
-            var toEdge = half - MathF.Max(MathF.Abs(at.X), MathF.Abs(at.Y));
-            if (toEdge < radius * 0.30f) continue;
-            // How fingered the outline is. Never zero, because a circular hill is the tell.
-            var lobing = 0.14f + random.Next() * 0.22f;
-            // <b>The steepest this landform is allowed to get anywhere, and it is a budget rather than a
-            // taste.</b> Measured: flanks chosen freely reached a grade of 0.73 against a traversable limit
-            // of 0.82, and once lobing and undulation had their say about two per cent of the map closed —
-            // which punched thousands of holes in a partition that had been one rectangle, took the worst
-            // route on the map to 640x optimal and the tick to 227 ms. §54's own rule, applied to itself:
-            // relief is a rate and not a gate, so a generated landform may not close ground, and the way to
-            // guarantee that is to spend a budget rather than to check afterwards.
-            //
-            // The budget is what the <em>tightest</em> part of the flank gets. Lobing pulls the rim inward,
-            // and a shorter flank of the same height is a steeper one, so the nominal grade is the budget
-            // discounted by how much the outline is allowed to bite.
-            var steepestAllowed = 0.20f + random.Next() * 0.22f;
-            // Discounted for the radial bite the lobing takes out of the flank, and for the tangential
-            // steepening it adds along the rim — see HeightAt, where the second of those cost two rounds of
-            // measurement to find.
-            var lobeRate = lobing * (0.62f * 2f + 0.38f * 3f);
-            var grade = steepestAllowed * (1f - lobing) /
-                        MathF.Sqrt(1f + lobeRate * lobeRate);
-
-            // The room the outline needs, once lobing has pushed the rim as far out as it goes.
-            var summit = MathF.Max(radius * 0.18f, radius - tall / grade);
-            var footprint = (summit + tall / (grade * 0.88f)) * (1f + lobing);
-            if (footprint > toEdge)
-            {
-                // Shrink rather than reject, because the alternative is a border with no relief within a
-                // radius of it on a map whose corners are where §50 put the settlement.
-                tall *= toEdge / footprint;
-                if (tall < 1.5f) continue;
-                summit = MathF.Max(radius * 0.18f, radius - tall / grade);
-            }
-            plan.landforms.Add(new Landform(
+            var t = members <= 1 ? 0.5f : i / (float)(members - 1);
+            // Along the chain, with a wander across it so the range is not a ruler.
+            var at = spine + along * ((t - 0.5f) * 2f * reach) +
+                     across * ((random.Next() - 0.5f) * radiusMetres * 0.55f);
+            // Tapered toward the ends, so a range has shoulders and a high middle.
+            var taper = 0.62f + 0.38f * MathF.Sin(t * MathF.PI);
+            Place(
+                plan,
+                ref random,
                 at,
-                // What is left of the radius once the flank has taken its share: a landform of a given
-                // footprint is a broad summit with a short flank or a small summit with a long one.
-                summit,
-                grade,
-                tall,
-                // Most are round-ish; a few stretch into ridges, which is what gives a site a back rather
-                // than a hummock behind it.
-                1f + random.Next() * random.Next() * 2.4f,
+                radiusMetres * (0.85f + random.Next() * 0.35f),
+                amplitudeMetres * taper * (0.85f + random.Next() * 0.35f),
+                // Stretched along the chain, so each member is a length of ridge.
+                1.5f + random.Next() * 1.4f,
+                MathF.Atan2(along.Y, along.X),
+                half);
+        }
+
+        // Foothills, on the range's own side and lower.
+        var foothills = 1 + members / 2;
+        for (var i = 0; i < foothills; i++)
+        {
+            var at = spine + along * ((random.Next() - 0.5f) * 2.4f * reach) +
+                     across * (-plainward * radiusMetres * (0.9f + random.Next() * 1.3f));
+            Place(
+                plan,
+                ref random,
+                at,
+                radiusMetres * (0.55f + random.Next() * 0.35f),
+                amplitudeMetres * (0.30f + random.Next() * 0.35f),
+                1f + random.Next() * 1.6f,
                 random.Next() * MathF.Tau,
-                lobing,
-                random.Next()));
+                half);
+        }
+
+        // And a knoll or two out in the open, well clear of the range so the plain stays a plain.
+        var knolls = 1 + (int)(random.Next() * 2f);
+        for (var i = 0; i < knolls; i++)
+        {
+            var outward = plainward * (radiusMetres * 2.2f + random.Next() * extentMeters * 0.22f);
+            var at = spine + across * outward +
+                     along * ((random.Next() - 0.5f) * extentMeters * 0.55f);
+            Place(
+                plan,
+                ref random,
+                at,
+                radiusMetres * (0.40f + random.Next() * 0.30f),
+                amplitudeMetres * (0.40f + random.Next() * 0.40f),
+                1f + random.Next() * 0.9f,
+                random.Next() * MathF.Tau,
+                half);
         }
 
         return plan;
+    }
+
+    /// <summary>
+    /// Places one landform if it fits, spending the grade budget and refusing to swallow its neighbours.
+    /// </summary>
+    /// <remarks>
+    /// Everything a landform has to be true about lives here rather than at each of the three call sites
+    /// above: it may not close ground, it must fit inside the map, and it must not merge into the landform
+    /// beside it so completely that the two stop being two. The composition decides <em>where</em> things
+    /// go; this decides whether what was asked for is something this map can contain.
+    /// </remarks>
+    private static void Place(
+        ReliefPlan plan,
+        ref Deterministic random,
+        Vector2 at,
+        float radius,
+        float height,
+        float stretch,
+        float bearing,
+        float half)
+    {
+        // How fingered the outline is. Never zero, because a circular hill is the tell.
+        var lobing = 0.14f + random.Next() * 0.22f;
+        // <b>The steepest this landform is allowed to get anywhere, and it is a budget rather than a
+        // taste.</b> §54: relief is a rate and not a gate, so a generated landform may not close ground.
+        // Discounted for the radial bite the lobing takes out of the flank and for the tangential
+        // steepening it adds along the rim — the second of which cost two rounds of measurement to find.
+        var steepestAllowed = 0.20f + random.Next() * 0.22f;
+        var lobeRate = lobing * (0.62f * 2f + 0.38f * 3f);
+        var grade = steepestAllowed * (1f - lobing) / MathF.Sqrt(1f + lobeRate * lobeRate);
+
+        // Whatever is built has to fit inside the map: a landform whose flank is cut off by the edge of the
+        // world is a wall of terrain where a hillside should be.
+        var toEdge = half - MathF.Max(MathF.Abs(at.X), MathF.Abs(at.Y));
+        if (toEdge < radius * 0.30f) return;
+
+        var summit = MathF.Max(radius * 0.18f, radius - height / grade);
+        var footprint = (summit + height / (grade * 0.88f)) * (1f + lobing);
+        if (footprint > toEdge)
+        {
+            height *= toEdge / footprint;
+            if (height < 1.5f) return;
+            summit = MathF.Max(radius * 0.18f, radius - height / grade);
+        }
+
+        // Neighbours may share a skirt — that is what makes a range — but not a summit, or two landforms
+        // become one shapeless mass and the saddle between them is lost.
+        foreach (var placed in plan.landforms)
+        {
+            if (Vector2.Distance(placed.Centre, at) >= (placed.TopRadius + summit) * 1.15f + 8f) continue;
+            return;
+        }
+
+        plan.landforms.Add(new Landform(
+            at, summit, grade, height, stretch, bearing, lobing, random.Next()));
     }
 
     /// <summary>

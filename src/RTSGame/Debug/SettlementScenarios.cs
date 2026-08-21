@@ -649,7 +649,13 @@ internal static class SettlementScenarios
     {
         var world = new SimulationWorld(extentMeters);
         granary = Populate(
-            world, Farms, Woodcutters, Carts, Wagons, ringRadius: 36f, centre: CornerSite(extentMeters));
+            world,
+            Farms,
+            Woodcutters,
+            Carts,
+            Wagons,
+            ringRadius: 36f,
+            centre: ChooseSite(world, extentMeters));
         return world;
     }
 
@@ -1114,6 +1120,94 @@ internal static class SettlementScenarios
     {
         var t = Math.Clamp((at - from) / MathF.Max(0.0001f, to - from), 0f, 1f);
         return t * t * (3f - 2f * t);
+    }
+
+    /// <summary>
+    /// Where to found, given the land: level ground to build on, wood within reach, and something at its back.
+    /// </summary>
+    /// <remarks>
+    /// <b>The terrain is generated first and the settlement is placed against it</b>, which is the right way
+    /// round and was not the case until now: the site was a fixed corner of the map and the land was
+    /// generated around it, so whether the settlement had any geography near it was luck. It is also why
+    /// landform coverage had to be raised as a stopgap — with a chosen site, that stops being a dial.
+    /// <para>
+    /// Three things are scored, and they pull against each other, which is what makes this a decision rather
+    /// than an arithmetic maximum:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><b>Level ground</b>, and it is a veto rather than a preference. Fields and buildings need a
+    /// bench; a settlement on a hillside is one that cannot lay a field.</item>
+    /// <item><b>Slope nearby but not underfoot</b>, because since the woodland learned about relief that is
+    /// where the wood is. This is the trade the whole coupling was for: flat to farm, slope to cut.</item>
+    /// <item><b>Something at its back</b> — high ground within a couple of hundred metres, which is the
+    /// crude form of §54's approach count. Honest about what it is: a proxy. The real measure asks the
+    /// router which bearings can reach the site and costs nothing extra to compute, and this is the
+    /// placeholder until that exists.</item>
+    /// </list>
+    /// <para>
+    /// <b>On a map with no relief it returns the corner it always did</b>, to the metre. Every calibrated
+    /// scenario founds where it founded, and §22's economic constant is measured against the same ground it
+    /// was measured against — the same guarantee the woodland and the ground cover make, for the same reason.
+    /// </para>
+    /// </remarks>
+    public static Vector2 ChooseSite(SimulationWorld world, float extentMeters)
+    {
+        var span = ReliefSpan(world);
+        if (span < 1f) return CornerSite(extentMeters);
+
+        var terrain = world.Terrain;
+        var inset = FieldKeepOut + Woodland.ReachMetres + 40f;
+        var limit = extentMeters * 0.5f - inset;
+        var best = CornerSite(extentMeters);
+        var bestScore = float.NegativeInfinity;
+        const float step = 15f;
+        for (var z = -limit; z <= limit; z += step)
+        for (var x = -limit; x <= limit; x += step)
+        {
+            var at = new Vector2(x, z);
+            var here = terrain.SampleHeight(at);
+
+            // A bench to build on. Sampled over the ground the village and its fields actually occupy
+            // rather than at a point, because a flat spot in a steep place is not a site.
+            var core = terrain.SampleGrade(at);
+            for (var i = 0; i < 4; i++)
+            {
+                var angle = i / 4f * MathF.Tau;
+                core = MathF.Max(
+                    core,
+                    terrain.SampleGrade(at + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * FieldKeepOut));
+            }
+
+            if (core > 0.11f) continue;
+
+            // Where the wood will be: slope within a cutter's reach, since that is where the woodland
+            // survives the plough.
+            var wood = 0f;
+            var back = 0f;
+            for (var i = 0; i < 12; i++)
+            {
+                var angle = i / 12f * MathF.Tau;
+                var bearing = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
+                wood += terrain.SampleGrade(at + bearing * (Woodland.ReachMetres * 0.85f));
+                // The tallest thing within a couple of hundred metres, relative to here.
+                back = MathF.Max(back, terrain.SampleHeight(at + bearing * 170f) - here);
+            }
+
+            wood /= 12f;
+
+            var score =
+                1.35f * MathF.Min(1f, back / (span * 0.35f)) +
+                1.10f * MathF.Min(1f, wood / 0.16f) -
+                2.20f * (core / 0.11f);
+            if (score <= bestScore) continue;
+            bestScore = score;
+            best = at;
+        }
+
+        Console.WriteLine(
+            $"  founded at ({best.X:F0}, {best.Y:F0}): standing at {terrain.SampleHeight(best):F1} m on a " +
+            $"grade of {terrain.SampleGrade(best):F3}, score {bestScore:F2} over a {span:F0} m height range");
+        return best;
     }
 
     /// <summary>Half-width of the ground the fields and the village occupy, which stays clear.</summary>
