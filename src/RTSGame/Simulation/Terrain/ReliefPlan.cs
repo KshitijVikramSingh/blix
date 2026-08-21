@@ -168,8 +168,13 @@ internal readonly record struct Landform(
         var y0 = (int)MathF.Floor(at.Y);
         var tx = at.X - x0;
         var ty = at.Y - y0;
-        tx = tx * tx * (3f - 2f * tx);
-        ty = ty * ty * (3f - 2f * ty);
+        // <b>Quintic rather than cubic, because the gradient has to be continuous and not just the
+        // value.</b> Smoothstep has a second derivative that jumps at every lattice line, which on a
+        // height field is a faint crease every wavelength — a grid of them, axis-aligned, which is one of
+        // the ways ground "changes in weird ways". The quintic is flat to second order at both ends, so the
+        // lattice leaves no trace in the slope.
+        tx = tx * tx * tx * (tx * (tx * 6f - 15f) + 10f);
+        ty = ty * ty * ty * (ty * (ty * 6f - 15f) + 10f);
         var a = Lattice(x0, y0);
         var b = Lattice(x0 + 1, y0);
         var c = Lattice(x0, y0 + 1);
@@ -316,6 +321,14 @@ internal sealed class ReliefPlan
             // — a height and a radius, with the grade falling out — is what produced landforms invisible at
             // any amplitude: a tall shape spread over a wide radius has no slope in it anywhere.
             var tall = amplitudeMetres * (0.55f + random.Next() * 0.90f);
+            // <b>Whatever is built has to fit inside the map.</b> Centres were drawn from the whole extent,
+            // so a landform near the border had its flank cut off by the edge of the world — which is a
+            // wall of terrain where a hillside should be, and reads exactly as sharp and wrong as it
+            // sounds. The height comes down until the base radius fits the room available, and a landform
+            // with no room left is not placed at all: a flat rim round a map is honest, and a truncated
+            // hill is not.
+            var toEdge = half - MathF.Max(MathF.Abs(at.X), MathF.Abs(at.Y));
+            if (toEdge < radius * 0.30f) continue;
             // How fingered the outline is. Never zero, because a circular hill is the tell.
             var lobing = 0.14f + random.Next() * 0.22f;
             // <b>The steepest this landform is allowed to get anywhere, and it is a budget rather than a
@@ -336,11 +349,23 @@ internal sealed class ReliefPlan
             var lobeRate = lobing * (0.62f * 2f + 0.38f * 3f);
             var grade = steepestAllowed * (1f - lobing) /
                         MathF.Sqrt(1f + lobeRate * lobeRate);
+
+            // The room the outline needs, once lobing has pushed the rim as far out as it goes.
+            var summit = MathF.Max(radius * 0.18f, radius - tall / grade);
+            var footprint = (summit + tall / (grade * 0.88f)) * (1f + lobing);
+            if (footprint > toEdge)
+            {
+                // Shrink rather than reject, because the alternative is a border with no relief within a
+                // radius of it on a map whose corners are where §50 put the settlement.
+                tall *= toEdge / footprint;
+                if (tall < 1.5f) continue;
+                summit = MathF.Max(radius * 0.18f, radius - tall / grade);
+            }
             plan.landforms.Add(new Landform(
                 at,
                 // What is left of the radius once the flank has taken its share: a landform of a given
                 // footprint is a broad summit with a short flank or a small summit with a long one.
-                MathF.Max(radius * 0.18f, radius - tall / grade),
+                summit,
                 grade,
                 tall,
                 // Most are round-ish; a few stretch into ridges, which is what gives a site a back rather

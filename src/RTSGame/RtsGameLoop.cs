@@ -2440,6 +2440,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private void BuildTerrainFeatures()
     {
         if (UsesFineGround) return;
+        // <b>Not on ground that rolls, and this layer is why curved ground came out banded.</b> A patch is
+        // a run of cells at one height drawn as one flat-topped box, which is the right description of an
+        // authored feature on an otherwise level map — a ramp, the lip of a pond — and the wrong one for a
+        // hillside. On a hillside the patches are small and each is flat, so a curve becomes a staircase of
+        // hundreds of them, and the cap of sixteen thousand was being hit.
+        //
+        // It was dormant rather than correct before: the skip below drops any grass patch within two
+        // centimetres of zero, which on a flat map is all of them. Generated relief turned the whole layer
+        // on at once.
+        //
+        // Nothing is lost by standing it down here, because the two layers that replaced it cover the same
+        // ground properly: chunks are meshed at the navigation grid's own resolution near the camera, and
+        // the coarse plates beyond them are laid on the slope rather than flat.
+        if (simulation.Navigation.HasRelief) return;
         var grid = simulation.Navigation.Transform;
         var cell = grid.CellSize;
         foreach (var patch in TerrainPatches().All)
