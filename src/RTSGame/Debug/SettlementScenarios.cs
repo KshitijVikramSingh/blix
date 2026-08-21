@@ -768,6 +768,7 @@ internal static class SettlementScenarios
 
         // The forest. Where it is, and how thin it has been cut, is the whole of the wood economy: there
         // is no woodcutter building any more, only trees and the people sent to them.
+        PaintBiomes(world);
         ScatterWoodland(world, centre, ringRadius);
 
         // One hand per producer, posted. Staggered dwell, so the settlement does not breathe in unison
@@ -888,6 +889,56 @@ internal static class SettlementScenarios
     /// simulation and this is not the place to introduce one.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Paints the country onto the map: moor high up, scree on the steep, marsh in the wet bottoms.
+    /// </summary>
+    /// <remarks>
+    /// <b>Generation rather than dressing, because a surface is what path cost derives from.</b> Moor is a
+    /// tenth slower than pasture, scree a fifth, marsh nearly half — so a route round a moor can be worth
+    /// taking, a catchment reaching into one is smaller, and a marsh in the wrong place is a real cost to a
+    /// settlement. That is the difference between geography and paint, and it is why this is fingerprinted
+    /// and saved rather than derived per frame.
+    /// <para>
+    /// Painted before the woodland, so forest cover is written over the top of it — a wood on a moor is
+    /// still a wood, and the cover's own surface value is what closes the ground inside a stand.
+    /// </para>
+    /// <para>
+    /// On a map with no relief the classifier answers Meadow everywhere, so nothing is painted and every
+    /// calibrated scenario keeps the ground it was measured on.
+    /// </para>
+    /// </remarks>
+    private static void PaintBiomes(SimulationWorld world)
+    {
+        var span = ReliefSpan(world);
+        if (span < 1f) return;
+
+        var terrain = world.Terrain;
+        var grid = terrain.Transform;
+        var floor = float.MaxValue;
+        for (var z = 0; z <= 100; z++)
+        for (var x = 0; x <= 100; x++)
+        {
+            var at = new Vector2(x / 100f - 0.5f, z / 100f - 0.5f) * world.ExtentMeters * 0.98f;
+            floor = MathF.Min(floor, terrain.SampleHeight(at));
+        }
+
+        var painted = 0;
+        for (var z = 0; z < grid.Height; z++)
+        for (var x = 0; x < grid.Width; x++)
+        {
+            var cell = new GridCell(x, z);
+            var biome = Biomes.At(terrain, grid.CellCenter(cell), floor, span);
+            var surface = Biomes.SurfaceOf(biome);
+            if (surface == TerrainSurface.Grass) continue;
+            terrain.SetSurface(cell, surface);
+            painted++;
+        }
+
+        Console.WriteLine(
+            $"  country: {painted * 100f / (grid.Width * grid.Height):F0}% of the map is moor, scree or " +
+            $"marsh over a {span:F0} m height range");
+    }
+
     private static void ScatterWoodland(SimulationWorld world, Vector2 centre, float ringRadius)
     {
         var seed = 0x9E3779B9u;

@@ -153,6 +153,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     // Also brought into the pack's range, and against its own materials where there is one to match:
     // Stone (0.244, 0.246, 0.215) for a road, Dirt (0.095, 0.074, 0.029) for mud, Water for a pond.
     private static readonly Vector4 RoadColor = new(0.255f, 0.240f, 0.190f, 1f);
+    /// <summary>Moor: bleached olive, the colour of grass that has had a poor season every season.</summary>
+    private static readonly Vector4 HeathColor = new(0.170f, 0.163f, 0.090f, 1f);
+
     private static readonly Vector4 RoughColor = new(0.230f, 0.190f, 0.115f, 1f);
     private static readonly Vector4 MudColor = new(0.125f, 0.098f, 0.062f, 1f);
     private static readonly Vector4 ImpassableColor = new(0.071f, 0.213f, 0.246f, 1f);
@@ -2837,8 +2840,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private const int MaximumContactShadows = 6_000;
 
-    /// <summary>Which model in the tree list is the conifer. Last, by construction — see SettlementArt.</summary>
-    private const int ConiferSlot = 2;
+    /// <summary>
+    /// Where each species sits in the tree list, as a range. Ordered by construction — see SettlementArt.
+    /// </summary>
+    /// <remarks>
+    /// Broadleaf on good level ground, conifer where it is steep and stony, twisted scrub on the exposed
+    /// moor, and dead trees standing in the wet bottoms. Four species is the difference between a map with a
+    /// forest on it and a map with country in it.
+    /// </remarks>
+    private static readonly (int First, int Count) Broadleaf = (0, 3);
+    private static readonly (int First, int Count) Conifer = (3, 3);
+    private static readonly (int First, int Count) Twisted = (6, 2);
+    private static readonly (int First, int Count) Dead = (8, 2);
 
     /// <summary>
     /// Which kind of tree stands here, from what the ground is doing rather than from the tree's id.
@@ -2861,17 +2874,26 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private int TreeKindAt(Vector2 at, int id)
     {
-        if (art is null || art.Trees.Length <= ConiferSlot) return 0;
-        var span = MathF.Max(1f, reliefSpan);
-        var above = Math.Clamp((simulation.Terrain.SampleHeight(at) - reliefFloor) / span, 0f, 1f);
-        var steep = MathF.Min(1f, simulation.Terrain.SampleGrade(at) / 0.22f);
-        var conifer = 0.66f * steep + 0.42f * above;
-        // A stable threshold per trunk, so the treeline is ragged and does not move when anything else does.
+        if (art is null || art.Trees.Length < Dead.First + Dead.Count) return 0;
+        // A stable jitter per trunk, so a species boundary is a band of mixed wood tens of metres deep
+        // rather than a line following a contour. A clean line between two species reads as a stencil.
         var hash = (uint)(id * 2654435761u);
         hash = (hash ^ (hash >> 15)) * 2246822519u;
         var jitter = ((hash ^ (hash >> 13)) & 0xFFFFu) / (float)0x10000u;
-        if (conifer > 0.30f + jitter * 0.55f) return ConiferSlot;
-        return id % ConiferSlot;
+
+        // The biome decides the species and the jitter decides where the boundary falls, by nudging the
+        // ground the classifier is asked about rather than by second-guessing its answer — so the mixing
+        // happens in the same units the rule is written in.
+        var wobble = new Vector2(jitter - 0.5f, (hash & 0xFFu) / 255f - 0.5f) * 22f;
+        var range = Biomes.At(simulation.Terrain, at + wobble, reliefFloor, MathF.Max(1f, reliefSpan)) switch
+        {
+            Biome.Scree => Conifer,
+            Biome.Moor => Twisted,
+            Biome.Marsh => Dead,
+            _ => Broadleaf,
+        };
+
+        return range.First + id % range.Count;
     }
 
     /// <summary>How much height the map has, and where its floor is. Recomputed when the terrain moves.</summary>
@@ -3048,26 +3070,50 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var rank = Math.Clamp((wooded ? 0.95f : 0.44f) + hollow * 0.30f, 0.1f, 1.2f);
             var basal = Math.Clamp((wooded ? 0.72f : 0.34f) - hollow * 0.10f, 0.05f, 1f);
 
+            // <b>Which country this is, which decides what grows here.</b> Two grass species rather than
+            // one is most of the read: common grass is pasture, wispy grass is moor and poor ground, and a
+            // map where those two swap over as the land rises is a map with regions in it.
+            var biome = Biomes.At(
+                simulation.Terrain, at, reliefFloor, MathF.Max(1f, reliefSpan));
+            var (shortGrass, tallGrass, third) = biome switch
+            {
+                // Wiry stuff, and the tall form is what stands up on an exposed top.
+                Biome.Moor => (ScatterWispyShort, ScatterWispyTall, ScatterWispyTall),
+                // Nothing much grows on stone, so what is scattered here is stone.
+                Biome.Scree => (ScatterPebbleRound, ScatterPebbleSquare, ScatterWispyShort),
+                // Rank and damp: tall wispy growth and clover in the bottoms.
+                Biome.Marsh => (ScatterClover, ScatterWispyTall, ScatterClover),
+                // Pasture, and the only country that gets flowers.
+                _ => (ScatterCommonShort, ScatterCommonTall, ScatterFlowers),
+            };
+
             var roll = ScatterHash(cx, cz, 0);
             var kind = -1;
             var width = 1f;
             if (roll < patch * basal)
             {
-                // The base layer. Short grass in sustained patches, and most of what gets drawn.
-                kind = 0;
+                // The base layer. Short cover in sustained patches, and most of what gets drawn.
+                kind = shortGrass;
                 width = 0.5f + ScatterHash(cx, cz, 4) * 0.5f;
             }
             else if (roll < patch * rank)
             {
-                // Tall grass, thick in woodland and in the hollows, occasional on open level ground.
-                kind = ScatterHash(cx, cz, 5) < 0.5f ? 1 : 2;
+                // The taller form, thick in woodland and in the hollows, occasional on open level ground.
+                kind = tallGrass;
                 width = (0.55f + ScatterHash(cx, cz, 4) * 0.55f) * (1f + hollow * 0.18f);
             }
-            else if (!wooded && roll > 0.985f - hollow * 0.004f)
+            else if (roll > 0.978f - hollow * 0.004f && (!wooded || biome != Biome.Meadow))
             {
-                // Flowers, rare, never under a canopy, and a little likelier in a damp bottom.
-                kind = 3;
+                // The rare one. Flowers in pasture, and in the other countries whatever that country's
+                // third thing is — never flowers under a canopy, which is the one rule §52 settled here.
+                kind = biome == Biome.Meadow && wooded ? -1 : third;
                 width = 0.4f + ScatterHash(cx, cz, 4) * 0.3f;
+            }
+            else if (biome == Biome.Scree && roll > 0.94f)
+            {
+                // An outcrop, on ground where the soil has gone.
+                kind = ScatterHash(cx, cz, 6) < 0.5f ? ScatterPebbleRound : ScatterPebbleSquare;
+                width = 0.7f + ScatterHash(cx, cz, 4) * 0.9f;
             }
 
             if (kind < 0) continue;
@@ -3119,6 +3165,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var slope = MathF.Min(1f, terrain.SampleGrade(at) / 0.24f);
         return Math.Clamp(1f + strength * (0.34f * hollow - 0.55f * slope), 0.12f, 1.4f);
     }
+
+    /// <summary>
+    /// Where each kind of ground cover sits in the scatter list. Ordered by construction — see SettlementArt.
+    /// </summary>
+    private const int ScatterCommonShort = 0;
+    private const int ScatterCommonTall = 1;
+    private const int ScatterWispyShort = 2;
+    private const int ScatterWispyTall = 3;
+    private const int ScatterClover = 4;
+    private const int ScatterFern = 5;
+    private const int ScatterFlowers = 6;
+    private const int ScatterPebbleRound = 8;
+    private const int ScatterPebbleSquare = 9;
 
     /// <summary>How much ground cover belongs at a point, from bare to thick.</summary>
     /// <remarks>
@@ -3461,6 +3520,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private static Vector4 TerrainColor(TerrainSurface surface) => surface switch
     {
         TerrainSurface.Road => RoadColor,
+        TerrainSurface.Heath => HeathColor,
         TerrainSurface.Rough => RoughColor,
         TerrainSurface.Mud => MudColor,
         TerrainSurface.Impassable => ImpassableColor,

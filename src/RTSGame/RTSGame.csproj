@@ -28,6 +28,8 @@
     <!-- CC0 art: 15 low-poly models + one OBJ body, untextured, position+normal only,
          with a flat base colour per material. No cook step and no texture memory. -->
     <None Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The nature kit: glTF geometry only. Its textures are palette sheets the flat-shaded prop pipeline
+         has no use for, so they are not shipped and each material's colour is authored in SettlementArt. -->
   </ItemGroup>
 
   <ItemGroup>

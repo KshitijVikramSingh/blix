@@ -47,6 +47,7 @@ internal sealed class SettlementArt : IDisposable
         PropModel[] crop,
         PropModel[] trees,
         PropModel stumps,
+        PropModel[] rocks,
         PropModel[] scatter,
         PropModel[] undergrowth,
         PropModel grainHeap,
@@ -60,12 +61,14 @@ internal sealed class SettlementArt : IDisposable
         Crop = crop;
         Trees = trees;
         Stumps = stumps;
+        Rocks = rocks;
         Scatter = scatter;
         Undergrowth = undergrowth;
         GrainHeap = grainHeap;
         WoodHeap = woodHeap;
         Villager = villager;
         owned.AddRange(new[] { granary, depot, fieldPlot, stumps, grainHeap, woodHeap });
+        owned.AddRange(rocks);
         owned.AddRange(scatter);
         owned.AddRange(undergrowth);
         owned.AddRange(houses);
@@ -73,6 +76,9 @@ internal sealed class SettlementArt : IDisposable
         owned.AddRange(trees);
         if (villager is not null) owned.Add(villager);
     }
+
+    /// <summary>Loose stone: an outcrop on scree, and the one piece of ground cover that is not alive.</summary>
+    public PropModel[] Rocks { get; private init; } = Array.Empty<PropModel>();
 
     public PropModel Granary { get; }
 
@@ -190,6 +196,60 @@ internal sealed class SettlementArt : IDisposable
                 PropModel.NormaliseToUnitFootprint(bounds));
         }
 
+        // <b>The nature kit's models come in for their geometry and are coloured here by hand.</b> Its
+        // materials are textured, and their textures are palettes rather than pictures — the pine's leaf
+        // sheet averages to pure white and the grass's to near-white, because the colour lives in a separate
+        // gradient the shader is meant to index. So averaging a texture is the wrong tool, a texture path
+        // for props is a great deal of work for flat-shaded low-poly art, and this pack's twelve material
+        // names are a perfectly good key.
+        //
+        // Which is also the rule this file already follows for the models it had: a flat colour per
+        // material, authored, in linear space because that is what the shader works in. Two of these are
+        // measured from the pack's own colour sheets — the dead bark's grey and the twisted bark's brown —
+        // and the rest are chosen to sit in the palette the settlement already uses.
+        static Vector4 KitColour(string? material, float surface) => material switch
+        {
+            "Bark_NormalTree" => new Vector4(0.085f, 0.058f, 0.038f, MaterialClass.Timber),
+            "Bark_TwistedTree" => new Vector4(0.091f, 0.075f, 0.066f, MaterialClass.Timber),
+            "Bark_DeadTree" => new Vector4(0.054f, 0.047f, 0.052f, MaterialClass.Timber),
+            "Leaves_NormalTree" => new Vector4(0.075f, 0.135f, 0.040f, MaterialClass.Foliage),
+            // Bluer and darker than broadleaf, which is most of what separates a conifer from an oak at
+            // three hundred metres.
+            "Leaves_Pine" => new Vector4(0.040f, 0.088f, 0.048f, MaterialClass.Foliage),
+            // Scrub on poor ground: olive rather than green.
+            "Leaves_TwistedTree" => new Vector4(0.095f, 0.100f, 0.045f, MaterialClass.Foliage),
+            "Leaves" => new Vector4(0.070f, 0.130f, 0.050f, MaterialClass.Foliage),
+            "Grass" => new Vector4(0.110f, 0.155f, 0.060f, MaterialClass.Foliage),
+            "Flowers" => new Vector4(0.450f, 0.200f, 0.160f, MaterialClass.Foliage),
+            "Mushrooms" => new Vector4(0.420f, 0.281f, 0.167f, MaterialClass.Foliage),
+            "Rocks" or "PathRocks" => new Vector4(0.083f, 0.103f, 0.066f, MaterialClass.Stone),
+            _ => new Vector4(0.6f, 0.6f, 0.6f, surface),
+        };
+
+        PropModel Kit(string file, bool casts = false, float surface = MaterialClass.Foliage)
+        {
+            var path = Path.Combine(directory, "kit", file + ".gltf");
+            if (!File.Exists(path))
+            {
+                throw new FileNotFoundException(
+                    $"The nature kit is missing '{file}.gltf'. Models live in " +
+                    "src/RTSGame/Assets/models/kit and are copied to the output by the csproj.", path);
+            }
+
+            var model = new GltfStaticImporter().Import(
+                new AssetImportContext(AssetId.Parse(file), path));
+            var parts = model.Primitives
+                .Select(prim => (prim.Mesh, Tint: KitColour(prim.Material?.Name, surface)))
+                .ToArray();
+            var bounds = parts.Select(part => part.Mesh).CombinedBounds();
+            var bake = PropModel.NormaliseToUnitFootprint(bounds);
+            var built = PropModel.Create(
+                device, file, parts, sceneShader, scenePipeline,
+                casts ? casterShader : null, casts ? casterPipeline : null, bake);
+            measured.Add((built, LowerExtent(parts.Select(part => part.Mesh), bounds, bake)));
+            return built;
+        }
+
         PropModel Prop(
             string file,
             bool casts = true,
@@ -288,14 +348,30 @@ internal sealed class SettlementArt : IDisposable
             // between them by what the ground under the trunk is doing rather than by the tree's id —
             // conifer on the steep and the high, broadleaf on the level — so which slot is which matters.
             // See ConiferSlot.
+            // <b>Four species in ordered ranges, and the ranges are the meaning.</b> DrawTree picks a range
+            // by what the ground is — see TreeKindAt — and an index inside it from the tree's id, so which
+            // slot is which matters as much as it does for the scatter. Broadleaf on good level ground,
+            // conifer high and steep, twisted scrub on exposed poor ground, dead in the wet bottoms.
             trees: new[]
             {
-                Prop("Resource_Tree1", surface: MaterialClass.Foliage),
-                Prop("Resource_Tree2", surface: MaterialClass.Foliage),
-                Prop("Resource_PineTree", surface: MaterialClass.Foliage),
+                Kit("CommonTree_1", casts: true),
+                Kit("CommonTree_2", casts: true),
+                Kit("CommonTree_3", casts: true),
+                Kit("Pine_1", casts: true),
+                Kit("Pine_2", casts: true),
+                Kit("Pine_3", casts: true),
+                Kit("TwistedTree_1", casts: true),
+                Kit("TwistedTree_2", casts: true),
+                Kit("DeadTree_1", casts: true),
+                Kit("DeadTree_2", casts: true),
             },
             // A real stump, at last: Resource_Tree_Group_Cut was a cluster of cut trunks standing in for one.
             stumps: Nature("TreeStump", casts: false, surface: MaterialClass.Timber),
+            rocks: new[]
+            {
+                Kit("Rock_Medium_1", casts: true, surface: MaterialClass.Stone),
+                Kit("Rock_Medium_2", casts: true, surface: MaterialClass.Stone),
+            },
             // <b>Grass, not bushes.</b> The round shrubs are out of the open scatter entirely: at any
             // density they read as objects placed on a lawn rather than as ground cover, and a map dotted
             // evenly with them looks arranged. They still do the job they are good at, which is hiding the
@@ -304,18 +380,32 @@ internal sealed class SettlementArt : IDisposable
             // Ordered, because DrawScatter picks by index and the meaning of each slot is the point: the
             // short grass is the base layer that goes everywhere in patches, the tall grass thickens in
             // woodland, and the flowers are rare and only in the open.
+            // <b>Ordered, and every slot means something to DrawScatter.</b> Two grass species rather than
+            // one, because that is what makes one stretch of country look unlike another: the common grass
+            // is pasture and meadow, the wispy is moor and poor ground. Then clover for damp bottoms, a
+            // fern for shade, flowers for open meadow, and stone for scree — which is ground cover too,
+            // where nothing will grow.
             scatter: new[]
             {
-                Nature("Grass_Short", casts: false, surface: MaterialClass.Foliage),
-                Nature("Grass", casts: false, surface: MaterialClass.Foliage),
-                Nature("Grass_2", casts: false, surface: MaterialClass.Foliage),
-                Nature("Flowers", casts: false, surface: MaterialClass.Foliage),
+                Kit("Grass_Common_Short"),
+                Kit("Grass_Common_Tall"),
+                Kit("Grass_Wispy_Short"),
+                Kit("Grass_Wispy_Tall"),
+                Kit("Clover_1"),
+                Kit("Fern_1"),
+                Kit("Flower_3_Group"),
+                Kit("Flower_4_Group"),
+                Kit("Pebble_Round_1", surface: MaterialClass.Stone),
+                Kit("Pebble_Square_1", surface: MaterialClass.Stone),
             },
             undergrowth: new[]
             {
-                Nature("Plant_1", casts: false, surface: MaterialClass.Foliage),
-                Nature("Grass_Short", casts: false, surface: MaterialClass.Foliage),
-                Nature("Bush_2", casts: false, surface: MaterialClass.Foliage),
+                Kit("Bush_Common"),
+                Kit("Fern_1"),
+                Kit("Plant_1"),
+                Kit("Plant_7"),
+                Kit("Bush_Common_Flowers"),
+                Kit("Mushroom_Common"),
             },
 
             // <b>One crate, not a stack of them, and the reason is the normalisation.</b> Props are baked to

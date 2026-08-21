@@ -18,6 +18,22 @@ internal enum TerrainSurface : byte
     Impassable,
 
     /// <summary>
+    /// Moor: high, exposed, thin-soiled ground. Walkable, and poor going.
+    /// </summary>
+    /// <remarks>
+    /// Added so that high country has a <em>ground</em> of its own rather than being grass with different
+    /// plants on it. A map where every stretch of country is the same colour under different scatter reads
+    /// as one place with dressing changes; four grounds — pasture, moor, scree, marsh — read as four kinds
+    /// of country, which at six hundred metres is what the map is for.
+    /// <para>
+    /// It costs something to cross, which is what makes it geography rather than paint: a tenth slower than
+    /// pasture, against scree's fifth and marsh's near-half. So a route round a moor can be worth taking and
+    /// a catchment reaching into one is smaller — without anything having to be impassable.
+    /// </para>
+    /// </remarks>
+    Heath,
+
+    /// <summary>
     /// The inside of a stand of trees: ground you cannot walk through.
     /// </summary>
     /// <remarks>
@@ -104,6 +120,7 @@ internal static class TerrainSurfaceRules
     {
         TerrainSurface.Road => 1.45f,
         TerrainSurface.Grass => 1.00f,
+        TerrainSurface.Heath => 0.90f,
         TerrainSurface.Rough => 0.78f,
         TerrainSurface.Mud => 0.55f,
         _ => 0f,
