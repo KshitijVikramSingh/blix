@@ -5218,3 +5218,160 @@ The render side of relief is a known list rather than a discovery: the wear fiel
 hearth falloff fades from height zero rather than from the ground, the coarse ground colours a 5 m block
 from one sample, and the shadow box assumes a flat receiver. None is hard, all are real, and doing heights
 first is what stops them being retrofitted twice.
+
+## 55. The look pass, the terrain layer, and the afternoon the frame cost twelve times what it should
+
+A long session, and it divides into three arcs that turned out to be one: what the light does (§53's
+follow-through), what the land is (§54's first milestones), and what a frame costs. The third only
+happened because the first two spent it.
+
+### The generator, and five ways a height field lies about its own grade
+
+`ReliefPlan` is a list of shapes rather than a field of noise, for the reason §54 gave: fractal noise is
+self-similar, so it puts five-metre bumps in the layer the simulation has to agree with. Feature size is
+absolute rather than a share of the extent, because a catchment is 66 m and a raid arrives from 120 m
+whatever the map's size.
+
+`--relief` is the gate, and it is not "does it look like hills": **the partition stays sane, the tick
+holds, and amplitude zero is bit-for-bit today's ground.** It found, in order:
+
+1. **A raised cosine is invisible.** Zero slope at rim *and* summit concentrates all the fall into a thin
+   ring, so a 7.6 m rise over 130 m peaks at 0.09 and reads as paper on the ground.
+2. **Lobing steepens tangentially.** Modulating a rim by bearing adds gradient *along* it of
+   `Lobing × Σ(coefficient × harmonic)` — 2.07 at harmonics 3/5/7, which multiplies the gradient by 2.3.
+3. **Landforms were summed.** Placement permits neighbours to overlap by half a radius, and overlapping
+   flanks add their gradients. Survived two rounds of budget-tightening because the budget was per
+   landform and the breach was between them. They take the higher now — which also makes overlapping
+   hills a range with a saddle, and a saddle is where an approach comes through.
+4. **The softening of that maximum was a cliff made of a constant.** Log-sum-exp normalised to be exact
+   at equality is wrong at the other end: it subtracts 1.31 m wherever one term dominates, so landforms
+   contributing *nothing* still moved the ground — eight metres over six of them, across the two metres
+   the blend acts over. Measured as a grade of **4.91** on a map whose steepest flank was 0.33.
+5. **The crest dipped below the flank it met.** A summit falling to 0.84 of the height where the flank
+   arrives at 1.0 is a step of 0.16 × height: 3.2 m at amplitude 20, in the same place every run.
+
+> **A generated height field's stated grade and its actual grade are different numbers.** Three of those
+> five were breaches of a budget the code stated correctly and did not keep, and the only reliable way to
+> know the second number is to measure it. `--relief` prints the measured steepest grade and where it is,
+> beside the claimed one.
+
+### Slope already cost something, and the hierarchy was the half that did not know
+
+The sharpest correction of the session. `PathService.FlowStepCost` has charged
+`|height change| × ClimbSecondsPerMetre` on every edge since long before there was relief to charge it
+on — a 30% penalty at a tenth grade. A slope band added to the rasteriser was therefore a **second
+source of truth for how fast ground is**, the exact mistake `TerrainSurfaceRules`' own remarks record
+having made once and fixed. The edge term is also the better model, because it is path-dependent: a
+contour route pays almost nothing where a direct climb pays the lot, so a switchback is cheaper than
+going straight up and nobody modelled switchbacks. The band was deleted.
+
+What *was* broken is one layer up. The fine field charged climb and the hierarchy priced a rectangle
+crossing as a straight line on the flat, so with relief the abstract layer was **cheaper than the routes
+it abstracts** — 0.977 of the exact field at three metres of amplitude, 0.845 at twenty-four.
+`RectangleFlowField.Expand` already states the invariant that breaks: an over-estimate is the safe
+direction, because a body must never be told a shortcut exists when it does not. Legs charge climb now,
+sampled along their length rather than end to end, since a leg over a summit climbs *and* descends and
+its endpoints can be level.
+
+And the fragmentation §54 feared was real but not where it was predicted: the rectangle mesh merged cells
+whose heights agreed to within **five centimetres**, which is exactly what a tenth grade climbs across
+one half-metre cell. The rule said *flat* where it meant *no unclimbable step* — a local property tested
+globally, and the raster already knows the local one. Merging on whether a body can step between two
+cells took 250,796 rectangles to 7,191, and once slope stopped being a per-cell cost, to **one**.
+
+### One ground, and three representations of it deleted
+
+The ground was drawn three ways: a whole-map mesh for worlds under 21,000 cells, flat plates every five
+metres above that, and flat patches over the top wherever cells disagreed with their plate. Three
+representations, three sets of artefacts, and this session found one in each — plates terracing on a
+slope, patches banding on curves, and the mesh switching itself off at a size no played map is under.
+
+The cap was a `ushort` index buffer, not a statement about terrain. **The render grid is not the
+navigation grid**: half a metre is the resolution a body's clearance is decided at, and nobody can see
+half a metre from a two hundred metre standoff. At a target of 316 render cells a side the whole map is
+90,000 cells and about 200k triangles — less than the near-field mesh and the plates were costing
+together — and the chunk count comes out roughly independent of the extent.
+
+Deleted with them: `BuildCoarseGround`, `BuildTerrainFeatures`, `GroundColumn`, `SlopedGroundColumn`,
+`BlockJitter`, `BlockColor`, `TerrainRectangles`, the plate and patch batches, the plate/chunk filtering,
+`UsesFineGround`, and two look dials that were properties of a ground made of flat plates.
+
+**"Flat is deliberate" was true and is retired**, and it is worth being exact about why it was true: it
+was written against the plate ground, whose cap was an index format. It also predicted the banding
+correctly — the detail patch layer *was* the banding, and had been dormant rather than correct, because
+it skips any grass patch within two centimetres of zero and on a flat map that is every patch.
+
+### The couplings, and the guarantee that made them safe
+
+Relief, woodland and ground cover were three systems generated into the same space with no knowledge of
+each other. Now: **woodland follows the slope**, because a slope is hard to plough so forest survives on
+it and the level ground gets cleared — which puts wood uphill and farmland on the level, so a site is a
+trade rather than a place with the same resources in every direction. Tree *kind* follows the same
+signal, cover thins on slopes and goes rank in hollows, and four biomes — pasture, moor, scree, marsh —
+carry real surfaces, so a moor costs a tenth more to cross and a marsh nearly half.
+
+Every one of those is a **modulation around one, faded out as the map's height range goes to nothing.**
+The first version of the woodland coupling was not, and it halved the trees on every map: 11,177 became
+5,294 on the flat, which is §22's economic constant cut in half by a decision about terrain on a map with
+no terrain in it. That is the shape of the whole migration plan and it holds everywhere now — flat maps
+found where they founded, grow what they grew, and measure what they measured.
+
+### And the frame
+
+Reported as five frames a second where it used to fly. Four causes, none of them guessable, and the
+render side had no instrument at all — which is how a factor of twelve accumulated over an afternoon.
+
+1. **Ground cover was 68 ms a frame, and not from drawing.** Forty thousand candidate cells, each
+   sampling the height field for the relief coupling *and* the biome classifier, before anything decided
+   whether the cell places so much as a tuft. Answered on an eight metre grid once per terrain change
+   instead: 2.7 ms.
+2. **Three quarters of the frame's geometry was ground nobody could see** — 204,800 of 276,315 triangles,
+   most of it behind the camera. Built everywhere, drawn where it can be seen.
+3. **The triangle counter reports per draw, not per instance**, so a frame drawing nine thousand trees of
+   six thousand triangles reported "276k" and looked cheap. It was **63.5 million**. Anything instanced
+   needs the product.
+4. **Trees.** Which is where the interesting part is.
+
+> **What a thing costs to prepare and what it costs to submit are different budgets.** I made that
+> mistake twice in one afternoon in opposite directions: first assuming the meshed ground was
+> unaffordable at all, then assuming that because building it was cheap, drawing it was too.
+
+### Foliage decimates — once the cook lets it
+
+The tree fix went through billboards and came back. Impostors are right for foliage that is mostly alpha
+to cut out, which is the Sponza Modern case; ours is solid low-poly geometry, and a crossed pair of quads
+seen from above is a shard. **Two flags in the cook tool were the whole story:**
+
+- **`LockBorder`**, passed unconditionally. It pins every mesh-boundary vertex so spatially split chunks
+  stay watertight — which matters with `--split` on and is meaningless with it off. On a model of many
+  open shells nearly every vertex is a border vertex: a blade of grass went 326/224 and stopped.
+- **`Prune`**, absent. A canopy is hundreds of small disconnected clusters, and a simplifier that may not
+  delete a component can only thin each until it would vanish. For foliage, deleting components is not a
+  compromise — what a canopy looks like from further away is fewer, larger masses.
+
+With both: **4,345 / 2,076 / 972 / 454**. Three tiers read out of one cooked chain sharing one vertex
+buffer, so the far bands cost index lists and nothing else. Then frustum culling, because a camera looks
+at a wedge and two trees in three were behind the viewer; no casting from the far band, whose shadows
+fall on ground the fog has taken; and **density as a second LOD signal**, since a tree in a thicket is
+part of a texture and the terrain already knows which trees those are.
+
+A latent engine bug fell out of it: the cooked-mesh runtime path looked its texture coordinate up by
+attribute location 3, which is the UV in the 48-byte tangent layout and the tangent slot in nothing. Every
+cooked asset so far came from VulkanSponza, which cooks with `--tangents`, so loading a cooked mesh
+without them had never been tried and threw.
+
+**125 ms and 63,552k triangles to 17 ms and 4,592k**, and 16.6 ms at a working zoom.
+
+### The handoff
+
+M1 of §54 is done and M2 is next: **approaches as a measured quantity**, the sixteen-bearing scorer. The
+site chooser exists but scores "something at its back" as a proxy for it, and says so — the real measure
+asks the router which bearings can reach a place and costs nothing extra, because relief, water and
+woodland are three ways of closing a bearing and the router already answers the question. After that:
+founding as the band-and-heap opening, water as a barrier, and stone.
+
+Two smaller things left where they are, deliberately. `--placementcheck` asserts that a tree comes down
+in three minutes, which at fifteen cutter-minutes a tree it cannot see; that is §51's tree grain item and
+the check should move when the grain does. And the wear field, the hearth falloff and the shadow box all
+turned out to be relief-correct already — the wear is indexed by world x/z, which is exactly right for a
+height field — so §54's "the dressing still assumes flat" item is retired without work.
