@@ -325,18 +325,35 @@ internal sealed class RaidDirector
         // are the lanes the woodland was carved with precisely so that something could come down them, so
         // a raid uses one — which is also the better mechanic, because it means a settlement's approaches
         // are knowable and watching them is worth doing.
+        // <b>Around the settlement, and it used to be around the origin — which is the whole of the stuck
+        // raid.</b> The rides are carved as rays <em>from the settlement</em> (Woodland.OnARide takes an
+        // offset from the centre), and this built its arrival ring in absolute world coordinates. That was
+        // the same point until §50 moved the site corner-ish, a quarter of the extent out on both axes; from
+        // then on the ring was centred two hundred metres from the place it was attacking and its bearings
+        // were measured from the wrong origin, so a raid arrived nowhere near a lane.
+        //
+        // What that looked like is precisely the failure this comment was already written about: bodies
+        // inside the impassable interior of a stand — thicker than ever since §50 doubled the density — where
+        // the spawn nudge cannot find open ground. Twenty-four raiders sent, none arrived, none escaped, and
+        // each one asked for a route it could never be given at every tick for the rest of the run, which is
+        // why a six-minute scenario took half an hour and cost 45 ms a tick per stuck body.
+        //
+        // Both numbers were right in the layer that owned them and wrong where they met, which is §51's
+        // recurring finding for the sixth time. The fix is to say which centre, once.
+        var home = RichestStore(world, Vector2.Zero);
+        var centre = world.Nodes.Contains(home) ? world.Nodes.Get(home).Position : Vector2.Zero;
         var ride = (int)(Next() * MathF.Max(1, Woodland.Rides));
         var angle = Woodland.Rides > 0
             ? ride / (float)Woodland.Rides * MathF.Tau
             : Next() * MathF.Tau;
         var edge = MathF.Min(settings.ArrivesAt, world.ExtentMeters * 0.47f);
-        var arrival = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * edge;
+        var along = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
+        var arrival = centre + along * edge;
         var started = 0;
         for (var i = 0; i < settings.Party; i++)
         {
             // Scattered along the ride rather than across it, so the party stays in the lane: the rides are
             // ten metres wide and a three-metre sideways scatter puts somebody in the trees.
-            var along = Vector2.Normalize(arrival);
             var at = arrival - along * (i * 2.2f) +
                      new Vector2(-along.Y, along.X) * (Next() * 4f - 2f);
             var body = world.SpawnAgent(world.Terrain.ClampPosition(at), Kind, enemy);

@@ -202,19 +202,27 @@ internal sealed class Hearths
             if (lit <= 0f) continue;
 
             var width = node.HalfExtent * 2f;
-            var yaw = SettlementArt.SquareYawOf(node.Id.Value);
-            var at = SettlementArt.LitFace(node.Position, width, yaw);
+            // <b>The middle of the building, not its doorway — because there is no way to be wrong about
+            // the middle.</b> Placing the fire at a face meant choosing a face, and the fitting's +x is not
+            // where any particular cottage in this pack keeps its door, so a fraction of the village was
+            // lit from a blank wall. Reported as "a little off on some houses", which is exactly what a
+            // rule that is right three times in four looks like.
+            //
+            // Nothing occludes a point light here, so a fire inside a house lights the ground all round it
+            // rather than in front of one wall. That is a truer description of what this is anyway: not a
+            // lamp in a doorway but a hearth warming a building, with the glow finding its way out of
+            // whatever the building has — door, shutters, the gaps in a timber frame.
+            var at = node.Position;
             // A slow breath, and per light rather than per field: a fire that is not quite steady is most
             // of what separates one from a bulb, and it was previously being sampled every sixth frame.
             var flicker = 0.86f + 0.14f * MathF.Sin(simSeconds * 2.9f + node.Id.Value * 1.7f) +
                           0.05f * MathF.Sin(simSeconds * 7.3f + node.Id.Value * 4.1f);
             var light = new Vector4(
                 at.X,
-                // Knee height. A fire is on the floor, but what escapes a doorway has bounced off the room
-                // first, so the effective source sits a little above the threshold — and a light exactly on
-                // the ground plane lights the ground it stands on at a grazing angle and almost nothing
-                // else.
-                world.Terrain.SampleHeight(node.Position) + width * 0.14f,
+                // Hearth height. Low, because a fire is on the floor and what it lights is the floor and the
+                // foot of the walls — but not on the ground plane itself, which would light the ground it
+                // stands on at a grazing angle and almost nothing else.
+                world.Terrain.SampleHeight(node.Position) + width * 0.16f,
                 at.Y,
                 strength * lit * banked * flicker);
 

@@ -71,13 +71,17 @@ layout(push_constant) uniform Push {
 // The colour of a wood fire seen at night, which is a hue and therefore stays in the shader — the
 // intensities are on sliders and these are not.
 //
-// <b>Twice too yellow, and each time the report was "that is a lamp".</b> The instinct is to reach for the
-// colour of a flame, and a flame is nearly white at its middle — but what leaves a room through a doorway is
-// not the flame, it is what the flame has bounced off, and hot coals and the underside of a thatch are much
-// further into the red than the fire that made them. Green at a third of red and blue at a tenth is a colour
-// no fixture ever made; the tell of the yellow version is that it reads as tungsten, because tungsten is
-// exactly what it is.
-const vec3 kHearthColor = vec3(1.00, 0.36, 0.11);
+// <b>Three times too yellow, and the third time it was not the colour's fault.</b> The first two were: the
+// instinct is to reach for the colour of a flame, and a flame is nearly white at its middle — but what leaves
+// a room through a doorway is not the flame, it is what the flame has bounced off, and hot coals and the
+// underside of a thatch are much further into the red than the fire that made them.
+//
+// What was left after that is the <em>curve</em>. A saturated warm colour driven past one clips its red
+// channel first, and once red is pinned every further increase in brightness arrives as green — so a hot
+// enough ember goes orange, then amber, then yellow, then white, and ACES skews warm hues that way even
+// before the clip. The colour was correct and the thing standing in a doorway was still a light bulb.
+// Deepened once more, and the fix that actually mattered is the hue-preserving rolloff below.
+const vec3 kHearthColor = vec3(1.00, 0.29, 0.075);
 
 void main() {
     vec3 n = normalize(vNormal);
@@ -204,6 +208,14 @@ void main() {
         float facing = (max(dot(n, normalize(toFire)), 0.0) + 0.35) / 1.35;
         hearth += kHearthColor * (uHearths[i].w * falloff * facing);
     }
+
+    // <b>Rolled off by brightness, not per channel, which is what keeps a fire the colour of a fire.</b>
+    // Dividing each channel by itself compresses the biggest one hardest — and the biggest one here is red,
+    // so a per-channel knee walks an ember toward yellow exactly as clipping does. Dividing the whole
+    // vector by a function of its own luminance leaves the ratios between the channels untouched: it gets
+    // dimmer, never blonder. Which is also just true of embers.
+    float fire = dot(hearth, vec3(0.2126, 0.7152, 0.0722));
+    hearth /= 1.0 + fire * 0.62;
 
     vec3 lit = albedo * (ambient + shadeLift + uSunTint.rgb * uLight.x * wrapWide * shadow * upFace);
     lit += albedo * hearth * uHearth.x;

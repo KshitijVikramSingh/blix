@@ -630,18 +630,6 @@ internal sealed class SettlementArt : IDisposable
     /// </remarks>
     public static Vector2 FaceDirection(float yaw) => new(MathF.Cos(yaw), -MathF.Sin(yaw));
 
-    /// <summary>
-    /// The point just outside a building's front, where its lantern hangs and its light falls.
-    /// </summary>
-    /// <remarks>
-    /// Outside rather than at the centre, and that is the whole reason this exists: a pool of light centred
-    /// on a building is a pool underneath a building, which is to say invisible. Models are fitted to the
-    /// footprint the simulation enforces and span half a width either side of their node, so a little past
-    /// six tenths puts the light on the ground in front of the door.
-    /// </remarks>
-    public static Vector2 LitFace(Vector2 position, float widthMetres, float yaw) =>
-        position + FaceDirection(yaw) * (widthMetres * 0.62f);
-
     public void Dispose()
     {
         foreach (var model in owned) model.Dispose();
