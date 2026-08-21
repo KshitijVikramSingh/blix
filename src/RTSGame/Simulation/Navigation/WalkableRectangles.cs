@@ -28,22 +28,30 @@ namespace RTSGame.Simulation.Navigation;
 /// </remarks>
 internal sealed class WalkableRectangles
 {
-    /// <summary>Height difference two cells may have and still count as the same ground.</summary>
-    /// <remarks>
-    /// Crossing a rectangle is priced as flat, so this bounds the error that approximation can
-    /// make. Five centimetres over a rectangle is well inside the noise of a route quoted in
-    /// seconds, and it is small enough that a ridge never merges into the plain beside it.
-    /// </remarks>
-    public const float HeightTolerance = 0.05f;
-
     /// <summary>A run of uniform walkable ground, in inclusive cell coordinates.</summary>
+    /// <remarks>
+    /// <b>The height is gone, and so is the tolerance that used to gate merging on it.</b> A rectangle held
+    /// the height of its first cell and nothing ever read it; what the field did do was justify a rule that
+    /// two cells could only share a rectangle if their heights agreed to within five centimetres. Five
+    /// centimetres is exactly what a tenth grade climbs across one half-metre cell, so the rule said
+    /// <em>flat</em> where it meant <em>no unclimbable step</em> — and measured on a 600 m map, one rectangle
+    /// became 53,133 at three metres of relief and 250,796 at twenty-four, with the worst route in the map
+    /// 52x longer than it needed to be.
+    /// <para>
+    /// The rule it meant is a local one and the raster already knows it: two cells may share a rectangle if
+    /// a body can step between them. So a hillside of even gradient is one rectangle and a cliff still
+    /// splits one, which is what the tolerance was reaching for by proxy. What is given up is that crossing
+    /// a rectangle is priced on the flat: over ground of gradient <c>g</c> that under-prices by about
+    /// <c>g²/2</c>, which is a per cent at a tenth grade and six at the steepest band — and the bands are
+    /// what bound it, since a rectangle cannot span two of them.
+    /// </para>
+    /// </remarks>
     public readonly record struct Rectangle(
         int MinimumX,
         int MinimumZ,
         int MaximumX,
         int MaximumZ,
-        float TraversalCost,
-        float Height)
+        float TraversalCost)
     {
         public int Width => MaximumX - MinimumX + 1;
         public int Depth => MaximumZ - MinimumZ + 1;
@@ -130,13 +138,14 @@ internal sealed class WalkableRectangles
         var openEnd = new int[grid.Width];
         var openTop = new int[grid.Width];
         var openCost = new float[grid.Width];
-        var openHeight = new float[grid.Width];
         var openCount = 0;
 
         var runStart = new int[grid.Width];
         var runEnd = new int[grid.Width];
         var runCost = new float[grid.Width];
-        var runHeight = new float[grid.Width];
+        // Whether each run can be reached from the row above it, cell by cell. A run that cannot is the
+        // bottom of a step, and merging it upward would let a route walk off a cliff for free.
+        var runCarries = new bool[grid.Width];
 
         for (var z = 0; z < grid.Height; z++)
         {
@@ -152,21 +161,31 @@ internal sealed class WalkableRectangles
                 }
 
                 var cost = grid.TraversalCost(cell);
-                var height = grid.HeightAt(cell);
                 var end = x;
                 while (end + 1 < grid.Width)
                 {
                     var next = new GridCell(end + 1, z);
                     if (!grid.IsWalkable(next, agentRadius)) break;
                     if (grid.TraversalCost(next) != cost) break;
-                    if (MathF.Abs(grid.HeightAt(next) - height) > HeightTolerance) break;
+                    // The step, not the height. See the remarks on Rectangle.
+                    if (!grid.CanTraverse(new GridCell(end, z), next, agentRadius)) break;
                     end++;
+                }
+
+                // Asked once per run rather than per candidate match below: whether this row's ground is
+                // reachable from the row above is a property of the ground, not of which open rectangle
+                // happens to be sitting over it.
+                var carries = z > 0;
+                for (var column = x; column <= end && carries; column++)
+                {
+                    carries = grid.CanTraverse(
+                        new GridCell(column, z - 1), new GridCell(column, z), agentRadius);
                 }
 
                 runStart[runCount] = x;
                 runEnd[runCount] = end;
                 runCost[runCount] = cost;
-                runHeight[runCount] = height;
+                runCarries[runCount] = carries;
                 runCount++;
                 result.CoveredCells += end - x + 1;
                 x = end + 1;
@@ -180,7 +199,6 @@ internal sealed class WalkableRectangles
             var carriedEnd = new int[runCount];
             var carriedTop = new int[runCount];
             var carriedCost = new float[runCount];
-            var carriedHeight = new float[runCount];
             var matched = new bool[openCount];
 
             for (var run = 0; run < runCount; run++)
@@ -191,7 +209,7 @@ internal sealed class WalkableRectangles
                     if (matched[open]) continue;
                     if (openStart[open] != runStart[run] || openEnd[open] != runEnd[run]) continue;
                     if (openCost[open] != runCost[run]) continue;
-                    if (MathF.Abs(openHeight[open] - runHeight[run]) > HeightTolerance) continue;
+                    if (!runCarries[run]) continue;
                     extended = open;
                     break;
                 }
@@ -199,7 +217,6 @@ internal sealed class WalkableRectangles
                 carriedStart[carriedCount] = runStart[run];
                 carriedEnd[carriedCount] = runEnd[run];
                 carriedCost[carriedCount] = runCost[run];
-                carriedHeight[carriedCount] = runHeight[run];
                 if (extended >= 0)
                 {
                     matched[extended] = true;
@@ -221,8 +238,7 @@ internal sealed class WalkableRectangles
                     openTop[open],
                     openEnd[open],
                     z - 1,
-                    openCost[open],
-                    openHeight[open]));
+                    openCost[open]));
             }
 
             for (var i = 0; i < carriedCount; i++)
@@ -231,7 +247,6 @@ internal sealed class WalkableRectangles
                 openEnd[i] = carriedEnd[i];
                 openTop[i] = carriedTop[i];
                 openCost[i] = carriedCost[i];
-                openHeight[i] = carriedHeight[i];
             }
 
             openCount = carriedCount;
@@ -244,8 +259,7 @@ internal sealed class WalkableRectangles
                 openTop[open],
                 openEnd[open],
                 grid.Height - 1,
-                openCost[open],
-                openHeight[open]));
+                openCost[open]));
         }
 
         result.Partition = new RegionPartition(grid.Transform);

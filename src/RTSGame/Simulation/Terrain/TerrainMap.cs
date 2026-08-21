@@ -76,6 +76,29 @@ internal sealed class TerrainMap
         Revision++;
     }
 
+    /// <summary>
+    /// Replaces the whole height field at once.
+    /// </summary>
+    /// <remarks>
+    /// One revision bump for the lot, which is the reason it exists: generating a 600 m map through
+    /// <see cref="SetVertexHeight"/> moves the revision 1.4 million times, and everything keyed against it
+    /// — the navigation raster, every cached flow field — is looking at a number that has no business
+    /// having moved that far. A generator writes the field; it does not edit it a vertex at a time.
+    /// </remarks>
+    internal void ReplaceHeights(ReadOnlySpan<float> heights)
+    {
+        if (heights.Length != vertexHeights.Length)
+        {
+            throw new ArgumentException(
+                $"This terrain has {vertexHeights.Length} height vertices and was given {heights.Length}. " +
+                "A height field is (width + 1) x (height + 1), not one per cell.",
+                nameof(heights));
+        }
+
+        heights.CopyTo(vertexHeights);
+        Revision++;
+    }
+
     /// <summary>The authored ground: heights at the corners, a surface per cell, and the revision.</summary>
     /// <remarks>
     /// The revision goes out and comes back rather than being re-derived, because everything keyed

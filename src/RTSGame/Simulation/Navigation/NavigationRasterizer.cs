@@ -145,6 +145,7 @@ internal static class NavigationRasterizer
         var heights = new float[blocked.Length];
         var traversalCosts = new float[blocked.Length];
         var speedMultipliers = new float[blocked.Length];
+        var surfacePace = new float[blocked.Length];
         var obstacleBounds = GatherObstacleBounds(placement);
 
         for (var z = 0; z < navigation.Height; z++)
@@ -155,14 +156,45 @@ internal static class NavigationRasterizer
             var center = navigation.CellCenter(cell);
             var surface = terrain.SampleSurface(center);
             heights[index] = terrain.SampleHeight(center);
-            traversalCosts[index] = TerrainSurfaceRules.PathCost(surface);
-            speedMultipliers[index] = TerrainSurfaceRules.SpeedMultiplier(surface);
+            surfacePace[index] = TerrainSurfaceRules.SpeedMultiplier(surface);
             if (!TerrainSurfaceRules.IsPassable(surface))
             {
                 blocked[index] = true;
                 navigation.Transform.CellBounds(cell, out var minimum, out var maximum);
                 obstacleBounds.Add((minimum, maximum));
             }
+        }
+
+        // <b>Slope costs, in bands, and computed from the heights this pass already has.</b> The obvious
+        // way to write it is one <c>SampleGrade</c> per cell in the loop above — and that is a normal, four
+        // clamped vertex fetches and a square root, 1.44M times, which measured as <b>a full extra second
+        // on every rasterise</b>. A rebuild happens every time a tree comes down, so that is a second
+        // charged to felling.
+        //
+        // The heights of the four neighbours are already in an array by now, so a central difference is
+        // four array reads and no trigonometry, and it is the same quantity: the grade of the plane through
+        // the neighbouring cell centres. Bands, rather than a smooth cost, because the router's partition
+        // is rectangles of cells that agree — see SlopeRules.
+        var cellSize = navigation.Transform.CellSize;
+        for (var z = 0; z < navigation.Height; z++)
+        for (var x = 0; x < navigation.Width; x++)
+        {
+            var index = navigation.Transform.Index(new GridCell(x, z));
+            var pace = surfacePace[index];
+            if (pace > 0f)
+            {
+                var west = navigation.Transform.Index(new GridCell(Math.Max(x - 1, 0), z));
+                var east = navigation.Transform.Index(new GridCell(Math.Min(x + 1, navigation.Width - 1), z));
+                var north = navigation.Transform.Index(new GridCell(x, Math.Max(z - 1, 0)));
+                var south = navigation.Transform.Index(new GridCell(x, Math.Min(z + 1, navigation.Height - 1)));
+                var slopeX = (heights[east] - heights[west]) / (2f * cellSize);
+                var slopeZ = (heights[south] - heights[north]) / (2f * cellSize);
+                var grade = MathF.Sqrt(slopeX * slopeX + slopeZ * slopeZ);
+                pace *= SlopeRules.SpeedMultiplier(SlopeRules.BandOf(grade));
+            }
+
+            speedMultipliers[index] = pace;
+            traversalCosts[index] = pace <= 0f ? float.PositiveInfinity : 1f / pace;
         }
 
         // A cliff is an obstacle boundary even though both cells on either side

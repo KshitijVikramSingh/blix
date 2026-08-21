@@ -171,6 +171,22 @@ internal sealed class SimulationWorld
 
 
     /// <summary>How far the rectangle decomposition sits above the flat optimum.</summary>
+    /// <summary>
+    /// How big the routing partition actually is, for a given body radius.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not the same number as <c>RoutingFidelity.RefinedRegions</c>, and mistaking the two hid the
+    /// answer to the question the relief sweep exists to ask.</b> Refined regions are the ones <em>one
+    /// search</em> had to open; this is the whole decomposition. On a map whose partition had quietly
+    /// collapsed to a rectangle per cell, a search that happened to run over uniform ground still reported
+    /// a handful — so the measurement said the partition was fine while the partition was the problem.
+    /// </remarks>
+    internal (int Rectangles, int Crossings, long Bytes) RouteMesh(float agentRadius)
+    {
+        var (mesh, _) = pathService.Mesh(agentRadius);
+        return (mesh.Count, mesh.Crossings.Count, mesh.ResidentBytes);
+    }
+
     internal RoutingFidelity MeasureRectangleFidelity(Vector2 goalPosition, float agentRadius)
     {
         if (!Navigation.TryWorldToCell(Terrain.ClampPosition(goalPosition), out var goal))

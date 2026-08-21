@@ -37,6 +37,61 @@ internal enum TerrainSurface : byte
     Forest,
 }
 
+/// <summary>
+/// What a slope costs, in bands rather than as a curve.
+/// </summary>
+/// <remarks>
+/// <b>Bands, and the banding is the load-bearing decision rather than the numbers in it.</b> §54 named the
+/// risk and the sweep confirmed it: the routing hierarchy's partition is rectangles of uniform ground, and
+/// a continuous per-cell cost gives no two neighbouring cells the same cost, so every rectangle collapses
+/// to a cell. Measured on a 600 m map, one rectangle became 53,133 at three metres of amplitude and 250,796
+/// at twenty-four, with the tick going from 27 ms to 106 and the worst route in the map 52x longer than it
+/// needed to be.
+/// <para>
+/// Quantised, a hillside of even gradient is <em>one</em> band and therefore one region. Five of them,
+/// which is enough that a cart minds a hill and few enough that a hill is a handful of shapes: the
+/// alternative is a cost that is exactly right per cell and a router that cannot use it.
+/// </para>
+/// <para>
+/// The pace numbers are the shape Tobler's hiking function has over this range — about a sixth off at a
+/// tenth grade, and roughly half gone by the time ground is steep enough to scramble. They are a rate and
+/// never a gate: nothing here refuses. What refuses is a <em>step</em> between two cells, which
+/// <see cref="TerrainMap.MaximumStepHeight"/> and <see cref="TerrainMap.MaximumTraversableGrade"/> decide,
+/// and that is the only way relief closes ground.
+/// </para>
+/// <para>
+/// Note what banding does <em>not</em> break: the slowest a band can make ground is slower, never faster,
+/// so the fastest ground on any map is still level road and the routing heuristic stays admissible.
+/// </para>
+/// </remarks>
+internal static class SlopeRules
+{
+    /// <summary>Bands of grade, by their upper bound. The last one runs to the traversable limit.</summary>
+    private static readonly float[] Ceilings = { 0.06f, 0.15f, 0.27f, 0.42f, float.MaxValue };
+
+    /// <summary>What each band does to pace.</summary>
+    private static readonly float[] Pace = { 1.00f, 0.87f, 0.73f, 0.57f, 0.42f };
+
+    public static int Bands => Ceilings.Length;
+
+    /// <summary>Which band a grade falls in.</summary>
+    public static int BandOf(float grade)
+    {
+        for (var band = 0; band < Ceilings.Length; band++)
+        {
+            if (grade <= Ceilings[band]) return band;
+        }
+
+        return Ceilings.Length - 1;
+    }
+
+    /// <summary>How fast a band's ground is, relative to level ground of the same surface.</summary>
+    public static float SpeedMultiplier(int band) => Pace[Math.Clamp(band, 0, Pace.Length - 1)];
+
+    /// <summary>The upper grade of a band, for reporting what a band means.</summary>
+    public static float CeilingOf(int band) => Ceilings[Math.Clamp(band, 0, Ceilings.Length - 1)];
+}
+
 internal static class TerrainSurfaceRules
 {
     /// <summary>Time multiplier of the quickest surface, for heuristic admissibility.</summary>

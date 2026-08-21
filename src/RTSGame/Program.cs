@@ -92,6 +92,17 @@ public static class Program
                 raidExtent, raidMinutes, between, health, seed, args.Contains("--peers")));
         }
 
+        if (args.Contains("--relief"))
+        {
+            var reliefExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var reliefSeed = Value(args, "--seed") is { } s ? uint.Parse(s) : 0x5EED1234u;
+            var amplitudes = ParseFloats(args, "--amplitudes");
+            Environment.Exit(ReliefScenarios.Run(
+                reliefExtent,
+                amplitudes is { Length: > 0 } given ? given : new[] { 0f, 3f, 6f, 12f, 24f },
+                reliefSeed));
+        }
+
         if (args.Contains("--skyprofile"))
         {
             var bearing = Value(args, "--bearing") is { } b ? float.Parse(b) : 37f;
