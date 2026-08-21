@@ -78,6 +78,18 @@ internal readonly record struct Landform(
 
     public float HeightAt(Vector2 position)
     {
+        // <b>Two octaves, and the second is what stops a landform reading as a solid of revolution.</b>
+        // Reported as looking more like the moon's surface than the earth's, which is exactly what a smooth
+        // radial shape is: the moon has no water, so its hills are un-eroded and radially symmetric, and
+        // ours were too. What breaks that on earth is drainage — water running off a hill cuts gullies and
+        // leaves spurs between them, at a scale of a few tens of metres.
+        //
+        // A second octave at forty-five metres does that without modelling any of it, and it is the right
+        // layer for it: at the landform's own scale it would move the whole shape, and below §54's sixty
+        // metre line it would be dressing. The amplitudes are chosen from their slopes rather than their
+        // looks — 2πA/λ each — so the two together spend about a quarter of a grade and the flanks are
+        // budgeted knowing it.
+
         var offset = position - Centre;
         // Into the landform's own frame, so a ridge is a circle in a squashed space.
         var along = MathF.Cos(BearingRadians) * offset.X + MathF.Sin(BearingRadians) * offset.Y;
@@ -152,8 +164,8 @@ internal readonly record struct Landform(
     }
 
     /// <summary>The broad undulation, shared with the plan that owns it.</summary>
-    internal static float Undulate(Vector2 position, uint seed) =>
-        Noise(position * (1f / 92f) + new Vector2(seed % 977 * 0.31f, seed % 613 * 0.57f));
+    internal static float Undulate(Vector2 position, uint seed, float wavelength) =>
+        Noise(position * (1f / wavelength) + new Vector2(seed % 977 * 0.31f, seed % 613 * 0.57f));
 
     /// <summary>Smooth value noise on a unit lattice, in [0,1].</summary>
     /// <remarks>
@@ -288,7 +300,7 @@ internal sealed class ReliefPlan
             Amplitude = amplitudeMetres,
             // A tenth of the amplitude, and never more than a metre and a half — see HeightAt for why that
             // ceiling is a slope budget rather than a preference.
-            Undulation = MathF.Min(1.5f, amplitudeMetres * 0.10f),
+            Undulation = MathF.Min(2.0f, amplitudeMetres * 0.13f),
             // Half a metre of fall per hundred, at the default amplitude: enough to give water a direction
             // and far too little to notice on foot.
             Tilt = amplitudeMetres / extentMeters * 0.5f,
@@ -398,7 +410,11 @@ internal sealed class ReliefPlan
         // taste.</b> §54: relief is a rate and not a gate, so a generated landform may not close ground.
         // Discounted for the radial bite the lobing takes out of the flank and for the tangential
         // steepening it adds along the rim — the second of which cost two rounds of measurement to find.
-        var steepestAllowed = 0.20f + random.Next() * 0.22f;
+        // <b>Steeper than it was, because gentle was reading as "slightly raised ground" rather than as
+        // hills.</b> The budget always allowed up to a 0.42 grade before anything closes; the first pass
+        // spent 0.20 to 0.42 of it and mostly landed low, which over a hundred-metre radius is a swell.
+        // 0.26 to 0.42 is a hillside somebody notices walking up it.
+        var steepestAllowed = 0.26f + random.Next() * 0.16f;
         var lobeRate = lobing * (0.62f * 2f + 0.38f * 3f);
         var grade = steepestAllowed * (1f - lobing) / MathF.Sqrt(1f + lobeRate * lobeRate);
 
@@ -407,13 +423,16 @@ internal sealed class ReliefPlan
         var toEdge = half - MathF.Max(MathF.Abs(at.X), MathF.Abs(at.Y));
         if (toEdge < radius * 0.30f) return;
 
-        var summit = MathF.Max(radius * 0.18f, radius - height / grade);
+        // A tenth rather than a fifth, so a landform can come to a top instead of a plateau. A broad flat
+        // summit is what made these read as mesas — and as the moon, since a flat top ringed by an even
+        // flank is a crater rim seen from the other side.
+        var summit = MathF.Max(radius * 0.10f, radius - height / grade);
         var footprint = (summit + height / (grade * 0.88f)) * (1f + lobing);
         if (footprint > toEdge)
         {
             height *= toEdge / footprint;
             if (height < 1.5f) return;
-            summit = MathF.Max(radius * 0.18f, radius - height / grade);
+            summit = MathF.Max(radius * 0.10f, radius - height / grade);
         }
 
         // Neighbours may share a skirt — that is what makes a range — but not a summit, or two landforms
@@ -445,6 +464,18 @@ internal sealed class ReliefPlan
     /// </remarks>
     public float HeightAt(Vector2 position)
     {
+        // <b>Two octaves, and the second is what stops a landform reading as a solid of revolution.</b>
+        // Reported as looking more like the moon's surface than the earth's, which is exactly what a smooth
+        // radial shape is: the moon has no water, so its hills are un-eroded and radially symmetric, and
+        // ours were too. What breaks that on earth is drainage — water running off a hill cuts gullies and
+        // leaves spurs between them, at a scale of a few tens of metres.
+        //
+        // A second octave at forty-five metres does that without modelling any of it, and it is the right
+        // layer for it: at the landform's own scale it would move the whole shape, and below §54's sixty
+        // metre line it would be dressing. The amplitudes are chosen from their slopes rather than their
+        // looks — 2πA/λ each — so the two together spend about a quarter of a grade and the flanks are
+        // budgeted knowing it.
+
         // <b>Landforms combine by taking the higher, not by adding.</b> Adding them is the obvious reading
         // of "a sum of shapes" and it is the last of the three things that kept closing ground: placement
         // permits neighbours to overlap by nearly half a radius, and where two flanks overlap their
@@ -473,7 +504,9 @@ internal sealed class ReliefPlan
         foreach (var landform in landforms) ground = SmoothMax(ground, landform.HeightAt(position));
         height += ground;
         if (Undulation <= 0f) return height;
-        return height + (Landform.Undulate(position, seed) * 2f - 1f) * Undulation;
+        height += (Landform.Undulate(position, seed, 92f) * 2f - 1f) * Undulation;
+        return height + (Landform.Undulate(position, seed * 2654435761u + 17u, 45f) * 2f - 1f) *
+               Undulation * 0.45f;
     }
 
     /// <summary>

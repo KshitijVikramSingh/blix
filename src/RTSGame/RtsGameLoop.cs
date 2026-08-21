@@ -266,6 +266,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private PipelineHandle smokePipeline;
     private InstanceBuffer smokeBuffer = null!;
     private InstancedBatch smokeBatch = null!;
+    // <b>Contact shadows: one soft dark disc per object where it meets the ground.</b> Its own pipeline for
+    // the same two reasons the smoke needs one — alpha blending and a depth test that does not write — and
+    // its own mesh, a fan whose texture coordinate carries the radius so the fragment stage can fade
+    // without being told where the instance is.
+    private ShaderProgramHandle contactShader;
+    private PipelineHandle contactPipeline;
+    private InstanceBuffer contactBuffer = null!;
+    private InstancedBatch contactBatch = null!;
+    private readonly List<InstanceData> contactInstances = new();
+    private readonly byte[] contactPush = new byte[96];   // viewProj, fade range, camera
+
     private readonly Hearths hearths = new();
     // <b>What was actually sent, so the geometry line cannot describe a frame that was not drawn.</b> It
     // recomputed the fog range from the dial, which stopped being the whole story the moment the mist
@@ -811,6 +822,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         this.graphicsDevice = graphicsDevice;
         vk = (VulkanGraphicsDevice)graphicsDevice;
 
+        // <b>The same stride, with the texture coordinate declared.</b> The world shaders read position and
+        // normal only, so the shared layout stopped at two attributes — and a pipeline whose shader declares
+        // a third fails to create, with an initialisation error that names nothing. The contact decal needs
+        // it: a disc carries its own radius in that channel, which is what lets a fragment fade without
+        // being told where its instance is.
+        var decalLayout = new VertexLayout(
+            Stride: VertexPosition3NormalTexture.Layout.Stride,
+            Attributes: new[]
+            {
+                new VertexAttribute(0, VertexAttributeFormat.Float3, 0),
+                new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
+                new VertexAttribute(2, VertexAttributeFormat.Float2, 6 * sizeof(float)),
+            });
         var meshLayout = new VertexLayout(
             Stride: VertexPosition3NormalTexture.Layout.Stride,
             Attributes: new[]
@@ -872,6 +896,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var skyInterface = new ShaderInterface(
             Slots: Array.Empty<DescriptorSetSlot>(),
             PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 128) });
+        var contactInterface = new ShaderInterface(
+            Slots: new[] { InstanceBuffer.Slot },
+            PushConstants: new[]
+            {
+                new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, contactPush.Length),
+            });
         var smokeInterface = new ShaderInterface(
             Slots: new[] { InstanceBuffer.Slot },
             PushConstants: new[]
@@ -894,7 +924,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             .ResolveColor(hdrHandle)
             .Depth(sceneDepthHandle, LoadOp.Clear, StoreOp.Store)
             .Read(sunShadowHandle)
-            .Shader(skyInterface, shaderInterface, smokeInterface)
+            .Shader(skyInterface, shaderInterface, smokeInterface, contactInterface)
             .Handle;
         graph.Compile();
 
@@ -925,6 +955,22 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 Array.Empty<BlendState>(),
                 RenderTarget: graph.GetPassSurface(shadowPassHandle)),
             "rts-caster");
+        contactShader = vk.CreateShaderProgramFromSpv(
+            Spv("contact.vert.spv"), Spv("contact.frag.spv"), contactInterface, "rts-contact");
+        contactPipeline = vk.CreatePipeline(
+            new PipelineDescription(
+                contactShader,
+                decalLayout,
+                PrimitiveTopology.Triangles,
+                // Tested against the ground it darkens, writing nothing: a disc is not a thing in the
+                // world, it is a mark on the thing under it.
+                DepthState.LessEqualNoWrite,
+                // No culling, because a disc laid on a slope can be seen from either side at a grazing
+                // camera and a one-sided one winks out.
+                RasterizerState.NoCulling,
+                new[] { BlendState.AlphaBlend },
+                RenderTarget: graph.GetPassSurface(scenePassHandle)),
+            "rts-contact");
         smokeShader = vk.CreateShaderProgramFromSpv(
             Spv("smoke.vert.spv"), Spv("smoke.frag.spv"), smokeInterface, "rts-smoke");
         smokePipeline = vk.CreatePipeline(
@@ -986,6 +1032,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         canopyBuffer = new InstanceBuffer(vk, worldShader, "rts-canopies");
         canopyBatch = new InstancedBatch(canopyMesh, worldPipeline, canopyBuffer);
         // The same sphere the greybox canopies use, which is what a puff of smoke wants to be.
+        var discMesh = CreateMesh(vk, "contact-disc", Disc.Vertices, Disc.Indices);
+        contactBuffer = new InstanceBuffer(vk, contactShader, "rts-contact");
+        contactBatch = new InstancedBatch(discMesh, contactPipeline, contactBuffer);
         smokeBuffer = new InstanceBuffer(vk, smokeShader, "rts-smoke");
         smokeBatch = new InstancedBatch(canopyMesh, smokePipeline, smokeBuffer);
         canopyCasterBuffer = new InstanceBuffer(vk, casterShader, "rts-canopies-caster");
@@ -1432,13 +1481,24 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 new GraphicsVector3(normal.X, normal.Y, normal.Z),
                 new GraphicsVector2(u, v));
 
+        // <b>Normals from the height field, not from the triangle.</b> A face normal is right for a crate
+        // and wrong for ground: the ground is split into triangles on an alternating diagonal, so two
+        // triangles covering the same gentle slope get noticeably different normals and the pair reads as a
+        // herringbone. Over a hillside that is a field of diagonal stripes, which is what "elevation changes
+        // have visible artefacts" was seeing — and it is worse the gentler the slope, because the facet
+        // difference stays the same while the slope it is describing shrinks.
+        //
+        // Sampled per vertex instead, so the surface is shaded as the smooth thing it is interpolated from
+        // and a slope reads as a slope. The geometry is unchanged; only what it claims about its own
+        // curvature is.
+        Vector3 GroundNormal(Vector3 at) => terrain.SampleNormal(new Vector2(at.X, at.Z));
+
         void AddTriangle(Vector3 first, Vector3 second, Vector3 third)
         {
-            var normal = Vector3.Normalize(Vector3.Cross(second - first, third - first));
             var start = checked((ushort)vertices.Count);
-            vertices.Add(Vertex(first, normal, 0f, 0f));
-            vertices.Add(Vertex(second, normal, 0f, 1f));
-            vertices.Add(Vertex(third, normal, 1f, 0f));
+            vertices.Add(Vertex(first, GroundNormal(first), 0f, 0f));
+            vertices.Add(Vertex(second, GroundNormal(second), 0f, 1f));
+            vertices.Add(Vertex(third, GroundNormal(third), 1f, 0f));
             indices.Add(start);
             indices.Add((ushort)(start + 1));
             indices.Add((ushort)(start + 2));
@@ -2062,6 +2122,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // of the beam, and packing the palette down to two vec4s keeps its whole layout at 128 bytes.
         var sunLight = new Vector4(new Vector3(sunTint.X, sunTint.Y, sunTint.Z) * light.X, 0f);
         var skyLight = new Vector4(new Vector3(skyAmbient.X, skyAmbient.Y, skyAmbient.Z) * light.Y, 0f);
+        // Faded over the last third of the visible ground, so the far field is not stippled.
+        var contactFade = new Vector4(DetailRadius * 0.55f, DetailRadius, 0f, 0f);
+        MemoryMarshal.Write(contactPush.AsSpan(0, 64), in viewProjection);
+        MemoryMarshal.Write(contactPush.AsSpan(64, 16), in contactFade);
+        MemoryMarshal.Write(contactPush.AsSpan(80, 16), in cameraPosition);
         MemoryMarshal.Write(smokePush.AsSpan(0, 64), in viewProjection);
         MemoryMarshal.Write(smokePush.AsSpan(64, 16), in cameraPosition);
         MemoryMarshal.Write(smokePush.AsSpan(80, 16), in sun);
@@ -2161,6 +2226,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 layer.Batch.End(scope, shadowBinding);
             }
 
+            // After the ground and before anything standing on it: a contact shadow is a mark on the ground,
+            // and the object that casts it draws over its own middle.
+            contactBatch.SetInstances(CollectionsMarshal.AsSpan(contactInstances));
+            contactBatch.End(scope);
+
             propBatch.End(scope, shadowBinding);
             unitBatch.End(scope, shadowBinding);
             canopyBatch.End(scope, shadowBinding);
@@ -2220,6 +2290,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             RebuildTerrainSurfaceLayers();
         }
 
+        contactBatch.Begin(contactPush);
         EnsureGroundChunks();
         foreach (var layers in groundChunks.Values)
         foreach (var layer in layers)
@@ -2236,6 +2307,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Before the nodes are built, because that is what draws the trees and therefore their skirts.
         undergrowthDrawn = 0;
         habitationLights = 0;
+        contactInstances.Clear();
         BuildObstacleInstances();
         BuildNodeInstances();
         BuildNavigationOverlay();
@@ -2406,11 +2478,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 DrawHabitationLights(in node, ground, width, yaw);
                 if (node.IsUnderConstruction)
                 {
+                    AddContactShadow(node.Position, width * 0.62f, 0.55f);
+                }
+
+                if (node.IsUnderConstruction)
+                {
                     DrawSite(in node, ground, width, yaw);
                     continue;
                 }
 
                 var placement = SettlementArt.Placement(node.Position, ground, width, yaw);
+                // A building's contact reaches a little past its walls, which is where the ground is
+                // sheltered from the sky by its eaves.
+                AddContactShadow(node.Position, width * 0.78f, 0.75f);
 
                 switch (node.Kind)
                 {
@@ -2716,6 +2796,47 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// have been cutting for years, closing up into unbroken canopy further out. A part-cut tree standing
     /// smaller means felling is visible while it happens rather than as a tree that is suddenly absent.
     /// </remarks>
+    /// <summary>
+    /// Lays a soft dark disc where something meets the ground.
+    /// </summary>
+    /// <remarks>
+    /// <b>The thing whose absence makes an object look composited rather than placed.</b> A sun shadow says
+    /// where the light is not; it says nothing about the crack between two surfaces being closed off from
+    /// the sky, and that crack is the darkest part of any real scene. Reported as trees and buildings
+    /// looking "placed atop the ground instead of built on it", which is exactly the symptom.
+    /// <para>
+    /// Tilted onto the local slope, because a flat disc on a hillside either buries one edge or floats the
+    /// other. Lifted by a few centimetres for the same reason the wear paths are: coplanar surfaces z-fight
+    /// into speckle. And it fades out with distance, since a far field stippled with dark dots reads as
+    /// noise rather than as grounding.
+    /// </para>
+    /// </remarks>
+    private void AddContactShadow(Vector2 at, float radius, float strength)
+    {
+        if (contactInstances.Count >= MaximumContactShadows) return;
+        var ground = simulation.Terrain.SampleHeight(at);
+        var normal = simulation.Terrain.SampleNormal(at);
+        // Lean the disc onto the ground: x and z stay unit length so the footprint is exact, and only y
+        // leans — the same shear the ground plates used before they were meshed away.
+        var lean = Matrix4x4.Identity;
+        lean.M12 = -normal.X / MathF.Max(0.2f, normal.Y);
+        lean.M32 = -normal.Z / MathF.Max(0.2f, normal.Y);
+        contactInstances.Add(new InstanceData(
+            Matrix4x4.CreateScale(radius, 1f, radius) * lean *
+            Matrix4x4.CreateTranslation(at.X, ground + 0.035f, at.Y),
+            new Vector4(0f, 0f, 0f, strength)));
+    }
+
+    /// <summary>
+    /// How many contact discs may be drawn at once.
+    /// </summary>
+    /// <remarks>
+    /// A ceiling in the same spirit as the grass budget: contact shadows are the second most numerous thing
+    /// in the frame after ground cover, one per tree in view, and the frame should degrade by losing the
+    /// furthest of them rather than by dropping frames.
+    /// </remarks>
+    private const int MaximumContactShadows = 6_000;
+
     /// <summary>Which model in the tree list is the conifer. Last, by construction — see SettlementArt.</summary>
     private const int ConiferSlot = 2;
 
@@ -2771,6 +2892,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             art.Trees[TreeKindAt(tree.Position, tree.Id.Value)].Add(
                 SettlementArt.Placement(
                     tree.Position, ground, width, SettlementArt.FreeYawOf(tree.Id.Value)));
+            // Sized to the canopy rather than the trunk, because what shades the ground is the canopy.
+            AddContactShadow(tree.Position, width * 0.42f, 0.55f);
             DrawUndergrowth(in tree, left);
             return;
         }
@@ -3416,6 +3539,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // thing a player reads at this distance is silhouette and facing, not gait.
             var person = art?.Villager;
             var drawnAsAPerson = person is not null;
+            // A body's own contact, tight and faint. This is the one that matters most for a scene read
+            // close up: a person standing on ground with nothing under their feet reads as hovering
+            // however good the sun shadow is, because a sun shadow at midday is somewhere else entirely.
+            AddContactShadow(position, agent.Radius * 1.5f, 0.42f);
             if (person is not null)
             {
                 // Facing is a direction rather than an angle, which is what the steering layer wants; a
@@ -3577,6 +3704,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // What the dressing is spending, on the same line as what can be seen, because both of the
             // questions they answer are "is this frame drawing more than it needs to".
             $"GROUND {groundChunks.Count} chunks at {GroundRenderStep * simulation.Navigation.Transform.CellSize:F1} m · " +
+            $"CONTACT {contactInstances.Count} · " +
             $"HEIGHT {simulation.Terrain.SampleHeight(cameraFocus):F1} m " +
             $"(grade {simulation.Terrain.SampleGrade(cameraFocus):F2}) · " +
             $"NIGHT {sky.Nightness:F2} (lights {habitationLights}) · " +
