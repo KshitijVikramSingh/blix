@@ -5083,3 +5083,138 @@ Ordered by what the session actually left undone rather than by size:
 4. **Wind that the shadows agree with**, if the sway ever wants to be stronger than 0.25.
 5. And still carried, still unfixed: **the red raid gate leg** — 21 of 24 raiders stuck since the map was
    reshaped in §50.
+
+## 54. Terrain generation, and approaches as the thing being generated
+
+Settled in conversation on 2026-08-21, after §52 named the two layers and handed generation the list it
+gates. Four questions were put and answered, and the answers decide more than they look:
+
+> 1. primarily, a site worth choosing (defensible back) > slope as cost > ridges/other features.
+> 2. Founding is definitely there in gameplay. 3. both technically, barrier first. 4. some here or there
+> but mostly concentrated in places.
+
+And on how it lands:
+
+> free founding, start "around" a plausible site with no placed structures and go will be it — [deposits
+> deplete] certainly — leave the tests/scenarios as they are, on flat ground, migrate them one by one
+> checking green and tweaking once we're done building and validating the relief layer
+
+### The line between the two layers, in metres
+
+Relief's first job is making a site worth choosing. A landform therefore earns its place only if it changes
+**what a site reaches** or **how many ways in it has** — and both of those are numbers this game already
+has. Catchment reach is 66 m off a road and 82 m along one; the settlement is 36 m across.
+
+> A feature smaller than a catchment cannot change what a site reaches, and one narrower than the
+> settlement cannot give it a back. Below that it is dressing, and §52 already says where dressing goes.
+
+So **generation owns features from about 60 m upward and dressing owns everything below**, with no overlap
+and nothing to argue about. That is the same discipline as pricing a tree in cutter-minutes, applied one
+layer earlier — and it is the answer to "how big is a hill" that does not require anybody's eye.
+
+### What is actually being generated is approaches
+
+The load-bearing idea, and the reason the priority order was worth asking for. "A defensible back" is not
+about elevation; it is about **how many directions something can arrive from**, which is countable: sample
+sixteen bearings, ask the router which of them reach the site without crossing closed ground or paying more
+than a margin over the straight line. Four of sixteen open is a strong site; thirteen is an exposed one.
+
+Three things follow, and together they are why this is the frame rather than "add hills":
+
+- **Relief, water and woodland stop being three features and become three ways of closing a bearing.** A
+  ridge closes a sector, a river closes a side, a dense stand closes a lane. They compose without any of
+  them knowing the others exist, and a site's score is one number whatever produced it.
+- **It is the same number the raid needs.** §53's fix centred the arrival ring on the settlement and had it
+  pick a ride; "which bearings are open" is precisely what a raid should be choosing among, and §33's
+  "approaches are knowable" becomes geography rather than a note about rides.
+- **The machinery exists.** The region graph and the flow field can answer it today. Nothing new is needed
+  to *score* a site — only to generate the ground that gets scored.
+
+### Feature scale, from the clock
+
+Walking round a landform has to cost something comparable to arriving at all, or a back is not a back. A
+raid arrives from 120 m in about 59 s at raider pace; a 150 m flank costs about 84 s to walk around at
+villager pace. So **landforms want a frontage of 150–250 m on a 600 m map**, which is a handful of them
+rather than a field of hills.
+
+And an accident worth having: **slope-as-cost needs no drama at all.** Pace drops about a sixth on a tenth
+grade, and a sixth off a 66 m catchment is a larger effect than the road multiplier buys in the other
+direction. So gentle gradient does the second job while a few big landforms do the first, and the two
+priorities barely compete — which was not obvious before the numbers were put side by side.
+
+### The opening: a band and a heap
+
+Free founding, and the start state is what makes it real: **a band of settlers around a plausible site with
+nothing built.** The generator still scores a starting position, but it places no structures, and the player
+may walk them off it before laying the first stone.
+
+The starting stores then have nowhere to be — and the answer is one this game already owns. §17's correction
+made resources physical until consumed, so a starting stock is **a heap on the ground**: a `NodeKind.Pile`,
+belonging to nobody, which the hauling board already collects with no new code. That gives the first
+decision a cost in metres — where the granary goes is measured against where the supplies are lying — and it
+means the opening exercises hauling, which §51 complained had never once been seen in a session.
+
+The rest falls out of rules already written: nobody is housed, so the population does not grow until houses
+exist (§6's "unhoused is a signal, not an error"); there is no store, so there is no catchment, so a
+household draws from nothing until one is built. The founding sequence is not scripted anywhere. It is what
+the existing rules do when you start with nothing.
+
+### The technical risk, named early because it is the one that could sink it
+
+**The router's premise is rectangles of uniform ground.** §-whatever's rebuild — flat field → portals over
+fixed regions → rectangles of uniform ground plus a corner graph — is what took 1200 m with 2,000 agents
+from 571 ms a tick to 5.8. Continuous relief makes every cell's cost differ from its neighbour's, which
+degenerates every rectangle to a single cell and hands back the 571 ms.
+
+So **slope enters the raster quantised**, into a few bands rather than as a float. Rectangles of uniform
+*band* stay large, the corner graph stays small, and the router never learns that the ground now rolls. The
+bands are a look at the economy rather than at the eye: enough of them that a cart minds a hill, few enough
+that a hillside is one region.
+
+Related and deliberately deferred: cost is **per cell, not per edge**, so "steep ground is slow" is
+expressible and "uphill is slower than down" is not. That is most of the effect for a fraction of the
+disturbance, and asymmetric cost is the follow-up if hauling routes turn out to need it — which is a thing
+to measure rather than assume.
+
+### Water and stone in the same frame
+
+**River, barrier first.** Carved down the generated heights to a map edge: deep channel closed, a few
+shallows crossable at a pace penalty. It closes a side, which serves the first job directly, and it is a
+rate everywhere except the channel. Water as a resource — mills, drinking, irrigation — stays open and
+blocks nothing.
+
+**Stone, concentrated and depleting.** Two to four deposits biased toward high ground and steep faces, plus
+a thin scatter. Biasing them to relief is the point: deposits stop being a fourth independent decision, and
+the thing worth holding ends up somewhere with a shape around it. **They deplete**, and largely — a quarry's
+life is measured in years rather than seasons. That is what gives territory an expiry and makes expansion
+inevitable rather than optional, which is the terminus §1's tenure argument asked for; and it is what makes
+a second settlement a decision rather than a duplicate.
+
+### Flat is amplitude zero, which is the whole migration plan
+
+The scenarios stay on flat ground and are migrated one at a time, checking green and tweaking, once relief
+is built and validated downstream. That is only cheap if flat is not a legacy mode:
+
+> **Relief is a parameter, and zero reproduces today's ground exactly.**
+
+Then every existing calibration stays valid, the determinism fingerprint does not move, the year gate keeps
+measuring the thing it was calibrated against, and migrating a scenario is a decision about that scenario
+rather than a flag day. Whatever survives migration gets a controlled and measured variant; whatever does
+not is left as it is, deliberately, on flat ground.
+
+### The order
+
+1. **Heights that mean something** — a generator of a few big landforms from a seed, amplitude as a
+   parameter, slope quantised into bands, cliffs closed. Verified by the router's rectangle count and the
+   tick time holding, and by every existing scenario being identical at amplitude zero.
+2. **Approaches as a measured quantity** — the sixteen-bearing scorer, a profile that prints the
+   distribution across a map and names its best and worst ground, and the raid's bearing choice reading it.
+3. **Founding** — a band, a heap, no structures, and the score of wherever the cursor is.
+4. **Water**, barrier first.
+5. **Stone**, concentrated and depleting.
+6. **Migration**, one scenario at a time.
+
+The render side of relief is a known list rather than a discovery: the wear field is two-dimensional, the
+hearth falloff fades from height zero rather than from the ground, the coarse ground colours a 5 m block
+from one sample, and the shadow box assumes a flat receiver. None is hard, all are real, and doing heights
+first is what stops them being retrofitted twice.
