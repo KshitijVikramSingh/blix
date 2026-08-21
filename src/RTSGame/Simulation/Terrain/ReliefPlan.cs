@@ -3,29 +3,78 @@ using System.Numerics;
 namespace RTSGame.Simulation.Terrain;
 
 /// <summary>
-/// One piece of high ground: where it is, how big, how tall, and how stretched.
+/// One piece of high ground: a flank at a stated grade, a lobed outline, and a summit that is not a lid.
 /// </summary>
 /// <remarks>
-/// A raised cosine rather than a Gaussian or a cone, for two reasons that both matter downstream. Its slope
-/// is zero at the rim and at the summit, so a landform meets the plain without a crease and has a top a
-/// settlement can stand on; and its steepest grade is exactly <c>π·Height / 2·Radius</c>, which means the
-/// question "is this walkable" has an answer in closed form rather than needing a sweep.
+/// <b>Third shape, and the two rejected ones are worth keeping because they fail in opposite directions.</b>
+/// A raised cosine has zero slope at both the rim and the summit, so all of its fall is concentrated in a
+/// thin ring and the average flank is nearly level — a 7.6 m rise over 130 m of radius was reported, quite
+/// correctly, as "less like features and more like paper lying on the ground". A plateau with straight sides
+/// fixes the grade and reads as a mesa: the shape the terrain lab used, and its own author's verdict on
+/// those is that they were barely placeholders.
+/// <para>
+/// So: a flank of a <em>stated</em> grade, because that is what both of relief's jobs need — a slope you can
+/// see and a cost you can price — wrapped in three things that stop it being a solid of revolution.
+/// </para>
+/// <para>
+/// <b>The outline is lobed</b>, by a few harmonics of the bearing, so a landform has spurs running out of it
+/// and re-entrants cut into it rather than a circular skirt. This is the single biggest difference between
+/// something that reads as a hill and something that reads as a dome: real high ground is where erosion has
+/// <em>not</em> removed the rock, and what erosion leaves is fingered.
+/// </para>
+/// <para>
+/// <b>The summit is not a lid.</b> It falls slightly toward its own edges and carries the ridge line along
+/// the landform's bearing, so a stretched landform is a ridge with a crest rather than a runway.
+/// </para>
+/// <para>
+/// The broad undulation that stops all of this reading as arithmetic belongs to the <em>plan</em> rather
+/// than to any one landform, because the plain needs it too — see <see cref="ReliefPlan.HeightAt"/>.
+/// </para>
 /// </remarks>
 internal readonly record struct Landform(
     Vector2 Centre,
-    float Radius,
+    float TopRadius,
+    float FlankGrade,
     float Height,
     float Stretch,
-    float BearingRadians)
+    float BearingRadians,
+    float Lobing,
+    float Seed)
 {
-    /// <summary>The steepest grade anywhere on this landform's flank.</summary>
+    /// <summary>
+    /// Share of the flank spent easing into the plain at one end and onto the summit at the other.
+    /// </summary>
     /// <remarks>
-    /// The derivative of the raised cosine at half radius, divided by the stretch, since stretching a
-    /// landform along a bearing makes its across-bearing flank the steep one.
+    /// Enough that the mesh facets cleanly instead of carrying a hard ring at the rim, and little enough
+    /// that the middle of the flank is a straight line of the stated grade — which is the point of stating
+    /// it.
     /// </remarks>
-    public float SteepestGrade => Radius <= 0.01f
-        ? float.PositiveInfinity
-        : MathF.PI * MathF.Abs(Height) / (2f * Radius) * MathF.Max(1f, Stretch);
+    private const float Ease = 0.12f;
+
+    /// <summary>
+    /// How wide the flank is, which follows from how tall the landform is and how steep it falls.
+    /// </summary>
+    /// <remarks>
+    /// Widened for the easing, so the <em>straight</em> part of the flank has exactly the stated grade
+    /// rather than the average having it.
+    /// </remarks>
+    public float FlankWidth =>
+        MathF.Abs(Height) / (MathF.Max(0.01f, FlankGrade) * (1f - Ease));
+
+    /// <summary>Where the landform stops and the plain begins, before the outline is lobed.</summary>
+    public float BaseRadius => TopRadius + FlankWidth;
+
+    /// <summary>
+    /// The steepest grade this landform can reach, as a bound rather than an identity.
+    /// </summary>
+    /// <remarks>
+    /// The flank's stated grade is what the straight part has, and the lobing steepens it wherever it pulls
+    /// the rim inward — a re-entrant is a short flank, and a short flank of the same height is a steeper
+    /// one. So this is the flank grade divided by the tightest the outline gets, which is an upper bound and
+    /// is what a caller wanting to know "can this close ground" needs. What the map <em>actually</em>
+    /// reaches is measured by the relief sweep's band histogram, and the two are worth comparing.
+    /// </remarks>
+    public float SteepestGrade => FlankGrade / MathF.Max(0.35f, 1f - Lobing);
 
     public float HeightAt(Vector2 position)
     {
@@ -34,9 +83,105 @@ internal readonly record struct Landform(
         var along = MathF.Cos(BearingRadians) * offset.X + MathF.Sin(BearingRadians) * offset.Y;
         var across = -MathF.Sin(BearingRadians) * offset.X + MathF.Cos(BearingRadians) * offset.Y;
         var stretched = new Vector2(along / MathF.Max(0.01f, Stretch), across);
-        var distance = stretched.Length() / MathF.Max(0.01f, Radius);
-        if (distance >= 1f) return 0f;
-        return Height * 0.5f * (1f + MathF.Cos(MathF.PI * distance));
+        var distance = stretched.Length();
+
+        // <b>Spurs and re-entrants, and their frequency is a slope budget rather than a look.</b> Modulating
+        // a rim by bearing steepens the surface <em>tangentially</em>, by the flank's grade times how fast
+        // the rim moves along itself: dR/ds is <c>Lobing × Σ(coefficient × harmonic)</c>, and at harmonics
+        // 3, 5 and 7 that reached 2.07 — a rim sliding two metres outward for every metre along it, which
+        // multiplies the gradient by 2.3 and puts a flank budgeted at 0.42 clean through the traversable
+        // limit. Measured before it was understood: ground kept closing at a stated steepest of 0.35, and
+        // about one and a half per cent of the map going impassable was enough to fragment a single-rectangle
+        // partition into two thousand and take the worst route to 465x optimal.
+        //
+        // Two harmonics rather than three, and the low ones. Same lobing, a quarter of the rate of change:
+        // dR/ds tops out near 0.5 and the gradient multiplier at 1.11, which the budget can afford. What is
+        // given up is the finest fingering, which was never load-bearing — spurs at the scale of a whole
+        // landform are what makes an outline read as eroded.
+        var bearing = MathF.Atan2(stretched.Y, stretched.X);
+        var lobes = 1f + Lobing * (
+            0.62f * MathF.Sin(2f * bearing + Seed * 6.28f) +
+            0.38f * MathF.Sin(3f * bearing - Seed * 11.0f));
+        var baseRadius = BaseRadius * lobes;
+        var topRadius = TopRadius * lobes;
+        if (distance >= baseRadius) return 0f;
+
+        float height;
+        if (distance <= topRadius)
+        {
+            // <b>A crest rather than a lid, and it has to rise above the flank's top rather than dip below
+            // it.</b> The first version fell from the centre to 0.84 of the height at the summit's edge —
+            // while the flank arrives there at 1.0, so the two met in a step of 0.16 of the landform's
+            // whole height. Measured as a grade of 5.25 at twelve metres of amplitude and 8.75 at twenty:
+            // proportional to the height, in the same place every time, and invisible to three rounds of
+            // budgeting the flank because it was not in the flank.
+            //
+            // Domed upward instead, so the summit is the highest point and the join is exact. The dome's
+            // own grade at the join is <c>0.2 x Height / TopRadius</c>, which is a tenth on a typical
+            // landform and part of the same budget the flank spends.
+            var acrossTop = topRadius <= 0.01f ? 0f : distance / topRadius;
+            height = Height * (1f + 0.10f * (1f - acrossTop * acrossTop));
+        }
+        else
+        {
+            var flank = MathF.Max(0.01f, baseRadius - topRadius);
+            height = Height * Rise((baseRadius - distance) / flank);
+        }
+
+        return height;
+    }
+
+    /// <summary>
+    /// Rises from nothing to one: a quadratic ramp, a straight run, a quadratic ramp.
+    /// </summary>
+    /// <remarks>
+    /// The slope of the straight run is <c>1/(1 - Ease)</c> rather than one, which is what makes the three
+    /// pieces meet and the total come to exactly one. Written out because the first version did not: it
+    /// eased both ends with the same expression and was discontinuous at the upper join by <c>Ease</c> — a
+    /// step of a metre or so, which would have shown as a ring round every landform and been blamed on the
+    /// mesh.
+    /// </remarks>
+    private static float Rise(float t)
+    {
+        if (t <= 0f) return 0f;
+        if (t >= 1f) return 1f;
+        var slope = 1f / (1f - Ease);
+        if (t < Ease) return slope * t * t / (2f * Ease);
+        if (t > 1f - Ease) return 1f - slope * (1f - t) * (1f - t) / (2f * Ease);
+        return slope * (t - Ease * 0.5f);
+    }
+
+    /// <summary>The broad undulation, shared with the plan that owns it.</summary>
+    internal static float Undulate(Vector2 position, uint seed) =>
+        Noise(position * (1f / 92f) + new Vector2(seed % 977 * 0.31f, seed % 613 * 0.57f));
+
+    /// <summary>Smooth value noise on a unit lattice, in [0,1].</summary>
+    /// <remarks>
+    /// Written here rather than reached for, because it has to be identical on any machine: this decides
+    /// ground the simulation agrees with, gets fingerprinted and gets saved. Bilinear over a hashed lattice
+    /// with a smoothstep on each axis — one octave is all that is wanted, since §54 gives everything below
+    /// sixty metres to the dressing layer and a second octave would be exactly that.
+    /// </remarks>
+    private static float Noise(Vector2 at)
+    {
+        var x0 = (int)MathF.Floor(at.X);
+        var y0 = (int)MathF.Floor(at.Y);
+        var tx = at.X - x0;
+        var ty = at.Y - y0;
+        tx = tx * tx * (3f - 2f * tx);
+        ty = ty * ty * (3f - 2f * ty);
+        var a = Lattice(x0, y0);
+        var b = Lattice(x0 + 1, y0);
+        var c = Lattice(x0, y0 + 1);
+        var d = Lattice(x0 + 1, y0 + 1);
+        return (a + (b - a) * tx) * (1f - ty) + (c + (d - c) * tx) * ty;
+    }
+
+    private static float Lattice(int x, int y)
+    {
+        var hash = (uint)(x * 374761393) ^ (uint)(y * 668265263);
+        hash = (hash ^ (hash >> 13)) * 1274126177u;
+        return ((hash ^ (hash >> 16)) & 0xFFFFFFu) / (float)0x1000000u;
     }
 }
 
@@ -71,11 +216,18 @@ internal sealed class ReliefPlan
     /// How much of the map high ground covers, before the landforms are allowed to overlap.
     /// </summary>
     /// <remarks>
-    /// Two fifths, so a map has both a landscape and a plain in it. Higher and the open ground between
-    /// landforms disappears, which is where a settlement wants to be; lower and the landforms stop meeting
-    /// each other, which is what makes a valley rather than a scattering of mounds.
+    /// Higher than the two fifths this started at, and the reason is measurable rather than aesthetic: at
+    /// two fifths on a 600 m map the five landforms sat 176 to 459 m from the settlement, so the nearest
+    /// high ground was beyond the detail radius and the played map was a plain with hills rumoured beyond
+    /// the fog. A map wants both a landscape and a plain in it, but the plain has to be a place <em>in</em>
+    /// the landscape rather than the whole of it.
+    /// <para>
+    /// This is a stopgap for the same reason the number is arbitrary: §54's founding milestone chooses a
+    /// site <em>against</em> the terrain, and once it does, whether high ground is near the settlement stops
+    /// being luck and becomes the player's decision.
+    /// </para>
     /// </remarks>
-    private const float Coverage = 0.40f;
+    private const float Coverage = 0.55f;
 
     /// <summary>Radius of a landform, in metres, and the reason it is this and not a share of the map.</summary>
     /// <remarks>
@@ -126,7 +278,11 @@ internal sealed class ReliefPlan
         var random = new Deterministic(seed);
         var plan = new ReliefPlan
         {
+            seed = seed,
             Amplitude = amplitudeMetres,
+            // A tenth of the amplitude, and never more than a metre and a half — see HeightAt for why that
+            // ceiling is a slope budget rather than a preference.
+            Undulation = MathF.Min(1.5f, amplitudeMetres * 0.10f),
             // Half a metre of fall per hundred, at the default amplitude: enough to give water a direction
             // and far too little to notice on foot.
             Tilt = amplitudeMetres / extentMeters * 0.5f,
@@ -150,33 +306,126 @@ internal sealed class ReliefPlan
             var tooClose = false;
             foreach (var placed in plan.landforms)
             {
-                if (Vector2.Distance(placed.Centre, at) >= (placed.Radius + radius) * 0.55f) continue;
+                if (Vector2.Distance(placed.Centre, at) >= (placed.BaseRadius + radius) * 0.55f) continue;
                 tooClose = true;
                 break;
             }
 
             if (tooClose) continue;
+            // <b>The height and the grade are chosen, and the flank's width follows.</b> Round the other way
+            // — a height and a radius, with the grade falling out — is what produced landforms invisible at
+            // any amplitude: a tall shape spread over a wide radius has no slope in it anywhere.
+            var tall = amplitudeMetres * (0.55f + random.Next() * 0.90f);
+            // How fingered the outline is. Never zero, because a circular hill is the tell.
+            var lobing = 0.14f + random.Next() * 0.22f;
+            // <b>The steepest this landform is allowed to get anywhere, and it is a budget rather than a
+            // taste.</b> Measured: flanks chosen freely reached a grade of 0.73 against a traversable limit
+            // of 0.82, and once lobing and undulation had their say about two per cent of the map closed —
+            // which punched thousands of holes in a partition that had been one rectangle, took the worst
+            // route on the map to 640x optimal and the tick to 227 ms. §54's own rule, applied to itself:
+            // relief is a rate and not a gate, so a generated landform may not close ground, and the way to
+            // guarantee that is to spend a budget rather than to check afterwards.
+            //
+            // The budget is what the <em>tightest</em> part of the flank gets. Lobing pulls the rim inward,
+            // and a shorter flank of the same height is a steeper one, so the nominal grade is the budget
+            // discounted by how much the outline is allowed to bite.
+            var steepestAllowed = 0.20f + random.Next() * 0.22f;
+            // Discounted for the radial bite the lobing takes out of the flank, and for the tangential
+            // steepening it adds along the rim — see HeightAt, where the second of those cost two rounds of
+            // measurement to find.
+            var lobeRate = lobing * (0.62f * 2f + 0.38f * 3f);
+            var grade = steepestAllowed * (1f - lobing) /
+                        MathF.Sqrt(1f + lobeRate * lobeRate);
             plan.landforms.Add(new Landform(
                 at,
-                radius,
-                // Taller shapes are the wider ones, so a landscape has a scale to it rather than spikes.
-                amplitudeMetres * (0.45f + random.Next() * 0.85f) * (radius / radiusMetres),
+                // What is left of the radius once the flank has taken its share: a landform of a given
+                // footprint is a broad summit with a short flank or a small summit with a long one.
+                MathF.Max(radius * 0.18f, radius - tall / grade),
+                grade,
+                tall,
                 // Most are round-ish; a few stretch into ridges, which is what gives a site a back rather
                 // than a hummock behind it.
                 1f + random.Next() * random.Next() * 2.4f,
-                random.Next() * MathF.Tau));
+                random.Next() * MathF.Tau,
+                lobing,
+                random.Next()));
         }
 
         return plan;
     }
 
-    /// <summary>Ground height at a position, before anything is dug into it.</summary>
+    /// <summary>
+    /// Ground height at a position: the tilt, the landforms, and the undulation under both.
+    /// </summary>
+    /// <remarks>
+    /// <b>The undulation is what stops a plain being a table, and its amplitude is chosen from its
+    /// slope rather than from how it looks.</b> A sine of amplitude <c>A</c> and wavelength <c>λ</c> has a
+    /// peak grade of <c>2πA/λ</c>, so at the 92 m wavelength used here every metre of amplitude is worth
+    /// about 0.07 of grade — which is a real share of the budget landforms are already spending, and the
+    /// reason the first version of this (fourteen per cent of a landform's height, so nearly three metres
+    /// on a tall one) contributed a fifth of a grade nobody had accounted for.
+    /// <para>
+    /// Capped at a metre and a half for that reason, and applied to the whole map rather than to the
+    /// landforms, because the ground between hills is the part that most needs to not look computed.
+    /// </para>
+    /// </remarks>
     public float HeightAt(Vector2 position)
     {
+        // <b>Landforms combine by taking the higher, not by adding.</b> Adding them is the obvious reading
+        // of "a sum of shapes" and it is the last of the three things that kept closing ground: placement
+        // permits neighbours to overlap by nearly half a radius, and where two flanks overlap their
+        // <em>gradients</em> add, so two hills budgeted at a third of a grade each meet at two thirds. That
+        // survived two rounds of tightening the budget because the budget was per landform and the breach
+        // was between them.
+        //
+        // Taking the higher bounds the gradient by the steepest single landform, which is what the budget
+        // was always meant to guarantee. It is also the better shape: two overlapping hills become a range
+        // with a saddle between them rather than one taller hill where they meet, and a range with saddles
+        // in it is what high ground actually looks like — and what gives an approach a pass to come through.
+        //
+        // Softened, because a plain maximum creases where two flanks cross and a crease is a line of steep
+        // ground exactly where the saddle should be gentlest.
+        //
+        // <b>And the softening has to have compact support, which the obvious form does not.</b> The first
+        // version was log-sum-exp normalised to be exact where the two are equal — and that is wrong at the
+        // other end: it subtracts a constant wherever one term dominates, so every landform contributing
+        // <em>nothing</em> at a position still shifted the total by 1.31 m, chaining to nearly eight metres
+        // over six of them and switching on across the two metres the blend acts over. Measured as a
+        // steepest grade of <b>4.91</b> on a map whose steepest flank was 0.33: a cliff assembled entirely
+        // out of a normalisation constant, and three rounds of tightening the flank budget could never have
+        // found it because it was not in the flanks.
         var height = -Vector2.Dot(position, Downhill) * Tilt;
-        foreach (var landform in landforms) height += landform.HeightAt(position);
-        return height;
+        var ground = 0f;
+        foreach (var landform in landforms) ground = SmoothMax(ground, landform.HeightAt(position));
+        height += ground;
+        if (Undulation <= 0f) return height;
+        return height + (Landform.Undulate(position, seed) * 2f - 1f) * Undulation;
     }
+
+    /// <summary>
+    /// The higher of two heights, with the crease between them rounded off.
+    /// </summary>
+    /// <remarks>
+    /// Exactly the maximum once the two differ by more than the blend, which is the property that matters:
+    /// a landform far from here must not be able to change the ground here at all. The rounding is a
+    /// quadratic worth a quarter of the blend where the two are equal, and its own contribution to the
+    /// gradient is bounded by half the difference between the two flanks' — so a saddle is gentler than the
+    /// flanks that form it rather than steeper, which is what a saddle is.
+    /// </remarks>
+    private static float SmoothMax(float first, float second)
+    {
+        const float blend = 1.6f;
+        var high = MathF.Max(first, second);
+        var gap = MathF.Abs(first - second);
+        if (gap >= blend) return high;
+        var closeness = 1f - gap / blend;
+        return high + blend * 0.25f * closeness * closeness;
+    }
+
+    /// <summary>Metres of broad undulation over the whole map, above and below whatever else is there.</summary>
+    public float Undulation { get; private init; }
+
+    private uint seed;
 
     /// <summary>The steepest grade any of this plan's flanks reaches.</summary>
     /// <remarks>
@@ -213,7 +462,8 @@ internal sealed class ReliefPlan
     public string Describe() => landforms.Count == 0
         ? "flat"
         : $"{landforms.Count} landforms, amplitude {Amplitude:F1} m, steepest flank " +
-          $"{SteepestGrade:F2} grade, fall {Tilt * 100f:F2} m per 100 m";
+          $"{SteepestGrade:F2} grade against a limit of {TerrainMap.MaximumTraversableGrade:F2}, " +
+          $"undulation {Undulation:F1} m, fall {Tilt * 100f:F2} m per 100 m";
 
     /// <summary>
     /// A repeatable sequence from a seed, because generation is the simulation's own truth.

@@ -1060,7 +1060,7 @@ internal static class SettlementScenarios
     /// with half its catchment off the map.
     /// </para>
     /// </remarks>
-    private static Vector2 CornerSite(float extentMeters) =>
+    public static Vector2 CornerSite(float extentMeters) =>
         new(-extentMeters * 0.25f, -extentMeters * 0.22f);
 
     private const float FieldKeepOut = 16f;

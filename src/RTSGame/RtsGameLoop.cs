@@ -720,6 +720,25 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             plan.Apply(simulation.Terrain);
             simulation.RebuildTerrainNavigation();
             Console.WriteLine($"  relief: {plan.Describe()}");
+            // Where the landforms actually are, relative to where the settlement is going. A generator
+            // that scatters shapes over a map says nothing about whether any of them is near the place the
+            // player will be looking at, and "the ground looks flat" is the same observation as "the site
+            // landed on the plain" until somebody prints both.
+            var site = SettlementScenarios.CornerSite(worldExtentMeters);
+            foreach (var landform in plan.Landforms)
+            {
+                Console.WriteLine(
+                    $"    landform at ({landform.Centre.X:F0}, {landform.Centre.Y:F0}) — " +
+                    $"{landform.Height:F1} m tall, summit {landform.TopRadius:F0} m, " +
+                    $"flank {landform.FlankWidth:F0} m at grade {landform.FlankGrade:F2}, " +
+                    $"stretch {landform.Stretch:F1}, lobing {landform.Lobing:F2}, " +
+                    $"{Vector2.Distance(landform.Centre, site) - landform.BaseRadius:F0} m " +
+                    "of plain between it and the site");
+            }
+
+            Console.WriteLine(
+                $"    the site itself stands at {simulation.Terrain.SampleHeight(site):F2} m, " +
+                $"grade {simulation.Terrain.SampleGrade(site):F3}");
         }
 
         SettlementScenarios.Populate(
@@ -3822,6 +3841,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"FOG {sentFog.X:F0}-{sentFog.Y:F0} m at {sentFog.Z:F2} · " +
             // What the dressing is spending, on the same line as what can be seen, because both of the
             // questions they answer are "is this frame drawing more than it needs to".
+            $"HEIGHT {simulation.Terrain.SampleHeight(cameraFocus):F1} m " +
+            $"(grade {simulation.Terrain.SampleGrade(cameraFocus):F2}) · " +
             $"GROUND {groundChunks.Count} chunks + {platedGround.Count} plates · " +
             $"NIGHT {sky.Nightness:F2} (lights {habitationLights}) · " +
             $"SMOKE {hearths.Drawn} from {hearths.Chimneys}";

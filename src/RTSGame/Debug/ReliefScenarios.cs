@@ -144,14 +144,35 @@ internal static class ReliefScenarios
         // an obstacle course.
         var closed = 0;
         var cells = 0;
+        var offMap = 0;
+        var steepest = 0f;
+        var steepestAt = Vector2.Zero;
         var grid = world.Navigation.Transform;
         for (var z = 0; z < grid.Height; z += 4)
         for (var x = 0; x < grid.Width; x += 4)
         {
             cells++;
             var at = grid.Origin + new Vector2(x + 0.5f, z + 0.5f) * grid.CellSize;
-            if (!world.Terrain.IsBodyTraversable(at, AgentDefaults.Radius)) closed++;
+            var grade = world.Terrain.SampleGrade(at);
+            if (grade > steepest)
+            {
+                steepest = grade;
+                steepestAt = at;
+            }
+
+            if (world.Terrain.IsBodyTraversable(at, AgentDefaults.Radius)) continue;
+            closed++;
+            // <b>Why it closed, not just that it did.</b> Three rounds of tightening the grade budget left
+            // this figure unmoved, which should have been the signal that it was never measuring grade:
+            // being outside the map is the other way to fail, and a body's whole outline has to fit.
+            if (!world.Terrain.Contains(at, AgentDefaults.Radius + 0.35f)) offMap++;
         }
+
+        Console.WriteLine(
+            $"    {amplitude,5:F1} m: {closed} closed of {cells} sampled, of which {offMap} are off the " +
+            $"map edge; steepest measured grade {steepest:F2} at " +
+            $"({steepestAt.X:F0}, {steepestAt.Y:F0}) against a limit of " +
+            $"{TerrainMap.MaximumTraversableGrade:F2}");
 
         // <b>What share of the map each slope band holds.</b> Without it the sweep cannot tell "the
         // partition survived because the banding worked" from "the partition survived because the whole map
