@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix;
@@ -1348,6 +1349,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private readonly Dictionary<(int X, int Z), List<TerrainSurfaceLayer>> groundChunks = new();
 
+    /// <summary>Chunks staged this frame, so the draw pass submits exactly what was staged.</summary>
+    private readonly List<(int X, int Z)> drawnChunks = new();
+
     /// <summary>The plates actually drawn this frame: the ones no meshed chunk has covered.</summary>
 
     /// <summary>
@@ -1461,6 +1465,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         reliefFloor = lowest;
         reliefSpan = highest - lowest;
+        RebuildCountryField();
     }
 
     private static (VertexPosition3NormalTexture[] Vertices, ushort[] Indices) BuildTerrainSurfaceMesh(
@@ -1771,6 +1776,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
 
         var frame = (float)Math.Clamp(time.Delta, 0.0, 0.25);
+        // Smoothed over about half a second, so the figure is readable rather than a flicker.
+        frameMilliseconds += (time.Delta * 1000.0 - frameMilliseconds) * 0.08;
         // Before anything that reads the light: the shadow box, the sky and the world shader all take their
         // sun from here and a disagreement between them is a scene lit from one place and shadowed from
         // another.
@@ -2126,7 +2133,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var sunLight = new Vector4(new Vector3(sunTint.X, sunTint.Y, sunTint.Z) * light.X, 0f);
         var skyLight = new Vector4(new Vector3(skyAmbient.X, skyAmbient.Y, skyAmbient.Z) * light.Y, 0f);
         // Faded over the last third of the visible ground, so the far field is not stippled.
-        var contactFade = new Vector4(DetailRadius * 0.55f, DetailRadius, 0f, 0f);
+        var contactFade = new Vector4(ContactRadiusMetres * 0.62f, ContactRadiusMetres, 0f, 0f);
         MemoryMarshal.Write(contactPush.AsSpan(0, 64), in viewProjection);
         MemoryMarshal.Write(contactPush.AsSpan(64, 16), in contactFade);
         MemoryMarshal.Write(contactPush.AsSpan(80, 16), in cameraPosition);
@@ -2182,9 +2189,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var treeDrawRadius = DetailRadius;
         treeDrawRadiusSquared = treeDrawRadius * treeDrawRadius;
 
+        // <b>Render-side phase timings, because the simulation's own breakdown cannot see any of this.</b>
+        // A frame went from sixty-odd to five and the sim tick had not moved, which says the cost is in
+        // building the frame rather than in stepping the world — and this session has been wrong three times
+        // guessing which part of a frame is expensive.
+        var buildClock = Stopwatch.StartNew();
         BuildTerrainInstances();
+        var terrainMs = buildClock.Elapsed.TotalMilliseconds;
+        buildClock.Restart();
         BuildAgentInstances((float)time.Total);
+        var agentMs = buildClock.Elapsed.TotalMilliseconds;
+        buildClock.Restart();
         DrawScatter();
+        var scatterMs = buildClock.Elapsed.TotalMilliseconds;
+        buildClock.Restart();
         DrawColliderOverlay();
 
         var props = CollectionsMarshal.AsSpan(propInstances);
@@ -2223,8 +2241,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         graph.Pass(scenePassHandle, scope =>
         {
             fullscreen.Draw(scope, skyPipeline, Array.Empty<ShaderTextureBinding>(), skyPush);
-            foreach (var layers in groundChunks.Values)
-            foreach (var layer in layers)
+            foreach (var chunk in drawnChunks)
+            foreach (var layer in groundChunks[chunk])
             {
                 layer.Batch.End(scope, shadowBinding);
             }
@@ -2279,6 +2297,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                     frame.Height);
             });
 
+        buildPhases = (terrainMs, agentMs, scatterMs, buildClock.Elapsed.TotalMilliseconds);
+
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames)
         {
             host.RequestClose();
@@ -2295,11 +2315,26 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         contactBatch.Begin(contactPush);
         EnsureGroundChunks();
-        foreach (var layers in groundChunks.Values)
-        foreach (var layer in layers)
+        // <b>Built everywhere, drawn where it can be seen.</b> Meshing the whole map is cheap — it happens
+        // once per terrain change and the chunks are kept — but <em>drawing</em> it all is not: measured,
+        // the ground was 204,800 of the scene pass's 276,315 triangles, three quarters of the frame's
+        // geometry, most of it behind the camera or beyond the fog. The distinction is the one this file
+        // keeps having to relearn: what a thing costs to prepare and what it costs to submit are different
+        // budgets.
+        drawnChunks.Clear();
+        var chunkMetres = GroundChunkCells * simulation.Navigation.Transform.CellSize;
+        foreach (var (chunk, layers) in groundChunks)
         {
-            layer.Batch.Begin(worldPush);
-            layer.Batch.Add(Matrix4x4.Identity, layer.Color);
+            var minimum = simulation.Navigation.Transform.Origin + new Vector2(chunk.X, chunk.Z) * chunkMetres;
+            // Against the nearest corner, so a chunk the camera stands on the edge of is drawn.
+            var nearest = Vector2.Clamp(cameraFocus, minimum, minimum + new Vector2(chunkMetres));
+            if (Vector2.DistanceSquared(nearest, cameraFocus) > DetailRadius * DetailRadius) continue;
+            drawnChunks.Add(chunk);
+            foreach (var layer in layers)
+            {
+                layer.Batch.Begin(worldPush);
+                layer.Batch.Add(Matrix4x4.Identity, layer.Color);
+            }
         }
 
         overlayBatch.Begin(worldPush);
@@ -2814,9 +2849,22 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// noise rather than as grounding.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// How far out contact shadows are drawn, in metres.
+    /// </summary>
+    /// <remarks>
+    /// <b>Much shorter than the detail radius, because a contact shadow is a close-up effect that costs by
+    /// the pixel.</b> Six thousand alpha-blended discs was the cap being hit at a wide zoom, and every one
+    /// of them is overdraw over ground already shaded — while at two hundred metres the thing it grounds is
+    /// a few pixels tall and the shadow under it is invisible. Ninety metres, faded over the last third, so
+    /// the effect is paid for exactly where it can be seen.
+    /// </remarks>
+    private const float ContactRadiusMetres = 90f;
+
     private void AddContactShadow(Vector2 at, float radius, float strength)
     {
         if (contactInstances.Count >= MaximumContactShadows) return;
+        if (Vector2.DistanceSquared(at, cameraFocus) > ContactRadiusMetres * ContactRadiusMetres) return;
         var ground = simulation.Terrain.SampleHeight(at);
         var normal = simulation.Terrain.SampleNormal(at);
         // Lean the disc onto the ground: x and z stay unit length so the footprint is exact, and only y
@@ -2885,7 +2933,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // ground the classifier is asked about rather than by second-guessing its answer — so the mixing
         // happens in the same units the rule is written in.
         var wobble = new Vector2(jitter - 0.5f, (hash & 0xFFu) / 255f - 0.5f) * 22f;
-        var range = Biomes.At(simulation.Terrain, at + wobble, reliefFloor, MathF.Max(1f, reliefSpan)) switch
+        var range = CountryAt(at + wobble) switch
         {
             Biome.Scree => Conifer,
             Biome.Moor => Twisted,
@@ -2899,6 +2947,109 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// <summary>How much height the map has, and where its floor is. Recomputed when the terrain moves.</summary>
     private float reliefSpan;
     private float reliefFloor;
+
+    /// <summary>
+    /// The country, the hollows and the cover density, sampled once per terrain change instead of per frame.
+    /// </summary>
+    /// <remarks>
+    /// <b>Measured: the scatter was costing 68 ms a frame on its own, and the frame had been sixty.</b> The
+    /// cause was not the drawing — the triangle count barely moved — it was that ground cover walks forty
+    /// thousand candidate cells at a two hundred metre standoff, and both the relief coupling and the biome
+    /// classifier were sampling the height field for every one of them, before anything had decided whether
+    /// that cell places so much as a tuft. About eight hundred thousand bilinear height reads a frame to
+    /// answer questions whose answers change over tens of metres.
+    /// <para>
+    /// So they are answered on an eight metre grid, once, when the terrain moves — five and a half thousand
+    /// cells against forty thousand queries a frame, and the queries become an array index. Eight metres
+    /// because that is finer than anything here varies at: a biome is a feature of a hillside and a hollow
+    /// is twenty metres across by definition.
+    /// </para>
+    /// <para>
+    /// Nearest-cell for the biome, because it is a discrete choice and the species jitter already ragged its
+    /// edges; bilinear for the two continuous fields, because banding in cover density would show.
+    /// </para>
+    /// </remarks>
+    private const float CountryCellMetres = 8f;
+
+    private byte[] countryBiome = Array.Empty<byte>();
+    private float[] countryHollow = Array.Empty<float>();
+    private float[] countryCover = Array.Empty<float>();
+    private int countryCells;
+
+    private void RebuildCountryField()
+    {
+        var extent = simulation.ExtentMeters;
+        countryCells = Math.Max(2, (int)MathF.Ceiling(extent / CountryCellMetres) + 1);
+        var total = countryCells * countryCells;
+        if (countryBiome.Length != total)
+        {
+            countryBiome = new byte[total];
+            countryHollow = new float[total];
+            countryCover = new float[total];
+        }
+
+        var span = MathF.Max(1f, reliefSpan);
+        for (var z = 0; z < countryCells; z++)
+        for (var x = 0; x < countryCells; x++)
+        {
+            var at = CountryPosition(x, z);
+            var index = z * countryCells + x;
+            countryBiome[index] = (byte)Biomes.At(simulation.Terrain, at, reliefFloor, span);
+            countryCover[index] = GroundCoverRelief(at, out var hollow);
+            countryHollow[index] = hollow;
+        }
+    }
+
+    private Vector2 CountryPosition(int x, int z) =>
+        new(
+            x * CountryCellMetres - simulation.ExtentMeters * 0.5f,
+            z * CountryCellMetres - simulation.ExtentMeters * 0.5f);
+
+    private Biome CountryAt(Vector2 at)
+    {
+        if (countryCells == 0) return Biome.Meadow;
+        var local = (at + new Vector2(simulation.ExtentMeters * 0.5f)) / CountryCellMetres;
+        var x = Math.Clamp((int)MathF.Round(local.X), 0, countryCells - 1);
+        var z = Math.Clamp((int)MathF.Round(local.Y), 0, countryCells - 1);
+        return (Biome)countryBiome[z * countryCells + x];
+    }
+
+    /// <summary>Cover density and hollowness here, interpolated so neither bands at the grid.</summary>
+    private float CoverAt(Vector2 at, out float hollow)
+    {
+        hollow = 0f;
+        if (countryCells == 0) return 1f;
+        var local = (at + new Vector2(simulation.ExtentMeters * 0.5f)) / CountryCellMetres;
+        var x0 = Math.Clamp((int)MathF.Floor(local.X), 0, countryCells - 2);
+        var z0 = Math.Clamp((int)MathF.Floor(local.Y), 0, countryCells - 2);
+        var tx = Math.Clamp(local.X - x0, 0f, 1f);
+        var tz = Math.Clamp(local.Y - z0, 0f, 1f);
+
+        float Sample(float[] field)
+        {
+            var a = field[z0 * countryCells + x0];
+            var b = field[z0 * countryCells + x0 + 1];
+            var c = field[(z0 + 1) * countryCells + x0];
+            var d = field[(z0 + 1) * countryCells + x0 + 1];
+            return (a + (b - a) * tx) * (1f - tz) + (c + (d - c) * tx) * tz;
+        }
+
+        hollow = Sample(countryHollow);
+        return Sample(countryCover);
+    }
+
+    /// <summary>Milliseconds the last frame spent building each part of itself.</summary>
+    private (double Terrain, double Agents, double Scatter, double Overlay) buildPhases;
+
+    /// <summary>
+    /// Wall clock for a whole frame, smoothed.
+    /// </summary>
+    /// <remarks>
+    /// The number the report is actually about. A build breakdown says where the time inside a frame goes and
+    /// says nothing about whether the frame is fast — and this session lost a factor of twelve without any
+    /// figure on screen that would have shown it, which is the argument for putting one there.
+    /// </remarks>
+    private double frameMilliseconds;
 
     private void DrawTree(in EconomyNode tree)
     {
@@ -3024,7 +3175,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private void DrawScatter()
     {
         if (art is null || art.Scatter.Length < 4) return;
-        var radius = MathF.Sqrt(treeDrawRadiusSquared);
+        // <b>Ground cover is drawn where it can be seen and not to the horizon.</b> §52 called it the most
+        // numerous thing in the scene and the least missed, and the numbers agree: the candidate grid is a
+        // square of the radius over the spacing, so it grows as the square — at a two hundred and forty
+        // metre standoff that is forty thousand cells walked to decide the fate of a tuft of grass, ten
+        // milliseconds of it, for cover that is well under a pixel at the far end.
+        //
+        // A hundred and ten metres is past anything a player is looking at when they can see individual
+        // plants at all, and it takes the grid to about eight thousand cells. The trees keep the full detail
+        // radius, because a tree at two hundred metres is still a tree.
+        var radius = MathF.Min(MathF.Sqrt(treeDrawRadiusSquared), ScatterRadiusMetres);
         // Tighter than the trees, because a tuft of grass is a few centimetres and stops being a tuft well
         // before a trunk stops being a trunk.
         const float spacing = 2.4f;
@@ -3042,7 +3202,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var at = new Vector2(
                 (cx + 0.15f + ScatterHash(cx, cz, 1) * 0.7f) * spacing,
                 (cz + 0.15f + ScatterHash(cx, cz, 2) * 0.7f) * spacing);
-            if (Vector2.DistanceSquared(at, cameraFocus) > treeDrawRadiusSquared) continue;
+            if (Vector2.DistanceSquared(at, cameraFocus) > radius * radius) continue;
+
+            // <b>Patches, not a per-cell coin toss.</b> A uniform probability spreads vegetation evenly at
+            // whatever rate it is given, and evenly is the one thing ground cover never is — it grows in
+            // runs and drifts, thick here and bare a few metres away. Two octaves of lattice noise give
+            // that for nothing: the coarse one decides where a patch is at all and the finer one varies
+            // its density inside itself, so a patch has a length and an edge that nobody authored.
+            // <b>Cheapest and most selective first, and the order is worth a good deal.</b> Ground cover
+            // walks forty thousand candidate cells at a wide zoom and places a few thousand, so every test
+            // done before the one that rejects nine cells in ten is done nine times more often than it needs
+            // to be. The patch noise is both the cheapest and the most selective, so it goes first, and the
+            // terrain bounds, the occupancy lookup and the country field all move behind it.
+            var patch = PatchDensity(at);
+            if (patch <= 0.05f) continue;
             if (!simulation.Terrain.Contains(at)) continue;
             if (simulation.TryGetPlacementCell(at, out var cell) &&
                 simulation.Placement.IsOccupied(cell))
@@ -3050,12 +3223,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 continue;
             }
 
-            // <b>Patches, not a per-cell coin toss.</b> A uniform probability spreads vegetation evenly at
-            // whatever rate it is given, and evenly is the one thing ground cover never is — it grows in
-            // runs and drifts, thick here and bare a few metres away. Two octaves of lattice noise give
-            // that for nothing: the coarse one decides where a patch is at all and the finer one varies
-            // its density inside itself, so a patch has a length and an edge that nobody authored.
-            var patch = PatchDensity(at) * GroundCoverRelief(at, out var hollow);
+            patch *= CoverAt(at, out var hollow);
             if (patch <= 0.04f) continue;
 
             // Denser under trees, which the terrain already knows: forest cover marks every cell with two
@@ -3073,8 +3241,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // <b>Which country this is, which decides what grows here.</b> Two grass species rather than
             // one is most of the read: common grass is pasture, wispy grass is moor and poor ground, and a
             // map where those two swap over as the land rises is a map with regions in it.
-            var biome = Biomes.At(
-                simulation.Terrain, at, reliefFloor, MathF.Max(1f, reliefSpan));
+            var biome = CountryAt(at);
             var (shortGrass, tallGrass, third) = biome switch
             {
                 // Wiry stuff, and the tall form is what stands up on an exposed top.
@@ -3165,6 +3332,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var slope = MathF.Min(1f, terrain.SampleGrade(at) / 0.24f);
         return Math.Clamp(1f + strength * (0.34f * hollow - 0.55f * slope), 0.12f, 1.4f);
     }
+
+    /// <summary>How far out ground cover is drawn, in metres. See DrawScatter for why it is not the
+    /// detail radius.</summary>
+    private const float ScatterRadiusMetres = 110f;
 
     /// <summary>
     /// Where each kind of ground cover sits in the scatter list. Ordered by construction — see SettlementArt.
@@ -3763,7 +3934,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"FOG {sentFog.X:F0}-{sentFog.Y:F0} m at {sentFog.Z:F2} · " +
             // What the dressing is spending, on the same line as what can be seen, because both of the
             // questions they answer are "is this frame drawing more than it needs to".
-            $"GROUND {groundChunks.Count} chunks at {GroundRenderStep * simulation.Navigation.Transform.CellSize:F1} m · " +
+            $"FRAME {frameMilliseconds:F1} ms · " +
+            $"BUILD terrain {buildPhases.Terrain:F1} agents {buildPhases.Agents:F1} " +
+            $"scatter {buildPhases.Scatter:F1} overlay {buildPhases.Overlay:F1} ms · " +
+            $"GROUND {drawnChunks.Count} of {groundChunks.Count} chunks at " +
+            $"{GroundRenderStep * simulation.Navigation.Transform.CellSize:F1} m · " +
             $"CONTACT {contactInstances.Count} · " +
             $"HEIGHT {simulation.Terrain.SampleHeight(cameraFocus):F1} m " +
             $"(grade {simulation.Terrain.SampleGrade(cameraFocus):F2}) · " +
