@@ -374,22 +374,12 @@ internal sealed class LookSettings
     [Tune(0.5, 1.8, Label = "contrast", Group = "grade")]
     public float Contrast = 1.05f;
 
-    /// <summary>How far apart the two checker greens are, as a share of their brightness.</summary>
-    /// <remarks>
-    /// The checker is a scale reference: perceived speed on an untextured plane comes almost entirely from
-    /// crossing edges, so a walking body on a flat colour looks like it is sliding. Turned up it is a
-    /// chessboard, which is the single most conspicuous "this is a prototype" signal a frame can carry.
-    /// </remarks>
-    [Tune(0.0, 0.30, Label = "checker contrast", Group = "ground")]
-    public float CheckerContrast = 0.03f;
-
-    /// <summary>Random variation between neighbouring ground blocks, as a share of brightness.</summary>
-    /// <remarks>
-    /// A regular grid of two colours reads as tiling however faint it is, because the eye finds the
-    /// period. The same faint contrast with the tiles individually varied reads as ground.
-    /// </remarks>
-    [Tune(0.0, 0.30, Label = "ground variation", Group = "ground")]
-    public float GroundVariation = 0.06f;
+    // <b>The checker and the per-block variation are gone with the ground they described.</b> Both were
+    // properties of a ground made of one flat plate every few metres: the checker gave an untextured plane
+    // the crossing edges that make a walking body look like it is walking, and the variation stopped the
+    // checker reading as tiling. Ground meshed from the height field has its own edges and its own shading,
+    // and §52's macro colour variation in the world shader does the rest — so these two were describing a
+    // representation that no longer exists.
 
     /// <summary>How far from what the camera is looking at trees are still drawn, in metres.</summary>
     /// <remarks>

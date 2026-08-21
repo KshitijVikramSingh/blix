@@ -432,10 +432,20 @@ internal sealed class ReliefPlan
     /// </summary>
     /// <remarks>
     /// Exactly the maximum once the two differ by more than the blend, which is the property that matters:
-    /// a landform far from here must not be able to change the ground here at all. The rounding is a
-    /// quadratic worth a quarter of the blend where the two are equal, and its own contribution to the
-    /// gradient is bounded by half the difference between the two flanks' — so a saddle is gentler than the
-    /// flanks that form it rather than steeper, which is what a saddle is.
+    /// a landform far from here must not be able to change the ground here at all.
+    /// <para>
+    /// <b>And flat where the two are equal, which the obvious quadratic is not.</b> The rounding is a
+    /// function of <c>|first - second|</c>, and an absolute value has a corner at zero — so any rounding
+    /// whose slope is non-zero there inherits the corner and lays a crease along the exact line where two
+    /// landforms meet. Which is the worst possible place for one: that line is the saddle, the way through
+    /// between two hills, and a crease there is a ridge across the pass.
+    /// </para>
+    /// <para>
+    /// <c>(1 - t²)²</c> is flat at both ends — zero slope at <c>t = 0</c> kills the corner, zero slope and
+    /// zero value at <c>t = 1</c> keeps the compact support — so the saddle comes out smooth in the height
+    /// <em>and</em> in the slope. It is still worth a quarter of the blend where the two are equal, so a
+    /// saddle is gentler than the flanks that form it rather than steeper, which is what a saddle is.
+    /// </para>
     /// </remarks>
     private static float SmoothMax(float first, float second)
     {
@@ -443,8 +453,9 @@ internal sealed class ReliefPlan
         var high = MathF.Max(first, second);
         var gap = MathF.Abs(first - second);
         if (gap >= blend) return high;
-        var closeness = 1f - gap / blend;
-        return high + blend * 0.25f * closeness * closeness;
+        var t = gap / blend;
+        var bump = 1f - t * t;
+        return high + blend * 0.25f * bump * bump;
     }
 
     /// <summary>Metres of broad undulation over the whole map, above and below whatever else is there.</summary>
