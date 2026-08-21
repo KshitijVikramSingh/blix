@@ -196,6 +196,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// <summary>Metres of relief the village is generated with. Zero is the flat ground everything is
     /// calibrated against — see §54's migration plan.</summary>
     private readonly float reliefAmplitudeMetres;
+
+    /// <summary>Camera standoff to open at, so a wide-zoom frame can be measured. Zero keeps the default.</summary>
+    private readonly float startingZoomMetres;
     private LiveMovementTrace? movementTrace;
     private SimulationWorld simulation;
     private readonly SelectionController selection = new();
@@ -278,6 +281,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private PipelineHandle contactPipeline;
     private InstanceBuffer contactBuffer = null!;
     private InstancedBatch contactBatch = null!;
+    // <b>The far level of detail for trees, and the reason a screenful of them stopped being nine
+    // seconds.</b> Measured at a wide zoom: 9,330 trees in view at 5,940 triangles each is 55M triangles a
+    // frame, drawn again for the shadow map, for a frame time of 125 ms. Eight triangles each is 75k.
+    private InstanceBuffer crossBuffer = null!;
+    private InstancedBatch crossBatch = null!;
+    private InstanceBuffer crossCasterBuffer = null!;
+    private InstancedBatch crossCaster = null!;
+    private readonly List<InstanceData> crossInstances = new();
+
     private readonly List<InstanceData> contactInstances = new();
     private readonly byte[] contactPush = new byte[96];   // viewProj, fade range, camera
 
@@ -290,6 +302,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private readonly Vector4[] hearthLights = new Vector4[Hearths.MaximumLights];
     private int hearthLightCount;
     private int habitationLights;
+    private int treesDrawn;
+    private (int Instances, long Triangles) stagedLoad;
     // viewProj, camPos, sunDir, sunLight, skyLight, fog, haze. As with the world block, this length is
     // also the declared push-constant range, so the two cannot disagree.
     private readonly byte[] smokePush = new byte[160];
@@ -599,6 +613,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     public RtsGameLoop(
         int exitAfterFrames,
         float reliefAmplitudeMetres = 0f,
+        float startingZoomMetres = 0f,
         bool traceMovement = false,
         bool startTerrainLab = false,
         bool debugAll = false,
@@ -634,6 +649,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             new GroupSettings());
         this.exitAfterFrames = exitAfterFrames;
         this.reliefAmplitudeMetres = reliefAmplitudeMetres;
+        this.startingZoomMetres = startingZoomMetres;
         movementTrace = traceMovement || debugAll ? new LiveMovementTrace() : null;
         if (debugAll)
         {
@@ -755,7 +771,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         SettlementScenarios.Populate(
             simulation, farms: 8, woodcutters: 4, carts: 5, wagons: 0, ringRadius: 30f, centre: founded);
         cameraFocus = founded;
-        cameraDistance = cameraDistanceTarget = 78f;
+        cameraDistance = cameraDistanceTarget = startingZoomMetres > 0f ? startingZoomMetres : 78f;
         Console.WriteLine(
             $"  settlement: {simulation.Nodes.LiveCount} nodes, {simulation.Agents.LiveCount} people, " +
             $"{simulation.Date}");
@@ -1036,6 +1052,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         canopyBuffer = new InstanceBuffer(vk, worldShader, "rts-canopies");
         canopyBatch = new InstancedBatch(canopyMesh, worldPipeline, canopyBuffer);
         // The same sphere the greybox canopies use, which is what a puff of smoke wants to be.
+        var crossMesh = CreateMesh(vk, "foliage-cross", FoliageCross.Vertices, FoliageCross.Indices);
+        crossBuffer = new InstanceBuffer(vk, worldShader, "rts-far-trees");
+        crossBatch = new InstancedBatch(crossMesh, worldPipeline, crossBuffer);
+        crossCasterBuffer = new InstanceBuffer(vk, casterShader, "rts-far-trees-caster");
+        crossCaster = new InstancedBatch(crossMesh, casterPipeline, crossCasterBuffer);
         var discMesh = CreateMesh(vk, "contact-disc", Disc.Vertices, Disc.Indices);
         contactBuffer = new InstanceBuffer(vk, contactShader, "rts-contact");
         contactBatch = new InstancedBatch(discMesh, contactPipeline, contactBuffer);
@@ -1049,6 +1070,22 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // a building (a lit window, a lantern, a chimney) has to be placed against numbers from the asset
         // rather than against a unit cube. Printed once at load: it is four lines, and it is the difference
         // between "the lights float" and knowing why.
+        // <b>What the art costs, per model, because "it is the trees" is a claim about triangles.</b> A
+        // frame that is slow zoomed out is slow in proportion to what is in view, and what is in view is
+        // thousands of trees — so the per-tree cost is the number the whole question turns on and it was
+        // nowhere on screen.
+        var treeTriangles = 0;
+        foreach (var tree in art.Trees) treeTriangles += tree.TriangleCount;
+        var coverTriangles = 0;
+        foreach (var cover in art.Scatter) coverTriangles += cover.TriangleCount;
+        var underTriangles = 0;
+        foreach (var under in art.Undergrowth) underTriangles += under.TriangleCount;
+        Console.WriteLine(
+            $"  art: trees {treeTriangles / MathF.Max(1, art.Trees.Length):F0} triangles each " +
+            $"({art.Trees.Length} models), cover {coverTriangles / MathF.Max(1, art.Scatter.Length):F0}, " +
+            $"undergrowth {underTriangles / MathF.Max(1, art.Undergrowth.Length):F0}, " +
+            $"villager {art.Villager?.TriangleCount ?? 0}, granary {art.Granary.TriangleCount}");
+
         foreach (var (name, model) in new[]
                  {
                      ("house", art.HouseFor(0)), ("granary", art.Granary), ("depot", art.Depot),
@@ -1915,6 +1952,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private void PanCamera(float deltaSeconds)
     {
+        // <b>Not on a measurement run.</b> Edge panning follows the pointer, and a --frames run opens a
+        // window under whatever the mouse was doing — so four hundred frames later the camera is in an empty
+        // corner and the numbers describe nothing. Measured that way once: 62 trees and no chimneys in view
+        // on a map with nine thousand trees, and a frame time to match.
+        if (exitAfterFrames > 0) return;
         var x = (panRight ? 1f : 0f) - (panLeft ? 1f : 0f);
         var z = (panUp ? 1f : 0f) - (panDown ? 1f : 0f);
 
@@ -2220,6 +2262,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         unitCaster.SetInstances(units);
         canopyCaster.Begin(shadowPush);
         canopyCaster.SetInstances(canopies);
+        var crosses = CollectionsMarshal.AsSpan(crossInstances);
+        crossBatch.Begin(worldPush);
+        crossBatch.SetInstances(crosses);
+        crossCaster.Begin(shadowPush);
+        crossCaster.SetInstances(crosses);
         art?.Stage(worldPush, shadowPush);
 
         // Shadow depth: only the solids. The ground is a receiver and not a caster — a large
@@ -2230,6 +2277,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             propCaster.End(scope);
             unitCaster.End(scope);
             canopyCaster.End(scope);
+            crossCaster.End(scope);
             art?.DrawShadow(scope);
         });
 
@@ -2255,6 +2303,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             propBatch.End(scope, shadowBinding);
             unitBatch.End(scope, shadowBinding);
             canopyBatch.End(scope, shadowBinding);
+            crossBatch.End(scope, shadowBinding);
             art?.DrawScene(scope, shadowBinding);
             // After every opaque thing and before the annotations: smoke blends over a finished frame, and
             // an overlay is a mark on the picture rather than something in the world for smoke to drift in
@@ -2298,6 +2347,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             });
 
         buildPhases = (terrainMs, agentMs, scatterMs, buildClock.Elapsed.TotalMilliseconds);
+        stagedLoad = art?.StagedLoad() ?? (0, 0L);
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames)
         {
@@ -2344,6 +2394,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         art?.Begin();
         // Before the nodes are built, because that is what draws the trees and therefore their skirts.
         undergrowthDrawn = 0;
+        treesDrawn = 0;
+        crossInstances.Clear();
         habitationLights = 0;
         contactInstances.Clear();
         BuildObstacleInstances();
@@ -3057,7 +3109,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var left = MathF.Max(0.12f, tree.Stock.Wood / MathF.Max(1f, Woodland.WoodPerTree));
         // Varied by id rather than by a random draw, so the same tree is the same tree across a save.
         var spread = 0.86f + (tree.Id.Value * 37 % 13) / 13f * 0.40f;
-        if (art is not null)
+        var away = Vector2.DistanceSquared(tree.Position, cameraFocus);
+        if (art is not null && away <= TreeModelRadiusMetres * TreeModelRadiusMetres)
         {
             // A tree is drawn wider than the trunk it is routed around, because a canopy overhangs and
             // nothing walks into a canopy. Its footprint in the simulation is the trunk.
@@ -3067,7 +3120,27 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                     tree.Position, ground, width, SettlementArt.FreeYawOf(tree.Id.Value)));
             // Sized to the canopy rather than the trunk, because what shades the ground is the canopy.
             AddContactShadow(tree.Position, width * 0.42f, 0.55f);
+            treesDrawn++;
             DrawUndergrowth(in tree, left);
+            return;
+        }
+
+        if (art is not null)
+        {
+            // <b>Far trees are a cross of quads, and this is the whole of the fix.</b> A full model past a
+            // hundred metres is six thousand triangles describing something forty pixels tall; eight
+            // triangles describe it as well and the difference is a factor of seven hundred and forty. The
+            // canopy colour comes from the same broadleaf-or-conifer question the near models answer, so a
+            // wood does not change species at the transition — only how many triangles it spends saying so.
+            var kind = TreeKindAt(tree.Position, tree.Id.Value);
+            var far = NodeFootprint.TreeHalfExtent * 2f * 3.1f * spread * MathF.Sqrt(left);
+            var tall = far * (kind >= Conifer.First && kind < Conifer.First + Conifer.Count ? 1.9f : 1.35f);
+            crossInstances.Add(new InstanceData(
+                Matrix4x4.CreateScale(far, tall, far) *
+                Matrix4x4.CreateRotationY(SettlementArt.FreeYawOf(tree.Id.Value)) *
+                Matrix4x4.CreateTranslation(tree.Position.X, ground, tree.Position.Y),
+                FarCanopyColour(kind, tree.Id.Value)));
+            treesDrawn++;
             return;
         }
 
@@ -3331,6 +3404,41 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         var slope = MathF.Min(1f, terrain.SampleGrade(at) / 0.24f);
         return Math.Clamp(1f + strength * (0.34f * hollow - 0.55f * slope), 0.12f, 1.4f);
+    }
+
+    /// <summary>
+    /// How far out trees are drawn as their models rather than as a cross of quads, in metres.
+    /// </summary>
+    /// <remarks>
+    /// The near band is the one that costs: a model is six thousand triangles and a cross is eight, so the
+    /// frame's tree budget is very nearly this radius squared. Measured at a wide zoom, ninety metres kept
+    /// fourteen hundred models in view and 8.3M of the frame's 8.67M triangles — the whole remaining cost
+    /// was the near band, and it goes as the square, so fifty-five metres is a third of it.
+    /// <para>
+    /// Fifty-five is also about where a tree stops being something you look <em>at</em> and becomes part of
+    /// the mass you look <em>through</em>: it is inside the contact-shadow radius and inside the ground
+    /// cover's, so the near band is the band where everything else is detailed too.
+    /// </para>
+    /// </remarks>
+    private const float TreeModelRadiusMetres = 55f;
+
+    /// <summary>The colour a far tree's cross is drawn in, by species.</summary>
+    /// <remarks>
+    /// Matched to the kit's own leaf colours rather than to the old greybox canopy, so the transition is a
+    /// change of shape and not of palette — and varied a little per trunk, because a wood of one flat green
+    /// reads as a painted backdrop.
+    /// </remarks>
+    private static Vector4 FarCanopyColour(int kind, int id)
+    {
+        var tint = kind switch
+        {
+            >= 3 and < 6 => new Vector3(0.040f, 0.088f, 0.048f),
+            >= 6 and < 8 => new Vector3(0.095f, 0.100f, 0.045f),
+            >= 8 => new Vector3(0.070f, 0.062f, 0.052f),
+            _ => new Vector3(0.075f, 0.135f, 0.040f),
+        };
+        var vary = 0.86f + (id * 29 % 11) / 11f * 0.28f;
+        return new Vector4(tint * vary, SettlementArt.MaterialClass.Foliage);
     }
 
     /// <summary>How far out ground cover is drawn, in metres. See DrawScatter for why it is not the
@@ -3937,6 +4045,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"FRAME {frameMilliseconds:F1} ms · " +
             $"BUILD terrain {buildPhases.Terrain:F1} agents {buildPhases.Agents:F1} " +
             $"scatter {buildPhases.Scatter:F1} overlay {buildPhases.Overlay:F1} ms · " +
+            $"LOAD {stagedLoad.Instances:N0} instances = {stagedLoad.Triangles / 1000L:N0}k triangles · " +
+            $"TREES {treesDrawn - crossInstances.Count} near + {crossInstances.Count} far + " +
+            $"{undergrowthDrawn} under · " +
             $"GROUND {drawnChunks.Count} of {groundChunks.Count} chunks at " +
             $"{GroundRenderStep * simulation.Navigation.Transform.CellSize:F1} m · " +
             $"CONTACT {contactInstances.Count} · " +

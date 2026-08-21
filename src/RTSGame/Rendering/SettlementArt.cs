@@ -80,6 +80,31 @@ internal sealed class SettlementArt : IDisposable
     /// <summary>Loose stone: an outcrop on scree, and the one piece of ground cover that is not alive.</summary>
     public PropModel[] Rocks { get; private init; } = Array.Empty<PropModel>();
 
+    /// <summary>
+    /// What the art staged this frame, as instances and as the triangles they actually amount to.
+    /// </summary>
+    /// <remarks>
+    /// <b>The number the render statistics do not report.</b> A pass counter sums each draw's mesh once,
+    /// which for instanced geometry is the cost of <em>one</em> of them — so a frame drawing four thousand
+    /// trees of six thousand triangles each reported a couple of hundred thousand triangles and looked
+    /// cheap. It was twenty-eight million. Anything that draws the same mesh many times needs the product,
+    /// not the sum.
+    /// </remarks>
+    public (int Instances, long Triangles) StagedLoad()
+    {
+        var instances = 0;
+        long triangles = 0;
+        foreach (var model in owned)
+        {
+            var count = model.InstanceCount;
+            if (count <= 0) continue;
+            instances += count;
+            triangles += (long)count * model.TriangleCount;
+        }
+
+        return (instances, triangles);
+    }
+
     public PropModel Granary { get; }
 
     public PropModel Depot { get; }

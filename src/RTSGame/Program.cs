@@ -295,9 +295,15 @@ public static class Program
             ? float.Parse(rate)
             : RtsGameLoop.DefaultCompression;
         var relief = Value(args, "--relief-amplitude") is { } metres ? float.Parse(metres) : 0f;
+        // <b>A starting zoom, so a frame can be measured at the standoff somebody is complaining about.</b>
+        // Everything the detail radius scales — how much ground is meshed, how many trees are drawn, how far
+        // the cover reaches — is a function of the camera's distance, so "it is slow zoomed out" is not
+        // reproducible from a run that starts zoomed in.
+        var zoom = Value(args, "--zoom") is { } standoff ? float.Parse(standoff) : 0f;
         var game = new RtsGameLoop(
             exitAfterFrames,
             relief,
+            zoom,
             traceMovement,
             startTerrainLab,
             debugAll,
