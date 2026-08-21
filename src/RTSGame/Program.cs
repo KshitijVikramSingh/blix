@@ -294,8 +294,10 @@ public static class Program
         var compression = Value(args, "--compression") is { } rate
             ? float.Parse(rate)
             : RtsGameLoop.DefaultCompression;
+        var relief = Value(args, "--relief-amplitude") is { } metres ? float.Parse(metres) : 0f;
         var game = new RtsGameLoop(
             exitAfterFrames,
+            relief,
             traceMovement,
             startTerrainLab,
             debugAll,

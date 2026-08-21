@@ -188,6 +188,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private static readonly int[] StressScenarioCounts = { 50, 200, 500, 30 };
 
     private readonly int exitAfterFrames;
+
+    /// <summary>Metres of relief the village is generated with. Zero is the flat ground everything is
+    /// calibrated against — see §54's migration plan.</summary>
+    private readonly float reliefAmplitudeMetres;
     private LiveMovementTrace? movementTrace;
     private SimulationWorld simulation;
     private readonly SelectionController selection = new();
@@ -588,6 +592,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public RtsGameLoop(
         int exitAfterFrames,
+        float reliefAmplitudeMetres = 0f,
         bool traceMovement = false,
         bool startTerrainLab = false,
         bool debugAll = false,
@@ -622,6 +627,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             new RoutingSettings(),
             new GroupSettings());
         this.exitAfterFrames = exitAfterFrames;
+        this.reliefAmplitudeMetres = reliefAmplitudeMetres;
         movementTrace = traceMovement || debugAll ? new LiveMovementTrace() : null;
         if (debugAll)
         {
@@ -703,6 +709,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         simulation = new SimulationWorld(worldExtentMeters);
         simulation.StartAtSeconds(3100f);
         selection.Clear();
+        // <b>Relief before the settlement, because the settlement is laid out against the ground.</b> Trees
+        // are refused on ground nobody can stand on and the site is chosen from the map, so generating the
+        // land after populating it would be describing a different world from the one the people were put
+        // in. Off by default until §54's milestones are through: this is the parameter the whole migration
+        // plan rests on, and zero is exactly the ground every calibrated scenario was measured against.
+        if (reliefAmplitudeMetres > 0f)
+        {
+            var plan = ReliefPlan.For(worldExtentMeters, 0x5EED1234u, reliefAmplitudeMetres);
+            plan.Apply(simulation.Terrain);
+            simulation.RebuildTerrainNavigation();
+            Console.WriteLine($"  relief: {plan.Describe()}");
+        }
+
         SettlementScenarios.Populate(
             simulation, farms: 8, woodcutters: 4, carts: 5, wagons: 0, ringRadius: 30f);
         cameraFocus = Vector2.Zero;
@@ -1241,6 +1260,142 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private bool UsesFineGround =>
         simulation.Navigation.Width * simulation.Navigation.Height <= FineGroundCellLimit;
 
+    /// <summary>
+    /// Side of a meshed ground chunk, in cells.
+    /// </summary>
+    /// <remarks>
+    /// <b>Bounded by the index buffer, and it is the only reason chunks exist.</b> The ground mesh emits
+    /// six unshared vertices per cell — flat normals per triangle, which is the faceted look this greybox
+    /// wants — and indexes them with a <c>ushort</c>. So one mesh can carry 65,535/6 = 10,922 cells, and a
+    /// 600 m map at half-metre cells is 1.44M of them: 132x over, which is why the whole fine path used to
+    /// switch itself off above 21,000 cells and hand a 600 m map to flat plates instead.
+    /// <para>
+    /// So a chunk has to stay under 10,922 <em>render</em> cells, and the worst case is the one that decides
+    /// it: a chunk entirely of one surface puts every cell in one mesh. Sixty-four render cells a side is
+    /// 4,096 of them and 24,576 vertices, inside the limit with room to spare.
+    /// <para>
+    /// Two arithmetic mistakes worth leaving on the record, because the checked cast caught both on the
+    /// first chunk built rather than as a corrupted mesh. 128 navigation cells was tried on arithmetic that
+    /// assumed a parity split this path deliberately drops — 98,304 vertices. And meshing cell for cell at
+    /// all put 1.8M triangles on screen at a two hundred metre standoff, which is what the render step is
+    /// for.
+    /// </para>
+    /// </remarks>
+    private const int GroundChunkRenderCells = 64;
+
+    /// <summary>Navigation cells per render cell: how coarsely the ground is drawn against how finely it is
+    /// walked. Four is two metres at the half-metre grid.</summary>
+    private const int GroundRenderStep = 4;
+
+    private const int GroundChunkCells = GroundChunkRenderCells * GroundRenderStep;
+
+    private readonly Dictionary<(int X, int Z), List<TerrainSurfaceLayer>> groundChunks = new();
+
+    /// <summary>The plates actually drawn this frame: the ones no meshed chunk has covered.</summary>
+    private readonly List<InstanceData> platedGround = new();
+
+    /// <summary>
+    /// Meshes the ground the camera can actually see, and lets plates cover the rest.
+    /// </summary>
+    /// <remarks>
+    /// <b>Height belongs where it says something — and now it can say it everywhere close enough to read.</b>
+    /// The fine ground has always been the right representation and could never be afforded on a played map,
+    /// because one mesh cannot index it. Chunked, it can: a chunk near the camera is meshed at the
+    /// navigation grid's own resolution, so the ground the player is looking at follows the terrain exactly,
+    /// with no resolution mismatch between what the simulation walks on and what the renderer draws. Beyond
+    /// the detail radius the sloped plates take over, and they are hazed by then.
+    /// <para>
+    /// Camera-dependent, which is a thing this file deliberately removed once — the detail patches used to
+    /// rebuild fourteen thousand blocks whenever the camera crossed one. The difference is caching: a chunk
+    /// is built once and kept, so crossing a boundary costs one chunk rather than the map, and a terrain
+    /// edit is the only thing that throws them all away.
+    /// </para>
+    /// <para>
+    /// The parity checker is dropped here. It exists as a scale reference on an untextured plane, and ground
+    /// that visibly rolls is its own scale reference — while keeping it would double the draw count of the
+    /// most numerous thing in the frame for a contrast of three per cent.
+    /// </para>
+    /// </remarks>
+    private void EnsureGroundChunks()
+    {
+        if (vk is null || UsesFineGround) return;
+
+        var transform = simulation.Navigation.Transform;
+        var chunkMetres = GroundChunkCells * transform.CellSize;
+        var reach = DetailRadius;
+        var wanted = new HashSet<(int X, int Z)>();
+        var columns = (transform.Width + GroundChunkCells - 1) / GroundChunkCells;
+        var rows = (transform.Height + GroundChunkCells - 1) / GroundChunkCells;
+        var span = (int)MathF.Ceiling(reach / chunkMetres);
+        var atX = (int)MathF.Floor((cameraFocus.X - transform.Origin.X) / chunkMetres);
+        var atZ = (int)MathF.Floor((cameraFocus.Y - transform.Origin.Y) / chunkMetres);
+        for (var z = atZ - span; z <= atZ + span; z++)
+        for (var x = atX - span; x <= atX + span; x++)
+        {
+            if (x < 0 || z < 0 || x >= columns || z >= rows) continue;
+            // Against the chunk's nearest corner rather than its centre, so a chunk the camera is looking
+            // across the edge of is meshed rather than left as a plate.
+            var minimum = transform.Origin + new Vector2(x, z) * chunkMetres;
+            var nearest = Vector2.Clamp(cameraFocus, minimum, minimum + new Vector2(chunkMetres));
+            if (Vector2.Distance(nearest, cameraFocus) > reach) continue;
+            wanted.Add((x, z));
+        }
+
+        foreach (var chunk in groundChunks.Keys.ToArray())
+        {
+            if (wanted.Contains(chunk)) continue;
+            vk.WaitIdle();
+            DisposeGroundChunk(chunk);
+        }
+
+        foreach (var chunk in wanted)
+        {
+            if (groundChunks.ContainsKey(chunk)) continue;
+            groundChunks[chunk] = BuildGroundChunk(chunk.X, chunk.Z);
+            // One chunk a frame. A camera dropped across the map wants thirty-odd of them and building
+            // them together is a visible hitch; building them over half a second is not, because the
+            // plates underneath are already drawing the same ground.
+            break;
+        }
+    }
+
+    private List<TerrainSurfaceLayer> BuildGroundChunk(int chunkX, int chunkZ)
+    {
+        var transform = simulation.Navigation.Transform;
+        var fromX = chunkX * GroundChunkCells;
+        var fromZ = chunkZ * GroundChunkCells;
+        var toX = Math.Min(fromX + GroundChunkCells - 1, transform.Width - 1);
+        var toZ = Math.Min(fromZ + GroundChunkCells - 1, transform.Height - 1);
+        var layers = new List<TerrainSurfaceLayer>();
+        foreach (var surface in Enum.GetValues<TerrainSurface>())
+        {
+            var (vertices, indices) = BuildTerrainSurfaceMesh(
+                simulation.Terrain, surface, -1, fromX, fromZ, toX, toZ, GroundRenderStep);
+            if (indices.Length == 0) continue;
+            var name = $"ground-{chunkX}-{chunkZ}-{surface.ToString().ToLowerInvariant()}";
+            var mesh = CreateMesh(vk, name, vertices, indices);
+            var buffer = new InstanceBuffer(vk, worldShader, $"{name}-instance");
+            layers.Add(new TerrainSurfaceLayer(
+                mesh,
+                buffer,
+                new InstancedBatch(mesh, worldPipeline, buffer),
+                TerrainClassed(TerrainColor(surface))));
+        }
+
+        return layers;
+    }
+
+    private void DisposeGroundChunk((int X, int Z) chunk)
+    {
+        if (!groundChunks.Remove(chunk, out var layers)) return;
+        foreach (var layer in layers)
+        {
+            layer.Buffer.Dispose();
+            vk!.DestroyVertexBuffer(layer.Mesh.VertexBuffer);
+            vk.DestroyIndexBuffer(layer.Mesh.IndexBuffer);
+        }
+    }
+
     private void RebuildTerrainSurfaceLayers()
     {
         if (vk is null) return;
@@ -1252,12 +1407,23 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         renderedTerrain = simulation.Terrain;
         renderedTerrainRevision = simulation.Terrain.Revision;
+        // The chunks describe ground that has just changed shape, so they go with it. A felling is a
+        // terrain edit, so this is also the cost of cutting a tree: the chunks near the camera are rebuilt
+        // one a frame while the plates cover for them.
+        foreach (var chunk in groundChunks.Keys.ToArray()) DisposeGroundChunk(chunk);
         if (!UsesFineGround) return;
 
         foreach (var surface in Enum.GetValues<TerrainSurface>())
         for (var parity = 0; parity < 2; parity++)
         {
-            var (vertices, indices) = BuildTerrainSurfaceMesh(simulation.Terrain, surface, parity);
+            var (vertices, indices) = BuildTerrainSurfaceMesh(
+                simulation.Terrain,
+                surface,
+                parity,
+                0,
+                0,
+                simulation.Navigation.Transform.Width - 1,
+                simulation.Navigation.Transform.Height - 1);
             if (indices.Length == 0) continue;
             var name = $"terrain-{surface.ToString().ToLowerInvariant()}-{parity}";
             var mesh = CreateMesh(vk, name, vertices, indices);
@@ -1279,7 +1445,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private static (VertexPosition3NormalTexture[] Vertices, ushort[] Indices) BuildTerrainSurfaceMesh(
         TerrainMap terrain,
         TerrainSurface surface,
-        int parity)
+        int parity,
+        int fromX,
+        int fromZ,
+        int toX,
+        int toZ,
+        int step = 1)
     {
         var vertices = new List<VertexPosition3NormalTexture>();
         var indices = new List<ushort>();
@@ -1304,19 +1475,34 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             indices.Add((ushort)(start + 2));
         }
 
-        for (var z = 0; z < grid.Height; z++)
-        for (var x = 0; x < grid.Width; x++)
+        // <b>The render grid is not the navigation grid, and that is the whole of what makes this
+        // affordable.</b> Meshed cell for cell, the ground the camera can see at a two hundred metre
+        // standoff is 1.8M triangles — measured, on the first version of this. The navigation grid is half a
+        // metre because that is the resolution a body's clearance is decided at; nobody can see half a
+        // metre from up there. A step of four samples the same height field every two metres, which is
+        // sixteen times fewer triangles for a surface whose <em>shape</em> is unchanged — the heights come
+        // from the same interpolation the simulation walks on, so the mesh sits on the ground rather than
+        // near it.
+        //
+        // What the step does cost is colour resolution: a render cell takes its surface from the cell at
+        // its own corner, so a road narrower than a few render cells would come out ragged. Nothing
+        // generates roads on a played map yet (§52), and forest cover is painted the same colour as grass
+        // deliberately, so today every chunk is one layer of grass. When roads arrive they will want either
+        // a finer step near the camera or colour carried per vertex, and this is the note that says so.
+        for (var z = fromZ; z <= toZ; z += step)
+        for (var x = fromX; x <= toX; x += step)
         {
             var cell = new GridCell(x, z);
-            if (terrain.Surface(cell) != surface || (x + z) % 2 != parity) continue;
+            if (terrain.Surface(cell) != surface) continue;
+            if (parity >= 0 && (x + z) % 2 != parity) continue;
             var x0 = grid.Origin.X + x * size;
             var z0 = grid.Origin.Y + z * size;
-            var x1 = x0 + size;
-            var z1 = z0 + size;
+            var x1 = x0 + step * size;
+            var z1 = z0 + step * size;
             var v00 = new Vector3(x0, terrain.VertexHeight(x, z), z0);
-            var v10 = new Vector3(x1, terrain.VertexHeight(x + 1, z), z0);
-            var v01 = new Vector3(x0, terrain.VertexHeight(x, z + 1), z1);
-            var v11 = new Vector3(x1, terrain.VertexHeight(x + 1, z + 1), z1);
+            var v10 = new Vector3(x1, terrain.VertexHeight(x + step, z), z0);
+            var v01 = new Vector3(x0, terrain.VertexHeight(x, z + step), z1);
+            var v11 = new Vector3(x1, terrain.VertexHeight(x + step, z + step), z1);
             AddTriangle(v00, v01, v10);
             AddTriangle(v11, v10, v01);
         }
@@ -2013,6 +2199,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         {
             fullscreen.Draw(scope, skyPipeline, Array.Empty<ShaderTextureBinding>(), skyPush);
             foreach (var layer in terrainSurfaceLayers) layer.Batch.End(scope, shadowBinding);
+            foreach (var layers in groundChunks.Values)
+            foreach (var layer in layers)
+            {
+                layer.Batch.End(scope, shadowBinding);
+            }
+
             groundBatch.End(scope, shadowBinding);
             detailBatch.End(scope, shadowBinding);
             propBatch.End(scope, shadowBinding);
@@ -2078,9 +2270,36 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             layer.Batch.Begin(worldPush);
             layer.Batch.Add(Matrix4x4.Identity, layer.Color);
         }
+
+        EnsureGroundChunks();
+        foreach (var layers in groundChunks.Values)
+        foreach (var layer in layers)
+        {
+            layer.Batch.Begin(worldPush);
+            layer.Batch.Add(Matrix4x4.Identity, layer.Color);
+        }
+
         RebuildGroundInstancesIfStale();
+        // <b>Plates only where there is no mesh.</b> A plate is one flat-topped box every few metres and a
+        // chunk is the same ground at the navigation grid's resolution, so where both exist the plate pokes
+            // through the mesh anywhere the two disagree by more than nothing — which on a slope is most of
+        // it. Filtered here rather than left out of the list, because the list is built when the terrain
+        // changes and which chunks are meshed depends on where the camera is: two different clocks, and the
+        // one that ticks per frame has to be the one doing the choosing.
+        var transform = simulation.Navigation.Transform;
+        var chunkMetres = GroundChunkCells * transform.CellSize;
+        platedGround.Clear();
+        foreach (var plate in groundInstances)
+        {
+            var chunk = (
+                X: (int)MathF.Floor((plate.Model.M41 - transform.Origin.X) / chunkMetres),
+                Z: (int)MathF.Floor((plate.Model.M43 - transform.Origin.Y) / chunkMetres));
+            if (groundChunks.ContainsKey(chunk)) continue;
+            platedGround.Add(plate);
+        }
+
         groundBatch.Begin(worldPush);
-        groundBatch.SetInstances(CollectionsMarshal.AsSpan(groundInstances));
+        groundBatch.SetInstances(CollectionsMarshal.AsSpan(platedGround));
         detailBatch.Begin(worldPush);
         detailBatch.SetInstances(CollectionsMarshal.AsSpan(detailInstances));
         overlayBatch.Begin(worldPush);
@@ -2135,12 +2354,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var jitter = 1f + (BlockJitter(x, z) - 0.5f) * look.GroundVariation;
             var color = BlockColor(terrain, center, block) * (checker * jitter);
             color.W = SettlementArt.MaterialClass.Terrain;
+            // The slope under this plate, from its own edges, so it lies on the hill instead of stepping
+            // down it. Zero on flat ground, so a flat map's plates are the plates they always were.
+            var half = block * 0.5f;
+            var fallX = (terrain.SampleHeight(center + new Vector2(half, 0f)) -
+                         terrain.SampleHeight(center - new Vector2(half, 0f))) / block;
+            var fallZ = (terrain.SampleHeight(center + new Vector2(0f, half)) -
+                         terrain.SampleHeight(center - new Vector2(0f, half))) / block;
             // Sized exactly to its spacing. An earlier version grew each block by a hair to
             // close sub-pixel cracks and bought a far worse artefact: neighbours then overlap
             // in a five-centimetre band of coplanar surface, which z-fights into speckle and
             // long bright seams running the width of the map.
             groundInstances.Add(new InstanceData(
-                GroundColumn(center, terrain.SampleHeight(center), block),
+                SlopedGroundColumn(center, terrain.SampleHeight(center), block, fallX, fallZ),
                 color));
         }
 
@@ -2265,6 +2491,43 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         const float floor = -1.5f;
         var thickness = MathF.Max(0.02f, height - floor);
         return Matrix4x4.CreateScale(width, thickness, width) *
+               Matrix4x4.CreateTranslation(centre.X, height - thickness * 0.5f, centre.Y);
+    }
+
+    /// <summary>
+    /// A ground plate laid on the slope under it rather than flat at its centre's height.
+    /// </summary>
+    /// <remarks>
+    /// <b>A flat plate on a hillside is a step, and a field of them is a staircase.</b> The coarse ground
+    /// is one plate every few metres coloured from one sample, which is exactly right on a plain and reads
+    /// as terracing the moment the ground rolls — and terracing was the whole of the case, recorded in
+    /// WorldTerrainScenarios, for keeping the ground flat and putting height only "where it says something".
+    /// <para>
+    /// A plate can be sheared, though: a model matrix is a general transform, so tilting one to the plane
+    /// through the terrain under its own corners costs two extra height samples and no extra draw. Adjacent
+    /// plates then fit adjacent planes rather than adjacent steps — they still disagree at their shared
+    /// edge, by a centimetre or two on gentle ground and more on steep, and they are boxes rather than
+    /// sheets so the disagreement shows as a seam rather than a hole. That is the right trade for the
+    /// <em>far</em> field, which is hazed; near the camera the ground is meshed properly.
+    /// </para>
+    /// <para>
+    /// The shear is built by hand rather than from a rotation because it is not one: a rotation would
+    /// shorten the plate's footprint by the cosine of the tilt and open real gaps between neighbours. The
+    /// columns stay unit length in x and z and only y leans, so the plate keeps its exact footprint and its
+    /// top follows the plane.
+    /// </para>
+    /// </remarks>
+    private static Matrix4x4 SlopedGroundColumn(
+        Vector2 centre, float height, float width, float fallX, float fallZ)
+    {
+        const float floor = -1.5f;
+        var thickness = MathF.Max(0.02f, height - floor);
+        // Scale, then lean, then place. The lean's terms are height per unit of x and z <em>after</em>
+        // scaling, so they are the grade itself.
+        var lean = Matrix4x4.Identity;
+        lean.M12 = fallX;
+        lean.M32 = fallZ;
+        return Matrix4x4.CreateScale(width, thickness, width) * lean *
                Matrix4x4.CreateTranslation(centre.X, height - thickness * 0.5f, centre.Y);
     }
 
@@ -3559,6 +3822,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"FOG {sentFog.X:F0}-{sentFog.Y:F0} m at {sentFog.Z:F2} · " +
             // What the dressing is spending, on the same line as what can be seen, because both of the
             // questions they answer are "is this frame drawing more than it needs to".
+            $"GROUND {groundChunks.Count} chunks + {platedGround.Count} plates · " +
             $"NIGHT {sky.Nightness:F2} (lights {habitationLights}) · " +
             $"SMOKE {hearths.Drawn} from {hearths.Chimneys}";
     }
@@ -3853,7 +4117,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         unitCasterBuffer?.Dispose();
         canopyBuffer?.Dispose();
         canopyCasterBuffer?.Dispose();
-        if (vk is not null) DisposeTerrainSurfaceLayers();
+        if (vk is not null)
+        {
+            foreach (var chunk in groundChunks.Keys.ToArray()) DisposeGroundChunk(chunk);
+            DisposeTerrainSurfaceLayers();
+        }
         // The graph owns render passes and offscreen images that are not in the device's auto-freed
         // tables, and Dispose runs after WaitIdle, which is the only safe place to free them.
         art?.Dispose();
