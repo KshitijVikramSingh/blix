@@ -5,13 +5,19 @@ using System.Text;
 namespace Blix.Diagnostics;
 
 // Kind of control a tunable maps to in the overlay.
-public enum TuneKind { Float, Int, Bool, Enum }
+public enum TuneKind { Float, Int, Bool, Enum, Button }
 
 // Marks a C# field or property as a live-tunable value — the CPU twin of a
 // shader `//@tune` decorator. The diagnostics overlay reflects these off a
 // registered object, builds a control per member, and reads/writes the value
 // straight back through the member:
-//   float/int → slider (range required),  bool → toggle,  enum → dropdown.
+//   float/int → slider (range required),  bool → toggle,  enum → dropdown,
+//   bool + Action = true → button (set for the one frame it is clicked).
+//
+// The button kind exists because DebugControls has had a real ImGui.Button all
+// along and this layer never surfaced it, so anything declaring its knobs with
+// [Tune] had to spell an action as a checkbox — which is not what a checkbox
+// means and does not read as one thing you press.
 //
 //   sealed class FogSettings {
 //       [Tune(0, 0.5)] public float Density = 0.1f;   // slider
@@ -31,6 +37,17 @@ public sealed class TuneAttribute : Attribute
     public bool HasRange { get; }
     public string? Label { get; init; }
     public string? Group { get; init; }
+
+    /// <summary>
+    /// Renders this bool as a button rather than a checkbox: an action, not a state.
+    /// </summary>
+    /// <remarks>
+    /// The member is set true for the single frame the button is clicked and false otherwise, so a reader
+    /// does the obvious thing — test it, act, and let it fall back by itself. A checkbox for an action asks
+    /// the user to tick something and then guess whether anything happened, and asks the reader to remember
+    /// to untick it.
+    /// </remarks>
+    public bool Action { get; init; }
 
     // bool / enum members — range is implied.
     public TuneAttribute() { }
@@ -107,7 +124,8 @@ public static class TuneReflection
 
             if (valueType == typeof(bool))
             {
-                result.Add(new TunableField(member.Name, label, group, TuneKind.Bool, 0f, 1f, null,
+                result.Add(new TunableField(
+                    member.Name, label, group, tune.Action ? TuneKind.Button : TuneKind.Bool, 0f, 1f, null,
                     () => (bool)getRaw()! ? 1f : 0f,
                     v => setRaw(v >= 0.5f)));
             }
@@ -220,7 +238,9 @@ public sealed class ObjectTunables
     /// A control that does not appear has two quite different causes — never registered, or registered and
     /// scrolled off the end of a panel with ten groups in it — and they are indistinguishable from the chair.
     /// </remarks>
-    public string Describe() => string.Join(", ", groups.Select(g => $"{g.Group}({g.Items.Count})"));
+    public string Describe() => string.Join(
+        ", ",
+        groups.Select(g => $"{g.Group}[{string.Join(" ", g.Items.Select(i => $"{i.Label}:{i.Kind}"))}]"));
 
     public void BuildControls(DebugContext debug)
     {
@@ -233,6 +253,9 @@ public sealed class ObjectTunables
                 {
                     f.Value = f.Kind switch
                     {
+                        // A button reports the frame it was clicked and nothing else, so the member it is
+                        // bound to is true for exactly that frame — no state to hold and none to reset.
+                        TuneKind.Button => debug.Controls.Button(f.Label) ? 1f : 0f,
                         TuneKind.Bool => debug.Controls.Toggle(f.Label, f.Value != 0f) ? 1f : 0f,
                         TuneKind.Enum => debug.Controls.Enum(f.Label, (int)f.Value, f.EnumNames!),
                         _ => debug.Controls.Float(f.Label, f.Value, f.Min, f.Max),

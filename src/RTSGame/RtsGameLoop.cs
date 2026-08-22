@@ -768,6 +768,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private int penScenarioVariant;
     private int frameCount;
     private int rolledAt = -1;
+    private (float Floor, float Span) labFloorSpan;
+    private float furthestChunk;
     private int rolls;
     private double nextTimingReport;
 
@@ -844,7 +846,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             new WallSettings(),
             new RoutingSettings(),
             new GroupSettings());
-        Console.WriteLine($"  panel groups: {tunables.Describe()}");
+        // Behind --debug-all: it answers "is my control registered, and as what", which is a question you ask
+        // when something is missing and never otherwise. Printed unconditionally it was ninety controls of
+        // startup noise.
+        if (debugAll) Console.WriteLine($"  panel controls: {tunables.Describe()}");
         this.exitAfterFrames = exitAfterFrames;
         this.reliefAmplitudeMetres = reliefAmplitudeMetres;
         // <b>The panel starts where the command line pointed, or the first roll would contradict it.</b> A
@@ -856,7 +861,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         mapTuning.Archetype = labArchetype;
         mapTuning.Region = labRegion;
         mapTuning.ReliefMetres = reliefAmplitudeMetres;
-        mapWanted = (labArchetype, labRegion, reliefAmplitudeMetres);
         this.startingZoomMetres = startingZoomMetres;
         movementTrace = traceMovement || debugAll ? new LiveMovementTrace() : null;
         if (debugAll)
@@ -1013,6 +1017,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // what the window survey reported before this line existed: one kind of country on every framing of
         // a canvas with seven on it.
         (labFloor, labSpan) = SettlementScenarios.InteriorReliefOf(simulation);
+        labFloorSpan = (labFloor, labSpan);
         var measured = clock.Elapsed.TotalMilliseconds - shaped - painted;
         // <b>Skipped in the lab, and it was fourteen seconds of every roll.</b> The lab has no agents in it:
         // nothing routes, nothing is placed, nothing asks whether a cell is walkable. Rebuilding the walkable
@@ -1791,6 +1796,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private readonly Dictionary<(int X, int Z), List<TerrainSurfaceLayer>> groundChunks = new();
 
+    /// <summary>The lowest and highest ground in each chunk, so a chunk can be frustum-tested as a box.</summary>
+    private readonly Dictionary<(int X, int Z), (float Low, float High)> groundChunkHeights = new();
+
     /// <summary>Chunks staged this frame, so the draw pass submits exactly what was staged.</summary>
     private readonly List<(int X, int Z)> drawnChunks = new();
 
@@ -1858,6 +1866,25 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var toZ = Math.Min(fromZ + GroundChunkCells - 1, transform.Height - 1);
         var cover = GroundCover.Build(simulation.Terrain, fromX, fromZ, toX, toZ, GroundRenderStep);
         var layers = new List<TerrainSurfaceLayer>();
+
+        // <b>How tall this chunk is, kept so the frustum can be asked about it.</b> Sampled on a coarse lattice
+        // rather than per vertex — a corner-and-middle grid over a chunk is enough to bound it, and the bound
+        // only has to be conservative. See the cull in the render pass for what this is for.
+        var low = float.MaxValue;
+        var high = float.MinValue;
+        for (var z = 0; z <= 4; z++)
+        for (var x = 0; x <= 4; x++)
+        {
+            var cell = new Vector2(
+                fromX + (toX - fromX) * (x / 4f),
+                fromZ + (toZ - fromZ) * (z / 4f));
+            var at = transform.Origin + cell * transform.CellSize;
+            var height = simulation.Terrain.SampleHeight(at);
+            low = MathF.Min(low, height);
+            high = MathF.Max(high, height);
+        }
+
+        groundChunkHeights[(chunkX, chunkZ)] = (low, MathF.Max(low + 0.5f, high));
 
         // Every opaque coat before any transition coat, because a transition blends against whatever is
         // already there and a chunk is the unit that has to be self-consistent. Across chunks the order is
@@ -2481,9 +2508,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             labArchetype = mapTuning.Archetype;
             labRegion = mapTuning.Region;
             reliefAmplitudeMetres = MathF.Max(0f, mapTuning.ReliefMetres);
-            mapWanted = (labArchetype, labRegion, reliefAmplitudeMetres);
-            mapSettleSeconds = 0f;
-            mapTuning.NextSeed = false;
         }
 
         if (reseed)
@@ -2738,65 +2762,74 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             MathF.Round(speed * (MathF.PI * 0.5f / MathF.Max(0.01f, bodyFeel.MaximumTurnSpeed)), 2));
     }
 
-    /// <summary>What the panel is currently asking for, so a change to it can be noticed.</summary>
-    private (Archetype Archetype, Region Region, float Relief) mapWanted;
-
-    /// <summary>How long the panel has been asking for something other than what is loaded.</summary>
-    private float mapSettleSeconds;
-
     /// <summary>
-    /// Regenerates the map when the panel asks for a different one.
+    /// Builds a map when the panel says to, and never otherwise.
     /// </summary>
     /// <remarks>
-    /// <b>A settle delay rather than an immediate reload, and the relief slider is why.</b> A map costs about a
-    /// second to generate — a new world, a drainage solve, a settlement, every instance buffer — and a dragged
-    /// slider changes its value every frame, so reloading on change would queue sixty maps for one drag and the
-    /// window would stop responding. Waiting for the value to hold still for a moment makes a drag one reload,
-    /// and a dropdown still feels immediate because a dropdown lands on its value in one frame.
-    /// <para>
-    /// Deliberately not debounced by "has the mouse let go", which the panel could not tell us, and deliberately
-    /// not a separate apply button: an apply button is the thing that made the old sliders feel broken, because
-    /// the setting and its effect were in different places.
-    /// </para>
+    /// <b>Configure and fire.</b> Nothing here watches the settings for changes — see the remarks on
+    /// <see cref="MapTuning"/> for why reload-on-change is the wrong model for an operation that costs a
+    /// second. Two toggles, read and cleared, and the only difference between them is whether the seed moves.
     /// </remarks>
-    private void FollowMapPanel(float deltaSeconds)
+    private void FollowMapPanel()
     {
         if (mapLab) return;
 
-        // A button, spelled as a toggle: read it, act, clear it. Ahead of the settle check because "another
-        // one like this" is an action and should not wait on anything.
-        if (mapTuning.NextSeed)
+        // <b>Two ways in, one decision.</b> A button member is <em>driven</em> by the panel: BuildControls
+        // writes it false on every frame nobody clicks, so setting it from code is overwritten before it can be
+        // read — which silently stopped the soak the moment these became real buttons. So a scripted press is
+        // its own request rather than a poke at the button's state, and both arrive here.
+        var newSeed = mapTuning.NewSeed || askedNewSeed;
+        var generate = mapTuning.Generate || askedGenerate;
+        askedNewSeed = false;
+        askedGenerate = false;
+        // Read and clear, which is the contract for a button whether or not the panel would have cleared it
+        // for us on the next frame. It also stops the compiler calling these write-only-by-reflection, which
+        // is a warning worth not learning to ignore.
+        mapTuning.NewSeed = false;
+        mapTuning.Generate = false;
+        if (newSeed)
         {
-            mapTuning.NextSeed = false;
             RollLab(0, reseed: true);
             return;
         }
 
-        var asked = (mapTuning.Archetype, mapTuning.Region, MathF.Max(0f, mapTuning.ReliefMetres));
-        if (asked == mapWanted)
-        {
-            mapSettleSeconds = 0f;
-            return;
-        }
-
-        mapSettleSeconds += deltaSeconds;
-        if (mapSettleSeconds < MapSettleDelaySeconds) return;
-        mapSettleSeconds = 0f;
-        // Same seed: what changed is which map, not which roll of it, so the answer should be recognisably
-        // the same landscape under a different regime rather than an unrelated one.
-        RollLab(0, reseed: false);
+        if (generate) RollLab(0, reseed: false);
     }
 
-    /// <summary>How long a panel value has to hold still before the map reloads.</summary>
+    /// <summary>A scripted press of "new seed", for the headless soak. See FollowMapPanel.</summary>
+    private bool askedNewSeed;
+
+    /// <summary>A scripted press of "generate", for the headless soak.</summary>
+    private bool askedGenerate;
+
+    /// <summary>
+    /// Which map is on screen, for the corner of the screen.
+    /// </summary>
     /// <remarks>
-    /// Long enough that dragging the relief slider across its range is one reload rather than a hundred, short
-    /// enough that choosing from a dropdown feels like it did it immediately.
+    /// <b>Because the lab already learned this and the village had to learn it again.</b> The remarks above
+    /// <c>SettlementHud</c>'s lab block say it outright — "a lab you have to read a terminal for is not a lab.
+    /// Every one of its controls worked and none of them appeared to" — and then the village shipped its map
+    /// panel with the identity printed only to the console. Reported from the chair as a suspicion that
+    /// changing the dropdowns reloaded without changing the map. It did change it: measured across the eight
+    /// archetypes at one seed, the share of low ground runs from 5% to 88%. <b>What was missing was any way to
+    /// tell</b>, and two downland river valleys are hard to tell apart by eye even when everything about their
+    /// topology differs.
+    /// <para>
+    /// So the seed is on it too. A seed is the one thing that makes "did that do anything" answerable at a
+    /// glance, because it changes on a reroll and holds still on a regenerate.
+    /// </para>
     /// </remarks>
-    private const float MapSettleDelaySeconds = 0.35f;
+    private string MapStatus()
+    {
+        var profile = RegionProfile.For(labRegion);
+        var sentence = labPlan?.Layout?.Sentence ?? "flat ground";
+        return $"{labArchetype} · {profile.Name} · {reliefAmplitudeMetres:F0} m relief · seed {labSeed}\n" +
+               sentence;
+    }
 
     public void OnUpdate(Time time)
     {
-        FollowMapPanel((float)time.Delta);
+        FollowMapPanel();
 
         // Between frames rather than inside one, which is where a keypress lands too: a roll replaces the
         // world the render is holding references into.
@@ -2806,20 +2839,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             rolls++;
             // <b>Through the panel, not through RollLab.</b> Calling the function directly proved the function
             // and nothing else — and the bug this soak was written for was never in the function, it was a
-            // guard one screen above it. What a person actually does is move a control and wait, so that is
-            // what this does: alternate turns pressing "next seed" and stepping the archetype dropdown, which
-            // between them exercise both paths through FollowMapPanel including its settle delay.
+            // guard one screen above it. What a person actually does is set the controls and fire, so that is
+            // what this does: alternate a "new seed" press with "step the archetype dropdown, then generate",
+            // which between them exercise both actions and the configure-then-fire order.
             if (rolls % 2 == 1)
             {
-                Console.WriteLine($"  panel asks for another seed at frame {frameCount}");
-                mapTuning.NextSeed = true;
+                Console.WriteLine($"  panel asks for a new seed at frame {frameCount}");
+                askedNewSeed = true;
             }
             else
             {
                 var all = MapLayout.All;
                 var next = all[(Array.IndexOf(all, mapTuning.Archetype) + 1 + all.Length) % all.Length];
-                Console.WriteLine($"  panel asks for {next} at frame {frameCount}");
+                Console.WriteLine($"  panel sets {next} and generates at frame {frameCount}");
                 mapTuning.Archetype = next;
+                askedGenerate = true;
             }
         }
 
@@ -3303,6 +3337,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var scatterMs = buildClock.Elapsed.TotalMilliseconds;
         buildClock.Restart();
         DrawColliderOverlay();
+        var overlayMs = buildClock.Elapsed.TotalMilliseconds;
+        buildClock.Restart();
 
         var props = CollectionsMarshal.AsSpan(propInstances);
         var units = CollectionsMarshal.AsSpan(unitInstances);
@@ -3320,6 +3356,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         canopyCaster.Begin(shadowPush);
         canopyCaster.SetInstances(canopies);
         art?.Stage(worldPush, shadowPush);
+        var stageMs = buildClock.Elapsed.TotalMilliseconds;
+        buildClock.Restart();
 
         // Shadow depth: only the solids. The ground is a receiver and not a caster — a large
         // near-flat mesh shadowing itself is all acne and no shadow — and the overlays are
@@ -3400,12 +3438,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                         ? $"{(int)sky.HourOfDay:00}:{(int)(sky.HourOfDay % 1f * 60f):00} {sky.Description}"
                         : null,
                     colliderOverlay > 0 ? GeometryLine() : null,
-                    mapLab ? LabStatus() : null,
+                    mapLab ? LabStatus() : MapStatus(),
                     frame.Width,
                     frame.Height);
             });
 
-        buildPhases = (terrainMs, agentMs, scatterMs, buildClock.Elapsed.TotalMilliseconds);
+        if (timingDebug && frameCount % 60 == 0)
+        {
+            Console.WriteLine(
+                $"  ground: {drawnChunks.Count} chunks drawn, {blendedChunks.Count} blended, " +
+                $"furthest {furthestChunk:F0} m against a flat-horizon reach of {GroundDrawRadius:F0} m " +
+                $"over {labFloorSpan.Span:F0} m of relief, zoom {cameraDistance:F0} m");
+        }
+
+        buildPhases = (terrainMs, agentMs, scatterMs, overlayMs, stageMs, buildClock.Elapsed.TotalMilliseconds);
         stagedLoad = art?.StagedLoad() ?? (0, 0L, 0L);
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames)
@@ -3450,8 +3496,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // louder by the invariant being a call across an interop boundary.
         // Frame constants, computed once. Cheap now that the window size is cached, and still wrong to
         // recompute per chunk — a number about the camera does not vary between chunks.
+        furthestChunk = 0f;
         var visible = VisibleGroundRadius;
         var groundReach = GroundDrawRadius;
+        // How much further a hill can enter the view than flat ground at the same bearing. The bottom edge of
+        // the frustum descends at (pitch - halfFov), so ground standing `span` metres proud of the focus plane
+        // meets it `span / tan(pitch - halfFov)` further out.
+        var half = camera.VerticalFieldOfView * 0.5f;
+        var descent = MathF.Max(0.08f, MathF.Tan(MathF.Max(half + 0.05f, CameraElevation) - half));
+        var outerReach = groundReach + labFloorSpan.Span / descent;
         var detailReach = DetailRadius;
         var metresPerPixel = viewportPixels > 0f ? 2f * visible / viewportPixels : 0.001f;
         var bandsWorthDrawing =
@@ -3462,8 +3515,34 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // Against the nearest corner, so a chunk the camera stands on the edge of is drawn.
             var nearest = Vector2.Clamp(cameraFocus, minimum, minimum + new Vector2(chunkMetres));
             var away = Vector2.DistanceSquared(nearest, cameraFocus);
-            if (away > groundReach * groundReach) continue;
+
+            // <b>The frustum, with the chunk's own height, rather than a radius from a flat-earth horizon.</b>
+            // GroundDrawRadius derives the far edge of the view by intersecting the bottom of the frustum with
+            // a <em>plane</em> at the camera's focus height — eye height over cameraDistance, straight
+            // trigonometry — which is exactly right on the flat ground it was written against and wrong the
+            // moment the map has hills in it. High ground beyond that plane's horizon still projects into the
+            // frame, and was being culled: measured at zoom 78 m on CentralHighGround, chunks inside the
+            // frustum but cut by the radius went 0 on flat ground, <b>4 at 32 m of relief and 5 at 60 m</b>,
+            // against 8, 7 and 6 actually drawn. Nearly half the visible ground, gone — reported from the
+            // chair as weird clipping when looking around, which is what it is.
+            //
+            // The radius stays as the cheap outer bound because it still means something (nothing past it is
+            // worth considering however tall it is) but it is widened by what relief can add: a hill of the
+            // map's own height can enter the view from that much further away, along the same bottom edge.
+            // Then the frustum test decides, on the chunk's real low and high.
+            if (away > outerReach * outerReach) continue;
+            var box = groundChunkHeights.TryGetValue(chunk, out var range) ? range : (0f, 1f);
+            if (!InView(
+                    minimum + new Vector2(chunkMetres * 0.5f),
+                    box.Item1,
+                    box.Item2 - box.Item1,
+                    chunkMetres * 0.71f))
+            {
+                continue;
+            }
+
             drawnChunks.Add(chunk);
+            furthestChunk = MathF.Max(furthestChunk, MathF.Sqrt(away));
             var blended = away <= detailReach * detailReach && bandsWorthDrawing;
             if (blended) blendedChunks.Add(chunk);
             foreach (var layer in layers)
@@ -4268,7 +4347,29 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     }
 
     /// <summary>Milliseconds the last frame spent building each part of itself.</summary>
-    private (double Terrain, double Agents, double Scatter, double Overlay) buildPhases;
+    /// <summary>
+    /// Where the frame's CPU went, by phase.
+    /// </summary>
+    /// <remarks>
+    /// <b>The last field used to be called <c>Overlay</c> and was not the overlay.</b> It was the build clock
+    /// read at the end, so it held everything after the scatter — the collider overlay, every batch's instance
+    /// staging, and the whole of the render graph's record and execute — under the name of the one component in
+    /// there that <c>--timings</c> exists to switch off. So the biggest single line item in the frame, 8.1 ms of
+    /// 16.6, read as something you could ignore because you had already turned it off.
+    /// <para>
+    /// The third instrument this session that was named after a subset of what it measured, after <c>BUILD
+    /// terrain</c> also timing the tree instances and <c>relief: flat</c> counting only landforms. The failure
+    /// mode is always the same: it stays plausible, so nobody looks, so the cost hides in the one place a
+    /// reader has already decided is uninteresting.
+    /// </para>
+    /// </remarks>
+    private (
+        double Terrain,
+        double Agents,
+        double Scatter,
+        double Overlay,
+        double Stage,
+        double Record) buildPhases;
 
     /// <summary>
     /// Wall clock for a whole frame, smoothed.
@@ -5482,7 +5583,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // questions they answer are "is this frame drawing more than it needs to".
             $"FRAME {frameMilliseconds:F1} ms · " +
             $"BUILD ground {buildPhases.Terrain:F1} nodes {nodeMilliseconds:F1} agents {buildPhases.Agents:F1} " +
-            $"scatter {buildPhases.Scatter:F1} overlay {buildPhases.Overlay:F1} ms · " +
+            $"scatter {buildPhases.Scatter:F1} overlay {buildPhases.Overlay:F1} stage {buildPhases.Stage:F1} " +
+            $"record {buildPhases.Record:F1} ms · " +
             $"LOAD {stagedLoad.Instances:N0} instances = {stagedLoad.Triangles / 1000L:N0}k triangles " +
             $"+ {stagedLoad.Casters / 1000L:N0}k cast · " +
             $"TREES {treeTiers.Near}/{treeTiers.Mid}/{treeTiers.Far}/{treeTiers.Deep} near/mid/far/deep over " +

@@ -106,6 +106,14 @@ public static class Program
                 raidExtent, raidMinutes, between, health, seed, args.Contains("--peers")));
         }
 
+        // <b>Every map the panel can ask for, because the panel can ask for more than the gate ever tried.</b>
+        if (args.Contains("--mapsweep"))
+        {
+            var sweepExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var sweepSeed = Value(args, "--mapseed") is { } s ? uint.Parse(s) : 0x5EED1234u;
+            Environment.Exit(Debug.MapSweep.Run(sweepExtent, sweepSeed));
+        }
+
         if (args.Contains("--shapes"))
         {
             var shapeExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;

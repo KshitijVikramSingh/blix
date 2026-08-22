@@ -22,10 +22,16 @@ namespace RTSGame.Debug;
 /// the quantity really is continuous, which is the relief.
 /// </para>
 /// <para>
-/// <b>And the panel reloads the map itself.</b> Changing a setting that has no effect until you find the
-/// keyboard is a setting that looks broken; the point of a browser is that turning the dial shows you the thing.
-/// See <c>RtsGameLoop.FollowMapPanel</c> for the settle delay, which exists because a map costs about a second
-/// to generate and a dragged slider would otherwise queue one per frame.
+/// <b>Configure and fire, which is the opposite of what I argued for and the right answer.</b> The first
+/// version reloaded on change, on the reasoning that a setting with no effect until you find the keyboard looks
+/// broken. That is true of a cheap setting and false of an expensive one: a map costs about a second to
+/// generate, so reload-on-change means you cannot set three things and then go — you get a map after the first,
+/// a map after the second, and a settle delay in between to stop a dragged slider queueing sixty. Reported from
+/// the chair as "because this is a slow operation the interface becomes kind of worse", which is exactly it.
+/// </para>
+/// <para>
+/// So nothing here reloads anything. Three settings and two actions, and the actions are the only things that
+/// touch the world. The settle delay is gone with the model that needed it.
 /// </para>
 /// </remarks>
 internal sealed class MapTuning
@@ -47,12 +53,27 @@ internal sealed class MapTuning
     [Tune(0.0, 60.0, Label = "relief (m)", Group = "map")]
     public float ReliefMetres;
 
-    /// <summary>Rolls the next seed of the same map. A button, spelled as a toggle.</summary>
+    /// <summary>Builds the configured map on the seed already loaded.</summary>
     /// <remarks>
-    /// The panel has no button control, and a toggle that is read and cleared in the same frame is one — which
-    /// is worth the small dishonesty because "another one like this" is the single most-pressed thing in a map
-    /// browser and it should not require reaching for the keyboard. SPACE still does it.
+    /// <b>Two actions rather than one, because the two questions a map browser asks are different questions.</b>
+    /// This one keeps the seed, so changing the archetype or the region and firing shows the <em>same
+    /// landscape under a different regime</em> — which is the comparison worth making and impossible to make if
+    /// every generate also rerolled.
+    /// <para>
+    /// <b>A real button.</b> These were checkboxes for a while on my claim that the panel had no button control,
+    /// which was simply not true — <c>DebugControls.Button</c> has been there all along, rendering an
+    /// <c>ImGui.Button</c>, and only <c>[Tune]</c> had never surfaced it. A checkbox for an action is wrong
+    /// twice: it asks you to tick a thing and then guess whether it happened, and it leaves a box sitting there
+    /// ticked as though it described a state. Fixed in the layer, so every tunable object gets buttons.
+    /// </para>
     /// </remarks>
-    [Tune(Label = "next seed", Group = "map")]
-    public bool NextSeed;
+    [Tune(Label = "generate", Group = "map", Action = true)]
+    public bool Generate;
+
+    /// <summary>Builds the configured map on a fresh seed.</summary>
+    /// <remarks>
+    /// The other question: another map like this. SPACE does the same thing, for when the mouse is elsewhere.
+    /// </remarks>
+    [Tune(Label = "new seed", Group = "map", Action = true)]
+    public bool NewSeed;
 }

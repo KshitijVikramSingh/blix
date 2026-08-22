@@ -1178,7 +1178,19 @@ internal sealed class ReliefPlan
             // router then has no reason to prefer either — so the trunk wanders into a tributary's bed and
             // out again. Half the depth keeps the hierarchy the drainage is supposed to discover.
             var trunk = index == 0;
-            var cut = Math.Clamp(river.WidthMetres * 0.19f, 1.1f, Amplitude * 0.17f) * (trunk ? 1f : 0.5f);
+            // <b>The ceiling wins over the floor, because they are not two bounds on one intention.</b> The
+            // floor says "a river shallower than this is not a river"; the ceiling says "no channel may be
+            // deeper than a fraction of this map's relief". On any map with less than about six and a half
+            // metres of relief the ceiling falls below the floor and <c>Math.Clamp</c> throws outright —
+            // <em>'1.1' cannot be greater than 0.6868</em> — which is what a four-metre relief setting did the
+            // first time the panel could ask for one.
+            //
+            // Not a clamping order to be tidied: on nearly flat ground a river <em>should</em> be a shallow
+            // scratch rather than a 1.1 m trench cut through a landscape that has no 1.1 m in it. The floor is
+            // an ambition and the ceiling is a fact about the map, so the fact wins.
+            var ceiling = Amplitude * 0.17f;
+            var cut = MathF.Min(ceiling, MathF.Max(river.WidthMetres * 0.19f, 1.1f)) *
+                      (trunk ? 1f : 0.5f);
             var reach = MathF.Max(river.WidthMetres * (trunk ? 2.4f : 1.6f), trunk ? 22f : 14f);
             var (from, to) = Band(river.Path, origin, side, reach);
             for (var z = from.Z; z <= to.Z; z++)
