@@ -768,6 +768,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private int penScenarioVariant;
     private int frameCount;
     private int rolledAt = -1;
+    private int rolls;
     private double nextTimingReport;
 
     private sealed record TerrainSurfaceLayer(
@@ -852,9 +853,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // The amplitude matters more. Every calibrated scenario runs on flat ground, so a hard-coded 32 on the
         // dial would mean one keypress silently generated terrain under a measurement that was taken without
         // it — the dial reads zero on a flat village, and stays there until somebody asks otherwise.
-        mapTuning.Archetype = Array.IndexOf(MapLayout.All, labArchetype);
-        mapTuning.Region = Array.IndexOf(RegionProfile.All, labRegion);
+        mapTuning.Archetype = labArchetype;
+        mapTuning.Region = labRegion;
         mapTuning.ReliefMetres = reliefAmplitudeMetres;
+        mapWanted = (labArchetype, labRegion, reliefAmplitudeMetres);
         this.startingZoomMetres = startingZoomMetres;
         movementTrace = traceMovement || debugAll ? new LiveMovementTrace() : null;
         if (debugAll)
@@ -2476,9 +2478,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // asked for" rather than "another seed of whatever the last key press left behind".
         if (!mapLab)
         {
-            labArchetype = mapTuning.ArchetypeOf();
-            labRegion = mapTuning.RegionOf();
+            labArchetype = mapTuning.Archetype;
+            labRegion = mapTuning.Region;
             reliefAmplitudeMetres = MathF.Max(0f, mapTuning.ReliefMetres);
+            mapWanted = (labArchetype, labRegion, reliefAmplitudeMetres);
+            mapSettleSeconds = 0f;
+            mapTuning.NextSeed = false;
         }
 
         if (reseed)
@@ -2733,15 +2738,89 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             MathF.Round(speed * (MathF.PI * 0.5f / MathF.Max(0.01f, bodyFeel.MaximumTurnSpeed)), 2));
     }
 
+    /// <summary>What the panel is currently asking for, so a change to it can be noticed.</summary>
+    private (Archetype Archetype, Region Region, float Relief) mapWanted;
+
+    /// <summary>How long the panel has been asking for something other than what is loaded.</summary>
+    private float mapSettleSeconds;
+
+    /// <summary>
+    /// Regenerates the map when the panel asks for a different one.
+    /// </summary>
+    /// <remarks>
+    /// <b>A settle delay rather than an immediate reload, and the relief slider is why.</b> A map costs about a
+    /// second to generate — a new world, a drainage solve, a settlement, every instance buffer — and a dragged
+    /// slider changes its value every frame, so reloading on change would queue sixty maps for one drag and the
+    /// window would stop responding. Waiting for the value to hold still for a moment makes a drag one reload,
+    /// and a dropdown still feels immediate because a dropdown lands on its value in one frame.
+    /// <para>
+    /// Deliberately not debounced by "has the mouse let go", which the panel could not tell us, and deliberately
+    /// not a separate apply button: an apply button is the thing that made the old sliders feel broken, because
+    /// the setting and its effect were in different places.
+    /// </para>
+    /// </remarks>
+    private void FollowMapPanel(float deltaSeconds)
+    {
+        if (mapLab) return;
+
+        // A button, spelled as a toggle: read it, act, clear it. Ahead of the settle check because "another
+        // one like this" is an action and should not wait on anything.
+        if (mapTuning.NextSeed)
+        {
+            mapTuning.NextSeed = false;
+            RollLab(0, reseed: true);
+            return;
+        }
+
+        var asked = (mapTuning.Archetype, mapTuning.Region, MathF.Max(0f, mapTuning.ReliefMetres));
+        if (asked == mapWanted)
+        {
+            mapSettleSeconds = 0f;
+            return;
+        }
+
+        mapSettleSeconds += deltaSeconds;
+        if (mapSettleSeconds < MapSettleDelaySeconds) return;
+        mapSettleSeconds = 0f;
+        // Same seed: what changed is which map, not which roll of it, so the answer should be recognisably
+        // the same landscape under a different regime rather than an unrelated one.
+        RollLab(0, reseed: false);
+    }
+
+    /// <summary>How long a panel value has to hold still before the map reloads.</summary>
+    /// <remarks>
+    /// Long enough that dragging the relief slider across its range is one reload rather than a hundred, short
+    /// enough that choosing from a dropdown feels like it did it immediately.
+    /// </remarks>
+    private const float MapSettleDelaySeconds = 0.35f;
+
     public void OnUpdate(Time time)
     {
+        FollowMapPanel((float)time.Delta);
+
         // Between frames rather than inside one, which is where a keypress lands too: a roll replaces the
         // world the render is holding references into.
         if (rollEveryFrames > 0 && frameCount > 0 && frameCount % rollEveryFrames == 0 && frameCount != rolledAt)
         {
             rolledAt = frameCount;
-            Console.WriteLine($"  roll at frame {frameCount}");
-            RollLab(0, reseed: true);
+            rolls++;
+            // <b>Through the panel, not through RollLab.</b> Calling the function directly proved the function
+            // and nothing else — and the bug this soak was written for was never in the function, it was a
+            // guard one screen above it. What a person actually does is move a control and wait, so that is
+            // what this does: alternate turns pressing "next seed" and stepping the archetype dropdown, which
+            // between them exercise both paths through FollowMapPanel including its settle delay.
+            if (rolls % 2 == 1)
+            {
+                Console.WriteLine($"  panel asks for another seed at frame {frameCount}");
+                mapTuning.NextSeed = true;
+            }
+            else
+            {
+                var all = MapLayout.All;
+                var next = all[(Array.IndexOf(all, mapTuning.Archetype) + 1 + all.Length) % all.Length];
+                Console.WriteLine($"  panel asks for {next} at frame {frameCount}");
+                mapTuning.Archetype = next;
+            }
         }
 
         // Before stepping, so a slider moved this frame is felt this frame.
