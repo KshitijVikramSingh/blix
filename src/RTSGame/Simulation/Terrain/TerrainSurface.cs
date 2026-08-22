@@ -51,6 +51,22 @@ internal enum TerrainSurface : byte
     /// </para>
     /// </remarks>
     Forest,
+
+    /// <summary>
+    /// Water shallow enough to wade: the ford, and the edge of everything deeper.
+    /// </summary>
+    /// <remarks>
+    /// <b>Separate from <see cref="Mud"/> although it costs exactly what mud costs.</b> The two are the same
+    /// speed on purpose — wading and wallowing are both about a stride and a half a second — so the
+    /// temptation was to reuse mud and be done. What that would have cost is the picture: mud is dark brown
+    /// and shallow water is pale, and a brook drawn in mud's colour flowing into a river drawn in water's is
+    /// the sort of thing nobody can name and everybody sees.
+    /// <para>
+    /// It is also the honest place to hang a seasonal water level when there is one. "Fordable at low water
+    /// only" is a property of a <em>ford</em>, and a ford needs to be a thing before it can have a season.
+    /// </para>
+    /// </remarks>
+    Shallows,
 }
 
 internal static class TerrainSurfaceRules
@@ -123,6 +139,9 @@ internal static class TerrainSurfaceRules
         TerrainSurface.Heath => 0.90f,
         TerrainSurface.Rough => 0.78f,
         TerrainSurface.Mud => 0.55f,
+        // Wading is mud's speed, and derived from it rather than repeated so the two cannot drift apart
+        // without somebody deciding they should.
+        TerrainSurface.Shallows => 0.55f,
         _ => 0f,
     };
 }

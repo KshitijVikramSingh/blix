@@ -93,6 +93,7 @@ internal sealed class SettlementHud : IDisposable
         string? raid,
         string? light,
         string? geometry,
+        string? lab,
         int width,
         int height)
     {
@@ -170,6 +171,17 @@ internal sealed class SettlementHud : IDisposable
         // fog starts — and "geometries that should tie together don't" cannot be checked without seeing
         // them next to each other.
         if (geometry is not null) lines.Add((geometry.ToUpperInvariant(), Body));
+        // <b>The map lab's whole state, on screen, because a lab you have to read a terminal for is not a
+        // lab.</b> Every one of its controls worked and none of them appeared to: the region, the archetype
+        // and the pick were printed to stdout, which on a windowed run is a file nobody is watching. Reported
+        // as "I don't think I can toggle these", and the keys were fine — the feedback was missing.
+        if (lab is not null)
+        {
+            foreach (var line in lab.Split('\n'))
+            {
+                if (line.Length > 0) lines.Add((line.ToUpperInvariant(), Action));
+            }
+        }
 
         Block(size, new Vector2(pad, pad), step);
 
@@ -180,7 +192,9 @@ internal sealed class SettlementHud : IDisposable
             ? EconomySystem.NodeAt(world.Nodes, pointer, PickRadius)
             : NodeId.None;
         if (world.Nodes.Contains(hovered)) DescribeNode(world, hovered);
-        Prompts(world, selected, hovered, additive, routeSource);
+        // The settlement's prompts are about a settlement. In the lab there is not one, and offering to
+        // build a granary is worse than offering nothing.
+        if (lab is null) Prompts(world, selected, hovered, additive, routeSource);
 
         var blockHeight = lines.Count * step;
         Block(size, new Vector2(pad, height - pad - blockHeight), step);

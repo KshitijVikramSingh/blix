@@ -74,9 +74,15 @@ internal static class SettlementScenarios
     /// </remarks>
     private const int YardCapacity = 150;
 
-    public static int Run(float extentMeters, float years)
+    public static int Run(
+        float extentMeters,
+        float years,
+        float reliefAmplitudeMetres = 0f,
+        Region region = Region.Downland,
+        Archetype archetype = Archetype.SplitValley,
+        uint mapSeed = 0x5EED1234u)
     {
-        var world = Build(extentMeters, out var granary);
+        var world = Build(extentMeters, out var granary, reliefAmplitudeMetres, region, archetype, mapSeed);
         var totalTicks = (int)(years * WorldCalendar.YearSeconds * TicksPerSecond);
         var faults = new List<string>();
 
@@ -645,9 +651,42 @@ internal static class SettlementScenarios
     /// them count as hands — so the economy is driven by the jobs layer rather than by a parallel notion
     /// of employment.
     /// </remarks>
-    private static SimulationWorld Build(float extentMeters, out NodeId granary)
+    /// <summary>
+    /// Builds the world the year is measured in, on flat ground or on generated terrain.
+    /// </summary>
+    /// <remarks>
+    /// <b>§54's last milestone, and it only became worth doing now.</b> The plan has owed a migration of the
+    /// calibrated scenarios off flat ground since relief existed; the reason to hold off was that the terrain
+    /// kept changing underneath, and a year-long economy assertion recalibrated against ground that moves next
+    /// week measures nothing. The generator has now stopped moving.
+    /// <para>
+    /// <b>Flat stays the default, deliberately.</b> Every economic constant in this file was measured on flat
+    /// ground, so flat is the control — the run that says whether a change broke the economy. Relief is the
+    /// second run, which says whether the economy survives the ground the game actually generates. Two
+    /// measurements answering two questions, rather than one measurement answering neither.
+    /// </para>
+    /// </remarks>
+    private static SimulationWorld Build(
+        float extentMeters,
+        out NodeId granary,
+        float reliefAmplitudeMetres = 0f,
+        Region region = Region.Downland,
+        Archetype archetype = Archetype.SplitValley,
+        uint mapSeed = 0x5EED1234u)
     {
         var world = new SimulationWorld(extentMeters);
+        if (reliefAmplitudeMetres > 0f)
+        {
+            world.Terrain.SetRegion(region);
+            var layout = MapLayout.Composed(archetype, extentMeters, mapSeed, reliefAmplitudeMetres);
+            var plan = ReliefPlan.FromLayout(layout, extentMeters, mapSeed);
+            plan.Apply(world.Terrain);
+            PaintCountry(world);
+            world.RebuildTerrainNavigation();
+            Console.WriteLine($"  ground: {archetype} in {RegionProfile.For(region).Name}, seed {mapSeed}");
+            Console.WriteLine($"    {layout.Sentence}");
+        }
+
         granary = Populate(
             world,
             Farms,
@@ -907,36 +946,136 @@ internal static class SettlementScenarios
     /// calibrated scenario keeps the ground it was measured on.
     /// </para>
     /// </remarks>
-    private static void PaintBiomes(SimulationWorld world)
+    /// <summary>
+    /// The map without its frontier, which is what "how high is this" has to be measured against.
+    /// </summary>
+    /// <remarks>
+    /// <b>The rim would otherwise eat every threshold on the map.</b> Height enters the classifier
+    /// normalised — <c>(here - floor) / span</c> — and the frontier stands at one and a half times the
+    /// interior's own relief. Measured across the whole map the span more than doubles, every interior hill
+    /// lands below a third of it, and moor disappears from a map that visibly has moors on it. The frontier
+    /// is not the country being classified; it is the edge of it.
+    /// </remarks>
+    private static float InteriorExtent(float extentMetres) =>
+        MathF.Max(extentMetres * 0.25f, extentMetres - 2f * ReliefPlan.RimWidthMetres);
+
+    /// <summary>The interior's lowest ground and how much relief it has, which every biome question needs.</summary>
+    /// <remarks>
+    /// One measurement with three callers rather than three copies of a sampling loop — §58 recorded the
+    /// duplication as something that would drift, and the third caller arriving is when to fix it.
+    /// </remarks>
+    /// <summary>The interior's floor and span, for callers outside the scenario. See InteriorRelief.</summary>
+    public static (float Floor, float Span) InteriorReliefOf(SimulationWorld world) => InteriorRelief(world);
+
+    private static (float Floor, float Span) InteriorRelief(SimulationWorld world)
     {
         var span = ReliefSpan(world);
+        var floor = float.MaxValue;
+        var reach = InteriorExtent(world.ExtentMeters);
+        for (var z = 0; z <= 100; z++)
+        for (var x = 0; x <= 100; x++)
+        {
+            var at = new Vector2(x / 100f - 0.5f, z / 100f - 0.5f) * reach;
+            floor = MathF.Min(floor, world.Terrain.SampleHeight(at));
+        }
+
+        return (floor, span);
+    }
+
+    /// <summary>
+    /// How much woodland a kind of country carries, as a multiple of what pasture carries.
+    /// </summary>
+    /// <remarks>
+    /// <b>Trees standing in the middle of a floodplain was the thing that made this necessary.</b> Woodland
+    /// density had been a function of slope and height, which is a good rule for a human reason — a slope is
+    /// hard to plough, so forest survives on it — and it is blind to everything else about the ground. A
+    /// floodplain is level, so the slope rule made it prime forest, and a level silted river-flat is in fact
+    /// the very first ground anybody clears and grazes.
+    /// <para>
+    /// Every number here is a reason rather than a taste. <b>Floodplain</b> is cleared, grazed and seasonally
+    /// wet, so it keeps almost nothing — a fringe of willows is what is left, which is what the species
+    /// mapping gives it. <b>Marsh</b> drowns roots. <b>Moor</b> is exposed and thin-soiled, so what grows is
+    /// stunted and scattered rather than absent. <b>Scree</b> has little to root in. And water and crag are
+    /// zero because they are not soil at all.
+    /// </para>
+    /// <para>
+    /// Meadow stays exactly one, which is the migration guarantee: a map with no relief classifies as all
+    /// meadow, so nothing here can move a flat map's tree count. §22's economic constants are safe by
+    /// construction rather than by being remembered.
+    /// </para>
+    /// </remarks>
+    private static float WoodlandFor(Biome biome) => biome switch
+    {
+        Biome.Water => 0f,
+        Biome.Crag => 0f,
+        Biome.Floodplain => 0.14f,
+        Biome.Marsh => 0.26f,
+        Biome.Scree => 0.42f,
+        Biome.Moor => 0.38f,
+        _ => 1f,
+    };
+
+    /// <summary>Paints the country the ground implies. Public so the map lab can generate terrain alone.</summary>
+    public static void PaintCountry(SimulationWorld world) => PaintBiomes(world);
+
+    private static void PaintBiomes(SimulationWorld world)
+    {
+        var (floor, span) = InteriorRelief(world);
         if (span < 1f) return;
 
         var terrain = world.Terrain;
         var grid = terrain.Transform;
-        var floor = float.MaxValue;
-        for (var z = 0; z <= 100; z++)
-        for (var x = 0; x <= 100; x++)
-        {
-            var at = new Vector2(x / 100f - 0.5f, z / 100f - 0.5f) * world.ExtentMeters * 0.98f;
-            floor = MathF.Min(floor, terrain.SampleHeight(at));
-        }
 
+        // <b>Classified on a three-metre grid and stamped onto the navigation cells, which took this from
+        // twenty seconds to under one.</b> The navigation grid is half a metre because that is the resolution
+        // a body's clearance is decided at, and classifying at that resolution meant thirteen million calls to
+        // a function that samples the drainage field, the grade and the height — to answer a question whose
+        // answer changes over tens of metres. Nothing about a biome varies at half a metre.
+        // <para>
+        // Three metres is the honest cost, and it is smaller than what the water already costs: channel width
+        // comes from the nearest four-metre lattice cell, so a shoreline was never finer than that. What the
+        // stamp does add is a three-metre step in <em>path cost</em> at a boundary, which is well below the
+        // scale any route is decided at.
+        // </para>
+        var stamp = MathF.Max(grid.CellSize, 3f);
+        var step = Math.Max(1, (int)MathF.Round(stamp / grid.CellSize));
         var painted = 0;
-        for (var z = 0; z < grid.Height; z++)
-        for (var x = 0; x < grid.Width; x++)
+        var tally = new int[Enum.GetValues<Biome>().Length];
+        for (var z = 0; z < grid.Height; z += step)
+        for (var x = 0; x < grid.Width; x += step)
         {
-            var cell = new GridCell(x, z);
-            var biome = Biomes.At(terrain, grid.CellCenter(cell), floor, span);
-            var surface = Biomes.SurfaceOf(biome);
+            var centre = grid.CellCenter(new GridCell(
+                Math.Min(x + step / 2, grid.Width - 1),
+                Math.Min(z + step / 2, grid.Height - 1)));
+            var biome = Biomes.At(terrain, centre, floor, span);
+            // The width is what decides whether water is a barrier or a wade, so it has to come from the
+            // same sample the classification did rather than be looked up again somewhere else.
+            var width = terrain.Drainage?.WidthAt(centre) ?? 0f;
+            var depth = terrain.Drainage is { } flow
+                ? flow.LevelAt(centre) - terrain.SampleHeight(centre)
+                : 0f;
+            var surface = Biomes.SurfaceOf(biome, width, depth);
+            var toX = Math.Min(x + step, grid.Width);
+            var toZ = Math.Min(z + step, grid.Height);
+            tally[(int)biome] += (toX - x) * (toZ - z);
             if (surface == TerrainSurface.Grass) continue;
-            terrain.SetSurface(cell, surface);
-            painted++;
+            for (var sz = z; sz < toZ; sz++)
+            for (var sx = x; sx < toX; sx++)
+            {
+                terrain.SetSurface(new GridCell(sx, sz), surface);
+                painted++;
+            }
         }
 
+        var cellCount = (float)(grid.Width * grid.Height);
+        var breakdown = string.Join(
+            ", ",
+            Enum.GetValues<Biome>()
+                .Where(biome => tally[(int)biome] > 0)
+                .Select(biome => $"{tally[(int)biome] / cellCount * 100f:F0}% {biome.ToString().ToLowerInvariant()}"));
         Console.WriteLine(
-            $"  country: {painted * 100f / (grid.Width * grid.Height):F0}% of the map is moor, scree or " +
-            $"marsh over a {span:F0} m height range");
+            $"  country: {breakdown} over a {span:F0} m height range " +
+            $"({painted * 100f / cellCount:F0}% of the map is something other than pasture)");
     }
 
     private static void ScatterWoodland(SimulationWorld world, Vector2 centre, float ringRadius)
@@ -992,6 +1131,7 @@ internal static class SettlementScenarios
             // the settlement in is a wood no raid can come out of — and the one thing this stage exists to
             // test could then never happen.
             if (Woodland.OnARide(at - centre)) return false;
+            if (!CanRoot(at)) return false;
             if (TooClose(at, spacing)) return false;
             var node = world.AddNode(NodeKind.Tree, at, capacity: (int)Woodland.WoodPerTree);
             world.SeedStock(node, Resource.Wood, (int)Woodland.WoodPerTree);
@@ -1051,7 +1191,7 @@ internal static class SettlementScenarios
         // decision about terrain on a map with no terrain in it. Written as a modulation around one and
         // faded out as the height range goes to nothing, flat ground comes out at exactly the density it
         // always had and nothing calibrated moves until somebody generates relief on purpose.
-        var span = ReliefSpan(world);
+        var (reliefFloor, span) = InteriorRelief(world);
         var strength = Math.Clamp(span / 8f, 0f, 1f);
         float Relief(Vector2 at)
         {
@@ -1060,7 +1200,27 @@ internal static class SettlementScenarios
             var above = Math.Clamp(world.Terrain.SampleHeight(at) / MathF.Max(1f, span), 0f, 1f);
             // Around one: the level ground loses some, the slopes and the tops gain more, and the total is
             // roughly redistributed rather than reduced.
-            return Math.Clamp(1f + strength * (0.85f * slope + 0.30f * above - 0.35f), 0.15f, 1.7f);
+            var shaped = Math.Clamp(1f + strength * (0.85f * slope + 0.30f * above - 0.35f), 0.15f, 1.7f);
+            // <b>And what kind of country it is, which slope alone cannot say.</b> Faded by the same
+            // strength, so it too vanishes on a flat map. See WoodlandFor.
+            // <b>Times the region's own density, which is what a region mostly is.</b> Boreal forest and dry
+            // scrub differ by a factor of seven here, and that single number does more for telling two maps
+            // apart than any amount of shape does — a wood is most of what a person sees.
+            var country = WoodlandFor(Biomes.At(world.Terrain, at, reliefFloor, span))
+                * RegionProfile.For(world.Terrain.Region).TreeDensity;
+            return shaped * (1f - strength + strength * country);
+        }
+
+        // <b>Nothing grows in a river or on bare rock, and that is not a density preference.</b> Kept apart
+        // from Relief because it has to apply to the near band as well, which is exempt from every shaping
+        // rule for §22's reason — the near band is the year's starting fuel and thinning it because of the
+        // terrain would cut an economic constant by a side effect. A tree standing in the water is not
+        // thinning, it is a lie about what that ground is.
+        bool CanRoot(Vector2 at)
+        {
+            if (strength <= 0f) return true;
+            var biome = Biomes.At(world.Terrain, at, reliefFloor, span);
+            return biome is not (Biome.Water or Biome.Crag);
         }
 
         void Band(float inner, float outer, int trees, float spacing, int clump, bool shape = true)

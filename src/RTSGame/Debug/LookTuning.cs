@@ -381,6 +381,28 @@ internal sealed class LookSettings
     // and §52's macro colour variation in the world shader does the rest — so these two were describing a
     // representation that no longer exists.
 
+    /// <summary>
+    /// Trees sharing a ten-metre cell before one of them drops to the middle level of detail.
+    /// </summary>
+    /// <remarks>
+    /// Crowding, not distance, is what picks a tree's level of detail — see the remarks on
+    /// <c>RtsGameLoop.RebuildCanopyDensity</c> for the two distance ladders that were built and taken back
+    /// out. This is the threshold where a copse becomes texture: below it a tree keeps every triangle
+    /// however far away it is.
+    /// </remarks>
+    [Tune(1.0, 12.0, Label = "tree crowd \u2192 mid", Group = "ground")]
+    public float TreeCrowdMid = 3f;
+
+    /// <summary>
+    /// Trees sharing a ten-metre cell before one of them drops to the coarsest level of detail.
+    /// </summary>
+    /// <remarks>
+    /// The coarse level sheds interior leaf cards, so it only holds up where the neighbours fill the mass
+    /// back in. That is what this threshold is: thick enough that nobody can tell which trunk is which.
+    /// </remarks>
+    [Tune(2.0, 20.0, Label = "tree crowd \u2192 far", Group = "ground")]
+    public float TreeCrowdFar = 6f;
+
     /// <summary>How far from what the camera is looking at trees are still drawn, in metres.</summary>
     /// <remarks>
     /// Not a look dial — a budget one, and it is here because it is judged the same way: turn it down

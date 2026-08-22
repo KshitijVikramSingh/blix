@@ -5375,3 +5375,1249 @@ in three minutes, which at fifteen cutter-minutes a tree it cannot see; that is 
 the check should move when the grain does. And the wear field, the hearth falloff and the shadow box all
 turned out to be relief-correct already — the wear is indexed by world x/z, which is exactly right for a
 height field — so §54's "the dressing still assumes flat" item is retired without work.
+
+## 56. Levels of detail belong to crowding, not to distance
+
+Three selectors for a tree's level of detail were built in one sitting. Two of them are the obvious
+answers and both were taken back out; writing down why is the point of this section, because the one that
+survived is the one nobody proposes first.
+
+**Screen-space error, which is the textbook answer.** The cook records each decimated level's world-space
+geometric error, so `error × viewportHeight / (2 × distance × tan(fov/2))` is that level's mistake measured
+in pixels, and the crossover distance is where it reaches a threshold. Two divisions a frame, correct at
+every zoom and every window size, no tuning. Measured, it put the crossovers at **four hundred metres** and
+left every tree in the frame at full detail. The reason is not a bug: decimating a canopy moves leaf
+clusters by tens of centimetres, so a tree's geometric error is enormous and *invisible*, where the same
+error on a wall would be a hole you could see through. The metric is calibrated for surfaces whose
+silhouette is the thing being looked at, and a canopy's silhouette is a statistical impression of ten
+thousand leaves. It does not qualify.
+
+**Hand-tuned distance bands, which is what everybody ships.** These went through two wrong shapes before
+the right one. Measured from `cameraFocus` — the point the camera aims at — they draw a detail ring around
+the middle of the screen, reported from the chair as *"getting the trees more pronounced through a circular
+lens in the middle of the screen looks like I have tree god eyes"*. Measured from the eye they collapse, because
+the eye is `cameraDistance` from the focus and a near band of 38 m is empty at any standoff wider than 38 m.
+The correct form is **depth past the focal plane** — `cameraDistance + Δ` — which runs the bands up the
+screen the way a level of detail should and is zoom-adaptive for free. That version worked, and was still
+wrong, for a reason that has nothing to do with geometry: *any* distance ladder thins the far half of the
+map at once, and the coarse levels shed interior leaf cards, so a wood going sparse as the camera pulls
+back reads as **logged**. A player cannot un-see that. Reported as *"at a distance LOD just seems to reduce
+apparent density by too much"*.
+
+**Crowding, which is what survived.** A tree standing on its own is being looked at and keeps every
+triangle however far away it is; a tree in a thicket is texture, and nobody can tell which trunk is which
+at any distance. Where trees overlap, the neighbours fill in the mass the coarse level lost, so the thinning
+lands exactly where it is covered — which is the property the distance ladder could not have. It also spends
+the detail where a settlement is, since the ground round a village is cleared, so the trees a player works
+among are the uncrowded ones by construction.
+
+The field is a count of standing trees per ten-metre cell, rebuilt once a frame from the node table: one
+pass, no spatial query. Ten metres is about two canopies across — finer and a tree is alone in its own cell
+however thick the wood, coarser and a village's cleared ring averages into the wood beside it. It is
+deliberately **not** the terrain's forest cover, which is a binary that says "two trees crowd this cell"
+and cannot tell a copse from a forest; three levels need more than one bit to choose between them. And it is
+a frame's field rather than a cached one because felling changes it — clear a stand and the survivors stop
+being texture and start being trees, which is exactly when they should get their triangles back. Dressing
+side throughout, per §52: nothing is remembered between frames and nothing is fingerprinted.
+
+Distance keeps exactly one job, and it is a limit rather than a ladder: `treeDrawRadiusSquared`, set beyond
+what the camera can see, and soon beyond what the player has scouted.
+
+### The shadow is allowed to disagree with the scene
+
+Once every tree cast its own shadow again — the far tier had been casting nothing, which is a large part of
+what made a distant wood read thin, since a wood with no darkness under it has no mass — the sun's pass
+became the pass a woodland actually costs. It draws every caster in the box whether or not the camera can
+see one, and at maximum zoom that was 5.7M triangles against the scene's 8.6M.
+
+So `PropModel` learned to build its caster from **different geometry than it draws**, which is the one place
+the two are allowed to differ. A shadow is a silhouette resolved to an eleven-centimetre texel, so it
+survives geometry the camera would refuse: the full tree casts from two levels down, and the middle and far
+tiers both cast from the coarsest. Measured back to back, that took the shadow pass from 5.7M to 3.7M
+triangles and the frame at maximum zoom from 24.5 ms to 22.0 ms, with no tree losing its shadow.
+
+What is still forbidden is a different *instance list*. Every list — scene parts and caster parts alike —
+is filled by the same `Add` call, because a caster drifting from what it casts for is a shadow under
+nothing. The substituted casters are their own parts rather than a second batch hung off the scene parts,
+since a pruned decimation need not have the same number of primitives as the model it came from and pairing
+them by index would silently mis-tint or crash.
+
+### On measuring on this machine
+
+Two hours of continuous headless runs and the same build read 22.0 ms and then 38-41 ms. The tell was
+`overlay`, a CPU build phase the tree LOD cannot touch: it moved by 1.74× while the frame moved by 1.77×.
+The machine was throttling, uniformly. **Only back-to-back comparisons inside one window mean anything
+here**, and every figure in this section is from such a pair. The absolute numbers are not portable and
+should not be quoted as a budget.
+
+## 57. Geography, from the one thing that makes geography
+
+The map was "a few mounds and tree types". The fix was not more mounds or more types.
+
+`Biomes.At` already knew what was missing, in its own remarks: *"Three signals, all of them about water,
+which is what actually decides what grows where."* Grade, height and a twenty-metre concavity test — three
+**local** stand-ins for one **global** quantity, and the limit of a local measurement is exactly this: a
+hollow cannot know whether half a hillside drains into it. So rivers were never a feature to add beside the
+other terrain types. A river is the visible part of the drainage network, and the network is what the
+classifier had been approximating all along.
+
+### The three layers, and why they are in this order
+
+**`Drainage`** — depression fill, flow direction, flow accumulation, on a four-metre lattice.
+
+Priority-Flood first, because nothing downstream works without it: a composed height field is full of small
+pits, a pit swallows every drop that reaches it, and so every river on an unfilled map is four cells long.
+Filling is one pass and needs no iteration, because always expanding from the lowest lip reached so far means
+the first path to a cell is the lowest path there is. What it fills is kept as `LakeDepth` — knowing which
+holes would hold water is a subtraction, not a second algorithm.
+
+D8 rather than multiple-flow-direction, and that is a choice about what a channel *is*: spreading flow over
+every downhill neighbour gives smoother accumulation and a broad damp smear where a valley floor should have
+a river in it. Concentration is the point.
+
+Accumulation walks cells from the highest filled surface down, which makes one pass sufficient — a receiver
+is always lower than its donor, so the height field already **is** the topological order.
+
+**`Erosion`** — `K · A^m · S^n`, plus hillslope creep, plus uplift, forty-eight times.
+
+One line of physics, and everything recognisable falls out of it unasked: valleys, because a channel deepens
+itself and so gathers more water and so deepens faster; a *network*, because two neighbouring channels
+compete for one divide and the winner captures the loser; ridges, because a divide is where nothing has won
+yet; concave valley floors under convex hilltops, because A grows downstream while S falls.
+
+Creep is not optional. Stream power acts only where water has gathered, so alone it cuts knife-thin slots and
+leaves everything between them exactly as smooth as it was — a hill with grooves scratched in it. Soil moves
+downhill *everywhere*, which is a Laplacian, and it is what rounds the interfluves into land.
+
+Uplift is not optional either, because "erode hard" without it erodes to a plain. So the composed landforms
+became an uplift **rate** rather than the finished ground: each pass adds a little of them back and then
+cuts. The landforms still decide where the high ground is; erosion decides what high ground looks like.
+
+**And the forty-five metre noise octave was deleted**, because it was a fake of exactly this. Its own comment
+said so — *"what breaks that on earth is drainage"* — and the two cannot both run: unorganised roughness at
+the scale erosion works at hands the flow solver a hillside full of pits to fill, so the fake was spending
+the real one's fidelity.
+
+**`GradeLimit`** — the budget, re-established on the surface that actually exists.
+
+`ReliefPlan.SteepestGrade` is computed from the shapes, and its remarks state the deal plainly: *"from the
+shapes rather than from the height field, so it can be checked before a single vertex is written."* That deal
+held while the shapes **were** the ground. It stops holding the instant erosion runs, because steepening
+valley sides is the mechanism rather than a side effect. Five grade bugs in this file's neighbourhood were
+caught by measuring the finished field instead of trusting the claim; this is the same lesson one step
+earlier — make the surface obey rather than hope the process did.
+
+Ascending order, lowering only, one pass: a cell is only ever pulled down by a cell already settled below it,
+and lowering a cell can only make compliance easier for everything above.
+
+### What it measures
+
+| amplitude | largest catchment | channel | outlets | standing water |
+|---|---|---|---|---|
+| 3 m | 43.6% | 0.6 ha / 347 cells | 6 | 0.01 ha, 0.05 m deep |
+| 12 m | 42.9% | 0.6 ha / 380 cells | 6 | 0.05 ha, 0.07 m |
+| 24 m | 48.9% | 0.6 ha / 365 cells | 7 | 0.76 ha, 0.61 m |
+
+**A largest catchment of half the map is the figure that matters**, and it is why the sweep grew a drainage
+line at all. Erosion cannot be checked against a slope histogram — noise and a river network produce the same
+one, and the entire difference between them is organisation. A map whose biggest catchment is a few per cent
+has no rivers on it however rough its slopes. Half the map, seven outlets, and about 1.4 km of channel on a
+600 m tile is a trunk river with tributaries.
+
+The country the classifier now produces, at 24 m on the village map:
+
+    66% meadow · 20% moor · 4% scree · 2% marsh · 4% water · 4% floodplain
+
+against one biome and two before.
+
+### The classifier, rewritten around two questions
+
+How much water arrives (upslope area) and how fast it leaves (grade). Their combination has a name — the
+topographic wetness index, `ln(area / grade)` — and it is a logarithm because area spans four orders of
+magnitude on one map, so a ridge and a valley floor ought to be a few units apart rather than a factor of ten
+thousand. Being scale-free is what lets one set of thresholds hold on a 600 m map and a 1200 m one.
+
+Two biomes were added. **Water**, which is the only class allowed to overrule the shape of the ground — a
+channel on a slope is still a channel. **Floodplain**: level, low, *and* beside water, all three, because any
+two of them describe something else — level and low without water is a dry pan, level and wet without being
+low is a hanging bog. It draws as grass on purpose: the difference between floodplain and meadow is soil, so
+it belongs in what a field yields and where a site scores, not in what a boot finds underfoot.
+
+### Water as a barrier, and the two things this got wrong first
+
+Width goes as `0.017 · sqrt(area)`, which is not a fit — discharge is proportional to catchment, a channel is
+about as deep as it is wide, so width goes as the root of area. One coefficient makes the trunk six metres
+across and its headwaters something you step over, and nobody placed either.
+
+**`Shallows` is a new surface, and it costs exactly what `Mud` costs.** Same speed on purpose — wading and
+wallowing are both about a stride and a half a second — so reusing mud was tempting. What that costs is the
+picture: mud is dark brown, shallow water is pale, and a brook drawn in mud's colour flowing into a river
+drawn in water's is the kind of thing nobody can name and everybody sees.
+
+**Two measurement bugs, both found by disbelieving a number.**
+
+*Interpolating upslope area painted the map three times too wet.* Area is the most non-linear field here — a
+trunk cell carries a hundred times what the ground one cell away does — so a bilinear read hands a fraction
+of the trunk's discharge to its neighbours, and a fraction of a hundred is still a river. Seven per cent of
+the map came out as water on a map with about two per cent of it in channels. Interpolation is right for the
+wetness index, which wants to vary smoothly across a hillside, and wrong for a question whose answer is a
+boundary.
+
+*The trace threshold has to be set by what the lattice can express, not by what a stream is.* Eighty
+centimetres — narrower than a stride — is the honest answer to when water stops being a decision, and it
+still painted six per cent, because every damp line on every hillside qualifies and each is painted a whole
+four-metre cell wide. A metre and a half is where the two agree.
+
+### Known, and deliberately not fixed yet
+
+- **Four metres is the narrowest channel this can express.** A one-metre brook needs the centreline extracted
+  as a polyline and the water painted about it — which is also what would let a river draw as a ribbon rather
+  than as painted cells, the same fix the road's staircase wants.
+- **Lakes are ponds.** 0.76 ha and 0.61 m deep at best, because erosion is a pit-*destroying* process: it
+  removes the basins that would hold water. A lake worth being a landmark needs a reason to exist that
+  survives erosion, not a lower fill threshold.
+- **"Fordable at low water only" is absent**, and `FordableWidthMetres` carries the note saying so. It needs a
+  seasonal water level for the router to read, and inventing one next to the field that already knows how
+  much water there is would be a second source of truth about the same fact.
+- **The `--relief` sweep does not paint biomes**, so it reports drainage but has never tested whether an
+  impassable river closes ground or cuts a map in two. It says "crossings 0" because there is no water in it.
+  That is the next thing the sweep owes.
+
+## 58. The frontier, and seven kinds of country
+
+Two asks: tune the distribution, and make the exact map edge unreachable — *"more of a preference"* than a
+restriction. The second one turned out to pay for three things at once, which is why it went first.
+
+### The edge already was a wall. This gives it a reason.
+
+The relief sweep has always reported `599 closed, of which 599 are off the map edge`, and the comment beside
+that count says what it is: *"being outside the map is the other way to fail, and a body's whole outline has
+to fit."* The boundary of the world was an invisible line at the extent that a body simply could not cross.
+High ground and deep water do the same job while being something a player can see and reason about.
+
+**Uneven on purpose, because it is a preference and not a wall.** A rim of constant height reads as exactly
+what it is — the edge of a level — and seals the map into a box. Modulated on a 205 m wavelength it becomes
+country instead: two or three stretches that stand up as crag, two or three that are merely high ground
+somebody could walk over, and the gates cut clean through. Discouraged in most places, stopped in some. That
+is the difference between a region and an arena.
+
+**It earns its keep three times.** The edge stops being an arbitrary line. Water is funnelled into two gates
+instead of leaking off all four sides, so the trunk rivers roughly doubled their catchment and now read as
+rivers. And the interior finally has ground enclosed behind high land — which is exactly what §57's "lakes
+are ponds" needed, because erosion *destroys* basins and standing water needs a reason to exist that erosion
+cannot take away.
+
+### Three orderings that are the whole design
+
+**Gates are chosen before the rim, from the un-rimmed field.** Choosing them afterwards would be choosing
+them from ground the rim had already raised, and a gate cut through the highest part of a frontier is a gate
+no water reaches. It also avoids the failure this arrangement invites: if every outlet sits above much of the
+interior, depression filling floods everything below the lowest sill and the map becomes a lake. Two gates,
+at least a third of the map apart — two side by side are one gate, whereas two on opposite quarters give the
+drainage competing destinations, and that is what makes a divide run across the middle of the map.
+
+**The grade budget applies to the interior and deliberately not to the frontier.** The budget exists so the
+ground a settlement lives on stays connected; a frontier's whole job is to not be connected. Limiting it
+would cap a mountain wall at a walkable slope. `GradeLimit` took an `insetCells` parameter for this.
+
+**And that exemption is what makes `Crag` need no special case.** The new impassable-rock class is told from
+`Scree` by a plain grade test at 0.55, and the test is sound only because the interior *cannot reach* that
+grade — the budget is about a third and the worst a bilinear corner turns that into is a half. The threshold
+sits in empty space with a gap either side, so which side of it a place falls on is never in doubt. It is not
+a knob for tuning how much crag there is.
+
+### Tuning: what moved and why
+
+The rim changed the ground enough to invalidate four thresholds at once, which is the honest cost of making
+the terrain causal — the numbers describe real ground rather than being free parameters.
+
+| | before rim | after, untuned | tuned |
+|---|---|---|---|
+| meadow | 66% | 66% | 58% |
+| moor | 20% | **0%** | 11% |
+| scree | 4% | **16%** | 5% |
+| marsh | 2% | 4% | 5% |
+| water | 4% | 7% | 6% |
+| crag | — | 6% | 6% |
+| floodplain | 4% | **0%** | 10% |
+
+**Moor vanished because height is normalised and the denominator moved.** A rimmed map's interior is incised
+far more deeply than a bare one — the measured interior range went from 24 m to 41 m at the same amplitude —
+so "above half of it" stopped being anywhere.
+
+**And the fix was an ordering, not a number.** With scree tested first, high ground only became moor where it
+was also gentle, and eroded high ground almost never is. But a moor is not level ground; it is ground that
+*sheds water*, and in upland country most of it is on a slope. So high-and-dry now claims a place before
+steep does, and scree takes what is left over. Which reads correctly as well: heather over the shoulder of a
+hill, bare stone where the shoulder breaks.
+
+**Floodplain at a wetness of 9.5 put a quarter of the map under silt**, because 9.5 is a hillslope with a few
+hundred square metres above it — most of a hillside. Half a unit of a logarithm is a factor of *e* in the
+catchment, which is the difference between "water passes here" and "a river laid this down".
+
+**The width coefficient was recalibrated once, and only because the frontier arrived.** Funnelling the water
+into two gates roughly doubled the largest catchment, so every channel on the map got wider for a reason that
+had nothing to do with how wide a channel should be. `0.017 → 0.013`. That is the single coefficient working
+as intended, and the reason to keep exactly one of it.
+
+### Two mistakes worth recording
+
+**An edit landed on the fallback branch.** `Biomes.At` has two scree tests — one in the no-drainage fallback,
+one in the real path — and the first occurrence in the file is the fallback. Scree stayed at 16% through a
+change that looked applied and was measured as having no effect. The measurement caught it; reading the diff
+would not have.
+
+**Floor and span had to become interior-only in two places**, and they are two separate copies of the same
+100×100 sampling loop — one in `SettlementScenarios.PaintBiomes`, one in `RtsGameLoop`. Both now inset by the
+rim width. That is one fact with two owners, which this file's history says is a thing that drifts; it wants
+collapsing into one method next time either is touched.
+
+Checked: `worst-stuck 0.000` over 400 frames with 12% of the map impassable, so neither the water nor the crag
+traps anybody.
+
+## 59. Flora belongs to the country, and a lake cannot be bigger than its catchment
+
+Three reports from the chair, and each of them named a rule rather than a symptom.
+
+### "Looks a bit curved inwards"
+
+**Erosion cannot shape a divide, which means it cannot shape the one thing I asked it to shape.** Incision
+goes as upslope area; a rim's crest has nothing above it and its outer face drains straight off the map edge
+and gathers nothing either. So the frontier stayed the smooth analytic ramp it was added as, and forty-eight
+passes of hillslope creep took out what little texture that ramp had. A smoothed ramp is a curve. The
+complaint was precise.
+
+Two modulations do the work erosion will not:
+
+- **The foot wanders**, on a ninety-metre wavelength, half the rim's width of swing. This is most of the fix,
+  because a wall is recognised by being *parallel to something* — and once the mountain front stops being an
+  offset copy of the map edge it stops reading as a boundary and starts reading as a range with spurs and
+  re-entrants.
+- **The crest carries a second, shorter wavelength**, multiplied rather than added so it cannot lift the
+  frontier where the long wavelength meant it to be low. A col has to stay a col.
+
+Creep also came down from 0.22 to 0.14: over forty-eight passes the diffusion was outrunning the incision and
+taking the definition back out of the valleys it had just cut.
+
+### "Large water bodies can't be placed upstream"
+
+Correct, and the code was violating it for a structural reason. **Priority-Flood raises every hollow to its
+spill point, because that is what routing requires** — so a broad shallow dish high on a hillside comes back
+carrying twenty centimetres of "water" across the whole of it, and drawn, that is a large lake sitting above
+anything that could fill it.
+
+The fix is the rule as stated: standing water now needs a catchment, `LakeCatchmentMetres2 = 12,000 m²`. The
+threshold is deliberately the same order as the one a channel needs, so that standing water and running water
+are the same claim about the same field — a lake sits on a watercourse, and a dry hollow stays a dry hollow
+however deeply the filler filled it.
+
+**It took water from 7% of the map to 1%.** Six of those seven points were never lakes.
+
+### "Trees growing straight in the middle of flood plains"
+
+Woodland density was a function of slope and height. The slope rule is a good one and human rather than
+botanical — *a slope is hard to plough, so forest survives on it and the flat gets cleared* — and it is blind
+to everything else about the ground. A floodplain is level, so the rule made it prime forest. A level silted
+river-flat is in fact the first ground anybody clears and grazes.
+
+`WoodlandFor(Biome)` now modulates it, and every number is a reason:
+
+| | × pasture | why |
+|---|---|---|
+| water, crag | 0 | not soil |
+| floodplain | 0.14 | cleared, grazed, seasonally wet — a willow fringe is what is left |
+| marsh | 0.26 | drowns roots |
+| moor | 0.38 | exposed, thin soil: stunted and scattered, not absent |
+| scree | 0.42 | little to root in |
+| meadow | 1 | the baseline, and the migration guarantee |
+
+Meadow being exactly one is what keeps §22 safe *by construction*: a map with no relief classifies as all
+meadow, so nothing here can move a flat map's tree count.
+
+**Rooting is separate from density, and has to be.** The near band is exempt from every shaping rule because
+it is the year's starting fuel — thinning it because of the terrain would cut an economic constant as a side
+effect. But a tree standing in a river is not thinning, it is a lie about what that ground is. So `CanRoot`
+vetoes water and crag everywhere, including the near band, while leaving the count alone.
+
+Three more things followed from the same reading:
+
+- **Species.** Floodplain gets the twisted form standing in for a willow — what survives on a river flat
+  tolerates being underwater half the year and grazed the rest. Crag gets conifer.
+- **Cover density, not just cover species.** The species mapping alone gave every country the same *amount*
+  of cover in a different shape, so a moor and a water meadow were equally shaggy. `lushness` runs from 0.22
+  on crag to 1.30 on floodplain, around one so pasture is untouched.
+- **Crag scatters square broken stone and never rounded pebbles**, because a crag sheds angular rock and a
+  rounded pebble is what a river makes — the other end of the map entirely.
+
+### The interior-relief duplication, closed
+
+§58 recorded that the 100×100 interior sampling loop had two owners and would drift. The third caller arriving
+is when to fix it, so `InteriorRelief(world)` is now one method with three callers. `RtsGameLoop` keeps its own
+copy because it is a different class and reads it per terrain change; that one is still outstanding.
+
+### A gate failure that was mine
+
+The year leg reported FAILED, and the cause was `pkill -f RTSGame` run to close a headed window while the gate
+was mid-run. Run alone that leg is fine. Worth recording because the log looked exactly like a regression —
+day 0 printed, then an immediate non-zero exit — and the only way to tell the difference was to reproduce it.
+
+## 60. The map lab, and archetypes instead of noise
+
+The framing that produced this section: at 600 m there is not enough canvas for geology, so a generator that
+reasons about watersheds and mountain ranges is answering a question the map is too small to ask. What fits is
+**one small landscape with a strong geographic idea** — two large geographic statements and three to five
+secondary consequences, and anything beyond that is theme-park geography.
+
+That changes the first layer and leaves the causal ones alone, which is the right shape: drainage, the wetness
+classification, flora by land type and the ground blend all stay exactly as they are. They were always the
+second and third layers.
+
+### What it retired
+
+- **`ReliefPlan`'s six random landforms.** Composing mounds and hoping is precisely "starting from noise and
+  hoping interesting geography appears".
+- **Erosion as a shape-maker.** Forty-eight passes was right while erosion was the only thing deciding what
+  the map looked like; it is wrong once the shape is authored, because fifty rounds of stream power turn *any*
+  input into the same mature dendritic texture. Twelve passes now — a finisher, enough for channels to
+  organise and valley floors to go concave, not enough to forget what it was given. This reverses an earlier
+  decision ("erode hard, many passes") deliberately rather than by drift.
+
+### Three separators, three mechanisms, and the split is not arbitrary
+
+- **A ridge becomes landforms** placed along its path — so it inherits the grade budget and the soft-maximum
+  composition that took five measured bugs to get right. Realised any other way it would have to earn all of
+  that again.
+- **An escarpment becomes a lattice step.** It is the one statement here that is not symmetric, and a landform
+  is radial: high on one flank and low on the other is a signed distance to a line, not a sum of hills. Built
+  out of hills you get a ridge with a plain on both sides, which is the opposite of a shelf.
+- **A river becomes a trough and an inflow**, carved *before* erosion so erosion deepens a valley that is
+  already there instead of inventing one elsewhere. The trough decides where; erosion decides what it looks
+  like.
+
+**And a connector is the separator not being there.** A saddle is an absence — anything *added* to a ridge to
+represent a way through is a bump in the middle of the gap. So connectors scale the relief down, which is the
+same mechanism that already cut the frontier's gates.
+
+### The lab
+
+`--maplab`, on a canvas larger than the game's map. `Q`/`E` cycle archetype, `Y` rolls a new seed, the arrows
+slide a 600 m window in eighths, `Enter` prints the pick:
+
+    pick: --archetype DiagonalRiver --seed 1592594996 --window 0,0
+        "settlements facing each other across a river valley"
+
+The triple is the whole identity of a map, because everything under it is deterministic. **And the sentence is
+the acceptance test, not a label** — a layout that cannot be said in a line has too much happening on 600 m of
+ground, so it is printed next to the map it is judging.
+
+**The larger canvas is the point, not a convenience.** A 600 m window cut from a coherent 1800 m landscape is a
+*fragment*: its river genuinely comes from off-window, its ridge genuinely continues past the edge. That is the
+property the inherited-inflow constant was faking, and framing a crop makes it true instead.
+
+### The bug that took five rounds, and what it taught
+
+Symptom: an 1800 m canvas came out a quarter marsh on thresholds tuned at 600 m. It looked exactly like
+thresholds sliding with the extent, so I normalised the wetness index by the map's area — which fixed that end
+and left the same canvas 81% pasture. **When both ends of a range go wrong together, the fault is upstream of
+both.**
+
+It was two faults, in fact:
+
+1. `InheritedCatchments` was written as a multiple of the canvas. A river's upstream catchment is a fact about
+   the country it came from; it does not change because the window you are looking through got wider. Viewing
+   1800 m poured nine times the water into the same watercourse. Now an absolute area — two 600 m tiles' worth
+   — so a picked window sees the river its own size implies whatever canvas it was framed on.
+2. **An absolute wetness cannot be portable at all**, inflow aside. A bigger canvas has longer hillslopes and
+   therefore genuinely bigger catchments, so ground that is merely damp at 600 m is a fen by the same number at
+   1800 m. No rescaling of the index fixes that, because the difference is real.
+
+So the classifier reasons in **ranks**. A rank has no units and cannot slide, and it is the more meaningful
+claim anyway: "wetter than nineteen twentieths of this landscape" is what a fen *is*, whereas a number of
+log-square-metres is a proxy that happens to work on maps of one size. The dials read as sentences — the
+wettest twentieth is fen, the wettest fifth of the level low ground is floodplain, the driest high ground is
+moor — and the distribution stopped being something that emerges and became something that is asked for.
+
+Measured across extents, at one amplitude and one archetype:
+
+| extent | meadow | moor | scree | marsh | water | crag | floodplain |
+|---|---|---|---|---|---|---|---|
+| 600 m | 51% | 16% | 9% | 3% | 2% | 5% | 15% |
+| 1200 m | 59% | 13% | 5% | 4% | 1% | 3% | 15% |
+| 1800 m | 64% | 12% | 2% | 3% | 3% | 1% | 15% |
+
+The wetness classes are stable by construction. The grade classes still drift — scree 9%→2% — and that is
+correct rather than outstanding: the same thirty metres of amplitude spread over three times the ground is
+genuinely gentler.
+
+### Outstanding
+
+- **Cropping is not implemented.** The lab prints a window and nothing consumes it yet; `--village` still
+  generates 600 m standalone. Until it does, the fragment property is available in the lab and not in the game.
+- **Eight archetypes are authored, and only their ridge/river/escarpment realisations exist.** Marsh, cliff-band
+  and dense-woodland separators, and the ford/narrows/valley-mouth/clearing connectors, are named in the enums
+  and not yet realised.
+- **Nothing expresses the four-player relationships yet.** `MapLayout.Regions` and `Contested` are carried and
+  unread. The point of them is that terrain should make the six pairwise relationships different from each
+  other; today they are only positions.
+
+### 60a. Unblocking the lab's zoom found three things, not one
+
+"Unblock the camera zoom on the canvas scenario" turned out to be three separate faults stacked, which is
+worth recording because only one of them was the limit it sounded like.
+
+**A limit tuned for a different question.** `CameraFurthestDistance = 118 m` is a judgement about a
+*settlement* — it sees about 165 m of ground, which is the village, its fields, its tree line and the shoulder
+of the nearest high ground, and it is exactly right for that. It is meaningless for a canvas three times the
+map wide, where the thing being judged is whether a whole landscape has one idea in it. Now a field, set from
+the extent in the lab, because the two limits scale differently: the game's is about how much detail is worth
+drawing, the lab's is about fitting the canvas on the screen. It costs nothing, because the lab has no trees —
+the far end of the game's zoom is expensive for reasons entirely about foliage.
+
+**An argument that never arrived.** `--zoom` was applied inside `LoadSettlementScenario`, which the lab does
+not run, so the camera sat at the default forty-six metres. That reads as a clamp too, because the wheel could
+not get out of it either. Two causes, one symptom.
+
+**And the world ended in a circle.** Ground chunks were culled against `DetailRadius`, which is capped by a
+look dial because it sizes the sun's box — and a box stretched to a kilometre has metre-wide texels, so the cap
+has to stay. But it was also deciding how much ground *existed*: pulling back past the cap showed less of the
+map rather than more. `GroundDrawRadius` is now separate and uncapped, because ground is the cheapest thing on
+the screen — a chunk is about eight thousand triangles and the whole 1800 m canvas is under two hundred
+thousand. This is the same class of bug this file already has a note about at the far plane.
+
+**Then the fill rate.** All 25 chunks drawing came to 81 ms, and the cost was the 126 alpha-blended transition
+coats covering a full-screen canvas. A crossfade band is a *detail*: at a standoff where the whole canvas is in
+frame the render step is six metres wide, which puts the band comfortably under a pixel. So base coats draw to
+what can be seen and transition coats to the detail radius — 219 layers at 81 ms became 108 at 18.5 ms with
+nothing visible lost.
+
+**One thing the primitive got right.** Skipping only the *draw* of a layer left its batch open, and the next
+frame's `Begin` threw `InstancedBatch.Begin called while a batch is already active`. That is the correct
+behaviour: a Begin without an End is a staged instance list nobody submitted, and it should be loud rather than
+silently leaking a frame's work. Staged and drawn are now the same set by construction.
+
+Gate green on all three legs afterwards, and the game path unchanged at 20.1 ms.
+
+## 61. A canvas holds more statements, not a bigger one
+
+"Each 1800 m map contains one interesting element, max two, so there's just no interesting 600 m map
+possible." Correct, and it was a bug of mine rather than a limit of the approach.
+
+**The archetypes were authored on a unit square and scaled by the canvas extent.** But every size in §60's
+brief is absolute — a ridge of 150-250 m standing 20 m over its surroundings, a valley 80 m across, a hill of
+30-60 m — and scaling by the extent stretched all of them threefold. An 1800 m canvas got one ridge system a
+mile and a half long, so no 600 m window in it contained anything at all. Which is precisely the failure the
+brief warns about — *realistic scale is actively your enemy* — reintroduced by making the canvas the frame of
+reference instead of the map.
+
+### Frame scale, not canvas scale
+
+A layout is authored on a 600 m **frame**, because the archetypes are statements about *a map* and not about a
+region. `MapLayout.Field` then fills a canvas with as many instances as fit, on a grid jittered by a third of
+a cell, each rotated and mirrored independently, and — this is the part that serves the actual workflow — each
+drawn from the whole archetype family unless one is pinned. So one roll of an 1800 m canvas is nine
+neighbourhoods of different character, and the windows over them are genuinely different maps rather than nine
+views of one:
+
+    "a river through 9 neighbourhoods: 3x CentralHighGround, 2x TwinBasins,
+     2x DiagonalRiver, Escarpment, SplitValley"
+
+**The river is the exception and spans the whole canvas**, because a river is the one feature that really is
+regional: it is what makes the canvas one place rather than a patchwork, and it is what gives a window its
+off-window context. Instance rivers become tributaries — carved, but given no inherited catchment, so they
+carry only what the ground above them sheds, which is what a tributary is.
+
+**A tributary is also cut shallower than the trunk, and not for looks.** Carved to the same depth, two channels
+of equal authority meet at a junction and the flow router has no reason to prefer either — so the trunk wanders
+into a tributary's bed and out again. Half the depth keeps the hierarchy the drainage is meant to discover.
+
+The seams that tiling would produce are handled by not tiling: the instances overlap, and every layer
+downstream composes rather than partitions — ridges combine through the soft maximum, and drainage and the
+classifier only ever read the finished surface.
+
+### The lab finds the maps
+
+The rule this whole layer rests on — *one map, one geographic sentence* — is **computable**, so making somebody
+hunt for a good framing was the wrong tool. `SurveyWindows` walks every framing on an eighth-of-a-window grid
+(the same step the arrows move in, so every suggestion is reachable and nameable) and scores it as the rule
+states:
+
+- **Statements** — separators crossing the window. Peaks at two, falls off either side, because four is
+  theme-park geography.
+- **Ways through** — connectors inside it. Two to four; none means a window cut in half.
+- **Variety** — kinds of country present at more than a token share. All-pasture is a window with nothing to
+  decide about.
+- **Somewhere to live** — the share that is level, dry and open. A dramatic window nobody can found in is not a
+  map.
+
+On the canvas above, five well-separated framings at 0.96-1.00:
+
+    1.00  --window 525,225    2 statements, 3 ways through, 4 kinds of country, 43% you could found on
+    1.00  --window -225,-525  2 statements, 2 ways through, 4 kinds of country, 45% you could found on
+    1.00  --window -600,-450  2 statements, 3 ways through, 4 kinds of country, 66% you could found on
+    1.00  --window 525,-600   2 statements, 2 ways through, 4 kinds of country, 61% you could found on
+    0.96  --window 225,600    2 statements, 2 ways through, 4 kinds of country, 32% you could found on
+
+It scores framings rather than choosing one — it is an instrument and the eye still decides. Its real value is
+being able to say when a canvas has *nothing* good on it, because that is a fact about the generator rather
+than about the person looking.
+
+**Known: the score saturates.** Four candidates at exactly 1.00 means it cannot rank the top of the field, only
+separate good from bad. That is adequate for its job and worth fixing if the top ever needs ordering.
+
+### And one bug the survey found immediately
+
+Every framing reported "1 kinds of country". `CountryAt` reads the renderer's country field, which is rebuilt
+inside the render pass and guards on the graphics device — so anything asking about country during generation
+gets an empty grid and the answer "all meadow". Measured directly from the terrain instead, the same canvas has
+seven. Worth recording as a shape of bug rather than an incident: a cache that is populated by a later phase
+answers confidently and wrongly when asked early, and the wrong answer was a plausible one.
+
+## 62. Region: the axis that was missing
+
+"The presets look mostly the same terrain type — grasslands or highlands with some water here or there, green
+all over."
+
+Correct, and structural rather than a tuning problem. `Biomes` was one classifier with one palette, so the
+code contained exactly **one climate**: temperate north-west European. The archetype layer varies *topology*
+and nothing varied *character*. Two orthogonal axes, and only one of them existed — which is why eight
+archetypes produced eight shapes of the same country.
+
+### It composes because the classifier reasons in ranks
+
+§60 moved the classifier off absolute wetness thresholds onto quantiles of the landscape's own distribution,
+and the reason at the time was portability between map sizes. The payoff turns out to be this: **a dry region
+is the same rule with the fen rank pushed to the ceiling, and a fen country is the same rule with it pulled
+down.** No second classifier, no special cases, and the causal story untouched — what makes a place wet is
+still how much water arrives and how fast it leaves.
+
+A `RegionProfile` carries eleven numbers and four colours. The ranks read as claims about rainfall; the rest
+are what a person would notice.
+
+| | meadow | moor | scree | marsh | floodplain | trees | conifer | lush |
+|---|---|---|---|---|---|---|---|---|
+| downland | 57% | 11% | 9% | 4% | 15% | 1.00× | 25% | 1.00 |
+| fen country | 45% | 3% | 7% | **21%** | 19% | 0.55× | 5% | 1.30 |
+| upland heath | 52% | **35%** | 3% | 0% | 5% | 0.32× | 60% | 0.70 |
+| dry scrub | 65% | 17% | 9% | 0% | 5% | **0.22×** | 35% | 0.52 |
+| boreal | 62% | 10% | 8% | 12% | 5% | **1.65×** | 92% | 0.92 |
+
+Eight archetypes times five regions is forty kinds of map, out of two small tables.
+
+**The tree density is the column that matters most**, and it is worth saying why: boreal and dry scrub differ
+by a factor of seven and a half, and a wood is most of what a person actually sees. Shape does less to tell
+two maps apart than that one number does.
+
+**And the palette had to stop being constants.** Five `static readonly Vector4`s meant a climate fixed in the
+code: the archetype layer could vary the land all it liked and the answer to "what colour is grass here" was
+the same on every map. Water and road stay global, because they do not vary that way — water is water, and a
+made road is the colour of what it was made from.
+
+### Three findings
+
+**The moor rank was inverted.** The test is `wetness < quantile(MoorRank)`, so it is the share of the landscape
+dry enough to count and a *higher* number means more moor. Set backwards, upland heath came out with **less
+heather than downland** — 6% against 11% — which is exactly the kind of inversion that is invisible in the code
+and obvious in one measurement.
+
+**`MoorAbove` matters as much as the rank.** Moor also has to be high, and on a heath the whole point is that
+it is *not* confined to the tops. Dropping the height gate from 0.42 to 0.18 is what took upland heath from 6%
+moor to 35%.
+
+**Scree had to vary too, and its absence was a third of why five regions still looked like one.** Thin-soiled
+upland shows stone on a gentler slope than pasture does; a fen holds its turf on a bank a heath would have
+lost. Every region had had identical scree and crag.
+
+### The same bug as §58, in the same place
+
+An edit landed on the **fallback branch** of `Biomes.At` again — there are two scree tests, one for maps with
+no drainage solved, and the no-drainage one comes first in the file. §58 recorded this exact hazard after it
+happened the first time, and recording it did not prevent it. The honest conclusion is that a note is not a
+fix: the two branches want merging, or the fallback wants moving below the real path so that "first occurrence"
+and "the one that runs" are the same line.
+
+### Picks are now typeable
+
+`--region`, `--archetype` and `--mapseed` on the command line, and the lab prints them in that form. `I` cycles
+region, `U` pins the canvas to one archetype instead of the family. A printed pick that cannot be typed back in
+is a note rather than a record.
+
+### Outstanding
+
+- **Ground-cover species are still keyed off biome alone**, so a boreal moor and a downland moor scatter the
+  same wispy grass. The region should choose the species list, not only how much of it there is.
+- **Upland heath's scree fell to 3%** because moor is tested first and now claims most steep high ground. It
+  reads acceptably — heather over the shoulder, stone where it breaks — but it is the ordering doing something
+  I did not ask for.
+- **Region is lab-only.** `--village` still generates downland, because nothing plumbs a chosen region into the
+  game path yet. That goes with cropping, which is also still outstanding.
+
+## 63. Six confirmed bugs in the macro layer, and the diagnosis that found them
+
+A review of the terrain code arrived with a central claim: **`MapLayout` describes genuinely different
+geographies, but `ReliefPlan` collapses most of them into arrangements of the same elongated positive mound.**
+The sentences differ more than the land does. Every specific claim under it checked out; four are fixed here and
+the structural one is not.
+
+### Confirmed, and worse than described: the grade ceiling knew about landforms only
+
+`SteepestGrade` iterated `landforms` and nothing else. But an escarpment is cut onto the lattice by `Shelve` and
+a basin by `Sink` — neither places a landform. So a layout whose separators are all escarpments had **zero
+landforms**, the ceiling fell back to the map's bare tilt of about one per cent, and `GradeLimit` then held the
+whole interior to one per cent.
+
+The measurement that proved it is worth keeping, because the symptom pointed the other way:
+
+    Escarpment    : over a 89 m height range          <- looks like the tallest map of the set
+    SplitValley   : 87 landforms, steepest flank 0.39
+
+Escarpment printed **no relief line at all** — `Describe()` returns "flat" when there are no landforms — and its
+entire 89 m was the frontier, which is exempt from limiting. A flattened interior hiding behind a tall border.
+
+The ceiling now takes the max over everything that shapes the ground: tilt, landforms, each escarpment's
+height-over-width, each basin's bowl-and-dam gradient. Same lesson this file keeps relearning in new costumes:
+**a budget derived from a subset of the things that shape the ground is not a budget, it is a cap on the subset
+it knows about.**
+
+### Confirmed: per-call jitter made incidence probabilistic
+
+`Place(x, z)` drew fresh randomness on every call, so two *identical* canonical coordinates — a river's bend and
+the ford authored to sit on it — became two different points, up to ±15 m apart on each axis independently. A
+ford not on its river is not a ford; a saddle not in its ridge is a hole in a field.
+
+Replaced by a coherent warp: a function of position, so the same input gives the same output and nearby points
+get similar displacement. Incidence is now structural rather than lucky, and it reads more geographical too,
+because real landforms bend together rather than each wandering off alone.
+
+### Confirmed: rotation was amputating archetypes
+
+Canonical coordinates reach (±0.50, ±0.36), which is a radius of 0.616 — further from the centre than the
+frame's own half-width. Rotating a square inside a square does not preserve containment, and
+`ReliefPlan.Place` *silently drops* landforms that do not fit. So "rotate the archetype" sometimes meant
+"randomly amputate the archetype". Now inscribed at 0.70, which contains the worst canonical radius at every
+angle.
+
+### Confirmed: `Escarpment` was not an escarpment
+
+`Shelve` iterated only a band of 1.2× the width around the path, so the high side was lifted for one width and
+then dropped back to zero — a low raised strip with plain on *both* sides. An escarpment is high **everywhere**
+on one side; the width is how far the *face* takes to fall, not how far the shelf extends. It is now a signed
+distance that saturates.
+
+Which immediately produced the opposite failure and taught something the single-map case hides: nine pinned
+escarpment instances each lifted their own half of the whole canvas and stacked to **99 m on a 30 m amplitude**.
+So `Separator` gained `ReachMetres` — a separator authored at frame scale is bounded at frame scale, one
+authored for a whole map reaches the whole map. Escarpment now measures 49 m against the others' 45-50.
+
+### Confirmed: the frontier was eating the map, and it is now off
+
+78 m of frontier each side of a 600 m map leaves 444 m of interior — the border is **45% of the map's area**, and
+at 1.55× amplitude it is also the tallest thing on it. Every map made one overwhelming statement before its
+archetype got a vote: *you live inside a mountain-rimmed arena.* That homogenises everything downstream, and it
+explains a good deal of "the presets all look the same" that §62's region layer only partly answered.
+
+**Deleted rather than tuned**, behind `ReliefPlan.Frontier`, defaulting off. A dominant feature present on every
+map cannot be evaluated by comparing maps. The code and its notes stay, because the problem it solved is real —
+the map ended in an invisible wall — and what it got wrong is *where*. A playable 600 m inside an 800-900 m
+rendered extent puts the scenery outside the gameplay instead of eating half of it.
+
+### Confirmed and not fixed: `ConnectorKind` means nothing
+
+`Saddle`, `Ford` and `Ramp` are exactly the right abstraction and the kind is never read. All three become
+`Opening(position)`, a circular suppression of relief. So a ford is a circular hole in the relief that does not
+narrow, shallow or otherwise touch the river — `AuthoredWidths` paints the channel at full width straight
+across it. A connector needs to belong to a *specific separator at a parameter along it*, and each separator
+needs to know how its own connectors modify it: a saddle lowers crest elevation, a ramp reduces face gradient
+over a corridor, a ford broadens and shallows a bed. Those are three different operations wearing one name.
+
+### The structural problem, which none of the above touches
+
+**A ridge is built as a row of overlapping stretched hills.** However well `SmoothMax` blends them, that is a
+mountain built out of sausages, and every member brings its own summit, lobing, radial flank and taper — so the
+eye keeps finding the primitive. A ridge should be one heightfield: distance along a spine and perpendicular
+distance from it, with crest height and width varying slowly along the length, and one to three deliberate
+spurs branching off.
+
+**And the valleys do not exist.** `SplitValley` generates two positive ridges with *nothing* between them — the
+"valley" is merely where no hills were put. `TwinBasins` contains no `Basin` at all; it is one central ridge,
+so "two fertile basins joined by one saddle" is implemented as "one ridge with flat ground either side". That is
+not the same geography.
+
+What is missing is a **macro landform field** with areal and negative primitives, not only positive
+separators — ridge, valley floor, basin, upland, shelf. Four would transform it. And with only eight
+archetypes, bespoke realisers are the right call rather than over-abstraction: expressing `CentralHighGround`,
+`Escarpment`, `YValley` and `TwinBasins` through one generic `Separator(Path, Width, Height)` is forcing four
+different shapes through one hole.
+
+Measured after this session's fixes, the five archetypes still land within a few points of each other on every
+country share — which is the same finding from a different direction.
+
+### The gate for that work
+
+A merciless lab view, before erosion or vegetation is touched again: top-down orthographic, greyscale height,
+contour lines at 2 or 5 m, ridge and valley skeleton, connectors marked. **No trees, no grass, no biome colour,
+no water material, no shader.** Run all eight, hide the labels, and identify them. If they cannot be told apart
+from the 30-50 m low-pass shape alone, nothing downstream can rescue it.
+
+The encouraging half of the diagnosis: the drainage, erosion and biome work is not wasted. It is arguably
+overqualified for the crude macro field it is being fed.
+
+## 64. The merciless view, and what it found in ten minutes
+
+§63 ended with a gate: print every archetype as bare height, hide the labels, try to name them. Built as
+`--shapes` — headless, textual, ten height bands in a terminal.
+
+**Textual on purpose, and that is the more important half.** Every judgement about this terrain had needed
+somebody to look at a window and describe it, which makes the loop as slow as a conversation and leaves whoever
+is writing the generator working blind. A contour map in a terminal is a far worse picture and an enormously
+better instrument: seconds to produce, trivial to compare against the last one, and readable by whoever holds
+the keyboard. It found three things immediately, one of which nobody had named.
+
+### The tilt was a third of every map's relief
+
+`Tilt = amplitude / extent × 0.5`, with a comment reading "half a metre of fall per hundred, far too little to
+notice on foot". True of the amplitude it was written against. At the amplitudes in use it came to 2.3 m per
+hundred — **fourteen metres of fall on a thirty-eight metre relief** — so a third of every map's entire range
+was one global ramp, in one direction, underneath whatever the archetype was trying to say.
+
+Every archetype shared a background and none of them was mostly its own shape. It is now an absolute
+`TiltFallMetres = 3.5` end to end, which is what tilt is actually for: giving water a direction.
+
+**Found by printing shapes and noticing they had a common background, not by reading the code** — where the
+expression looks small and the comment agrees with it. The comment was right about a number the expression had
+stopped producing.
+
+### Two archetypes were straightforwardly lying, and the dumps said so
+
+    === SplitValley  "two ridges with a fertile floor between them"
+        low 23% · middle 60% · high 17%      <- 60% undulation, no floor, no ridge
+
+    === TwinBasins   "two fertile basins joined by one saddle"
+        ... 1 separators, 1 connectors, 0 basins     <- zero basins
+
+### Two new primitives, and the rule for when each is applied
+
+**`Trough`** — a valley floor, cut rather than left over. Flat-bottomed, meeting its banks with no crease. The
+absence of this is why "a fertile floor between them" was implemented as *the gap between two mounds*, which is
+a different shape: a floor is flat, wide, and lower than the ground beyond the ridges.
+
+**`Upland`** — areal high ground as one field, not a chain of mounds. This one is subtler and it is what makes
+the negatives legible at all: **a basin cut into ground that is already the lowest thing on the map is not a
+basin.** TwinBasins got its two basins and still read as "a ridge with low ground either side", because there
+was nothing for the depressions to be depressions *relative to*.
+
+And the ordering rule, which fell out of the drainage work:
+
+> **Open negatives before erosion, closed negatives after.** A trough drains, so erosion deepens it and hangs
+> tributaries off it — cutting it early is what gives erosion something worth finishing. A basin is a closed
+> depression and erosion's first act is to fill it, so that one has to wait until erosion has finished.
+
+Uplands go before troughs, because a trough is cut *into* whatever is there.
+
+### What the dumps say now
+
+    === CentralHighGround   "four sides around one defensible hill"
+        low 89% · high 5% · 0 landforms, 0 separators
+
+                     .,:;;::,
+                .....,;+#@#+;.
+               .....,;*@@@@#+-:.
+                   ,;+####@@@*-:..
+                   .,:;::;+#+-:...
+
+    === YValley   "three valleys meeting at one lowland junction"
+        low 2% · middle 67% · high 31% · 0 landforms, 0 separators
+
+        -++*#@@#*+;,.  .:-#@@@@#*+-;;;
+        -++*##@@#+:.....:+#@@@@#*+-;;;
+        -+++*#@@@#+-;;;--+#@@@##*+-;;;
+
+`CentralHighGround` and `YValley` now have **no separators and no landforms at all** — they are made entirely
+of areal primitives, and both are legible from the shape. Which is the review's other point demonstrated: with
+only eight archetypes, forcing four different shapes through one generic `Separator(Path, Width, Height)` was
+over-abstraction. Letting them be different shapes cost less code than the abstraction did.
+
+### Still outstanding
+
+- **A ridge is still a row of stretched hills.** `SplitValley`, `BrokenRidge` and `CornerHighlands` still use
+  the landform chain, and it still reads as its primitive. A ridge wants to be one heightfield: distance along a
+  spine, perpendicular distance from it, crest height varying slowly along the length, one to three spurs.
+- **`ConnectorKind` still means nothing.** Saddle, ford and ramp are all one circular suppression, and a ford
+  still does not narrow its river.
+- **YValley is 67% middle band** — the Y is visible but most of the map is undifferentiated slope between the
+  valleys. It wants either more valleys or a smaller upland.
+- **The frontier is off**, and the eventual answer is a playable 600 m inside an 800-900 m rendered extent
+  rather than a border eating 45% of the map.
+
+## 65. Two statements on one 600 m map, and the canvas retired
+
+Two questions arrived together: how does this get looped into the game, and is the 1200/1800 m canvas still
+needed. The answers turn out to be the same answer.
+
+### The canvas was a workaround, and it is gone
+
+It existed to be **searched**. Archetypes were not legible at 600 m, so the response was to generate a lot of
+ground and hunt for a framing that happened to contain something. §64's areal primitives and the ridge
+heightfield make an archetype read at map scale — which is where `--shapes` judges them — so searching now
+solves a problem that does not exist.
+
+Its one real contribution was the fragment property: a river arriving from off-map, a ridge carrying on past
+the edge. **That never needed a bigger canvas; it needed correct boundary conditions**, and those were already
+right. `InheritedCatchmentMetres2` is an absolute two tiles' worth of upstream country, so a 600 m river comes
+from somewhere by construction, and a ridge that leaves the frame is a path whose end is outside it.
+
+What replaces searching is **re-rolling**: 347 ms a map against 4,400 ms a canvas, so twenty seeds cost less
+than one canvas did. And choosing between whole maps is a better question than choosing between framings of
+one. The window, the survey, the pick-plus-window and the never-finished cropping all go with it. A pick is now
+three values: `--region --archetype --mapseed`.
+
+### One archetype is a thin map, and the score had been saying so
+
+The rule is two large statements plus three to five consequences. An archetype contributes about one. Measured:
+SplitValley scored 0.95 with three statements in frame; **CentralHighGround scored 0.76 with one**. The
+statement term peaks at two, and a lone plateau on a plain never reaches it however good the plateau is.
+
+So neither one nor nine. `MapLayout.Composed` puts a primary statement at full scale and a secondary at half
+scale and 0.78 relief, and **the secondary goes where the primary is open** — which is what `Regions` is for. It
+had been carried and unread since it was added. A primary's regions are by construction the ground it does not
+occupy, so centring the second statement on one of them is both the cheapest placement rule and the right one:
+two statements competing for the same ground is mush.
+
+The secondary's river is retargeted onto the primary's nearest watercourse, because two unconnected
+watercourses on one map is the "meets nothing" complaint again, one composition layer up.
+
+Result — 4 to 6 separators, 3 to 5 connectors, 0 to 2 basins per map, and pairings that read:
+
+    "a high shelf above a low plain, with a few ways up,
+     and two ridges with a fertile floor between them off to one side"
+
+### Four bugs the composition exposed, all of them mine
+
+**Every archetype but one had no river.** `Field` had been supplying the canvas trunk, so collapsing to a single
+archetype left seven of eight dry — Escarpment's thickest water was 4 m. Each now authors a river *as a
+consequence of its own shape*: down SplitValley's trough, along Escarpment's foot where a slope meets a plain,
+as YValley's own Y so the archetype states itself twice in agreement. That is the "three to five consequences"
+half of the rule, which had never been implemented at all.
+
+**`Separator.WidthMetres` was absolute while paths scaled with the frame.** A secondary at half frame kept
+hundred-metre ridges while its paths shrank to eighty-eight, making every ridge wider than it was long; the
+end-taper flattened what was left and the second statement arrived in the bottom two height bands. A width is a
+proportion of a statement, not a constant of the world.
+
+**The secondary fell off the map.** A primary's regions sit near its corners by design, and a half-scale frame
+centred on one reaches 130 m further out again — measured, a secondary centred at 226 m radius with a reach of
+130 on a map whose half-width is 300. A third of the second statement was outside the world.
+
+**The pairing ignored the primary.** Seeded from the seed alone, the first draw is the same draw whatever the
+primary is, so a sweep across all eight at one seed paired seven with the same partner. Correct determinism
+answering a question nobody asked.
+
+### And amplitude finally means its own units
+
+The shaping primitives add: uplands, ridges and spurs each contribute lift and where they overlap the lifts
+sum, so a layout with a massif and a ridge system came out at **92.9 m from a 34 m amplitude**. Erosion's own
+rescale preserves whatever relief it is handed, which is right for erosion and no use here. A final
+normalisation to the requested amplitude puts all eight at 29.7-33.7 m against 34.
+
+Worth more than the tidiness: **amplitude is a number a person sets, and it has spent this whole arc not
+meaning what it says** — first because the tilt silently added half again (§64), now because the primitives
+compound. A dial that does not mean its own units cannot be tuned, only fiddled with.
+
+### Next
+
+1. **Loop it into `--village`**: accept `--region/--archetype/--mapseed` and generate from a layout instead of
+   `ReliefPlan.For`, so the game plays the same generator the lab judges. `ChooseSite` already reads terrain.
+2. **`ConnectorKind` semantics.** Still one circular relief suppression for saddle, ford and ramp — so a ford
+   does not narrow or shallow its river. This went from cosmetic to load-bearing the moment every archetype got
+   a river: a crossing is most of what a river adds to a map.
+3. **Region-specific ground cover** — a boreal moor and a downland moor still scatter identical grass.
+4. **The frontier's proper home**: playable 600 m inside a larger *rendered* extent, so scenery sits outside
+   gameplay rather than eating 45% of it.
+
+## 66. The sea, three composition rules, and a bug that had been hiding behind all of them
+
+Two-at-random was still throw-and-see, and two things were missing outright: a sea, and a climate that does
+more than recolour. What came out of building them was one bug that had been quietly causing several of the
+complaints from earlier sections.
+
+### The sea, which is the first absolute height this terrain has ever had
+
+Every water level before it was **relative** — a lake fills to its own spill point, a channel stands above its
+own bed — and relative levels cannot answer "how high is this place". A sea is a height full stop, so any cell
+below it is under water without needing a depression, a catchment or a channel width to justify it.
+
+It also does the deleted frontier's job properly. §63 removed the mountain rim because it ate 45% of a 600 m map
+to hide the boundary; a coast hides the same boundary at no gameplay cost, because water already blocks. There
+is no need to invent impassable scenery when the map can end in the sea.
+
+Realised as a warped shoreline along one side, pulling the land *down toward* a shelf rather than replacing it,
+so whatever the archetype put near the coast still shows through as a headland or a cliff. Measured on a coastal
+map: **19% of the map water, thickest 347 m**, against 4-7% inland.
+
+And the classifier got simpler rather than more complex. Lake depth, channel width and sea level are three
+reasons a place can be under water, and the level field already resolves all three into one number — so
+`Biomes.At` now asks the level for a depth and the sea needed no case of its own. Fordability gained a depth
+term at the same time: it was a question about how far you have to wade, which is meaningless for a body of
+water reporting zero width, and "a narrow gorge is not a ford" is better physics anyway.
+
+### Three rules, and each one came from a measurement
+
+**Rule one — the sea lies where the river was already going.** Placed independently, a coast gives a river
+running off the wrong edge while the sea sits behind it: the "flows into nothing" complaint with an extra
+feature on top. The seaward direction is taken from the trunk's own course, so the water reaches the water
+without anything being routed to make it.
+
+**Rule two — the secondary may not dam the primary's drainage.** Placed by "furthest region" alone, a
+secondary's ridges landed across the primary's valley. Priority-Flood was doing exactly its job; the
+composition had built a dam and not noticed.
+
+**Rule three — whatever is meant to cross the map, crosses it.** This is the one that had been hiding.
+
+### The inscribe factor was fixing one bug and causing another
+
+§63 pulled every canonical coordinate in to 0.70 so rotation could not push part of an archetype off the map,
+because `ReliefPlan.Place` silently drops what does not fit. Right for a hill. Wrong for anything meant to
+*leave*: a river authored to ±0.52 ended at ±218 m on a map whose half-width is 300, and a valley floor at ±0.48
+stopped 98 m short of the edge.
+
+**A trough that does not reach the edge is a closed basin.** That is what flooded SplitValley — sixteen per cent
+of the map under water and a 132 m lake sitting in the fertile floor, because the valley had nowhere to drain.
+It is also, in hindsight, most of "the river meets nothing and flows into nothing" from §61: it was ending in a
+field.
+
+Positives stay inscribed; linear features are now extended along their own terminal headings until clear of the
+boundary. The distinction that was missing is that an inscribed hill is contained on purpose and an inscribed
+river is a river that stops.
+
+    water 16% -> 4%   ·   thickest 132 m -> 60 m   ·   the valley floor is farmland again
+
+### And only then did the climate become visible
+
+`WaterScale` multiplies the water a layout's statements carry — authored channel widths and basin depths — so
+dry country gets a river in a bed too big for it. Measured, it changed nothing, because the largest body on the
+map was **emergent**: a hollow the layout never mentioned, fed by the trunk and therefore holding water in any
+climate. So climate also scales the catchment a hollow needs before it holds water at all, which is what
+evaporation is when you have one number for it.
+
+With the drainage unblocked, both finally show:
+
+| region | water | thickest |
+|---|---|---|
+| Downland | 4% | 60 m |
+| DryScrub | 2% | 12 m |
+| FenCountry | 5% | 60 m |
+
+A river in dry scrub is a twelve-metre stream where downland has a sixty-metre body. Climate is now an input to
+composition rather than a palette over it.
+
+### Where the role system stands
+
+The four roles — frame, spine, low, accent — are implicit rather than declared: the primary supplies spine and
+low, the secondary is the accent, and the coast is the frame. That is enough for the rules above to be written
+and is not yet a table anybody could read. Making it explicit is worth doing when a fifth rule wants adding,
+not before.
+
+Still outstanding, unchanged from §65: `--village` does not use any of this yet, `ConnectorKind` still means
+nothing (and a ford matters more now that every map has a river), and ground-cover species are still keyed off
+biome alone.
+
+## 67. Looped in: the game plays the generator, and the year is measured on it
+
+### One generator
+
+The village used to build its ground with `ReliefPlan.For` — six landforms scattered from a seed — while the
+lab built composed archetypes. **Every judgement made in the lab was therefore about terrain nobody would ever
+play on.** Both now go through `MapLayout.Composed`, and `--region / --archetype / --mapseed` work on
+`--village` exactly as they do on the lab. The legacy path stays for `--relief`, which sweeps amplitudes and
+needs a shape whose steepest grade is known analytically.
+
+Every run prints its own pick, so a map somebody liked while playing can be asked for again:
+
+    map: --region Downland --archetype SplitValley --mapseed 1592594996
+      two ridges with a fertile floor between them, and ... off to one side
+      downland: temperate pasture, rough grazing on the tops
+
+Founding lands where it should without any change to `ChooseSite`: **grade 0.005, twelve metres below the map's
+mean** — the valley floor, which is what the archetype's fertile floor is for. `worst-stuck 0.000` over 700
+frames, 28-33 ms.
+
+### §54's last milestone, and why it was worth waiting for
+
+The plan has owed a migration of the calibrated scenarios off flat ground since relief existed. The reason to
+hold off was sound: a year-long economy assertion recalibrated against terrain that changes next week measures
+nothing. The generator has now stopped moving, so it is worth doing.
+
+`--settlement` takes relief, and the first run of a full year on generated ground:
+
+    produced 8,161 grain, ate 7,474, went short 0
+    31 alive, 5 born, 0 left because their household went hungry
+    forest: 7,030 of 7,065 trees left
+    per person per year: 270 grain against a nominal 270 · 128 wood against 120
+
+**270 against a nominal 270.** The terrain coupling — woodland density by biome, path cost by surface, climb
+charged per edge, a river to route around — costs the economy essentially nothing. That is a real result rather
+than a tidy one: those couplings were each added on the argument that they would change how the settlement
+behaves, and the honest finding is that they change *where* it behaves without changing *whether* it survives.
+
+Tree count is 7,065 against 11,177 on flat ground, which is the woodland coupling doing exactly what §59 said
+it would — a third of the map is now moor, water, crag or floodplain, and none of those carry pasture's
+woodland.
+
+### The gate has a fourth leg
+
+    --selftest                              a broken rule
+    --settlement                            an economy that cannot feed itself, on the flat
+    --settlement --relief-amplitude 30       an economy that only works on a plain   <- new
+    --raidtest                              a defence that stops defending
+
+Flat stays the control, because that is where every economic constant was measured; relief is the second
+question. Two measurements answering two questions rather than one answering neither.
+
+### What is left
+
+- **`ConnectorKind` still means nothing.** Saddle, ford and ramp are one circular relief suppression. This is
+  now the largest gap by some distance: every map has a river, so a crossing is the main thing a river
+  contributes, and a ford that does not narrow or shallow its water is not a ford.
+- **Ground-cover species are keyed off biome alone** — a boreal moor and a downland moor scatter the same grass.
+- **The role table is implicit.** Frame, spine, low and accent exist as a shape in the code rather than as
+  something readable. Worth making explicit when a fifth rule wants adding.
+- **Amplitude wants a settled default.** It finally means its own units (§64, §65); the lab is at 34 and the
+  village at 30, chosen by eye rather than measured.
+
+## 68. Connectors that mean something, and a proxy that had to break
+
+`Saddle`, `Ford` and `Ramp` were the right abstraction and the kind was never read. All three became
+`Opening(position)` — suppress relief in a circle — so a saddle authored for a ridge also holed whatever upland
+it overlapped, a ramp reduced no gradient, and a ford did not touch its river at all. Three names for one
+operation.
+
+### A connector knows what it is a way through
+
+`Connector` gained `ConnectorOf` and an `Index`. The discriminator is explicit rather than inferred from the
+kind, because the inference *nearly* works and that is worse: a saddle is always in a ridge and a ford always in
+a river, but a ramp is a way up a **face**, and the two things with faces are an escarpment and an upland. "Ramp
+means upland if the layout has one" is the sort of rule that reads fine and silently targets the wrong thing.
+
+Three kinds, three operations:
+
+- **Saddle** lowers its ridge's crest, and only its own ridge. `Crest` and its spurs share the index, so a col
+  opens the spur running off it too, which is what a col looks like from the side.
+- **Ramp** *stretches a face* rather than lowering it. Suppressing height at a ramp cuts a notch, and a notch
+  is a gully, not a way up — widening the run the same height falls over is what makes ground climbable. Three
+  times the width is a third of the gradient and the shelf behind it is untouched.
+- **Ford** narrows and shallows a riverbed, acting on `AuthoredWidths` rather than on the ground.
+
+### The proxy that had to break
+
+Fordability was `channelWidth < 2 m`, and it had always worked — because depth was *derived* from width, so the
+two could never disagree. **A ford is precisely the case where they must.** It is a broad shallow place, gravel
+rather than gorge: wide and crossable at once. Under the width test a map could author a crossing and get an
+unbroken barrier, which is exactly what it did.
+
+Depth decides now. Width keeps one job as an escape hatch rather than a criterion — a channel narrower than a
+stride is wadeable whatever the depth field says, because at four metres a lattice cell the depth of something
+two metres across is not a number to trust.
+
+This is the third time in this arc that a derived quantity turned out to be standing in for the thing that
+actually mattered: slope cost for path cost (§-early), width for depth here, and per-cell tests for per-body
+properties twice over. The pattern is worth naming — **a proxy that agrees with its target in every case you
+have tested is indistinguishable from the target until you build the case that separates them.**
+
+### Two bugs found while wiring it
+
+**YValley's connectors pointed at features that no longer existed.** They were saddles in the enclosing ridges,
+and §64 deleted those ridges when the Y became cut valleys. Two connectors had been aimed at nothing for
+several sections. They are fords on the arms now, which is what that archetype's ways through actually are.
+
+**Composition shifts what an index means.** A secondary authored with "saddle in separator 1" means its *own*
+separator 1, and after concatenation that slot holds one of the primary's. Unshifted, every composed map would
+cut the second statement's passes through the first statement's ridges — a bug that would have read as bad
+authoring for a long time. Indices are rebased on merge.
+
+### And crossings are measurable for the first time
+
+    DiagonalRiver  : 1872 crossable samples against 986 blocked
+    SplitValley    : 1108 crossable against 667 blocked
+    YValley        : 2897 crossable against 886 blocked
+    Escarpment     : 1005 crossable against 1837 blocked   <- coastal, so mostly deep
+
+A map can have a beautiful river and be two maps if nothing can get over it, and no figure printed so far could
+tell the difference — area, thickness and depth are all silent on whether there is a way across. Escarpment
+inverting the ratio is the coast being genuinely impassable, which is the point of a coast.
+
+**Gate is four legs and all four green**, including the year on generated terrain.
+
+## 69. The underwater dams, and the river that was every map
+
+Two reports from one screenshot: straight "dam-like separators" between the deeper waters, and the diagonal
+river defining pretty much every landmass.
+
+### The dams were chunk overlap, and only water could show them
+
+`WaterRenderStep` was derived from an index budget — `ceil(GroundChunkCells / 96)`, which is six for a chunk of
+five hundred and twelve cells. **512 is not a multiple of 6.** The loop runs to `x <= toX`, so the last quad in
+every chunk reached four cells past the boundary into its neighbour.
+
+The ground coats overlap in exactly the same way and it has never mattered, because they are opaque: drawing
+the same ground twice looks like drawing it once. Translucent water drawn twice does not — the alpha compounds
+and the overlap appears as a dark line along every chunk edge, which at a forty-five degree camera yaw is a
+grid of diagonals under the surface.
+
+A chunk is sixty-four render cells by construction, so the ground's own step tiles it exactly. What the
+half-step was buying — a finer shoreline — turns out to cost nothing to give up, because **the shore is a depth
+fade rather than a mesh edge**: opacity goes to zero as the water thins, whatever resolution the quads are.
+
+### A rule that did nothing, because of a units mismatch
+
+Culling blend coats against the detail radius works when the map is larger than the view and fails when it is
+not: at 600 m the whole map sits inside the detail radius, so every blend coat drew, each covering a large share
+of the screen with alpha blending on.
+
+The fix is screen-relative — a transition band is about one and a half render cells across, and under three
+pixels there is nothing in it to see. It did not fire, and the reason is worth recording: **`frame.Height` is
+physical pixels and `VisibleGroundRadius` derives from `host.LogicalSize`.** On this display they differ by two,
+so every screen-space size computed from the pair was doubled and the three-pixel test was measuring six.
+
+    lab      16.8 ms -> 9.0 ms   (81 coats + 76 blends -> 81 coats + 0 blends)
+    village  16.4 ms -> 16.4 ms  (33 blends, unchanged — a gameplay standoff needs them)
+
+Also, and separately: `metresPerPixel` was being computed *inside* the per-chunk loop, and
+`VisibleGroundRadius` asks the host for the window size. Twenty-five calls a frame took the terrain build phase
+from 1.4 ms to 13.1. One number about the camera has no business being recomputed per chunk.
+
+### And a measurement error of mine, twice in one sitting
+
+I read 77 ms, then 91 ms, then 94 ms, and started fixing a regression that did not exist. Those were **startup
+frames**: the ground chunks rebuild once, and with `--frames 40` the run ends before the steady state arrives.
+Over 200 frames: `terrain 35.6 -> 13.0 -> 1.0` and `FRAME 133.5 -> 54.8 -> 15.2`. §56 already records that only
+same-window comparisons mean anything on this machine; the new lesson is that a *short* run is its own
+confound, and the tell is a build phase that should be one-off being large in the sample.
+
+### The river was every map because every river was equally important
+
+The authored widths were backwards: **`DiagonalRiver`'s river was the narrowest of the eight at twelve metres**,
+while the archetypes where a river is a mere side effect ran fifteen to twenty. And the carve depth was a single
+constant, so a ten-metre consequence got the same trough as a twenty-six-metre statement — and erosion then
+deepened both.
+
+Three changes, and none of them adds a field:
+
+- `DiagonalRiver` goes to 26 m and every consequence-river drops to 10-15.
+- **Trough depth follows width**, because the authored width already says how important a river is — that is
+  what authoring a width means.
+- The inherited catchment comes down from two 600 m tiles to a little over one. It was chosen when the map was a
+  window on a canvas, and it is also an *erosion* input: stream power goes as the square root of catchment, so
+  doubling the inflow makes the trunk cut about forty per cent harder than anything else on the map, every
+  pass. Which is how a river becomes the only thing a map is about.
+
+The eight archetypes now spread, where before they sat within a few points of each other:
+
+| | low | middle | high |
+|---|---|---|---|
+| BrokenRidge | 91% | 7% | 2% |
+| DiagonalRiver | 84% | 10% | 6% |
+| CornerHighlands | 83% | 13% | 4% |
+| TwinBasins | 76% | 15% | 8% |
+| Escarpment | 63% | 18% | 19% |
+| SplitValley | 24% | 64% | 12% |
+| CentralHighGround | 23% | 70% | 7% |
+| YValley | 17% | 56% | 27% |

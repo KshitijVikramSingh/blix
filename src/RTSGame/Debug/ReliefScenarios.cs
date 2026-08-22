@@ -125,6 +125,61 @@ internal static class ReliefScenarios
         public double MillisecondsPerTick { get; init; }
     }
 
+    /// <summary>
+    /// What the water did, which is the only way to tell a valley network from a rough hillside.
+    /// </summary>
+    /// <remarks>
+    /// <b>Erosion cannot be checked by looking at the steepest grade.</b> Noise and a river network produce
+    /// the same slope histogram, and the difference between them is entirely one of <em>organisation</em> —
+    /// whether the steep places are connected to each other and drain somewhere. So the figures here are
+    /// about connectedness: how much area the largest catchment gathers (a network has one big one, a
+    /// hillside of gullies has many small ones), how much of the map is channel, and how long the channels
+    /// are. A map where the biggest catchment is a few per cent of the whole has no rivers on it, whatever
+    /// its slopes look like.
+    /// </remarks>
+    private static void ReportDrainage(TerrainMap terrain, float amplitude)
+    {
+        if (terrain.Drainage is not { } drainage)
+        {
+            Console.WriteLine($"    {amplitude,5:F1} m: no relief, so no drainage");
+            return;
+        }
+
+        var cells = drainage.Area.Length;
+        var cellArea = ReliefPlan.DrainageCellMetres * ReliefPlan.DrainageCellMetres;
+        var whole = cells * cellArea;
+        // A channel where the upslope area is more than a hectare, which on a 600 m map is about a
+        // three-hundredth of it: below that a "river" is a damp line nobody would draw on a map.
+        const float channelArea = 10_000f;
+        var channel = 0;
+        var biggest = 0f;
+        var lakeCells = 0;
+        var deepest = 0f;
+        for (var i = 0; i < cells; i++)
+        {
+            if (drainage.Area[i] >= channelArea) channel++;
+            biggest = MathF.Max(biggest, drainage.Area[i]);
+            if (drainage.LakeDepth[i] <= 0.05f) continue;
+            lakeCells++;
+            deepest = MathF.Max(deepest, drainage.LakeDepth[i]);
+        }
+
+        // Outlets: where a channel leaves the map. One or two is a coherent drainage; dozens means the
+        // water is running off the edge everywhere and never gathered into anything.
+        var outlets = 0;
+        for (var i = 0; i < cells; i++)
+        {
+            if (drainage.Receiver[i] >= 0 || drainage.Area[i] < channelArea) continue;
+            outlets++;
+        }
+
+        Console.WriteLine(
+            $"    {amplitude,5:F1} m: drainage | largest catchment {biggest / whole * 100f:F1}% of the map " +
+            $"| channel {channel * cellArea / 10_000f:F1} ha over {channel} cells " +
+            $"| {outlets} outlets | standing water {lakeCells * cellArea / 10_000f:F2} ha, " +
+            $"deepest {deepest:F2} m");
+    }
+
     private static Row Measure(float extentMeters, float amplitude, uint seed, List<string> faults)
     {
         // <b>The bare map, not the village.</b> What is being measured is what relief alone does to the
@@ -173,6 +228,7 @@ internal static class ReliefScenarios
             $"map edge; steepest measured grade {steepest:F2} at " +
             $"({steepestAt.X:F0}, {steepestAt.Y:F0}) against a limit of " +
             $"{TerrainMap.MaximumTraversableGrade:F2}");
+        ReportDrainage(world.Terrain, amplitude);
 
         // <b>What share of the map each slope band holds.</b> Without it the sweep cannot tell "the
         // partition survived because the banding worked" from "the partition survived because the whole map

@@ -61,7 +61,21 @@ public static class Program
         {
             var settlementExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
             var years = Value(args, "--years") is { } span ? float.Parse(span) : 1f;
-            Environment.Exit(SettlementScenarios.Run(settlementExtent, years));
+            var settlementRelief = Value(args, "--relief-amplitude") is { } sa ? float.Parse(sa) : 0f;
+            var settlementRegion = Value(args, "--region") is { } sr
+                ? Enum.Parse<Simulation.Terrain.Region>(sr, ignoreCase: true)
+                : Simulation.Terrain.Region.Downland;
+            var settlementArchetype = Value(args, "--archetype") is { } sk
+                ? Enum.Parse<Simulation.Terrain.Archetype>(sk, ignoreCase: true)
+                : Simulation.Terrain.Archetype.SplitValley;
+            var settlementSeed = Value(args, "--mapseed") is { } sm ? uint.Parse(sm) : 0x5EED1234u;
+            Environment.Exit(SettlementScenarios.Run(
+                settlementExtent,
+                years,
+                settlementRelief,
+                settlementRegion,
+                settlementArchetype,
+                settlementSeed));
         }
 
         if (args.Contains("--placementcheck"))
@@ -90,6 +104,16 @@ public static class Program
             var seed = Value(args, "--seed") is { } s ? uint.Parse(s) : 0x1B873593u;
             Environment.Exit(SettlementScenarios.RunRaids(
                 raidExtent, raidMinutes, between, health, seed, args.Contains("--peers")));
+        }
+
+        if (args.Contains("--shapes"))
+        {
+            var shapeExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var shapeAmplitude = Value(args, "--relief-amplitude") is { } amp ? float.Parse(amp) : 28f;
+            var shapeSeed = Value(args, "--mapseed") is { } s ? uint.Parse(s) : 0x5EED1234u;
+            var shapeRows = Value(args, "--rows") is { } r ? int.Parse(r) : 26;
+            Debug.ShapeScenarios.Run(shapeExtent, shapeAmplitude, shapeSeed, shapeRows);
+            Environment.Exit(0);
         }
 
         if (args.Contains("--relief"))
@@ -287,6 +311,20 @@ public static class Program
         var traceMovement = args.Contains("--trace-movement");
         var startTerrainLab = args.Contains("--terrain-lab");
         var startVillage = args.Contains("--village");
+        // <b>The map lab: a large canvas, terrain only, and a window to frame a map out of.</b> Larger than
+        // the game's own extent on purpose — a 600 m window cut from a coherent 1800 m landscape is a
+        // fragment of somewhere, with a river that comes from off-window and a ridge that carries on past
+        // the edge. See the remarks on RtsGameLoop.mapLab.
+        var startMapLab = args.Contains("--maplab");
+        // The other half of the lab's workflow: a printed pick has to be typeable back in, or it is a note
+        // rather than a record.
+        var labRegion = Value(args, "--region") is { } regionName
+            ? Enum.Parse<Simulation.Terrain.Region>(regionName, ignoreCase: true)
+            : (Simulation.Terrain.Region?)null;
+        var labArchetype = Value(args, "--archetype") is { } archetypeName
+            ? Enum.Parse<Simulation.Terrain.Archetype>(archetypeName, ignoreCase: true)
+            : (Simulation.Terrain.Archetype?)null;
+        var labSeed = Value(args, "--mapseed") is { } ms ? uint.Parse(ms) : (uint?)null;
         var debugAll = args.Contains("--debug-all");
         // <b>Timings without the overlays.</b> --debug-all turns on the collider overlay too, which draws a
         // disc per body and per tree — 17 ms of it with five thousand trees in view — so a frame measured
@@ -314,7 +352,11 @@ public static class Program
             timingsOnly,
             extent,
             compression,
-            startVillage);
+            startVillage,
+            startMapLab,
+            labRegion,
+            labArchetype,
+            labSeed);
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
     }

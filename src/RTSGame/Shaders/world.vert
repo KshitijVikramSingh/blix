@@ -8,6 +8,10 @@
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
+// x is how much of this ground class covers this corner, for terrain; for everything else these are the
+// asset's own texture coordinates, which nothing reads. See the note on meshLayout in RtsGameLoop: the two
+// floats were already in every vertex buffer, unbound.
+layout(location = 2) in vec2 inGround;
 
 struct Instance {
     mat4 model;
@@ -51,6 +55,7 @@ layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec4 vTint;
 layout(location = 2) out vec3 vWorldPos;
 layout(location = 3) out vec4 vSunShadowCoord;
+layout(location = 4) out vec2 vGround;
 
 // The normal-offset technique — src/Blix.Shaders/shadow.glsl. Applied here rather than in
 // the fragment stage on purpose: the offset is a property of the surface, so interpolating
@@ -115,6 +120,7 @@ void main() {
     vNormal = normal;
     vTint = inst.tint;
     vWorldPos = world.xyz;
+    vGround = inGround;
 
     float ndotl = max(dot(normal, normalize(uSunDir.xyz)), 0.0);
     vec3 offset = blix_shadow_normal_offset(

@@ -18,8 +18,15 @@ namespace Blix.Render;
 //
 // It also draws each part TWICE — once lit into a scene pass, once depth-only into a
 // shadow pass — because a prop that does not cast is a prop that does not look like it
-// is standing on the ground. The two draws read the same instance list by construction,
-// which is the property worth having: a caster cannot drift from what it casts for.
+// is standing on the ground. Every list is filled by the same Add call, which is the
+// property worth having: a caster cannot drift from what it casts for.
+//
+// The caster may be built from DIFFERENT geometry than the scene draw, which is the one
+// place the two are allowed to disagree — see the casterParts argument to Create. A
+// shadow is a silhouette resolved to a shadow map's texels, so it can afford geometry
+// the camera could not: a four-hundred-triangle tree casts a shadow indistinguishable
+// from the four-thousand-triangle one it stands in for. What is NOT allowed is a
+// different instance list, because that is how a shadow ends up under nothing.
 //
 // Geometry only. It owns meshes, instance buffers and batches; it does NOT own a
 // pipeline, a shader, a push-constant layout, or an opinion about lighting. The caller
@@ -39,13 +46,16 @@ namespace Blix.Render;
 public sealed class PropModel : IDisposable
 {
     private readonly Part[] parts;
+    private readonly Part[] casters;
 
-    private PropModel(string name, Part[] parts, Bounds3 bounds, int triangles)
+    private PropModel(string name, Part[] parts, Part[] casters, Bounds3 bounds, int triangles, int casterTriangles)
     {
         Name = name;
         this.parts = parts;
+        this.casters = casters;
         Bounds = bounds;
         TriangleCount = triangles;
+        CasterTriangleCount = casterTriangles;
     }
 
     public string Name { get; }
@@ -56,6 +66,12 @@ public sealed class PropModel : IDisposable
     // Triangles for one copy, summed over the parts — the number a caller needs to
     // decide whether four hundred of these is reasonable.
     public int TriangleCount { get; }
+
+    // Triangles one copy costs the sun's pass, which is TriangleCount unless the caller
+    // gave the caster its own geometry. Worth reporting separately: the shadow pass draws
+    // every caster in the box whether or not the camera can see it, so this is often the
+    // larger of the two numbers and the one a frame budget trips over.
+    public int CasterTriangleCount { get; }
 
     public int PartCount => parts.Length;
 
@@ -71,6 +87,11 @@ public sealed class PropModel : IDisposable
     //
     // Pass casterPipeline/casterShader null for a prop that receives light but does not
     // cast — ground decals, plots, anything flat enough that its own shadow is noise.
+    //
+    // `casterParts` substitutes geometry for the shadow pass only, and defaults to the
+    // scene geometry. It takes the same `bake`, which is what keeps a substitute standing
+    // where the thing it casts for stands; a caster normalised to its own bounds would
+    // sit a few centimetres off and put the shadow beside the trunk.
     public static PropModel Create(
         VulkanGraphicsDevice device,
         string name,
@@ -79,7 +100,8 @@ public sealed class PropModel : IDisposable
         PipelineHandle scenePipeline,
         ShaderProgramHandle? casterShader = null,
         PipelineHandle? casterPipeline = null,
-        Matrix4x4? bake = null)
+        Matrix4x4? bake = null,
+        IEnumerable<MeshData>? casterParts = null)
     {
         ArgumentNullException.ThrowIfNull(device);
         ArgumentNullException.ThrowIfNull(parts);
@@ -95,6 +117,10 @@ public sealed class PropModel : IDisposable
         var meshes = new List<MeshData>();
         var triangles = 0;
         var index = 0;
+        var casting = casterShader is not null && casterPipeline is not null;
+        // Only when the caller substituted geometry; otherwise the caster shares the scene mesh's upload,
+        // which is the whole reason the default costs nothing.
+        var substitutes = casting && casterParts is not null ? casterParts.ToArray() : null;
         foreach (var (source, tint) in parts)
         {
             var mesh = bake is { } transform
@@ -116,7 +142,7 @@ public sealed class PropModel : IDisposable
                 SceneBuffer = sceneBuffer,
                 Scene = new InstancedBatch(uploaded, scenePipeline, sceneBuffer),
             };
-            if (casterShader is { } cs && casterPipeline is { } cp)
+            if (substitutes is null && casterShader is { } cs && casterPipeline is { } cp)
             {
                 part.CasterBuffer = new InstanceBuffer(device, cs, $"{name}.{index}.caster");
                 part.Caster = new InstancedBatch(uploaded, cp, part.CasterBuffer);
@@ -126,13 +152,45 @@ public sealed class PropModel : IDisposable
             index++;
         }
 
-        return new PropModel(name, built.ToArray(), meshes.CombinedBounds(), triangles);
+        // Substituted casters are their own parts rather than a second batch hung off the scene parts,
+        // because a decimated model need not have the same number of primitives as the model it came from
+        // — pruning can drop one entirely — and pairing them by index would silently mis-tint or crash.
+        var casters = new List<Part>();
+        var casterTriangles = 0;
+        if (substitutes is { Length: > 0 } && casterShader is { } shader && casterPipeline is { } pipeline)
+        {
+            var slot = 0;
+            foreach (var source in substitutes)
+            {
+                var mesh = bake is { } transform
+                    ? source.Transformed(transform, $"{name}.caster.{slot}")
+                    : source;
+                if (mesh.IndexCount == 0) continue;
+                casterTriangles += mesh.IndexCount / 3;
+                var buffer = new InstanceBuffer(device, shader, $"{name}.{slot}.caster");
+                casters.Add(new Part
+                {
+                    CasterBuffer = buffer,
+                    Caster = new InstancedBatch(Upload(device, mesh), pipeline, buffer),
+                });
+                slot++;
+            }
+        }
+
+        return new PropModel(
+            name,
+            built.ToArray(),
+            casters.ToArray(),
+            meshes.CombinedBounds(),
+            triangles,
+            casters.Count > 0 ? casterTriangles : casting ? triangles : 0);
     }
 
     // Drop every copy staged last frame. Call once, before the frame's Adds.
     public void Begin()
     {
         foreach (var part in parts) part.Instances.Clear();
+        foreach (var part in casters) part.Instances.Clear();
     }
 
     // Place one copy. The transform is whatever the caller's shader expects to multiply
@@ -140,6 +198,7 @@ public sealed class PropModel : IDisposable
     public void Add(Matrix4x4 model)
     {
         foreach (var part in parts) part.Instances.Add(new InstanceData(model, part.Tint));
+        foreach (var part in casters) part.Instances.Add(new InstanceData(model, part.Tint));
     }
 
     // Place one copy in a single colour, overriding every material. For a faction tint,
@@ -147,6 +206,7 @@ public sealed class PropModel : IDisposable
     public void Add(Matrix4x4 model, Vector4 tint)
     {
         foreach (var part in parts) part.Instances.Add(new InstanceData(model, tint));
+        foreach (var part in casters) part.Instances.Add(new InstanceData(model, tint));
     }
 
     // Hand this frame's instances and push payloads to the batches. Split from the draws
@@ -157,31 +217,41 @@ public sealed class PropModel : IDisposable
         foreach (var part in parts)
         {
             var instances = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances);
-            part.Scene.Begin(scenePush);
+            part.Scene!.Begin(scenePush);
             part.Scene.SetInstances(instances);
             if (part.Caster is null) continue;
             part.Caster.Begin(shadowPush);
+            part.Caster.SetInstances(instances);
+        }
+
+        foreach (var part in casters)
+        {
+            var instances = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances);
+            part.Caster!.Begin(shadowPush);
             part.Caster.SetInstances(instances);
         }
     }
 
     public void DrawScene(RenderPassBuilder pass, IReadOnlyList<ShaderTextureBinding>? textures = null)
     {
-        foreach (var part in parts) part.Scene.End(pass, textures);
+        foreach (var part in parts) part.Scene!.End(pass, textures);
     }
 
     public void DrawShadow(RenderPassBuilder pass)
     {
         foreach (var part in parts) part.Caster?.End(pass);
+        foreach (var part in casters) part.Caster!.End(pass);
     }
 
     public void Dispose()
     {
         foreach (var part in parts)
         {
-            part.SceneBuffer.Dispose();
+            part.SceneBuffer?.Dispose();
             part.CasterBuffer?.Dispose();
         }
+
+        foreach (var part in casters) part.CasterBuffer?.Dispose();
     }
 
     // A transform that normalises an asset the way a game placing it on the ground
@@ -224,9 +294,9 @@ public sealed class PropModel : IDisposable
     private sealed class Part
     {
         public Vector4 Tint;
-        public InstanceBuffer SceneBuffer = null!;
+        public InstanceBuffer? SceneBuffer;
         public InstanceBuffer? CasterBuffer;
-        public InstancedBatch Scene = null!;
+        public InstancedBatch? Scene;
         public InstancedBatch? Caster;
         public readonly List<InstanceData> Instances = new();
     }

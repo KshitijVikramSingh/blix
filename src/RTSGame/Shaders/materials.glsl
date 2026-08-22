@@ -23,11 +23,22 @@ const float kBody    = 0.85;
 // Anything that makes its own light: a lit window, a lantern at a doorway, embers at a work site. The
 // only class the sun is not allowed to have an opinion about.
 const float kEmber   = 0.95;
+// <b>Water, and it sits outside the 0..1 run on purpose.</b> Every tenth from 0.05 to 0.95 was taken, and the
+// channel is a float in a storage buffer rather than a normalised colour, so there is room above. Renumbering
+// the others to make space would have touched every constant in this table for the sake of one addition.
+const float kWater   = 1.05;
 
 bool isClass(float carried, float which) { return abs(carried - which) < 0.05; }
 
 // Whether a surface is a growing thing, which is the one question both stages ask: the vertex stage to
 // bend it and the fragment stage to shade it as a leaf rather than as a tile.
 bool isPlant(float carried) { return isClass(carried, kFoliage) || isClass(carried, kCrop); }
+
+// Whether a surface is the ground itself, which is asked twice in the fragment stage now — once to vary its
+// colour over the landscape and once to read how much of it covers this pixel.
+bool isTerrain(float carried) { return isClass(carried, kTerrain); }
+
+// Whether this is the surface of a body of water rather than the bed under it.
+bool isWater(float carried) { return isClass(carried, kWater); }
 
 #endif

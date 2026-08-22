@@ -14,6 +14,7 @@ layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec4 vTint;
 layout(location = 2) in vec3 vWorldPos;
 layout(location = 3) in vec4 vSunShadowCoord;
+layout(location = 4) in vec2 vGround;
 
 layout(location = 0) out vec4 outColor;
 
@@ -112,7 +113,46 @@ void main() {
         vec3 glow = albedo * uHearth.z * uHearth.x;
         float towardSunlit = max(dot(normalize(toFragment), normalize(uSunDir.xyz)), 0.0);
         vec3 hazeLit = mix(uHazeAway.rgb, uHazeToward.rgb, towardSunlit * uHaze.y);
-        outColor = vec4(mix(glow, hazeLit, haze), vTint.a);
+        outColor = vec4(mix(glow, hazeLit, haze), 1.0);
+        return;
+    }
+
+    // <b>The surface of water, which is a surface and not a colour on the ground.</b> Water had been painted
+    // into the terrain's own albedo, and everything wrong with it followed from that: a lake was a wet-looking
+    // patch of sloping hillside instead of a level plane, a channel had no banks because a per-cell colour has
+    // no edges, and the whole lot read as "seeping into ravines and laying low and still".
+    //
+    // Three things make it read as water, and only the first is about colour.
+    //
+    // <b>It is flat and it is above the bed</b>, which the geometry does — the mesh sits at the water level, so
+    // a lake is level by construction and a shore is simply where that level meets the ground. Nobody draws a
+    // shoreline.
+    //
+    // <b>It is translucent, and by depth.</b> vGround.x is opacity and it goes to zero as the water thins, so
+    // the bed shows through at the margin and the edge fades out instead of ending. That gradient is the shore.
+    //
+    // <b>And it moves.</b> Two crossed waves on the clock the wind already carries, at a sixteenth of the
+    // albedo — far too little to see as motion in a still frame and enough that the surface is not dead. The
+    // frequencies are deliberately close and not harmonic, so the interference never repeats on screen.
+    if (isWater(surface)) {
+        float depth = clamp(vGround.y, 0.0, 1.0);
+        // Toward a third of the shallow colour: deep water is not a darker shade of shallow water, it is the
+        // same water with less bed showing through it, and the bed is what most of the brightness was.
+        vec3 body = albedo * mix(1.0, 0.34, depth);
+        float t = uWind.y;
+        float ripple =
+            sin(vWorldPos.x * 0.83 + t * 1.10) * sin(vWorldPos.z * 0.61 - t * 0.87) +
+            0.5 * sin(vWorldPos.x * 0.31 - t * 0.63) * sin(vWorldPos.z * 0.37 + t * 0.71);
+        body *= 1.0 + 0.062 * ripple;
+        // Lit as the flat, upward-facing thing it is, and computed here rather than borrowed from the block
+        // below — that one is derived from the interpolated normal and does not exist yet at this point in the
+        // shader. For a surface whose normal is straight up the hemispheric mix collapses to the sky term.
+        vec3 wet = uSkyAmbient.rgb * uLight.y
+            + uSunTint.rgb * uLight.x * max(normalize(uSunDir.xyz).y, 0.0);
+        vec3 litWater = body * wet;
+        float wetFog = smoothstep(uFog.x, uFog.y, length(vWorldPos - uCamPos.xyz)) * uFog.z;
+        vec3 wetHaze = mix(uHazeAway.rgb, uHazeToward.rgb, 0.5);
+        outColor = vec4(mix(litWater, wetHaze, wetFog), clamp(vGround.x, 0.0, 1.0));
         return;
     }
 
@@ -238,5 +278,11 @@ void main() {
     float towardSun = max(dot(normalize(toFragment), normalize(uSunDir.xyz)), 0.0);
     vec3 hazeColor = mix(uHazeAway.rgb, uHazeToward.rgb, towardSun * uHaze.y);
 
-    outColor = vec4(mix(lit, hazeColor, fog), vTint.a);
+    // <b>Alpha is coverage, and it used to be the material class.</b> Carrying the class in the fourth
+    // channel was free while every pipeline here had blending disabled — and it stopped being free the
+    // moment the ground grew a blended coat, because kTerrain is 0.05 and would have drawn every transition
+    // at five per cent. Terrain reports how much of this class covers the pixel; everything else is opaque
+    // and says so.
+    float coverage = isTerrain(surface) ? clamp(vGround.x, 0.0, 1.0) : 1.0;
+    outColor = vec4(mix(lit, hazeColor, fog), coverage);
 }

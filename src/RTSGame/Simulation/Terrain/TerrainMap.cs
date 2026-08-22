@@ -85,6 +85,31 @@ internal sealed class TerrainMap
     /// — the navigation raster, every cached flow field — is looking at a number that has no business
     /// having moved that far. A generator writes the field; it does not edit it a vertex at a time.
     /// </remarks>
+    /// <summary>Where the water on this ground goes, or null on a map with no relief.</summary>
+    /// <remarks>
+    /// <b>Derived, so it is neither saved nor fingerprinted.</b> It is a pure function of the height field
+    /// and <see cref="Drainage"/> is written to be reproducible on any machine, so a load re-solves it and
+    /// gets the same answer rather than carrying it in the manifest. Which is the right call for a field of
+    /// this size — it would be the largest thing in a save and the least necessary.
+    /// <para>
+    /// Read by both layers, like <see cref="Biomes"/> and for the same reason: generation paints the
+    /// surfaces the water implies, and the renderer draws the water and picks what grows near it.
+    /// </para>
+    /// </remarks>
+    public Drainage? Drainage { get; private set; }
+
+    internal void SetDrainage(Drainage? drainage) => Drainage = drainage;
+
+    /// <summary>What kind of country this whole landscape is.</summary>
+    /// <remarks>
+    /// Read by both layers, and for different halves of itself: the classifier reads its wetness ranks, which
+    /// decide surfaces and are therefore simulation truth; the renderer reads its palette and its flora, which
+    /// are dressing. One choice, two consumers, the same split as <see cref="Biomes"/>.
+    /// </remarks>
+    public Region Region { get; private set; } = Region.Downland;
+
+    internal void SetRegion(Region region) => Region = region;
+
     internal void ReplaceHeights(ReadOnlySpan<float> heights)
     {
         if (heights.Length != vertexHeights.Length)

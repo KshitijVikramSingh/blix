@@ -161,6 +161,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private static readonly Vector4 MudColor = new(0.125f, 0.098f, 0.062f, 1f);
     private static readonly Vector4 ImpassableColor = new(0.071f, 0.213f, 0.246f, 1f);
 
+    /// <summary>Silt: what a river lays on its own bed where the water is too deep to disturb it.</summary>
+    private static readonly Vector4 RiverbedColor = new(0.088f, 0.079f, 0.058f, 1f);
+
+    /// <summary>Gravel and shingle, which is what a ford is made of and why a ford is crossable.</summary>
+    private static readonly Vector4 ShingleColor = new(0.196f, 0.184f, 0.156f, 1f);
+
+    /// <summary>Water you can see the bottom of, which is why it is lighter and browner than the deep.</summary>
+    /// <remarks>
+    /// Between the river and the bed under it rather than a paler version of the river, because that is what
+    /// shallow water looks like: most of what reaches the eye off a ford is the gravel, tinted.
+    /// </remarks>
+    private static readonly Vector4 ShallowsColor = new(0.146f, 0.235f, 0.223f, 1f);
+
     /// <summary>Ground inside a stand of trees: leaf litter, dark because nothing reaches it.</summary>
     /// <remarks>
     /// Distinct from the water this shares its impassability with, and darker than grass, so that the shape
@@ -248,6 +261,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private VulkanGraphicsDevice vk = null!;
     private ShaderProgramHandle worldShader;
     private PipelineHandle worldPipeline;
+    private PipelineHandle groundBlendPipeline;
 
     // Daylight: a RenderGraph — sun shadow depth pass → HDR scene pass (procedural sky,
     // shadowed sun, aerial perspective) → present (expose, grade, tonemap). Lifted from
@@ -372,7 +386,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     /// <summary>How many trees each level of detail drew, which is the shape of the frame's tree budget.</summary>
     private (int Near, int Mid, int Far) treeTiers;
-    private (int Instances, long Triangles) stagedLoad;
+    private (int Instances, long Triangles, long Casters) stagedLoad;
     // viewProj, camPos, sunDir, sunLight, skyLight, fog, haze. As with the world block, this length is
     // also the declared push-constant range, so the two cannot disagree.
     private readonly byte[] smokePush = new byte[160];
@@ -544,6 +558,24 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         look.DetailCeilingMetres,
         MathF.Max(look.ShadowFloorMetres * 0.5f, VisibleGroundRadius + ShadowReachMetres));
 
+    /// <summary>
+    /// How far the ground itself is drawn, which is a different question from how far it is shadowed.
+    /// </summary>
+    /// <remarks>
+    /// <b>Ground chunks were culled against <see cref="DetailRadius"/>, and that conflated two budgets.</b>
+    /// The detail radius is capped by a look dial because it sizes the sun's box, and a box stretched to a
+    /// kilometre has metre-wide texels — so the cap is real and has to stay. But it was also deciding how much
+    /// ground existed, which meant pulling the camera back past the cap made the world end in a circle instead
+    /// of showing more of itself. The same class of bug this file already has a note about at the far plane.
+    /// <para>
+    /// Uncapped, because ground is the cheapest thing on the screen: a chunk is sixty-four render cells a side
+    /// at whatever step the map's size implies, so eight thousand triangles, and the whole of an 1800 m canvas
+    /// is under two hundred thousand. Nothing about drawing the ground was ever what cost anything — foliage
+    /// was.
+    /// </para>
+    /// </remarks>
+    private float GroundDrawRadius => VisibleGroundRadius * 1.08f + 12f;
+
     private float SunOrthoExtent => 2f * DetailRadius;
 
     private const float SunDistance = 220f;
@@ -629,6 +661,30 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private const float CameraFurthestDistance = 118f;
 
+    /// <summary>
+    /// How far back the camera may actually stand, which the map lab raises.
+    /// </summary>
+    /// <remarks>
+    /// <b>The constant above is a judgement about a settlement, and the lab is not judging a settlement.</b>
+    /// A hundred and eighteen metres was measured against everything a decision is made against — the
+    /// village, its fields, its tree line, the shoulder of the nearest high ground — and it is exactly right
+    /// for that. It is meaningless for a canvas three times the map wide, where the thing being judged is
+    /// whether a whole landscape has one idea in it, and you cannot judge that through a hole showing a
+    /// seventh of it.
+    /// <para>
+    /// Set from the extent rather than to a bigger number, because the two questions scale differently: the
+    /// game's limit is about how much detail is worth drawing, and the lab's is about fitting the canvas on
+    /// the screen. Three quarters of the extent puts the whole thing in frame — the camera sees roughly one
+    /// and two fifths of its own standoff on the ground at this pitch, measured off the dressing line.
+    /// </para>
+    /// <para>
+    /// It costs nothing that matters, because the lab has no trees in it: woodland is scattered by the
+    /// settlement scenario, and the lab deliberately places nothing. The far end of the game's zoom is
+    /// expensive for reasons that are entirely about foliage.
+    /// </para>
+    /// </remarks>
+    private float cameraFurthest = CameraFurthestDistance;
+
     /// <summary>Metres a second the arrow keys pan, as a share of how far back the camera is.</summary>
     /// <remarks>
     /// A share rather than a speed, because a pan that crosses the screen in a second when zoomed in
@@ -685,7 +741,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Mesh Mesh,
         InstanceBuffer Buffer,
         InstancedBatch Batch,
-        Vector4 Color);
+        Vector4 Color,
+        bool Blend,
+        bool Water = false);
 
     public RtsGameLoop(
         int exitAfterFrames,
@@ -697,9 +755,25 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         bool timingsOnly = false,
         float extentMeters = DefaultWorldExtentMeters,
         float compression = DefaultCompression,
-        bool startVillage = false)
+        bool startVillage = false,
+        bool startMapLab = false,
+        Region? region = null,
+        Archetype? archetype = null,
+        uint? mapSeed = null)
     {
+        mapLab = startMapLab;
+        if (region is { } chosen) labRegion = chosen;
+        if (archetype is { } wanted)
+        {
+            labArchetype = wanted;
+            // Naming an archetype means asking about that archetype, so the canvas is filled with it rather
+            // than with the family.
+            labPinned = true;
+        }
+
+        if (mapSeed is { } given) labSeed = given;
         worldExtentMeters = extentMeters;
+        if (startMapLab) cameraFurthest = MathF.Max(CameraFurthestDistance, extentMeters * 0.75f);
         clock.Compression = compression;
         // A camera sized for a thirty-metre square shows a kilometre map as a patch of
         // ground, which is the one thing this session must not do — the body has to be
@@ -741,7 +815,29 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         simulation = new SimulationWorld(worldExtentMeters);
         cameraFocus = Vector2.Zero;
         if (startVillage) raiders = new RaidDirector(raids);
-        if (startVillage)
+        if (mapLab)
+        {
+            // <b>Time stands still in the lab, at mid-morning.</b> It had a running clock, so a canvas left
+            // alone for a few minutes was being judged at half past six at night — and a landscape at night is
+            // a landscape you cannot see. The lab is for looking at ground, and the light it is looked at in
+            // should be a constant rather than whatever the session has drifted to.
+            clock.Compression = 0f;
+            simulation.StartAtSeconds(34_000f);
+            // Terrain only. The lab is about ground, and a settlement standing on it is both a distraction
+            // and a lie — the whole point of a window is that nothing has been placed for it yet.
+            LoadRelief();
+            // <b>The opening standoff was set inside the settlement scenario, which the lab does not run.</b>
+            // So --zoom silently did nothing here and the camera sat at the default forty-six metres — which
+            // reads as the zoom being clamped, since the wheel could not get out of it either. Worth the note:
+            // the symptom was "the canvas scenario will not zoom out" and one of its two causes was a limit,
+            // the other was an argument that never arrived.
+            cameraDistance = cameraDistanceTarget = startingZoomMetres > 0f
+                ? MathF.Min(startingZoomMetres, cameraFurthest)
+                : cameraFurthest * 0.72f;
+            ReportPick();
+            SurveyWindows();
+        }
+        else if (startVillage)
         {
             LoadSettlementScenario();
         }
@@ -796,6 +892,125 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     }
 
     /// <summary>
+    /// Generates the ground, and reports whether there is any. The one place relief is made.
+    /// </summary>
+    /// <remarks>
+    /// <b>Relief before anything is placed on it, because everything placed is laid out against the
+    /// ground.</b> Trees are refused where nobody can stand and the site is chosen from the map, so
+    /// generating the land after populating it would be describing a different world from the one the people
+    /// were put in.
+    /// <para>
+    /// Off by default until §54's milestones are through: relief is the parameter the whole migration plan
+    /// rests on, and zero is exactly the ground every calibrated scenario was measured against. Which is also
+    /// why this returns a bool rather than being called unconditionally — "there is no relief" has to stay a
+    /// distinct case from "there is relief of zero metres".
+    /// </para>
+    /// </remarks>
+    private bool LoadRelief()
+    {
+        if (reliefAmplitudeMetres <= 0f) return false;
+        // <b>One generator, for the lab and for play.</b> The village used to build its ground with
+        // <see cref="ReliefPlan.For"/> — six landforms scattered from a seed — while the lab built composed
+        // archetypes, so every judgement made in the lab was about terrain nobody would ever play on. The
+        // legacy path stays for <c>--relief</c>, which sweeps amplitudes and needs a shape whose steepest grade
+        // is known analytically.
+        var plan = ReliefPlan.FromLayout(
+                // <b>A field of statements, not one statement stretched.</b> Ask a canvas three times the map
+                // wide for a single archetype and you get one ridge system a mile and a half long, which no
+                // 600 m window can contain any of — reported from the chair as "there's just no interesting
+                // 600 m map possible". Filled at frame scale instead, so every window has one or two
+                // statements in it and neighbouring windows are different maps.
+                // <b>One statement, at map scale, and the canvas is gone.</b> The larger canvas existed to be
+                // <em>searched</em>: archetypes were not legible at 600 m, so the answer was to generate a lot
+                // of ground and go hunting for a framing that happened to contain something. Now that the areal
+                // primitives and the ridge heightfield make an archetype read at map scale — which is where
+                // <c>--shapes</c> judges them — searching solves a problem that no longer exists.
+                //
+                // The canvas's one real contribution was the fragment property: a river arriving from off-map,
+                // a ridge carrying on past the edge. That never needed a bigger canvas, it needed the right
+                // boundary conditions, and those are already right. The inherited catchment is an absolute two
+                // tiles' worth of upstream country, so a 600 m map's river comes from somewhere by
+                // construction, and a ridge that leaves the frame is a path whose end is outside it.
+                //
+                // What replaces searching is re-rolling. A 600 m map generates in about a third of a second,
+                // so twenty seeds cost less than one canvas did — and choosing between whole maps is a better
+                // question than choosing between framings of one.
+            MapLayout.Composed(labArchetype, worldExtentMeters, labSeed, reliefAmplitudeMetres),
+            worldExtentMeters,
+            labSeed);
+        // <b>Before the country is painted, because the region decides what the country is.</b> The
+        // classifier reads its wetness ranks, so setting it afterwards would paint one climate's surfaces and
+        // then claim another's.
+        //
+        // No longer lab-only. The whole point of the lab was to judge maps the game would then play, and a lab
+        // that generates through one path while the game generates through another judges nothing.
+        simulation.Terrain.SetRegion(labRegion);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        plan.Apply(simulation.Terrain);
+        var shaped = clock.Elapsed.TotalMilliseconds;
+        labPlan = plan;
+        SettlementScenarios.PaintCountry(simulation);
+        var painted = clock.Elapsed.TotalMilliseconds - shaped;
+        // <b>Measured here rather than read off the renderer's country field, which does not exist yet.</b>
+        // That field is rebuilt inside the render pass and guards on the device being up, so anything asking
+        // about country during generation gets an empty grid and the answer "all meadow" — which is exactly
+        // what the window survey reported before this line existed: one kind of country on every framing of
+        // a canvas with seven on it.
+        (labFloor, labSpan) = SettlementScenarios.InteriorReliefOf(simulation);
+        var measured = clock.Elapsed.TotalMilliseconds - shaped - painted;
+        // <b>Skipped in the lab, and it was fourteen seconds of every roll.</b> The lab has no agents in it:
+        // nothing routes, nothing is placed, nothing asks whether a cell is walkable. Rebuilding the walkable
+        // rectangles and the region partition over thirteen million cells to answer questions nobody is going
+        // to ask is the single largest thing a roll was paying for.
+        if (!mapLab) simulation.RebuildTerrainNavigation();
+        var navigated = clock.Elapsed.TotalMilliseconds - shaped - painted - measured;
+        Console.WriteLine($"  relief: {plan.Describe()}");
+        // The pick, on every run rather than only in the lab, so a map somebody liked while playing can be
+        // asked for again.
+        var picked = RegionProfile.For(labRegion);
+        Console.WriteLine(
+            $"  map: --region {labRegion} --archetype {labArchetype} --mapseed {labSeed}");
+        Console.WriteLine($"    {plan.Layout?.Sentence ?? "no layout"}");
+        Console.WriteLine($"    {picked.Name}: {picked.Character}");
+        Console.WriteLine(
+            $"    generated in {clock.Elapsed.TotalMilliseconds:F0} ms — shape {shaped:F0}, " +
+            $"country {painted:F0}, measure {measured:F0}, navigation {navigated:F0}");
+        if (simulation.Terrain.Drainage is { } water)
+        {
+            var bodies = water.Bodies();
+            var report = bodies.Length == 0
+                ? "none"
+                : string.Join(
+                    ", ",
+                    bodies.Select(body =>
+                        $"{body.AreaMetres2 / 10_000f:F1} ha ({body.SpanMetres:F0} m across, " +
+                        $"{body.DeepestMetres:F1} m deep)"));
+            var (widest, where) = water.Widest();
+            // <b>Crossable against blocked, because that is what a connector is for.</b> A map can have a
+            // beautiful river and be two maps if nothing can get over it, and no figure printed so far could
+            // tell the difference — water area, thickness and depth are all silent on whether there is a way
+            // across.
+            var grid = simulation.Navigation.Transform;
+            var fordable = 0;
+            var blocked = 0;
+            for (var z = 0; z < grid.Height; z += 6)
+            for (var x = 0; x < grid.Width; x += 6)
+            {
+                switch (simulation.Terrain.Surface(new GridCell(x, z)))
+                {
+                    case TerrainSurface.Shallows: fordable++; break;
+                    case TerrainSurface.Impassable: blocked++; break;
+                }
+            }
+
+            Console.WriteLine(
+                $"    water: {report}; thickest {widest:F0} m at ({where.X:F0}, {where.Y:F0}); " +
+                $"{fordable} crossable samples against {blocked} blocked");
+        }
+        return true;
+    }
+
+    /// <summary>
     /// Drops a working settlement into the live world, in the middle of a harvest.
     /// </summary>
     /// <remarks>
@@ -815,12 +1030,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // land after populating it would be describing a different world from the one the people were put
         // in. Off by default until §54's milestones are through: this is the parameter the whole migration
         // plan rests on, and zero is exactly the ground every calibrated scenario was measured against.
-        if (reliefAmplitudeMetres > 0f)
+        if (LoadRelief())
         {
-            var plan = ReliefPlan.For(worldExtentMeters, 0x5EED1234u, reliefAmplitudeMetres);
-            plan.Apply(simulation.Terrain);
-            simulation.RebuildTerrainNavigation();
-            Console.WriteLine($"  relief: {plan.Describe()}");
+            var plan = labPlan!;
             // Where the landforms actually are, relative to where the settlement is going. A generator
             // that scatters shapes over a map says nothing about whether any of them is near the place the
             // player will be looking at, and "the ground looks flat" is the same observation as "the site
@@ -934,12 +1146,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
                 new VertexAttribute(2, VertexAttributeFormat.Float2, 6 * sizeof(float)),
             });
+        // <b>Location 2 was already in every one of these buffers, unbound.</b> Every mesh drawn through
+        // the world pipeline is a VertexPosition3NormalTexture — the glTF importer, the OBJ importer and
+        // the terrain builder all pack that one struct — so its two texture floats have always been
+        // uploaded and thrown away. Binding them costs no new vertex format, no wider buffer and no second
+        // upload path: props supply their own texture coordinates and never read them back, and the ground
+        // supplies how much of itself covers each corner. Which is what a shader input is allowed to be,
+        // since the pipeline's attributes need only be a superset of what a stage consumes — the shadow
+        // caster and the smoke share this layout and declare neither.
         var meshLayout = new VertexLayout(
             Stride: VertexPosition3NormalTexture.Layout.Stride,
             Attributes: new[]
             {
                 new VertexAttribute(0, VertexAttributeFormat.Float3, 0),
                 new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
+                new VertexAttribute(2, VertexAttributeFormat.Float2, 6 * sizeof(float)),
             });
         // The world shader now reads the sun shadow map (set 0) and needs the camera, the sun, the
         // sun's shadow view-projection and the fog range in both stages, which is 176 bytes rather
@@ -1039,6 +1260,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 new[] { BlendState.Disabled },
                 RenderTarget: graph.GetPassSurface(scenePassHandle)),
             "rts-world");
+        // <b>The same shader and the same layout as the world, blending instead of replacing.</b> The
+        // ground is drawn twice where two kinds of country meet: an opaque coat in whichever class owns the
+        // cell, then the minority classes over it at their own share. Coplanar with what it covers, so the
+        // depth test has to be LessEqual — and it still writes depth, because the result is ground and
+        // everything standing on it must test against it.
+        groundBlendPipeline = vk.CreatePipeline(
+            new PipelineDescription(
+                worldShader,
+                meshLayout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualWrite,
+                RasterizerState.BackFaceCulling,
+                new[] { BlendState.AlphaBlend },
+                RenderTarget: graph.GetPassSurface(scenePassHandle)),
+            "rts-ground-blend");
         casterShader = vk.CreateShaderProgramFromSpv(
             Spv("shadow_caster.vert.spv"), Spv("shadow_caster.frag.spv"), casterInterface, "rts-caster");
         casterPipeline = vk.CreatePipeline(
@@ -1164,7 +1400,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"{farTriangles / MathF.Max(1, art.TreesFar.Length):F0} far ({art.Trees.Length} species); " +
             $"cover {coverTriangles / MathF.Max(1, art.Scatter.Length):F0}, " +
             $"undergrowth {underTriangles / MathF.Max(1, art.Undergrowth.Length):F0}, " +
-            $"villager {art.Villager?.TriangleCount ?? 0}, granary {art.Granary.TriangleCount}");
+            $"villager {art.Villager?.TriangleCount ?? 0}, granary {art.Granary.TriangleCount}; " +
+            $"decimation error {art.MidError:F2} m at the middle level and {art.FarError:F2} m far");
 
         foreach (var (name, model) in new[]
                  {
@@ -1464,10 +1701,40 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private int GroundChunkCells => GroundChunkRenderCells * GroundRenderStep;
 
+    /// <summary>
+    /// Navigation cells per water-sheet quad. The ground's own step, and it has to divide the chunk exactly.
+    /// </summary>
+    /// <remarks>
+    /// <b>Sized from the chunk rather than from an index budget, because the budget did not divide it.</b> The
+    /// previous form was <c>ceil(GroundChunkCells / 96)</c> — six, for a chunk of five hundred and twelve cells
+    /// — and 512 is not a multiple of 6. The loop runs to <c>x &lt;= toX</c>, so the last quad in every chunk
+    /// reached four cells <em>past</em> the boundary and into its neighbour.
+    /// <para>
+    /// The ground coats overlap the same way and it has never mattered, because they are opaque: drawing the
+    /// same ground twice looks like drawing it once. Translucent water drawn twice does not — the alpha
+    /// compounds, and the overlap appears as a dark line along every chunk edge. Reported as "dam-like
+    /// separators between the deeper waters", which is exactly what a grid of them looks like from above at a
+    /// forty-five degree yaw.
+    /// </para>
+    /// <para>
+    /// A chunk is sixty-four render cells by construction, so the ground's step tiles it exactly. What is given
+    /// up is the finer shoreline the half-step was for — and that turns out to cost nothing, because the shore
+    /// is a <em>depth</em> fade rather than a mesh edge: the opacity goes to zero as the water thins whatever
+    /// resolution the quads are.
+    /// </para>
+    /// </remarks>
+    private int WaterRenderStep => GroundRenderStep;
+
     private readonly Dictionary<(int X, int Z), List<TerrainSurfaceLayer>> groundChunks = new();
 
     /// <summary>Chunks staged this frame, so the draw pass submits exactly what was staged.</summary>
     private readonly List<(int X, int Z)> drawnChunks = new();
+
+    /// <summary>How tall the window is, so ground detail can be judged in pixels rather than in metres.</summary>
+    private float viewportPixels;
+
+    /// <summary>The chunks close enough for their transition coats to be worth drawing.</summary>
+    private readonly HashSet<(int X, int Z)> blendedChunks = new();
 
     /// <summary>The plates actually drawn this frame: the ones no meshed chunk has covered.</summary>
 
@@ -1519,23 +1786,158 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var fromZ = chunkZ * GroundChunkCells;
         var toX = Math.Min(fromX + GroundChunkCells - 1, transform.Width - 1);
         var toZ = Math.Min(fromZ + GroundChunkCells - 1, transform.Height - 1);
+        var cover = GroundCover.Build(simulation.Terrain, fromX, fromZ, toX, toZ, GroundRenderStep);
         var layers = new List<TerrainSurfaceLayer>();
-        foreach (var surface in Enum.GetValues<TerrainSurface>())
+
+        // Every opaque coat before any transition coat, because a transition blends against whatever is
+        // already there and a chunk is the unit that has to be self-consistent. Across chunks the order is
+        // free: they do not overlap.
+        for (var pass = 0; pass < 2; pass++)
+        for (var slot = 0; slot < GroundCover.Classes.Length; slot++)
         {
+            var blend = pass == 1;
+            var surface = GroundCover.Classes[slot];
             var (vertices, indices) = BuildTerrainSurfaceMesh(
-                simulation.Terrain, surface, -1, fromX, fromZ, toX, toZ, GroundRenderStep);
+                simulation.Terrain, cover, slot, blend, fromX, fromZ, toX, toZ, GroundRenderStep);
             if (indices.Length == 0) continue;
-            var name = $"ground-{chunkX}-{chunkZ}-{surface.ToString().ToLowerInvariant()}";
+            var kind = surface.ToString().ToLowerInvariant() + (blend ? "-blend" : string.Empty);
+            var name = $"ground-{chunkX}-{chunkZ}-{kind}";
             var mesh = CreateMesh(vk, name, vertices, indices);
             var buffer = new InstanceBuffer(vk, worldShader, $"{name}-instance");
             layers.Add(new TerrainSurfaceLayer(
                 mesh,
                 buffer,
-                new InstancedBatch(mesh, worldPipeline, buffer),
-                TerrainClassed(TerrainColor(surface))));
+                new InstancedBatch(mesh, blend ? groundBlendPipeline : worldPipeline, buffer),
+                TerrainClassed(TerrainColor(surface)),
+                blend));
+        }
+
+        // <b>The water goes on last, and it is a surface rather than a coat.</b> Every layer above is the
+        // ground in a colour; this one is a separate sheet at the water's own level, so it is the one thing
+        // here that is not coplanar with the terrain. Drawn after the coats because it lies over them, and
+        // through the blend pipeline because it is translucent — which is what makes a shore a gradient
+        // instead of a line.
+        if (simulation.Terrain.Drainage is not null)
+        {
+            // <b>Finer than the ground's step, because the shoreline is the detail and the ground is not</b> —
+            // a water edge that steps in whole render cells puts a six-metre staircase round a lake, which is
+            // the artefact the ground blend exists to remove, reintroduced by the one surface that does not use
+            // it.
+            //
+            // <b>But derived from the index budget rather than from the ground's step, which is a crash I
+            // shipped.</b> "Half the ground's step" makes the cell count across a chunk constant at 128
+            // whatever the map size — 16,384 cells at six vertices each is 98,304, and these meshes are
+            // 16-bit indexed. So it overflowed on every map and threw the moment a chunk was full. Sized from
+            // the limit instead: ninety-six cells a side is 55,296 vertices, comfortably inside 65,535, and
+            // still finer than the ground everywhere.
+            var (vertices, indices) = BuildWaterMesh(
+                simulation.Terrain, fromX, fromZ, toX, toZ, WaterRenderStep);
+            if (indices.Length > 0)
+            {
+                var name = $"ground-{chunkX}-{chunkZ}-water";
+                var mesh = CreateMesh(vk, name, vertices, indices);
+                var buffer = new InstanceBuffer(vk, worldShader, $"{name}-instance");
+                layers.Add(new TerrainSurfaceLayer(
+                    mesh,
+                    buffer,
+                    new InstancedBatch(mesh, groundBlendPipeline, buffer),
+                    new Vector4(ShallowsColor.X, ShallowsColor.Y, ShallowsColor.Z, SettlementArt.MaterialClass.Water),
+                    Blend: false,
+                    Water: true));
+            }
         }
 
         return layers;
+    }
+
+    /// <summary>
+    /// The sheet of water lying over a chunk, at the level the drainage says it stands.
+    /// </summary>
+    /// <remarks>
+    /// <b>Emitted only where there is depth, which is what makes the shoreline.</b> A cell whose four corners
+    /// are all dry contributes nothing, so the mesh ends where the water does — and because the per-vertex
+    /// opacity goes to zero as the depth does, the last few metres fade out rather than stopping at a polygon
+    /// edge. The shore is not drawn; it is where two surfaces meet.
+    /// <para>
+    /// The two spare texture floats carry <b>opacity</b> and <b>depth</b>. Opacity because a shallow ford
+    /// should show its gravel and a river should not; depth because water gets darker with it, and the two are
+    /// not the same curve — opacity saturates within a metre and colour keeps deepening past three.
+    /// </para>
+    /// <para>
+    /// Normals point straight up rather than following the sheet. The sheet <em>is</em> flat where it is a lake
+    /// and very nearly flat where it is a channel, and a normal derived from a nearly-flat surface is mostly
+    /// noise — which on something this reflective reads as crumpled foil.
+    /// </para>
+    /// </remarks>
+    private static (VertexPosition3NormalTexture[] Vertices, ushort[] Indices) BuildWaterMesh(
+        TerrainMap terrain,
+        int fromX,
+        int fromZ,
+        int toX,
+        int toZ,
+        int step)
+    {
+        var vertices = new List<VertexPosition3NormalTexture>();
+        var indices = new List<ushort>();
+        if (terrain.Drainage is not { } water) return (vertices.ToArray(), indices.ToArray());
+        var grid = terrain.Transform;
+        var size = grid.CellSize;
+
+        // Below this a body of water is a damp patch, and drawing it puts a translucent film over every hollow
+        // on the map. Two centimetres is under a boot sole.
+        const float wetEnough = 0.02f;
+
+        VertexPosition3NormalTexture Vertex(Vector2 at)
+        {
+            var level = water.LevelAt(at);
+            var depth = MathF.Max(0f, level - water.BedAt(at));
+            // Opacity saturates within a metre and a half: past that there is no more bed to hide. Eased
+            // rather than linear so the shallows hold their transparency further out — a hard ramp puts a
+            // visible ring of half-opaque water round every shore, which is the thing a shore should not have.
+            var eased = Math.Clamp(depth / 1.5f, 0f, 1f);
+            var opacity = 0.88f * eased * eased * (3f - 2f * eased);
+            // Colour keeps deepening for about three, which is why this is a second curve and not the same one.
+            var deep = Math.Clamp(depth / 2.4f, 0f, 1f);
+            return new VertexPosition3NormalTexture(
+                new GraphicsVector3(at.X, level, at.Y),
+                new GraphicsVector3(0f, 1f, 0f),
+                new GraphicsVector2(opacity, deep));
+        }
+
+        void AddTriangle(Vector2 first, Vector2 second, Vector2 third)
+        {
+            var start = checked((ushort)vertices.Count);
+            vertices.Add(Vertex(first));
+            vertices.Add(Vertex(second));
+            vertices.Add(Vertex(third));
+            indices.Add(start);
+            indices.Add((ushort)(start + 1));
+            indices.Add((ushort)(start + 2));
+        }
+
+        for (var z = fromZ; z <= toZ; z += step)
+        for (var x = fromX; x <= toX; x += step)
+        {
+            var x0 = grid.Origin.X + x * size;
+            var z0 = grid.Origin.Y + z * size;
+            var x1 = x0 + step * size;
+            var z1 = z0 + step * size;
+            var c00 = new Vector2(x0, z0);
+            var c10 = new Vector2(x1, z0);
+            var c01 = new Vector2(x0, z1);
+            var c11 = new Vector2(x1, z1);
+            var wettest = 0f;
+            foreach (var corner in new[] { c00, c10, c01, c11 })
+            {
+                wettest = MathF.Max(wettest, water.LevelAt(corner) - water.BedAt(corner));
+            }
+
+            if (wettest <= wetEnough) continue;
+            AddTriangle(c00, c01, c10);
+            AddTriangle(c11, c10, c01);
+        }
+
+        return (vertices.ToArray(), indices.ToArray());
     }
 
     private void DisposeGroundChunk((int X, int Z) chunk)
@@ -1574,7 +1976,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         for (var z = 0; z <= 100; z++)
         for (var x = 0; x <= 100; x++)
         {
-            var at = new Vector2(x / 100f - 0.5f, z / 100f - 0.5f) * simulation.ExtentMeters * 0.98f;
+            // The interior, not the whole map: the frontier stands well above everything inside it, so a
+            // span measured across it would put every interior hill in the bottom third and no country would
+            // ever be classified as high. See SettlementScenarios.InteriorExtent.
+            var interior = MathF.Max(
+                simulation.ExtentMeters * 0.25f,
+                simulation.ExtentMeters - 2f * ReliefPlan.RimWidthMetres);
+            var at = new Vector2(x / 100f - 0.5f, z / 100f - 0.5f) * interior;
             var height = simulation.Terrain.SampleHeight(at);
             lowest = MathF.Min(lowest, height);
             highest = MathF.Max(highest, height);
@@ -1585,10 +1993,27 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         RebuildCountryField();
     }
 
+    /// <summary>
+    /// One coat of ground: the cells a visual class owns, or the cells it merely reaches into.
+    /// </summary>
+    /// <remarks>
+    /// <b>The staircase is gone because a surface no longer belongs to a cell — it covers a corner by an
+    /// amount.</b> <see cref="GroundCover"/> measures that amount over a noise-warped disc, and it arrives
+    /// here as the vertex's second texture float, which the world shader reads as coverage. A cell is drawn
+    /// once opaquely in whichever class owns it and again, blended, in each class that reaches into it, so a
+    /// boundary is a crossfade whose line wanders off the grid it was rasterised on.
+    /// <para>
+    /// The two agree at every shared edge without being made to: an owned cell and its neighbour read the
+    /// <em>same</em> corner shares, so the crossfade is continuous across the line where ownership flips.
+    /// That is the property that makes this work, and it is why coverage is a function of position rather
+    /// than of which mesh is asking.
+    /// </para>
+    /// </remarks>
     private static (VertexPosition3NormalTexture[] Vertices, ushort[] Indices) BuildTerrainSurfaceMesh(
         TerrainMap terrain,
-        TerrainSurface surface,
-        int parity,
+        GroundCover cover,
+        int slot,
+        bool blend,
         int fromX,
         int fromZ,
         int toX,
@@ -1600,12 +2025,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var grid = terrain.Transform;
         var size = grid.CellSize;
 
-        VertexPosition3NormalTexture Vertex(Vector3 position, Vector3 normal, float u, float v) =>
-            new(
-                new GraphicsVector3(position.X, position.Y, position.Z),
-                new GraphicsVector3(normal.X, normal.Y, normal.Z),
-                new GraphicsVector2(u, v));
-
         // <b>Normals from the height field, not from the triangle.</b> A face normal is right for a crate
         // and wrong for ground: the ground is split into triangles on an alternating diagonal, so two
         // triangles covering the same gentle slope get noticeably different normals and the pair reads as a
@@ -1616,14 +2035,26 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Sampled per vertex instead, so the surface is shaded as the smooth thing it is interpolated from
         // and a slope reads as a slope. The geometry is unchanged; only what it claims about its own
         // curvature is.
-        Vector3 GroundNormal(Vector3 at) => terrain.SampleNormal(new Vector2(at.X, at.Z));
+        VertexPosition3NormalTexture Vertex((Vector3 At, float Coverage) corner)
+        {
+            var normal = terrain.SampleNormal(new Vector2(corner.At.X, corner.At.Z));
+            return new VertexPosition3NormalTexture(
+                new GraphicsVector3(corner.At.X, corner.At.Y, corner.At.Z),
+                new GraphicsVector3(normal.X, normal.Y, normal.Z),
+                // x is coverage. y is spare — two floats were already being uploaded and this only needed
+                // one, and inventing a use for the other is how a channel acquires two meanings.
+                new GraphicsVector2(corner.Coverage, 0f));
+        }
 
-        void AddTriangle(Vector3 first, Vector3 second, Vector3 third)
+        void AddTriangle(
+            (Vector3 At, float Coverage) first,
+            (Vector3 At, float Coverage) second,
+            (Vector3 At, float Coverage) third)
         {
             var start = checked((ushort)vertices.Count);
-            vertices.Add(Vertex(first, GroundNormal(first), 0f, 0f));
-            vertices.Add(Vertex(second, GroundNormal(second), 0f, 1f));
-            vertices.Add(Vertex(third, GroundNormal(third), 1f, 0f));
+            vertices.Add(Vertex(first));
+            vertices.Add(Vertex(second));
+            vertices.Add(Vertex(third));
             indices.Add(start);
             indices.Add((ushort)(start + 1));
             indices.Add((ushort)(start + 2));
@@ -1638,31 +2069,322 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // from the same interpolation the simulation walks on, so the mesh sits on the ground rather than
         // near it.
         //
-        // What the step does cost is colour resolution: a render cell takes its surface from the cell at
-        // its own corner, so a road narrower than a few render cells would come out ragged. Nothing
-        // generates roads on a played map yet (§52), and forest cover is painted the same colour as grass
-        // deliberately, so today every chunk is one layer of grass. When roads arrive they will want either
-        // a finer step near the camera or colour carried per vertex, and this is the note that says so.
+        // What it used to cost was colour resolution, and that is what coverage buys back: the step is
+        // still two metres, but a boundary inside a cell is now a gradient across it rather than a decision
+        // taken at its corner.
         for (var z = fromZ; z <= toZ; z += step)
         for (var x = fromX; x <= toX; x += step)
         {
-            var cell = new GridCell(x, z);
-            if (terrain.Surface(cell) != surface) continue;
-            if (parity >= 0 && (x + z) % 2 != parity) continue;
+            var cellX = (x - fromX) / step;
+            var cellZ = (z - fromZ) / step;
+            var owns = cover.DominantAt(cellX, cellZ) == slot;
+            if (owns == blend) continue;
+
+            var c00 = blend ? cover.Share(cellX, cellZ, slot) : 1f;
+            var c10 = blend ? cover.Share(cellX + 1, cellZ, slot) : 1f;
+            var c01 = blend ? cover.Share(cellX, cellZ + 1, slot) : 1f;
+            var c11 = blend ? cover.Share(cellX + 1, cellZ + 1, slot) : 1f;
+            // A coat nobody can see costs a draw and a quarter of a megabyte of vertices. Two per cent is
+            // below what one step of an eight-bit channel can express.
+            if (blend && MathF.Max(MathF.Max(c00, c10), MathF.Max(c01, c11)) < 0.02f) continue;
+
             var x0 = grid.Origin.X + x * size;
             var z0 = grid.Origin.Y + z * size;
             var x1 = x0 + step * size;
             var z1 = z0 + step * size;
-            var v00 = new Vector3(x0, terrain.VertexHeight(x, z), z0);
-            var v10 = new Vector3(x1, terrain.VertexHeight(x + step, z), z0);
-            var v01 = new Vector3(x0, terrain.VertexHeight(x, z + step), z1);
-            var v11 = new Vector3(x1, terrain.VertexHeight(x + step, z + step), z1);
+            var v00 = (new Vector3(x0, terrain.VertexHeight(x, z), z0), c00);
+            var v10 = (new Vector3(x1, terrain.VertexHeight(x + step, z), z0), c10);
+            var v01 = (new Vector3(x0, terrain.VertexHeight(x, z + step), z1), c01);
+            var v11 = (new Vector3(x1, terrain.VertexHeight(x + step, z + step), z1), c11);
             AddTriangle(v00, v01, v10);
             AddTriangle(v11, v10, v01);
         }
         return (vertices.ToArray(), indices.ToArray());
     }
 
+
+    /// <summary>
+    /// Slides the pick window, in steps of an eighth of it.
+    /// </summary>
+    /// <remarks>
+    /// An eighth rather than a free drag, because the thing being chosen is a <em>framing</em> and a framing
+    /// wants to be repeatable. Quantised steps mean a promising window can be nudged, compared against its
+    /// neighbour and gone back to, and the number written down is one somebody can type again.
+    /// </remarks>
+    private void MoveWindow(float x, float z)
+    {
+        if (!mapLab) return;
+        var step = LabWindowMetres * 0.125f;
+        var room = MathF.Max(0f, (worldExtentMeters - LabWindowMetres) * 0.5f);
+        labWindow = new Vector2(
+            Math.Clamp(labWindow.X + x * step, -room, room),
+            Math.Clamp(labWindow.Y + z * step, -room, room));
+        cameraFocus = labWindow;
+    }
+
+    /// <summary>Draws the pick window on the ground, so a framing is something you can see.</summary>
+    private void DrawWindow()
+    {
+        if (!mapLab) return;
+        var half = LabWindowMetres * 0.5f;
+        var a = labWindow + new Vector2(-half, -half);
+        var b = labWindow + new Vector2(half, -half);
+        var c = labWindow + new Vector2(half, half);
+        var d = labWindow + new Vector2(-half, half);
+        // Followed along the ground rather than drawn as four straight lines, because on relief a straight
+        // line between two corners is mostly underground — and a window that disappears into a ridge is
+        // exactly the window somebody is trying to judge.
+        void Edge(Vector2 from, Vector2 to)
+        {
+            const int steps = 24;
+            var previous = from;
+            for (var i = 1; i <= steps; i++)
+            {
+                var next = Vector2.Lerp(from, to, i / (float)steps);
+                AddGroundLine(previous, next, WindowColor, 0.6f);
+                previous = next;
+            }
+        }
+
+        Edge(a, b);
+        Edge(b, c);
+        Edge(c, d);
+        Edge(d, a);
+    }
+
+    private static readonly Vector4 WindowColor = new(1.00f, 0.86f, 0.32f, 1f);
+
+    /// <summary>
+    /// What a 600 m window would be worth as a map, and the sentence describing it.
+    /// </summary>
+    /// <remarks>
+    /// <b>"One map, one geographic sentence" is computable, so the lab should not make anybody hunt.</b> The
+    /// rule the archetype layer is built on says a good map has one or two large statements, a few ways
+    /// through, and a spread of country — every one of which is a thing this can count. So it counts them for
+    /// every candidate window and says which framings are worth looking at.
+    /// <para>
+    /// The terms are the rule, stated as arithmetic:
+    /// <list type="bullet">
+    /// <item><b>Statements</b> — separators crossing the window. Two is the target, one is thin, four is
+    /// theme-park geography, so the score peaks at two and falls off either side.</item>
+    /// <item><b>Ways through</b> — connectors inside it. Two to four; none means a window cut in half.</item>
+    /// <item><b>Variety</b> — how many kinds of country are present at more than a token share. A window that
+    /// is all pasture has nothing to decide about.</item>
+    /// <item><b>Somewhere to live</b> — the share that is level, dry and open. A dramatic window nobody can
+    /// found in is not a map.</item>
+    /// </list>
+    /// </para>
+    /// <para>
+    /// It scores framings rather than choosing one, which is the point: it is an instrument, and the eye still
+    /// decides. Its real job is to say when there is nothing good on a canvas at all — which is a fact about
+    /// the generator and not about the person looking for it.
+    /// </para>
+    /// </remarks>
+    private (float Score, string Why) ScoreWindow(Vector2 centre)
+    {
+        var layout = labPlan?.Layout;
+        var half = LabWindowMetres * 0.5f;
+
+        var statements = 0;
+        if (layout is not null)
+        {
+            foreach (var separator in layout.Separators)
+            {
+                foreach (var point in separator.Path)
+                {
+                    if (MathF.Abs(point.X - centre.X) > half || MathF.Abs(point.Y - centre.Y) > half) continue;
+                    statements++;
+                    break;
+                }
+            }
+        }
+
+        var ways = 0;
+        if (layout is not null)
+        {
+            foreach (var connector in layout.Connectors)
+            {
+                if (MathF.Abs(connector.At.X - centre.X) > half) continue;
+                if (MathF.Abs(connector.At.Y - centre.Y) > half) continue;
+                ways++;
+            }
+        }
+
+        // The country, sampled on a coarse grid over the window. Coarse because this is a share and a share
+        // does not need every cell — and it is run over dozens of candidate framings.
+        var counts = new int[Enum.GetValues<Biome>().Length];
+        const int samples = 24;
+        var total = 0;
+        var livable = 0;
+        for (var z = 0; z < samples; z++)
+        for (var x = 0; x < samples; x++)
+        {
+            var at = centre + new Vector2(
+                (x + 0.5f) / samples - 0.5f,
+                (z + 0.5f) / samples - 0.5f) * LabWindowMetres;
+            if (!simulation.Terrain.Contains(at)) continue;
+            var biome = Biomes.At(simulation.Terrain, at, labFloor, MathF.Max(1f, labSpan));
+            counts[(int)biome]++;
+            total++;
+            if (biome is Biome.Meadow or Biome.Floodplain &&
+                simulation.Terrain.SampleGrade(at) < 0.08f)
+            {
+                livable++;
+            }
+        }
+
+        if (total == 0) return (0f, "off the canvas");
+        var variety = 0;
+        foreach (var count in counts)
+        {
+            if (count / (float)total >= 0.04f) variety++;
+        }
+
+        var livableShare = livable / (float)total;
+
+        // Peaks at two statements, tails off at four. Written as a triangle rather than a curve because the
+        // rule it encodes is a range and not a preference.
+        var statementScore = statements switch
+        {
+            0 => 0f,
+            1 => 0.55f,
+            2 => 1f,
+            3 => 0.85f,
+            4 => 0.5f,
+            _ => 0.2f,
+        };
+        var wayScore = ways switch { 0 => 0.15f, 1 => 0.6f, 2 => 1f, 3 => 1f, 4 => 0.9f, _ => 0.6f };
+        // Four kinds of country is a map with regions in it; two is a map with a gradient.
+        var varietyScore = Math.Clamp((variety - 1) / 3f, 0f, 1f);
+        // A third of the window wanting to be lived on is comfortable; a tenth is a gauntlet.
+        var livableScore = Math.Clamp((livableShare - 0.08f) / 0.30f, 0f, 1f);
+
+        var score = statementScore * 0.34f + wayScore * 0.20f + varietyScore * 0.26f + livableScore * 0.20f;
+        var why = $"{statements} statements, {ways} ways through, {variety} kinds of country, " +
+                  $"{livableShare * 100f:F0}% you could found on";
+        return (score, why);
+    }
+
+    /// <summary>
+    /// Walks every framing on the canvas and reports the best few.
+    /// </summary>
+    /// <remarks>
+    /// On an eighth-of-a-window grid, which is the same step the arrows move in — so every framing this
+    /// suggests is one the arrows can actually reach and one the printed pick can name.
+    /// </remarks>
+    private void SurveyWindows()
+    {
+        if (!mapLab) return;
+        var step = LabWindowMetres * 0.125f;
+        var room = MathF.Max(0f, (worldExtentMeters - LabWindowMetres) * 0.5f);
+        var span = (int)MathF.Floor(room / step);
+        var found = new List<(float Score, Vector2 At, string Why)>();
+        for (var z = -span; z <= span; z++)
+        for (var x = -span; x <= span; x++)
+        {
+            var at = new Vector2(x * step, z * step);
+            var (score, why) = ScoreWindow(at);
+            found.Add((score, at, why));
+        }
+
+        found.Sort((first, second) => second.Score.CompareTo(first.Score));
+        Console.WriteLine($"  best framings on this canvas ({found.Count} considered):");
+        var shown = 0;
+        var taken = new List<Vector2>();
+        foreach (var candidate in found)
+        {
+            // Spread out, or the top five are five nudges of the same framing.
+            var tooClose = false;
+            foreach (var already in taken)
+            {
+                if (Vector2.Distance(already, candidate.At) < LabWindowMetres * 0.6f) tooClose = true;
+            }
+
+            if (tooClose) continue;
+            taken.Add(candidate.At);
+            Console.WriteLine(
+                $"    {candidate.Score:F2}  --window {candidate.At.X:F0},{candidate.At.Y:F0}   " +
+                $"{candidate.Why}");
+            if (++shown >= 5) break;
+        }
+    }
+
+    /// <summary>
+    /// The lab's state and its controls, for the screen rather than the log.
+    /// </summary>
+    /// <remarks>
+    /// Two lines: what this canvas <em>is</em>, and what the keys do. The second one exists because a lab has
+    /// eight bindings nobody can be expected to remember, and the first because every one of them was already
+    /// working while appearing not to — the state was printed to a console that a windowed run does not have
+    /// in front of it.
+    /// </remarks>
+    private string LabStatus()
+    {
+        var profile = RegionProfile.For(labRegion);
+        var (score, why) = ScoreWindow(labWindow);
+        return
+            $"{labArchetype} · {profile.Name} — {profile.Character}\n" +
+            $"seed {labSeed} · scores {score:F2} ({why})\n" +
+            "Q/E archetype · I region · Y next seed · enter print";
+    }
+
+    /// <summary>Rolls a new landscape on the same archetype, or steps to the next one.</summary>
+    private void RollLab(int archetypeStep, bool reseed)
+    {
+        if (!mapLab) return;
+        if (archetypeStep != 0)
+        {
+            var all = MapLayout.All;
+            var index = Array.IndexOf(all, labArchetype);
+            labArchetype = all[((index + archetypeStep) % all.Length + all.Length) % all.Length];
+            // <b>Naming an archetype means asking about that archetype, so cycling pins.</b> It did not, and
+            // the result was a key that did nothing at all: the canvas is filled from the pinned archetype or
+            // from the whole family, pinning was off by default, and the seed did not move either — so Q and E
+            // spent two seconds regenerating a byte-identical landscape. The state changed and the ground could
+            // not. Same rule the --archetype flag already followed.
+            labPinned = true;
+            Console.WriteLine($"  pinned to {labArchetype}");
+        }
+
+        if (reseed)
+        {
+            // An integer avalanche on the old seed, so the sequence of rolls is itself reproducible: the
+            // fourth landscape from a starting seed is always the same fourth landscape.
+            var next = labSeed * 2654435761u + 0x9E3779B9u;
+            labSeed = (next ^ (next >> 15)) * 2246822519u;
+        }
+
+        // A fresh world, because a roll is a different landscape and the surfaces, the navigation and the
+        // drainage all belong to the one it replaces.
+        simulation = new SimulationWorld(worldExtentMeters);
+        LoadRelief();
+        ReportPick();
+        SurveyWindows();
+    }
+
+    /// <summary>
+    /// Prints the triple that identifies this landscape, and the sentence it was built from.
+    /// </summary>
+    /// <remarks>
+    /// The sentence is the acceptance test, not a label. A layout that cannot be said in a line has too much
+    /// happening on six hundred metres of ground, so printing it beside the pick puts the rule where it will
+    /// actually be read — next to the map it is judging.
+    /// </remarks>
+    private void ReportPick()
+    {
+        if (!mapLab) return;
+        var sentence = labPlan?.Layout?.Sentence ?? "no layout";
+        var profile = RegionProfile.For(labRegion);
+        // <b>The whole identity of a map, and it no longer needs a window.</b> Three values, because the map
+        // is the frame: everything under them is deterministic, so this triple regenerates the ground exactly.
+        Console.WriteLine(
+            $"  pick: --region {labRegion} --archetype {labArchetype} --mapseed {labSeed}");
+        Console.WriteLine($"    {profile.Name}: {profile.Character}");
+        Console.WriteLine($"    {sentence}");
+        if (labPlan is { } plan) Console.WriteLine($"    relief: {plan.Describe()}");
+        var (score, why) = ScoreWindow(labWindow);
+        Console.WriteLine($"    this framing scores {score:F2}: {why}");
+    }
 
     public void OnResize(int width, int height)
     {
@@ -2316,6 +3038,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // building the frame rather than in stepping the world — and this session has been wrong three times
         // guessing which part of a frame is expensive.
         UpdateFrustum(viewProjection);
+        // <b>Logical pixels, not the framebuffer's.</b> VisibleGroundRadius derives from host.LogicalSize, so
+        // a metres-per-pixel figure built from frame.Height mixes two units — and on a retina display the two
+        // differ by a factor of two, which silently doubled every screen-space size computed from it. The rule
+        // that culls transition bands under three pixels was therefore measuring six.
+        viewportPixels = host.LogicalSize.Height;
+        RebuildCanopyDensity();
         var buildClock = Stopwatch.StartNew();
         BuildTerrainInstances();
         var terrainMs = buildClock.Elapsed.TotalMilliseconds;
@@ -2367,6 +3095,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             foreach (var chunk in drawnChunks)
             foreach (var layer in groundChunks[chunk])
             {
+                // <b>A transition coat is a detail, and past the detail radius it is an invisible one.</b>
+                // The coats are alpha-blended, so each one that covers screen pays fill rate whether or not
+                // anybody can tell it is there — and at a standoff where the whole canvas is in frame the
+                // render step is metres wide, which puts a crossfade band comfortably under a pixel.
+                // Measured on the 1800 m lab canvas: 219 layers at 81 ms, 25 at 19 ms, and no visible
+                // difference at that zoom because there is nothing there to see.
+                if (layer.Blend && !blendedChunks.Contains(chunk)) continue;
+
                 layer.Batch.End(scope, shadowBinding);
             }
 
@@ -2416,12 +3152,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                         ? $"{(int)sky.HourOfDay:00}:{(int)(sky.HourOfDay % 1f * 60f):00} {sky.Description}"
                         : null,
                     colliderOverlay > 0 ? GeometryLine() : null,
+                    mapLab ? LabStatus() : null,
                     frame.Width,
                     frame.Height);
             });
 
         buildPhases = (terrainMs, agentMs, scatterMs, buildClock.Elapsed.TotalMilliseconds);
-        stagedLoad = art?.StagedLoad() ?? (0, 0L);
+        stagedLoad = art?.StagedLoad() ?? (0, 0L, 0L);
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames)
         {
@@ -2446,16 +3183,45 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // keeps having to relearn: what a thing costs to prepare and what it costs to submit are different
         // budgets.
         drawnChunks.Clear();
+        blendedChunks.Clear();
         var chunkMetres = GroundChunkCells * simulation.Navigation.Transform.CellSize;
+
+        // <b>A transition band is a detail, so what decides it is how wide it is on screen.</b> Culling blends
+        // against the detail radius alone works when the map is larger than the view and fails when it is not:
+        // at 600 m the whole map sits inside the detail radius, so every blend coat drew, each covering a large
+        // share of the screen with alpha blending on.
+        //
+        // A band is about one and a half render cells across. Under three pixels there is nothing in it to see,
+        // and the fade it provides is invisible. At a gameplay standoff it is eight pixels and draws; looking at
+        // a whole map it is under two and does not.
+        //
+        // <b>Hoisted out of the chunk loop, where it cost eleven milliseconds a frame.</b>
+        // <see cref="VisibleGroundRadius"/> asks the host for the window size, and asking twenty-five times a
+        // frame took the terrain build phase from 1.4 ms to 13.1. The figure is one number about the camera and
+        // has no business being recomputed per chunk — the same mistake as any other loop-invariant, made
+        // louder by the invariant being a call across an interop boundary.
+        var metresPerPixel = viewportPixels > 0f
+            ? 2f * VisibleGroundRadius / viewportPixels
+            : 0.001f;
+        var bandsWorthDrawing =
+            GroundRenderStep * simulation.Navigation.Transform.CellSize * 1.5f / metresPerPixel >= 3f;
         foreach (var (chunk, layers) in groundChunks)
         {
             var minimum = simulation.Navigation.Transform.Origin + new Vector2(chunk.X, chunk.Z) * chunkMetres;
             // Against the nearest corner, so a chunk the camera stands on the edge of is drawn.
             var nearest = Vector2.Clamp(cameraFocus, minimum, minimum + new Vector2(chunkMetres));
-            if (Vector2.DistanceSquared(nearest, cameraFocus) > DetailRadius * DetailRadius) continue;
+            var reach = GroundDrawRadius;
+            var away = Vector2.DistanceSquared(nearest, cameraFocus);
+            if (away > reach * reach) continue;
             drawnChunks.Add(chunk);
+            var blended = away <= DetailRadius * DetailRadius && bandsWorthDrawing;
+            if (blended) blendedChunks.Add(chunk);
             foreach (var layer in layers)
             {
+                // <b>Staged and drawn have to be the same set.</b> Skipping only the draw leaves the batch
+                // open, and the next frame's Begin throws — which is the primitive being right: a Begin
+                // without an End is a staged instance list nothing ever submitted, and it should be loud.
+                if (layer.Blend && !blended) continue;
                 layer.Batch.Begin(worldPush);
                 layer.Batch.Add(Matrix4x4.Identity, layer.Color);
             }
@@ -2473,6 +3239,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         habitationLights = 0;
         contactInstances.Clear();
         BuildObstacleInstances();
+        DrawWindow();
         BuildNodeInstances();
         BuildNavigationOverlay();
         BuildPathDebug();
@@ -3059,16 +3826,76 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // ground the classifier is asked about rather than by second-guessing its answer — so the mixing
         // happens in the same units the rule is written in.
         var wobble = new Vector2(jitter - 0.5f, (hash & 0xFFu) / 255f - 0.5f) * 22f;
+        // <b>The region decides what a wood is made of, and the biome decides the exception.</b> A boreal
+        // pasture grows pine and a fen grows willow, so keying species off the biome alone gave every region
+        // the same wood with the same three species in it. Below the share, broadleaf; above it, conifer —
+        // and the jitter that already ragged the biome boundaries does the same for this one, so a region's
+        // mix is a mix rather than a rule anybody can see.
+        var conifers = RegionProfile.For(simulation.Terrain.Region).ConiferShare;
         var range = CountryAt(at + wobble) switch
         {
             Biome.Scree => Conifer,
+            Biome.Crag => Conifer,
             Biome.Moor => Twisted,
             Biome.Marsh => Dead,
-            _ => Broadleaf,
+            // <b>Floodplain gets the twisted form, and it is standing in for a willow.</b> What survives on
+            // a river flat is the thing that tolerates having its roots underwater half the year and being
+            // grazed the rest, and in this kit that is the low crooked shape rather than the tall clean one.
+            // The density rule has already made these rare — see SettlementScenarios.WoodlandFor — so what
+            // this decides is what the few look like, which is the fringe along the water.
+            Biome.Floodplain => Twisted,
+            _ => jitter < conifers ? Conifer : Broadleaf,
         };
 
         return range.First + id % range.Count;
     }
+
+    /// <summary>
+    /// The map lab: a large canvas to roll landscapes on and a window to pick one out of.
+    /// </summary>
+    /// <remarks>
+    /// <b>What it is for.</b> A generator is only as good as the loop you can tune it in, and every dial in
+    /// this one had been tuned by editing a constant, rebuilding and squinting at a village. The lab rolls a
+    /// whole landscape at a stroke, cycles the archetypes, and draws a six-hundred-metre window on the ground
+    /// so a promising patch can be framed and written down.
+    /// <para>
+    /// <b>And the canvas is larger than the game's map on purpose, which is the part that matters.</b> A
+    /// 600 m window cut out of a coherent 1800 m landscape is a <em>fragment</em> — its river genuinely comes
+    /// from off-window, its ridge genuinely continues past the edge, and the ground has a context the window
+    /// does not contain. That is the property the inherited-inflow constant was faking, and framing a crop
+    /// makes it true instead.
+    /// </para>
+    /// <para>
+    /// The pick is <c>(archetype, seed, window centre)</c>, printed on demand, and that triple is the whole
+    /// identity of a map — enough to regenerate it exactly, because everything under it is deterministic.
+    /// </para>
+    /// </remarks>
+    private readonly bool mapLab;
+
+    private Archetype labArchetype = Archetype.DiagonalRiver;
+
+    /// <summary>
+    /// Whether the canvas is filled with one archetype or with the whole family.
+    /// </summary>
+    /// <remarks>
+    /// Mixed by default, because a canvas of nine different neighbourhoods is nine candidate maps and a canvas
+    /// of nine of the same is one map nine times. Pinning it to a single archetype is for judging that
+    /// archetype — which is what the cycle keys are for — rather than for finding a map.
+    /// </remarks>
+    private bool labPinned;
+
+    /// <summary>Which kind of country the canvas is. One region per canvas, because a region is regional.</summary>
+    private Region labRegion = Region.Downland;
+
+    private Archetype? labOnlyArchetype => labPinned ? labArchetype : null;
+    private uint labSeed = 0x5EED1234u;
+    private ReliefPlan? labPlan;
+    private Vector2 labWindow = Vector2.Zero;
+    private float labFloor;
+    private float labSpan;
+
+    /// <summary>How much ground a picked map covers. The game's own extent, and the point of the window.</summary>
+    private const float LabWindowMetres = 600f;
 
     /// <summary>How much height the map has, and where its floor is. Recomputed when the terrain moves.</summary>
     private float reliefSpan;
@@ -3183,7 +4010,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var left = MathF.Max(0.12f, tree.Stock.Wood / MathF.Max(1f, Woodland.WoodPerTree));
         // Varied by id rather than by a random draw, so the same tree is the same tree across a save.
         var spread = 0.86f + (tree.Id.Value * 37 % 13) / 13f * 0.40f;
-        var away = Vector2.DistanceSquared(tree.Position, cameraFocus);
         if (art is not null)
         {
             // A tree is drawn wider than the trunk it is routed around, because a canopy overhangs and
@@ -3194,23 +4020,23 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var placement = SettlementArt.Placement(
                 tree.Position, ground, width, SettlementArt.FreeYawOf(tree.Id.Value));
 
-            // <b>The same tree at three levels of detail, chosen by distance and by how crowded it is.</b>
-            // Our foliage is solid low-poly geometry rather than alpha-cut cards, so it decimates — 5,940 /
-            // 1,041 / 603 triangles for a species — and a decimated tree still reads as a tree where an
-            // impostor reads as a shard. The bands are squared distances so nothing takes a square root.
+            // <b>The same tree at three levels of detail, chosen by how crowded it is and by nothing
+            // else.</b> Our foliage is solid low-poly geometry rather than alpha-cut cards, so it decimates
+            // — 5,940 / 1,041 / 603 triangles for a species — and a decimated tree still reads as a tree
+            // where an impostor reads as a shard. What it does not keep is <em>mass</em>: the coarse levels
+            // shed interior leaf cards, so a stand of them reads thinner than the stand it replaced.
             //
-            // <b>And density is as good a proxy as distance.</b> A tree standing on its own is looked at; a
-            // tree in a thicket is part of a texture, and nobody can tell which trunk is which at any
-            // distance. The terrain already knows which is which — forest cover marks every cell with two
-            // trees crowding it, painted once when the woodland goes down — so a crowded tree drops a level
-            // and the detail is spent on the ones whose shape can actually be read. It also spends it where
-            // a settlement is: the ground round a village is cleared, so the trees a player is working
-            // among are exactly the uncrowded ones.
-            var crowded = simulation.Terrain.SampleSurface(tree.Position) == TerrainSurface.Forest;
-            var tier = away <= TreeNearRadiusMetres * TreeNearRadiusMetres
-                ? 0
-                : away <= TreeMidRadiusMetres * TreeMidRadiusMetres ? 1 : 2;
-            if (crowded) tier = Math.Min(2, tier + 1);
+            // <b>Which is why distance was taken out of this decision entirely.</b> Coarsening by distance
+            // thins whole regions of the map at once, and a distant wood going sparse as you pull back is
+            // the one artefact of it a player cannot help seeing — the far half of the valley looks logged.
+            // Crowding does not have that failure: where trees overlap, the neighbours fill in the mass the
+            // coarse level lost, so the thinning lands exactly where it is covered. A tree standing on its
+            // own is looked at and keeps every triangle at any distance; a tree in a thicket is texture.
+            // It also spends the detail where a settlement is, since the ground round a village is cleared.
+            //
+            // The far limit is <c>treeDrawRadiusSquared</c>, and it stays a limit rather than a ladder:
+            // beyond what the camera can see, and soon beyond what the player has scouted.
+            var tier = CanopyTierAt(tree.Position);
 
             if (tier == 0)
             {
@@ -3428,11 +4254,37 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 Biome.Moor => (ScatterWispyShort, ScatterWispyTall, ScatterWispyTall),
                 // Nothing much grows on stone, so what is scattered here is stone.
                 Biome.Scree => (ScatterPebbleRound, ScatterPebbleSquare, ScatterWispyShort),
+                // Bare rock, and only the square broken sort — a crag sheds angular stone, and rounded
+                // pebbles are what a river makes, which is the other end of the map entirely.
+                Biome.Crag => (ScatterPebbleSquare, ScatterPebbleSquare, ScatterPebbleSquare),
                 // Rank and damp: tall wispy growth and clover in the bottoms.
                 Biome.Marsh => (ScatterClover, ScatterWispyTall, ScatterClover),
+                // <b>The lushest ground on the map, and it shows it in the grass rather than in trees.</b>
+                // Silt and water and no trees to shade it out — see WoodlandFor for why the trees are gone —
+                // so what stands here is deep pasture with clover through it. Which is also the read the
+                // economy wants: the best ground looks like the best ground.
+                Biome.Floodplain => (ScatterCommonTall, ScatterCommonTall, ScatterClover),
                 // Pasture, and the only country that gets flowers.
                 _ => (ScatterCommonShort, ScatterCommonTall, ScatterFlowers),
             };
+
+            // <b>How much of it there is, which is as much of the read as which kind it is.</b> The species
+            // mapping alone gave every country the same amount of cover in a different shape, so a moor and
+            // a water meadow were equally shaggy. Around one, so pasture is untouched and a flat map — all
+            // meadow by classification — cannot move.
+            var lushness = RegionProfile.For(simulation.Terrain.Region).Lushness * biome switch
+            {
+                Biome.Water => 0f,
+                Biome.Crag => 0.22f,
+                Biome.Scree => 0.40f,
+                Biome.Moor => 0.62f,
+                Biome.Marsh => 1.15f,
+                Biome.Floodplain => 1.30f,
+                _ => 1f,
+            };
+            if (lushness <= 0f) continue;
+            rank *= lushness;
+            basal *= lushness;
 
             var roll = ScatterHash(cx, cz, 0);
             var kind = -1;
@@ -3528,7 +4380,90 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </para>
     /// </remarks>
     /// <summary>
-    /// Where each level of tree detail gives way to the next, in metres.
+    /// Where each level of tree detail gives way to the next this frame, in metres, and measured from the
+    /// eye rather than from what the camera is looking at.
+    /// </summary>
+    /// <remarks>
+    /// <b>Two things were wrong and the first was visible.</b> The bands were measured from
+    /// <c>cameraFocus</c> — the point on the ground the camera is aimed at, which projects to the middle of
+    /// the screen — so the detailed band appeared as a circle around screen centre, reported as looking
+    /// through "a circular lens" with "tree god eyes". Distance from the eye instead: on a tilted camera
+    /// that reads as bands running up the screen, which is what a level of detail is supposed to look like,
+    /// because it is what the change in a tree's projected size actually follows.
+    /// <para>
+    /// <b>Two ways of choosing by distance were built and both were taken back out, which is worth
+    /// recording because they are the obvious answers.</b> Screen-space error first: the cook records each
+    /// level's world-space geometric error, and projecting it — <c>error × viewportHeight / (2 × distance ×
+    /// tan(fov/2))</c> — is the textbook selector, right at any zoom and window size. Measured, it put the
+    /// crossovers at four hundred metres and left every tree in the frame at full detail, because
+    /// decimating a canopy moves leaf clusters by tens of centimetres: the error is enormous and invisible,
+    /// where the same error on a wall would be a hole. The metric is calibrated for surfaces whose
+    /// silhouette is what you are looking at, and a canopy's is not. Hand-tuned bands next, as depth past
+    /// the focal plane so they ran up the screen rather than ringing its middle — correct, and still wrong,
+    /// because any distance ladder thins the far half of the map, and a wood that goes sparse as you pull
+    /// back reads as logged. Crowding is what survived. The errors are still reported at load, because they
+    /// are worth knowing; they do not choose.
+    /// </para>
+    /// </remarks>
+    /// <summary>
+    /// How many standing trees share each ten-metre cell, which is what chooses their level of detail.
+    /// </summary>
+    /// <remarks>
+    /// Ten metres because that is about two canopies across: finer and a tree is alone in its own cell no
+    /// matter how thick the wood, coarser and the cleared ring round a village averages into the wood
+    /// beside it. Counted rather than read off the terrain's forest cover, which is a binary — cover says
+    /// "two trees crowd this cell" and cannot tell a copse from a forest, and three levels of detail need
+    /// more than one bit to choose between them.
+    /// <para>
+    /// Rebuilt once a frame from the node table, which is one pass over the nodes and no spatial query. It
+    /// has to be a frame's field rather than a cached one because felling changes it: clear a stand and the
+    /// survivors stop being texture and start being trees you are looking at, which is exactly when they
+    /// should get their triangles back.
+    /// </para>
+    /// <para>
+    /// Dressing-side, and it never touches simulation state — nothing here is remembered between frames or
+    /// fingerprinted. §52's rule: an observational field the renderer keeps to itself.
+    /// </para>
+    /// </remarks>
+    private const float CanopyCellMetres = 10f;
+
+    private int[] canopyCounts = Array.Empty<int>();
+    private int canopyCells;
+
+    private void RebuildCanopyDensity()
+    {
+        var extent = simulation.ExtentMeters;
+        canopyCells = Math.Max(2, (int)MathF.Ceiling(extent / CanopyCellMetres) + 1);
+        var total = canopyCells * canopyCells;
+        if (canopyCounts.Length != total) canopyCounts = new int[total];
+        else Array.Clear(canopyCounts);
+
+        foreach (ref readonly var node in simulation.Nodes.All)
+        {
+            if (!node.IsAlive || !node.IsStanding) continue;
+            canopyCounts[CanopyIndex(node.Position)]++;
+        }
+    }
+
+    private int CanopyIndex(Vector2 at)
+    {
+        var local = (at + new Vector2(simulation.ExtentMeters * 0.5f)) / CanopyCellMetres;
+        var x = Math.Clamp((int)local.X, 0, canopyCells - 1);
+        var z = Math.Clamp((int)local.Y, 0, canopyCells - 1);
+        return z * canopyCells + x;
+    }
+
+    /// <summary>Which level of detail the crowding here earns: 0 full, 1 middle, 2 coarse.</summary>
+    private int CanopyTierAt(Vector2 at)
+    {
+        if (canopyCells == 0) return 0;
+        var crowd = canopyCounts[CanopyIndex(at)];
+        if (crowd >= look.TreeCrowdFar) return 2;
+        return crowd >= look.TreeCrowdMid ? 1 : 0;
+    }
+
+    /// <summary>
+    /// Where each level of tree detail gave way to the next before this was measured, in metres.
     /// </summary>
     /// <remarks>
     /// <b>And the last of them is deliberately beyond what the camera can see.</b> The zoom caps at 118 m,
@@ -3541,8 +4476,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// tenth of the triangles over four times the area.
     /// </para>
     /// </remarks>
-    private const float TreeNearRadiusMetres = 38f;
-    private const float TreeMidRadiusMetres = 95f;
+
 
     /// <summary>How far out ground cover is drawn, in metres. See DrawScatter for why it is not the
     /// detail radius.</summary>
@@ -3899,13 +4833,54 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private static Vector4 TerrainClassed(Vector4 color) =>
         new(color.X, color.Y, color.Z, SettlementArt.MaterialClass.Terrain);
 
-    private static Vector4 TerrainColor(TerrainSurface surface) => surface switch
+    /// <summary>
+    /// The ground's own colour, which is a fact about the region as much as about the surface.
+    /// </summary>
+    /// <remarks>
+    /// <b>It was five static constants, and that was the whole reason every map came out green.</b> A palette
+    /// fixed in the code is a climate fixed in the code: the archetype layer could vary the shape of the land
+    /// all it liked and the answer to "what colour is grass here" was the same on every one of them. Now the
+    /// four grounds a region has an opinion about — pasture, heath, rough and mud — come from its profile.
+    /// <para>
+    /// Water and road do not, because they do not vary that way. Water is water, and a made road is the
+    /// colour of what it was made from wherever it is.
+    /// </para>
+    /// </remarks>
+    private Vector4 TerrainColor(TerrainSurface surface)
+    {
+        var profile = RegionProfile.For(simulation.Terrain.Region);
+        return surface switch
+        {
+            TerrainSurface.Road => RoadColor,
+            TerrainSurface.Heath => profile.Heath,
+            TerrainSurface.Rough => profile.Rough,
+            TerrainSurface.Mud => profile.Mud,
+            // <b>The bed, not the water — and this is what "the edges are too hard" was.</b> These two
+            // surfaces are how the simulation knows water is there, and they were also being drawn as water:
+            // a dark teal patch stamped at the classifier's own resolution, with a step in it every three
+            // metres, under a translucent sheet that had a soft edge. The hard edge won, because it was the
+            // opaque one.
+            //
+            // Now the water is the sheet and only the sheet, and these draw what lies under it — silt in the
+            // deep, gravel in the shallows. Which is also why a shore works at all: the bed shows through the
+            // margin, so the transition is a change in what you are seeing through the water rather than a
+            // line where one colour stops.
+            TerrainSurface.Impassable => RiverbedColor,
+            TerrainSurface.Shallows => ShingleColor,
+            // Forest cover is a navigation fact painted the colour of what grows under a wood, which is the
+            // same ground as beside it. See the long note that used to live here.
+            _ => profile.Pasture,
+        };
+    }
+
+    private static Vector4 TerrainColorLegacy(TerrainSurface surface) => surface switch
     {
         TerrainSurface.Road => RoadColor,
         TerrainSurface.Heath => HeathColor,
         TerrainSurface.Rough => RoughColor,
         TerrainSurface.Mud => MudColor,
         TerrainSurface.Impassable => ImpassableColor,
+        TerrainSurface.Shallows => ShallowsColor,
         // <b>Forest cover is not a colour, and this is why the woodland had patches in it.</b> Cover is a
         // navigation fact — cells with two trees crowding them are closed — written into the surface channel
         // because that is where the raster reads terrain from. It was never meant to be seen: what you see
@@ -4148,10 +5123,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"FRAME {frameMilliseconds:F1} ms · " +
             $"BUILD terrain {buildPhases.Terrain:F1} agents {buildPhases.Agents:F1} " +
             $"scatter {buildPhases.Scatter:F1} overlay {buildPhases.Overlay:F1} ms · " +
-            $"LOAD {stagedLoad.Instances:N0} instances = {stagedLoad.Triangles / 1000L:N0}k triangles · " +
-            $"TREES {treeTiers.Near}/{treeTiers.Mid}/{treeTiers.Far} near/mid/far · " +
+            $"LOAD {stagedLoad.Instances:N0} instances = {stagedLoad.Triangles / 1000L:N0}k triangles " +
+            $"+ {stagedLoad.Casters / 1000L:N0}k cast · " +
+            $"TREES {treeTiers.Near}/{treeTiers.Mid}/{treeTiers.Far} near/mid/far over " +
+            $"{look.TreeCrowdMid:F0}/{look.TreeCrowdFar:F0} per {CanopyCellMetres:F0} m · " +
             $"{undergrowthDrawn} under · " +
-            $"GROUND {drawnChunks.Count} of {groundChunks.Count} chunks at " +
+            $"GROUND {drawnChunks.Count} of {groundChunks.Count} chunks, " +
+            $"{drawnChunks.Sum(chunk => groundChunks[chunk].Count(layer => !layer.Blend && !layer.Water))} coats " +
+            $"+ {blendedChunks.Sum(chunk => groundChunks[chunk].Count(layer => layer.Blend))} blends " +
+            $"+ {drawnChunks.Sum(chunk => groundChunks[chunk].Count(layer => layer.Water))} water at " +
             $"{GroundRenderStep * simulation.Navigation.Transform.CellSize:F1} m · " +
             $"CONTACT {contactInstances.Count} · " +
             $"HEIGHT {simulation.Terrain.SampleHeight(cameraFocus):F1} m " +
@@ -4236,7 +5216,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         cameraDistanceTarget = Math.Clamp(
             cameraDistanceTarget - offsetY * step,
             CameraNearestDistance,
-            CameraFurthestDistance);
+            cameraFurthest);
     }
 
     private AgentId? FindNearestUnselectedTarget()
@@ -4277,6 +5257,46 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     {
         switch (key)
         {
+            case Key.Q when mapLab:
+                RollLab(-1, reseed: false);
+                break;
+            case Key.E when mapLab:
+                RollLab(1, reseed: false);
+                break;
+            case Key.Y when mapLab:
+                RollLab(0, reseed: true);
+                break;
+            case Key.I when mapLab:
+                labRegion = RegionProfile.All[
+                    (Array.IndexOf(RegionProfile.All, labRegion) + 1) % RegionProfile.All.Length];
+                RollLab(0, reseed: false);
+                break;
+            case Key.U when mapLab:
+                labPinned = !labPinned;
+                Console.WriteLine(
+                    labPinned
+                        ? $"  pinned to {labArchetype} — every neighbourhood the same statement"
+                        : "  mixed — every neighbourhood its own statement");
+                RollLab(0, reseed: false);
+                break;
+            case Key.Up when mapLab:
+                MoveWindow(0f, -1f);
+                break;
+            case Key.Down when mapLab:
+                MoveWindow(0f, 1f);
+                break;
+            case Key.Left when mapLab:
+                MoveWindow(-1f, 0f);
+                break;
+            case Key.Right when mapLab:
+                MoveWindow(1f, 0f);
+                break;
+            case Key.Enter when mapLab:
+                ReportPick();
+                break;
+            case Key.O when mapLab:
+                SurveyWindows();
+                break;
             case Key.Escape:
                 if (obstacleEditMode)
                 {

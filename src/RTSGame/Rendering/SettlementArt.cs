@@ -102,19 +102,21 @@ internal sealed class SettlementArt : IDisposable
     /// cheap. It was twenty-eight million. Anything that draws the same mesh many times needs the product,
     /// not the sum.
     /// </remarks>
-    public (int Instances, long Triangles) StagedLoad()
+    public (int Instances, long Triangles, long Casters) StagedLoad()
     {
         var instances = 0;
         long triangles = 0;
+        long casters = 0;
         foreach (var model in owned)
         {
             var count = model.InstanceCount;
             if (count <= 0) continue;
             instances += count;
             triangles += (long)count * model.TriangleCount;
+            casters += (long)count * model.CasterTriangleCount;
         }
 
-        return (instances, triangles);
+        return (instances, triangles, casters);
     }
 
     public PropModel Granary { get; }
@@ -203,6 +205,8 @@ internal sealed class SettlementArt : IDisposable
     {
         var directory = Path.Combine(AppContext.BaseDirectory, "Assets", "models");
         var measured = new List<(PropModel Model, Bounds3 Walls)>();
+        var midError = 0f;
+        var farError = 0f;
 
         // <b>The OBJ pack, loaded the same way the glTF one is.</b> WavefrontParts splits a file by
         // material and reads each colour out of the MTL, so the two paths meet at the same shape — a
@@ -271,7 +275,16 @@ internal sealed class SettlementArt : IDisposable
         /// end of a chain clamp to the coarsest, so a model that would not decimate simply repeats itself
         /// rather than failing.
         /// </remarks>
-        PropModel Kit(string file, bool casts = false, float surface = MaterialClass.Foliage, int lod = 0)
+        // <b>casterLod is how far the shadow is allowed to fall behind the scene draw.</b> A shadow is a
+        // silhouette resolved to an eleven-centimetre texel, so it survives geometry the camera would not
+        // accept — and the sun's pass draws every caster in the box whether or not the camera can see it,
+        // which makes it the pass a woodland actually costs. Zero means the caster shares the scene mesh.
+        PropModel Kit(
+            string file,
+            bool casts = false,
+            float surface = MaterialClass.Foliage,
+            int lod = 0,
+            int casterLod = 0)
         {
             var path = Path.Combine(directory, "kit", file + ".gltf");
             if (!File.Exists(path))
@@ -283,14 +296,27 @@ internal sealed class SettlementArt : IDisposable
 
             var model = new GltfStaticImporter().Import(
                 new AssetImportContext(AssetId.Parse(file), path));
+            var worst = 0f;
             var parts = model.Primitives
-                .Select(prim => (Mesh: AtLevel(prim.Mesh, lod), Tint: KitColour(prim.Material?.Name, surface)))
+                .Select(prim =>
+                {
+                    var mesh = AtLevel(prim.Mesh, lod, out var error);
+                    worst = MathF.Max(worst, error);
+                    return (Mesh: mesh, Tint: KitColour(prim.Material?.Name, surface));
+                })
                 .ToArray();
+            if (lod == 1) midError = MathF.Max(midError, worst);
+            if (lod >= 2) farError = MathF.Max(farError, worst);
             var bounds = parts.Select(part => part.Mesh).CombinedBounds();
             var bake = PropModel.NormaliseToUnitFootprint(bounds);
+            // Taken from the model's own chain rather than from the scene parts, because those have already
+            // been flattened to one level and no longer carry the chain to step down.
+            var shadowParts = casts && casterLod > lod
+                ? model.Primitives.Select(prim => AtLevel(prim.Mesh, casterLod, out _)).ToArray()
+                : null;
             var built = PropModel.Create(
                 device, file, parts, sceneShader, scenePipeline,
-                casts ? casterShader : null, casts ? casterPipeline : null, bake);
+                casts ? casterShader : null, casts ? casterPipeline : null, bake, shadowParts);
             measured.Add((built, LowerExtent(parts.Select(part => part.Mesh), bounds, bake)));
             return built;
         }
@@ -402,11 +428,11 @@ internal sealed class SettlementArt : IDisposable
             // and far bands cost index lists and nothing else.
             treesMid: new[]
             {
-                Kit("CommonTree_1", casts: true, lod: 2), Kit("CommonTree_2", casts: true, lod: 2),
-                Kit("CommonTree_3", casts: true, lod: 2), Kit("Pine_1", casts: true, lod: 2),
-                Kit("Pine_2", casts: true, lod: 2), Kit("Pine_3", casts: true, lod: 2),
-                Kit("TwistedTree_1", casts: true, lod: 2), Kit("TwistedTree_2", casts: true, lod: 2),
-                Kit("DeadTree_1", casts: true, lod: 2), Kit("DeadTree_2", casts: true, lod: 2),
+                Kit("CommonTree_1", casts: true, lod: 1, casterLod: 3), Kit("CommonTree_2", casts: true, lod: 1, casterLod: 3),
+                Kit("CommonTree_3", casts: true, lod: 1, casterLod: 3), Kit("Pine_1", casts: true, lod: 1, casterLod: 3),
+                Kit("Pine_2", casts: true, lod: 1, casterLod: 3), Kit("Pine_3", casts: true, lod: 1, casterLod: 3),
+                Kit("TwistedTree_1", casts: true, lod: 1, casterLod: 3), Kit("TwistedTree_2", casts: true, lod: 1, casterLod: 3),
+                Kit("DeadTree_1", casts: true, lod: 1, casterLod: 3), Kit("DeadTree_2", casts: true, lod: 1, casterLod: 3),
             },
             treesFar: new[]
             {
@@ -415,27 +441,27 @@ internal sealed class SettlementArt : IDisposable
                 // is four thousand trees, which is most of the sun's pass for a contribution nobody can
                 // see. The near and middle bands cast their own geometry, which is already decimated, so
                 // the shadow map gets the same level of detail the scene does for nothing.
-                Kit("CommonTree_1", lod: 3), Kit("CommonTree_2", lod: 3),
-                Kit("CommonTree_3", lod: 3), Kit("Pine_1", lod: 3),
-                Kit("Pine_2", lod: 3), Kit("Pine_3", lod: 3),
-                Kit("TwistedTree_1", lod: 3), Kit("TwistedTree_2", lod: 3),
-                Kit("DeadTree_1", lod: 3), Kit("DeadTree_2", lod: 3),
+                Kit("CommonTree_1", casts: true, lod: 2, casterLod: 3), Kit("CommonTree_2", casts: true, lod: 2, casterLod: 3),
+                Kit("CommonTree_3", casts: true, lod: 2, casterLod: 3), Kit("Pine_1", casts: true, lod: 2, casterLod: 3),
+                Kit("Pine_2", casts: true, lod: 2, casterLod: 3), Kit("Pine_3", casts: true, lod: 2, casterLod: 3),
+                Kit("TwistedTree_1", casts: true, lod: 2, casterLod: 3), Kit("TwistedTree_2", casts: true, lod: 2, casterLod: 3),
+                Kit("DeadTree_1", casts: true, lod: 2, casterLod: 3), Kit("DeadTree_2", casts: true, lod: 2, casterLod: 3),
             },
             trees: new[]
             {
                 // <b>Each level casts its own shadow.</b> The blob substitution that stood in for this is
                 // gone: a tier already costs what its own level of detail costs, so the sun's pass gets the
                 // decimated geometry for free and there is nothing left for a stand-in to save.
-                Kit("CommonTree_1", casts: true),
-                Kit("CommonTree_2", casts: true),
-                Kit("CommonTree_3", casts: true),
-                Kit("Pine_1", casts: true),
-                Kit("Pine_2", casts: true),
-                Kit("Pine_3", casts: true),
-                Kit("TwistedTree_1", casts: true),
-                Kit("TwistedTree_2", casts: true),
-                Kit("DeadTree_1", casts: true),
-                Kit("DeadTree_2", casts: true),
+                Kit("CommonTree_1", casts: true, casterLod: 2),
+                Kit("CommonTree_2", casts: true, casterLod: 2),
+                Kit("CommonTree_3", casts: true, casterLod: 2),
+                Kit("Pine_1", casts: true, casterLod: 2),
+                Kit("Pine_2", casts: true, casterLod: 2),
+                Kit("Pine_3", casts: true, casterLod: 2),
+                Kit("TwistedTree_1", casts: true, casterLod: 2),
+                Kit("TwistedTree_2", casts: true, casterLod: 2),
+                Kit("DeadTree_1", casts: true, casterLod: 2),
+                Kit("DeadTree_2", casts: true, casterLod: 2),
             },
             // A real stump, at last: Resource_Tree_Group_Cut was a cluster of cut trunks standing in for one.
             stumps: Nature("TreeStump", casts: false, surface: MaterialClass.Timber),
@@ -489,6 +515,8 @@ internal sealed class SettlementArt : IDisposable
             woodHeap: Prop("Logs", surface: MaterialClass.Timber),
             villager: LoadVillager(device, directory, sceneShader, scenePipeline, casterShader, casterPipeline));
         foreach (var (model, extent) in measured) art.walls[model] = extent;
+        art.MidError = midError;
+        art.FarError = farError;
         return art;
     }
 
@@ -582,6 +610,17 @@ internal sealed class SettlementArt : IDisposable
 
         /// <summary>A person. Kept separate because people are read as silhouettes, not as surfaces.</summary>
         internal const float Body = 0.85f;
+
+        /// <summary>
+        /// The surface of water: a translucent sheet at a level, over a bed that shows through it.
+        /// </summary>
+        /// <remarks>
+        /// <b>Above the run rather than inside it, and that is a decision about churn.</b> Every tenth from
+        /// 0.05 to 0.95 was already spoken for, and the channel is a float in a storage buffer rather than a
+        /// normalised colour — so there is room above one. Renumbering the ten below to make space would have
+        /// touched every constant in this table, and the shader's copy of it, for the sake of one addition.
+        /// </remarks>
+        internal const float Water = 1.05f;
 
         /// <summary>Anything that makes its own light: a lit window, a lantern, embers at a work site.</summary>
         /// <remarks>
@@ -725,10 +764,12 @@ internal sealed class SettlementArt : IDisposable
     /// record copy rather than a re-import. The chain rides along in <c>MeshData.Lods</c> whenever a cooked
     /// .blixmesh sits beside the glTF; without one there is a single level and every request clamps to it.
     /// </remarks>
-    private static MeshData AtLevel(MeshData mesh, int lod)
+    private static MeshData AtLevel(MeshData mesh, int lod, out float error)
     {
+        error = 0f;
         if (lod <= 0 || mesh.Lods is not { Count: > 1 } chain) return mesh;
         var level = chain[Math.Min(lod, chain.Count - 1)];
+        error = level.Error;
         return mesh with
         {
             Indices = level.Indices16 ?? Array.Empty<ushort>(),
@@ -736,6 +777,24 @@ internal sealed class SettlementArt : IDisposable
             Lods = null,
         };
     }
+
+    /// <summary>
+    /// The world-space geometric error of the mid and far tree levels, in metres.
+    /// </summary>
+    /// <remarks>
+    /// <b>What the cook measured when it decimated, which is what lets the runtime choose by pixels rather
+    /// than by a magic distance.</b> A level's error is how far its surface can be from the original, so
+    /// projecting it — <c>error × viewportHeight / (2 × distance × tan(fov/2))</c> — gives the size of the
+    /// mistake on screen. Choosing the coarsest level whose mistake is under a pixel or two is correct at
+    /// every zoom and every window size by construction, where a hand-tuned radius is correct at one.
+    /// <para>
+    /// The largest error across the species, because the tiers are shared arrays and a band has to be safe
+    /// for the worst model in it.
+    /// </para>
+    /// </remarks>
+    public float MidError { get; private set; }
+
+    public float FarError { get; private set; }
 
     /// <summary>
     /// The footprint of a model's <em>walls</em>, which is not the footprint of its roof.
