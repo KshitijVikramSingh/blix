@@ -170,7 +170,7 @@ internal sealed class WoodlandCover
         // is also the honest reading of what a rank tells you — that a place is dry <em>for here</em>, and only
         // the ends of that are strong enough to decide anything.
         var drink = 1f - MathF.Max(0f, MathF.Abs(moisture - 0.56f) - 0.24f) / 0.32f;
-        var depth = soil.DepthAt(at, floor, span);
+        var depth = soil.DepthAt(at);
         return Math.Clamp(drink, 0f, 1f) * (0.25f + 0.75f * depth);
     }
 

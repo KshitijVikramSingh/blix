@@ -95,11 +95,21 @@ internal static class EconomyRates
     // economy. The seasonal-shape machinery below survives for <em>draw</em>, which really is a curve:
     // every house burns three times as much wood in winter and nobody decides that.
 
+    /// <summary>What a whole year of this field is worth, at full potential, on the ground it stands on.</summary>
+    /// <remarks>
+    /// <b>The rate is per farm-year; the field is what makes it per <em>this</em> farm.</b> Both places that
+    /// used to multiply <c>GrainPerFarmPerYear</c> by a potential now go through here, because they were the
+    /// two halves of one quantity — what a second of reaping earns, and what is left standing — and a
+    /// fertility applied to one of them and not the other would have made the store's own forecast disagree
+    /// with what the reapers brought in.
+    /// </remarks>
+    public static float FullYearOf(in EconomyNode farm) => GrainPerFarmPerYear * farm.Fertility;
+
     /// <summary>Grain a second of reaping earns from this field, at its own potential.</summary>
     public static float ReapedPerSecond(in EconomyNode farm) =>
         CropCycle.ReapTargetOf(in farm) <= 0f
             ? 0f
-            : GrainPerFarmPerYear * CropCycle.PotentialOf(in farm) / CropCycle.ReapTargetOf(in farm);
+            : FullYearOf(in farm) * CropCycle.PotentialOf(in farm) / CropCycle.ReapTargetOf(in farm);
 
     /// <summary>Units per second one person draws of this resource right now.</summary>
     public static float DrawPerSecond(Resource resource, Season season, float appetite)

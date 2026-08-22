@@ -265,6 +265,13 @@ internal sealed class SimulationWorld
             // that already exists — a fixture that had to wait a season for its granary would be testing
             // construction rather than whatever it was about. The game's own build key passes false.
             BuildWork = built ? Construction.LabourFor(kind) : 0f,
+            // <b>What this ground is worth, asked once, here.</b> The single place nodes are made, so every
+            // caller gets it — scenarios, self-tests and the player's own build key alike — and no caller has
+            // to remember. A map with no relief has no soil field, which is how the flat ground every
+            // calibrated scenario runs on keeps a fertility of exactly one.
+            Fertility = kind == NodeKind.Farm && Terrain.Soil is { } soil
+                ? soil.FertilityAt(at)
+                : FertilityWithoutSoil(kind),
         });
         Placement.Transform.TryWorldToCell(at, out var cell);
         Nodes.Get(id).Collider = Colliders.Add(
@@ -285,6 +292,35 @@ internal sealed class SimulationWorld
         // map every time a cart is destroyed would be both wrong and expensive.
         if (NodeFootprint.Blocks(kind)) OccupyFootprint(id);
         return id;
+    }
+
+    /// <summary>
+    /// The neutral fertility, and a refusal if neutral is a lie about this map.
+    /// </summary>
+    /// <remarks>
+    /// <b>The one ordering this feature rests on, made impossible to get wrong instead of merely true.</b> A
+    /// field reads the soil when it is placed, so the country has to be painted first — and it is, on both
+    /// paths that generate relief, by two call sites neither of which mentions the other. Nothing stopped a
+    /// third path from placing fields on generated ground before the soil existed, and the symptom would have
+    /// been every field reporting exactly 1.00: not a crash, not a wrong-looking number, just a map that had
+    /// quietly stopped mattering to the economy it was generated for.
+    /// <para>
+    /// The tell is precise, which is what makes it worth asserting rather than reporting: a solved drainage
+    /// means relief was generated, and generated relief with no soil field means the country was never
+    /// painted. Flat ground has neither, and is genuinely neutral.
+    /// </para>
+    /// </remarks>
+    private float FertilityWithoutSoil(NodeKind kind)
+    {
+        if (kind == NodeKind.Farm && Terrain.Drainage is not null)
+        {
+            throw new InvalidOperationException(
+                "A field is being placed on generated terrain before the country has been painted, so it " +
+                "would take a neutral fertility on ground that is not neutral. Paint the country (which " +
+                "builds the soil field) before founding anything that farms.");
+        }
+
+        return 1f;
     }
 
     /// <summary>

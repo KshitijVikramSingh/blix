@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Reflection;
 using System.Text;
 
@@ -213,6 +214,13 @@ public sealed class ObjectTunables
             }
         }
     }
+
+    /// <summary>Every group and how many controls it holds, so "my slider is missing" is answerable.</summary>
+    /// <remarks>
+    /// A control that does not appear has two quite different causes — never registered, or registered and
+    /// scrolled off the end of a panel with ten groups in it — and they are indistinguishable from the chair.
+    /// </remarks>
+    public string Describe() => string.Join(", ", groups.Select(g => $"{g.Group}({g.Items.Count})"));
 
     public void BuildControls(DebugContext debug)
     {

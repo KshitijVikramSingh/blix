@@ -6621,3 +6621,136 @@ The eight archetypes now spread, where before they sat within a few points of ea
 | SplitValley | 24% | 64% | 12% |
 | CentralHighGround | 23% | 70% | 7% |
 | YValley | 17% | 56% | 27% |
+
+## 70. The map reaches the economy, and the ring that was hiding the design
+
+> what should we build/address next in the game?
+
+> seems like we have something ensuring the settlement is surrounded by woods, I wouldn't necessarily do
+> that rather place a settlement around existing woods rather than change the map to fit the player (which
+> anyway, we have building settlements)
+
+Thirteen sections of generated geography (§57–§69) and the simulation had never once asked the map a
+question. `EconomyRates.GrainPerFarmPerYear` was a flat constant, so a field on a river flat and a field on
+a scree shoulder yielded identically; `Soil` existed, documented as "farming will want this next", with no
+caller in the economy at all. Where a player founded was a scoring function's opinion rather than a
+consequence. **The map was decoration.**
+
+### Fertility: the first thing the economy asks the ground
+
+`Soil.FertilityAt` is two terms, and the second is deliberately not the same shape as the first. Depth is
+monotonic — more soil is more crop, always. Moisture is a **plateau with both ends falling away**, because
+grain wants moist ground and neither parched nor waterlogged ground, and that is the difference between
+farmland and fen. Note that `DepthAt` already rewards wetness monotonically through its deposition term, so
+a marsh reads as *deep* soil; the hump is what makes it deep and useless — which is exactly what the remark
+on the peat line already said out loud and could not act on.
+
+Three decisions worth keeping:
+
+- **Expressed as a multiple of neutral, and the neutral is derived rather than pasted.** One is literally
+  "the ground every calibrated scenario was measured on" — level, meadow, middling water — evaluated by
+  calling the same arithmetic every other case goes through. A neutral written out by hand is a copy that
+  stops agreeing the first time either is touched, and stops agreeing *silently*.
+- **Absolute, not a rank within this map** — the opposite of the choice §60 made for the biome thresholds,
+  and for a reason: a rank would make every landscape feed its people equally well, and dry country being
+  poor country is the whole point of `WaterScale`.
+- **Read once, when the field is placed, at the single choke point where nodes are made.** Not per tick: the
+  economy tick has no business reaching into terrain, a save has to round-trip what a field is worth, and a
+  field's fertility is settled when the ground is broken — the same thing `CropCycle` already says about the
+  ceiling. A map with no relief has no soil field to ask, so **every flat calibrated scenario keeps a
+  fertility of exactly one by construction** rather than by a default.
+
+It discriminates, which is the whole point: SplitValley's ridge country came out at median 0.64 — feeding
+20 against 25 living there — where CornerHighlands managed 1.03 and feeds 32.
+
+### The ring, and the causation it had backwards
+
+`ScatterWoodland` planted 46 trees between 19 m and 29 m of wherever the village landed, and defended itself
+as an economic constant — §22's starting fuel, which the year gate was calibrated against — while ending on:
+*"It is also true of settlements: you found the place because there was wood round it."* **The correct
+causation, stated in the comment and inverted in the code.** It did not put the settlement where the wood
+was; it put wood where the settlement was.
+
+It was also the last thing holding §51's first finding in place. Hauling has never been seen in a session —
+no cart ever built, no stranded stock ever boarded — because a guaranteed ring of fuel inside every cutter's
+reach means nothing is ever far from anything. **Distance cannot bite while the map is edited to remove it.**
+
+### Two bugs in the site scorer, both found by deleting the ring
+
+**Wood was a proxy for wood.** `ChooseSite` scored *slope within a cutter's reach*, steep ground being where
+woodland survives the plough. Fair while trees were planted in a ring regardless of the land, because then
+nothing could contradict it. `WoodlandCover` is now the actual answer — geography, ground, shelter, aspect,
+soil — and a proxy for a quantity sitting in a field one call away is just a worse copy of it. The sixth
+instance of the same lesson: *a proxy agrees with its target in every tested case until something separates
+them*, and what separates these two is a fertile valley floor thick with trees — high wood, no slope at all.
+
+**The grade gate was a cross-layer number.** `core > 0.11f` on the **max** of five samples across the
+footprint. Fair when relief was smooth mounds, because then the max and the mean agreed. Erosion dissects,
+so they stopped: measured across the candidate grid, SplitValley's median max-of-five is 0.243 against a
+mean-of-five of 0.160, and the gate was throwing out **814 sites of 841**. Eighteen survivors is not a
+choice of where to found, it is one place with rounding — and none of the eighteen had a tree near it.
+Gating on the mean with a separate cliff guard took it to 231–499 eligible sites and three of four
+archetypes founding with real wood in reach.
+
+Every bug in §51's list had this shape and so does this one: a threshold correct in the layer that owns it —
+a buildable grade really is about 11% — and wrong where it meets another, because one erosion gully clipping
+a sixteen-metre ring disqualifies a hillside a village would sit on quite happily.
+
+### The wood line, which is a two-metre coincidence
+
+```
+the wood line: nearest tree 32 m from the store, and within
+30/60/90/120/180/260 m there are 0/71/95/332/1443/2149 trees
+— a cutter reaches 29 m
+```
+
+Nearest tree 31–48 m across the archetypes; reach 29 m. `FieldKeepOut` (16 m) plus the scatter's spacing
+puts the first trunk at about 31 m, and `ReachMetres` derives 29 m from `CutterWalkShare` — **two numbers
+that had never been compared.** The ring bridged exactly that gap by planting at `FieldKeepOut + 3` = 19 m,
+*inside* reach. That is what the ring really was: a workaround for reach being smaller than the distance at
+which a tree can actually stand.
+
+**`CutterWalkShare` was not touched, because `ReachMetres`'s own docstring already prescribes the answer:**
+
+> The reach is measured from the store the cutter delivers to, which is what makes a lumber camp a thing you
+> build rather than a thing you are given: when the near trees are gone, no store is within reach of any
+> tree, the cutters say so, and the answer is a forward depot at the tree line. Everything that follows from
+> that — wood accumulating somewhere nobody eats, and therefore carts — follows on its own.
+
+That is precisely the state the settlement is now in, for the first time. Raising the dial would undo the
+design to avoid exercising it, and it costs output anyway — `CutPerSecond` divides by `1 − walkShare`.
+
+### Left unfuelled on purpose
+
+The year now produces **no wood at all**, goes short 1,835, and lands 45 wood per person against a nominal
+120. Decided from the chair: leave it, and report it. The remedy is a forward depot at the wood line, the
+thing that puts one there is a player, and there is no interface to commit to that yet — so an unfuelled
+settlement is the honest reading of a village that has not solved its wood problem. **Quietly planting fuel
+next to it to make the column look healthy is how the ring got there in the first place.**
+
+So the run says so in words rather than leaving a zero to be read as a bug: *the nearest standing tree is N
+metres from any store and a cutter reaches 29, so no wood can be cut at all — the answer is a forward depot
+at the wood line, and nothing in this scenario builds one.*
+
+### Instruments added, and why each one exists
+
+- **`farmland: N fields at a–b fertility, median m — G grain a year, which feeds P`.** In grain as well as
+  in multiples, because a multiple is not a quantity anybody can be hungry against.
+- **`why here: farmland, wood, backdrop, worst grade`.** A score of 1.69 says a site won and nothing about
+  what it won on. Named terms are how slope-as-wood would have been caught years earlier.
+- **`chosen from N eligible sites, the woodiest of which had W`.** A site chosen from eighteen candidates and
+  one chosen from four hundred are different claims about the map and the score cannot tell them apart. The
+  second half is the honest ceiling: if the best in the whole map is nothing, the settlement is not being
+  sited badly, it *cannot* be sited well — which is true of `DiagonalRiver`, whose eligible ground tops out
+  at 0.07.
+- **`the wood line: nearest tree, and counts at six radii`.** The measurement that separated "woodland
+  pressure in reach" from "a trunk in reach", after the first fix produced 0.38 pressure and zero trees.
+
+### Two things this leaves
+
+`ReportFarmland` was written and not called for an hour, printing nothing while I read its absence as a
+result. And the fertility ordering is still correct by accident: a field reads the soil when it is placed, so
+the country must be painted first, and it is — by two separate call sites neither of which mentions the
+other. Nothing stops a third path from placing fields before the soil exists, and the symptom would be every
+field reporting exactly 1.00: not a crash, not a wrong-looking number, just a map that quietly stopped
+mattering. The farmland line is the guard against that, which is why it prints the spread and not the mean.

@@ -315,6 +315,27 @@ internal sealed class RoutingSettings
     }
 
 
+    /// <summary>Standoff at which a body lines up on a gap's axis before entering it.</summary>
+    /// <remarks>
+    /// <b>The slider its own documentation said it shipped as, and did not.</b>
+    /// <c>PathService.ApertureApproachStandoff</c> ends on "it ships as a slider rather than as a decision,
+    /// because whoever is watching can weigh it and the benchmark cannot" — and no slider was ever wired, so
+    /// the field sat at zero, its first line short-circuited on <c>&lt;= 0f</c>, and the whole feature was
+    /// unreachable. The compiler had been saying so in every build: <em>never assigned to, and will always
+    /// have its default value</em>.
+    /// <para>
+    /// Still zero by default, so nothing about how bodies move changes here. What changes is that the trade
+    /// the remarks describe — a cleaner approach angle against stall time and steering stability — can now
+    /// actually be weighed by somebody watching, which was the stated plan.
+    /// </para>
+    /// </remarks>
+    [Tune(0.0, 3.0, Label = "aperture standoff (m)", Group = "Routing")]
+    public float ApertureApproachStandoff
+    {
+        get => PathService.ApertureApproachStandoff;
+        set => PathService.ApertureApproachStandoff = value;
+    }
+
     [Tune(0.0, 3.0, Label = "climb (s/m)", Group = "Routing")]
     public float ClimbSecondsPerMetre
     {

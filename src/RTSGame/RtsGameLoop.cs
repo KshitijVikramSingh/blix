@@ -821,17 +821,26 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // timings — is a constant in the code with its measurements beside it, and everything
         // that is a fixed proportion of another number is now written as that proportion.
         // Forty-five sliders to eight, and none of the eight is derivable from another.
+        // <b>Order is visibility.</b> Sixteen groups and about ninety controls render as one column, so a
+        // group's position in this list decides whether anybody can reach it — `map` was thirteenth, behind
+        // seventy-five sliders, and reported from the chair as missing. It was registered the whole time,
+        // which is why `Describe()` above prints the roster: "never registered" and "registered and off the
+        // end of a long panel" look identical from the chair and want opposite fixes.
+        //
+        // So the list is ordered by what is currently being worked on rather than by when it was written.
+        // Which map to generate is the live question; the sun's seventeen knobs are settled.
         tunables = new ObjectTunables(
+            mapTuning,
             bodyFeel,
             clock,
-            look,
             woodland,
             new SettlementSettings(),
             raids,
-            mapTuning,
+            look,
             new WallSettings(),
             new RoutingSettings(),
             new GroupSettings());
+        Console.WriteLine($"  panel groups: {tunables.Describe()}");
         this.exitAfterFrames = exitAfterFrames;
         this.reliefAmplitudeMetres = reliefAmplitudeMetres;
         // <b>The panel starts where the command line pointed, or the first roll would contradict it.</b> A
@@ -1110,7 +1119,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // same corner it always was, to the metre.
         var founded = SettlementScenarios.ChooseSite(simulation, worldExtentMeters);
         SettlementScenarios.Populate(
-            simulation, farms: 8, woodcutters: 4, carts: 5, wagons: 0, ringRadius: 30f, centre: founded);
+            simulation, farms: 8, woodcutters: 4, carts: 5, wagons: 0, centre: founded);
         cameraFocus = founded;
         cameraDistance = cameraDistanceTarget = startingZoomMetres > 0f ? startingZoomMetres : 78f;
         Console.WriteLine(

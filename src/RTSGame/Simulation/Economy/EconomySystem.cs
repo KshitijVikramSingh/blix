@@ -327,7 +327,7 @@ internal sealed class EconomySystem
                 // A field's contribution is what it will still yield this year spread over what is left of
                 // it, which is the honest answer to "how long will the stores last": a field standing
                 // unreaped in harvest is income, and the same field in winter is not.
-                var remaining = EconomyRates.GrainPerFarmPerYear * CropCycle.PotentialOf(in node) *
+                var remaining = EconomyRates.FullYearOf(in node) * CropCycle.PotentialOf(in node) *
                                 (1f - (CropCycle.ReapTargetOf(in node) <= 0f
                                     ? 1f
                                     : node.ReapWork / CropCycle.ReapTargetOf(in node)));

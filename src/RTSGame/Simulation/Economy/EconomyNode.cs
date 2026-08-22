@@ -231,6 +231,23 @@ internal struct EconomyNode
     /// </remarks>
     public float BuildWork;
 
+    /// <summary>
+    /// How well this ground grows grain, as a multiple of what level neutral ground grows.
+    /// </summary>
+    /// <remarks>
+    /// <b>A property of the ground, read once when the field is placed.</b> Not sampled per tick, for three
+    /// reasons that agree: the economy tick has no business reaching into the terrain, a save has to round-trip
+    /// what a field is worth, and a field's fertility is settled when the ground is broken — which is the same
+    /// thing <see cref="CropCycle"/> already says about the ceiling.
+    /// <para>
+    /// One on flat ground, and that is structural rather than a default: a map with no generated relief has no
+    /// soil field to ask, so every calibrated scenario keeps the exact numbers it was measured with. Zero is a
+    /// legitimate value — open water and bare crag grow nothing — so it is set explicitly at the one place
+    /// nodes are made rather than left to the struct's default, where an unset field would silently be barren.
+    /// </para>
+    /// </remarks>
+    public float Fertility;
+
     /// <summary>Labour-seconds of ground broken on this field this year. Sets its ceiling.</summary>
     public float PrepareWork;
 

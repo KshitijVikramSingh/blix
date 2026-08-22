@@ -473,7 +473,7 @@ internal static class SettlementScenarios
         Console.WriteLine($"RTSGame forest cover cost — {extentMeters:F0} m map");
         SweepCover(extentMeters);
         var world = new SimulationWorld(extentMeters);
-        var granary = Populate(world, Farms, Woodcutters, Carts, Wagons, ringRadius: 36f);
+        var granary = Populate(world, Farms, Woodcutters, Carts, Wagons);
 
         var transform = world.Terrain.Transform;
         var cells = transform.Width * transform.Height;
@@ -629,7 +629,7 @@ internal static class SettlementScenarios
             Woodland.CoverTrees = count;
             Woodland.CoverRadius = reach;
             var probe = new SimulationWorld(extentMeters);
-            var store = Populate(probe, Farms, Woodcutters, Carts, Wagons, ringRadius: 36f);
+            var store = Populate(probe, Farms, Woodcutters, Carts, Wagons);
             var transform = probe.Terrain.Transform;
             var closed = 0;
             for (var z = 0; z < transform.Height; z++)
@@ -710,7 +710,6 @@ internal static class SettlementScenarios
             Woodcutters,
             Carts,
             Wagons,
-            ringRadius: 36f,
             centre: ChooseSite(world, extentMeters));
         return world;
     }
@@ -729,7 +728,6 @@ internal static class SettlementScenarios
         int woodcutters,
         int carts,
         int wagons,
-        float ringRadius,
         Vector2 centre = default)
     {
         var granary = world.AddNode(NodeKind.Granary, centre, capacity: 9000);
@@ -825,7 +823,10 @@ internal static class SettlementScenarios
         // The forest. Where it is, and how thin it has been cut, is the whole of the wood economy: there
         // is no woodcutter building any more, only trees and the people sent to them.
         PaintBiomes(world);
-        ScatterWoodland(world, centre, ringRadius);
+        ScatterWoodland(world, centre);
+        // After the scatter, because both of these are readings of ground that has to exist first: the fields
+        // have their fertility from the soil field and the wood line is a distance to actual trunks.
+        ReportFarmland(world);
 
         // One hand per producer, posted. Staggered dwell, so the settlement does not breathe in unison
         // — see the note on the stagger below.
@@ -1003,6 +1004,81 @@ internal static class SettlementScenarios
     /// One measurement with three callers rather than three copies of a sampling loop — §58 recorded the
     /// duplication as something that would drift, and the third caller arriving is when to fix it.
     /// </remarks>
+    /// <summary>
+    /// What the fields are standing on, which is the only thing that says whether the map reached the economy.
+    /// </summary>
+    /// <remarks>
+    /// <b>Printed because the ordering that makes fertility work is not enforced anywhere.</b> A field reads
+    /// the soil when it is placed, so the country has to be painted first — and it is, on both paths that
+    /// generate relief, by two separate call sites neither of which mentions the other. Nothing stops a third
+    /// path from placing fields on a generated map before the soil exists, and the symptom would be every
+    /// field reporting exactly one: not a crash, not a wrong-looking number, just a map that quietly stopped
+    /// mattering. One line naming the spread turns that into something a run says out loud.
+    /// <para>
+    /// A flat map genuinely has no soil field and every field there genuinely is neutral, so it says so in
+    /// those words rather than printing a row of ones that would read like the bug.
+    /// </para>
+    /// </remarks>
+    public static void ReportFarmland(SimulationWorld world)
+    {
+        var fertility = new List<float>();
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (node.IsAlive && node.Kind == NodeKind.Farm) fertility.Add(node.Fertility);
+        }
+
+        if (fertility.Count == 0) return;
+        // <b>How far the wood actually is, which is the question the pressure field cannot answer.</b>
+        // Woodland pressure says a wood belongs here; a cutter needs a trunk to be standing at a distance he
+        // can walk. Those are different claims, and siting the village on the first one gave a settlement with
+        // 0.38 pressure in reach and not one tree in it.
+        {
+            var store = Vector2.Zero;
+            foreach (ref readonly var node in world.Nodes.All)
+            {
+                if (node.IsAlive && node.Stores) { store = node.Position; break; }
+            }
+
+            var nearest = float.MaxValue;
+            var bands = new int[6];
+            var edges = new[] { 30f, 60f, 90f, 120f, 180f, 260f };
+            foreach (ref readonly var tree in world.Nodes.All)
+            {
+                if (!tree.IsAlive || !tree.IsStanding) continue;
+                var d = Vector2.Distance(tree.Position, store);
+                nearest = MathF.Min(nearest, d);
+                for (var i = 0; i < edges.Length; i++)
+                {
+                    if (d <= edges[i]) bands[i]++;
+                }
+            }
+
+            Console.WriteLine(
+                $"    the wood line: nearest tree {nearest:F0} m from the store, and within " +
+                $"30/60/90/120/180/260 m there are {bands[0]}/{bands[1]}/{bands[2]}/{bands[3]}/" +
+                $"{bands[4]}/{bands[5]} trees — a cutter reaches {Woodland.ReachMetres:F0} m");
+        }
+
+        if (world.Terrain.Soil is null)
+        {
+            Console.WriteLine($"    farmland: {fertility.Count} fields on level neutral ground");
+            return;
+        }
+
+        fertility.Sort();
+        var median = fertility[fertility.Count / 2];
+        var total = 0f;
+        foreach (var one in fertility) total += one;
+        // In grain as well as in multiples, because a multiple is not a quantity anybody can be hungry
+        // against. The ration is the other half of the comparison and it is what decides the gate.
+        var grain = total * EconomyRates.GrainPerFarmPerYear;
+        var mouths = grain / EconomyRates.GrainPerVillagerPerYear;
+        Console.WriteLine(
+            $"    farmland: {fertility.Count} fields at {fertility[0]:F2}–{fertility[^1]:F2} " +
+            $"fertility, median {median:F2} — {grain:N0} grain a year at full potential, " +
+            $"which feeds {mouths:F0}");
+    }
+
     /// <summary>The interior's floor and span, for callers outside the scenario. See InteriorRelief.</summary>
     public static (float Floor, float Span) InteriorReliefOf(SimulationWorld world) => InteriorRelief(world);
 
@@ -1066,7 +1142,7 @@ internal static class SettlementScenarios
         // and building the field below that line meant flat ground got no field at all and the scatter fell back
         // to a default. Which happened to behave correctly, and is exactly the kind of accident that stops
         // behaving correctly the moment the default changes.
-        world.Terrain.SetSoil(Soil.For(world.Terrain));
+        world.Terrain.SetSoil(Soil.For(world.Terrain, floor, span));
         world.Terrain.SetWoodland(WoodlandCover.For(world.Terrain, world.Terrain.Layout, floor, span));
         if (span < 1f) return;
 
@@ -1133,7 +1209,7 @@ internal static class SettlementScenarios
     /// </remarks>
     private const int WoodAnchorsPerSquareKilometre = 62_000;
 
-    private static void ScatterWoodland(SimulationWorld world, Vector2 centre, float ringRadius)
+    private static void ScatterWoodland(SimulationWorld world, Vector2 centre)
     {
         var seed = 0x9E3779B9u;
 
@@ -1154,7 +1230,12 @@ internal static class SettlementScenarios
         // thousand. The cell is sized to the widest spacing any band asks for, so a tree's neighbours are
         // always in its own cell or one adjacent.
         const float cellSize = 4f;
-        var buckets = new Dictionary<(int, int), List<Vector2>>();
+        // <b>Explicitly typed, not <c>var</c>, and that is what silences the nullable warning honestly.</b>
+        // <c>var</c> infers the <em>nullable</em> annotation for a reference type and relies on flow analysis
+        // to narrow it — and flow state does not cross into a local function, so inside TooClose below the
+        // compiler falls back to the declared type and reads this dictionary as possibly null. Stating the
+        // type fixes the cause; a <c>!</c> at the use site would only have hidden it.
+        Dictionary<(int, int), List<Vector2>> buckets = new();
 
         bool TooClose(Vector2 at, float spacing)
         {
@@ -1210,119 +1291,21 @@ internal static class SettlementScenarios
         // modulation around one and faded out as the height range goes to nothing, flat ground comes out at
         // exactly the density it always had and nothing calibrated moves until somebody generates relief on
         // purpose.
+        // <b>Four shaping functions removed with the ring they belonged to.</b> Relief, Cover, Aspect and
+        // Shelter were this scenario's own opinions about where woodland goes — slope, height, which way a
+        // hillside faces, how enclosed it is — written when the scatter was rings around a settlement and the
+        // terrain was only allowed to reject candidates. WoodlandCover owns all four judgements now, on a
+        // baked field, and has owned them since §69; these were left behind as dead code the compiler had been
+        // naming in every build.
+        //
+        // Worth deleting rather than leaving to rot for the same reason Band was: a dead implementation of a
+        // superseded idea is not inert, it is a working shortcut one call away from the next person who wants
+        // woodland to do something the field will not do.
         var (reliefFloor, span) = InteriorRelief(world);
         var strength = Math.Clamp(span / 8f, 0f, 1f);
-        float Relief(Vector2 at)
-        {
-            if (strength <= 0f) return 1f;
-            var slope = Smoothstep(0.04f, 0.26f, world.Terrain.SampleGrade(at));
-            var above = Math.Clamp(world.Terrain.SampleHeight(at) / MathF.Max(1f, span), 0f, 1f);
-            var shaped = Math.Clamp(1f + strength * (0.85f * slope + 0.30f * above - 0.35f), 0.15f, 1.7f);
-            // Times the region's own density, which is what a region mostly is: boreal forest and dry scrub
-            // differ by a factor of seven here, and a wood is most of what a person sees.
-            var country = WoodlandFor(Biomes.At(world.Terrain, at, reliefFloor, span))
-                * RegionProfile.For(world.Terrain.Region).TreeDensity;
-            return shaped * (1f - strength + strength * country);
-        }
 
-        /// <summary>
-        /// Whether this is forest country, open country, or somewhere between.
-        /// </summary>
-        /// <remarks>
-        /// <b>The scale that was missing entirely.</b> Density was slope times shelter times biome, and every
-        /// one of those is a <em>local</em> term with modest variance — so the accept probability came out
-        /// roughly the same everywhere a tree could stand. Measured on fifty-metre cells: <b>3% of the map
-        /// open, 89% wooded or dense</b>. No open land and no forest, only an even sprinkle over everything
-        /// that was not water or rock.
-        /// <para>
-        /// Forest and open country alternate at the scale of <em>hundreds</em> of metres and nothing in the
-        /// expression worked at that scale. Two octaves at 230 m and 95 m, pushed through a curve with a
-        /// plateau at each end so the result is three regimes rather than a gradient.
-        /// </para>
-        /// <para>
-        /// <b>The curve does the work, not the noise.</b> Smooth noise gives a smooth gradient of density,
-        /// which reads as a haze of trees thinning in every direction; a squared smoothstep gives ground that
-        /// is definitely wooded next to ground that is definitely not. And the window sits <em>above</em> the
-        /// middle of the noise, because centred it maps almost nothing to the floor — which is how a third of
-        /// the map ends up open rather than merely thinner.
-        /// </para>
-        /// <para>
-        /// The floor has to be near zero and not merely small: six hundredths sounds open and is thirty-five
-        /// trees a hectare once the anchor budget is applied, which is parkland. A hundredth is six a hectare,
-        /// which is the stragglers a field has in it.
-        /// </para>
-        /// </remarks>
-        float Cover(Vector2 at)
-        {
-            var broad = LatticeNoise.Value(at * (1f / 230f) + new Vector2(11.3f, 47.9f));
-            var fine = LatticeNoise.Value(at * (1f / 95f) + new Vector2(83.1f, 5.7f));
-            var n = broad * 0.72f + fine * 0.28f;
-            // <b>The window's width sets the mix, and the anchor budget cannot.</b> Tripling the anchors moved
-            // the total by 1.8x and the <em>shape</em> hardly at all — because the spacing rule caps how tight
-            // a stand can pack, so extra anchors thicken open ground into stragglers and leave forest where it
-            // was. What decides how much of the map is forest is how much of the noise clears the top of this
-            // window, and nothing else.
-            // <b>Narrower, because the concentration is worth more than the coverage.</b> Twenty-eight per cent
-            // of the map as forest at half the density it wants reads as scrub everywhere; eighteen per cent at
-            // full density reads as woods with country between them. The trade was asked for explicitly and it
-            // is the right one — a forest is a place, and a place has to be somewhere rather than everywhere.
-            var t = Math.Clamp((n - 0.50f) / 0.21f, 0f, 1f);
-            t = t * t * (3f - 2f * t);
-            var cover = 0.012f + 1.9f * t * t;
 
-            // <b>And what the layout asked for, on top.</b> A wooded ridge is authored — see MapLayout.Wood —
-            // and this is where the asking turns into trees. Added rather than multiplied, because a boost has
-            // to be able to put a wood on ground the noise left open: multiplying by a floor of a hundredth
-            // would let the noise veto every authored wood it happened not to have chosen.
-            return cover + (world.Terrain.Layout?.WoodBoost(at) ?? 0f);
-        }
 
-        /// <summary>
-        /// Which way a slope faces, as a multiplier on how much woodland it holds.
-        /// </summary>
-        /// <remarks>
-        /// A geographic input rather than a look: at this latitude a south-facing slope takes the sun and
-        /// dries, and a north-facing one holds its damp and its trees. Small on purpose — aspect decides the
-        /// <em>edge</em> of a wood rather than whether there is one — but it is the term that makes a
-        /// hillside's two sides differ, which is one of the most recognisable things about wooded country.
-        /// </remarks>
-        float Aspect(Vector2 at)
-        {
-            var normal = world.Terrain.SampleNormal(at);
-            var facing = new Vector2(normal.X, normal.Z);
-            var length = facing.Length();
-            if (length < 1e-4f) return 1f;
-            // +Z is south here, so a normal leaning that way is a sunward slope.
-            return 1f - 0.30f * Math.Clamp(facing.Y / length, -1f, 1f);
-        }
-
-        /// <summary>
-        /// How sheltered a place is, from the shape of the ground around it.
-        /// </summary>
-        /// <remarks>
-        /// <b>The geographic input woodland was missing.</b> Density already accounted for slope, height and
-        /// what kind of country a place is; none of those distinguishes a valley from a shoulder at the same
-        /// height and grade, and that distinction is most of where trees actually are. A wood survives in a
-        /// hollow, on a lee slope, behind a ridge; it fails on an exposed top, which is why a treeline looks
-        /// like a contour and a wood looks like a catchment.
-        /// <para>
-        /// Convexity, over forty metres: is this lower than the ground around it. Forty because that is the
-        /// scale a wood is sheltered at — a hollow between two tufts shelters nothing and a whole valley is a
-        /// climate rather than a shelter.
-        /// </para>
-        /// </remarks>
-        float Shelter(Vector2 at)
-        {
-            const float reach = 40f;
-            var here = world.Terrain.SampleHeight(at);
-            var around = (world.Terrain.SampleHeight(at + new Vector2(reach, 0f)) +
-                          world.Terrain.SampleHeight(at - new Vector2(reach, 0f)) +
-                          world.Terrain.SampleHeight(at + new Vector2(0f, reach)) +
-                          world.Terrain.SampleHeight(at - new Vector2(0f, reach))) * 0.25f;
-            // Normalised against the drop a tenth grade would give over the same reach, so this is "how much
-            // of a hollow is this" rather than a number of metres. Half sheltered on level ground.
-            return Math.Clamp(0.5f + (around - here) / (reach * 0.10f), 0f, 1.6f);
-        }
 
         // <b>Nothing grows in a river or on bare rock, and that is not a density preference.</b> Kept apart
         // from Relief because it has to apply to the near band as well, which is exempt from every shaping
@@ -1335,43 +1318,10 @@ internal static class SettlementScenarios
             var biome = Biomes.At(world.Terrain, at, reliefFloor, span);
             return biome is not (Biome.Water or Biome.Crag);
         }
-
-        // <b>One caller, and it is the economic near band.</b> The bearing shaping this used to apply went with
-        // the rings — it was a statement about where woodland belongs relative to the settlement, which is the
-        // thing the land-driven scatter replaced.
-        void Band(float inner, float outer, int trees, float spacing, int clump)
-        {
-            for (var i = 0; i < trees; i++)
-            {
-                // A clump is one draw for the centre and the rest scattered around it, which is what
-                // makes a canopy read as a canopy rather than as evenly spread noise.
-                var anchor = centre + Polar(Next(), inner, outer, Next());
-                // Shaped by bearing, and rejected rather than moved: nudging a refused anchor somewhere
-                // acceptable would pile the rejects along the edge of the open sector and draw a wall
-                // exactly where the gap is supposed to be.
-                // Shaped by bearing and by what the ground is doing, and rejected rather than moved: nudging
-                // a refused anchor somewhere acceptable would pile the rejects along the edge of the open
-                // sector and draw a wall exactly where the gap is supposed to be.
-                //
-                // The near band is exempt from both, for §22's reason: it is an economic constant rather
-                // than scenery, and thinning it because the settlement happens to have been founded on the
-                // flat would cut the year's starting fuel as a side effect of a decision about terrain.
-                // Off the map is a refusal too. Clamping instead would stack every out-of-bounds tree onto
-                // the border as a hedge, which is the artefact a corner-ish settlement invites.
-                if (!world.Terrain.Contains(anchor)) continue;
-                for (var k = 0; k < clump; k++)
-                {
-                    var at = clump == 1
-                        ? anchor
-                        : anchor + new Vector2(Next() * 2f - 1f, Next() * 2f - 1f) * spacing * 2.2f;
-                    for (var attempt = 0; attempt < 6; attempt++)
-                    {
-                        if (TryPlant(world.Terrain.ClampPosition(at), spacing)) break;
-                        at = anchor + new Vector2(Next() * 2f - 1f, Next() * 2f - 1f) * spacing * 2.6f;
-                    }
-                }
-            }
-        }
+        // <b>The ring-planting machinery is gone with the ring.</b> Band placed trees in an annulus around a
+        // position, which is the whole shape of "the map is arranged around the settlement" — kept as dead
+        // code it would be a working implementation of the thing that was just deleted, sitting one call away
+        // from whoever next wants a quick fix for a village with no fuel.
 
         /// <summary>
         /// Anchors over the whole map, accepted against how much woodland the ground there carries.
@@ -1433,17 +1383,21 @@ internal static class SettlementScenarios
             }
         }
 
-        // <b>The first band is load-bearing and the rest are scenery.</b> Everything the economy gate
-        // measures depends on how much wood stands within a cutter's reach of the granary — about two
-        // years of this settlement's burning, so a one-year run never runs out and a two-year one only
-        // just does. Change 46 and the numbers in §22 change with it. Everything past reach is the map
-        // the player expands into, and its density is free to be whatever reads best.
-        // <b>Unshaped, and that is not an oversight.</b> §22: everything the economy gate measures depends
-        // on how much wood stands within a cutter's reach, so this band is an economic constant rather than
-        // scenery — thinning it by bearing would cut the settlement's starting fuel roughly in half as a
-        // side effect of a decision about how the map looks. It is also true of settlements: you found the
-        // place because there was wood round it.
-        Band(FieldKeepOut + 3f, Woodland.ReachMetres, trees: 46, spacing: 3.4f, clump: 1);
+        // <b>The near band is gone, and its own last sentence is the argument against it.</b> It planted 46
+        // trees in a ring around the settlement and defended itself as an economic constant — §22's starting
+        // fuel, which the year gate was calibrated against — while ending on "it is also true of settlements:
+        // you found the place because there was wood round it." That is the correct causation stated in the
+        // comment and inverted in the code. The band did not put the settlement where the wood was; it put
+        // wood where the settlement was.
+        //
+        // Reported from the chair, and it is the same objection: <em>place a settlement around existing woods
+        // rather than change the map to fit the player.</em> Which is also the last thing holding §51's first
+        // finding in place — hauling has never once been seen in a session, no cart ever built and no stranded
+        // stock ever boarded, because a guaranteed ring of fuel inside every cutter's reach means nothing is
+        // ever far from anything. Distance cannot bite while the map is edited to remove it.
+        //
+        // What replaces it is ChooseSite asking the woodland field where the trees actually are. The
+        // settlement moves to the wood.
         // <b>And everything past reach is placed by the land, not by the settlement.</b> It used to be three
         // more rings — out to ringRadius × 8, which is 240 m — so woodland was a function of distance from the
         // player with geography allowed only to <em>reject</em> candidates. Two things followed. Trees thinned
@@ -1554,6 +1508,10 @@ internal static class SettlementScenarios
         var limit = extentMeters * 0.5f - inset;
         var best = CornerSite(extentMeters);
         var bestScore = float.NegativeInfinity;
+        // What made this the best site, so "why here" is answerable rather than a single opaque score.
+        var bestWhy = (Farm: 1f, Wood: 0f, Back: 0f, Grade: 0f);
+        var candidates = 0;
+        var woodSeen = 0f;
         const float step = 15f;
         for (var z = -limit; z <= limit; z += step)
         for (var x = -limit; x <= limit; x += step)
@@ -1563,16 +1521,32 @@ internal static class SettlementScenarios
 
             // A bench to build on. Sampled over the ground the village and its fields actually occupy
             // rather than at a point, because a flat spot in a steep place is not a site.
+            //
+            // <b>On the average of that ground, with a separate guard against the worst of it — and it was on
+            // the worst alone.</b> A max-of-five gate at 0.11 was a fair reading of "level enough to build on"
+            // when relief was a handful of smooth mounds, because then the max and the mean agreed. Erosion
+            // dissects, so they stopped agreeing: measured across the candidate grid, SplitValley's median
+            // max-of-five is 0.243 against a mean-of-five of 0.160, and the gate was throwing out
+            // <b>814 sites of 841</b>. Eighteen survivors is not a choice of where to found, it is one place
+            // with rounding, and none of the eighteen had a tree near it.
+            //
+            // The same cross-layer shape as every bug in §51's list: a threshold correct in the layer that
+            // owns it — a buildable grade really is about 11% — and wrong where it meets another, because one
+            // erosion gully clipping a sixteen-metre ring now disqualifies an entire hillside that a village
+            // would sit on quite happily. The mean says whether this is level ground; the cliff guard says
+            // whether it straddles something no village straddles.
             var core = terrain.SampleGrade(at);
+            var meanCore = core;
             for (var i = 0; i < 4; i++)
             {
                 var angle = i / 4f * MathF.Tau;
-                core = MathF.Max(
-                    core,
-                    terrain.SampleGrade(at + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * FieldKeepOut));
+                var g = terrain.SampleGrade(at + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * FieldKeepOut);
+                core = MathF.Max(core, g);
+                meanCore += g;
             }
 
-            if (core > 0.11f) continue;
+            meanCore /= 5f;
+            if (meanCore > LevelEnoughGrade || core > CliffGrade) continue;
 
             // <b>And not in the water, which the flatness test actively steers it into.</b> The score rewards
             // level ground, and the most level ground on a map with a river through it is the river — so the
@@ -1596,33 +1570,73 @@ internal static class SettlementScenarios
                 if (wet > WadeableSiteDepth) continue;
             }
 
-            // Where the wood will be: slope within a cutter's reach, since that is where the woodland
-            // survives the plough.
+            // <b>Where the wood actually is, and what the fields will actually grow.</b> Both of these were
+            // proxies, and both proxies were reasonable right up until the thing they stood for existed.
+            //
+            // Wood was <em>slope within a cutter's reach</em> — steep ground being where woodland survives the
+            // plough. That was a fair guess while trees were planted in a ring regardless of the land, because
+            // then nothing could contradict it. Now <see cref="WoodlandCover"/> is the actual answer to "how
+            // much wood is here", computed from geography, ground, shelter, aspect and soil, and a proxy for a
+            // quantity that is sitting in a field one call away is just a worse copy of it. Same shape as slope
+            // standing in for path cost, and width standing in for depth: <b>a proxy agrees with its target in
+            // every tested case until something separates them, and what separates these two is a fertile
+            // valley floor thick with trees — high wood, no slope at all.</b>
+            //
+            // Farmland was not a term at all, which is why founding was never a decision. It is the first
+            // consumer of Soil.FertilityAt, and it is sampled over the ground the fields will occupy rather
+            // than at the granary, because a settlement eats off its fields and not off its yard.
             var wood = 0f;
+            var farm = 0f;
             var back = 0f;
             for (var i = 0; i < 12; i++)
             {
                 var angle = i / 12f * MathF.Tau;
                 var bearing = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
-                wood += terrain.SampleGrade(at + bearing * (Woodland.ReachMetres * 0.85f));
+                wood += world.Terrain.Woodland?.At(at + bearing * (Woodland.ReachMetres * 0.85f)) ?? 0f;
+                farm += world.Terrain.Soil?.FertilityAt(at + bearing * (FieldKeepOut * 0.8f)) ?? 1f;
                 // The tallest thing within a couple of hundred metres, relative to here.
                 back = MathF.Max(back, terrain.SampleHeight(at + bearing * 170f) - here);
             }
 
             wood /= 12f;
+            farm /= 12f;
+            candidates++;
+            woodSeen = MathF.Max(woodSeen, wood);
 
+            // <b>The two economic terms lead, and the backdrop is demoted to what it always was.</b> Shelter
+            // behind the village is a thing you notice about a place; grain and fuel are the two things that
+            // decide whether anybody is still living there in a year. Wood saturates because a cutter cannot
+            // use more than reach-full of trees, and fertility does not, because better ground is better
+            // ground all the way up.
             var score =
-                1.35f * MathF.Min(1f, back / (span * 0.35f)) +
-                1.10f * MathF.Min(1f, wood / 0.16f) -
-                2.20f * (core / 0.11f);
+                1.65f * farm +
+                1.30f * MathF.Min(1f, wood / 0.62f) +
+                0.55f * MathF.Min(1f, back / (span * 0.35f)) -
+                2.20f * (meanCore / LevelEnoughGrade);
             if (score <= bestScore) continue;
             bestScore = score;
             best = at;
+            bestWhy = (farm, wood, back / MathF.Max(0.01f, span * 0.35f), meanCore);
         }
 
+        // <b>Named terms, not one number.</b> A score of 1.69 says a site won and nothing about what it won
+        // on, so a settlement founded on beautiful sheltered gravel reads identically to one founded on a
+        // river flat. The columns are the answer to "why here", and they are also the only way to catch the
+        // scorer preferring the wrong thing — which is how slope-as-wood survived as long as it did.
         Console.WriteLine(
             $"  founded at ({best.X:F0}, {best.Y:F0}): standing at {terrain.SampleHeight(best):F1} m on a " +
             $"grade of {terrain.SampleGrade(best):F3}, score {bestScore:F2} over a {span:F0} m height range");
+        Console.WriteLine(
+            $"    why here: farmland {bestWhy.Farm:F2}, wood {bestWhy.Wood:F2} within reach, " +
+            $"backdrop {bestWhy.Back:F2}, worst grade {bestWhy.Grade:F3}");
+        // How much of the map was even eligible, because a site chosen from eighteen candidates and a site
+        // chosen from four hundred are different claims about the map, and the score alone cannot tell them
+        // apart. Also the strongest wood any candidate had, which is the honest ceiling on "found near woods":
+        // if the best in the whole map is nothing, the settlement is not being sited badly, it cannot be
+        // sited well.
+        Console.WriteLine(
+            $"    chosen from {candidates} eligible sites, the woodiest of which had {woodSeen:F2} " +
+            $"within a cutter's {Woodland.ReachMetres:F0} m reach");
         return best;
     }
 
@@ -1645,6 +1659,17 @@ internal static class SettlementScenarios
         new(-extentMeters * 0.25f, -extentMeters * 0.22f);
 
     private const float FieldKeepOut = 16f;
+
+    /// <summary>Average grade over a village's own ground that still counts as level enough to build on.</summary>
+    /// <remarks>
+    /// Chosen from the measured distribution rather than picked: across the candidate grid this admits about
+    /// three fifths of CornerHighlands, two fifths of SplitValley and half of Escarpment, so every archetype
+    /// offers a real choice of where to found and none offers the whole map.
+    /// </remarks>
+    private const float LevelEnoughGrade = 0.14f;
+
+    /// <summary>The worst grade anywhere under the village, past which it is straddling something.</summary>
+    private const float CliffGrade = 0.45f;
 
     /// <summary>What the woodland held when it was seeded, so felling can be reported against it.</summary>
     private static int SeededTimber;
@@ -1870,6 +1895,37 @@ internal static class SettlementScenarios
             $"  hauling: {carts} carts built, {economy.HaulsAssigned:N0} board jobs given out, " +
             $"{economy.HaulsAbandoned:N0} dropped when the source emptied or the sink filled, " +
             $"{economy.RoutesFinished:N0} standing routes run dry");
+        // <b>Why no wood was cut, said out loud, because the number alone reads as a bug.</b> A year that
+        // produces nothing and goes short seventeen hundred looks like a broken economy, and this one is a
+        // working economy in a state it has never been in: no store has a tree inside a cutter's reach, so
+        // there is no cutting to do and no arrangement in place to fix it.
+        // <para>
+        // Kept as a report rather than solved, deliberately. <see cref="Woodland.ReachMetres"/> already
+        // prescribes the remedy — a forward depot at the wood line, after which wood piles up somewhere
+        // nobody eats and carts follow on their own — and in the finished game the thing that puts a depot
+        // there is a player. Until there is an interface to commit to that, an unfuelled settlement is the
+        // honest reading of a village that has not solved its wood problem, and quietly planting fuel next to
+        // it to make the column look healthy is how the ring got there in the first place.
+        // </para>
+        var nearest = float.MaxValue;
+        foreach (ref readonly var store in world.Nodes.All)
+        {
+            if (!store.IsAlive || !store.Stores) continue;
+            foreach (ref readonly var tree in world.Nodes.All)
+            {
+                if (!tree.IsAlive || !tree.IsStanding || tree.Stock.Wood <= 0) continue;
+                nearest = MathF.Min(nearest, Vector2.Distance(tree.Position, store.Position));
+            }
+        }
+
+        if (nearest > Woodland.ReachMetres && nearest < float.MaxValue)
+        {
+            Console.WriteLine(
+                $"  the wood problem: the nearest standing tree is {nearest:F0} m from any store and a " +
+                $"cutter reaches {Woodland.ReachMetres:F0} m, so no wood can be cut at all — the answer is " +
+                "a forward depot at the wood line, and nothing in this scenario builds one");
+        }
+
         var (standing, trees) = world.Nodes.StandingTimber();
         // Against what the woodland started with, not against everything ever seeded: the granary's
         // founding stock is also seeded wood, and subtracting standing timber from the whole ledger
