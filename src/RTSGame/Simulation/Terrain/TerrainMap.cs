@@ -110,6 +110,47 @@ internal sealed class TerrainMap
 
     internal void SetRegion(Region region) => Region = region;
 
+    /// <summary>
+    /// Where the layout asked for woodland, if anything did.
+    /// </summary>
+    /// <remarks>
+    /// <b>Carried here for the same reason <see cref="Drainage"/> is: two layers need it and neither owns it.</b>
+    /// The layout states it, the woodland scatter reads it, and those live in different assemblies' worth of
+    /// concern — generation and scenario. Handing it over on the terrain is how the drainage and the region
+    /// already travel, so this is the established route rather than a new one.
+    /// <para>
+    /// A function rather than a field, because a boost is a question about a position and the layout can already
+    /// answer it. Null when the ground was not made from a layout.
+    /// </para>
+    /// </remarks>
+    public MapLayout? Layout { get; private set; }
+
+    internal void SetLayout(MapLayout? layout) => Layout = layout;
+
+    /// <summary>
+    /// How much woodland belongs where. One field, four consumers.
+    /// </summary>
+    /// <remarks>
+    /// Placement asks it where to put trees, species asks it what kind of wood this is, the renderer asks it how
+    /// wide a crown and how thick the undergrowth, and clearings are subtracted from it. Before it existed those
+    /// four disagreed — species in particular was reading the renderer's per-frame canopy counts, which is a
+    /// proxy for this and not this.
+    /// </remarks>
+    public WoodlandCover? Woodland { get; private set; }
+
+    internal void SetWoodland(WoodlandCover? cover) => Woodland = cover;
+
+    /// <summary>
+    /// How deep the soil is and how wet, which is what the ground is made of rather than what shape it is.
+    /// </summary>
+    /// <remarks>
+    /// Woodland reads it now; a field's yield, grazing and where a player wants to found will all read it next,
+    /// which is why it is a field of its own rather than two terms inside the woodland.
+    /// </remarks>
+    public Soil? Soil { get; private set; }
+
+    internal void SetSoil(Soil? soil) => Soil = soil;
+
     internal void ReplaceHeights(ReadOnlySpan<float> heights)
     {
         if (heights.Length != vertexHeights.Length)

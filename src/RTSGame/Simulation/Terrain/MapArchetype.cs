@@ -52,6 +52,20 @@ internal enum ConnectorKind
 
     /// <summary>A climbable break in an escarpment.</summary>
     Ramp,
+
+    /// <summary>Open ground through a wood: a glade, a broad ride, a stream corridor kept clear.</summary>
+    /// <remarks>
+    /// <b>The grammar closes here.</b> Hard geography has separators and connectors — a ridge has a saddle, a
+    /// river a ford, an escarpment a ramp — and soft geography turns out to use exactly the same one: a wood
+    /// has a clearing. Which is not only tidy, it is mechanically true. A thirty-metre clearing through a
+    /// hundred-and-twenty-metre wooded belt is a way through a barrier in precisely the sense a saddle is,
+    /// and it should be read, defended and contested the same way.
+    /// <para>
+    /// A dense wood with random holes in it is noise. A dense wood with a stream corridor, a broad glade and a
+    /// saddle kept open is a place.
+    /// </para>
+    /// </remarks>
+    Clearing,
 }
 
 /// <summary>One of the map's large geographic statements: a line that divides the ground.</summary>
@@ -88,6 +102,7 @@ internal enum ConnectorOf
 {
     Separator,
     Upland,
+    Wood,
 }
 
 /// <summary>
@@ -141,6 +156,27 @@ internal readonly record struct Connector(
 /// Which way the water leaves, so the sill can be put across it.
 /// </param>
 /// <summary>
+/// A wood the layout asks for, rather than one the noise happened to put there.
+/// </summary>
+/// <remarks>
+/// <b>Because half the archetypes talk about woodland and none of them could cause any.</b>
+/// <c>BrokenRidge</c>'s sentence is "an open plain fractured by <em>wooded</em> ridges" and nothing made those
+/// ridges wooded — whether a wood landed on them was up to a noise field that had never heard of them. A
+/// sentence the generator cannot act on is a label.
+/// <para>
+/// It is a <em>boost</em> rather than a placement, which is the important part: the wood still has to obey the
+/// ground. Authoring one on a ridge asks for forest there; slope, shelter, aspect, biome and climate all still
+/// get their say, so an authored wood on a crag is bare rock and an authored wood in a dry region is thin. The
+/// layout says where woodland belongs and the land says how much of it there can be.
+/// </para>
+/// <para>
+/// Along a path rather than at a point, because the things worth wooding are linear — a ridge, a valley side, a
+/// river bank. A radius round a centre puts a disc of trees on a ridge, which is a copse and not a wooded ridge.
+/// </para>
+/// </remarks>
+internal readonly record struct Wood(Vector2[] Path, float WidthMetres, float Strength);
+
+/// <summary>
 /// The sea, taking one side of the map, with a shoreline that wanders.
 /// </summary>
 /// <remarks>
@@ -181,8 +217,24 @@ internal readonly record struct Coast(Vector2 Seaward, float InsetMetres, float 
 /// Cut before erosion, like <see cref="Trough"/> and unlike <see cref="Basin"/> — it drains, so there is
 /// nothing for the flow router to fill.
 /// </para>
+/// <para>
+/// <b>And it has an axis, because a radial field is a solid of revolution.</b> A dome with a warped outline and
+/// relief on top reads far better than a plain disc and still reads as round; almost no real massif is. A
+/// stretch and a bearing give it a grain — which is also what the drainage wants, since water coming off an
+/// elongated upland runs off <em>both flanks</em> and cuts a valley system with a divide along the length,
+/// rather than radiating from a point like spokes.
+/// </para>
 /// </remarks>
-internal readonly record struct Upland(Vector2 Centre, float RadiusMetres, float HeightMetres);
+/// <param name="Stretch">
+/// How much longer the massif is along its bearing than across it. One is a dome.
+/// </param>
+/// <param name="BearingRadians">Which way the grain runs.</param>
+internal readonly record struct Upland(
+    Vector2 Centre,
+    float RadiusMetres,
+    float HeightMetres,
+    float Stretch = 1f,
+    float BearingRadians = 0f);
 
 /// <summary>
 /// A valley floor: low ground with a length and a direction, cut rather than left over.
@@ -253,9 +305,13 @@ internal sealed class MapLayout
         Basin[]? basins = null,
         Trough[]? troughs = null,
         Upland[]? uplands = null,
-        Coast? coast = null)
+        Coast? coast = null,
+        Wood[]? woods = null,
+        float woodedness = 1f)
     {
         Coast = coast;
+        Woods = woods ?? Array.Empty<Wood>();
+        Woodedness = woodedness;
         Basins = basins ?? Array.Empty<Basin>();
         Troughs = troughs ?? Array.Empty<Trough>();
         Uplands = uplands ?? Array.Empty<Upland>();
@@ -299,6 +355,81 @@ internal sealed class MapLayout
 
     /// <summary>The sea, if this map has one. The only absolute height on the map.</summary>
     public Coast? Coast { get; }
+
+    /// <summary>Woodland this layout asks for, as a boost the ground still has to agree to.</summary>
+    public Wood[] Woods { get; }
+
+    /// <summary>
+    /// How wooded this map is overall, as a multiplier on every woodland statement it makes.
+    /// </summary>
+    /// <remarks>
+    /// <b>A whole axis of map variety for the price of one float, and it changes no heights at all.</b> The same
+    /// broken ridge country is a different game as open pastoral ground than as deep wood: the ridges are the
+    /// same barriers on paper and completely different ones to cross, to see over, and to hold. Terrain geometry
+    /// and terrain cover are independent, and treating them as one thing was leaving half the variety on the
+    /// table.
+    /// <para>
+    /// Three regimes rather than a continuum, because the point is that a map is recognisably one <em>or</em> the
+    /// other. A map at 0.8 of the way to wooded is just a map.
+    /// </para>
+    /// </remarks>
+    public float Woodedness { get; }
+
+    /// <summary>
+    /// How strongly this layout asks for open ground here, from its clearings.
+    /// </summary>
+    /// <remarks>
+    /// Subtracted from the woodland pressure rather than multiplying it, which is the mirror of how a wood is
+    /// added: a clearing has to be able to empty ground the noise wanted full, and a multiplier could only
+    /// thin what was already thin.
+    /// </remarks>
+    public float Clearing(Vector2 at)
+    {
+        var open = 0f;
+        foreach (var connector in Connectors)
+        {
+            if (connector.Kind != ConnectorKind.Clearing) continue;
+            if (MathF.Abs(at.X - connector.At.X) > connector.WidthMetres) continue;
+            if (MathF.Abs(at.Y - connector.At.Y) > connector.WidthMetres) continue;
+            var reach = Math.Clamp(1f - Vector2.Distance(at, connector.At) / connector.WidthMetres, 0f, 1f);
+            open = MathF.Max(open, reach * reach * (3f - 2f * reach));
+        }
+
+        return open;
+    }
+
+    /// <summary>How much extra woodland this layout asks for here. Zero where it asks for none.</summary>
+    /// <remarks>
+    /// Falls off across the wood's width with the same flat-bottomed profile the river trough uses, so a wooded
+    /// ridge has a thinning edge rather than a boundary — a wood with a straight edge is a plantation, which is
+    /// a thing people made rather than a thing that grew.
+    /// </remarks>
+    public float WoodBoost(Vector2 at)
+    {
+        var boost = 0f;
+        foreach (var wood in Woods)
+        {
+            if (wood.Path.Length < 2) continue;
+            var half = MathF.Max(6f, wood.WidthMetres * 0.5f);
+            var away = float.MaxValue;
+            for (var i = 1; i < wood.Path.Length; i++)
+            {
+                var from = wood.Path[i - 1];
+                var span = wood.Path[i] - from;
+                var lengthSquared = span.LengthSquared();
+                if (lengthSquared <= 1e-4f) continue;
+                var t = Math.Clamp(Vector2.Dot(at - from, span) / lengthSquared, 0f, 1f);
+                away = MathF.Min(away, Vector2.Distance(at, from + span * t));
+            }
+
+            if (away >= half) continue;
+            var u = away / half;
+            var bump = 1f - u * u;
+            boost = MathF.Max(boost, wood.Strength * bump * bump);
+        }
+
+        return boost;
+    }
 
     /// <summary>Every archetype there is, for a lab that cycles them.</summary>
     public static Archetype[] All { get; } = Enum.GetValues<Archetype>();
@@ -405,6 +536,9 @@ internal sealed class MapLayout
                     // Indices name the separator each way-through belongs to: 0 is the river, 1 and 2 the two
                     // ridges. A saddle in the wrong ridge is a hole in a hillside.
                     new Connector(ConnectorKind.Saddle, Place(-0.16f, -0.28f), 70f * scale, Index: 1),
+                    // The wooded ridge's saddle has to be clear of trees too, or the way over it is a way
+                    // through a thicket — which is a different thing to defend and a different thing to use.
+                    new Connector(ConnectorKind.Clearing, Place(-0.16f, -0.27f), 52f * scale, ConnectorOf.Wood, 0),
                     new Connector(ConnectorKind.Saddle, Place(0.26f, 0.28f), 70f * scale, Index: 2),
                     new Connector(ConnectorKind.Ford, Place(0.06f, 0.02f), 30f * scale, Index: 0),
                 },
@@ -419,6 +553,16 @@ internal sealed class MapLayout
                         new[] { Place(-0.48f, 0.00f), Place(-0.06f, 0.03f), Place(0.46f, -0.01f) },
                         frameMetres * 0.20f,
                         amplitudeMetres * 0.34f),
+                },
+                // <b>One ridge wooded and one bare, which is the asymmetry worth having.</b> Two identical
+                // ridges either side of a floor is a symmetrical map; one you can see over and one you cannot
+                // is two different flanks, and then which side to hold is a question with an answer.
+                woods: new[]
+                {
+                    new Wood(
+                        new[] { Place(-0.42f, -0.26f), Place(0.10f, -0.30f), Place(0.44f, -0.22f) },
+                        100f * scale,
+                        1.7f),
                 }),
 
             Archetype.DiagonalRiver => new MapLayout(
@@ -462,7 +606,12 @@ internal sealed class MapLayout
                 new[] { Place(-0.40f, -0.36f), Place(0.40f, -0.36f), Place(-0.40f, 0.36f), Place(0.40f, 0.36f) },
                 Place(0f, 0f),
                 amplitudeMetres,
-                uplands: new[] { new Upland(Place(0f, 0f), frameMetres * 0.23f, high) }),
+                uplands: new[]
+                {
+                    // Across the river rather than along it, so the high ground and the water are two
+                    // statements meeting rather than one lying on the other.
+                    new Upland(Place(0f, 0f), frameMetres * 0.25f, high, 1.7f, turn + MathF.PI * 0.5f),
+                }),
 
             Archetype.TwinBasins => new MapLayout(
                 kind,
@@ -489,7 +638,11 @@ internal sealed class MapLayout
                 },
                 // The country the basins are sunk into. Without it they are two dips in a plain and the
                 // archetype reads as its dividing ridge and nothing else.
-                uplands: new[] { new Upland(Place(0f, 0f), frameMetres * 0.46f, amplitudeMetres * 0.66f) }),
+                uplands: new[]
+                {
+                    // Along the dividing ridge, so the two basins are sunk into the flanks of one massif.
+                    new Upland(Place(0f, 0f), frameMetres * 0.46f, amplitudeMetres * 0.66f, 1.5f, turn),
+                }),
 
             Archetype.CornerHighlands => new MapLayout(
                 kind,
@@ -574,7 +727,12 @@ internal sealed class MapLayout
                         frameMetres * 0.15f,
                         amplitudeMetres * 0.88f),
                 },
-                uplands: new[] { new Upland(Place(0f, -0.06f), frameMetres * 0.52f, amplitudeMetres * 0.92f) }),
+                uplands: new[]
+                {
+                    // Broad and only slightly grained: the three valleys are what shape this one, and a strong
+                    // axis would fight them.
+                    new Upland(Place(0f, -0.06f), frameMetres * 0.52f, amplitudeMetres * 0.92f, 1.25f, turn),
+                }),
 
             _ => new MapLayout(
                 Archetype.BrokenRidge,
@@ -589,10 +747,22 @@ internal sealed class MapLayout
                 {
                     new Connector(ConnectorKind.Saddle, Place(-0.06f, -0.22f), 90f * scale, Index: 1),
                     new Connector(ConnectorKind.Saddle, Place(-0.10f, 0.14f), 90f * scale, Index: 2),
+                    // <b>And a clearing through each wooded ridge, which is what "fractured" means.</b> The
+                    // saddles break the ridges as landforms; without these the wood closes the gaps back up and
+                    // a fractured plain is one continuous barrier again.
+                    new Connector(ConnectorKind.Clearing, Place(-0.30f, -0.22f), 46f * scale, ConnectorOf.Wood, 0),
+                    new Connector(ConnectorKind.Clearing, Place(0.20f, 0.15f), 42f * scale, ConnectorOf.Wood, 1),
                 },
                 new[] { Place(-0.36f, 0.28f), Place(0.34f, -0.30f), Place(-0.34f, -0.36f), Place(0.36f, 0.32f) },
                 Place(-0.02f, -0.06f),
-                amplitudeMetres),
+                amplitudeMetres,
+                woods: new[]
+                {
+                    // The ridges this archetype is named for. The same paths as its separators, so the wood is
+                    // on the ridge rather than near it.
+                    new Wood(new[] { Place(-0.44f, -0.18f), Place(-0.20f, -0.26f) }, 90f * scale, 1.6f),
+                    new Wood(new[] { Place(0.06f, 0.08f), Place(0.34f, 0.22f) }, 90f * scale, 1.5f),
+                }),
         };
     }
 
@@ -792,9 +962,21 @@ internal sealed class MapLayout
             coast = new Coast(seaward, frameMetres * (0.17f + random.Next() * 0.10f), frameMetres * 0.10f);
         }
 
+        // <b>Pastoral, mixed or wooded — the same ground, played differently.</b> Rolled per map rather than
+        // per region, because it is a fact about this place and not about its climate: downland has both open
+        // sheep country and deep beech hanger in it.
+        var woodedness = random.Next();
+        var (wooded, woodedName) = woodedness switch
+        {
+            < 0.30f => (0.34f, "open pastoral"),
+            < 0.72f => (1.00f, string.Empty),
+            _ => (1.85f, "deeply wooded"),
+        };
+
         var sentence = coast is null
             ? $"{main.Sentence}, and {second.Sentence} off to one side"
             : $"{main.Sentence}, and {second.Sentence} off to one side, with the sea along one edge";
+        if (woodedName.Length > 0) sentence = $"{woodedName} country: {sentence}";
         return new MapLayout(
             primary,
             sentence,
@@ -821,7 +1003,9 @@ internal sealed class MapLayout
                 .Concat(second.Troughs)
                 .ToArray(),
             main.Uplands.Concat(second.Uplands).ToArray(),
-            coast);
+            coast,
+            main.Woods.Concat(second.Woods).ToArray(),
+            wooded);
     }
 
     /// <summary>
@@ -969,6 +1153,7 @@ internal sealed class MapLayout
         var kinds = new List<Archetype>();
         var troughs = new List<Trough>();
         var uplands = new List<Upland>();
+        var woods = new List<Wood>();
 
         // <b>The trunk meanders, and the first version did not.</b> Five points with one sine bend across the
         // whole canvas is a diagonal with a bow in it — reported exactly as "straight lines running through the
@@ -1083,6 +1268,7 @@ internal sealed class MapLayout
             troughs.AddRange(instance.Troughs);
             basins.AddRange(instance.Basins);
             uplands.AddRange(instance.Uplands);
+            woods.AddRange(instance.Woods);
         }
 
         var tally = kinds.GroupBy(kind => kind)
@@ -1099,7 +1285,8 @@ internal sealed class MapLayout
             amplitudeMetres,
             basins.ToArray(),
             troughs.ToArray(),
-            uplands.ToArray());
+            uplands.ToArray(),
+            woods: woods.ToArray());
     }
 
     /// <summary>Every river in this layout, trunk first.</summary>

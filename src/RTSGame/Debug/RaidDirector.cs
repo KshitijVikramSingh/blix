@@ -5,6 +5,8 @@ using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Collision;
 using RTSGame.Simulation.Economy;
 
+using RTSGame.Simulation.Terrain;
+
 namespace RTSGame.Debug;
 
 /// <summary>How often something comes over the hill, and how much of it. A scenario knob.</summary>
@@ -342,13 +344,33 @@ internal sealed class RaidDirector
         // recurring finding for the sixth time. The fix is to say which centre, once.
         var home = RichestStore(world, Vector2.Zero);
         var centre = world.Nodes.Contains(home) ? world.Nodes.Get(home).Position : Vector2.Zero;
-        var ride = (int)(Next() * MathF.Max(1, Woodland.Rides));
-        var angle = Woodland.Rides > 0
-            ? ride / (float)Woodland.Rides * MathF.Tau
-            : Next() * MathF.Tau;
+        // <b>A bearing with open ground on it, rather than a lane that was carved to have some.</b> The rides
+        // are gone: they were four lanes cut out from the settlement so a raid had somewhere to arrive, which
+        // was the right answer while the woodland was rings around the settlement and had sealed it in. The
+        // woodland is placed by the land now and leaves about a third of the map open, so the lane can be
+        // <em>found</em> instead of built.
+        //
+        // Which is also the more honest mechanic. A raid arriving down an authored lane was a raid arriving
+        // where the map had been prepared for it; a raid arriving on whatever open ground exists is a raid
+        // arriving where the country lets it, and that is a fact about the country a player can learn.
+        //
+        // Sixteen bearings tried, and the first one whose arrival point is passable and not inside a stand
+        // wins. Sixteen because at a third of the map open, the chance of sixteen consecutive refusals is
+        // remote — and if every one of them refuses, the last is used anyway rather than skipping the raid:
+        // a raid that silently does not happen is a defence that silently is not tested.
         var edge = MathF.Min(settings.ArrivesAt, world.ExtentMeters * 0.47f);
+        var opening = Next() * MathF.Tau;
+        var angle = opening;
         var along = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
         var arrival = centre + along * edge;
+        for (var attempt = 0; attempt < 16; attempt++)
+        {
+            angle = opening + attempt / 16f * MathF.Tau;
+            along = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
+            arrival = world.Terrain.ClampPosition(centre + along * edge);
+            var surface = world.Terrain.SampleSurface(arrival);
+            if (surface is not (TerrainSurface.Forest or TerrainSurface.Impassable)) break;
+        }
         var started = 0;
         for (var i = 0; i < settings.Party; i++)
         {

@@ -548,6 +548,34 @@ internal sealed class Drainage
     /// what decides that a place is wet is still how much water arrives and how fast it leaves.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Where this place's wetness falls in the landscape's own distribution: 0 driest, 1 wettest.
+    /// </summary>
+    /// <remarks>
+    /// The inverse of <see cref="WetnessQuantile"/>, and it exists because a rank is what anything downstream
+    /// actually wants. A wetness of 11.4 means nothing on its own; "wetter than four fifths of this landscape"
+    /// means something on every map, which is the whole argument §60 made for ranks in the first place.
+    /// <para>
+    /// A binary search over the sorted table, so it costs a handful of comparisons rather than a pass.
+    /// </para>
+    /// </remarks>
+    public float WetnessRankAt(Vector2 world)
+    {
+        var sorted = EnsureRanked();
+        if (sorted.Length == 0) return 0.5f;
+        var value = WetnessAt(world);
+        var low = 0;
+        var high = sorted.Length - 1;
+        while (low < high)
+        {
+            var middle = (low + high) / 2;
+            if (sorted[middle] < value) low = middle + 1;
+            else high = middle;
+        }
+
+        return low / (float)MathF.Max(1, sorted.Length - 1);
+    }
+
     public float WetnessQuantile(float quantile)
     {
         var sorted = EnsureRanked();

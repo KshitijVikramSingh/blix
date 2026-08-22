@@ -48,6 +48,7 @@ internal sealed class SettlementArt : IDisposable
         PropModel[] trees,
         PropModel[] treesMid,
         PropModel[] treesFar,
+        PropModel[] treesDeep,
         PropModel stumps,
         PropModel[] rocks,
         PropModel[] scatter,
@@ -64,6 +65,7 @@ internal sealed class SettlementArt : IDisposable
         Trees = trees;
         TreesMid = treesMid;
         TreesFar = treesFar;
+        TreesDeep = treesDeep;
         Stumps = stumps;
         Rocks = rocks;
         Scatter = scatter;
@@ -88,6 +90,24 @@ internal sealed class SettlementArt : IDisposable
 
     /// <summary>The same species again, coarsest, for the band past that.</summary>
     public PropModel[] TreesFar { get; private init; } = Array.Empty<PropModel>();
+
+    /// <summary>
+    /// The coarsest level, for trees buried in a wood thick enough to hide it.
+    /// </summary>
+    /// <remarks>
+    /// <b>§56 moved the far tier up from this level because it read too thin, and the reason that finding does
+    /// not forbid this one is density.</b> The complaint was that coarsening by distance thins whole regions at
+    /// once, so the far half of a valley looks logged; the answer was to coarsen by crowding instead, because
+    /// where trees overlap the neighbours fill in the mass a coarse level loses. This is the same argument taken
+    /// one step further: at twice the crowding that earns the far tier, there is twice the neighbour to fill it.
+    /// <para>
+    /// It exists because the deeply-wooded roll made it necessary. Measured at a gameplay standoff, a wooded map
+    /// drew 2,454 trees for 3,953k triangles and 78 ms against a pastoral map's 60 trees and 21 ms — and the far
+    /// tier was most of it. Four hundred and fifty triangles against nine hundred and seventy is the difference
+    /// between that roll being playable and being a slideshow.
+    /// </para>
+    /// </remarks>
+    public PropModel[] TreesDeep { get; private init; } = Array.Empty<PropModel>();
 
     /// <summary>Loose stone: an outcrop on scree, and the one piece of ground cover that is not alive.</summary>
     public PropModel[] Rocks { get; private init; } = Array.Empty<PropModel>();
@@ -446,6 +466,28 @@ internal sealed class SettlementArt : IDisposable
                 Kit("Pine_2", casts: true, lod: 2, casterLod: 3), Kit("Pine_3", casts: true, lod: 2, casterLod: 3),
                 Kit("TwistedTree_1", casts: true, lod: 2, casterLod: 3), Kit("TwistedTree_2", casts: true, lod: 2, casterLod: 3),
                 Kit("DeadTree_1", casts: true, lod: 2, casterLod: 3), Kit("DeadTree_2", casts: true, lod: 2, casterLod: 3),
+            },
+            treesDeep: new[]
+            {
+                // <b>The coarsest level, for trees buried deep enough in a wood to hide it.</b> §56 moved the
+                // far tier <em>up</em> off this level because it read too thin, and the reason that finding does
+                // not forbid this one is the finding's own argument: coarsening by distance thins whole regions
+                // at once, so a far valley looks logged, whereas coarsening by <em>crowding</em> works because
+                // the neighbours fill in the mass a coarse level loses. This is that taken one step — at twice
+                // the crowding the far tier needs, there is twice the neighbour to fill it.
+                //
+                // It exists because the deeply-wooded roll made it necessary: measured at a gameplay standoff, a
+                // wooded map drew 2,454 trees for 3,953k triangles and 78 ms against a pastoral map's 60 trees
+                // and 21 ms, and the far tier was most of it. Four hundred and fifty triangles against nine
+                // hundred and seventy is the difference between that roll being playable and being a slideshow.
+                //
+                // Casts, and from its own geometry, because a deep wood is precisely where the shadow is doing
+                // the most work — the darkness under a thick canopy is most of what makes it read as thick.
+                Kit("CommonTree_1", casts: true, lod: 3), Kit("CommonTree_2", casts: true, lod: 3),
+                Kit("CommonTree_3", casts: true, lod: 3), Kit("Pine_1", casts: true, lod: 3),
+                Kit("Pine_2", casts: true, lod: 3), Kit("Pine_3", casts: true, lod: 3),
+                Kit("TwistedTree_1", casts: true, lod: 3), Kit("TwistedTree_2", casts: true, lod: 3),
+                Kit("DeadTree_1", casts: true, lod: 3), Kit("DeadTree_2", casts: true, lod: 3),
             },
             trees: new[]
             {

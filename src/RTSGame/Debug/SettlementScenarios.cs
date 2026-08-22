@@ -278,8 +278,25 @@ internal static class SettlementScenarios
                 "even arrives at — defenders are chasing rather than defending");
         }
 
-        // Walk in, loot, walk out, with a wide allowance for a crowded lane.
-        var round = 3f * settings.ArrivesAt / UnitType.Raider.MaximumSpeed + settings.LootSeconds;
+        // Walk in, loot, walk out, with a wide allowance for a crowded lane — and now for the woods as well.
+        //
+        // <b>The allowance was calibrated against crowds and had to learn about barriers.</b> Its own comment
+        // says "a crowded lane": three legs' worth of walking for a two-leg trip, which is fifty per cent of
+        // slack for bodies getting in each other's way. That was ample while the woodland was rings with cleared
+        // rides through them. It is not ample now: closed woodland on the flat map went from seven per cent to
+        // sixteen when stands tightened, the rides are gone, and a raider walks <em>around</em> a wood rather
+        // than down a lane cut for it. Measured, a raider lived 191 s against an allowance of 182 — a five per
+        // cent overrun reported as "something scripted to walk has stopped walking", which was not what had
+        // happened.
+        //
+        // Scaled by the barriers actually present rather than by a bigger constant, so the check keeps meaning
+        // the thing it was written to mean on any map: a body that detours is walking, and a body that has
+        // stopped is still caught. Path length through randomly-placed obstacles inflates roughly linearly in
+        // their area share at these fractions, which is where the coefficient comes from — and on a map with no
+        // woodland on it nothing changes at all.
+        var closed = ClosedShare(world);
+        var round = (3f * settings.ArrivesAt / UnitType.Raider.MaximumSpeed + settings.LootSeconds)
+            * (1f + 1.4f * closed);
         if (longestRaider > round)
         {
             faults.Add(
@@ -959,6 +976,28 @@ internal static class SettlementScenarios
     private static float InteriorExtent(float extentMetres) =>
         MathF.Max(extentMetres * 0.25f, extentMetres - 2f * ReliefPlan.RimWidthMetres);
 
+    /// <summary>
+    /// What share of the map is closed woodland: ground a body has to walk round.
+    /// </summary>
+    /// <remarks>
+    /// Sampled on a stride rather than every cell, because this feeds a tolerance rather than a decision and a
+    /// tolerance does not need four decimal places from thirteen million reads.
+    /// </remarks>
+    private static float ClosedShare(SimulationWorld world)
+    {
+        var transform = world.Terrain.Transform;
+        var closed = 0;
+        var seen = 0;
+        for (var z = 0; z < transform.Height; z += 8)
+        for (var x = 0; x < transform.Width; x += 8)
+        {
+            seen++;
+            if (world.Terrain.Surface(new GridCell(x, z)) == TerrainSurface.Forest) closed++;
+        }
+
+        return closed / (float)MathF.Max(1, seen);
+    }
+
     /// <summary>The interior's lowest ground and how much relief it has, which every biome question needs.</summary>
     /// <remarks>
     /// One measurement with three callers rather than three copies of a sampling loop — §58 recorded the
@@ -1021,6 +1060,14 @@ internal static class SettlementScenarios
     private static void PaintBiomes(SimulationWorld world)
     {
         var (floor, span) = InteriorRelief(world);
+
+        // <b>Built before the flat-map early return, not after it.</b> This is where the interior's floor and
+        // span are already measured, so it is the right place — but a flat map leaves this method immediately,
+        // and building the field below that line meant flat ground got no field at all and the scatter fell back
+        // to a default. Which happened to behave correctly, and is exactly the kind of accident that stops
+        // behaving correctly the moment the default changes.
+        world.Terrain.SetSoil(Soil.For(world.Terrain));
+        world.Terrain.SetWoodland(WoodlandCover.For(world.Terrain, world.Terrain.Layout, floor, span));
         if (span < 1f) return;
 
         var terrain = world.Terrain;
@@ -1078,6 +1125,14 @@ internal static class SettlementScenarios
             $"({painted * 100f / cellCount:F0}% of the map is something other than pasture)");
     }
 
+    /// <summary>How many anchors the map-wide scatter tries, per square kilometre of map.</summary>
+    /// <remarks>
+    /// Chosen so the accepted count lands near what the three rings it replaced produced — the flat map still
+    /// comes out at the density §22's constants were measured against, because on flat ground every term in the
+    /// density is one. What changes on a map with relief is <em>where</em> they go.
+    /// </remarks>
+    private const int WoodAnchorsPerSquareKilometre = 62_000;
+
     private static void ScatterWoodland(SimulationWorld world, Vector2 centre, float ringRadius)
     {
         var seed = 0x9E3779B9u;
@@ -1127,10 +1182,15 @@ internal static class SettlementScenarios
                 return false;
             }
 
-            // And not in a ride. Four lanes out from the settlement, kept clear, because a wood that seals
-            // the settlement in is a wood no raid can come out of — and the one thing this stage exists to
-            // test could then never happen.
-            if (Woodland.OnARide(at - centre)) return false;
+            // <b>No rides.</b> Four lanes were carved out from the settlement so a raid had somewhere to come
+            // down, which was the right answer while the woodland was rings around the settlement and had
+            // therefore sealed it in. It is the wrong answer twice over now: the woodland is placed by the land
+            // and already leaves about a third of the map open, and a settlement in the finished game is
+            // something a player builds rather than something this scenario lays out — so lanes radiating from
+            // a position nobody chose are scenery pretending to be planning.
+            //
+            // What depended on them is the raid arrival, which used a ride's bearing. See RaidDirector: it now
+            // looks for open ground instead, which is what the lanes were standing in for.
             if (!CanRoot(at)) return false;
             if (TooClose(at, spacing)) return false;
             var node = world.AddNode(NodeKind.Tree, at, capacity: (int)Woodland.WoodPerTree);
@@ -1142,55 +1202,14 @@ internal static class SettlementScenarios
             return true;
         }
 
-        // <b>Which way the map is, from here.</b> The settlement sits off toward a corner, so there is a
-        // direction with a country in it and a direction with a border in it — and that is enough to shape a
-        // woodland without inventing anything: the deep forest goes where the land is, and the open side is
-        // the one that runs out.
-        var inland = centre.LengthSquared() > 1f
-            ? MathF.Atan2(-centre.Y, -centre.X)
-            : 0f;
-
-        // How much woodland belongs on this bearing, from bare to solid.
-        float Shaped(Vector2 offset)
-        {
-            if (offset.LengthSquared() < 1f) return 1f;
-            var bearing = MathF.Atan2(offset.Y, offset.X);
-
-            float Lobe(float towards, float halfWidth)
-            {
-                var delta = MathF.Abs(MathF.IEEERemainder(bearing - towards, MathF.Tau));
-                return delta >= halfWidth
-                    ? 0f
-                    : MathF.Cos(delta / halfWidth * MathF.PI * 0.5f);
-            }
-
-            // Two deep masses either side of inland, an open run toward the corner, and a floor of
-            // stragglers everywhere so no side is a bald patch with a straight edge.
-            var forest = MathF.Max(Lobe(inland - 0.55f, 1.05f), Lobe(inland + 0.6f, 0.95f));
-            var open = Lobe(inland + MathF.PI, 1.15f);
-            return Math.Clamp(0.14f + forest - open * 0.55f, 0.02f, 1f);
-        }
-
-        // <b>Where the wood is, given what the ground is doing.</b> The bearing shaping above gives a map a
-        // near side and a far side; this gives it a reason. Until now the woodland and the relief were two
-        // systems generated into the same space with no knowledge of each other, which is why the map read
-        // as two things stacked rather than as one place.
+        // <b>How much woodland the ground itself carries.</b> Slope is the human part of it: a slope is hard
+        // to plough, so forest survives on it and the flat gets cleared. Height adds a little — higher is
+        // cooler and poorer and keeps its trees.
         //
-        // Slope is what decides it, and the mechanism is human rather than botanical: a slope is hard to
-        // plough, so forest survives on it and the flat ground gets cleared. That single rule is worth more
-        // than any amount of density tuning, because of what it does to the economy — <b>wood ends up
-        // uphill and farmland on the level</b>, so a site is a trade between the two rather than a place
-        // with the same resources in every direction. Height adds a little on top: higher is cooler and
-        // poorer, and keeps its trees.
-        //
-        // Multiplicative with the bearing, and never zero, so it thins and thickens rather than deciding.
-        //
-        // <b>And scaled by how much relief the map actually has, which is the migration guarantee applied
-        // here.</b> The first version returned 0.42 on level ground, so it halved the woodland on <em>every</em>
-        // map — 11,177 trees became 5,294 on the flat, which is §22's economic constant cut in half by a
-        // decision about terrain on a map with no terrain in it. Written as a modulation around one and
-        // faded out as the height range goes to nothing, flat ground comes out at exactly the density it
-        // always had and nothing calibrated moves until somebody generates relief on purpose.
+        // <b>Scaled by how much relief the map actually has, which is the migration guarantee.</b> Written as a
+        // modulation around one and faded out as the height range goes to nothing, flat ground comes out at
+        // exactly the density it always had and nothing calibrated moves until somebody generates relief on
+        // purpose.
         var (reliefFloor, span) = InteriorRelief(world);
         var strength = Math.Clamp(span / 8f, 0f, 1f);
         float Relief(Vector2 at)
@@ -1198,17 +1217,111 @@ internal static class SettlementScenarios
             if (strength <= 0f) return 1f;
             var slope = Smoothstep(0.04f, 0.26f, world.Terrain.SampleGrade(at));
             var above = Math.Clamp(world.Terrain.SampleHeight(at) / MathF.Max(1f, span), 0f, 1f);
-            // Around one: the level ground loses some, the slopes and the tops gain more, and the total is
-            // roughly redistributed rather than reduced.
             var shaped = Math.Clamp(1f + strength * (0.85f * slope + 0.30f * above - 0.35f), 0.15f, 1.7f);
-            // <b>And what kind of country it is, which slope alone cannot say.</b> Faded by the same
-            // strength, so it too vanishes on a flat map. See WoodlandFor.
-            // <b>Times the region's own density, which is what a region mostly is.</b> Boreal forest and dry
-            // scrub differ by a factor of seven here, and that single number does more for telling two maps
-            // apart than any amount of shape does — a wood is most of what a person sees.
+            // Times the region's own density, which is what a region mostly is: boreal forest and dry scrub
+            // differ by a factor of seven here, and a wood is most of what a person sees.
             var country = WoodlandFor(Biomes.At(world.Terrain, at, reliefFloor, span))
                 * RegionProfile.For(world.Terrain.Region).TreeDensity;
             return shaped * (1f - strength + strength * country);
+        }
+
+        /// <summary>
+        /// Whether this is forest country, open country, or somewhere between.
+        /// </summary>
+        /// <remarks>
+        /// <b>The scale that was missing entirely.</b> Density was slope times shelter times biome, and every
+        /// one of those is a <em>local</em> term with modest variance — so the accept probability came out
+        /// roughly the same everywhere a tree could stand. Measured on fifty-metre cells: <b>3% of the map
+        /// open, 89% wooded or dense</b>. No open land and no forest, only an even sprinkle over everything
+        /// that was not water or rock.
+        /// <para>
+        /// Forest and open country alternate at the scale of <em>hundreds</em> of metres and nothing in the
+        /// expression worked at that scale. Two octaves at 230 m and 95 m, pushed through a curve with a
+        /// plateau at each end so the result is three regimes rather than a gradient.
+        /// </para>
+        /// <para>
+        /// <b>The curve does the work, not the noise.</b> Smooth noise gives a smooth gradient of density,
+        /// which reads as a haze of trees thinning in every direction; a squared smoothstep gives ground that
+        /// is definitely wooded next to ground that is definitely not. And the window sits <em>above</em> the
+        /// middle of the noise, because centred it maps almost nothing to the floor — which is how a third of
+        /// the map ends up open rather than merely thinner.
+        /// </para>
+        /// <para>
+        /// The floor has to be near zero and not merely small: six hundredths sounds open and is thirty-five
+        /// trees a hectare once the anchor budget is applied, which is parkland. A hundredth is six a hectare,
+        /// which is the stragglers a field has in it.
+        /// </para>
+        /// </remarks>
+        float Cover(Vector2 at)
+        {
+            var broad = LatticeNoise.Value(at * (1f / 230f) + new Vector2(11.3f, 47.9f));
+            var fine = LatticeNoise.Value(at * (1f / 95f) + new Vector2(83.1f, 5.7f));
+            var n = broad * 0.72f + fine * 0.28f;
+            // <b>The window's width sets the mix, and the anchor budget cannot.</b> Tripling the anchors moved
+            // the total by 1.8x and the <em>shape</em> hardly at all — because the spacing rule caps how tight
+            // a stand can pack, so extra anchors thicken open ground into stragglers and leave forest where it
+            // was. What decides how much of the map is forest is how much of the noise clears the top of this
+            // window, and nothing else.
+            // <b>Narrower, because the concentration is worth more than the coverage.</b> Twenty-eight per cent
+            // of the map as forest at half the density it wants reads as scrub everywhere; eighteen per cent at
+            // full density reads as woods with country between them. The trade was asked for explicitly and it
+            // is the right one — a forest is a place, and a place has to be somewhere rather than everywhere.
+            var t = Math.Clamp((n - 0.50f) / 0.21f, 0f, 1f);
+            t = t * t * (3f - 2f * t);
+            var cover = 0.012f + 1.9f * t * t;
+
+            // <b>And what the layout asked for, on top.</b> A wooded ridge is authored — see MapLayout.Wood —
+            // and this is where the asking turns into trees. Added rather than multiplied, because a boost has
+            // to be able to put a wood on ground the noise left open: multiplying by a floor of a hundredth
+            // would let the noise veto every authored wood it happened not to have chosen.
+            return cover + (world.Terrain.Layout?.WoodBoost(at) ?? 0f);
+        }
+
+        /// <summary>
+        /// Which way a slope faces, as a multiplier on how much woodland it holds.
+        /// </summary>
+        /// <remarks>
+        /// A geographic input rather than a look: at this latitude a south-facing slope takes the sun and
+        /// dries, and a north-facing one holds its damp and its trees. Small on purpose — aspect decides the
+        /// <em>edge</em> of a wood rather than whether there is one — but it is the term that makes a
+        /// hillside's two sides differ, which is one of the most recognisable things about wooded country.
+        /// </remarks>
+        float Aspect(Vector2 at)
+        {
+            var normal = world.Terrain.SampleNormal(at);
+            var facing = new Vector2(normal.X, normal.Z);
+            var length = facing.Length();
+            if (length < 1e-4f) return 1f;
+            // +Z is south here, so a normal leaning that way is a sunward slope.
+            return 1f - 0.30f * Math.Clamp(facing.Y / length, -1f, 1f);
+        }
+
+        /// <summary>
+        /// How sheltered a place is, from the shape of the ground around it.
+        /// </summary>
+        /// <remarks>
+        /// <b>The geographic input woodland was missing.</b> Density already accounted for slope, height and
+        /// what kind of country a place is; none of those distinguishes a valley from a shoulder at the same
+        /// height and grade, and that distinction is most of where trees actually are. A wood survives in a
+        /// hollow, on a lee slope, behind a ridge; it fails on an exposed top, which is why a treeline looks
+        /// like a contour and a wood looks like a catchment.
+        /// <para>
+        /// Convexity, over forty metres: is this lower than the ground around it. Forty because that is the
+        /// scale a wood is sheltered at — a hollow between two tufts shelters nothing and a whole valley is a
+        /// climate rather than a shelter.
+        /// </para>
+        /// </remarks>
+        float Shelter(Vector2 at)
+        {
+            const float reach = 40f;
+            var here = world.Terrain.SampleHeight(at);
+            var around = (world.Terrain.SampleHeight(at + new Vector2(reach, 0f)) +
+                          world.Terrain.SampleHeight(at - new Vector2(reach, 0f)) +
+                          world.Terrain.SampleHeight(at + new Vector2(0f, reach)) +
+                          world.Terrain.SampleHeight(at - new Vector2(0f, reach))) * 0.25f;
+            // Normalised against the drop a tenth grade would give over the same reach, so this is "how much
+            // of a hollow is this" rather than a number of metres. Half sheltered on level ground.
+            return Math.Clamp(0.5f + (around - here) / (reach * 0.10f), 0f, 1.6f);
         }
 
         // <b>Nothing grows in a river or on bare rock, and that is not a density preference.</b> Kept apart
@@ -1223,7 +1336,10 @@ internal static class SettlementScenarios
             return biome is not (Biome.Water or Biome.Crag);
         }
 
-        void Band(float inner, float outer, int trees, float spacing, int clump, bool shape = true)
+        // <b>One caller, and it is the economic near band.</b> The bearing shaping this used to apply went with
+        // the rings — it was a statement about where woodland belongs relative to the settlement, which is the
+        // thing the land-driven scatter replaced.
+        void Band(float inner, float outer, int trees, float spacing, int clump)
         {
             for (var i = 0; i < trees; i++)
             {
@@ -1240,7 +1356,6 @@ internal static class SettlementScenarios
                 // The near band is exempt from both, for §22's reason: it is an economic constant rather
                 // than scenery, and thinning it because the settlement happens to have been founded on the
                 // flat would cut the year's starting fuel as a side effect of a decision about terrain.
-                if (shape && Next() > Shaped(anchor - centre) * Relief(anchor)) continue;
                 // Off the map is a refusal too. Clamping instead would stack every out-of-bounds tree onto
                 // the border as a hedge, which is the artefact a corner-ish settlement invites.
                 if (!world.Terrain.Contains(anchor)) continue;
@@ -1249,6 +1364,66 @@ internal static class SettlementScenarios
                     var at = clump == 1
                         ? anchor
                         : anchor + new Vector2(Next() * 2f - 1f, Next() * 2f - 1f) * spacing * 2.2f;
+                    for (var attempt = 0; attempt < 6; attempt++)
+                    {
+                        if (TryPlant(world.Terrain.ClampPosition(at), spacing)) break;
+                        at = anchor + new Vector2(Next() * 2f - 1f, Next() * 2f - 1f) * spacing * 2.6f;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Anchors over the whole map, accepted against how much woodland the ground there carries.
+        /// </summary>
+        /// <remarks>
+        /// Uniform in <em>position</em> and shaped entirely by density, which is the inversion this is for: the
+        /// rings were uniform in density and shaped by position. A wood now appears where the ground suits a
+        /// wood, at whatever distance from anybody that happens to be.
+        /// <para>
+        /// Clumped like the rings were, because that part was right — a canopy reads as a canopy rather than as
+        /// evenly spread noise. Clump size follows the local density, so thin country gets scattered singles
+        /// and good country gets stands, which is a second thing the rings could not express: they had one
+        /// clump size per radius.
+        /// </para>
+        /// </remarks>
+        void Woods()
+        {
+            var pressure = world.Terrain.Woodland
+                ?? WoodlandCover.For(world.Terrain, world.Terrain.Layout, 0f, 0f);
+            var half = world.ExtentMeters * 0.5f;
+            var area = world.ExtentMeters * world.ExtentMeters / 1_000_000f;
+            var anchors = (int)MathF.Round(WoodAnchorsPerSquareKilometre * area);
+            for (var i = 0; i < anchors; i++)
+            {
+                var anchor = new Vector2(Next() * 2f - 1f, Next() * 2f - 1f) * half;
+                if (!world.Terrain.Contains(anchor)) continue;
+                // Never inside the settlement's own ring: the near band owns that ground and doubling up there
+                // would move §22's in-reach count as a side effect.
+                if (Vector2.Distance(anchor, centre) < Woodland.ReachMetres + 8f) continue;
+
+                // <b>One field, asked once.</b> Slope, shelter, aspect, biome, climate, the noise and whatever
+                // the layout authored all live in WoodlandCover now — including the veto that used to be
+                // CanRoot, since "nothing grows in a river" is a term in the same product rather than a
+                // separate rule that could disagree with it.
+                var density = pressure.At(anchor);
+                if (Next() > density) continue;
+
+                // Denser ground carries bigger stands. Eleven was the old forest clump and three the old
+                // fringe; the same range, now decided by the place rather than by the radius.
+                var clump = 3 + (int)MathF.Round(Math.Clamp(density, 0f, 1.6f) * 7f);
+                // <b>Spacing is what caps a forest, so spacing is what had to move.</b> Trees per unit area go
+                // as the inverse square of spacing, so doubling the density of a stand means dividing its
+                // spacing by root two — and no amount of extra anchors does it, because <see cref="TryPlant"/>
+                // refuses anything closer than this. Measured: tripling the anchor budget moved the total by
+                // 1.8x and the dense share not at all.
+                //
+                // 2.2 m in closed wood becomes 1.55, which is the trunk spacing of a plantation rather than a
+                // park. Open ground keeps its wide spacing, so the contrast widens at both ends.
+                var spacing = 1.1f + 0.45f / MathF.Max(0.3f, density);
+                for (var k = 0; k < clump; k++)
+                {
+                    var at = anchor + new Vector2(Next() * 2f - 1f, Next() * 2f - 1f) * spacing * 2.2f;
                     for (var attempt = 0; attempt < 6; attempt++)
                     {
                         if (TryPlant(world.Terrain.ClampPosition(at), spacing)) break;
@@ -1268,22 +1443,19 @@ internal static class SettlementScenarios
         // scenery — thinning it by bearing would cut the settlement's starting fuel roughly in half as a
         // side effect of a decision about how the map looks. It is also true of settlements: you found the
         // place because there was wood round it.
-        Band(FieldKeepOut + 3f, Woodland.ReachMetres, trees: 46, spacing: 3.4f, clump: 1, shape: false);
-        // Canopies: clumps just beyond reach, which is where the tree line currently sits. Started clear
-        // of the reach radius rather than at it, because a clump scatters its members several metres
-        // around its anchor and the ones that landed inward pushed the in-reach count from 46 to 66 —
-        // half a settlement's annual fuel, arriving as a side effect of a density change.
-        Band(Woodland.ReachMetres + 8f, ringRadius * 1.5f, trees: 260, spacing: 2.2f, clump: 6);
-        // Closing up: the transition from a thinned edge to woodland proper.
-        Band(ringRadius * 1.5f, ringRadius * 3f, trees: 620, spacing: 1.9f, clump: 9);
-        // Continuous forest, and the reason a settlement expands rather than starves. Out to a bit under
-        // half the map, because a 600 m world whose outer half is bare plain does not read as a world with
-        // a forest in it — it reads as a diorama with a hedge round it.
-        // <b>Denser, by request, and the density is why a forest reads as one.</b> Spacing 2.2 to 1.6 is
-        // roughly twice the trunks per hectare, and the anchor count is up because bearing shaping refuses
-        // most of what it is offered — the same number of anchors over a third of the compass would have
-        // thinned the forest rather than concentrated it.
-        Band(ringRadius * 3f, ringRadius * 8f, trees: 2600, spacing: 1.6f, clump: 11);
+        Band(FieldKeepOut + 3f, Woodland.ReachMetres, trees: 46, spacing: 3.4f, clump: 1);
+        // <b>And everything past reach is placed by the land, not by the settlement.</b> It used to be three
+        // more rings — out to ringRadius × 8, which is 240 m — so woodland was a function of distance from the
+        // player with geography allowed only to <em>reject</em> candidates. Two things followed. Trees thinned
+        // outward from the village whatever the ground was doing, and on a 600 m map <b>everything beyond 240 m
+        // of the settlement had no trees at all</b>: the outer half of the world was bare because no band
+        // reached it.
+        //
+        // Sampled over the whole map instead, accepted against a density that is entirely about the ground —
+        // what country it is, how steep, how high, how sheltered. The settlement no longer appears in the
+        // expression. What it does appear in is the near band above, which stays a ring on purpose: that one is
+        // §22's economic constant and is a fact about the site rather than about the scenery.
+        Woods();
 
         (SeededTimber, SeededTrees) = world.Nodes.StandingTimber();
 
@@ -1361,6 +1533,17 @@ internal static class SettlementScenarios
     /// was measured against — the same guarantee the woodland and the ground cover make, for the same reason.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// How much standing water a site may have on it. Essentially none.
+    /// </summary>
+    /// <remarks>
+    /// Five centimetres, which is a damp hollow rather than water. Not zero, because the water level is sampled
+    /// from a four-metre lattice and a hair of interpolated depth on ground that is really dry would otherwise
+    /// refuse half the valley floors on the map — and a valley floor beside a river is the single best place to
+    /// found, which is the whole reason floodplain exists as a biome.
+    /// </remarks>
+    private const float WadeableSiteDepth = 0.05f;
+
     public static Vector2 ChooseSite(SimulationWorld world, float extentMeters)
     {
         var span = ReliefSpan(world);
@@ -1390,6 +1573,28 @@ internal static class SettlementScenarios
             }
 
             if (core > 0.11f) continue;
+
+            // <b>And not in the water, which the flatness test actively steers it into.</b> The score rewards
+            // level ground, and the most level ground on a map with a river through it is the river — so the
+            // village was founded in the channel and the villagers stood in it. Reported from the chair as the
+            // village drowning along with the men.
+            //
+            // A radius rather than a point, because a settlement is thirty-six metres across and its fields
+            // reach further: standing dry at the granary is no use if the ground the fields want is a floodplain
+            // under half a metre of water. Checked out to the field keep-out, which is exactly the ground the
+            // village occupies.
+            if (terrain.Drainage is { } water)
+            {
+                var wet = water.LevelAt(at) - here;
+                for (var i = 0; i < 8 && wet <= WadeableSiteDepth; i++)
+                {
+                    var angle = i / 8f * MathF.Tau;
+                    var about = at + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * FieldKeepOut;
+                    wet = MathF.Max(wet, water.LevelAt(about) - terrain.SampleHeight(about));
+                }
+
+                if (wet > WadeableSiteDepth) continue;
+            }
 
             // Where the wood will be: slope within a cutter's reach, since that is where the woodland
             // survives the plough.

@@ -770,9 +770,11 @@ internal sealed class ReliefPlan
                 foreach (var upland in layout.Uplands)
                 {
                     // Its shoulder falls the full height across the outer half of its radius.
+                    // Across the grain is the steep way, and stretching does not change it: the across-axis
+                    // is left at the radius precisely so the width means the width.
                     steepest = MathF.Max(
                         steepest,
-                        upland.HeightMetres / MathF.Max(1f, upland.RadiusMetres * 0.55f));
+                        upland.HeightMetres * 1.3f / MathF.Max(1f, upland.RadiusMetres * 0.55f));
                 }
 
                 foreach (var trough in layout.Troughs)
@@ -1020,6 +1022,7 @@ internal sealed class ReliefPlan
 
         terrain.ReplaceHeights(heights);
         terrain.SetDrainage(drainage);
+        terrain.SetLayout(Layout);
     }
 
     /// <summary>
@@ -1388,8 +1391,11 @@ internal sealed class ReliefPlan
         {
             var upland = layout.Uplands[slot];
             var reach = MathF.Max(12f, upland.RadiusMetres);
-            var from = (upland.Centre - new Vector2(reach * 1.35f) - origin) / DrainageCellMetres;
-            var to = (upland.Centre + new Vector2(reach * 1.35f) - origin) / DrainageCellMetres;
+            var stretch = MathF.Max(1f, upland.Stretch);
+            // The box has to cover the long axis, whichever way it is pointing.
+            var span = reach * 1.35f * stretch;
+            var from = (upland.Centre - new Vector2(span) - origin) / DrainageCellMetres;
+            var to = (upland.Centre + new Vector2(span) - origin) / DrainageCellMetres;
             var x0 = Math.Clamp((int)MathF.Floor(from.X), 0, side - 1);
             var z0 = Math.Clamp((int)MathF.Floor(from.Y), 0, side - 1);
             var x1 = Math.Clamp((int)MathF.Ceiling(to.X), 0, side - 1);
@@ -1399,6 +1405,15 @@ internal sealed class ReliefPlan
             {
                 var world = origin + new Vector2(x, z) * DrainageCellMetres;
                 var offset = world - upland.Centre;
+                // <b>Into the massif's own frame, so an elongated upland is a circle in a squashed space.</b>
+                // The same trick Landform uses for a stretched hill, and for the same reason: every test below
+                // stays radial while the shape it describes stops being round. Dividing the along-axis is what
+                // lengthens it — the across-axis is left alone so the width is the radius.
+                var along = MathF.Cos(upland.BearingRadians) * offset.X
+                    + MathF.Sin(upland.BearingRadians) * offset.Y;
+                var across = -MathF.Sin(upland.BearingRadians) * offset.X
+                    + MathF.Cos(upland.BearingRadians) * offset.Y;
+                offset = new Vector2(along / stretch, across);
                 var away = offset.Length();
                 // <b>Two octaves of outline, not one, and a much wider swing.</b> One octave at fifteen per
                 // cent gives a circle with a slight wobble, which the eye reads as a circle.

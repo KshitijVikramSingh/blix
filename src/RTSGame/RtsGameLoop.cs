@@ -385,7 +385,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     }
 
     /// <summary>How many trees each level of detail drew, which is the shape of the frame's tree budget.</summary>
-    private (int Near, int Mid, int Far) treeTiers;
+    private (int Near, int Mid, int Far, int Deep) treeTiers;
     private (int Instances, long Triangles, long Casters) stagedLoad;
     // viewProj, camPos, sunDir, sunLight, skyLight, fog, haze. As with the world block, this length is
     // also the declared push-constant range, so the two cannot disagree.
@@ -470,11 +470,28 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// was.
     /// </para>
     /// </remarks>
+    /// <summary>The window's logical size, read once a frame instead of dozens of times.</summary>
+    /// <remarks>
+    /// <b>Asking the host costs about half a millisecond, and eighteen call sites were asking it.</b> That is
+    /// not a number anybody would guess: it is a property that looks like a field, and it crosses into the
+    /// window library to answer. <see cref="VisibleGroundRadius"/> reads it, and that in turn is read by
+    /// <c>DetailRadius</c> and <c>GroundDrawRadius</c>, both of which were being evaluated <em>inside the
+    /// per-chunk loop</em> — three host queries per chunk, twenty-five chunks, thirty-eight milliseconds a
+    /// frame of doing nothing.
+    /// <para>
+    /// Which is why a wooded map looked eight times more expensive than a pastoral one: the wooded map draws
+    /// more chunks. The trees were never the cost. Measured before this: 3.5M triangles at 85 ms, against 8.6M
+    /// at 22 ms earlier in the same renderer — a tenth of the geometry at four times the price, which is the
+    /// shape of a per-item constant rather than of geometry.
+    /// </para>
+    /// </remarks>
+    private (int Width, int Height) windowSize = (1280, 720);
+
     private float VisibleGroundRadius
     {
         get
         {
-            var (width, height) = host.LogicalSize;
+            var (width, height) = windowSize;
             var aspect = height > 0 ? width / (float)height : 1.78f;
             var half = camera.VerticalFieldOfView * 0.5f;
             var pitch = MathF.Max(half + 0.05f, CameraElevation);
@@ -1049,9 +1066,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                     "of plain between it and the site");
             }
 
+            // <b>And how wet it is, which is the number that was missing when the village drowned.</b> Height
+            // and grade both looked perfect for a site in the middle of a river: it is the flattest ground on
+            // the map and its height is unremarkable. Nothing printed said "there is half a metre of water on
+            // it", so nothing caught it until somebody watched their men wade.
+            var wet = simulation.Terrain.Drainage is { } water
+                ? water.LevelAt(site) - simulation.Terrain.SampleHeight(site)
+                : 0f;
             Console.WriteLine(
                 $"    the site itself stands at {simulation.Terrain.SampleHeight(site):F2} m, " +
-                $"grade {simulation.Terrain.SampleGrade(site):F3}");
+                $"grade {simulation.Terrain.SampleGrade(site):F3}, " +
+                $"under {MathF.Max(0f, wet) * 100f:F0} cm of water");
         }
 
         // <b>The land first, then a place in it.</b> The village used to be laid at the origin whatever the
@@ -1730,6 +1755,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// <summary>Chunks staged this frame, so the draw pass submits exactly what was staged.</summary>
     private readonly List<(int X, int Z)> drawnChunks = new();
 
+    /// <summary>Woodland-field queries this frame, which is the first thing to measure about a cheap-looking field.</summary>
+    private long woodlandAsked;
+
+    /// <summary>How long the nodes took, so the ground's own figure is the ground's own.</summary>
+    private double nodeMilliseconds;
+
     /// <summary>How tall the window is, so ground detail can be judged in pixels rather than in metres.</summary>
     private float viewportPixels;
 
@@ -1960,9 +1991,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// plates — one ground for the laboratory and another for a played map, which is two representations
     /// and therefore two sets of artefacts. There is one now, at whatever resolution the map can afford.
     /// </remarks>
+    /// <summary>How many times the ground has been rebuilt, which should be a handful for a whole session.</summary>
+    private int terrainRebuilds;
+
     private void RebuildTerrainSurfaceLayers()
     {
         if (vk is null) return;
+        terrainRebuilds++;
         vk.WaitIdle();
         foreach (var chunk in groundChunks.Keys.ToArray()) DisposeGroundChunk(chunk);
         renderedTerrain = simulation.Terrain;
@@ -2328,6 +2363,55 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             "Q/E archetype · I region · Y next seed · enter print";
     }
 
+    /// <summary>
+    /// Whether the woodland is patchy or evenly sprinkled, which no figure printed so far could tell.
+    /// </summary>
+    /// <remarks>
+    /// <b>"There is a roughly equal density of trees everywhere that can have trees" is a claim about a
+    /// distribution, and every number reported about woodland so far has been a total.</b> A count and a
+    /// percentage-of-map-closed are both silent on whether that wood is one forest and a plain or an even haze
+    /// over everything — which is exactly the difference being complained about.
+    /// <para>
+    /// Counted on a fifty-metre grid, which is about the size of a stand. The shape of the histogram is the
+    /// answer: an even sprinkle piles every cell into one bucket, and real woodland is bimodal — a lot of cells
+    /// with almost nothing and a lot with a great deal, and fewer in between than at either end.
+    /// </para>
+    /// </remarks>
+    private void ReportWoodlandSpread()
+    {
+        const float cellMetres = 50f;
+        var across = Math.Max(1, (int)MathF.Round(simulation.ExtentMeters / cellMetres));
+        var counts = new int[across * across];
+        foreach (ref readonly var node in simulation.Nodes.All)
+        {
+            if (!node.IsAlive || !node.IsStanding) continue;
+            var local = (node.Position + new Vector2(simulation.ExtentMeters * 0.5f)) / cellMetres;
+            var x = Math.Clamp((int)local.X, 0, across - 1);
+            var z = Math.Clamp((int)local.Y, 0, across - 1);
+            counts[z * across + x]++;
+        }
+
+        // Buckets in trees per hectare, since a fifty-metre cell is a quarter of one.
+        var bare = 0;
+        var thin = 0;
+        var wooded = 0;
+        var dense = 0;
+        foreach (var count in counts)
+        {
+            var perHectare = count * 4;
+            if (perHectare < 12) bare++;
+            else if (perHectare < 90) thin++;
+            else if (perHectare < 280) wooded++;
+            else dense++;
+        }
+
+        var cells = (float)counts.Length;
+        Console.WriteLine(
+            $"    spread over {cellMetres:F0} m cells: {bare / cells * 100f:F0}% open, " +
+            $"{thin / cells * 100f:F0}% stragglers, {wooded / cells * 100f:F0}% wooded, " +
+            $"{dense / cells * 100f:F0}% dense forest");
+    }
+
     /// <summary>Rolls a new landscape on the same archetype, or steps to the next one.</summary>
     private void RollLab(int archetypeStep, bool reseed)
     {
@@ -2356,10 +2440,23 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         // A fresh world, because a roll is a different landscape and the surfaces, the navigation and the
         // drainage all belong to the one it replaces.
-        simulation = new SimulationWorld(worldExtentMeters);
-        LoadRelief();
+        // <b>Whatever scenario is running gets rebuilt, not just the ground.</b> The lab wants terrain and
+        // nothing else; the village wants terrain <em>and a settlement founded on it</em>, because a village
+        // standing where the old map's valley floor used to be is worse than no village. LoadSettlementScenario
+        // builds its own world and calls LoadRelief itself, so the two paths differ by which one is asked.
+        if (mapLab)
+        {
+            simulation = new SimulationWorld(worldExtentMeters);
+            LoadRelief();
+        }
+        else
+        {
+            selection.Clear();
+            LoadSettlementScenario();
+        }
+
         ReportPick();
-        SurveyWindows();
+        if (mapLab) SurveyWindows();
     }
 
     /// <summary>
@@ -2687,6 +2784,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Console.WriteLine(
             $"  woodland: {Woodland.CoverTrees} trees within {Woodland.CoverRadius:F1} m closes ground " +
             $"— {ClosedGroundShare(simulation) * 100f:F1}% of the map is now wood");
+        ReportWoodlandSpread();
     }
 
     private Vector2 woodlandRequested = new(-1f, -1f);
@@ -3042,11 +3140,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // a metres-per-pixel figure built from frame.Height mixes two units — and on a retina display the two
         // differ by a factor of two, which silently doubled every screen-space size computed from it. The rule
         // that culls transition bands under three pixels was therefore measuring six.
-        viewportPixels = host.LogicalSize.Height;
+        windowSize = host.LogicalSize;
+        viewportPixels = windowSize.Height;
+        woodlandAsked = -WoodlandCover.Asked;
         RebuildCanopyDensity();
+        // <b>"terrain" measured the terrain <em>and every node on it</em>, and that cost me an hour.</b>
+        // BuildTerrainInstances calls BuildNodeInstances, so a figure labelled terrain was mostly tree drawing —
+        // which sent me looking for a chunk rebuild that was not happening while thirty-five milliseconds of
+        // woodland queries sat in plain sight under the wrong name. An instrument that lies is worse than no
+        // instrument, because it is believed.
+        //
+        // Split, and the ground phase is now the ground. The label is the fix, not the timing.
         var buildClock = Stopwatch.StartNew();
         BuildTerrainInstances();
-        var terrainMs = buildClock.Elapsed.TotalMilliseconds;
+        var terrainMs = buildClock.Elapsed.TotalMilliseconds - nodeMilliseconds;
         buildClock.Restart();
         BuildAgentInstances((float)time.Total);
         var agentMs = buildClock.Elapsed.TotalMilliseconds;
@@ -3200,9 +3307,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // frame took the terrain build phase from 1.4 ms to 13.1. The figure is one number about the camera and
         // has no business being recomputed per chunk — the same mistake as any other loop-invariant, made
         // louder by the invariant being a call across an interop boundary.
-        var metresPerPixel = viewportPixels > 0f
-            ? 2f * VisibleGroundRadius / viewportPixels
-            : 0.001f;
+        // Frame constants, computed once. Cheap now that the window size is cached, and still wrong to
+        // recompute per chunk — a number about the camera does not vary between chunks.
+        var visible = VisibleGroundRadius;
+        var groundReach = GroundDrawRadius;
+        var detailReach = DetailRadius;
+        var metresPerPixel = viewportPixels > 0f ? 2f * visible / viewportPixels : 0.001f;
         var bandsWorthDrawing =
             GroundRenderStep * simulation.Navigation.Transform.CellSize * 1.5f / metresPerPixel >= 3f;
         foreach (var (chunk, layers) in groundChunks)
@@ -3210,11 +3320,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var minimum = simulation.Navigation.Transform.Origin + new Vector2(chunk.X, chunk.Z) * chunkMetres;
             // Against the nearest corner, so a chunk the camera stands on the edge of is drawn.
             var nearest = Vector2.Clamp(cameraFocus, minimum, minimum + new Vector2(chunkMetres));
-            var reach = GroundDrawRadius;
             var away = Vector2.DistanceSquared(nearest, cameraFocus);
-            if (away > reach * reach) continue;
+            if (away > groundReach * groundReach) continue;
             drawnChunks.Add(chunk);
-            var blended = away <= DetailRadius * DetailRadius && bandsWorthDrawing;
+            var blended = away <= detailReach * detailReach && bandsWorthDrawing;
             if (blended) blendedChunks.Add(chunk);
             foreach (var layer in layers)
             {
@@ -3235,12 +3344,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Before the nodes are built, because that is what draws the trees and therefore their skirts.
         undergrowthDrawn = 0;
         treesDrawn = 0;
-        treeTiers = (0, 0, 0);
+        treeTiers = (0, 0, 0, 0);
         habitationLights = 0;
         contactInstances.Clear();
         BuildObstacleInstances();
         DrawWindow();
+        var nodeClock = Stopwatch.StartNew();
         BuildNodeInstances();
+        nodeMilliseconds = nodeClock.Elapsed.TotalMilliseconds;
         BuildNavigationOverlay();
         BuildPathDebug();
         BuildVelocityDebug();
@@ -3826,14 +3937,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // ground the classifier is asked about rather than by second-guessing its answer — so the mixing
         // happens in the same units the rule is written in.
         var wobble = new Vector2(jitter - 0.5f, (hash & 0xFFu) / 255f - 0.5f) * 22f;
-        // <b>The region decides what a wood is made of, and the biome decides the exception.</b> A boreal
-        // pasture grows pine and a fen grows willow, so keying species off the biome alone gave every region
-        // the same wood with the same three species in it. Below the share, broadleaf; above it, conifer —
-        // and the jitter that already ragged the biome boundaries does the same for this one, so a region's
-        // mix is a mix rather than a rule anybody can see.
+        // <b>The region decides what a wood is made of, the biome decides the exception, and how crowded a
+        // place is decides the rest.</b> Biome alone gave every region the same wood; region and biome together
+        // still gave a closed forest and a field with three trees in it the same species mix, which is the one
+        // distinction a person actually reads. A closed wood is nearly a monoculture — whatever won there won
+        // everywhere — and open ground keeps the survivors, which are the crooked and the dead.
         var conifers = RegionProfile.For(simulation.Terrain.Region).ConiferShare;
+        // <b>The field, not the renderer's canopy counts.</b> Those counts exist for level of detail and are a
+        // dressing-side <em>proxy</em> for woodland pressure: they measure how many trees were placed nearby,
+        // which is downstream of the thing that decided to place them. Species is a question about the wood, so
+        // it asks the wood.
+        var pressure = simulation.Terrain.Woodland?.At(at) ?? 1f;
         var range = CountryAt(at + wobble) switch
         {
+            // <b>The biome exceptions come first, because they are about what can live there at all.</b> No
+            // amount of crowding makes a marsh grow pine.
             Biome.Scree => Conifer,
             Biome.Crag => Conifer,
             Biome.Moor => Twisted,
@@ -3841,9 +3959,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // <b>Floodplain gets the twisted form, and it is standing in for a willow.</b> What survives on
             // a river flat is the thing that tolerates having its roots underwater half the year and being
             // grazed the rest, and in this kit that is the low crooked shape rather than the tall clean one.
-            // The density rule has already made these rare — see SettlementScenarios.WoodlandFor — so what
-            // this decides is what the few look like, which is the fringe along the water.
             Biome.Floodplain => Twisted,
+            // <b>A closed wood is almost one species.</b> Whatever suits the region best crowds out the rest,
+            // so past the crowding threshold the mix collapses toward the region's own — the jitter is squared,
+            // which pushes it to whichever end it was already leaning.
+            _ when pressure >= 0.85f => jitter * jitter < conifers ? Conifer : Broadleaf,
+            // <b>And a straggler is a survivor.</b> One tree in a field is there because nothing removed it:
+            // a crooked hedgerow oak, or a standing dead one. Half the stragglers are the shapes nobody would
+            // plant — which is exactly what makes open country read as open rather than as thin forest.
+            _ when pressure <= 0.22f => jitter < 0.42f ? Twisted : (jitter < 0.58f ? Dead : Broadleaf),
             _ => jitter < conifers ? Conifer : Broadleaf,
         };
 
@@ -4014,7 +4138,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         {
             // A tree is drawn wider than the trunk it is routed around, because a canopy overhangs and
             // nothing walks into a canopy. Its footprint in the simulation is the trunk.
-            var width = NodeFootprint.TreeHalfExtent * 2f * 3.1f * spread * MathF.Sqrt(left);
+            // <b>An open tree has a wide crown and a forest tree has a narrow one, and that is not decoration.</b>
+            // A crown grows into whatever light it can reach: standing alone it spreads, and in a closed stand
+            // it is squeezed by its neighbours into a column. Which means the same amount of woodland reads
+            // completely differently at the two ends — scattered parkland of broad crowns against a wall of
+            // narrow ones — and until now density changed only how many trees there were, so more woodland was
+            // more copies of the same tree.
+            //
+            // A fifth either side. Small enough that no single tree looks wrong and large enough that a
+            // hillside of them does not look stamped.
+            var canopy = simulation.Terrain.Woodland is { } cover
+                ? 1.22f - 0.34f * Math.Clamp(cover.At(tree.Position), 0f, 1.2f)
+                : 1f;
+            var width = NodeFootprint.TreeHalfExtent * 2f * 3.1f * spread * MathF.Sqrt(left) * canopy;
             if (!InView(tree.Position, ground, width * 1.4f, width * 0.6f)) return;
             var kind = TreeKindAt(tree.Position, tree.Id.Value);
             var placement = SettlementArt.Placement(
@@ -4051,10 +4187,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 art.TreesMid[kind].Add(placement);
                 treeTiers.Mid++;
             }
-            else
+            else if (tier == 2)
             {
                 art.TreesFar[kind].Add(placement);
                 treeTiers.Far++;
+            }
+            else
+            {
+                art.TreesDeep[kind].Add(placement);
+                treeTiers.Deep++;
             }
 
             treesDrawn++;
@@ -4140,8 +4281,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             return;
         }
 
+        // <b>Undergrowth peaks at a wood's edge, not in its middle.</b> Which is the opposite of the obvious
+        // rule — more trees, more scrub — and it is what a wood actually looks like: a closed canopy shades its
+        // own floor bare, while the margin gets light from the side and chokes. So a wood ends up with a thick
+        // edge and a walkable interior, which is a far better read than uniform scrub, and it is also the thing
+        // that makes the edge legible from outside as an edge.
+        //
+        // A triangle on pressure, peaking around the half-closed mark. Open ground gets almost none, because a
+        // lone tree in a field has grass under it rather than bramble.
+        var pressure = simulation.Terrain.Woodland?.At(tree.Position) ?? 0.6f;
+        var edge = 1f - MathF.Abs(Math.Clamp(pressure, 0f, 1.2f) - 0.55f) / 0.65f;
+        if (edge <= 0.08f) return;
+
         var id = tree.Id.Value;
-        var clumps = 1 + id * 31 % 2;
+        var clumps = 1 + (int)MathF.Round(edge * (1f + id * 31 % 2));
         for (var i = 0; i < clumps; i++)
         {
             var angle = (id * 47 + i * 137) % 360 * MathF.PI / 180f;
@@ -4458,6 +4611,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     {
         if (canopyCells == 0) return 0;
         var crowd = canopyCounts[CanopyIndex(at)];
+        // <b>A fourth tier at twice the crowding the third needs.</b> The rule is the same one all the way up:
+        // a coarse level loses mass and the neighbours put it back, so the deeper into a wood a tree is the
+        // less its own shape is doing. Twice, rather than a new dial, because that is the statement — "twice
+        // as crowded as crowded" — and a number would invite tuning where a relationship does not.
+        if (crowd >= look.TreeCrowdFar * 2f) return 3;
         if (crowd >= look.TreeCrowdFar) return 2;
         return crowd >= look.TreeCrowdMid ? 1 : 0;
     }
@@ -5121,11 +5279,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // What the dressing is spending, on the same line as what can be seen, because both of the
             // questions they answer are "is this frame drawing more than it needs to".
             $"FRAME {frameMilliseconds:F1} ms · " +
-            $"BUILD terrain {buildPhases.Terrain:F1} agents {buildPhases.Agents:F1} " +
+            $"BUILD ground {buildPhases.Terrain:F1} nodes {nodeMilliseconds:F1} agents {buildPhases.Agents:F1} " +
             $"scatter {buildPhases.Scatter:F1} overlay {buildPhases.Overlay:F1} ms · " +
             $"LOAD {stagedLoad.Instances:N0} instances = {stagedLoad.Triangles / 1000L:N0}k triangles " +
             $"+ {stagedLoad.Casters / 1000L:N0}k cast · " +
-            $"TREES {treeTiers.Near}/{treeTiers.Mid}/{treeTiers.Far} near/mid/far over " +
+            $"TREES {treeTiers.Near}/{treeTiers.Mid}/{treeTiers.Far}/{treeTiers.Deep} near/mid/far/deep over " +
             $"{look.TreeCrowdMid:F0}/{look.TreeCrowdFar:F0} per {CanopyCellMetres:F0} m · " +
             $"{undergrowthDrawn} under · " +
             $"GROUND {drawnChunks.Count} of {groundChunks.Count} chunks, " +
@@ -5133,6 +5291,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"+ {blendedChunks.Sum(chunk => groundChunks[chunk].Count(layer => layer.Blend))} blends " +
             $"+ {drawnChunks.Sum(chunk => groundChunks[chunk].Count(layer => layer.Water))} water at " +
             $"{GroundRenderStep * simulation.Navigation.Transform.CellSize:F1} m · " +
+            $"WOODASK {woodlandAsked + WoodlandCover.Asked:N0} · " +
+            $"REBUILDS {terrainRebuilds} · " +
             $"CONTACT {contactInstances.Count} · " +
             $"HEIGHT {simulation.Terrain.SampleHeight(cameraFocus):F1} m " +
             $"(grade {simulation.Terrain.SampleGrade(cameraFocus):F2}) · " +
@@ -5296,6 +5456,24 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 break;
             case Key.O when mapLab:
                 SurveyWindows();
+                break;
+            // <b>Rolling a new map while playing, on the modifier that already means "the other thing".</b>
+            // Every letter is taken in the village — Q and E turn the camera, Y unassigns — and Ctrl is the
+            // established way to say a second meaning here: Ctrl+A places a house where A places a field.
+            //
+            // Worth having at all because the generator is now one generator. The lab and the village build
+            // their ground the same way, so "show me another map" is the same question in both, and answering
+            // it only in the tool that cannot be played was an accident of which one was written first.
+            case Key.N when additiveSelection && !mapLab:
+                RollLab(0, reseed: true);
+                break;
+            case Key.M when additiveSelection && !mapLab:
+                RollLab(1, reseed: false);
+                break;
+            case Key.B when additiveSelection && !mapLab:
+                labRegion = RegionProfile.All[
+                    (Array.IndexOf(RegionProfile.All, labRegion) + 1) % RegionProfile.All.Length];
+                RollLab(0, reseed: false);
                 break;
             case Key.Escape:
                 if (obstacleEditMode)
