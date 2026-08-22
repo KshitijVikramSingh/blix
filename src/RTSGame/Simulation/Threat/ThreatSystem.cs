@@ -527,7 +527,7 @@ internal sealed class ThreatSystem
         foreach (ref readonly var node in nodes.All)
         {
             if (!node.IsAlive || node.Stock.Total <= 0) continue;
-            if (node.IsStanding) continue;
+            if (node.IsNaturalDeposit) continue;
             if (!node.Stores && !node.IsPile) continue;
             if (node.Faction != body.Faction && !node.IsPile) continue;
             guarded.Add(node.Position);

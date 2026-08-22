@@ -190,7 +190,7 @@ internal sealed class Hearths
         var reachSquared = reachMetres * reachMetres;
         foreach (ref readonly var node in world.Nodes.All)
         {
-            if (!node.IsAlive || node.IsStanding || node.IsPile) continue;
+            if (!node.IsAlive || node.IsNaturalDeposit || node.IsPile) continue;
             var toFocus = Vector2.DistanceSquared(node.Position, focus);
             if (toFocus > reachSquared) continue;
 

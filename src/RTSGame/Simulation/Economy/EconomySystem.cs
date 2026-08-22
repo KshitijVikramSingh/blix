@@ -11,14 +11,60 @@ internal struct ResourceTotals
 {
     public long Grain;
     public long Wood;
+    public long Stone;
 
     public long this[Resource resource]
     {
-        readonly get => resource == Resource.Grain ? Grain : Wood;
+        readonly get => resource switch
+        {
+            Resource.Grain => Grain,
+            Resource.Wood => Wood,
+            Resource.Stone => Stone,
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(resource), resource, "this store has no field for that resource"),
+        };
         set
         {
-            if (resource == Resource.Grain) Grain = value;
-            else Wood = value;
+            switch (resource)
+            {
+                case Resource.Grain: Grain = value; break;
+                case Resource.Wood: Wood = value; break;
+                case Resource.Stone: Stone = value; break;
+                default:
+                    throw new ArgumentOutOfRangeException(
+                        nameof(resource), resource, "this store has no field for that resource");
+            }
+        }
+    }
+
+    /// <summary>
+    /// How far off the books are in total, counting each resource's error as an error.
+    /// </summary>
+    /// <remarks>
+    /// Absolute values, because a drift is a fault whichever direction it goes and two faults must not cancel
+    /// into a clean bill. A plain sum reported zero for one unit appearing here and one vanishing there.
+    /// </remarks>
+    public readonly long Fault
+    {
+        get
+        {
+            var total = 0L;
+            foreach (var resource in Resources.All) total += Math.Abs(this[resource]);
+            return total;
+        }
+    }
+
+    /// <summary>Whether every resource is exactly zero. See <see cref="NodeStock.IsZero"/>.</summary>
+    public readonly bool IsZero
+    {
+        get
+        {
+            foreach (var resource in Resources.All)
+            {
+                if (this[resource] != 0) return false;
+            }
+
+            return true;
         }
     }
 
@@ -339,7 +385,7 @@ internal sealed class EconomySystem
             // Wood income is however many axes are actually swinging. Not a rate a building has and not
             // a headcount of people who call themselves woodcutters: a cutter walking a load in, or one
             // whose trees have run out, is contributing nothing this second and the figure should say so.
-            produced += CuttersAtWork(agents) * Woodland.CutPerSecond;
+            produced += DepositWorkersAtWork(agents, resource) * Deposits.TakePerSecond(resource);
         }
 
         var net = draw - produced;
@@ -618,7 +664,11 @@ internal sealed class EconomySystem
             // Working means being there. A body still walking to the site is not breaking any ground
             // and not cutting any wood.
             if (!JobSystem.IsWorking(in body)) continue;
-            if (nodes.Get(siteId).Kind == NodeKind.Tree)
+            // Both deposits take the same branch: a shift at a deposit is labour against a stock, and which
+            // stock it is comes off the node. Left as a Tree-only test, a quarrier stood at its rock all year
+            // and fell through to the crop code, which returned it as "not a farm" — no error, no work, and a
+            // stone column of zeros that read exactly like an out-of-reach quarry.
+            if (nodes.Get(siteId).IsNaturalDeposit)
             {
                 Cut(ref nodes.Get(siteId), ref body, deltaSeconds);
                 continue;
@@ -731,31 +781,34 @@ internal sealed class EconomySystem
     /// more units does not silently destroy the third.
     /// </para>
     /// </remarks>
-    private static void Cut(ref EconomyNode tree, ref AgentState body, float deltaSeconds)
+    private static void Cut(ref EconomyNode deposit, ref AgentState body, float deltaSeconds)
     {
+        // Which resource this is comes off the deposit rather than off the assignment, because the deposit is
+        // the thing that has it. A body sent to an outcrop cannot come back with wood.
+        var resource = Deposits.ResourceOf(deposit.Kind);
         var room = body.CarryCapacity - body.Jobs.CarriedUnits;
-        if (room <= 0 || tree.Stock.Wood <= 0)
+        if (room <= 0 || deposit.Stock[resource] <= 0)
         {
             JobSystem.EndShift(ref body);
             return;
         }
 
-        var whole = tree.Pending.Accrue(Resource.Wood, Woodland.CutPerSecond * deltaSeconds);
+        var whole = deposit.Pending.Accrue(resource, Deposits.TakePerSecond(resource) * deltaSeconds);
         if (whole > 0)
         {
-            var taken = Math.Min(whole, Math.Min(room, tree.Stock.Wood));
+            var taken = Math.Min(whole, Math.Min(room, deposit.Stock[resource]));
             if (taken > 0)
             {
-                tree.Stock.Wood -= taken;
-                body.Jobs.Carrying = Resource.Wood;
+                deposit.Stock[resource] -= taken;
+                body.Jobs.Carrying = resource;
                 body.Jobs.CarriedUnits += taken;
             }
 
-            // Cut but not carried: the axe swing still happened, so the labour stays on the tree.
-            if (whole > taken) tree.Pending.Wood += whole - taken;
+            // Worked but not carried: the swing still happened, so the labour stays on the deposit.
+            if (whole > taken) deposit.Pending[resource] += whole - taken;
         }
 
-        if (tree.Stock.Wood <= 0 || body.Jobs.CarriedUnits >= body.CarryCapacity)
+        if (deposit.Stock[resource] <= 0 || body.Jobs.CarriedUnits >= body.CarryCapacity)
         {
             JobSystem.EndShift(ref body);
         }
@@ -1045,35 +1098,47 @@ internal sealed class EconomySystem
         }
     }
 
-    /// <summary>Bodies currently standing at a tree with an axe in them.</summary>
-    public static int CuttersAtWork(AgentStore agents)
+    /// <summary>Bodies currently standing at a deposit of this resource, working it.</summary>
+    /// <remarks>
+    /// Hands actually on the rock or the trunk, rather than people who hold the job — which is the
+    /// distinction the wood income figure was built on and it matters more for stone, where the walk is
+    /// longer and a larger share of a quarrier's day is spent on the road rather than at the face.
+    /// </remarks>
+    public static int DepositWorkersAtWork(AgentStore agents, Resource resource)
     {
-        var cutting = 0;
+        var working = 0;
         foreach (ref readonly var agent in agents.All)
         {
             if (!agent.IsAlive || agent.Jobs.IsInterrupted) continue;
             if (agent.Jobs.Assignment.Kind != AssignmentKind.Work) continue;
-            if (agent.Jobs.Assignment.Cargo != Resource.Wood) continue;
+            if (agent.Jobs.Assignment.Cargo != resource) continue;
             if (agent.Jobs.Leg % 2 != 0 || !JobSystem.IsWorking(in agent)) continue;
-            cutting++;
+            working++;
         }
 
-        return cutting;
+        return working;
     }
 
-    /// <summary>Bodies whose standing job is to cut wood, wherever they are in the round trip.</summary>
-    public static int Cutters(AgentStore agents)
+    /// <summary>Bodies currently standing at a tree with an axe in them.</summary>
+    public static int CuttersAtWork(AgentStore agents) =>
+        DepositWorkersAtWork(agents, Resource.Wood);
+
+    /// <summary>Bodies whose standing job is to work a deposit, wherever they are in the round trip.</summary>
+    public static int DepositWorkers(AgentStore agents, Resource resource)
     {
-        var cutters = 0;
+        var workers = 0;
         foreach (ref readonly var agent in agents.All)
         {
             if (!agent.IsAlive) continue;
             if (agent.Jobs.Assignment.Kind != AssignmentKind.Work) continue;
-            if (agent.Jobs.Assignment.Cargo == Resource.Wood) cutters++;
+            if (agent.Jobs.Assignment.Cargo == resource) workers++;
         }
 
-        return cutters;
+        return workers;
     }
+
+    /// <summary>Bodies whose standing job is to cut wood, wherever they are in the round trip.</summary>
+    public static int Cutters(AgentStore agents) => DepositWorkers(agents, Resource.Wood);
 
     /// <summary>
     /// Removes what has been used up: heaps that have been carried away and trees that have been felled.
@@ -1091,7 +1156,7 @@ internal sealed class EconomySystem
             var id = new NodeId(slot);
             if (!nodes.Contains(id)) continue;
             ref readonly var node = ref nodes.Get(id);
-            if (!(node.IsPile || node.IsStanding) || node.Stock.Total > 0) continue;
+            if (!(node.IsPile || node.IsNaturalDeposit) || node.Stock.Total > 0) continue;
             var standing = node.IsStanding;
             var where = node.Position;
             nodes.Remove(id);
@@ -1113,10 +1178,11 @@ internal sealed class EconomySystem
     /// <summary>Whether a body could get to a tree at all — see <c>SimulationWorld.CanReachTree</c>.</summary>
     internal delegate bool Reachable(Vector2 position);
 
-    public static NodeId NearestTree(
+    public static NodeId NearestDeposit(
         NodeStore nodes,
         AgentStore agents,
         Vector2 from,
+        Resource resource,
         float reachMetres,
         AgentId self,
         Reachable? reachable)
@@ -1125,7 +1191,7 @@ internal sealed class EconomySystem
         var bestDistance = reachMetres * reachMetres;
         foreach (ref readonly var node in nodes.All)
         {
-            if (!node.IsAlive || !node.IsStanding || node.Stock.Wood <= 0) continue;
+            if (!node.IsAlive || !node.IsNaturalDeposit || node.Stock[resource] <= 0) continue;
             var distance = Vector2.DistanceSquared(node.Position, from);
             if (distance > bestDistance) continue;
             if (IsClaimed(agents, node.Id, self)) continue;
@@ -1137,7 +1203,7 @@ internal sealed class EconomySystem
         // Everything in reach already has somebody on it. Sharing a trunk is legitimate — two axes fell
         // a tree in half the time — so the claim is a preference and not a lock; without the fallback a
         // seventh cutter with six trees in reach would simply stop.
-        return best.IsValid ? best : NearestTree(nodes, from, reachMetres, reachable);
+        return best.IsValid ? best : NearestDeposit(nodes, from, resource, reachMetres, reachable);
     }
 
     /// <summary>The nearest reachable tree with wood in it, whoever else is already on it.</summary>
@@ -1148,9 +1214,10 @@ internal sealed class EconomySystem
     /// wood while standing next to a forest. Only the fringe can be worked, which is the mechanic: fell the
     /// edge and the edge moves in.
     /// </remarks>
-    public static NodeId NearestTree(
+    public static NodeId NearestDeposit(
         NodeStore nodes,
         Vector2 from,
+        Resource resource,
         float reachMetres,
         Reachable? reachable = null)
     {
@@ -1158,7 +1225,7 @@ internal sealed class EconomySystem
         var bestDistance = reachMetres * reachMetres;
         foreach (ref readonly var node in nodes.All)
         {
-            if (!node.IsAlive || !node.IsStanding || node.Stock.Wood <= 0) continue;
+            if (!node.IsAlive || !node.IsNaturalDeposit || node.Stock[resource] <= 0) continue;
             var distance = Vector2.DistanceSquared(node.Position, from);
             if (distance > bestDistance) continue;
             if (reachable is not null && !reachable(node.Position)) continue;
@@ -1207,11 +1274,12 @@ internal sealed class EconomySystem
     /// to work, and no store anywhere having a tree in reach is the settlement being told, unambiguously,
     /// that it has run out of forest.
     /// </remarks>
-    public static (NodeId Store, NodeId Tree) NearestBaseWithTrees(
+    public static (NodeId Store, NodeId Deposit) NearestBaseWithDeposit(
         NodeStore nodes,
         AgentStore agents,
         FactionId faction,
         Vector2 from,
+        Resource resource,
         float reachMetres,
         AgentId self,
         Reachable? reachable)
@@ -1222,8 +1290,8 @@ internal sealed class EconomySystem
         foreach (ref readonly var store in nodes.All)
         {
             if (!store.IsAlive || !store.Stores || store.Faction != faction) continue;
-            if (store.RoomFor(Resource.Wood) <= 0) continue;
-            var tree = NearestTree(nodes, agents, store.Position, reachMetres, self, reachable);
+            if (store.RoomFor(resource) <= 0) continue;
+            var tree = NearestDeposit(nodes, agents, store.Position, resource, reachMetres, self, reachable);
             if (!tree.IsValid) continue;
             var distance = Vector2.DistanceSquared(store.Position, from);
             if (distance >= bestDistance) continue;
@@ -1326,7 +1394,7 @@ internal sealed class EconomySystem
             // A tree is not a delivery. Standing timber is released by an axe, not collected by a cart,
             // and a woodland is two orders of magnitude more numerous than the buildings — so it is
             // skipped first, before the per-resource sweep, rather than falling through every test.
-            if (!source.IsAlive || source.IsStanding) continue;
+            if (!source.IsAlive || source.IsNaturalDeposit) continue;
             // Nor is a site a source. It is holding timber that is about to become a wall.
             if (source.IsUnderConstruction) continue;
             var stranded = source.Stores && !drawnOn.Contains(source.Id);

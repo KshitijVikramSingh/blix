@@ -800,9 +800,17 @@ internal sealed class SimulationWorld
             NodeKind.Farm => Assignment.Work(
                 at, site.Position, site.FootprintRadius, Resource.Grain,
                 EconomySystem.WorkShiftSeconds, EconomySystem.HandoverSeconds),
+            // <b>Both deposits, and the shift length comes off the resource being assigned.</b> Written for a
+            // moment as the body's <em>current</em> cargo, which is the cargo of the job it is leaving — so a
+            // villager moving from the fields to a tree would have been given a grain shift at a trunk.
             NodeKind.Tree => Assignment.Work(
                 at, site.Position, site.FootprintRadius, Resource.Wood,
-                Woodland.LoadSeconds(agent.CarryCapacity), EconomySystem.HandoverSeconds),
+                Deposits.LoadSeconds(Resource.Wood, agent.CarryCapacity),
+                EconomySystem.HandoverSeconds),
+            NodeKind.Outcrop => Assignment.Work(
+                at, site.Position, site.FootprintRadius, Resource.Stone,
+                Deposits.LoadSeconds(Resource.Stone, agent.CarryCapacity),
+                EconomySystem.HandoverSeconds),
             _ => assignment,
         };
     }
@@ -2190,19 +2198,23 @@ internal sealed class SimulationWorld
     private bool TrySendBackToWork(ref AgentState agent)
     {
         var assignment = agent.Jobs.Assignment;
-        if (assignment.Cargo == Resource.Wood)
+        if (Deposits.IsDeposit(assignment.Cargo))
         {
+            // <b>One chain for both deposits, asking Deposits which reach applies.</b> Copying it per resource
+            // would have made the re-basing rule below — the thing that turns a depot into a working quarry —
+            // two rules that have to be kept in step by hand.
+            var reach = Deposits.ReachMetres(assignment.Cargo);
             // Base the search on the store just delivered to, falling back to where the body is standing
             // on the very first shift, when it has not delivered anything yet.
             var from = Nodes.Contains(assignment.Sink)
                 ? Nodes.Get(assignment.Sink).Position
                 : agent.Position;
-            var tree = EconomySystem.NearestTree(
-                Nodes, Agents, from, Woodland.ReachMetres, agent.Id, CanReachTree);
+            var tree = EconomySystem.NearestDeposit(
+                Nodes, Agents, from, assignment.Cargo, reach, agent.Id, CanReachTree);
             if (!tree.IsValid)
             {
-                var (store, elsewhere) = EconomySystem.NearestBaseWithTrees(
-                    Nodes, Agents, agent.Faction, agent.Position, Woodland.ReachMetres, agent.Id,
+                var (store, elsewhere) = EconomySystem.NearestBaseWithDeposit(
+                    Nodes, Agents, agent.Faction, agent.Position, assignment.Cargo, reach, agent.Id,
                     CanReachTree);
                 if (!elsewhere.IsValid) return false;
                 tree = elsewhere;

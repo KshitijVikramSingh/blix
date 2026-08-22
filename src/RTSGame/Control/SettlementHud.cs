@@ -293,10 +293,16 @@ internal sealed class SettlementHud : IDisposable
         {
             NodeKind.Farm => CropCycle.StateOf(in node, world.Date.Season),
             NodeKind.Tree => $"{Woodland.StateOf(in node)}, {node.Stock.Wood} wood",
+            NodeKind.Outcrop => $"{Quarrying.StateOf(in node)}, {node.Stock.Stone} stone",
             NodeKind.House => $"{node.Occupants}/{node.Occupancy} living here" +
                               (node.Privation > 0.5f ? " · GOING HUNGRY" : string.Empty),
-            NodeKind.Pile => $"{node.Stock.Grain + node.Stock.Wood} lying on the ground",
-            _ => $"{node.Stock.Grain:N0} grain, {node.Stock.Wood:N0} wood",
+            // <b>Total, not two named fields.</b> Both of these read the resources rather than listing them,
+            // because a panel that names the resources it knows about is a panel that silently stops mentioning
+            // the next one — a stone pile read "0 lying on the ground" and a store holding nothing but stone
+            // read "0 grain, 0 wood". The same shape as the ledger sweeps in Resource.cs, in the layer where
+            // being wrong is merely invisible rather than unbalanced.
+            NodeKind.Pile => $"{node.Stock.Total} lying on the ground",
+            _ => Held(in node),
         };
 
         var hands = node.Hands > 0 ? $" · {node.Hands} at work" : string.Empty;
@@ -382,6 +388,25 @@ internal sealed class SettlementHud : IDisposable
                 Shadow);
             batch.DrawText(font!, size, text, position, colour);
         }
+    }
+
+    /// <summary>What a store is holding, naming only what is actually in it.</summary>
+    /// <remarks>
+    /// Built from <see cref="Resources.All"/> so a resource added later appears here without anybody
+    /// remembering to add it, and skipping empties so a granary with grain in it does not read
+    /// "4,200 grain, 0 wood, 0 stone" — the zeros are the least interesting thing on a crowded panel, and one
+    /// per resource is a line that gets longer every time the game gets richer.
+    /// </remarks>
+    private static string Held(in EconomyNode node)
+    {
+        var parts = new List<string>();
+        foreach (var resource in Resources.All)
+        {
+            var units = node.Stock[resource];
+            if (units != 0) parts.Add($"{units:N0} {resource.ToString().ToLowerInvariant()}");
+        }
+
+        return parts.Count == 0 ? "empty" : string.Join(", ", parts);
     }
 
     public void Dispose() => batch.Dispose();

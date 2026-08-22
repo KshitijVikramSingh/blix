@@ -3226,10 +3226,20 @@ internal static class SimulationSelfTests
                     resource, WorldCalendar.At(second).Season, appetite: 1f);
             }
 
-            var nominalDrawn = resource == Resource.Grain
-                ? EconomyRates.GrainPerVillagerPerYear
-                : EconomyRates.WoodPerVillagerPerYear;
-            normalised &= MathF.Abs(drawn - nominalDrawn) < nominalDrawn * 0.002f;
+            var nominalDrawn = resource switch
+            {
+                Resource.Grain => EconomyRates.GrainPerVillagerPerYear,
+                Resource.Wood => EconomyRates.WoodPerVillagerPerYear,
+                _ => 0f,
+            };
+            // <b>A relative tolerance cannot check a nominal of zero, and stone's nominal is legitimately
+            // zero.</b> `|drawn - 0| < 0 * 0.002` is false however right the answer is, so the first run with a
+            // third resource failed this test while printing "Stone drawn 0/0" in its own evidence line. The
+            // rule the test wants is "nothing draws stone", which is an exact claim rather than an approximate
+            // one — so a resource nobody has written a draw for is checked exactly, and the rest by proportion.
+            normalised &= nominalDrawn <= 0f
+                ? drawn == 0f
+                : MathF.Abs(drawn - nominalDrawn) < nominalDrawn * 0.002f;
             report.Add($"{resource} drawn {drawn:F0}/{nominalDrawn:F0}");
         }
 
@@ -3327,7 +3337,7 @@ internal static class SimulationSelfTests
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
-            if (drift.Grain != 0 || drift.Wood != 0) break;
+            if (!drift.IsZero) break;
         }
 
         foreach (ref readonly var agent in world.Agents.All)
@@ -3356,7 +3366,7 @@ internal static class SimulationSelfTests
         var stored = world.Nodes.Get(granary).Stock.Grain;
         // And no hauling at all, which is the point rather than an omission: the producer carries its own
         // crop, the granary is next door, and a settlement this compact has nothing for a cart to do.
-        var passed = drift.Grain == 0 && drift.Wood == 0 && stalled == 0 && worked == 3 &&
+        var passed = drift.IsZero && stalled == 0 && worked == 3 &&
                      world.Economy.Produced.Grain > 0 && world.Economy.Consumed.Grain > 0 &&
                      world.Economy.HaulsAssigned == 0 && stored > 0;
         Console.WriteLine(
@@ -3604,7 +3614,7 @@ internal static class SimulationSelfTests
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
-            if (drift.Grain != 0 || drift.Wood != 0) break;
+            if (!drift.IsZero) break;
         }
 
         var stored = world.Nodes.Get(granary).Stock.Grain;
@@ -3615,7 +3625,7 @@ internal static class SimulationSelfTests
         // The prepared field is being reaped and its crop is arriving; the unbroken one is not touched at
         // all, because there is nothing there to reap.
         var passed = reaped > 0f && barren == 0f && stored > 0 &&
-                     says == "failed" && drift.Grain == 0 && drift.Wood == 0;
+                     says == "failed" && drift.IsZero;
         Console.WriteLine(
             $"    prepared field reaped {reaped:F0} labour-s and delivered {stored} grain; " +
             $"unbroken field reaped {barren:F0} and says '{says}'; drift {drift.Grain}");
@@ -3659,7 +3669,7 @@ internal static class SimulationSelfTests
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
-            if (drift.Grain != 0 || drift.Wood != 0) break;
+            if (!drift.IsZero) break;
             if (!world.Nodes.Contains(tree)) felled = true;
         }
 
@@ -3670,7 +3680,7 @@ internal static class SimulationSelfTests
                         (int)world.Economy.Consumed.Wood + standing;
         var passed = felled && trees == 0 && world.Economy.Produced.Wood == 0 &&
                      stored > 0 && accounted == seeded &&
-                     drift.Grain == 0 && drift.Wood == 0;
+                     drift.IsZero;
         Console.WriteLine(
             $"    one tree of {seeded} wood: felled={felled}, {trees} left standing, " +
             $"{stored} in the granary, produced {world.Economy.Produced.Wood} (must be 0), " +
@@ -3765,7 +3775,7 @@ internal static class SimulationSelfTests
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             var discrepancy = world.Economy.Discrepancy(world.Nodes, world.Agents);
-            drift = discrepancy.Grain + discrepancy.Wood;
+            drift = discrepancy.Fault;
             if (drift != 0) break;
         }
 
@@ -3862,7 +3872,7 @@ internal static class SimulationSelfTests
 
         var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
         var passed = granted && refused && paid && wore && moved > 0 && legs > 2 && stillOnRoute &&
-                     keptThroughAnOrder && scrapped && drift.Grain == 0 && drift.Wood == 0;
+                     keptThroughAnOrder && scrapped && drift.IsZero;
         Console.WriteLine(
             $"    cart cost {SimulationWorld.CartTimber} wood (paid={paid}), second one refused={refused}, " +
             $"body {wideBefore:F2}->{UnitType.HaulerCart.Radius:F2} m (worn={wore}); route ran {legs} legs, " +
@@ -3927,7 +3937,7 @@ internal static class SimulationSelfTests
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             var discrepancy = world.Economy.Discrepancy(world.Nodes, world.Agents);
-            drift = discrepancy.Grain + discrepancy.Wood;
+            drift = discrepancy.Fault;
             if (drift != 0) break;
             if (!world.Nodes.Contains(site)) break;
             if (deliveredAt < 0f && world.Nodes.Get(site).TimberWanted == 0)
@@ -3998,7 +4008,7 @@ internal static class SimulationSelfTests
         var stoppedWhenEmpty = poorBorn == 0 && poorReadiness <= 0.001f;
 
         var passed = born > 0 && grewRoomy && fullStayedFull && strandedGrewNobody &&
-                     readiness > 0.9f && stoppedWhenEmpty && drift.Grain == 0 && drift.Wood == 0;
+                     readiness > 0.9f && stoppedWhenEmpty && drift.IsZero;
         Console.WriteLine(
             $"    a year at {readiness * 100f:F0}% readiness: {started} -> {world.Agents.LiveCount} people, " +
             $"{born} born into the house with room; full house stayed full={fullStayedFull}, " +
@@ -4055,7 +4065,7 @@ internal static class SimulationSelfTests
 
         var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
         var passed = privationRose && recovered && stayedPut && world.Agents.LiveCount < started &&
-                     drift.Grain == 0 && drift.Wood == 0;
+                     drift.IsZero;
         Console.WriteLine(
             $"    a season of empty stores: {started} -> {world.Agents.LiveCount} people, {lost} left; " +
             $"privation cleared once the granary was filled={recovered}, and nobody else left after=" +

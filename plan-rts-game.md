@@ -6754,3 +6754,122 @@ the country must be painted first, and it is — by two separate call sites neit
 other. Nothing stops a third path from placing fields before the soil exists, and the symptom would be every
 field reporting exactly 1.00: not a crash, not a wrong-looking number, just a map that quietly stopped
 mattering. The farmland line is the guard against that, which is why it prints the spread and not the mean.
+
+## 71. Stone: the first resource the player cannot move toward
+
+> first stone, then we'll pick placement/building/and that whole chain next
+
+`Resource` had a docstring arguing against this section. Grain and wood, it said, because "two is the smallest
+number that produces the mechanic — they peak and bottom at different times of year, so storage is needed for
+both on different clocks and summer's free labour is a real allocation decision with a deadline. **A third
+resource adds bookkeeping and no new question.**"
+
+Fair, and worth answering rather than ignoring. The answer is about the map.
+
+- **Grain** is something you *make*. A field goes on any level ground you like, so where it is is your decision.
+- **Wood** is placed by the land, but placed nearly everywhere — §70's woodland pressure leaves about a third of
+  the map open and covers the rest. Which trees you cut is a choice among many.
+- **Stone** is where the rock is, and the rock is where the generator put crag and scree: steep, high, broken
+  ground. And `ChooseSite` rejects exactly that ground as unbuildable. So stone is **the first resource whose
+  location the player cannot influence at all**, and the first that is always uphill and always outside the
+  arrangement.
+
+That is why it is not a third clock. Wood could always be answered by founding well — which is precisely what
+the deleted tree ring was doing on the player's behalf. Stone cannot be answered that way at all, so the forward
+depot and the cart stop being *available* and become *necessary*. Measured across archetypes at 30 m amplitude:
+
+| archetype | outcrops | stone | nearest | against a 60 m reach |
+| --- | --- | --- | --- | --- |
+| Escarpment | 30 | 9,000 | 35 m | workable from the granary |
+| SplitValley | 15 | 4,500 | 52 m | just workable |
+| CornerHighlands | 16 | 4,800 | 86 m | **needs a depot** |
+
+Which kind of map you are on is something you find out by looking, and it is the same claim fertility makes
+about grain: how rich in a thing a country is belongs to the country.
+
+### The ledger was written for two, and the compiler was not going to say so
+
+Every store's lookup was `resource == Resource.Grain ? Grain : Wood`. That is not a shorthand, it is a trap:
+a third resource compiles perfectly and **silently reads and writes the second one's field**. Every unit of
+stone would have been a unit of wood, conservation would have balanced, and nothing would have said a word.
+The remarks on `NodeStock` promised that "adding a resource adds a field and the compiler finds every switch
+that needs it" — true of the field, false of the lookup.
+
+Three shapes of the same hole, all swept before the enum grew:
+
+1. **Two-way ternaries** in `NodeStock`, `NodePending` and `ResourceTotals`, now switches that throw on
+   anything they have no field for. The compiler will not name the sites — it demands a default arm for cast
+   values, and a build carrying three standing warnings teaches people to ignore warnings — but a resource
+   added to the enum and not to the stores now **fails on its first tick instead of quietly becoming wood.**
+   Loud beats early when the alternative is silent.
+2. **Sweeps that add fields by name.** `total.Grain += …; total.Wood += …` is the identical hole with none of
+   the syntax to warn about. Now `foreach (var resource in Resources.All)`.
+3. **Assertions that name what they check.** `drift.Grain != 0 || drift.Wood != 0` would have gone on passing
+   while a third resource leaked, and the fault message would have gone on printing two columns of zeros. Now
+   `!drift.IsZero`, which is per-resource on purpose: one unit appearing and one vanishing sums to nothing and
+   is two broken ledgers rather than none.
+
+### And then the one that got through the sweep
+
+```
+stone: 62 quarried and held (20 stored, 2 on backs), 8,938 still in 30 outcrops,
+       42 consumed — 9,000/9,000 accounted for
+```
+
+**42 consumed, and nothing consumes stone.** `EconomyRates.DrawPerSecond` had the same ternary — `resource ==
+Grain ? grainRation : woodRation` — so stone fell into the else and **every household began burning it at a
+villager's firewood rate.** Conservation was perfectly happy, because the units really had left the world
+through a real door.
+
+Worse than an aliased store, because an aliased store is a wrong number and this was an *invented demand*. And
+it only surfaced because the report prints every term of the identity rather than one figure: the first version
+said "20 quarried" beside 62 gone from the rock and no fault, which are two claims that cannot both be true.
+An instrument that cannot be wrong about its own arithmetic is worth the four extra numbers.
+
+The third bug was the work dispatch: `if (nodes.Get(siteId).Kind == NodeKind.Tree)`. A quarrier stood at its
+rock all year and fell through to the crop code, which returned it as "not a farm" — no error, no work, and a
+stone column of zeros that read exactly like an out-of-reach quarry.
+
+### Two things I did and reversed
+
+**A walk-share dial set before measuring.** `QuarrierWalkShare = 0.25`, on the argument that rock is on the
+steep tops and a tenth of a year would leave every outcrop unworkable. Then the scatter was measured: nearest
+outcrop 52–86 m against the 151 m a quarter buys. The dial had made stone *trivially* reachable from the
+granary, which is the opposite of the paragraph written above it, and it would have shipped as a resource whose
+documentation contradicted its numbers. **How much of its year a body spends on the road is a fact about the
+body, not about what it carries** — so it is the same tenth as a cutter's, and the difference falls out of the
+annual figures instead: 240 stone a year against 500 wood is fewer, bigger trips, so 60 m rather than 29.
+
+**A predicate widened by one word.** `IsStanding` became "any natural deposit" so nothing else would need
+changing. It compiled, and it was wrong in eighteen of twenty-five call sites: most of them mean *tree* — they
+count trees, pick a fringe tree, draw a canopy, mark the cells a canopy closes. An outcrop passing those tests
+would have been posted to woodcutters, drawn as foliage and counted in the forest. **Widening a predicate is a
+change at every call site whether or not the compiler says so.** `IsStanding` went back to meaning a tree, the
+general concept got its own name in `IsNaturalDeposit`, and the eight sites that genuinely wanted it — the
+held/on-the-map line, the spent sweep, the deposit searches, haul sources, raid loot, hearths — were widened
+deliberately.
+
+### One behaviour, not two
+
+The chain that sends a body to work — find the nearest deposit, re-base on a store that can still reach one,
+spend a shift taking units out of it, walk them home — was written against `Resource.Wood` by name. Copying it
+for stone would have produced two of everything, and the two would have drifted: **the reach, the claim check
+and the re-basing rule are one behaviour.** `Deposits` decides nothing and owns no numbers; it only knows
+whether to ask `Woodland` or `Quarrying`. Grain is not a deposit and returns zero rather than pretending — a
+field is not a stock on the ground, it is labour in three windows, which is what `CropCycle` is.
+
+### The rocks were already loaded
+
+`SettlementArt.Rocks` held two models and drew neither, with a note: *"stone is about to be a resource, mined
+from a deposit somebody chooses to work. Strewing rocks over the whole map as decoration teaches the player
+that a rock is nothing to look at, which is precisely the wrong lesson to teach a fortnight before rocks start
+mattering."* A fortnight later they are drawn only where a deposit is, so a rock in this scene means stone.
+Shrinking on the cube root of what is left rather than a tree's square root, because a quarry is eaten into in
+three dimensions and a trunk is felled in one.
+
+### What stone deliberately does not have
+
+**A sink.** Nothing is built of it, so one quarrier is posted rather than a crew sized against a demand that
+does not exist — enough to prove stone moves out of the rock, into a pair of hands, into a store, with
+conservation holding across a resource that has no production term. What it is *for* belongs to the placement
+and building chain, which is where stone stops being a stock and becomes a cost.

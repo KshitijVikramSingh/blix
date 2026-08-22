@@ -57,6 +57,23 @@ internal enum NodeKind
     /// </remarks>
     Tree,
 
+    /// <summary>
+    /// An outcrop: a finite stock of stone lying where the rock is.
+    /// </summary>
+    /// <remarks>
+    /// The same argument as <see cref="Tree"/> and the same implementation — stock at a place with a labour
+    /// cost to release it, saved by memory copy, fingerprinted unasked, nameable by a stable id, and worked out
+    /// is <c>Remove</c>. What differs is that a tree is where woodland pressure put it and an outcrop is where
+    /// the rock is, which nothing the player does can change. See <see cref="Quarrying"/>.
+    /// <para>
+    /// It does not block, for the same reason a tree does not: the mechanic is <em>how far the stone is</em>,
+    /// and a hundred small holes punched in the navigation raster would buy nothing but the wide-body routing
+    /// failure that is already known debt. An outcrop also sits on crag and scree, which the grade already
+    /// makes hard going, so the ground defends itself without a collider.
+    /// </para>
+    /// </remarks>
+    Outcrop,
+
     /// <summary>Stores at the frontier, so a distant holding runs without a hauler each way.</summary>
     ForwardDepot,
 
@@ -365,7 +382,32 @@ internal struct EconomyNode
     /// woodland in reach reads as twenty-five thousand wood in store and the autonomy figure — the one
     /// number the HUD is for — becomes a statement about the forest rather than about the winter.
     /// </remarks>
+    /// <summary>A tree still standing, with wood in it.</summary>
+    /// <remarks>
+    /// <b>Left meaning exactly what it meant, and that was a decision rather than an omission.</b> Widening it
+    /// to "any natural deposit" so <see cref="IsNaturalDeposit"/> would not be needed compiled cleanly and was
+    /// wrong in eighteen places: twenty-five callers read this predicate, and most of them mean <em>tree</em> —
+    /// they count trees, pick a fringe tree, draw a tree with a canopy, mark the cells a canopy closes. An
+    /// outcrop passing those tests would have been posted to woodcutters, drawn as foliage and counted in the
+    /// forest.
+    /// <para>
+    /// Widening a predicate is a change at every call site whether or not the compiler says so. Eight sites
+    /// genuinely wanted the general meaning, so the general meaning got its own name and those eight were
+    /// changed deliberately.
+    /// </para>
+    /// </remarks>
     public readonly bool IsStanding => Kind == NodeKind.Tree;
+
+    /// <summary>
+    /// Something natural with a stock in it that nobody has taken yet: a standing tree, or an unworked outcrop.
+    /// </summary>
+    /// <remarks>
+    /// The line between <em>on the map</em> and <em>in the settlement's hands</em>. <see cref="NodeStore"/>'s
+    /// held total excludes it, conservation includes it, a hauler must not treat it as a source, and a raider
+    /// must not treat it as loot. Stone in the rock is on the same side of that line as wood in a trunk and the
+    /// opposite side from a pile of either in the yard.
+    /// </remarks>
+    public readonly bool IsNaturalDeposit => Kind is NodeKind.Tree or NodeKind.Outcrop;
 
     /// <summary>Somewhere goods can be delivered to. A pile is not: nobody delivers to a pile.</summary>
     public readonly bool Stores => IsBuilt && Kind is NodeKind.Granary or NodeKind.ForwardDepot;
@@ -492,8 +534,7 @@ internal sealed class NodeStore
         foreach (ref readonly var node in All)
         {
             if (!node.IsAlive) continue;
-            total.Grain += node.Stock.Grain;
-            total.Wood += node.Stock.Wood;
+            foreach (var resource in Resources.All) total.Add(resource, node.Stock[resource]);
         }
 
         return total;
@@ -505,9 +546,8 @@ internal sealed class NodeStore
         var total = default(NodeStock);
         foreach (ref readonly var node in All)
         {
-            if (!node.IsAlive || node.IsStanding) continue;
-            total.Grain += node.Stock.Grain;
-            total.Wood += node.Stock.Wood;
+            if (!node.IsAlive || node.IsNaturalDeposit) continue;
+            foreach (var resource in Resources.All) total.Add(resource, node.Stock[resource]);
         }
 
         return total;

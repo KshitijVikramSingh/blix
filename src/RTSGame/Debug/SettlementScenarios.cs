@@ -109,12 +109,16 @@ internal static class SettlementScenarios
 
             // Conservation is checked every tick, not every season. It is a handful of additions, and
             // the value of an exact ledger is knowing the tick a unit went missing on.
+            // <b>Asked per resource, not resource by resource.</b> `drift.Grain != 0 || drift.Wood != 0`
+            // was a check that named the two resources that existed, so it would have gone on passing while a
+            // third drifted — and the fault message would have gone on reporting two columns of zeros.
             var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
-            if (drift.Grain != 0 || drift.Wood != 0)
+            if (!drift.IsZero)
             {
-                faults.Add(
-                    $"conservation broke on tick {tick} ({world.Date}): " +
-                    $"{drift.Grain:+#;-#;0} grain, {drift.Wood:+#;-#;0} wood unaccounted for");
+                var missing = string.Join(
+                    ", ",
+                    Resources.All.Select(r => $"{drift[r]:+#;-#;0} {r.ToString().ToLowerInvariant()}"));
+                faults.Add($"conservation broke on tick {tick} ({world.Date}): {missing} unaccounted for");
                 break;
             }
 
@@ -200,12 +204,14 @@ internal static class SettlementScenarios
             raids.Update(world, (float)SimulationWorld.FixedDeltaSeconds);
             ledger.Observe(world, (float)SimulationWorld.FixedDeltaSeconds);
 
+            // Per resource, for the reason given on the same check in the settlement run above.
             var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
-            if (drift.Grain != 0 || drift.Wood != 0)
+            if (!drift.IsZero)
             {
-                faults.Add(
-                    $"conservation broke on tick {tick} ({world.Date}): " +
-                    $"{drift.Grain:+#;-#;0} grain, {drift.Wood:+#;-#;0} wood unaccounted for");
+                var missing = string.Join(
+                    ", ",
+                    Resources.All.Select(r => $"{drift[r]:+#;-#;0} {r.ToString().ToLowerInvariant()}"));
+                faults.Add($"conservation broke on tick {tick} ({world.Date}): {missing} unaccounted for");
                 break;
             }
 
@@ -473,7 +479,7 @@ internal static class SettlementScenarios
         Console.WriteLine($"RTSGame forest cover cost — {extentMeters:F0} m map");
         SweepCover(extentMeters);
         var world = new SimulationWorld(extentMeters);
-        var granary = Populate(world, Farms, Woodcutters, Carts, Wagons);
+        var granary = Populate(world, Farms, Woodcutters, Quarriers, Carts, Wagons);
 
         var transform = world.Terrain.Transform;
         var cells = transform.Width * transform.Height;
@@ -557,7 +563,7 @@ internal static class SettlementScenarios
         var furthest = 0f;
         foreach (ref readonly var node in world.Nodes.All)
         {
-            if (!node.IsAlive || node.IsStanding || node.IsPile) continue;
+            if (!node.IsAlive || node.IsNaturalDeposit || node.IsPile) continue;
             counts[node.Kind] = counts.GetValueOrDefault(node.Kind) + 1;
             if (node.Kind != NodeKind.House) continue;
             housing += node.Occupancy;
@@ -629,7 +635,7 @@ internal static class SettlementScenarios
             Woodland.CoverTrees = count;
             Woodland.CoverRadius = reach;
             var probe = new SimulationWorld(extentMeters);
-            var store = Populate(probe, Farms, Woodcutters, Carts, Wagons);
+            var store = Populate(probe, Farms, Woodcutters, Quarriers, Carts, Wagons);
             var transform = probe.Terrain.Transform;
             var closed = 0;
             for (var z = 0; z < transform.Height; z++)
@@ -708,6 +714,7 @@ internal static class SettlementScenarios
             world,
             Farms,
             Woodcutters,
+            Quarriers,
             Carts,
             Wagons,
             centre: ChooseSite(world, extentMeters));
@@ -726,6 +733,7 @@ internal static class SettlementScenarios
         SimulationWorld world,
         int farms,
         int woodcutters,
+        int quarriers,
         int carts,
         int wagons,
         Vector2 centre = default)
@@ -745,7 +753,7 @@ internal static class SettlementScenarios
         // so near is the safe direction, and the arc is sized to leave a cart's width between
         // neighbours — buildings are 4.5 m across and a ring that fitted them at 1.5 m puts them
         // shoulder to shoulder.
-        var people = farms + woodcutters + carts + wagons;
+        var people = farms + woodcutters + quarriers + carts + wagons;
         // Two households more than the people need, because population is capped by housing and a
         // settlement with no spare room does not grow at all. Which is correct and is also why a run with
         // exactly enough houses measured nothing: growth accrues in houses that have room, so a full
@@ -824,6 +832,7 @@ internal static class SettlementScenarios
         // is no woodcutter building any more, only trees and the people sent to them.
         PaintBiomes(world);
         ScatterWoodland(world, centre);
+        ScatterOutcrops(world);
         // After the scatter, because both of these are readings of ground that has to exist first: the fields
         // have their fertility from the soil field and the wood line is a distance to actual trunks.
         ReportFarmland(world);
@@ -878,7 +887,33 @@ internal static class SettlementScenarios
                 new[] { hand },
                 Assignment.Work(
                     tree, at, extent, Resource.Wood,
-                    Woodland.LoadSeconds(UnitType.Villager.CarryCapacity),
+                    Deposits.LoadSeconds(Resource.Wood, UnitType.Villager.CarryCapacity),
+                    EconomySystem.HandoverSeconds));
+        }
+
+        // <b>Quarriers, posted the same way and for the same reason.</b> One rather than four: a settlement
+        // founding itself has no use for stone yet — nothing is built of it — so this is the smallest crew that
+        // makes the mechanic observable rather than a crew sized against a demand that does not exist. What it
+        // proves is that stone moves at all: out of the rock, into a pair of hands, into a store, with
+        // conservation holding across a resource that has no production term.
+        //
+        // It also puts the map's answer on the report. On a map whose nearest outcrop is inside a quarrier's
+        // reach the stone comes in; on one where it is not, this hand stands idle and the settlement is being
+        // told the same thing the wood line tells it — that the answer is a depot out at the rock.
+        for (var i = 0; i < quarriers; i++)
+        {
+            var rock = NearestUnworkedOutcrop(world, granary, claimed);
+            if (!rock.IsValid) break;
+            ref readonly var face = ref world.Nodes.Get(rock);
+            var at = face.Position;
+            var extent = face.FootprintRadius;
+            var hand = world.SpawnAgent(
+                at + new Vector2(0f, extent + UnitType.Villager.Radius + 0.6f), UnitType.Villager);
+            world.QueueAssign(
+                new[] { hand },
+                Assignment.Work(
+                    rock, at, extent, Resource.Stone,
+                    Deposits.LoadSeconds(Resource.Stone, UnitType.Villager.CarryCapacity),
                     EconomySystem.HandoverSeconds));
         }
 
@@ -901,6 +936,33 @@ internal static class SettlementScenarios
     }
 
     /// <summary>The nearest tree to the store that no cutter has been sent to yet.</summary>
+    /// <summary>The nearest unworked outcrop within a quarrier's reach of a store.</summary>
+    /// <remarks>
+    /// Deliberately separate from <see cref="NextUnclaimedTree"/> rather than one function with a resource
+    /// argument, because the two differ in what they have to check: a tree has to be <em>reachable</em>, since
+    /// a wood's interior is impassable and a cutter posted inside a stand stands beside it forever. An outcrop
+    /// sits on open crag, so it has no such trap — and adding a reachability query for it would be paying for
+    /// a problem stone does not have.
+    /// </remarks>
+    private static NodeId NearestUnworkedOutcrop(SimulationWorld world, NodeId store, HashSet<int> claimed)
+    {
+        var from = world.Nodes.Get(store).Position;
+        var best = NodeId.None;
+        var bestDistance = Quarrying.ReachMetres * Quarrying.ReachMetres;
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (!node.IsAlive || node.Kind != NodeKind.Outcrop) continue;
+            if (node.Stock.Stone <= 0 || claimed.Contains(node.Id.Value)) continue;
+            var distance = Vector2.DistanceSquared(node.Position, from);
+            if (distance > bestDistance) continue;
+            bestDistance = distance;
+            best = node.Id;
+        }
+
+        if (best.IsValid) claimed.Add(best.Value);
+        return best;
+    }
+
     private static NodeId NextUnclaimedTree(SimulationWorld world, NodeId store, HashSet<int> claimed)
     {
         var from = world.Nodes.Get(store).Position;
@@ -908,7 +970,7 @@ internal static class SettlementScenarios
         var bestDistance = Woodland.ReachMetres * Woodland.ReachMetres;
         foreach (ref readonly var node in world.Nodes.All)
         {
-            if (!node.IsAlive || !node.IsStanding || claimed.Contains(node.Id.Value)) continue;
+            if (!node.IsAlive || node.Kind != NodeKind.Tree || claimed.Contains(node.Id.Value)) continue;
             // Reachable, which since the interior of a wood is impassable is a real question: the nearest
             // tree to the granary is often one the near band closed over, and a cutter posted on it stands
             // beside it forever.
@@ -1052,6 +1114,26 @@ internal static class SettlementScenarios
                     if (d <= edges[i]) bands[i]++;
                 }
             }
+
+            // <b>And the stone line beside it, because stone's whole claim is that it is further.</b> Printed
+            // in the same shape as the wood line so the two are comparable at a glance: if a map's rock is not
+            // measurably further off than its trees, the third resource is not earning its bookkeeping.
+            var rock = float.MaxValue;
+            var outcrops = 0;
+            var stone = 0;
+            foreach (ref readonly var node in world.Nodes.All)
+            {
+                if (!node.IsAlive || node.Kind != NodeKind.Outcrop) continue;
+                outcrops++;
+                stone += node.Stock.Stone;
+                rock = MathF.Min(rock, Vector2.Distance(node.Position, store));
+            }
+
+            Console.WriteLine(
+                outcrops == 0
+                    ? "    the stone line: no outcrop anywhere on this map — nothing here is crag or scree"
+                    : $"    the stone line: {outcrops} outcrops holding {stone:N0} stone, nearest " +
+                      $"{rock:F0} m from the store — a quarrier reaches {Quarrying.ReachMetres:F0} m");
 
             Console.WriteLine(
                 $"    the wood line: nearest tree {nearest:F0} m from the store, and within " +
@@ -1208,6 +1290,83 @@ internal static class SettlementScenarios
     /// density is one. What changes on a map with relief is <em>where</em> they go.
     /// </remarks>
     private const int WoodAnchorsPerSquareKilometre = 62_000;
+
+    /// <summary>
+    /// Stone, placed where the rock is and nowhere else.
+    /// </summary>
+    /// <remarks>
+    /// <b>The settlement does not appear in this function, and that is the whole design.</b> §70 deleted a tree
+    /// ring that put fuel wherever the village landed; this is written so the equivalent mistake is not
+    /// available. An outcrop goes where <see cref="Biomes"/> says crag or scree — steep, high, thin-soiled
+    /// ground, classified from grade and height by the generator — so a map's stone is decided before anybody
+    /// chooses where to live, and choosing well cannot bring it closer.
+    /// <para>
+    /// <b>Sparse on purpose, and clustered.</b> A quarry is a place rather than a scatter: a few deposits worth
+    /// walking to beats stone everywhere, which would make the distance mechanic vanish exactly the way the
+    /// tree ring made it vanish. So the spacing is wide, and what governs the count is how much broken ground
+    /// the map actually has — a downland map with two per cent crag gets a handful, and a highland map gets
+    /// real quarries. That is the map deciding how rich in stone a country is, which is the same thing
+    /// fertility does for grain.
+    /// </para>
+    /// <para>
+    /// No spatial hash and no clump machinery, unlike the woodland: at these counts a linear spacing test is a
+    /// few thousand comparisons, and the borrowed complexity would be the only thing to go wrong.
+    /// </para>
+    /// </remarks>
+    private static void ScatterOutcrops(SimulationWorld world)
+    {
+        var (floor, span) = InteriorRelief(world);
+        if (span < 1f) return;
+
+        // Wide enough that two outcrops read as two quarries rather than as a stone field.
+        const float spacingMetres = 34f;
+        // Coarse, because what is being looked for is a region of broken ground rather than a cell of it.
+        const float stepMetres = 12f;
+        var reach = InteriorExtent(world.ExtentMeters);
+        var across = Math.Max(1, (int)MathF.Round(reach / stepMetres));
+        var placed = new List<Vector2>();
+        var seed = 0x85EBCA6Bu;
+
+        float Next()
+        {
+            seed += 0x9E3779B9u;
+            var z = seed;
+            z = (z ^ (z >> 16)) * 0x21F0AAADu;
+            z = (z ^ (z >> 15)) * 0x735A2D97u;
+            z ^= z >> 15;
+            return (z & 0xFFFFFFu) / (float)0x1000000u;
+        }
+
+        for (var z = 0; z <= across; z++)
+        for (var x = 0; x <= across; x++)
+        {
+            // Jittered inside its own cell, so a grid sweep does not produce a grid of rocks.
+            var at = new Vector2(
+                (x + Next() - 0.5f) / across - 0.5f,
+                (z + Next() - 0.5f) / across - 0.5f) * reach;
+            if (!world.Terrain.Contains(at)) continue;
+            var biome = Biomes.At(world.Terrain, at, floor, span);
+            if (biome is not (Biome.Crag or Biome.Scree)) continue;
+
+            var clear = true;
+            foreach (var other in placed)
+            {
+                if (Vector2.DistanceSquared(other, at) >= spacingMetres * spacingMetres) continue;
+                clear = false;
+                break;
+            }
+
+            if (!clear) continue;
+            var node = world.AddNode(NodeKind.Outcrop, at, capacity: (int)Quarrying.StonePerOutcrop);
+            world.SeedStock(node, Resource.Stone, (int)Quarrying.StonePerOutcrop);
+            placed.Add(world.Nodes.Get(node).Position);
+        }
+
+        SeededOutcrops = placed.Count;
+    }
+
+    /// <summary>How many outcrops the map had, so working them out can be reported against it.</summary>
+    private static int SeededOutcrops;
 
     private static void ScatterWoodland(SimulationWorld world, Vector2 centre)
     {
@@ -1658,6 +1817,13 @@ internal static class SettlementScenarios
     public static Vector2 CornerSite(float extentMeters) =>
         new(-extentMeters * 0.25f, -extentMeters * 0.22f);
 
+    /// <summary>How many hands start on the rock.</summary>
+    /// <remarks>
+    /// One, against four cutters and twelve fields, because nothing is built of stone yet — see the note at
+    /// the posting loop. It is sized to make the mechanic observable, not to meet a demand.
+    /// </remarks>
+    private const int Quarriers = 1;
+
     private const float FieldKeepOut = 16f;
 
     /// <summary>Average grade over a village's own ground that still counts as level enough to build on.</summary>
@@ -1885,6 +2051,39 @@ internal static class SettlementScenarios
             $"  over {years:F2} year(s): produced {economy.Produced.Grain:N0} grain and " +
             $"{economy.Produced.Wood:N0} wood, ate {economy.Consumed.Grain:N0} and " +
             $"{economy.Consumed.Wood:N0}, went short {economy.Unmet.Grain:N0} and {economy.Unmet.Wood:N0}");
+
+        // <b>Stone gets its own line rather than a third column, because it is a different kind of number.</b>
+        // Grain and wood are flows against an appetite — produced, eaten, short — and stone is a stock being
+        // moved off the map into the settlement, with nothing yet drawing on it. Reported as what came out of
+        // the rock and what is left in it, which is the only question worth asking until something is built of
+        // it: <b>did any stone move at all.</b> Zero with outcrops on the map means the quarry is out of reach,
+        // which is the map talking and not a bug.
+        var quarried = 0;
+        var inTheRock = 0;
+        var outcrops = 0;
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (!node.IsAlive || node.Kind != NodeKind.Outcrop) continue;
+            outcrops++;
+            inTheRock += node.Stock.Stone;
+        }
+
+        var held = world.Nodes.TotalHeld();
+        var carried = EconomySystem.CarriedTotal(world.Agents).Stone;
+        quarried = held.Stone + carried;
+        // <b>The line accounts for itself, because the first version of it did not and I nearly believed it.</b>
+        // It reported 20 held against 62 gone from the rock and no conservation fault, which is two claims that
+        // cannot both be true — and the resolution was that the missing units were in a place the report was
+        // not looking rather than a place the ledger was not counting. Printing every term of the identity is
+        // what turns "these numbers look odd" into "this term is the one".
+        var seeded = world.Economy.Seeded.Stone;
+        var accounted = inTheRock + held.Stone + carried + (int)world.Economy.Consumed.Stone;
+        Console.WriteLine(
+            outcrops == 0 && quarried == 0
+                ? "  stone: none on this map"
+                : $"  stone: {quarried:N0} quarried and held ({held.Stone:N0} stored, {carried:N0} on backs), " +
+                  $"{inTheRock:N0} still in {outcrops} outcrops, {world.Economy.Consumed.Stone:N0} consumed — " +
+                  $"{accounted:N0}/{seeded:N0} accounted for");
         var carts = 0;
         foreach (ref readonly var body in world.Agents.All)
         {

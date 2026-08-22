@@ -143,6 +143,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     // villager's back is the same colour as the crop it came from and the timber it was cut from.
     private static readonly Vector4 GrainColor = new(0.384f, 0.300f, 0.065f, 1f);
     private static readonly Vector4 WoodColor = new(0.246f, 0.144f, 0.054f, 1f);
+
+    /// <summary>Pale, cool and desaturated: the one thing in this palette that is not earth or leaf.</summary>
+    private static readonly Vector4 StoneColor = new(0.300f, 0.306f, 0.318f, 1f);
     private static readonly Vector4 BuildValidColor = new(0.30f, 0.84f, 0.72f, 1f);
     private static readonly Vector4 BuildRemoveColor = new(0.96f, 0.53f, 0.28f, 1f);
     private static readonly Vector4 BuildInvalidColor = new(0.82f, 0.24f, 0.22f, 1f);
@@ -1119,7 +1122,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // same corner it always was, to the metre.
         var founded = SettlementScenarios.ChooseSite(simulation, worldExtentMeters);
         SettlementScenarios.Populate(
-            simulation, farms: 8, woodcutters: 4, carts: 5, wagons: 0, centre: founded);
+            simulation, farms: 8, woodcutters: 4, quarriers: 1, carts: 5, wagons: 0, centre: founded);
         cameraFocus = founded;
         cameraDistance = cameraDistanceTarget = startingZoomMetres > 0f ? startingZoomMetres : 78f;
         Console.WriteLine(
@@ -3568,6 +3571,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 continue;
             }
 
+            if (node.Kind == NodeKind.Outcrop)
+            {
+                // Same cull as a tree and for the same reason, though there are two orders of magnitude
+                // fewer of them: a map has a few dozen outcrops against a few thousand trunks.
+                if (Vector2.DistanceSquared(node.Position, cameraFocus) > treeDrawRadiusSquared) continue;
+                DrawOutcrop(in node);
+                continue;
+            }
+
             var ground = simulation.Terrain.SampleHeight(node.Position);
             var width = node.HalfExtent * 2f;
             if (art is not null)
@@ -4188,6 +4200,51 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// figure on screen that would have shown it, which is the argument for putting one there.
     /// </remarks>
     private double frameMilliseconds;
+
+    /// <summary>The colour a unit of a resource is, on a back or in a heap.</summary>
+    /// <remarks>
+    /// A switch rather than the <c>Grain ? grain : wood</c> pairs this replaced in three places. Those were
+    /// harmless while there were two resources and became wrong in the same instant stone existed: a quarrier
+    /// walked home carrying something the colour of timber.
+    /// </remarks>
+    private static Vector4 ColourOf(Resource resource) => resource switch
+    {
+        Resource.Grain => GrainColor,
+        Resource.Stone => StoneColor,
+        _ => WoodColor,
+    };
+
+    /// <summary>
+    /// An outcrop: a rock the size of what is still in it.
+    /// </summary>
+    /// <remarks>
+    /// <b>The models were loaded and deliberately never drawn, waiting for exactly this.</b>
+    /// <c>SettlementArt.Rocks</c> holds two of them with a note explaining why they were kept out of the open
+    /// scatter — "stone is about to be a <em>resource</em>, mined from a deposit somebody chooses to work.
+    /// Strewing rocks over the whole map as decoration teaches the player that a rock is nothing to look at,
+    /// which is precisely the wrong lesson to teach a fortnight before rocks start mattering." A fortnight
+    /// later, here they are, and a rock in this scene means stone.
+    /// <para>
+    /// Shrinking as it is worked, on the cube root of what is left rather than the square root a tree uses: a
+    /// quarry is eaten into in three dimensions and a trunk is felled in one, so a half-worked outcrop should
+    /// still read as a substantial rock rather than as half a rock.
+    /// </para>
+    /// </remarks>
+    private void DrawOutcrop(in EconomyNode rock)
+    {
+        if (art is null || art.Rocks.Length == 0) return;
+        var ground = simulation.Terrain.SampleHeight(rock.Position);
+        var left = MathF.Max(0.22f, rock.Stock.Stone / MathF.Max(1f, Quarrying.StonePerOutcrop));
+        // Varied by id, so the same outcrop is the same outcrop across a save.
+        var spread = 0.90f + (rock.Id.Value * 29 % 11) / 11f * 0.45f;
+        var width = 5.2f * spread * MathF.Cbrt(left);
+        if (!InView(rock.Position, ground, width * 1.2f, width * 0.7f)) return;
+        // Its own materials, not a tint: the pack's stone already reads as stone, and the material classifier
+        // routes it through MaterialClass.Stone for the specular response.
+        art.Rocks[rock.Id.Value % art.Rocks.Length].Add(
+            SettlementArt.Placement(
+                rock.Position, ground, width, SettlementArt.FreeYawOf(rock.Id.Value)));
+    }
 
     private void DrawTree(in EconomyNode tree)
     {
@@ -4928,7 +4985,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var spread = 0.55f + MathF.Min(0.75f, MathF.Sqrt(units / 40f) * 0.45f);
             if (art is not null)
             {
-                var model = resource == Resource.Grain ? art.GrainHeap : art.WoodHeap;
+                var model = resource switch
+                {
+                    Resource.Grain => art.GrainHeap,
+                    Resource.Stone when art.Rocks.Length > 0 => art.Rocks[0],
+                    _ => art.WoodHeap,
+                };
                 model.Add(SettlementArt.Placement(
                     pile.Position, ground, spread, SettlementArt.FreeYawOf(pile.Id.Value + (int)resource)));
                 continue;
@@ -4938,7 +5000,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             propInstances.Add(new InstanceData(
                 Matrix4x4.CreateScale(spread, height, spread) *
                 Matrix4x4.CreateTranslation(pile.Position.X, ground + height * 0.5f, pile.Position.Y),
-                resource == Resource.Grain ? GrainColor : WoodColor));
+                ColourOf(resource)));
         }
     }
 
@@ -5224,7 +5286,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                     Matrix4x4.CreateScale(loadWidth, loadHeight, loadWidth) *
                     Matrix4x4.CreateTranslation(
                         position.X, height + bodyHeight + loadHeight * 0.5f, position.Y),
-                    agent.Jobs.Carrying == Resource.Grain ? GrainColor : WoodColor));
+                    ColourOf(agent.Jobs.Carrying)));
             }
 
             var crowdYielding = agent.IsVisiblyYielding;

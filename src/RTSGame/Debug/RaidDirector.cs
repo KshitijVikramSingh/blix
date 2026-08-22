@@ -66,8 +66,12 @@ internal sealed class RaidSettings
     public float WoodLootShare = 0.4f;
 
     /// <summary>Seconds inside a store, for what is being taken out of it.</summary>
+    /// <remarks>
+    /// Stone rummages like wood rather than like grain: it is bulk, and the share is about how much of a store
+    /// a raider bothers with when what is in it is heavy.
+    /// </remarks>
     public float RummageSecondsFor(Resource resource) =>
-        resource == Resource.Wood
+        resource is Resource.Wood or Resource.Stone
             ? LootSeconds * Math.Clamp(WoodLootShare, 0.05f, 1f)
             : LootSeconds;
 

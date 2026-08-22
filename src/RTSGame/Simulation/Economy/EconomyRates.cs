@@ -43,6 +43,20 @@ internal static class EconomyRates
     /// </remarks>
     internal static float WoodPerHandPerYear = 500f;
 
+    /// <summary>Stone one pair of hands quarries over a year, walking included.</summary>
+    /// <remarks>
+    /// Lower than wood's five hundred, and the gap is the claim: stone is heavier to win and further to carry,
+    /// so a pair of hands on the rock brings in less of it than a pair of hands in the wood. Like
+    /// <see cref="WoodPerHandPerYear"/> it is not a rate anything has — <see cref="Quarrying"/> derives the cut
+    /// rate, the load and the reach from it — but the anchor the derivation hangs on, and the only place a
+    /// number about stone is chosen rather than computed.
+    /// <para>
+    /// At 240 a year, one quarrier is most of a house's stone in a season, which keeps a quarry worth manning
+    /// without making it the whole economy.
+    /// </para>
+    /// </remarks>
+    internal static float StonePerHandPerYear = 240f;
+
     /// <summary>Grain one villager eats a year. One unit a day unit, so the day is the ration.</summary>
     internal static float GrainPerVillagerPerYear = WorldCalendar.DaysPerYear;
 
@@ -112,11 +126,25 @@ internal static class EconomyRates
             : FullYearOf(in farm) * CropCycle.PotentialOf(in farm) / CropCycle.ReapTargetOf(in farm);
 
     /// <summary>Units per second one person draws of this resource right now.</summary>
+    /// <remarks>
+    /// <b>The two-way ternary this used to be was the worst of the lot, because it did not alias a store — it
+    /// invented a demand.</b> <c>resource == Grain ? grainRation : woodRation</c> put stone in the else, so the
+    /// moment stone existed every household began burning it at a villager's firewood rate. Measured on the
+    /// first run that quarried any: 62 units out of the rock, 20 in hand, <b>42 consumed</b>, and conservation
+    /// perfectly happy because the units really had left the world through a real door.
+    /// <para>
+    /// Nothing burns stone, so its annual draw is zero, and a resource nobody has written a draw for should
+    /// read zero rather than inherit its neighbour's.
+    /// </para>
+    /// </remarks>
     public static float DrawPerSecond(Resource resource, Season season, float appetite)
     {
-        var annual = resource == Resource.Grain
-            ? GrainPerVillagerPerYear
-            : WoodPerVillagerPerYear;
+        var annual = resource switch
+        {
+            Resource.Grain => GrainPerVillagerPerYear,
+            Resource.Wood => WoodPerVillagerPerYear,
+            _ => 0f,
+        };
         return annual / WorldCalendar.YearSeconds * Normalised(resource, season, production: false) *
                appetite;
     }
