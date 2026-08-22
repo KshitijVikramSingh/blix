@@ -206,9 +206,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private readonly int exitAfterFrames;
 
+    /// <summary>
+    /// Rolls a new map every so many frames, so the regeneration path can be soaked without a keyboard.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because a key nobody can press in a test is a key nobody has tested.</b> Rolling a map is the single
+    /// heaviest thing this loop does — a new world, a new drainage solve, a new settlement, and a full rebuild
+    /// of every instance buffer — and it had shipped as a keypress that silently did nothing at all. A headless
+    /// cadence turns "does Space work" into a question a gate leg can answer, and turns "does it survive being
+    /// pressed fifty times" into the same question run fifty times.
+    /// </remarks>
+    private readonly int rollEveryFrames;
+
     /// <summary>Metres of relief the village is generated with. Zero is the flat ground everything is
     /// calibrated against — see §54's migration plan.</summary>
-    private readonly float reliefAmplitudeMetres;
+    private float reliefAmplitudeMetres;
 
     /// <summary>Camera standoff to open at, so a wide-zoom frame can be measured. Zero keeps the default.</summary>
     private readonly float startingZoomMetres;
@@ -752,6 +764,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private int stressScenarioIndex = -1;
     private int penScenarioVariant;
     private int frameCount;
+    private int rolledAt = -1;
     private double nextTimingReport;
 
     private sealed record TerrainSurfaceLayer(
@@ -776,8 +789,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         bool startMapLab = false,
         Region? region = null,
         Archetype? archetype = null,
-        uint? mapSeed = null)
+        uint? mapSeed = null,
+        int rollEveryFrames = 0)
     {
+        this.rollEveryFrames = rollEveryFrames;
         mapLab = startMapLab;
         if (region is { } chosen) labRegion = chosen;
         if (archetype is { } wanted)
@@ -813,11 +828,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             woodland,
             new SettlementSettings(),
             raids,
+            mapTuning,
             new WallSettings(),
             new RoutingSettings(),
             new GroupSettings());
         this.exitAfterFrames = exitAfterFrames;
         this.reliefAmplitudeMetres = reliefAmplitudeMetres;
+        // <b>The panel starts where the command line pointed, or the first roll would contradict it.</b> A
+        // slider that owns a value must be initialised from that value: launch with --archetype Estuary and a
+        // panel sitting at index zero would have thrown the archetype away the moment somebody pressed Space.
+        // The amplitude matters more. Every calibrated scenario runs on flat ground, so a hard-coded 32 on the
+        // dial would mean one keypress silently generated terrain under a measurement that was taken without
+        // it — the dial reads zero on a flat village, and stays there until somebody asks otherwise.
+        mapTuning.Archetype = Array.IndexOf(MapLayout.All, labArchetype);
+        mapTuning.Region = Array.IndexOf(RegionProfile.All, labRegion);
+        mapTuning.ReliefMetres = reliefAmplitudeMetres;
         this.startingZoomMetres = startingZoomMetres;
         movementTrace = traceMovement || debugAll ? new LiveMovementTrace() : null;
         if (debugAll)
@@ -2415,7 +2440,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// <summary>Rolls a new landscape on the same archetype, or steps to the next one.</summary>
     private void RollLab(int archetypeStep, bool reseed)
     {
-        if (!mapLab) return;
+        // <b>No lab-only guard, and its absence is the whole fix.</b> This began as a lab function and kept
+        // <c>if (!mapLab) return;</c> when the village branch was added below — so the village path compiled,
+        // read correctly, and could never run. The key was wired, the handler was reached, the trace would have
+        // printed, and nothing happened: an early return one screen above the code it disables is invisible at
+        // the call site and invisible in the branch it skips.
         if (archetypeStep != 0)
         {
             var all = MapLayout.All;
@@ -2428,6 +2457,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // not. Same rule the --archetype flag already followed.
             labPinned = true;
             Console.WriteLine($"  pinned to {labArchetype}");
+        }
+
+        // <b>The panel is the source of truth for which map, outside the lab.</b> The lab cycles with keys
+        // because it is a browser; the village reads the sliders, so a roll is always "another seed of the map I
+        // asked for" rather than "another seed of whatever the last key press left behind".
+        if (!mapLab)
+        {
+            labArchetype = mapTuning.ArchetypeOf();
+            labRegion = mapTuning.RegionOf();
+            reliefAmplitudeMetres = MathF.Max(0f, mapTuning.ReliefMetres);
         }
 
         if (reseed)
@@ -2469,6 +2508,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private void ReportPick()
     {
+        // Lab only, because outside it LoadRelief has already printed the triple, the sentence and the region
+        // on its own — and a roll that reports itself twice reads like two rolls.
         if (!mapLab) return;
         var sentence = labPlan?.Layout?.Sentence ?? "no layout";
         var profile = RegionProfile.For(labRegion);
@@ -2682,6 +2723,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void OnUpdate(Time time)
     {
+        // Between frames rather than inside one, which is where a keypress lands too: a roll replaces the
+        // world the render is holding references into.
+        if (rollEveryFrames > 0 && frameCount > 0 && frameCount % rollEveryFrames == 0 && frameCount != rolledAt)
+        {
+            rolledAt = frameCount;
+            Console.WriteLine($"  roll at frame {frameCount}");
+            RollLab(0, reseed: true);
+        }
+
         // Before stepping, so a slider moved this frame is felt this frame.
         bodyFeel.Observe(simulation);
         bodyFeel.Apply(simulation);
@@ -3995,6 +4045,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </para>
     /// </remarks>
     private readonly bool mapLab;
+
+    private readonly MapTuning mapTuning = new();
 
     private Archetype labArchetype = Archetype.DiagonalRiver;
 
@@ -5415,6 +5467,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void OnKeyDown(Key key)
     {
+        // <b>Every key that arrives, and whether a modifier was up when it did.</b> Whether Ctrl+letter reaches
+        // a game is not answerable by reading: the mapping table can be correct, the dispatch unfiltered, and
+        // the combination still swallowed by the window library or the OS. One line per press settles it, and
+        // it is behind --debug-all so it costs nothing the rest of the time.
+        if (timingDebug) Console.WriteLine($"  key {key}{(additiveSelection ? " (ctrl held)" : string.Empty)}");
+
         switch (key)
         {
             case Key.Q when mapLab:
@@ -5464,16 +5522,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // Worth having at all because the generator is now one generator. The lab and the village build
             // their ground the same way, so "show me another map" is the same question in both, and answering
             // it only in the tool that cannot be played was an accident of which one was written first.
-            case Key.N when additiveSelection && !mapLab:
+            // <b>Space, and only Space, because the panel owns the rest.</b> Which archetype and which region
+            // are parameters, not actions: they are chosen once and then rolled against, so they belong on the
+            // tuning panel where a value can be seen as well as changed. Cycling them from keys as well left
+            // two writers for one piece of state — the roll below reads the sliders, so a key that stepped the
+            // archetype would have been overwritten by the panel on the very next line.
+            //
+            // That leaves one action, and it gets the one free single key. Ctrl+letter is mapped and forwarded
+            // and ought to work, but "ought to" is doing a lot of work in that sentence: modifier delivery
+            // depends on the window library and on what the OS keeps for itself, and Shift is not in the
+            // <c>Key</c> enum at all. Rolling a map is the thing somebody presses fifty times in a row, and it
+            // should not rest on a combination I cannot verify by reading the source.
+            case Key.Space when !mapLab:
                 RollLab(0, reseed: true);
-                break;
-            case Key.M when additiveSelection && !mapLab:
-                RollLab(1, reseed: false);
-                break;
-            case Key.B when additiveSelection && !mapLab:
-                labRegion = RegionProfile.All[
-                    (Array.IndexOf(RegionProfile.All, labRegion) + 1) % RegionProfile.All.Length];
-                RollLab(0, reseed: false);
                 break;
             case Key.Escape:
                 if (obstacleEditMode)

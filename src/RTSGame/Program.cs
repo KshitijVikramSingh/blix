@@ -342,6 +342,8 @@ public static class Program
         // the cover reaches — is a function of the camera's distance, so "it is slow zoomed out" is not
         // reproducible from a run that starts zoomed in.
         var zoom = Value(args, "--zoom") is { } standoff ? float.Parse(standoff) : 0f;
+        // <b>A soak for the map roll, because Space could not be pressed from a gate.</b>
+        var rollEvery = Value(args, "--roll-every") is { } cadence ? int.Parse(cadence) : 0;
         var game = new RtsGameLoop(
             exitAfterFrames,
             relief,
@@ -356,7 +358,8 @@ public static class Program
             startMapLab,
             labRegion,
             labArchetype,
-            labSeed);
+            labSeed,
+            rollEvery);
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
     }

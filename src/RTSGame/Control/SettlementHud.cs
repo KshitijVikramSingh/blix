@@ -330,7 +330,7 @@ internal sealed class SettlementHud : IDisposable
             // The map keys, on the line below, because they are about the world rather than about the
             // settlement — and because eight bindings nobody can be expected to remember is what the lab
             // learned to print.
-            lines.Add(("CTRL+N NEW MAP · CTRL+M NEXT ARCHETYPE · CTRL+B NEXT REGION", Body));
+            lines.Add(("SPACE NEW MAP · ` PANEL FOR ARCHETYPE, REGION AND RELIEF", Body));
             return;
         }
 

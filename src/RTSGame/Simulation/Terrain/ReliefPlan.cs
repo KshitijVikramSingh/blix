@@ -1792,11 +1792,41 @@ internal sealed class ReliefPlan
         _ = half;
     }
 
-    public string Describe() => landforms.Count == 0
-        ? "flat"
-        : $"{landforms.Count} landforms, amplitude {Amplitude:F1} m, steepest flank " +
-          $"{SteepestGrade:F2} grade against a limit of {TerrainMap.MaximumTraversableGrade:F2}, " +
-          $"undulation {Undulation:F1} m, fall {Tilt * 100f:F2} m per 100 m";
+    /// <summary>What this plan actually put on the ground, counted.</summary>
+    /// <remarks>
+    /// <b>It used to say "flat" for every composed map, and that is worth recording.</b> The line read
+    /// <c>landforms.Count == 0 ? "flat" : …</c>, which was true when a plan was nothing but a bag of mounds.
+    /// The areal primitives — uplands, troughs, basins, the ridge heightfield, the coast — arrived as separate
+    /// collections and none of them is a <see cref="Landform"/>, so a map with two ridges and a fertile floor
+    /// over a 32 m height range printed <c>relief: flat</c> beside its own sentence saying otherwise.
+    /// <para>
+    /// The same failure as the <c>BUILD terrain</c> timer that was also timing the tree instances: an instrument
+    /// keyed to a subset of what it claims to measure reads correctly until something is added outside the
+    /// subset, and then reads confidently wrong. Counting every collection is the fix; the count being
+    /// mechanical is the point.
+    /// </para>
+    /// </remarks>
+    public string Describe()
+    {
+        var parts = new List<string>();
+        if (landforms.Count > 0) parts.Add($"{landforms.Count} landforms");
+        if (Layout is { } layout)
+        {
+            if (layout.Uplands.Length > 0) parts.Add($"{layout.Uplands.Length} uplands");
+            if (layout.Troughs.Length > 0) parts.Add($"{layout.Troughs.Length} troughs");
+            if (layout.Basins.Length > 0) parts.Add($"{layout.Basins.Length} basins");
+            if (layout.Separators.Length > 0) parts.Add($"{layout.Separators.Length} separators");
+            if (layout.Connectors.Length > 0) parts.Add($"{layout.Connectors.Length} connectors");
+            if (layout.Coast is not null) parts.Add("a coast");
+            if (layout.Woods.Length > 0) parts.Add($"{layout.Woods.Length} woods");
+        }
+
+        if (parts.Count == 0) return "flat";
+        return string.Join(", ", parts) +
+               $"; amplitude {Amplitude:F1} m, steepest flank {SteepestGrade:F2} grade against a limit of " +
+               $"{TerrainMap.MaximumTraversableGrade:F2}, undulation {Undulation:F1} m, " +
+               $"fall {Tilt * 100f:F2} m per 100 m";
+    }
 
     /// <summary>
     /// A repeatable sequence from a seed, because generation is the simulation's own truth.
