@@ -368,7 +368,9 @@ public static class Program
             labArchetype,
             labSeed,
             rollEvery,
-            args.Contains("--treeprofile"));
+            args.Contains("--treeprofile"),
+            args.Contains("--fog"),
+            args.Contains("--fogcells"));
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
     }

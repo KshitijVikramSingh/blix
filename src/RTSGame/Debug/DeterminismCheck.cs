@@ -162,6 +162,42 @@ internal static class DeterminismCheck
     };
 
     /// <summary>
+    /// State this check deliberately does not cover, and the argument for each exclusion.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not a category the census enforces, and that is exactly why it is written down.</b> Every other
+    /// list here is checked: a field appears or the census fails by name. This one records state the census
+    /// <em>cannot</em> see, because it does not hang off <see cref="SimulationWorld"/> at all — so nothing
+    /// will ever complain about it, and the only thing standing between it and the fingerprint is a later
+    /// session's reading of why it is outside.
+    /// <para>
+    /// <b>Fog of war</b> (<c>RTSGame.Rendering.FogOfWar</c>) is renderer-side: two masks over ten-metre
+    /// cells recording what the player has scouted and what they are watching. It is derived from unit
+    /// positions and is therefore perfectly deterministic, which is the whole trap — the determinism
+    /// argument for pulling it inside is sound and the consequence is not. The moment a simulation decision
+    /// reads it, "what the player can see" becomes "what the world does", and view state is inside the
+    /// fingerprint for good: two runs that differ only in where the camera has been would then diverge.
+    /// The rule is a direction rather than a location — <b>fog may read the simulation; the simulation may
+    /// never read fog</b> — and it holds cheaply because what crosses the seam is a pure predicate,
+    /// <see cref="SimulationWorld.CanSee"/>, rather than state.
+    /// </para>
+    /// <para>
+    /// <b>What is not an exclusion.</b> A per-faction knowledge aggregate — which cells a faction can
+    /// currently see, as read by an AI opponent or by a defence deciding whether it is needed — is
+    /// simulation state and belongs in <see cref="Carried"/> with a census entry, not here. It is not built.
+    /// Conflating it with the masks above is the mistake this note exists to prevent, in both directions:
+    /// fingerprinting the view, or letting a decision read something unfingerprinted.
+    /// </para>
+    /// </remarks>
+    private static readonly Dictionary<string, string> OutsideTheSimulation = new()
+    {
+        ["RTSGame.Rendering.FogOfWar"] =
+            "renderer-side view state, derived from unit positions through SimulationWorld.CanSee and " +
+            "never read back by the simulation. Fingerprinting it would put where the camera has been " +
+            "inside the state two runs are compared on.",
+    };
+
+    /// <summary>
     /// Types the census walks field by field. Anything a carried field points at is either
     /// one of these, plain data, or has a line in <see cref="Boundaries"/>.
     /// </summary>
@@ -322,7 +358,12 @@ internal static class DeterminismCheck
                        "ledger. Add it to DeterminismCheck: to Carried and to the walk if the " +
                        "next tick can read it, to Derived with the reason it is rebuilt first, " +
                        "or to WallClock if fingerprinting it would make two identical runs " +
-                       "differ.";
+                       "differ. A fourth answer is that it does not belong on the world at all — " +
+                       "state that exists to be looked at rather than simulated is held by the " +
+                       "renderer and stays outside this check, as " +
+                       $"{string.Join(", ", OutsideTheSimulation.Keys)} " +
+                       "does; see OutsideTheSimulation for why that is a direction rather than a " +
+                       "preference.";
             }
 
             // A carried field is only as covered as the thing it points at. This is the layer

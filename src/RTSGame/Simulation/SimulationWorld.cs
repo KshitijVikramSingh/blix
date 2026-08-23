@@ -1492,15 +1492,32 @@ internal sealed class SimulationWorld
     /// asks.
     /// </para>
     /// </remarks>
-    public bool CanSee(in AgentState observer, Vector2 target)
+    public bool CanSee(in AgentState observer, Vector2 target) =>
+        CanSee(observer.Position, observer.SightMetres, target);
+
+    /// <summary>
+    /// Whether anything standing at a place with a given reach can see a point.
+    /// </summary>
+    /// <remarks>
+    /// <b>The same predicate, without requiring a body to ask it.</b> A building is not an agent and has no
+    /// <see cref="AgentState.SightMetres"/>, and the fog of war wants to ask this of a granary and of a
+    /// villager in one loop. Split out rather than copied because the copy is the whole risk: the moment two
+    /// pieces of code decide independently what "can see" means, the fog shows ground the simulation calls
+    /// hidden — and that disagreement is invisible until a player is standing in it.
+    /// <para>
+    /// Adds no state and reads nothing that is not already read, so it is outside the determinism ledger's
+    /// concern by construction: a pure function of the terrain and two arguments.
+    /// </para>
+    /// </remarks>
+    public bool CanSee(Vector2 from, float sightMetres, Vector2 target)
     {
-        var toTarget = target - observer.Position;
+        var toTarget = target - from;
         var distance = toTarget.Length();
-        if (distance > observer.SightMetres) return false;
+        if (distance > sightMetres) return false;
         if (distance <= NavigationCellSize) return true;
 
         var step = toTarget / distance * NavigationCellSize;
-        var at = observer.Position;
+        var at = from;
         var samples = (int)(distance / NavigationCellSize);
         for (var i = 1; i < samples; i++)
         {

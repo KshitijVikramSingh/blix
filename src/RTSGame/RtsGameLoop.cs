@@ -61,6 +61,24 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private readonly ClockSettings clock = new();
     private readonly LookSettings look = new();
     private readonly WoodlandSettings woodland = new();
+    private readonly FogSettings fogSettings = new();
+
+    /// <summary>
+    /// What the player has seen of this map, and what they are watching now.
+    /// </summary>
+    /// <remarks>
+    /// Renderer-side and never handed to the simulation. See <see cref="FogOfWar"/> for why that direction
+    /// is the whole design rather than an implementation detail.
+    /// </remarks>
+    private readonly FogOfWar fog = new();
+
+    /// <summary>The world the fog was sized to, so a new map starts unexplored.</summary>
+    /// <remarks>
+    /// Identity rather than extent, because two maps of the same size are still two maps and rolling a new
+    /// one has to forget the last. Six places in this file build a <see cref="SimulationWorld"/> and a save
+    /// load builds a seventh; comparing the reference catches all of them without a hook in each.
+    /// </remarks>
+    private SimulationWorld? fogWorld;
     private readonly RaidSettings raids = new();
 
     /// <summary>
@@ -1103,9 +1121,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Archetype? archetype = null,
         uint? mapSeed = null,
         int rollEveryFrames = 0,
-        bool profileTreeWork = false)
+        bool profileTreeWork = false,
+        bool fogOfWar = false,
+        bool showFogCells = false)
     {
         this.rollEveryFrames = rollEveryFrames;
+        // <b>Reachable from the command line because the panel cannot be clicked from a gate.</b> The fog's
+        // masks are checked by reading the SCOUTED counts out of a run, and a default-off feature that can
+        // only be switched on by hand is a feature no automated run ever exercises. --fogcells adds the
+        // overlay and turns on the timings that print the line.
+        fogSettings.Enabled = fogOfWar || showFogCells;
+        fogSettings.ShowCells = showFogCells;
+        if (fogOfWar || showFogCells) timingDebug = true;
         // The ablation starts at the cheapest level and works up, so nothing it measures was warmed by the
         // level above it. See treeWork.
         treeProfile = profileTreeWork;
@@ -1160,6 +1187,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             new SettlementSettings(),
             raids,
             look,
+            fogSettings,
             new WallSettings(),
             new RoutingSettings(),
             new GroupSettings());
@@ -3345,6 +3373,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             look.SunBearingDegrees,
             look.Seasonality);
         AdvanceWear(frame);
+        AdvanceFog();
         ApplyWoodlandCover(frame);
         TurnAndZoom(frame);
         PanCamera(frame);
@@ -4020,6 +4049,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var scatterMs = buildClock.Elapsed.TotalMilliseconds;
         buildClock.Restart();
         DrawColliderOverlay();
+        DrawFogOverlay();
         var overlayMs = buildClock.Elapsed.TotalMilliseconds;
         buildClock.Restart();
 
@@ -6153,16 +6183,24 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// fingerprinted. §52's rule: an observational field the renderer keeps to itself.
     /// </para>
     /// </remarks>
-    private const float CanopyCellMetres = 10f;
+    /// <summary>
+    /// How much ground one canopy cell covers, which is <see cref="FogOfWar.CellMetres"/> and must stay so.
+    /// </summary>
+    /// <remarks>
+    /// <b>An alias, not a second constant.</b> This grid and the fog's are the same grid — the fog was put on
+    /// the canopy geometry deliberately, because the per-cell draw gate has to read the fog and iterate the
+    /// trees, and two ten-metre grids computed by two copies of one formula is precisely the failure this
+    /// file keeps producing. A tree popping along a boundary the player can see the fog at is what the
+    /// duplicate would have looked like.
+    /// </remarks>
+    private const float CanopyCellMetres = FogOfWar.CellMetres;
 
     private int[] canopyCounts = Array.Empty<int>();
-    private int canopyCells;
 
     private void RebuildCanopyDensity()
     {
-        var extent = simulation.ExtentMeters;
-        canopyCells = Math.Max(2, (int)MathF.Ceiling(extent / CanopyCellMetres) + 1);
-        var total = canopyCells * canopyCells;
+        EnsureFog();
+        var total = fog.Cells * fog.Cells;
         if (canopyCounts.Length != total) canopyCounts = new int[total];
         else Array.Clear(canopyCounts);
 
@@ -6173,13 +6211,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
     }
 
-    private int CanopyIndex(Vector2 at)
-    {
-        var local = (at + new Vector2(simulation.ExtentMeters * 0.5f)) / CanopyCellMetres;
-        var x = Math.Clamp((int)local.X, 0, canopyCells - 1);
-        var z = Math.Clamp((int)local.Y, 0, canopyCells - 1);
-        return z * canopyCells + x;
-    }
+    private int CanopyIndex(Vector2 at) => fog.Index(at);
 
     /// <summary>Which level of detail the crowding here earns: 0 full, 1 middle, 2 coarse.</summary>
     // <b>The drawn-density cap is out again, and it is worth recording why.</b> It capped how many trees a
@@ -6191,7 +6223,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private int CanopyTierAt(Vector2 at)
     {
-        if (canopyCells == 0) return 0;
+        if (fog.Cells == 0 || canopyCounts.Length == 0) return 0;
         var crowd = canopyCounts[CanopyIndex(at)];
         // <b>A fourth tier at twice the crowding the third needs.</b> The rule is the same one all the way up:
         // a coarse level loses mass and the neighbours put it back, so the deeper into a wood a tree is the
@@ -6885,6 +6917,95 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// <summary>How many collider plates the overlay drew, and how many it had no room for.</summary>
     private int collidersDrawn, collidersDropped;
 
+    /// <summary>Sizes the fog to the current map, forgetting whatever was known about the last one.</summary>
+    /// <remarks>
+    /// Called from both the frame update and the canopy rebuild, because either can be the first to touch the
+    /// grid on a given frame and an unsized grid has no valid cell to index. Idempotent and a reference
+    /// compare, so calling it twice costs nothing.
+    /// </remarks>
+    private void EnsureFog()
+    {
+        if (ReferenceEquals(fogWorld, simulation)) return;
+        fogWorld = simulation;
+        fog.Resize(simulation.ExtentMeters);
+    }
+
+    private void AdvanceFog()
+    {
+        EnsureFog();
+        fog.Advance(simulation, fogSettings);
+    }
+
+    /// <summary>
+    /// Paints every fog cell in the colour of its tier.
+    /// </summary>
+    /// <remarks>
+    /// <b>The instrument, and it exists before anything reads the masks.</b> §73: three cascades were four
+    /// rounds of screenshots until a debug tint answered it in one, and fog is the worse case — correct fog
+    /// and broken fog both look like dark ground from the chair, so there is no version of "watch it and see"
+    /// that works here.
+    /// <para>
+    /// <b>Opaque, so the tint replaces the ground rather than multiplying it.</b> §73's other lesson, and it
+    /// comes free here: alpha is coverage for terrain and one for everything else, and these plates are
+    /// props. Multiplied, an unexplored blue over grass would be a plausible dusk and the question "is this
+    /// cell unexplored" would be a judgement about a hue.
+    /// </para>
+    /// <para>
+    /// <b>Frustum-tested and capped, because a debug overlay must not be able to end the run.</b> Learnt
+    /// the hard way one commit ago, when the collider overlay lost its bound and took the process down on a
+    /// keystroke — the worst possible place for a hard exception, since the toggle exists to diagnose.
+    /// </para>
+    /// <para>
+    /// Plates are drawn a little short of the cell so the gutters show the grid. That is not decoration:
+    /// the gate that will read these masks works a whole cell at a time, and seeing the quantum is seeing
+    /// what the gate can actually resolve.
+    /// </para>
+    /// </remarks>
+    private void DrawFogOverlay()
+    {
+        fogCellsDrawn = 0;
+        fogCellsDropped = 0;
+        if (!fogSettings.ShowCells || fog.Cells == 0) return;
+
+        var room = propBuffer.Capacity - propInstances.Count;
+        var side = FogOfWar.CellMetres * 0.86f;
+        var total = fog.Cells * fog.Cells;
+        for (var index = 0; index < total; index++)
+        {
+            var centre = fog.CentreOf(index);
+            if (Vector2.DistanceSquared(centre, cameraFocus) > treeCullBoundSquared) continue;
+            var ground = simulation.Terrain.SampleHeight(centre);
+            if (!InView(centre, ground, 0.5f, FogOfWar.CellMetres)) continue;
+
+            if (fogCellsDrawn >= room)
+            {
+                fogCellsDropped++;
+                continue;
+            }
+
+            fogCellsDrawn++;
+            propInstances.Add(new InstanceData(
+                Matrix4x4.CreateScale(side, 0.03f, side) *
+                Matrix4x4.CreateTranslation(centre.X, ground + 0.35f, centre.Y),
+                fog.TierOf(index) switch
+                {
+                    FogTier.Visible => FogVisibleColor,
+                    FogTier.Remembered => FogRememberedColor,
+                    _ => FogUnexploredColor,
+                }));
+        }
+    }
+
+    /// <summary>How many fog plates the overlay drew, and how many it had no room for.</summary>
+    private int fogCellsDrawn, fogCellsDropped;
+
+    // Three hues chosen to be nothing the ground ever is, for the reason §73 records: a debug colour that
+    // could be mistaken for the scene is not telling you anything, and this scene already contains dark
+    // ground, dim ground and lit ground.
+    private static readonly Vector4 FogUnexploredColor = new(0.05f, 0.06f, 0.20f, 1f);
+    private static readonly Vector4 FogRememberedColor = new(0.55f, 0.13f, 0.52f, 1f);
+    private static readonly Vector4 FogVisibleColor = new(0.16f, 0.78f, 0.80f, 1f);
+
     /// <summary>
     /// The distances that are supposed to agree with each other, on one line.
     /// </summary>
@@ -6949,6 +7070,27 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"TREES {treeTiers.Near}/{treeTiers.Mid}/{treeTiers.Far}/{treeTiers.Deep} near/mid/far/deep over " +
             $"{look.TreeCrowdMid:F0}/{look.TreeCrowdFar:F0} per {CanopyCellMetres:F0} m · " +
             $"{undergrowthDrawn} under · " +
+            // <b>Called SCOUTED and not FOG, because this line already has a FOG and it is the haze.</b> Two
+            // unrelated things under one label on the one line whose entire purpose is catching numbers that
+            // disagree would be a good way to spend an evening comparing a view distance against a cell count.
+            //
+            // Counted per tier because "the map is dark" is what working fog and broken fog both look like —
+            // and the three counts sum to the cell total, so a sum that does not is the instrument telling you
+            // it is lying rather than you finding out later. The cost is on the same line for the reason §74
+            // ended up needing it: the refresh is round-robin precisely to keep off this frame's budget, and a
+            // budget nobody prints is a budget nobody notices being exceeded.
+            $"SCOUTED {fog.Counts.Visible:N0} seen + {fog.Counts.Remembered:N0} known + " +
+            $"{fog.Counts.Unexplored:N0} dark of {fog.Cells * fog.Cells:N0} cells at " +
+            $"{FogOfWar.CellMetres:F0} m ({(fogSettings.Enabled ? "on" : "off")}, " +
+            $"{fog.WatcherCount.Bodies} bodies + {fog.WatcherCount.Buildings} buildings watching, " +
+            $"{fog.QueriesLastFrame:N0} asks in " +
+            $"{fog.MillisecondsLastFrame:F2} ms, cycle asked {fog.LastCycle.Asked:N0} granted " +
+            $"{fog.LastCycle.Granted:N0}, widest reach {fog.LastCycle.WidestReach:F0} m)" +
+            (fogSettings.ShowCells
+                ? $" · FOGCELLS {fogCellsDrawn:N0} drawn" +
+                  (fogCellsDropped > 0 ? $", {fogCellsDropped:N0} over budget" : string.Empty)
+                : string.Empty) +
+            " · " +
             $"GROUNDSUBMIT {groundLayersDrawn} layers in {groundSubmitMs:F2} ms · " +
             $"GROUND {drawnChunks.Count} of {groundChunks.Count} chunks, " +
             $"{drawnChunks.Sum(chunk => groundChunks[chunk].Count(layer => !layer.Blend && !layer.Water))} coats " +
