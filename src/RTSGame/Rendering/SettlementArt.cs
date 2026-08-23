@@ -146,7 +146,7 @@ internal sealed class SettlementArt : IDisposable
             if (count <= 0) continue;
             instances += count;
             triangles += (long)count * model.TriangleCount;
-            casters += (long)count * model.CasterTriangleCount;
+            casters += (long)model.CasterInstanceCount * model.CasterTriangleCount;
         }
 
         return (instances, triangles, casters);

@@ -417,8 +417,27 @@ internal sealed class LookSettings
     /// way out on a dense map is thousands of models and the frame is allowed to give up before the
     /// simulation does.
     /// </remarks>
-    [Tune(60.0, 600.0, Label = "detail radius ceiling (m)", Group = "ground")]
-    public float DetailCeilingMetres = 240f;
+    /// <remarks>
+    /// <b>Expressed as texels rather than metres, because that is what the cap protects.</b> The sun's box is
+    /// twice the detail radius across and the shadow map is a fixed number of texels wide, so "how far may the
+    /// box reach" and "how coarse may a texel be" are one statement — and only the second stays true if the
+    /// map's resolution ever changes. 23.4 cm at 2,048 texels is the 240 m ceiling this replaces, to the metre.
+    /// </remarks>
+    /// <summary>Draws every tree on the map, bypassing both the distance bound and the frustum test.</summary>
+    /// <remarks>
+    /// <b>An A/B switch for "is culling doing this", because four rounds of reasoning have not settled it.</b>
+    /// With it on, nothing about visibility is decided by this file — every tree the simulation has is submitted.
+    /// If what you are looking at does not change, the culling is innocent and the answer is elsewhere: correct
+    /// perspective as the camera descends, the ground under them, or the models themselves.
+    /// <para>
+    /// Expensive by design and not a setting to leave on: on a wooded map that is thirty thousand trees.
+    /// </para>
+    /// </remarks>
+    [Tune(Label = "draw every tree", Group = "ground")]
+    public bool DrawEveryTree = false;
+
+    [Tune(6.0, 60.0, Label = "coarsest shadow texel (cm)", Group = "ground")]
+    public float CoarsestShadowTexelCentimetres = 23.4f;
 
     /// <summary>How much brighter tilled soil is drawn than the pack authored it.</summary>
     /// <remarks>

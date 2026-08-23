@@ -78,6 +78,18 @@ public sealed class PropModel : IDisposable
     // Copies staged this frame.
     public int InstanceCount => parts.Length == 0 ? 0 : parts[0].Instances.Count;
 
+    /// <summary>
+    /// How many copies are casting this frame, which is not the same as how many are drawn.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reported separately because assuming it equals <see cref="InstanceCount"/> made a caster cull
+    /// invisible.</b> A caller placing copies with <see cref="AddUnlit"/> draws them and casts nothing, so a
+    /// load figure computed as <c>instances x casterTriangles</c> answers "what would this cost if everything
+    /// cast" — which is a fair question and not the one being asked when you are trying to find out whether
+    /// the cull worked.
+    /// </remarks>
+    public int CasterInstanceCount => casters.Length == 0 ? 0 : casters[0].Instances.Count;
+
     // Build from a set of (mesh, tint) parts — one per material of the source asset.
     //
     // `bake` is applied to every part's geometry once, here, rather than to every
@@ -199,6 +211,24 @@ public sealed class PropModel : IDisposable
     {
         foreach (var part in parts) part.Instances.Add(new InstanceData(model, part.Tint));
         foreach (var part in casters) part.Instances.Add(new InstanceData(model, part.Tint));
+    }
+
+    /// <summary>
+    /// Places one copy that is drawn but casts nothing.
+    /// </summary>
+    /// <remarks>
+    /// <b>For anything standing outside the light's own box.</b> A caster submitted beyond the shadow map's
+    /// extent is geometry rasterised into a texture it cannot land in — the whole cost and none of the effect.
+    /// Measured on a wooded map at maximum zoom: 8.2M of 18.8M triangles submitted were casters, and most
+    /// belonged to trees between the box's edge and the draw bound.
+    /// <para>
+    /// A separate method rather than a flag, so the decision is visible at the call site. Whether a thing is
+    /// inside the light's box is the caller's knowledge, not the model's.
+    /// </para>
+    /// </remarks>
+    public void AddUnlit(Matrix4x4 model)
+    {
+        foreach (var part in parts) part.Instances.Add(new InstanceData(model, part.Tint));
     }
 
     // Place one copy in a single colour, overriding every material. For a faction tint,

@@ -373,6 +373,22 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private int treeNodesAlive;
     private int treesOffered;
 
+    /// <summary>Time inside the tree branch, and inside the undergrowth it draws, in Stopwatch ticks.</summary>
+    /// <remarks>
+    /// <b>Split because the node phase is six kinds of work under one number.</b> It read 16.4 ms at a wide
+    /// zoom and every guess about why — the species lookup, the woodland field, the frustum test — was a guess.
+    /// A phase that names one thing and measures six is the same fault as the `overlay` label that turned out
+    /// to be the whole render graph.
+    /// </remarks>
+    private long treeTicks;
+    private long undergrowthTicks;
+
+    /// <summary>Trees the frustum threw away after the coarse bound let them through.</summary>
+    private int treesOutOfView;
+
+    /// <summary>Trees within twenty metres of the camera that the frustum refused. Should be near zero.</summary>
+    private int treesNearRejected;
+
     /// <summary>
     /// The camera's frustum, as six outward planes, rebuilt each frame.
     /// </summary>
@@ -472,6 +488,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     /// <summary>A coarse bound on how far a tree is worth frustum-testing, squared. Not a visibility rule.</summary>
     private float treeCullBoundSquared = 1f;
+
+    /// <summary>How far from the focus the sun's box still contains a caster, squared.</summary>
+    private float shadowBoxRadiusSquared = 1f;
 
     /// <summary>Ground colouring the built instances were made with, so a slider forces a rebuild.</summary>
 
@@ -621,8 +640,30 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </para>
     /// </remarks>
     private float DetailRadius => MathF.Min(
-        look.DetailCeilingMetres,
-        MathF.Max(look.ShadowFloorMetres * 0.5f, VisibleGroundRadius + ShadowReachMetres));
+        CoarsestShadowReachMetres,
+        // <b>From the relief-corrected reach, not the flat one, because the box has to cover what is drawn.</b>
+        // Sized from Sees it covered 173 m while trees reached 460 — so shadows stopped in a circle in the
+        // middle of the view and everything beyond it stood in flat light. Reported from the chair as only a
+        // disc of the view being shaded, which is exactly what a box centred on the focus and smaller than the
+        // draw distance looks like.
+        MathF.Max(look.ShadowFloorMetres * 0.5f, VisibleReach + ShadowReachMetres));
+
+    /// <summary>
+    /// The furthest the sun's box may reach before its texels are coarser than the dial allows.
+    /// </summary>
+    /// <remarks>
+    /// <b>The cap was in metres and the thing it protects is measured in centimetres per texel.</b> The box is
+    /// <c>2 × DetailRadius</c> across and <see cref="ShadowMapSize"/> texels wide, so a reach limit and a texel
+    /// limit are the same statement — but only one of them survives a change to the shadow map's resolution.
+    /// Doubling the map with the old dial bought nothing; with this one it buys reach, automatically, which is
+    /// what anybody doubling it wanted.
+    /// <para>
+    /// 240 m at 2,048 texels is 23.4 cm a texel, so the dial's default reproduces the old ceiling exactly. What
+    /// changes is what the number means and what it stays true under.
+    /// </para>
+    /// </remarks>
+    private float CoarsestShadowReachMetres =>
+        look.CoarsestShadowTexelCentimetres / 100f * ShadowMapSize * 0.5f;
 
     /// <summary>
     /// How far the ground itself is drawn, which is a different question from how far it is shadowed.
@@ -640,9 +681,111 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// was.
     /// </para>
     /// </remarks>
-    private float GroundDrawRadius => VisibleGroundRadius * 1.08f + 12f;
+    private float GroundDrawRadius => Sees * GroundBoundShare;
 
-    private float SunOrthoExtent => 2f * DetailRadius;
+    /// <summary>
+    /// How far this camera can see ground: the one distance every other draw distance is a fraction of.
+    /// </summary>
+    /// <remarks>
+    /// <b>There were a dozen of these, each chosen on its own, and that is the bug class this file has now hit
+    /// six times.</b> The far plane, the detail radius, the ground draw radius, the shadow box, the tree bound,
+    /// the scatter radius, the contact radius — every one a distance from a 2D <c>cameraFocus</c>, every one
+    /// picked or tuned separately, and <see cref="GeometryLine"/> exists solely to print "the distances that are
+    /// supposed to agree with each other", which is this file admitting the problem in code.
+    /// <para>
+    /// So there is one measurement and the rest are ratios to it. A ratio cannot silently disagree with the
+    /// view the way a metre value can, and the shares below say what they mean: <em>contact shadows are paid for
+    /// out to seven tenths of what can be seen</em> is a sentence; <em>ninety metres</em> is a number that was
+    /// right at one zoom.
+    /// </para>
+    /// <para>
+    /// It does not fix the deeper fault — this is still 3D frustum information collapsed into a scalar, which is
+    /// what let a radius centred on the focus disagree with a trapezoid reaching past it. What it does is make
+    /// the collapse happen <b>once</b>, in one place, where the next person can see it.
+    /// </para>
+    /// </remarks>
+    private float Sees => VisibleGroundRadius;
+
+    /// <summary>
+    /// How far ground can actually be seen, once the map's relief is allowed for.
+    /// </summary>
+    /// <remarks>
+    /// <b><see cref="Sees"/> is a flat-plane answer, and this is the correction every user of it needs.</b> That
+    /// calculation intersects the frustum's bottom edge with a <em>horizontal plane through the focus</em>, so
+    /// it is exact on a plain and short everywhere else: looking down a valley, the real ground lies below that
+    /// plane and carries on well past where the plane was cut.
+    /// <para>
+    /// <b>The ground cull was given this correction today and the trees were not, which is the whole bug.</b>
+    /// Ground chunks reached <c>Sees + span / descent</c> and trees reached <c>2 x Sees</c>, so on relief the
+    /// grass was drawn where the trees were culled — and it got worse the closer the camera came, because Sees
+    /// shrinks with camera distance while the hill in front of you does not. Reported from the chair as zooming
+    /// in and seeing less, and confirmed by a switch that draws every tree: with the bound gone the picture is
+    /// right, and the frustum was refusing twelve trees out of thirty-four thousand.
+    /// </para>
+    /// <para>
+    /// A hill <c>span</c> metres proud of the focus plane meets the same bottom edge <c>span / tan(pitch −
+    /// halfFov)</c> further out, which is the term. Seventh flat-ground constant in a world with hills, and the
+    /// first one to be fixed by putting the correction where <em>both</em> callers have to go through it.
+    /// </para>
+    /// </remarks>
+    private float VisibleReach
+    {
+        get
+        {
+            var half = camera.VerticalFieldOfView * 0.5f;
+            var descent = MathF.Max(0.08f, MathF.Tan(MathF.Max(half + 0.05f, CameraElevation) - half));
+            return Sees + labFloorSpan.Span / descent;
+        }
+    }
+
+    /// <summary>Coarse bound on ground chunks, as a share of what can be seen. The frustum decides.</summary>
+    /// <remarks>
+    /// Twice, because it is no longer a visibility rule — chunks are frustum-tested against their own height
+    /// range — and its only remaining job is to keep the far half of a large map out of the loop. It used to be
+    /// <c>visible × 1.08 + 12</c>, which was a visibility rule, and being one is what made it wrong on relief.
+    /// </remarks>
+    private const float GroundBoundShare = 2f;
+
+
+    /// <summary>Metres between candidate ground-cover positions.</summary>
+    /// <remarks>
+    /// Tighter than the trees, because a tuft of grass is a few centimetres and stops being a tuft well before
+    /// a trunk stops being a trunk.
+    /// </remarks>
+    private const float ScatterSpacingMetres = 2.4f;
+
+    /// <summary>How many ground-cover candidates this loop will walk in a frame.</summary>
+    /// <remarks>
+    /// The real limit on the scatter, and the thing the old 110 m radius was a proxy for. A budget in cells
+    /// survives a change to the spacing; a radius in metres silently changes how much work it means the moment
+    /// the spacing moves.
+    /// </remarks>
+    private const float CoverCellBudget = 8_000f;
+
+    /// <summary>
+    /// How far ground cover is generated, as a share of what can be seen.
+    /// </summary>
+    /// <remarks>
+    /// Not a visibility cull but a generation bound — the scatter walks a grid of candidate positions, so this
+    /// decides how many cells it visits. Under one because a tuft of grass stops reading as a tuft well before
+    /// a trunk stops reading as a trunk, which is the same argument the old 110 m constant was making without
+    /// being able to say it relative to anything.
+    /// </remarks>
+    private const float ScatterShare = 0.85f;
+
+    /// <summary>
+    /// How far contact shadows are paid for, as a share of what can be seen.
+    /// </summary>
+    /// <remarks>
+    /// A close-up effect that costs by the pixel: every disc is overdraw on ground already shaded, and at range
+    /// the thing it grounds is a few pixels tall. Faded over its last third, so the bound is never a line.
+    /// </remarks>
+    private const float ContactShare = 0.7f;
+
+    // <b>SunOrthoExtent is gone.</b> It was 2 x DetailRadius — a square sized from a flat-plane radius around
+    // the focus — and the box is now fitted to the camera frustum's own corners in the light's frame. See
+    // SunShadowViewProjection. What the box measures is reported by sunBoxSideMetres, which is the width the
+    // matrix was actually built with rather than a second estimate of it.
 
     private const float SunDistance = 220f;
 
@@ -3224,16 +3367,112 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// shadow edge in the scene then crawls and shimmers as the camera pans — the artefact is
     /// far more distracting than the low resolution it would otherwise be hiding.
     /// </remarks>
+    /// <summary>
+    /// The sun's box, fitted to the camera frustum itself rather than to a radius around the focus.
+    /// </summary>
+    /// <remarks>
+    /// <b>The frustum is the authority on what is being looked at, and this was the last thing still guessing at
+    /// it.</b> Every other consumer was moved onto <see cref="InView"/> or onto the frustum-fitted ground cull;
+    /// the shadow box went on being a square of side <c>2 x DetailRadius</c> centred on <c>cameraFocus</c>, sized
+    /// from a scalar that is itself a flat-plane estimate. That is why shadows stopped in a circle inside the
+    /// view: a disc and a trapezoid, again, one layer up.
+    /// <para>
+    /// <b>Fitted properly: unproject the frustum's eight corners, put them in the light's frame, take the
+    /// bounds.</b> Then the box is exactly the shape of what the camera can see, from the sun's point of view —
+    /// tight when looking down, long when looking along the ground, and correct on relief without a correction
+    /// term, because frustum corners carry no assumption about where the ground is.
+    /// </para>
+    /// <para>
+    /// The frustum is truncated at <see cref="ShadowDepthMetres"/> first, because the camera's own far plane runs
+    /// to several hundred metres and fitting the whole of it would spend every texel on ground nobody is looking
+    /// at closely. That truncation is the single cascade of a cascaded shadow map, and splitting it into three
+    /// is the next step rather than a different design.
+    /// </para>
+    /// <para>
+    /// Still snapped to its own texel grid, and it has to be: a box that slides continuously slides in sub-texel
+    /// steps and every shadow edge in the scene crawls as the camera pans. Snapping now happens in the light's
+    /// frame rather than in world XZ, which is where it always belonged — the old version snapped the centre in
+    /// world space while the box orientation came from the sun, so the grid it snapped to was not the grid the
+    /// texels were on.
+    /// </para>
+    /// </remarks>
     private Matrix4x4 SunShadowViewProjection()
     {
-        var texel = SunOrthoExtent / ShadowMapSize;
-        var focus = new Vector3(
-            MathF.Round(cameraFocus.X / texel) * texel,
-            simulation.Terrain.SampleHeight(cameraFocus),
-            MathF.Round(cameraFocus.Y / texel) * texel);
+        var toLight = Vector3.Normalize(SunDirection);
+        var up = MathF.Abs(toLight.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
+        // The light's frame: looking along -toLight, i.e. from the sun toward the scene.
+        var forward = -toLight;
+        var right = Vector3.Normalize(Vector3.Cross(up, forward));
+        var above = Vector3.Cross(forward, right);
+
+        // <b>Built from the camera's own basis and trigonometry, not by unprojecting NDC.</b> The first version
+        // unprojected the NDC cube's corners and picked its far slice as <c>reach / farPlane</c> — treating NDC
+        // depth as linear in distance, which it emphatically is not. At a 592 m far plane that fraction
+        // unprojects to about seventeen centimetres in front of the eye, and the box collapsed to its 40 m
+        // minimum with 2 cm texels: a shadow map spending everything on the camera's shoelaces.
+        //
+        // A frustum's corners are four points at each of two distances, and the half-extents at a distance are
+        // just <c>d x tan(halfFov)</c> and that times the aspect. No matrix, no inversion, no depth convention
+        // to get wrong.
+        var eye = camera.Transform.Position;
+        var ahead = camera.Transform.Forward;
+        var sideways = camera.Transform.Right;
+        var overhead = camera.Transform.Up;
+        var halfFov = camera.VerticalFieldOfView * 0.5f;
+        var tangent = MathF.Tan(halfFov);
+
+        var low = new Vector3(float.MaxValue);
+        var high = new Vector3(float.MinValue);
+        var reach = MathF.Min(ShadowDepthMetres, camera.FarPlane);
+        Span<float> slices = stackalloc float[] { 0.5f, reach };
+        foreach (var away2 in slices)
+        {
+            var tall = away2 * tangent;
+            var wide = tall * aspect;
+            var middleOfSlice = eye + ahead * away2;
+            for (var corner = 0; corner < 4; corner++)
+            {
+                var at = middleOfSlice
+                         + sideways * ((corner & 1) == 0 ? -wide : wide)
+                         + overhead * ((corner & 2) == 0 ? -tall : tall);
+                var inLight = new Vector3(
+                    Vector3.Dot(at, right),
+                    Vector3.Dot(at, above),
+                    Vector3.Dot(at, forward));
+                low = Vector3.Min(low, inLight);
+                high = Vector3.Max(high, inLight);
+            }
+        }
+
+        if (low.X > high.X) return GraphicsMatrices.SunShadowViewProjection(
+            SunDirection, Vector3.Zero, SunDistance, 200f, 20f, SunDistance + 200f);
+
+        // A square, because the map is square and a rectangle would make texels of two different sizes.
+        var side = MathF.Max(high.X - low.X, high.Y - low.Y);
+        side = MathF.Max(40f, side + ShadowReachMetres * 2f);
+        var texel = side / ShadowMapSize;
+        var middle = (low + high) * 0.5f;
+        // Snapped on the light's own axes, which is the grid the texels are actually on.
+        var centre = right * (MathF.Round(middle.X / texel) * texel) +
+                     above * (MathF.Round(middle.Y / texel) * texel) +
+                     forward * middle.Z;
+
+        sunBoxSideMetres = side;
+        var away = (high.Z - low.Z) * 0.5f + SunDistance;
         return GraphicsMatrices.SunShadowViewProjection(
-            SunDirection, focus, SunDistance, SunOrthoExtent, 20f, SunDistance + SunOrthoExtent);
+            SunDirection, centre, away, side, 20f, away * 2f + side);
     }
+
+    /// <summary>How far along the camera frustum the sun's box is fitted, in metres.</summary>
+    /// <remarks>
+    /// The camera's far plane runs to several hundred metres and fitting all of it would spend every texel on
+    /// ground nobody is looking at closely. This is the one cascade split there is; the number is what the texel
+    /// budget affords at the shadow map's resolution.
+    /// </remarks>
+    private float ShadowDepthMetres => CoarsestShadowReachMetres;
+
+    /// <summary>The fitted box's side, in metres, for the geometry report and the caster cull.</summary>
+    private float sunBoxSideMetres = 200f;
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
@@ -3265,9 +3504,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             0f);
         // What the shaders need about the shadow map's geometry — a texel as a fraction of the map, and
         // how many metres the map covers — plus the two biases, which are a look and not geometry.
+        // <b>The fitted box, not the estimate.</b> The shaders scale their bias by how many metres a texel
+        // covers, so handing them a different width from the one the matrix was built with makes every bias
+        // wrong by that ratio — quietly, as acne or peter-panning rather than as anything that looks like a
+        // mismatch.
         var shadow = new Vector4(
             1f / ShadowMapSize,
-            SunOrthoExtent,
+            sunBoxSideMetres,
             look.ShadowPenumbraTexels,
             look.ShadowNormalOffsetTexels);
         var following = look.SunFollowsTheYear;
@@ -3356,7 +3599,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var sunLight = new Vector4(new Vector3(sunTint.X, sunTint.Y, sunTint.Z) * light.X, 0f);
         var skyLight = new Vector4(new Vector3(skyAmbient.X, skyAmbient.Y, skyAmbient.Z) * light.Y, 0f);
         // Faded over the last third of the visible ground, so the far field is not stippled.
-        var contactFade = new Vector4(ContactRadiusMetres * 0.62f, ContactRadiusMetres, 0f, 0f);
+        var contactReach = Sees * ContactShare;
+        var contactFade = new Vector4(contactReach * 0.62f, contactReach, 0f, 0f);
         MemoryMarshal.Write(contactPush.AsSpan(0, 64), in viewProjection);
         MemoryMarshal.Write(contactPush.AsSpan(64, 16), in contactFade);
         MemoryMarshal.Write(contactPush.AsSpan(80, 16), in cameraPosition);
@@ -3419,7 +3663,22 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // detail radius. A missing shadow at 150 m is not noticeable; a wall where the forest ends is.
         // Twice what can be seen, so nothing in view is ever outside it and the loop still refuses the far
         // half of a big map. Not a decision about visibility — see the note at its use.
-        var treeDrawRadius = MathF.Max(DetailRadius, VisibleGroundRadius * 2f + 24f);
+        // <b>The far plane, which is to say: no distance bound at all.</b> Three attempts to size a disc around
+        // cameraFocus so that it covered the view all failed the same way, and the last one failed at the
+        // corners — which is the tell, because the corners are the furthest points from the centre of a disc and
+        // the nearest thing to a proof that <em>a disc cannot match a trapezoid over undulating ground</em>. The
+        // arithmetic said Sees reaches the corner and the relief term covers the drop; the screen said otherwise,
+        // and the screen is right. A radius has one number and the view has four edges and a heightfield.
+        //
+        // So the frustum decides, alone, and this is only the sanity cap that keeps the loop from testing the
+        // whole map: nothing past the far plane can be in any frustum. Affordable because it was measured —
+        // drawing every tree on the map, thirty-four thousand of them, costs five to ten frames a second, so
+        // the bound was never buying much and was costing correctness the whole time.
+        var treeDrawRadius = camera.FarPlane;
+        // The sun's box reaches half its own width from the focus, so this is where casting stops meaning
+        // anything. A hair inside it, because a caster on the boundary is half outside.
+        var shadowBoxRadius = sunBoxSideMetres * 0.48f;
+        shadowBoxRadiusSquared = shadowBoxRadius * shadowBoxRadius;
         treeCullBoundSquared = treeDrawRadius * treeDrawRadius;
 
         // <b>Render-side phase timings, because the simulation's own breakdown cannot see any of this.</b>
@@ -3647,9 +3906,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // How much further a hill can enter the view than flat ground at the same bearing. The bottom edge of
         // the frustum descends at (pitch - halfFov), so ground standing `span` metres proud of the focus plane
         // meets it `span / tan(pitch - halfFov)` further out.
-        var half = camera.VerticalFieldOfView * 0.5f;
-        var descent = MathF.Max(0.08f, MathF.Tan(MathF.Max(half + 0.05f, CameraElevation) - half));
-        var outerReach = groundReach + labFloorSpan.Span / descent;
+        // The same relief-corrected reach the trees use, so the two can no longer disagree about how far the
+        // world goes — which is what they were doing.
+        var outerReach = VisibleReach * GroundBoundShare;
         var detailReach = DetailRadius;
         var metresPerPixel = viewportPixels > 0f ? 2f * visible / viewportPixels : 0.001f;
         var bandsWorthDrawing =
@@ -3711,6 +3970,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         treesDrawn = 0;
         treeNodesAlive = 0;
         treesOffered = 0;
+        treeTicks = 0L;
+        undergrowthTicks = 0L;
+        treesOutOfView = 0;
+        treesNearRejected = 0;
         treeTiers = (0, 0, 0, 0);
         habitationLights = 0;
         contactInstances.Clear();
@@ -3927,9 +4190,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 // shadow box as well as the view — a tree behind the camera still casts into the frame —
                 // so it is compared against both. Not an optimisation so much as the thing that makes a
                 // forest affordable at all: without it the frame draws the whole map every frame.
-                if (Vector2.DistanceSquared(node.Position, cameraFocus) > treeCullBoundSquared) continue;
+                if (!look.DrawEveryTree &&
+                    Vector2.DistanceSquared(node.Position, cameraFocus) > treeCullBoundSquared)
+                {
+                    continue;
+                }
+
                 treesOffered++;
+                // Timed around the branch rather than inside it, so "is the node phase trees" is answerable
+                // before anything is guessed about which part of a tree costs.
+                var treeStart = timingDebug ? Stopwatch.GetTimestamp() : 0L;
                 DrawTree(in node);
+                if (timingDebug) treeTicks += Stopwatch.GetTimestamp() - treeStart;
                 continue;
             }
 
@@ -4281,46 +4553,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             cropColor));
     }
 
-    /// <summary>
-    /// A tree, shrinking as it is cut.
-    /// </summary>
-    /// <remarks>
-    /// Three species picked by id, at a size that reads how much wood is left in it, because Stage B's
-    /// only interface is <b>the wood line as a thing you look at</b>: thinned to stragglers where people
-    /// have been cutting for years, closing up into unbroken canopy further out. A part-cut tree standing
-    /// smaller means felling is visible while it happens rather than as a tree that is suddenly absent.
-    /// </remarks>
-    /// <summary>
-    /// Lays a soft dark disc where something meets the ground.
-    /// </summary>
-    /// <remarks>
-    /// <b>The thing whose absence makes an object look composited rather than placed.</b> A sun shadow says
-    /// where the light is not; it says nothing about the crack between two surfaces being closed off from
-    /// the sky, and that crack is the darkest part of any real scene. Reported as trees and buildings
-    /// looking "placed atop the ground instead of built on it", which is exactly the symptom.
-    /// <para>
-    /// Tilted onto the local slope, because a flat disc on a hillside either buries one edge or floats the
-    /// other. Lifted by a few centimetres for the same reason the wear paths are: coplanar surfaces z-fight
-    /// into speckle. And it fades out with distance, since a far field stippled with dark dots reads as
-    /// noise rather than as grounding.
-    /// </para>
-    /// </remarks>
-    /// <summary>
-    /// How far out contact shadows are drawn, in metres.
-    /// </summary>
-    /// <remarks>
-    /// <b>Much shorter than the detail radius, because a contact shadow is a close-up effect that costs by
-    /// the pixel.</b> Six thousand alpha-blended discs was the cap being hit at a wide zoom, and every one
-    /// of them is overdraw over ground already shaded — while at two hundred metres the thing it grounds is
-    /// a few pixels tall and the shadow under it is invisible. Ninety metres, faded over the last third, so
-    /// the effect is paid for exactly where it can be seen.
-    /// </remarks>
-    private const float ContactRadiusMetres = 90f;
 
     private void AddContactShadow(Vector2 at, float radius, float strength)
     {
         if (contactInstances.Count >= MaximumContactShadows) return;
-        if (Vector2.DistanceSquared(at, cameraFocus) > ContactRadiusMetres * ContactRadiusMetres) return;
+        var contactReach = Sees * ContactShare;
+        if (Vector2.DistanceSquared(at, cameraFocus) > contactReach * contactReach) return;
         var ground = simulation.Terrain.SampleHeight(at);
         var normal = simulation.Terrain.SampleNormal(at);
         // Lean the disc onto the ground: x and z stay unit length so the footprint is exact, and only y
@@ -4970,6 +5208,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private const float WidestTreeMetres = 9f;
 
+    /// <summary>Places a prop, with or without its shadow, depending on whether the light can see it.</summary>
+    private static void Cast(PropModel model, Matrix4x4 placement, bool casts)
+    {
+        if (casts) model.Add(placement);
+        else model.AddUnlit(placement);
+    }
+
     private void DrawTree(in EconomyNode tree)
     {
         var ground = simulation.Terrain.SampleHeight(tree.Position);
@@ -4998,11 +5243,35 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // Conservative on purpose: a fixed generous extent, so the early test can only ever reject a tree
             // the exact test would also have rejected. A cheap conservative cull followed by an exact one is
             // the whole trick, and getting it backwards is what made the ordering matter.
-            if (!InView(tree.Position, ground, WidestTreeMetres, WidestTreeMetres * 0.5f)) return;
+            if (!look.DrawEveryTree &&
+                !InView(tree.Position, ground, WidestTreeMetres, WidestTreeMetres * 0.5f))
+            {
+                treesOutOfView++;
+                // <b>Of the trees the frustum throws away, how many were right next to the camera.</b>
+                // "Trees near the camera vanish as I zoom in" is a claim about this number and nothing else:
+                // the distance bound is 86 m at the closest zoom and the view is 43 m deep, so the bound cannot
+                // be the culprit and the frustum test is the only thing left that can refuse a near tree.
+                var eye = camera.Transform.Position;
+                if (Vector2.DistanceSquared(tree.Position, new Vector2(eye.X, eye.Z)) < 20f * 20f)
+                {
+                    treesNearRejected++;
+                }
+
+                return;
+            }
             var canopy = simulation.Terrain.Woodland is { } cover
                 ? 1.22f - 0.34f * Math.Clamp(cover.At(tree.Position), 0f, 1.2f)
                 : 1f;
             var width = NodeFootprint.TreeHalfExtent * 2f * 3.1f * spread * MathF.Sqrt(left) * canopy;
+            // <b>Outside the sun's box a tree is drawn but casts nothing.</b> The box is 2 x DetailRadius
+            // across and centred on the focus, so anything past that radius rasterises into a shadow map it
+            // cannot appear in. Measured at maximum zoom on a wooded map: casters were 8.2M of 18.8M triangles
+            // submitted, and the trees between the box's edge and the draw bound owned most of it.
+            //
+            // No visual cost by construction — a shadow that lands outside the map was never on screen. This is
+            // the same mistake as the instance upload earlier today, in a different currency: work whose result
+            // has nowhere to go.
+            var casts = Vector2.DistanceSquared(tree.Position, cameraFocus) <= shadowBoxRadiusSquared;
             var kind = TreeKindAt(tree.Position, tree.Id.Value);
             var placement = SettlementArt.Placement(
                 tree.Position, ground, width, SettlementArt.FreeYawOf(tree.Id.Value));
@@ -5028,25 +5297,27 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
             if (tier == 0)
             {
-                art.Trees[kind].Add(placement);
+                Cast(art.Trees[kind], placement, casts);
                 treeTiers.Near++;
                 // Sized to the canopy rather than the trunk, because what shades the ground is the canopy.
                 AddContactShadow(tree.Position, width * 0.42f, 0.55f);
+                var underStart = timingDebug ? Stopwatch.GetTimestamp() : 0L;
                 DrawUndergrowth(in tree, left);
+                if (timingDebug) undergrowthTicks += Stopwatch.GetTimestamp() - underStart;
             }
             else if (tier == 1)
             {
-                art.TreesMid[kind].Add(placement);
+                Cast(art.TreesMid[kind], placement, casts);
                 treeTiers.Mid++;
             }
             else if (tier == 2)
             {
-                art.TreesFar[kind].Add(placement);
+                Cast(art.TreesFar[kind], placement, casts);
                 treeTiers.Far++;
             }
             else
             {
-                art.TreesDeep[kind].Add(placement);
+                Cast(art.TreesDeep[kind], placement, casts);
                 treeTiers.Deep++;
             }
 
@@ -5195,10 +5466,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // A hundred and ten metres is past anything a player is looking at when they can see individual
         // plants at all, and it takes the grid to about eight thousand cells. The trees keep the full detail
         // radius, because a tree at two hundred metres is still a tree.
-        var radius = MathF.Min(MathF.Sqrt(treeCullBoundSquared), ScatterRadiusMetres);
+        // <b>Bounded by a cell budget, which is what the old constant was measuring without saying so.</b>
+        // A hundred and ten metres was justified as "it takes the grid to about eight thousand cells" — a
+        // statement about how much work this loop does, not about how far a tuft of grass can be seen. Turning
+        // it into a share of the view was the wrong kind of substitution: it would have grown to 140 m at the
+        // widest zoom, where the old number was deliberately a ceiling.
+        //
+        // So the share decides it near in, and the budget decides it far out, and the budget is stated in the
+        // units it always meant. Eight thousand cells at 2.4 m is 107 m, which is the number it replaces.
+        var budgeted = MathF.Sqrt(CoverCellBudget) * ScatterSpacingMetres * 0.5f;
+        var radius = MathF.Min(MathF.Min(MathF.Sqrt(treeCullBoundSquared), Sees * ScatterShare), budgeted);
         // Tighter than the trees, because a tuft of grass is a few centimetres and stops being a tuft well
         // before a trunk stops being a trunk.
-        const float spacing = 2.4f;
+        const float spacing = ScatterSpacingMetres;
         var cells = (int)MathF.Ceiling(radius / spacing);
         var originX = MathF.Floor(cameraFocus.X / spacing);
         var originZ = MathF.Floor(cameraFocus.Y / spacing);
@@ -5495,9 +5775,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
 
 
-    /// <summary>How far out ground cover is drawn, in metres. See DrawScatter for why it is not the
-    /// detail radius.</summary>
-    private const float ScatterRadiusMetres = 110f;
 
     /// <summary>
     /// Where each kind of ground cover sits in the scatter list. Ordered by construction — see SettlementArt.
@@ -6155,12 +6432,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // the box is a full width, the standoff is not a radius, and the honest comparison said 1.16x at
         // that zoom and 0.69x — too small — at the far one. A tie-together line whose terms are not
         // commensurable invents mismatches and hides real ones.
-        var seen = VisibleGroundRadius;
-        var half = SunOrthoExtent * 0.5f;
-        var texelCentimetres = SunOrthoExtent / ShadowMapSize * 100f;
+        var seen = Sees;
+        var half = sunBoxSideMetres * 0.5f;
+        var texelCentimetres = sunBoxSideMetres / ShadowMapSize * 100f;
         return
-            $"SEES {seen:F0} m · DETAIL {DetailRadius:F0} m ({DetailRadius / seen:F2}x) · " +
+            $"SEES {seen:F0} m (reach {VisibleReach:F0}) · DETAIL {DetailRadius:F0} m " +
+            $"({DetailRadius / seen:F2}x) · " +
+            // <b>The two numbers that have to agree, side by side.</b> A tree drawn past the box's half-width
+            // stands in flat light, so TREES must not exceed SHADOW — which is the check this line exists for
+            // and could not make while one was derived from the flat reach and the other from the corrected one.
             $"SHADOW {half:F0} m (texel {texelCentimetres:F1} cm) · " +
+            $"TREES {MathF.Sqrt(treeCullBoundSquared):F0} m · " +
             $"FOG {sentFog.X:F0}-{sentFog.Y:F0} m at {sentFog.Z:F2} · " +
             // What the dressing is spending, on the same line as what can be seen, because both of the
             // questions they answer are "is this frame drawing more than it needs to".
@@ -6171,7 +6453,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"LOAD {stagedLoad.Instances:N0} instances = {stagedLoad.Triangles / 1000L:N0}k triangles " +
             $"+ {stagedLoad.Casters / 1000L:N0}k cast · " +
             $"STONE {outcropsDrawn} of {outcropsSeen} outcrops drawn · " +
-            $"TREENODES {treeNodesAlive} alive, {treesOffered} offered, {treesDrawn} drawn · " +
+            $"TREENODES {treeNodesAlive} alive, {treesOffered} offered, {treesOutOfView} out of view " +
+            $"({treesNearRejected} of them within 20 m of the eye), " +
+            $"{treesDrawn} drawn in {treeTicks * 1000.0 / Stopwatch.Frequency:F1} ms " +
+            $"(undergrowth {undergrowthTicks * 1000.0 / Stopwatch.Frequency:F1} ms) · " +
             $"TREES {treeTiers.Near}/{treeTiers.Mid}/{treeTiers.Far}/{treeTiers.Deep} near/mid/far/deep over " +
             $"{look.TreeCrowdMid:F0}/{look.TreeCrowdFar:F0} per {CanopyCellMetres:F0} m · " +
             $"{undergrowthDrawn} under · " +
