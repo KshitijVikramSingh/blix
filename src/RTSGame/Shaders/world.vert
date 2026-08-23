@@ -69,6 +69,7 @@ layout(push_constant) uniform Push {
     // world.frag for what the four components are.
     vec4 uScouted;
     vec4 uVeil;
+    vec4 uVeilAir;
 };
 
 layout(location = 0) out vec3 vNormal;

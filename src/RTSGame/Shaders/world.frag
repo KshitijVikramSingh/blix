@@ -85,9 +85,12 @@ layout(push_constant) uniform Push {
     // ground nobody is watching.
     vec4 uScouted;
     // The cloud the veil is made of. x = one over a billow's size in metres, y = how much the noise thins and
-    // thickens it, z = drift in metres per second of the wind's clock, w = how bright it is against the sky's
-    // own ambient.
+    // thickens it, z = drift in metres per second of the wind's clock, w = how bright it is.
     vec4 uVeil;
+    // How that cloud is lit and how it is pulled about. x = how strongly its colour follows the sun's bearing
+    // rather than the sky's, y = how much it glows looked at against the sun, z = how far it is drawn out
+    // downwind (smaller is longer), w = how much the gust makes it breathe.
+    vec4 uVeilAir;
 };
 
 // The hues stay here and the intensities do not. A colour is a decision about what kind of
@@ -223,15 +226,29 @@ vec3 rts_veil(vec3 shown, vec3 worldPos) {
     // world [i*c - e/2, (i+1)*c - e/2) and centres at (i+0.5)*c - e/2, so a texel-centre lookup wants
     // uv = (world + e/2) / (cells*c). Both denominators are e for the wear texture above, which is why this
     // looks like it does not need deriving. RtsGameLoop asserts this agrees with the masks, per cell.
-    // Two octaves at different sizes drifting at different rates, which is what gives the layers a parallax
-    // between them. Downwind on the wind's own clock, so the cloud, the canopy and the ripples agree about the
-    // weather rather than holding three opinions about it.
+    // <b>Sampled in wind-aligned coordinates, so the cloud can be a shape that has a direction.</b> Along the
+    // wind and across it, with the along axis compressed — which stretches what comes out of the noise
+    // downwind. Isotropic noise that merely translates reads as a texture sliding over the map; a bank pulled
+    // out along its own motion reads as weather sweeping across it, and that is the whole difference.
     vec2 heading = vec2(cos(uWind.w), sin(uWind.w));
-    vec2 drift = heading * uWind.y * uVeil.z;
-    vec2 p = (worldPos.xz + drift) * uVeil.x;
+    vec2 across = vec2(-heading.y, heading.x);
+    float travelled = uWind.y * uVeil.z;
+    vec2 alongAcross = vec2(dot(worldPos.xz, heading) + travelled, dot(worldPos.xz, across));
+    vec2 p = vec2(alongAcross.x * uVeilAir.z, alongAcross.y) * uVeil.x;
+
+    // Two octaves at different sizes, the finer one carried further downwind than the broad one, which is
+    // what puts a parallax between the layers instead of scaling one of them. Both on the wind's own clock, so
+    // the cloud, the canopy and the water's ripples agree about the weather rather than holding three
+    // opinions about it.
     float cloud =
         blix_fbm2(p) * 0.62 +
-        blix_fbm2(p * 2.30 + heading * uWind.y * uVeil.z * uVeil.x * 0.45) * 0.38;
+        blix_fbm2(p * 2.30 + vec2(travelled * uVeil.x * uVeilAir.z * 1.35, 0.0)) * 0.38;
+
+    // <b>The gust, in bands running across the wind.</b> A single global pulse would make the whole map
+    // breathe in unison, which nothing does; a wave travelling along the wind thickens one band while the next
+    // is thinning, and that is what reads as rolling. On uWind.z because that is the gust rate the canopy
+    // already sways to.
+    cloud *= 1.0 + uVeilAir.w * sin(uWind.y * uWind.z * 0.55 - alongAcross.x * uVeil.x * 1.7);
 
     // <b>The boundary is displaced before it is read, which is what makes it seep rather than step.</b>
     // Thinning a veil with noise varies how thick it is and leaves the <em>shape</em> of its edge exactly
@@ -242,9 +259,11 @@ vec3 rts_veil(vec3 shown, vec3 worldPos) {
     // Derived from the wispiness rather than given a dial of its own, and at a fraction of a billow, because
     // the two are one statement — how ragged is this cloud — and a second slider would only let them
     // disagree. A warp approaching a full billow tears holes through to unscouted ground.
-    vec2 warp = vec2(
+    // Displaced in world axes, from noise sampled in the wind's, so the fingers it tears also lie downwind.
+    vec2 warpAmount = vec2(
         blix_fbm2(p * 1.7 + vec2(11.3, 4.1)) - 0.5,
         blix_fbm2(p * 1.7 + vec2(2.7, 19.6)) - 0.5) * uVeil.y * 0.9 / uVeil.x;
+    vec2 warp = heading * warpAmount.x + across * warpAmount.y;
 
     vec2 scoutUv = (worldPos.xz + warp + uHaze.z * 0.5) * uScouted.x;
     vec2 scouted = texture(uScoutedMap, scoutUv).rg;
@@ -266,11 +285,25 @@ vec3 rts_veil(vec3 shown, vec3 worldPos) {
     // `hidden`, which keeps the tier thicknesses in charge of how much is hidden.
     float density = clamp(hidden * mix(1.0 - uVeil.y, 1.0 + uVeil.y, cloud), 0.0, 1.0);
 
+    // <b>Lit as the same air the distance haze is made of.</b> It was mixing toward flat sky ambient, which
+    // is why it sat on top of the scene instead of in it: the one thing every other bit of atmosphere in this
+    // shader does is pick between a cold scatter away from the sun and a warm glow toward it, and the veil was
+    // the only air on screen with no opinion about where the sun was. Sharing the pair also means Atmosphere.cs
+    // drives it — so the fog is the right colour for the season and the hour without a second palette, and it
+    // cannot disagree with the haze standing next to it.
+    vec3 toFragment = worldPos - uCamPos.xyz;
+    float towardSun = max(dot(normalize(toFragment), normalize(uSunDir.xyz)), 0.0);
+    vec3 veilColor = mix(uHazeAway.rgb, uHazeToward.rgb, towardSun * uVeilAir.x);
+    // Forward scatter, which is the most recognisable thing fog does with light: a bank between the eye and a
+    // low sun is brighter than the lit ground beside it. Tight, so it is a glow about the sun's bearing rather
+    // than a general lift — a broad one only washes the veil out and loses the shape of the cloud.
+    veilColor += uSunTint.rgb * uLight.x * uVeilAir.y * pow(towardSun, 6.0);
+
     // Colour before value, the same order the aerial perspective uses: a scene that only loses saturation
     // still reads as itself, and this map carries its season in hue.
     float luma = dot(shown, vec3(0.2126, 0.7152, 0.0722));
     shown = mix(shown, vec3(luma), density * uScouted.w);
-    return mix(shown, uSkyAmbient.rgb * uVeil.w, density);
+    return mix(shown, veilColor * uVeil.w, density);
 }
 
 void main() {

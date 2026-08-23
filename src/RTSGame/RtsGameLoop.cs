@@ -559,10 +559,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     /// <summary>
     /// Two further view-projections (the third is uSunShadowVP at 96), then the sides, the texel fractions,
-    /// the split distances, the camera's own axis, the fog of war's grid span and thicknesses, and the cloud
-    /// the veil is drawn as.
+    /// the split distances, the camera's own axis, the fog of war's grid span and thicknesses, the cloud the
+    /// veil is drawn as, and how that cloud is lit and pulled about.
     /// </summary>
-    private const int CascadeBlockSize = 64 * 2 + 16 * 6;
+    private const int CascadeBlockSize = 64 * 2 + 16 * 7;
 
     private readonly byte[] worldPush = new byte[CascadeBlockOffset + CascadeBlockSize];
     private readonly byte[] skyPush = new byte[128];     // invViewProj, camPos, sunDir, zenith, horizon
@@ -3962,6 +3962,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             fogSettings.CloudDriftMetresPerSecond,
             fogSettings.CloudBrightness);
         MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 208, 16), in veil);
+        // <b>The stretch goes down as a multiplier on the along-wind axis, so smaller is longer.</b> Named for
+        // what it does to the shape rather than for what it does to the number, which is why the slider reads
+        // "stretch" and the value shrinks.
+        var veilAir = new Vector4(
+            fogSettings.Scatter,
+            fogSettings.SunGlow,
+            MathF.Max(0.05f, fogSettings.CloudStretch),
+            fogSettings.GustRoll);
+        MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 224, 16), in veilAir);
         for (var i = 0; i < Hearths.MaximumLights; i++)
         {
             // The tail is zeroed rather than left stale: the count bounds the loop, but a light left in the

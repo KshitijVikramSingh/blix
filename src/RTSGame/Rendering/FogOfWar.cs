@@ -107,7 +107,7 @@ internal sealed class FogSettings
     /// </para>
     /// </remarks>
     [Tune(0.0, 0.8, Label = "unexplored shows through", Group = "fog")]
-    public float UnexploredLight = 0.20f;
+    public float UnexploredLight = 0.13f;
 
     /// <summary>How much shows through where scouted but no longer watched.</summary>
     /// <remarks>
@@ -116,7 +116,7 @@ internal sealed class FogSettings
     /// that the land reads and the wisps still drift over it.
     /// </remarks>
     [Tune(0.1, 1.0, Label = "remembered shows through", Group = "fog")]
-    public float RememberedLight = 0.66f;
+    public float RememberedLight = 0.56f;
 
     /// <summary>How much colour drains out of ground that is not being watched.</summary>
     /// <remarks>
@@ -171,6 +171,50 @@ internal sealed class FogSettings
     /// </remarks>
     [Tune(0.0, 3.0, Label = "cloud brightness", Group = "fog")]
     public float CloudBrightness = 1.15f;
+
+    /// <summary>How much the veil takes its colour from which way the sun is, rather than from the sky.</summary>
+    /// <remarks>
+    /// <b>The same two colours the aerial perspective uses, so the fog is made of the same air.</b> Twenty
+    /// lines of world.frag already pick between a cold sky-scatter and a warm toward-the-sun glow for
+    /// distance haze; the veil was mixing toward flat sky ambient instead, which is why it sat on the scene
+    /// rather than in it. Sharing the pair means the fog is seasonal and hourly for free — Atmosphere.cs
+    /// derives them per frame from the date — and it can never disagree with the haze about what colour the
+    /// air is today.
+    /// <para>
+    /// Its own intensity rather than the haze's, because the two are not the same thickness of air: distance
+    /// haze is kilometres of it and this is a bank sitting on the ground, so the directional term reads
+    /// stronger here at the same sun.
+    /// </para>
+    /// </remarks>
+    [Tune(0.0, 1.5, Label = "veil scatter", Group = "fog")]
+    public float Scatter = 0.85f;
+
+    /// <summary>How much the veil glows when looked at against the sun.</summary>
+    /// <remarks>
+    /// Forward scattering, and it is the single most recognisable thing fog does with light: a bank between
+    /// you and a low sun is brighter than the sun-lit ground beside it. Tightly focused — a sixth power — so
+    /// it is a glow around the sun's bearing and not a general brightening, which would just wash the veil out.
+    /// </remarks>
+    [Tune(0.0, 3.0, Label = "veil sun glow", Group = "fog")]
+    public float SunGlow = 1.1f;
+
+    /// <summary>How far the cloud is drawn out along the wind, as a fraction of its width.</summary>
+    /// <remarks>
+    /// <b>Isotropic noise that translates looks like a texture sliding; a bank pulled out along its own
+    /// motion looks like weather sweeping.</b> The noise is sampled in wind-aligned coordinates and the
+    /// along-wind axis is compressed, which stretches the features that come out of it downwind. One is
+    /// round; a half makes every billow twice as long as it is wide.
+    /// </remarks>
+    [Tune(0.15, 1.0, Label = "cloud stretch", Group = "fog")]
+    public float CloudStretch = 0.42f;
+
+    /// <summary>How much the gust makes the veil breathe.</summary>
+    /// <remarks>
+    /// On the wind's own gust rate, in bands running across the wind, so the fog thickens and thins in waves
+    /// travelling through it rather than pulsing all at once. This is the rolling; the stretch is the sweeping.
+    /// </remarks>
+    [Tune(0.0, 0.6, Label = "gust roll", Group = "fog")]
+    public float GustRoll = 0.22f;
 
     /// <summary>How long the veil takes to open or close over a cell, in seconds.</summary>
     /// <remarks>
