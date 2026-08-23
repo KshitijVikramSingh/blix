@@ -70,7 +70,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// Renderer-side and never handed to the simulation. See <see cref="FogOfWar"/> for why that direction
     /// is the whole design rather than an implementation detail.
     /// </remarks>
-    private readonly FogOfWar fog = new();
+    // Named for the readout rather than for the feature, and the rename was not cosmetic: `fog` is
+    // already a local Vector4 in the frame's push writer, carrying the haze range. The two met at a
+    // compile error, which is the good outcome — see the note on the SCOUTED line for the same
+    // collision caught earlier by reading.
+    private readonly FogOfWar scouted = new();
 
     /// <summary>The world the fog was sized to, so a new map starts unexplored.</summary>
     /// <remarks>
@@ -555,9 +559,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     /// <summary>
     /// Two further view-projections (the third is uSunShadowVP at 96), then the sides, the texel fractions,
-    /// the split distances and the camera's own axis.
+    /// the split distances, the camera's own axis, the fog of war's grid span and thicknesses, and the cloud
+    /// the veil is drawn as.
     /// </summary>
-    private const int CascadeBlockSize = 64 * 2 + 16 * 4;
+    private const int CascadeBlockSize = 64 * 2 + 16 * 6;
 
     private readonly byte[] worldPush = new byte[CascadeBlockOffset + CascadeBlockSize];
     private readonly byte[] skyPush = new byte[128];     // invViewProj, camPos, sunDir, zenith, horizon
@@ -1597,6 +1602,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 // because renaming a binding that works is how a shader and its interface drift apart.
                 new DescriptorSetSlot(0, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 new DescriptorSetSlot(0, 3, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                // What the player has scouted. Appended at 4 for the same reason the cascades were appended
+                // to the push block: a binding that works is worth more than a tidy numbering.
+                new DescriptorSetSlot(0, 4, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 InstanceBuffer.Slot,
             },
             PushConstants: new[]
@@ -1921,6 +1929,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             new TextureDescription(WearCells, WearCells, TextureFormat.R8, SamplerDescription.LinearClamp),
             wear,
             "rts-wear");
+        // <b>Sized from the fog's own grid, so the texel grid and the cell grid are one thing.</b> EnsureFog
+        // first because the cell count comes from the map and this runs before the first frame does.
+        // Linear-clamped for the reason the wear texture is: the filtering between texel centres is what
+        // makes a fog edge a ten-metre ramp instead of a staircase, and it is free.
+        EnsureFog();
+        fogTexture = graphicsDevice.CreateTexture2D(
+            new TextureDescription(scouted.Cells, scouted.Cells, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
+            scouted.Texels.ToArray(),
+            "rts-scouted");
+        fogTextureCells = scouted.Cells;
+        scouted.MarkUploaded();
 
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         mouseX = host.LogicalSize.Width * 0.5f;
@@ -3373,7 +3392,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             look.SunBearingDegrees,
             look.Seasonality);
         AdvanceWear(frame);
+        frameSeconds = frame;
         AdvanceFog();
+        UploadFogTexture();
         ApplyWoodlandCover(frame);
         TurnAndZoom(frame);
         PanCamera(frame);
@@ -3920,6 +3941,27 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 144, 16), in cascadeTexels);
         MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 160, 16), in cascadeSplits);
         MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 176, 16), in cameraAhead);
+        // <b>One over the grid's span, and the shader adds the map's extent.</b> Two lengths, and they are not
+        // interchangeable: scouted.Cells is a ceiling plus one, so the grid spans more ground than the map does.
+        // The divisor is the span; the offset that centres it is the extent. I wrote the warning about this and
+        // then used the span for both, which slides the veil half a cell — invisible as an offset, and visible
+        // only as fog disagreeing with the cell overlay by a row at the edges. The derivation is in world.frag,
+        // and it is written out there because the wear lookup beside it legitimately uses the extent twice.
+        var scoutedDials = new Vector4(
+            1f / MathF.Max(1f, scouted.SpanMetres),
+            fogSettings.UnexploredLight,
+            fogSettings.RememberedLight,
+            fogSettings.MemoryDrain);
+        MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 192, 16), in scoutedDials);
+        // <b>One over the billow size, because the shader multiplies.</b> A wavelength divides and a
+        // frequency multiplies, and handing the shader metres to divide by would be one more place for the
+        // fog's two length scales to be confused for each other.
+        var veil = new Vector4(
+            1f / MathF.Max(1f, fogSettings.CloudMetres),
+            fogSettings.Wispiness,
+            fogSettings.CloudDriftMetresPerSecond,
+            fogSettings.CloudBrightness);
+        MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 208, 16), in veil);
         for (var i = 0; i < Hearths.MaximumLights; i++)
         {
             // The tail is zeroed rather than left stale: the count bounds the loop, but a light left in the
@@ -4117,6 +4159,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             new ShaderTextureBinding(
                 "uSunShadowMap", graph.GetDepthTexture(cascadeTargets[0]), Slot: 0),
             new ShaderTextureBinding("uWear", wearTexture, Slot: 1),
+            new ShaderTextureBinding("uScoutedMap", fogTexture, Slot: 4),
             new ShaderTextureBinding(
                 "uCascade1Map", graph.GetDepthTexture(cascadeTargets[1]), Slot: 2),
             new ShaderTextureBinding(
@@ -6200,7 +6243,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private void RebuildCanopyDensity()
     {
         EnsureFog();
-        var total = fog.Cells * fog.Cells;
+        var total = scouted.Cells * scouted.Cells;
         if (canopyCounts.Length != total) canopyCounts = new int[total];
         else Array.Clear(canopyCounts);
 
@@ -6211,7 +6254,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
     }
 
-    private int CanopyIndex(Vector2 at) => fog.Index(at);
+    private int CanopyIndex(Vector2 at) => scouted.Index(at);
 
     /// <summary>Which level of detail the crowding here earns: 0 full, 1 middle, 2 coarse.</summary>
     // <b>The drawn-density cap is out again, and it is worth recording why.</b> It capped how many trees a
@@ -6223,7 +6266,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private int CanopyTierAt(Vector2 at)
     {
-        if (fog.Cells == 0 || canopyCounts.Length == 0) return 0;
+        if (scouted.Cells == 0 || canopyCounts.Length == 0) return 0;
         var crowd = canopyCounts[CanopyIndex(at)];
         // <b>A fourth tier at twice the crowding the third needs.</b> The rule is the same one all the way up:
         // a coarse level loses mass and the neighbours put it back, so the deeper into a wood a tree is the
@@ -6927,14 +6970,67 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     {
         if (ReferenceEquals(fogWorld, simulation)) return;
         fogWorld = simulation;
-        fog.Resize(simulation.ExtentMeters);
+        scouted.Resize(simulation.ExtentMeters);
     }
 
     private void AdvanceFog()
     {
         EnsureFog();
-        fog.Advance(simulation, fogSettings);
+        // Once, and only where it can be read: the mapping is a property of the grid, so it either holds for
+        // every cell or for none, and checking it per frame would be three thousand comparisons to learn the
+        // same thing twice a second.
+        if (!fogMappingChecked)
+        {
+            fogMappingChecked = true;
+            var fault = scouted.MappingFault(simulation.ExtentMeters);
+            Console.WriteLine(fault is null
+                ? $"  fog: {scouted.Cells}x{scouted.Cells} cells of {FogOfWar.CellMetres:F0} m spanning " +
+                  $"{scouted.SpanMetres:F0} m over a {simulation.ExtentMeters:F0} m map; " +
+                  "veil and masks agree on every cell"
+                : $"  fog: MAPPING FAULT — {fault}");
+        }
+
+        scouted.Advance(simulation, fogSettings, frameSeconds);
     }
+
+    private bool fogMappingChecked;
+
+    /// <summary>This frame's delta, so the veil can ease on the same clock everything else does.</summary>
+    private float frameSeconds;
+
+    /// <summary>Hands the masks to the GPU, on the frames they changed.</summary>
+    /// <remarks>
+    /// The masks change once per refresh cycle, so this uploads about once every eight frames rather than
+    /// every frame — the dirty flag is the throttle and there is no second one, because the thing that sets
+    /// it is the only thing that can change the image.
+    /// <para>
+    /// The cell count is fixed for the process: every map is built at the one extent this session was
+    /// launched with. If that ever stops being true this is where it shows, so it says so rather than
+    /// uploading the wrong number of bytes into a texture of the wrong size.
+    /// </para>
+    /// </remarks>
+    private void UploadFogTexture()
+    {
+        if (!scouted.TexelsDirty) return;
+        if (scouted.Cells != fogTextureCells)
+        {
+            Console.WriteLine(
+                $"  fog: grid went from {fogTextureCells} cells to {scouted.Cells} — the texture cannot follow " +
+                "it without being recreated, so the veil is now stale. Size it from the largest map instead.");
+            scouted.MarkUploaded();
+            return;
+        }
+
+        graphicsDevice.UploadTextureMip(fogTexture, 0, scouted.Texels.ToArray());
+        scouted.MarkUploaded();
+        fogUploads++;
+    }
+
+    private TextureHandle fogTexture;
+    private int fogTextureCells;
+
+    /// <summary>How many times the veil has been handed to the GPU, which is the cycle count.</summary>
+    private int fogUploads;
 
     /// <summary>
     /// Paints every fog cell in the colour of its tier.
@@ -6965,14 +7061,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     {
         fogCellsDrawn = 0;
         fogCellsDropped = 0;
-        if (!fogSettings.ShowCells || fog.Cells == 0) return;
+        if (!fogSettings.ShowCells || scouted.Cells == 0) return;
 
         var room = propBuffer.Capacity - propInstances.Count;
         var side = FogOfWar.CellMetres * 0.86f;
-        var total = fog.Cells * fog.Cells;
+        var total = scouted.Cells * scouted.Cells;
         for (var index = 0; index < total; index++)
         {
-            var centre = fog.CentreOf(index);
+            var centre = scouted.CentreOf(index);
             if (Vector2.DistanceSquared(centre, cameraFocus) > treeCullBoundSquared) continue;
             var ground = simulation.Terrain.SampleHeight(centre);
             if (!InView(centre, ground, 0.5f, FogOfWar.CellMetres)) continue;
@@ -6987,7 +7083,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             propInstances.Add(new InstanceData(
                 Matrix4x4.CreateScale(side, 0.03f, side) *
                 Matrix4x4.CreateTranslation(centre.X, ground + 0.35f, centre.Y),
-                fog.TierOf(index) switch
+                scouted.TierOf(index) switch
                 {
                     FogTier.Visible => FogVisibleColor,
                     FogTier.Remembered => FogRememberedColor,
@@ -7079,13 +7175,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // it is lying rather than you finding out later. The cost is on the same line for the reason §74
             // ended up needing it: the refresh is round-robin precisely to keep off this frame's budget, and a
             // budget nobody prints is a budget nobody notices being exceeded.
-            $"SCOUTED {fog.Counts.Visible:N0} seen + {fog.Counts.Remembered:N0} known + " +
-            $"{fog.Counts.Unexplored:N0} dark of {fog.Cells * fog.Cells:N0} cells at " +
+            $"SCOUTED {scouted.Counts.Visible:N0} seen + {scouted.Counts.Remembered:N0} known + " +
+            $"{scouted.Counts.Unexplored:N0} dark of {scouted.Cells * scouted.Cells:N0} cells at " +
             $"{FogOfWar.CellMetres:F0} m ({(fogSettings.Enabled ? "on" : "off")}, " +
-            $"{fog.WatcherCount.Bodies} bodies + {fog.WatcherCount.Buildings} buildings watching, " +
-            $"{fog.QueriesLastFrame:N0} asks in " +
-            $"{fog.MillisecondsLastFrame:F2} ms, cycle asked {fog.LastCycle.Asked:N0} granted " +
-            $"{fog.LastCycle.Granted:N0}, widest reach {fog.LastCycle.WidestReach:F0} m)" +
+            $"{scouted.SeededCells:N0} known at start, " +
+            $"{scouted.WatcherCount.Bodies} bodies + {scouted.WatcherCount.Buildings} buildings watching, " +
+            $"{scouted.QueriesLastFrame:N0} asks in " +
+            $"{scouted.MillisecondsLastFrame:F2} ms, cycle asked {scouted.LastCycle.Asked:N0} granted " +
+            $"{scouted.LastCycle.Granted:N0}, widest reach {scouted.LastCycle.WidestReach:F0} m)" +
             (fogSettings.ShowCells
                 ? $" · FOGCELLS {fogCellsDrawn:N0} drawn" +
                   (fogCellsDropped > 0 ? $", {fogCellsDropped:N0} over budget" : string.Empty)

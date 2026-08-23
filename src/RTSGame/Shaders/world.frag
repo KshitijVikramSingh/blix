@@ -27,6 +27,11 @@ layout(set = 0, binding = 1) uniform sampler2D uWear;
 // worth more than a tidy numbering.
 layout(set = 0, binding = 2) uniform sampler2D uCascade1Map;
 layout(set = 0, binding = 3) uniform sampler2D uCascade2Map;
+// What the player has scouted, and what they are watching. Red is explored, green is watched, one texel per
+// ten-metre cell, linear-filtered so the boundary is a ten-metre ramp rather than a staircase — see
+// Rendering/FogOfWar.cs, which owns the masks and is deliberately not simulation state. Named for the map so
+// it cannot be confused with uScouted below, which carries the dials.
+layout(set = 0, binding = 4) uniform sampler2D uScoutedMap;
 
 layout(push_constant) uniform Push {
     mat4 uViewProjection;
@@ -71,6 +76,18 @@ layout(push_constant) uniform Push {
     vec4 uCascadeSplit;
     // xyz = the camera's unit forward, the axis those distances are measured along.
     vec4 uCameraAhead;
+    // x = one over how much ground the fog grid spans. <b>Two different lengths are involved and mixing them
+    // is the whole trap.</b> The grid is a ceiling plus one cell, so it spans more than the map: the divisor
+    // is that span, and the offset that centres it is the map extent (uHaze.z). Using the span for both — the
+    // first version of this — slides the fog half a cell sideways, which is invisible as an offset and shows
+    // up as fog that disagrees with the cell overlay by one row at the edges.
+    // y = how much shows through where unexplored, z = where remembered, w = how much colour drains from
+    // ground nobody is watching.
+    vec4 uScouted;
+    // The cloud the veil is made of. x = one over a billow's size in metres, y = how much the noise thins and
+    // thickens it, z = drift in metres per second of the wind's clock, w = how bright it is against the sky's
+    // own ambient.
+    vec4 uVeil;
 };
 
 // The hues stay here and the intensities do not. A colour is a decision about what kind of
@@ -183,6 +200,79 @@ vec3 rts_cascade_tint(int cascade) {
 // Deepened once more, and the fix that actually mattered is the hue-preserving rolloff below.
 const vec3 kHearthColor = vec3(1.00, 0.29, 0.075);
 
+// <b>What the player knows, as weather rather than as a filter.</b> The first version multiplied the finished
+// pixel by a constant per tier, and from the chair it read as too strong and as obviously a post-process: an
+// even sheet has no wisps, so nothing about it says "cloud" and everything says "the renderer stopped". This
+// draws two layers of value-noise cloud instead, rolling downwind, thick over ground never scouted and thin
+// over ground merely unwatched.
+//
+// <b>Mixed toward light rather than multiplied toward black.</b> That is the substantive change and the
+// reason it reads softer at the same coverage: an overcast you look at is brighter than the ground under it,
+// so hiding something under cloud should raise its value and kill its contrast, not lower both. Multiplying
+// could only ever make a darker version of the same picture, which is why more of it looked like less
+// weather.
+//
+// <b>Lit by the sky, not painted grey.</b> A constant would be the same overcast at noon and at midnight;
+// scaling uSkyAmbient means dusk and night come free and the cloud can never out-glow the light on it.
+//
+// Called from two places, which is the whole reason it is a function: water returns early with its own
+// colour, and the first cut applied the veil only after that return — so every lake on the map sat in clear
+// view in the middle of unexplored ground, which is exactly the information the fog exists to withhold.
+vec3 rts_veil(vec3 shown, vec3 worldPos) {
+    // Offset by the map extent, scaled by one over the grid span. Derived rather than asserted: cell i covers
+    // world [i*c - e/2, (i+1)*c - e/2) and centres at (i+0.5)*c - e/2, so a texel-centre lookup wants
+    // uv = (world + e/2) / (cells*c). Both denominators are e for the wear texture above, which is why this
+    // looks like it does not need deriving. RtsGameLoop asserts this agrees with the masks, per cell.
+    // Two octaves at different sizes drifting at different rates, which is what gives the layers a parallax
+    // between them. Downwind on the wind's own clock, so the cloud, the canopy and the ripples agree about the
+    // weather rather than holding three opinions about it.
+    vec2 heading = vec2(cos(uWind.w), sin(uWind.w));
+    vec2 drift = heading * uWind.y * uVeil.z;
+    vec2 p = (worldPos.xz + drift) * uVeil.x;
+    float cloud =
+        blix_fbm2(p) * 0.62 +
+        blix_fbm2(p * 2.30 + heading * uWind.y * uVeil.z * uVeil.x * 0.45) * 0.38;
+
+    // <b>The boundary is displaced before it is read, which is what makes it seep rather than step.</b>
+    // Thinning a veil with noise varies how thick it is and leaves the <em>shape</em> of its edge exactly
+    // where the mask put it — so a ten-metre grid stays legible as a grid however much the density wobbles,
+    // which is what "blocky" meant. Warping the lookup instead moves the edge itself: the same fog, asked
+    // about a point a few metres off, and the answer wanders in and out of the cells in fingers.
+    //
+    // Derived from the wispiness rather than given a dial of its own, and at a fraction of a billow, because
+    // the two are one statement — how ragged is this cloud — and a second slider would only let them
+    // disagree. A warp approaching a full billow tears holes through to unscouted ground.
+    vec2 warp = vec2(
+        blix_fbm2(p * 1.7 + vec2(11.3, 4.1)) - 0.5,
+        blix_fbm2(p * 1.7 + vec2(2.7, 19.6)) - 0.5) * uVeil.y * 0.9 / uVeil.x;
+
+    vec2 scoutUv = (worldPos.xz + warp + uHaze.z * 0.5) * uScouted.x;
+    vec2 scouted = texture(uScoutedMap, scoutUv).rg;
+    // <b>Smoothed again on the way out, because a linear ramp has a corner in it.</b> The mask is blurred on
+    // the CPU and the sampler interpolates it linearly, and linear interpolation is continuous in value but
+    // not in slope — and it is the slope the eye reads. Two applications of the cubic ease flatten those
+    // corners at both ends of the ramp, which is the difference between a soft edge and a faceted one.
+    scouted = scouted * scouted * (3.0 - 2.0 * scouted);
+    scouted = scouted * scouted * (3.0 - 2.0 * scouted);
+
+    // Explored gates the two thicknesses; watched clears it. Nested rather than summed because the tiers are
+    // ordered and not independent — watched ground is always explored ground, so there is no fourth case.
+    float shows = mix(uScouted.y, mix(uScouted.z, 1.0, scouted.g), scouted.r);
+    float hidden = 1.0 - shows;
+    if (hidden <= 0.001) return shown;
+
+    // The noise thins and thickens the veil on top of the warp: the warp decides where the edge is, this
+    // decides how solid the middle is. At zero wispiness both vanish and this is a flat sheet of exactly
+    // `hidden`, which keeps the tier thicknesses in charge of how much is hidden.
+    float density = clamp(hidden * mix(1.0 - uVeil.y, 1.0 + uVeil.y, cloud), 0.0, 1.0);
+
+    // Colour before value, the same order the aerial perspective uses: a scene that only loses saturation
+    // still reads as itself, and this map carries its season in hue.
+    float luma = dot(shown, vec3(0.2126, 0.7152, 0.0722));
+    shown = mix(shown, vec3(luma), density * uScouted.w);
+    return mix(shown, uSkyAmbient.rgb * uVeil.w, density);
+}
+
 void main() {
     vec3 n = normalize(vNormal);
     float sunDot = dot(n, normalize(uSunDir.xyz));
@@ -211,7 +301,10 @@ void main() {
         vec3 glow = albedo * uHearth.z * uHearth.x;
         float towardSunlit = max(dot(normalize(toFragment), normalize(uSunDir.xyz)), 0.0);
         vec3 hazeLit = mix(uHazeAway.rgb, uHazeToward.rgb, towardSunlit * uHaze.y);
-        outColor = vec4(mix(glow, hazeLit, haze), 1.0);
+        // Veiled like everything else, and this is the leak that mattered most of the three: a lit window is
+        // the single most legible thing on a night map, so a settlement in unexplored ground would have
+        // announced itself as a row of bright dots on black. Water gave away terrain; this gives away people.
+        outColor = vec4(rts_veil(mix(glow, hazeLit, haze), vWorldPos), 1.0);
         return;
     }
 
@@ -250,7 +343,9 @@ void main() {
         vec3 litWater = body * wet;
         float wetFog = smoothstep(uFog.x, uFog.y, length(vWorldPos - uCamPos.xyz)) * uFog.z;
         vec3 wetHaze = mix(uHazeAway.rgb, uHazeToward.rgb, 0.5);
-        outColor = vec4(mix(litWater, wetHaze, wetFog), clamp(vGround.x, 0.0, 1.0));
+        outColor = vec4(
+            rts_veil(mix(litWater, wetHaze, wetFog), vWorldPos),
+            clamp(vGround.x, 0.0, 1.0));
         return;
     }
 
@@ -391,7 +486,12 @@ void main() {
     //
     // Applied after the fog for the same reason it is not mixed: the far cascade must not fade toward the same
     // grey that means no cascade at all.
-    vec3 shown = mix(lit, hazeColor, fog);
+    // After the aerial perspective rather than before it, and the ordering is a claim: haze is a fact about
+    // air and distance so it belongs to the scene, while the veil is a fact about the player and belongs to
+    // the image of it. Applied first, the haze would be veiled and then added back, and unexplored ground
+    // would glow with the colour of air nobody can see through.
+    vec3 shown = rts_veil(mix(lit, hazeColor, fog), vWorldPos);
+
     if (uCascadeSide.w > 0.5) shown = rts_cascade_tint(gCascade) * (0.30 + 0.70 * shadow);
     outColor = vec4(shown, coverage);
 }

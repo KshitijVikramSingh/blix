@@ -93,6 +93,114 @@ internal sealed class FogSettings
     /// </remarks>
     [Tune(1, 24, Label = "watchers per frame", Group = "fog")]
     public int WatchersPerFrame = 4;
+
+    /// <summary>How much of the scene shows through the cloud where unexplored.</summary>
+    /// <remarks>
+    /// <b>Not zero, and the number stopped meaning brightness when the veil became cloud.</b> It used to
+    /// multiply the pixel, so it read as darkness; now it sets how much of the ground shows through an
+    /// overcast, so it reads as thickness. Pure zero hides the map and also hides that there <em>is</em> a
+    /// map — the frame becomes a lit village on a void, and the shape of the land stops existing rather than
+    /// being unknown.
+    /// <para>
+    /// Raised from the first cut's six per cent, which was reported as too strong from the chair. Cloud you
+    /// can almost see through reads as weather; cloud you cannot reads as a hole in the render.
+    /// </para>
+    /// </remarks>
+    [Tune(0.0, 0.8, Label = "unexplored shows through", Group = "fog")]
+    public float UnexploredLight = 0.20f;
+
+    /// <summary>How much shows through where scouted but no longer watched.</summary>
+    /// <remarks>
+    /// The memory tier, and it has to read as <em>information</em> rather than as night. Too thick and
+    /// scouting buys nothing you can see; too thin and there is no reason to keep anything watched. Enough
+    /// that the land reads and the wisps still drift over it.
+    /// </remarks>
+    [Tune(0.1, 1.0, Label = "remembered shows through", Group = "fog")]
+    public float RememberedLight = 0.66f;
+
+    /// <summary>How much colour drains out of ground that is not being watched.</summary>
+    /// <remarks>
+    /// <b>Because dimming alone reads as dusk, not as memory.</b> The same trick the aerial perspective uses
+    /// twenty lines further down world.frag: air drains saturation before it drains value, and a scene that
+    /// only loses brightness looks like the same scene at a different hour. Draining the colour too makes
+    /// remembered ground read as a record of ground rather than as ground at night — which matters most on
+    /// this map, whose whole seasonal grade is carried in hue.
+    /// </remarks>
+    [Tune(0.0, 1.0, Label = "memory colour drain", Group = "fog")]
+    public float MemoryDrain = 0.55f;
+
+    /// <summary>How many metres across one billow of cloud is.</summary>
+    /// <remarks>
+    /// <b>Two scales are drawn, and this is the broad one.</b> A single octave reads as a texture laid over
+    /// the map; two at different sizes, drifting at different rates, read as layers with depth between them
+    /// — which is most of what makes cloud look like cloud rather than like noise.
+    /// <para>
+    /// Sized against the fog cell rather than against the screen, deliberately. At ninety metres a billow is
+    /// nine cells across, so the cloud is much larger than the quantum underneath it and the ten-metre grid
+    /// stops being legible in the result. A wavelength near the cell size would do the opposite and advertise
+    /// the grid.
+    /// </para>
+    /// </remarks>
+    [Tune(20.0, 400.0, Label = "cloud size (m)", Group = "fog")]
+    public float CloudMetres = 95f;
+
+    /// <summary>How much the cloud thins and thickens across itself.</summary>
+    /// <remarks>
+    /// Zero is a flat wash — the first version, and what "too strong" partly meant: an even sheet has no
+    /// wisps and so reads as a filter rather than as weather. High values tear holes in it and leak
+    /// information about ground the player has not scouted, which is the reason this has a ceiling below one.
+    /// </remarks>
+    [Tune(0.0, 0.8, Label = "wispiness", Group = "fog")]
+    public float Wispiness = 0.45f;
+
+    /// <summary>How fast the cloud rolls, in metres of simulated time per second.</summary>
+    /// <remarks>
+    /// <b>Downwind, on the wind's own clock.</b> The bearing and the clock are already in the push block for
+    /// the trees and the water, so the fog rolls the same way the canopy leans and at the same rate the
+    /// ripples cross — three things agreeing about the weather rather than three opinions about it. Slow, in
+    /// absolute terms: cloud that moves as fast as a unit walks reads as smoke.
+    /// </remarks>
+    [Tune(0.0, 12.0, Label = "cloud drift (m/s)", Group = "fog")]
+    public float CloudDriftMetresPerSecond = 2.2f;
+
+    /// <summary>How bright the cloud is against the sky's own ambient.</summary>
+    /// <remarks>
+    /// <b>Lit by the sky rather than painted a colour.</b> A constant grey would be wrong twice a day: the
+    /// same overcast at noon and at midnight. Scaling the sky ambient means the fog is grey-blue at dusk and
+    /// nearly black at night for free, and it can never be brighter than the light falling on it.
+    /// </remarks>
+    [Tune(0.0, 3.0, Label = "cloud brightness", Group = "fog")]
+    public float CloudBrightness = 1.15f;
+
+    /// <summary>How long the veil takes to open or close over a cell, in seconds.</summary>
+    /// <remarks>
+    /// <b>Because the masks change eight frames at a time and the eye sees the step.</b> A watcher's view is
+    /// recomputed once per refresh cycle, so without this the lit region jumps a whole cell at a time a few
+    /// times a second — which was most of what "blocky" meant at the dim-to-lit boundary. Easing decouples
+    /// what the veil looks like from how often the truth underneath it is recomputed.
+    /// <para>
+    /// It also earns its keep as motion: fog that opens over half a second reads as fog withdrawing, and fog
+    /// that switches reads as a stencil being moved.
+    /// </para>
+    /// </remarks>
+    [Tune(0.0, 3.0, Label = "veil fade (s)", Group = "fog")]
+    public float FadeSeconds = 0.65f;
+
+    /// <summary>How far around the settlement is already known when the map opens, in metres.</summary>
+    /// <remarks>
+    /// <b>Because nobody arrives somewhere knowing nothing about it.</b> A settlement mid-harvest has been
+    /// standing for a year in the fiction, so a map that opens with the fog closed up against the granary
+    /// wall says the villagers have never walked anywhere — and it puts the first thing the player sees
+    /// behind a scouting errand.
+    /// <para>
+    /// Revealed as a plain disc around each of the player's own buildings, and deliberately <em>not</em>
+    /// through <see cref="SimulationWorld.CanSee"/>: this is ground the settlement is presumed to know, not
+    /// ground it can currently see, so a wood in the way should not punch a hole in the neighbourhood. It
+    /// seeds the explored mask only — what is <em>watched</em> is still decided every cycle by sight.
+    /// </para>
+    /// </remarks>
+    [Tune(0.0, 400.0, Label = "known at start (m)", Group = "fog")]
+    public float StartRevealMetres = 150f;
 }
 
 /// <summary>
@@ -216,6 +324,146 @@ internal sealed class FogOfWar
     /// <summary>Frames left to wait before looking for watchers again, after finding none.</summary>
     private int emptyCycleWait;
 
+    /// <summary>Whether the settlement's presumed neighbourhood still has to be marked known.</summary>
+    /// <remarks>
+    /// A flag rather than a call at the resize, because the seed needs the world and <see cref="Resize"/>
+    /// deliberately does not take one — and because there are two moments that need it, a new map and the fog
+    /// being switched back on, which would otherwise be two copies of the same loop.
+    /// </remarks>
+    private bool needsSeed;
+
+    /// <summary>
+    /// The two masks as one RGBA8 image, a texel per cell: red is explored, green is watched.
+    /// </summary>
+    /// <remarks>
+    /// <b>Native resolution, and the smoothing is the sampler's job.</b> The first plan here was to upsample
+    /// into something wear-sized with a blur — and it is redundant, because a linear-filtered texture already
+    /// interpolates between texel centres, which is exactly the CPU bilinear it would have paid for. Uploaded
+    /// at one texel per cell, a sixty-one square map is seven kilobytes and the ramp between a watched cell
+    /// and its neighbour is ten metres wide, which is what a fog edge should look like anyway.
+    /// <para>
+    /// If it ever reads as a diamond lattice — the artefact bilinear on a coarse grid gives — the fix is a
+    /// blur on the way out, and the wear texture's note says why it must be a blur of the mask and never
+    /// back into it: smoothing the truth compounds until there is no truth left.
+    /// </para>
+    /// <para>
+    /// <b>Four bytes a texel for two channels, because there is no two-channel format.</b>
+    /// <c>TextureFormat</c> offers R8 and Rgba8 and nothing between, and the whole image is fifteen
+    /// kilobytes on a six-hundred-metre map — so the alternative, threading an RG8 through the graphics
+    /// layer and the Vulkan backend, would be engine work to save twelve kilobytes uploaded twice a second.
+    /// Blue and alpha are spare and deliberately left so: the obvious tenant is a second faction's mask,
+    /// which is the shape the knowledge layer wants.
+    /// </para>
+    /// <para>
+    /// <b>The UV mapping is the trap.</b> The grid spans <see cref="SpanMetres"/>, which is <em>not</em> the
+    /// map extent — the cell count is a ceiling plus one, so the grid overhangs the map by up to two cells.
+    /// Sampling this with the extent, the way the wear texture is sampled, puts the fog half a cell out and
+    /// leaves it there.
+    /// </para>
+    /// </remarks>
+    private byte[] texels = Array.Empty<byte>();
+
+    /// <summary>
+    /// The masks as the veil shows them: eased toward the truth, and blurred on the way to the texture.
+    /// </summary>
+    /// <remarks>
+    /// <b>Blurred into the texture and never back into the masks.</b> The wear texture's rule, and it applies
+    /// for the same reason: a blur folded back into its own source compounds every time it runs, until after
+    /// a minute there is no boundary left anywhere and the whole map is a uniform smear. So
+    /// <see cref="explored"/> and <see cref="visible"/> stay the sharp binary truth — which is also what the
+    /// draw gate will read, because a gate wants a decision and not a gradient — and these are a view of them.
+    /// <para>
+    /// <b>Two separable passes, because one is not enough to hide a ten-metre grid.</b> A linear-filtered
+    /// binary mask ramps over exactly one cell with a kink at each texel centre, and a kink in the gradient is
+    /// what the eye reads as a facet: reported from the chair as blocks, most visibly where dim meets lit.
+    /// Two 1-2-1 passes spread the boundary over about three cells, so the ramp the sampler interpolates is
+    /// already smooth before it is magnified.
+    /// </para>
+    /// </remarks>
+    private float[] shownExplored = Array.Empty<float>();
+    private float[] shownVisible = Array.Empty<float>();
+    private float[] blurFront = Array.Empty<float>();
+    private float[] blurBack = Array.Empty<float>();
+
+    /// <summary>The image, ready to upload.</summary>
+    public ReadOnlySpan<byte> Texels => texels;
+
+    /// <summary>Whether the image has changed since it was last uploaded.</summary>
+    public bool TexelsDirty { get; private set; }
+
+    /// <summary>How much ground the grid covers, which is what the shader divides by. Not the map extent.</summary>
+    public float SpanMetres => cells * CellMetres;
+
+    /// <summary>Says the image has been handed to the GPU.</summary>
+    public void MarkUploaded() => TexelsDirty = false;
+
+    /// <summary>
+    /// Eases the shown masks toward the truth, blurs them, and packs the result for upload.
+    /// </summary>
+    /// <remarks>
+    /// Runs every frame rather than once a cycle, which is the point: the truth changes in eight-frame steps
+    /// and the veil must not. Fifteen kilobytes and about a tenth of a millisecond, against a frame this
+    /// session has measured at ninety.
+    /// </remarks>
+    private void RebuildTexels(float deltaSeconds, float fadeSeconds)
+    {
+        // <b>Snapped rather than eased when there is no time to ease over.</b> A zero delta is the first frame
+        // and a zero fade is the slider turned off; both want the truth immediately, and easing by zero would
+        // leave the veil shut on a map that is supposed to open already partly known.
+        var step = fadeSeconds <= 0.001f || deltaSeconds <= 0f
+            ? 1f
+            : Math.Clamp(deltaSeconds / fadeSeconds, 0f, 1f);
+        for (var i = 0; i < explored.Length; i++)
+        {
+            shownExplored[i] += (explored[i] - shownExplored[i]) * step;
+            shownVisible[i] += (visible[i] - shownVisible[i]) * step;
+        }
+
+        Soften(shownExplored, 0);
+        Soften(shownVisible, 1);
+        TexelsDirty = true;
+    }
+
+    /// <summary>Blurs one mask twice and writes it into a channel of the image.</summary>
+    /// <remarks>
+    /// Separable 1-2-1, twice, which spreads a hard edge over about three cells — enough that what the sampler
+    /// magnifies is already a smooth ramp rather than a one-cell step with a kink in it. Edges clamp by
+    /// reusing the nearest row, so the map's border does not fade to unexplored and put a false frontier round
+    /// the outside of the world.
+    /// </remarks>
+    private void Soften(float[] source, int channel)
+    {
+        Pass(source, blurFront);
+        Pass(blurFront, blurBack);
+        for (var i = 0; i < blurBack.Length; i++)
+        {
+            texels[i * 4 + channel] = (byte)Math.Clamp((int)(blurBack[i] * 255f + 0.5f), 0, 255);
+            texels[i * 4 + 3] = 255;
+        }
+
+        void Pass(float[] from, float[] into)
+        {
+            for (var z = 0; z < cells; z++)
+            for (var x = 0; x < cells; x++)
+            {
+                var row = z * cells;
+                var left = from[row + Math.Max(0, x - 1)];
+                var right = from[row + Math.Min(cells - 1, x + 1)];
+                blurScratch[row + x] = (left + from[row + x] * 2f + right) * 0.25f;
+            }
+
+            for (var z = 0; z < cells; z++)
+            for (var x = 0; x < cells; x++)
+            {
+                var up = blurScratch[Math.Max(0, z - 1) * cells + x];
+                var down = blurScratch[Math.Min(cells - 1, z + 1) * cells + x];
+                into[z * cells + x] = (up + blurScratch[z * cells + x] * 2f + down) * 0.25f;
+            }
+        }
+    }
+
+    private float[] blurScratch = Array.Empty<float>();
+
     /// <summary>How many cells the grid is on a side.</summary>
     public int Cells => cells;
 
@@ -280,12 +528,20 @@ internal sealed class FogOfWar
             explored = new float[total];
             visible = new float[total];
             pending = new float[total];
+            shownExplored = new float[total];
+            shownVisible = new float[total];
+            blurFront = new float[total];
+            blurBack = new float[total];
+            blurScratch = new float[total];
+            texels = new byte[total * 4];
         }
         else
         {
             Array.Clear(explored);
             Array.Clear(visible);
             Array.Clear(pending);
+            Array.Clear(shownExplored);
+            Array.Clear(shownVisible);
         }
 
         watchers.Clear();
@@ -295,7 +551,12 @@ internal sealed class FogOfWar
         // Cleared along with the masks, or a map rolled while the fog is switched off comes up dark: the
         // fill that "off" depends on would be skipped as already done, against arrays that were just zeroed.
         revealed = false;
+        needsSeed = true;
         Counts = (total, 0, 0);
+        // All unexplored, which is what a new map should look like before anyone has seen any of it. The
+        // first Advance eases up from here.
+        Array.Clear(texels);
+        TexelsDirty = true;
     }
 
     /// <summary>Which cell a place falls in.</summary>
@@ -339,7 +600,7 @@ internal sealed class FogOfWar
     /// Reads the simulation and writes nothing back to it. The one-way rule in this class's remarks is
     /// enforced by that being the only direction any call here points.
     /// </remarks>
-    public void Advance(SimulationWorld simulation, FogSettings settings)
+    public void Advance(SimulationWorld simulation, FogSettings settings, float deltaSeconds)
     {
         if (cells == 0) return;
 
@@ -363,7 +624,12 @@ internal sealed class FogOfWar
             revealed = true;
             Array.Fill(explored, 1f);
             Array.Fill(visible, 1f);
+            // Snapped, not eased: switching the feature off should look like it was never on rather than like
+            // the weather clearing, and snapping is what lets every later frame return early costing nothing.
+            Array.Fill(shownExplored, 1f);
+            Array.Fill(shownVisible, 1f);
             Counts = (0, 0, cells * cells);
+            RebuildTexels(0f, 0f);
             return;
         }
 
@@ -378,6 +644,13 @@ internal sealed class FogOfWar
             askedThisCycle = 0;
             grantedThisCycle = 0;
             Counts = (cells * cells, 0, 0);
+            needsSeed = true;
+        }
+
+        if (needsSeed)
+        {
+            needsSeed = false;
+            Seed(simulation, settings);
         }
 
         var clock = Stopwatch.StartNew();
@@ -393,6 +666,9 @@ internal sealed class FogOfWar
             if (watchers.Count == 0 && emptyCycleWait > 0)
             {
                 emptyCycleWait--;
+                // Still eased and still uploaded: an empty map is a reason not to look for watchers, not a
+                // reason to freeze the veil half open.
+                RebuildTexels(deltaSeconds, settings.FadeSeconds);
                 MillisecondsLastFrame = clock.Elapsed.TotalMilliseconds;
                 return;
             }
@@ -424,8 +700,66 @@ internal sealed class FogOfWar
             grantedThisCycle = 0;
         }
 
+        // <b>Every frame, and this is the fix for the blocky edge.</b> The masks change once a cycle, in whole
+        // cells; an image that followed them would step eight frames at a time and the boundary would read as a
+        // row of squares switching on. Easing here decouples what the veil looks like from how often the truth
+        // beneath it is recomputed.
+        RebuildTexels(deltaSeconds, settings.FadeSeconds);
         MillisecondsLastFrame = clock.Elapsed.TotalMilliseconds;
     }
+
+    /// <summary>
+    /// Marks the ground the settlement is presumed to know already.
+    /// </summary>
+    /// <remarks>
+    /// A disc around each of the player's own buildings, into the explored mask only. Not through
+    /// <see cref="SimulationWorld.CanSee"/> on purpose — see the note on
+    /// <see cref="FogSettings.StartRevealMetres"/>. Nothing here touches <see cref="visible"/>: what is
+    /// watched is still earned every cycle by sight, so the seed cannot hand the player a view of anything
+    /// moving.
+    /// </remarks>
+    private void Seed(SimulationWorld simulation, FogSettings settings)
+    {
+        var reach = settings.StartRevealMetres;
+        if (reach <= 0f) return;
+
+        var span = (int)MathF.Ceiling(reach / CellMetres);
+        var reachSquared = reach * reach;
+        var marked = 0;
+
+        foreach (ref readonly var node in simulation.Nodes.All)
+        {
+            if (!node.IsAlive || !node.IsBuilt || node.Faction != Player) continue;
+            if (node.Kind is not (NodeKind.Granary or NodeKind.ForwardDepot
+                or NodeKind.House or NodeKind.Farm))
+            {
+                continue;
+            }
+
+            var origin = Index(node.Position);
+            var originX = origin % cells;
+            var originZ = origin / cells;
+            for (var dz = -span; dz <= span; dz++)
+            for (var dx = -span; dx <= span; dx++)
+            {
+                var x = originX + dx;
+                var z = originZ + dz;
+                if (x < 0 || z < 0 || x >= cells || z >= cells) continue;
+
+                var index = z * cells + x;
+                if (explored[index] > 0.5f) continue;
+                if (Vector2.DistanceSquared(CentreOf(index), node.Position) > reachSquared) continue;
+                explored[index] = 1f;
+                marked++;
+            }
+        }
+
+        SeededCells = marked;
+        if (marked > 0) Recount();
+    }
+
+    /// <summary>How many cells the opening reveal marked known, which says whether it ran.</summary>
+    public int SeededCells { get; private set; }
 
     /// <summary>Collects who is watching, for the cycle about to start.</summary>
     private void StartCycle(SimulationWorld simulation, FogSettings settings)
@@ -498,6 +832,45 @@ internal sealed class FogOfWar
             pending[index] = 1f;
             explored[index] = 1f;
         }
+    }
+
+    /// <summary>
+    /// Checks that the shader's world-to-texel mapping lands on the cells this class thinks it does.
+    /// </summary>
+    /// <remarks>
+    /// <b>One mapping, two implementations, and the second one cannot be looked at.</b> World position to
+    /// cell is written here in <see cref="Index"/> and <see cref="CentreOf"/>, and again in world.frag as a
+    /// UV — and the shader's copy is unreadable from a log, unverifiable from a screenshot (a veil half a
+    /// cell out looks exactly like a veil), and wrong the first time it was written. So the arithmetic is
+    /// asserted instead of inspected: for every cell, the shader's expression evaluated on the centre of
+    /// that cell must land on that cell's own texel centre.
+    /// <para>
+    /// It does not prove the shader compiles to this. It proves the expression I put in the shader agrees
+    /// with the grid the masks are built on, which is the half that was actually wrong — and it fails loudly
+    /// if either side is edited without the other, which is the failure this file produces most.
+    /// </para>
+    /// </remarks>
+    public string? MappingFault(float extentMetres)
+    {
+        var span = SpanMetres;
+        for (var index = 0; index < cells * cells; index++)
+        {
+            var centre = CentreOf(index);
+            // Exactly the expression in world.frag: offset by the map extent, scaled by one over the span.
+            var u = (centre.X + extentMetres * 0.5f) / span;
+            var v = (centre.Y + extentMetres * 0.5f) / span;
+            // And exactly the sampler's convention: texel i covers [i, i+1) and its centre is at i + 0.5.
+            var wantX = index % cells + 0.5f;
+            var wantZ = index / cells + 0.5f;
+            if (MathF.Abs(u * cells - wantX) > 1e-3f || MathF.Abs(v * cells - wantZ) > 1e-3f)
+            {
+                return $"cell {index} centres at ({centre.X:F2}, {centre.Y:F2}) m, which the shader's UV " +
+                       $"sends to texel ({u * cells:F3}, {v * cells:F3}) when it should be " +
+                       $"({wantX:F3}, {wantZ:F3}). The veil and the masks are on different grids.";
+            }
+        }
+
+        return null;
     }
 
     private void Recount()

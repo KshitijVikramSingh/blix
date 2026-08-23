@@ -65,6 +65,10 @@ layout(push_constant) uniform Push {
     vec4 uCascadeSplit;
     // xyz = the camera's unit forward, the axis those distances are measured along.
     vec4 uCameraAhead;
+    // Declared and unread here, like uWind in the fragment stage: one block, one layout, every stage. See
+    // world.frag for what the four components are.
+    vec4 uScouted;
+    vec4 uVeil;
 };
 
 layout(location = 0) out vec3 vNormal;
