@@ -313,10 +313,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// <summary>Each cascade's shadow push, which is its own fitted view-projection.</summary>
     private readonly byte[][] cascadePush = BuildCascadePushes();
 
+    /// <summary>A cascade's light view-projection, then the wind. See shadow_caster.vert.</summary>
+    private const int CascadePushSize = 64 + 16;
+
     private static byte[][] BuildCascadePushes()
     {
         var pushes = new byte[ShadowCascades.Count][];
-        for (var c = 0; c < pushes.Length; c++) pushes[c] = new byte[64];
+        for (var c = 0; c < pushes.Length; c++) pushes[c] = new byte[CascadePushSize];
         return pushes;
     }
     private PipelineHandle casterPipeline, skyPipeline, presentPipeline;
@@ -395,6 +398,36 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// to be the whole render graph.
     /// </remarks>
     private long treeTicks;
+
+    /// <summary>How many trees were actually timed, so the sample can be scaled back to the whole.</summary>
+    private int treeSamples;
+
+    /// <summary>
+    /// How much of the per-tree work to actually do, for attributing the node phase's cost.
+    /// </summary>
+    /// <remarks>
+    /// <b>An ablation, because six readings of the code named nothing.</b> Every function in the tree path
+    /// measures cheap on inspection — the heightfield is a bilinear array read, the woodland and country fields
+    /// are baked grids, the tier is one grid index, a placement is two SIMD matrix multiplies, and a model turns
+    /// out to have 1.8 parts so a submission is under four appends. Summed, that is about a third of what the
+    /// phase costs, and a profiler could not close the gap either: <c>sample</c> cannot symbolise JIT frames and
+    /// macOS CoreCLR writes no perf map.
+    /// <para>
+    /// So the remaining honest measurement is subtraction. Level 2 does the iteration, the height sample and
+    /// the frustum test and stops; level 1 adds everything computed per surviving tree; level 0 adds the
+    /// submission. The differences attribute the phase without needing to know which line inside each stage is
+    /// responsible — and unlike a guess, a difference is the number you would actually save by removing it.
+    /// </para>
+    /// </remarks>
+    private int treeWork;
+
+    /// <summary>Cycles <see cref="treeWork"/> and reports the node phase at each level, then exits.</summary>
+    private bool treeProfile;
+
+    private readonly double[] treeWorkMilliseconds = new double[3];
+    private readonly int[] treeWorkFrames = new int[3];
+    private readonly int[] treeWorkOffered = new int[3];
+    private readonly int[] treeWorkDrawn = new int[3];
     private long undergrowthTicks;
 
     /// <summary>Trees the frustum threw away after the coarse bound let them through.</summary>
@@ -671,7 +704,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // middle of the view and everything beyond it stood in flat light. Reported from the chair as only a
         // disc of the view being shaded, which is exactly what a box centred on the focus and smaller than the
         // draw distance looks like.
-        MathF.Max(look.ShadowFloorMetres * 0.5f, VisibleReach + ShadowReachMetres));
+        MathF.Max(look.MinimumDetailRadiusMetres, VisibleReach + ShadowReachMetres));
 
     /// <summary>
     /// The furthest the sun's box may reach before its texels are coarser than the dial allows.
@@ -1069,9 +1102,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Region? region = null,
         Archetype? archetype = null,
         uint? mapSeed = null,
-        int rollEveryFrames = 0)
+        int rollEveryFrames = 0,
+        bool profileTreeWork = false)
     {
         this.rollEveryFrames = rollEveryFrames;
+        // The ablation starts at the cheapest level and works up, so nothing it measures was warmed by the
+        // level above it. See treeWork.
+        treeProfile = profileTreeWork;
+        if (profileTreeWork)
+        {
+            treeWork = 2;
+            timingDebug = true;
+        }
+
         mapLab = startMapLab;
         if (region is { } chosen) labRegion = chosen;
         if (archetype is { } wanted)
@@ -1582,7 +1625,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         var casterInterface = new ShaderInterface(
             Slots: new[] { InstanceBuffer.Slot },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+            PushConstants: new[]
+            {
+                // A light matrix and the wind. The wind is here so a caster leans exactly as the scene shader
+                // leans the same geometry — see shadow_caster.vert.
+                new PushConstantRange(ShaderStages.Vertex, 0, CascadePushSize),
+            });
         var skyInterface = new ShaderInterface(
             Slots: Array.Empty<DescriptorSetSlot>(),
             PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 128) });
@@ -1795,6 +1843,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // to be true while every line in it is correct.
         var deepTriangles = 0;
         foreach (var tree in art.TreesDeep) deepTriangles += tree.TriangleCount;
+        // <b>Parts, because a part is an append and appends are what the node phase spends itself on.</b>
+        // PropModel.Add pushes one InstanceData — eighty bytes — into every part's own list, and again into
+        // every caster part's, so a model with a dozen materials costs twenty-four scattered writes per copy
+        // rather than one. Twelve thousand trees a frame makes that the difference between a hundred thousand
+        // appends and a quarter of a million, and nothing in the report said which it was: triangle counts
+        // describe what the GPU is given and say nothing about what the loop does to hand it over.
+        var deepParts = 0;
+        foreach (var tree in art.TreesDeep) deepParts += tree.PartCount;
+        var nearParts = 0;
+        foreach (var tree in art.Trees) nearParts += tree.PartCount;
+        Console.WriteLine(
+            $"  art: a tree is {nearParts / MathF.Max(1, art.Trees.Length):F1} parts near and " +
+            $"{deepParts / MathF.Max(1, art.TreesDeep.Length):F1} deep, so one placement is that many " +
+            $"instance appends (twice, where it casts)");
         Console.WriteLine(
             $"  art: a tree is {treeTriangles / MathF.Max(1, art.Trees.Length):F0} triangles near, " +
             $"{midTriangles / MathF.Max(1, art.TreesMid.Length):F0} at the middle level, " +
@@ -3796,6 +3858,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             look.WindGustRate,
             look.WindBearingDegrees * MathF.PI / 180f);
         MemoryMarshal.Write(worldPush.AsSpan(304, 16), in wind);
+        // <b>The same four numbers into every caster push.</b> A tree that leans in the scene and stands
+        // straight in the shadow map has a shadow detached from its trunk, and one that leans on a different
+        // clock has a shadow that swims. Written here rather than in FitCascades because the wind is derived
+        // further down the frame than the matrices are.
+        for (var c = 0; c < ShadowCascades.Count; c++)
+        {
+            MemoryMarshal.Write(cascadePush[c].AsSpan(64, 16), in wind);
+        }
         // <b>What the settlement lights of itself, and how far into the night it is.</b> One ramp decides
         // both the windows and their pools, and it is the sun's height rather than the clock — so the
         // village comes up over the same twilight in which the palette goes blue, and neither can be seen
@@ -4243,6 +4313,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         treeNodesAlive = 0;
         treesOffered = 0;
         treeTicks = 0L;
+        treeSamples = 0;
         undergrowthTicks = 0L;
         treesOutOfView = 0;
         treesNearRejected = 0;
@@ -4256,6 +4327,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var nodeClock = Stopwatch.StartNew();
         BuildNodeInstances();
         nodeMilliseconds = nodeClock.Elapsed.TotalMilliseconds;
+        AdvanceTreeProfile();
         BuildNavigationOverlay();
         BuildPathDebug();
         BuildVelocityDebug();
@@ -4383,6 +4455,79 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// number worth being legible from across the map without selecting anything.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Runs the tree-work ablation: a hundred frames at each level, then the attribution and out.
+    /// </summary>
+    /// <remarks>
+    /// One run rather than three, because three runs is three different camera positions and three different
+    /// tree counts — and comparing a phase across those is exactly the mistake made earlier tonight, when
+    /// <c>nodes</c> from one run was held against <c>TREENODES</c> from another and called a contradiction. The
+    /// levels have to be measured against the same frame to be subtractable.
+    /// <para>
+    /// The first twenty frames of each level are discarded. A level change moves what the loop touches, and the
+    /// first frames after it pay for cache that the previous level left cold.
+    /// </para>
+    /// </remarks>
+    private void AdvanceTreeProfile()
+    {
+        if (!treeProfile) return;
+
+        // <b>Two harness designs, each with its own bias, and the second one was mine too.</b>
+        //
+        // A block of frames per level drifts: the simulation runs on between blocks and the camera is still
+        // easing toward its zoom, so the last level measures a different scene from the first. That showed as a
+        // negative cost for submission — the whole phase reading cheaper than the cull alone.
+        //
+        // Interleaving the levels frame by frame fixes the drift and introduces a worse bias. A level-0 frame
+        // writes megabytes of instances and evicts the node array, so with the levels cycling, the cull is
+        // always measured on a cold sweep and the fuller levels on a warm one. The differences come out
+        // understated by however much that is worth, and nothing in the output says so.
+        //
+        // So: blocks again, with a long enough settle that the camera has arrived, and — the part that was
+        // missing both times — <b>the scene reported per level, so the comparison can be checked rather than
+        // assumed.</b> If the three counts agree, the differences mean what they say. If they do not, the run is
+        // void and it says so itself instead of printing three numbers that look fine.
+        const int settle = 90;
+        const int measured = 120;
+        var level = 2 - treeWork;
+        var frames = ++treeWorkFrames[level];
+        if (frames > settle)
+        {
+            treeWorkMilliseconds[level] += nodeMilliseconds;
+            treeWorkOffered[level] = treesOffered;
+            treeWorkDrawn[level] = treesDrawn;
+        }
+
+        if (frames < settle + measured) return;
+
+        if (treeWork > 0)
+        {
+            treeWork--;
+            return;
+        }
+
+        var cull = treeWorkMilliseconds[0] / measured;
+        var compute = treeWorkMilliseconds[1] / measured;
+        var whole = treeWorkMilliseconds[2] / measured;
+        var spread = treeWorkOffered.Max() - treeWorkOffered.Min();
+        Console.WriteLine(
+            $"  tree work — offered {treeWorkOffered[0]:N0}/{treeWorkOffered[1]:N0}/{treeWorkOffered[2]:N0}, " +
+            $"past the frustum {treeWorkDrawn[0]:N0}/{treeWorkDrawn[1]:N0}/{treeWorkDrawn[2]:N0}, " +
+            $"{measured} frames a level");
+        if (spread > treeWorkOffered.Max() / 100)
+        {
+            Console.WriteLine(
+                $"    VOID — the scene moved by {spread:N0} trees between levels, so the differences below are " +
+                "not differences in the same world. Freeze the camera and try again.");
+        }
+
+        Console.WriteLine(
+            $"    iterate + height + frustum {cull:F1} ms · " +
+            $"per-tree fields + placement +{compute - cull:F1} ms · " +
+            $"submission +{whole - compute:F1} ms · whole phase {whole:F1} ms");
+        host.RequestClose();
+    }
+
     private void BuildNodeInstances()
     {
         DrawStumps();
@@ -4471,9 +4616,22 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 treesOffered++;
                 // Timed around the branch rather than inside it, so "is the node phase trees" is answerable
                 // before anything is guessed about which part of a tree costs.
-                var treeStart = timingDebug ? Stopwatch.GetTimestamp() : 0L;
+                //
+                // <b>Sampled, because the instrument was a sixth of what it was measuring.</b> Probing every
+                // node meant two Stopwatch.GetTimestamp calls thirty-four thousand times a frame — around
+                // 4.5 ms of the 26 it reported, all of it the cost of asking. One node in thirty-two, scaled
+                // back up: the answer to "how long does a tree take" needs an average and not a census, and a
+                // thousand samples is a fine average. The probe overhead drops with it, so the number stops
+                // including a sixth of itself.
+                var timed = timingDebug && (treesOffered & 31) == 0;
+                var treeStart = timed ? Stopwatch.GetTimestamp() : 0L;
                 DrawTree(in node);
-                if (timingDebug) treeTicks += Stopwatch.GetTimestamp() - treeStart;
+                if (timed)
+                {
+                    treeTicks += Stopwatch.GetTimestamp() - treeStart;
+                    treeSamples++;
+                }
+
                 continue;
             }
 
@@ -5531,6 +5689,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
                 return;
             }
+            // Ablation level 2 stops here: iteration, one height sample and the frustum test. See treeWork.
+            if (treeWork >= 2)
+            {
+                treesDrawn++;
+                return;
+            }
+
             var canopy = simulation.Terrain.Woodland is { } cover
                 ? 1.22f - 0.34f * Math.Clamp(cover.At(tree.Position), 0f, 1.2f)
                 : 1f;
@@ -5566,6 +5731,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // beyond what the camera can see, and soon beyond what the player has scouted.
             var tier = CanopyTierAt(tree.Position);
 
+            // Ablation level 1 stops here: everything computed about a tree, nothing submitted. See treeWork.
+            if (treeWork >= 1)
+            {
+                treesDrawn++;
+                return;
+            }
 
             if (tier == 0)
             {
@@ -6771,7 +6942,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"STONE {outcropsDrawn} of {outcropsSeen} outcrops drawn · " +
             $"TREENODES {treeNodesAlive} alive, {treesOffered} offered, {treesOutOfView} out of view " +
             $"({treesNearRejected} of them within 20 m of the eye), " +
-            $"{treesDrawn} drawn in {treeTicks * 1000.0 / Stopwatch.Frequency:F1} ms " +
+            $"{treesDrawn} drawn in " +
+            $"{treeTicks * 1000.0 / Stopwatch.Frequency * treesOffered / MathF.Max(1, treeSamples):F1} ms " +
+            $"(from {treeSamples} samples) " +
             $"(undergrowth {undergrowthTicks * 1000.0 / Stopwatch.Frequency:F1} ms) · " +
             $"TREES {treeTiers.Near}/{treeTiers.Mid}/{treeTiers.Far}/{treeTiers.Deep} near/mid/far/deep over " +
             $"{look.TreeCrowdMid:F0}/{look.TreeCrowdFar:F0} per {CanopyCellMetres:F0} m · " +

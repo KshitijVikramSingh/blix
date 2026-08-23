@@ -245,14 +245,24 @@ internal sealed class LookSettings
     [Tune(0.0, 8.0, Label = "shadow normal offset (texels)", Group = "shadows")]
     public float ShadowNormalOffsetTexels = 2.5f;
 
-    /// <summary>Side of the box the sun's shadow map covers, in metres.</summary>
+    /// <summary>The closest the world's detail radius is allowed to pull in, in metres.</summary>
     /// <remarks>
-    /// Crispness against coverage, and the trade is direct: the map is a fixed 2048 texels, so halving
-    /// this doubles the resolution of every shadow in it and halves how far from the camera a shadow
-    /// exists at all.
+    /// <b>This was called the shadow box and it has not been one for some time.</b> It set the side of the
+    /// single ortho box the sun's map covered, and its docstring described that trade — halve it and every
+    /// shadow doubles in resolution. Then the box became fitted to the view, and then it became three boxes
+    /// fitted to three slices, and neither reads this number at all. What survived is the one other thing it
+    /// did: floor <c>DetailRadius</c>, so that zoomed all the way in the world is not drawn to a radius of a
+    /// few metres.
+    /// <para>
+    /// Renamed rather than left, because a control whose label describes something it stopped doing is worse
+    /// than no control: it invites exactly the reasoning I did against it — reading 60 as forty per cent of a
+    /// near cascade's width, and proposing to halve a number that would have changed nothing about shadows and
+    /// quietly halved the draw distance instead. The factor of a half is gone with it; it was the leftover of
+    /// a side becoming a radius.
+    /// </para>
     /// </remarks>
-    [Tune(40.0, 400.0, Label = "shadow box (m)", Group = "shadows")]
-    public float ShadowFloorMetres = 60f;
+    [Tune(20.0, 200.0, Label = "min detail radius (m)", Group = "shadows")]
+    public float MinimumDetailRadiusMetres = 30f;
 
     /// <summary>
     /// How far outside the view the sun's box reaches, for casters that are not on screen, in metres.

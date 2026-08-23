@@ -367,7 +367,8 @@ public static class Program
             labRegion,
             labArchetype,
             labSeed,
-            rollEvery);
+            rollEvery,
+            args.Contains("--treeprofile"));
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
     }

@@ -58,6 +58,7 @@
     <GlslInclude Include="..\Blix.Shaders\noise.glsl" />
     <!-- The game's own shared GLSL, resolved relative to the including file. -->
     <GlslInclude Include="Shaders\materials.glsl" />
+    <GlslInclude Include="Shaders\lean.glsl" />
   </ItemGroup>
 
   <Target Name="CompileSpirV"
