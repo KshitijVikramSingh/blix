@@ -70,6 +70,7 @@ layout(push_constant) uniform Push {
     vec4 uScouted;
     vec4 uVeil;
     vec4 uVeilAir;
+    vec4 uVeilDeep;
 };
 
 layout(location = 0) out vec3 vNormal;

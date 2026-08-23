@@ -559,10 +559,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     /// <summary>
     /// Two further view-projections (the third is uSunShadowVP at 96), then the sides, the texel fractions,
-    /// the split distances, the camera's own axis, the fog of war's grid span and thicknesses, the cloud the
-    /// veil is drawn as, and how that cloud is lit and pulled about.
+    /// the split distances, the camera's own axis, the fog of war's grid span and the two layer densities, the
+    /// cloud the veil is drawn as, how that cloud is lit and pulled about, and the deep bank's own four.
     /// </summary>
-    private const int CascadeBlockSize = 64 * 2 + 16 * 7;
+    private const int CascadeBlockSize = 64 * 2 + 16 * 8;
 
     private readonly byte[] worldPush = new byte[CascadeBlockOffset + CascadeBlockSize];
     private readonly byte[] skyPush = new byte[128];     // invViewProj, camPos, sunDir, zenith, horizon
@@ -972,7 +972,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// where the thing being judged is a dozen bodies at once; a settlement wants to be looked at from
     /// close enough to see what one villager is carrying.
     /// </remarks>
-    private const float CameraNearestDistance = 8f;
+    private const float CameraNearestDistance = 6f;
+
+    /// <summary>The ground under the focus, eased, which is where the camera aims.</summary>
+    /// <remarks>
+    /// A field rather than a fresh sample each time because it is eased across frames, and because two
+    /// different heights for one focus inside one frame would put the eye and the frustum in different places.
+    /// </remarks>
+    private float cameraGroundHeight;
 
     /// <summary>How far back the camera may stand.</summary>
     /// <remarks>
@@ -3407,7 +3414,39 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     {
         const float elevation = CameraElevation;
         var horizontal = MathF.Cos(elevation) * cameraDistance;
-        var focus = new Vector3(cameraFocus.X, 0f, cameraFocus.Y);
+        // <b>The focus sits on the ground, and it used to sit at sea level.</b> This is one bug behind two
+        // complaints, and it is worth writing out because everything geometric in this file is measured from
+        // this point.
+        //
+        // The village's ground is at -47.7 m. With the focus pinned to y = 0 the camera aimed at a point
+        // forty-eight metres up in clear air, and at full zoom-in its eye — 5.9 m above the focus — stood
+        // <em>fifty-three metres above the terrain</em>. So the closest the camera could get was still a
+        // middle-distance view, reported from the chair as not being able to zoom in far enough. And the pan
+        // speed is a share of the standoff, which at that zoom is 8.8 m/s while the eye is fifty metres up
+        // seeing a hundred metres of ground: reported as the camera massively slowing down. Same cause.
+        //
+        // It also puts the derived reaches on their proper datum. VisibleGroundRadius and GroundBand both take
+        // the eye height as sin(pitch) x cameraDistance — the height above <em>this</em> point — so with the
+        // focus off the ground every draw distance in the frame was computed for a camera much lower than the
+        // one that was drawing it. The comment on the ground-chunk cull already describes the symptom: the far
+        // edge of the view comes from intersecting the frustum with a plane at the focus height, "exactly
+        // right on the flat ground it was written against and wrong the moment the map has hills in it".
+        // Putting the focus on the ground is what makes that plane the right plane.
+        //
+        // Eased, because the alternative is a camera that bobs over every hillock it pans across, and snapped
+        // when the step is large so a map load or a jump to a selection does not fly the camera in.
+        var groundAtFocus = simulation.Terrain.SampleHeight(cameraFocus);
+        if (MathF.Abs(groundAtFocus - cameraGroundHeight) > 25f || frameSeconds <= 0f)
+        {
+            cameraGroundHeight = groundAtFocus;
+        }
+        else
+        {
+            cameraGroundHeight += (groundAtFocus - cameraGroundHeight) *
+                (1f - MathF.Exp(-frameSeconds * 6f));
+        }
+
+        var focus = new Vector3(cameraFocus.X, cameraGroundHeight, cameraFocus.Y);
         var eye = focus + new Vector3(
             MathF.Sin(cameraYaw) * horizontal,
             MathF.Sin(elevation) * cameraDistance,
@@ -3949,8 +3988,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // and it is written out there because the wear lookup beside it legitimately uses the extent twice.
         var scoutedDials = new Vector4(
             1f / MathF.Max(1f, scouted.SpanMetres),
-            fogSettings.UnexploredLight,
-            fogSettings.RememberedLight,
+            fogSettings.MemoryDensity,
+            fogSettings.UnknownDensity,
             fogSettings.MemoryDrain);
         MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 192, 16), in scoutedDials);
         // <b>One over the billow size, because the shader multiplies.</b> A wavelength divides and a
@@ -3971,6 +4010,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             MathF.Max(0.05f, fogSettings.CloudStretch),
             fogSettings.GustRoll);
         MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 224, 16), in veilAir);
+        // The deep bank's own four, because a thick layer is not a thin one turned up: it is paler, less
+        // directional, more solid, and it has to keep off ground the player already knows.
+        var veilDeep = new Vector4(
+            fogSettings.DeepBrightness,
+            fogSettings.DeepScatterShare,
+            MathF.Max(0.05f, fogSettings.DeepSolidity),
+            MathF.Max(1f, fogSettings.DeepEdgeFalloff));
+        MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 240, 16), in veilDeep);
         for (var i = 0; i < Hearths.MaximumLights; i++)
         {
             // The tail is zeroed rather than left stale: the count bounds the loop, but a light left in the
@@ -7206,6 +7253,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"WOODASK {woodlandAsked + WoodlandCover.Asked:N0} · " +
             $"REBUILDS {terrainRebuilds} · " +
             $"CONTACT {contactInstances.Count} · " +
+            // <b>The eye's height above the ground, not above the origin.</b> The distinction is the whole of
+            // the focus-datum bug: at the village these differed by forty-eight metres, and every reach on
+            // this line is derived from the standoff as though it were height over terrain.
+            $"EYE {MathF.Sin(CameraElevation) * cameraDistance:F1} m over ground " +
+            $"(focus at {cameraGroundHeight:F1} m, standoff {cameraDistance:F0} m) · " +
             $"HEIGHT {simulation.Terrain.SampleHeight(cameraFocus):F1} m " +
             $"(grade {simulation.Terrain.SampleGrade(cameraFocus):F2}) · " +
             $"NIGHT {sky.Nightness:F2} (lights {habitationLights}) · " +

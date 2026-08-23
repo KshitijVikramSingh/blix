@@ -81,8 +81,8 @@ layout(push_constant) uniform Push {
     // is that span, and the offset that centres it is the map extent (uHaze.z). Using the span for both — the
     // first version of this — slides the fog half a cell sideways, which is invisible as an offset and shows
     // up as fog that disagrees with the cell overlay by one row at the edges.
-    // y = how much shows through where unexplored, z = where remembered, w = how much colour drains from
-    // ground nobody is watching.
+    // y = how thick the memory layer is, z = how thick the deep bank over unknown ground is, w = how much
+    // colour drains from ground nobody is watching. <b>Two densities and not one ramp</b> — see rts_veil.
     vec4 uScouted;
     // The cloud the veil is made of. x = one over a billow's size in metres, y = how much the noise thins and
     // thickens it, z = drift in metres per second of the wind's clock, w = how bright it is.
@@ -91,6 +91,9 @@ layout(push_constant) uniform Push {
     // rather than the sky's, y = how much it glows looked at against the sun, z = how far it is drawn out
     // downwind (smaller is longer), w = how much the gust makes it breathe.
     vec4 uVeilAir;
+    // The deep bank's own four: x = brightness, y = what share of the directional colouring it takes,
+    // z = how solid the shared cloud reads under it, w = how sharply it retreats from ground already known.
+    vec4 uVeilDeep;
 };
 
 // The hues stay here and the intensities do not. A colour is a decision about what kind of
@@ -274,16 +277,33 @@ vec3 rts_veil(vec3 shown, vec3 worldPos) {
     scouted = scouted * scouted * (3.0 - 2.0 * scouted);
     scouted = scouted * scouted * (3.0 - 2.0 * scouted);
 
-    // Explored gates the two thicknesses; watched clears it. Nested rather than summed because the tiers are
-    // ordered and not independent — watched ground is always explored ground, so there is no fourth case.
-    float shows = mix(uScouted.y, mix(uScouted.z, 1.0, scouted.g), scouted.r);
-    float hidden = 1.0 - shows;
-    if (hidden <= 0.001) return shown;
+    // <b>Two layers, composited, rather than one number lerped through three tiers.</b> The ramp version
+    // could not be tuned: unknown and remembered shared a scalar, so the only way to make unscouted ground
+    // properly opaque was to drag the whole ramp and pay for it in visibility on ground the player had
+    // already scouted — which is a real cost, because the memory tier is most of the frame.
+    //
+    // Split, each layer answers one question and the answers do not have to be traded off. The memory layer
+    // lives on ground that is known and unwatched; the deep bank lives where nothing is known. On fully known
+    // ground the deep term is <em>identically zero</em>, so its density is free to go as high as it likes.
+    //
+    // The blur that keeps the boundary soft is the one place they still meet, and uVeilDeep.w is what that
+    // costs: an exponent above one concentrates the bank in genuinely unscouted ground and pulls it back off
+    // the fringe of the known.
+    float known = scouted.r;
+    float watched = scouted.g;
+    float memory = known * (1.0 - watched) * uScouted.y;
+    float deep = pow(1.0 - known, uVeilDeep.w) * uScouted.z;
+    if (memory + deep <= 0.002) return shown;
 
-    // The noise thins and thickens the veil on top of the warp: the warp decides where the edge is, this
-    // decides how solid the middle is. At zero wispiness both vanish and this is a flat sheet of exactly
-    // `hidden`, which keeps the tier thicknesses in charge of how much is hidden.
-    float density = clamp(hidden * mix(1.0 - uVeil.y, 1.0 + uVeil.y, cloud), 0.0, 1.0);
+    // The noise thins and thickens both layers on top of the warp: the warp decides where the edge is, this
+    // decides how solid the middle is. At zero wispiness it is a flat sheet of exactly the two densities,
+    // which keeps them in charge of how much is hidden.
+    float wisp = mix(1.0 - uVeil.y, 1.0 + uVeil.y, cloud);
+    float memoryDensity = clamp(memory * wisp, 0.0, 1.0);
+    // <b>The same cloud, curved rather than a second field.</b> Below one it fills the thin parts in while
+    // leaving the thick ones, so the bank reads as a mass that has texture instead of as the mist turned up.
+    // One weather system: two independent noise fields drifting over each other never resolve into a sky.
+    float deepDensity = clamp(deep * pow(clamp(wisp, 0.0, 2.0), uVeilDeep.z), 0.0, 1.0);
 
     // <b>Lit as the same air the distance haze is made of.</b> It was mixing toward flat sky ambient, which
     // is why it sat on top of the scene instead of in it: the one thing every other bit of atmosphere in this
@@ -299,11 +319,23 @@ vec3 rts_veil(vec3 shown, vec3 worldPos) {
     // than a general lift — a broad one only washes the veil out and loses the shape of the cloud.
     veilColor += uSunTint.rgb * uLight.x * uVeilAir.y * pow(towardSun, 6.0);
 
+    // The deep bank keeps only a share of that directional colouring, and the physics is the reason rather
+    // than the taste: light that has been scattered many times has forgotten which way it came from, so a
+    // thick bank is more uniform than a thin one. At a full share it reads as coloured glass.
+    vec3 deepColor = mix(
+        vec3(dot(veilColor, vec3(0.2126, 0.7152, 0.0722))),
+        veilColor,
+        uVeilDeep.y);
+
     // Colour before value, the same order the aerial perspective uses: a scene that only loses saturation
     // still reads as itself, and this map carries its season in hue.
     float luma = dot(shown, vec3(0.2126, 0.7152, 0.0722));
-    shown = mix(shown, vec3(luma), density * uScouted.w);
-    return mix(shown, veilColor * uVeil.w, density);
+    shown = mix(shown, vec3(luma), clamp(memoryDensity + deepDensity, 0.0, 1.0) * uScouted.w);
+    // Memory first, then the bank over the top of it — which is the ordering the whole split is for. Layered
+    // this way the bank hides the mist it covers instead of averaging with it, and neither one's dial reaches
+    // into the other's ground.
+    shown = mix(shown, veilColor * uVeil.w, memoryDensity);
+    return mix(shown, deepColor * uVeilDeep.x, deepDensity);
 }
 
 void main() {

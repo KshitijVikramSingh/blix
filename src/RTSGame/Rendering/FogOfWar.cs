@@ -94,29 +94,71 @@ internal sealed class FogSettings
     [Tune(1, 24, Label = "watchers per frame", Group = "fog")]
     public int WatchersPerFrame = 4;
 
-    /// <summary>How much of the scene shows through the cloud where unexplored.</summary>
+    /// <summary>How thick the deep bank over never-scouted ground is.</summary>
     /// <remarks>
-    /// <b>Not zero, and the number stopped meaning brightness when the veil became cloud.</b> It used to
-    /// multiply the pixel, so it read as darkness; now it sets how much of the ground shows through an
-    /// overcast, so it reads as thickness. Pure zero hides the map and also hides that there <em>is</em> a
-    /// map — the frame becomes a lit village on a void, and the shape of the land stops existing rather than
-    /// being unknown.
+    /// <b>A density now, and the two tiers are two layers rather than one blended number.</b> They were a
+    /// single lerp from unknown through remembered to watched, which is what made them impossible to tune
+    /// against each other: the only way to make the unknown denser was to drag the whole ramp with it, so
+    /// every gain in "you cannot see out there" was paid for in visibility on ground the player had already
+    /// scouted. Reported from the chair exactly that way.
     /// <para>
-    /// Raised from the first cut's six per cent, which was reported as too strong from the chair. Cloud you
-    /// can almost see through reads as weather; cloud you cannot reads as a hole in the render.
+    /// Composited instead — the memory layer, then the deep bank over the top of it. What that buys is a
+    /// guarantee rather than a compromise: on fully known ground the deep layer's contribution is
+    /// <em>identically zero</em>, so this dial can go as high as it likes and cost nothing where the player
+    /// has been. See <see cref="DeepEdgeFalloff"/> for the only place the two still meet.
     /// </para>
     /// </remarks>
-    [Tune(0.0, 0.8, Label = "unexplored shows through", Group = "fog")]
-    public float UnexploredLight = 0.13f;
+    [Tune(0.0, 1.0, Label = "unknown density", Group = "fog")]
+    public float UnknownDensity = 0.97f;
 
-    /// <summary>How much shows through where scouted but no longer watched.</summary>
+    /// <summary>How thick the veil is over ground scouted once and no longer watched.</summary>
     /// <remarks>
-    /// The memory tier, and it has to read as <em>information</em> rather than as night. Too thick and
-    /// scouting buys nothing you can see; too thin and there is no reason to keep anything watched. Enough
-    /// that the land reads and the wisps still drift over it.
+    /// The memory tier, and it is most of the frame once the opening reveal lands, so it is the one the polish
+    /// is for. Thin: it has to read as information rather than as weather, because the player is expected to
+    /// make decisions looking at it.
     /// </remarks>
-    [Tune(0.1, 1.0, Label = "remembered shows through", Group = "fog")]
-    public float RememberedLight = 0.56f;
+    [Tune(0.0, 1.0, Label = "memory density", Group = "fog")]
+    public float MemoryDensity = 0.42f;
+
+    /// <summary>How brightly the deep bank is lit, against the memory layer's own brightness.</summary>
+    /// <remarks>
+    /// Its own number because a metre of mist and a kilometre of cloud are not the same thing lit harder. A
+    /// deep bank scatters so much that almost nothing gets through it, which reads as flatter and paler than
+    /// the thin layer, not as darker.
+    /// </remarks>
+    [Tune(0.0, 3.0, Label = "deep brightness", Group = "fog")]
+    public float DeepBrightness = 1.25f;
+
+    /// <summary>How much of the sun-direction colouring the deep bank takes.</summary>
+    /// <remarks>
+    /// Less than the thin layer by default, and that is the physics rather than a preference: the further
+    /// light has been scattered the less it remembers which way it came from, so a thick bank is more uniform
+    /// than a thin one. Setting this to one makes the deep bank as directional as the mist and it immediately
+    /// reads as a sheet of coloured glass.
+    /// </remarks>
+    [Tune(0.0, 1.0, Label = "deep scatter share", Group = "fog")]
+    public float DeepScatterShare = 0.45f;
+
+    /// <summary>How solid the deep bank's cloud is, as a curve on the shared noise.</summary>
+    /// <remarks>
+    /// Below one it fills in — the thin parts of the same cloud field thicken while the thick parts stay
+    /// thick, so the deep layer reads as a mass with texture rather than as the mist turned up. Above one it
+    /// breaks apart. Sharing the field rather than sampling a second one is deliberate: it is one weather
+    /// system, and two independent noise fields drifting over each other never resolve into a sky.
+    /// </remarks>
+    [Tune(0.3, 2.5, Label = "deep solidity", Group = "fog")]
+    public float DeepSolidity = 0.62f;
+
+    /// <summary>How sharply the deep bank retreats from ground that is known.</summary>
+    /// <remarks>
+    /// <b>The one place the two layers still touch, and the dial that decides how much that costs.</b> The
+    /// masks are blurred to keep the boundary soft, so across the blur's width the deep bank does reach a
+    /// little way into known ground — which is the visibility loss that made blending the wrong shape in the
+    /// first place, just confined to the transition now. Raising this exponent concentrates the bank in
+    /// genuinely unscouted ground and pulls it back off the fringe, at the cost of a tighter edge.
+    /// </remarks>
+    [Tune(1.0, 6.0, Label = "deep edge falloff", Group = "fog")]
+    public float DeepEdgeFalloff = 2.4f;
 
     /// <summary>How much colour drains out of ground that is not being watched.</summary>
     /// <remarks>
