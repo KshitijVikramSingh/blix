@@ -7067,3 +7067,169 @@ Back to `Add(in NodeStock)` with named fields, and `WantsMaterials` checks `IsBu
 resource. 1.465 ms/tick. **Third time in one session that a loop over `Resources.All` — correct by
 construction — was far too slow where it was actually called.** The rule now written in the code: a
 hand-written sum is allowed only with a self-test pinning it to the generic one, and there is one.
+
+## 73. Three cascades, and the batch that aliased its own push
+
+> culling is still clearly fundamentally broken btw
+> shadow needs the same fix, why do I have to keep spelling these out
+> I think cascades are the correct solve here
+> I'd start with the splits tunable and renderable, along with the frustum bounds being renderable
+> still broken
+> shadows are all wrong
+
+One fitted sun box could be correct or sharp, never both. Wide enough to reach the far corners meant texels
+too coarse near the camera; capping its width to keep the texels left the far corners standing in flat light.
+Three boxes is the answer to that rather than a better single one.
+
+### The instrument first, and it earned that twice over
+
+`ShadowCascades` draws each fitted box and the frustum slice it was fitted to, and tints every fragment by
+the cascade that shaded it. Those are two different claims — where the maps *are* against which one each
+pixel *read* — and the gap between them is where a cascaded map goes wrong: the fit can be perfect while the
+select misses, and the fragment quietly falls to a coarser box or to no box at all. Both failures look like
+nothing until the frame is painted red, green and blue.
+
+The user asked for exactly this before any pass was wired, and it paid immediately.
+
+### Slicing the frustum is wrong for a camera that stands back
+
+Every CSM reference splits the frustum from zero to the shadowed depth, and every one assumes a camera among
+the things it looks at. This one hangs about 1.4x its focus distance back at forty-seven degrees, so the
+nearest ground on screen is already most of the way to the focus and **the slice from half a metre to thirty
+is empty air above the terrain**. Cascade 0 shaded nothing, cascade 1 caught a wedge, and the 1024-texel far
+map did nearly all the work — three passes doing one cascade's job, visibly worse than the single box.
+
+Cascades now split `GroundBand`: the span of view-ray distances over which this camera can see ground at all,
+from the same trigonometry `VisibleGroundRadius` already uses. The splits went from 0.12/0.38 to even thirds;
+0.12 had been right only because it was the one value putting cascade 0 anywhere near the ground.
+
+Relief applies to both ends of the band and asymmetrically on purpose. The **near** pad is capped at forty per
+cent of the standoff — taken raw, thirty metres of relief under a camera thirty-four metres up claims the
+nearest ground could be four metres away, which is true only if a hilltop sits directly under the eye, and if
+it does the camera is inside the terrain and worse things are already wrong. The **far** pad keeps the whole
+span, because ground falling away really is that much further along the ray and cutting it short is what
+leaves a wood unshadowed.
+
+### Containment cannot pick the cascade
+
+The second thing the tint found. Every box is the bounding sphere of its slice plus a margin, so the middle
+box is wide enough to hold the entire visible ground: it wins every test and the outer cascade is never
+sampled. Two colours where there should be three, and a boundary that curved with the box instead of running
+across the view.
+
+Depth picks the cascade now and the box only gets to veto, **outward and never inward**. A nearer box is
+smaller, so it is less likely to contain anything, and if it did the fragment would be sampling a map fitted
+to a slice it is not in. Cascade 0 is fitted from the camera rather than from the band, which is nearly free —
+a slice's bounding sphere is dominated by its far cross-section, so 0.5→141 m gives a 238 m box where
+80→141 m gives 226 — and it covers the near ground that would otherwise fall out of every box.
+
+### And the thing that made it all look broken was not the cascade maths
+
+Reported as "shadows are all wrong": detached from their casters, wrong scale, blobby.
+
+**A recorded draw keeps its push-constant array by reference,** and `InstancedBatch.Begin` copied each new
+push into the same internal array whenever the length matched. Invisible while every batch was begun once per
+frame; wrong the moment one is begun three times. All three cascade maps were rasterised with cascade 2's
+matrix and sampled with their own. Fixed in the batch, where the contract lives — `Begin` takes a fresh array
+when the previous one has already been handed to a draw, so the common path stays allocation-free.
+
+A latent bug, and cascades were the first caller to trigger it. **Look there first whenever a batch is reused
+within a frame.**
+
+### Measured after
+
+`SHADOW 61>122>187>264 m` at 11.5/15.1/42.0 cm texels, against the single box's 130 m at 23.4 cm. Twice the
+reach and twice as sharp where the eye is. `TREES` exceeding `SHADOW` is now expected rather than a bug: the
+cascades cover the depth the texel budget affords, the far plane covers what the frustum holds, and the gap
+sits entirely inside fog that closes at 240 m.
+
+The threefold caster redraw — which I had flagged as the next necessary work — costs 0.38 ms and 59k triangles
+a cascade against a 488k frame, so the partition is **not** worth doing. It would also cost more than it
+looks: all three passes share one `InstanceBuffer`, whose `Write` targets one buffer per frame slot, so
+per-cascade instance subsets need a buffer per cascade or every pass silently draws the last subset. Noted at
+both sites where someone would try it.
+
+Two more from deleting the tree draw radius one commit earlier: the collider overlay inherited the far plane
+and overran the prop batch, taking the process down on a debug toggle; and the caster cull was still measured
+from the focus while the boxes are fitted down-view.
+
+## 74. A caster that leans, a slider that lied, and where the node phase goes
+
+> looks better, let's proceed with 1 and then 2, then dig into 3
+
+### The shadow of a tree that sways
+
+`shadow_caster.vert` transformed its instance and stopped while `world.vert` displaced the same geometry
+downwind, so a swaying tree had a still shadow sitting under it, shimmering as the gust passed. The lean lives
+in `Shaders/lean.glsl` now and takes the wind as a *parameter* rather than reading it out of a push block —
+which is the whole reason the file exists, since the two shaders have different push layouts and a function
+reading `uWind` directly could only ever live in one of them. A caster and its receiver have to agree about
+where the geometry is, and sharing the function is the only way to guarantee it.
+
+### A control whose label described something it stopped doing
+
+I read `shadow box (m) 60` off the panel and argued it was inflating the near cascade's box by forty per cent.
+It was not. That is `ShadowFloorMetres`, which has not sized a shadow box since the box became fitted, and the
+pad that widens each cascade is derived already — `TallestCaster / tan(elevation)`.
+
+The real defect was the label, and it is worse than no control: it invited exactly the reasoning I did against
+it, where halving the number would have changed nothing about shadows and quietly halved the draw distance.
+Renamed to `MinimumDetailRadiusMetres`, with the stray factor of a half — a leftover of a side becoming a
+radius — folded in.
+
+### The node phase is a sweep problem, not a per-tree problem
+
+11.2 ms at zoom 110 on a 34k-tree map, and **63% of it is the sweep**: visiting all 34,051 standing nodes to
+find the 11,567 the frustum keeps. Per-tree work is the minority — 2.8 ms of fields and placement, 1.4 ms of
+submission.
+
+Six hypotheses about an expensive per-tree call died to code reading first: the heightfield, woodland, country
+and tier lookups are all plain array reads, a placement is two SIMD multiplies, a tree model turns out to have
+**1.8 parts** so a submission is under four appends, and the instance lists clear rather than reallocate. The
+cost was never the work done per tree. It is how many nodes are visited to decide which trees to do it for,
+and `EconomyNode` is ~144 bytes, so the sweep streams about 4.9 MB of struct per frame to read a position and
+a kind.
+
+### Three harnesses, and the first two were both wrong
+
+Worth writing down, because both failures print numbers that look fine.
+
+**A block of frames per level drifts.** The world runs on between blocks — woodcutters fell trees, the camera
+eases — so the last level measures a different scene from the first. Symptom: a *negative* cost for
+submission, the whole phase reading cheaper than the cull alone. The same "compared across two different
+worlds" error made earlier the same evening, when `nodes` from one run was held against `TREENODES` from
+another and called a contradiction.
+
+**Interleaving the levels frame by frame fixes the drift and biases worse.** A level-0 frame writes megabytes
+of instances and evicts the node array, so with levels cycling the cull is always measured cold and the fuller
+levels warm. It read 20.6 ms where the truth is 11.2 — nearly double — and nothing in its output said so.
+
+**Blocks, plus the tree count reported per level, and VOID if the scene moved.** The piece missing both times
+was any way to *check* that the levels describe the same world. The valid run reports
+34,051/34,051/34,051 offered and 11,567/11,567/11,567 drawn, and only then are the differences differences.
+
+Also: `sample(1)` cannot symbolise .NET JIT frames and macOS CoreCLR writes no perf map, so ablation is the
+tool here rather than a sampling profiler. And the per-node timing probe was two `Stopwatch` calls thirty-four
+thousand times a frame — about a sixth of what it reported. Sampled one in thirty-two now, and it says so.
+
+### What fog of war does to the fix
+
+> so fog of war etc is on the table too - so let's keep that in mind while designing solutions
+
+It rules out the option I was leaning toward. A compact array of tree positions wins bandwidth but still
+visits every tree, so it cannot exploit "this whole region is unexplored" — and it would be thrown away the
+moment fog lands. Fog is spatially coherent exactly like frustum visibility, so both want the same shape: **a
+per-cell gate, with the per-tree work running only inside cells that pass.** A tree index grid at the canopy
+grid's existing 10 m cells, gated on `frustum AND explored`. The ground chunks already do the frustum half
+correctly, tested against their own height range.
+
+Two constraints settled while it is still a design. **The gate goes above `DrawTree`, not inside it** — fog
+will gate agents, buildings, piles and stone by the same rule, and this file's signature failure is a local
+rule reimplemented per call site until the copies disagree. And **fog state stays out of the simulation**: it
+is deterministic, being derived from unit positions, but the moment a sim decision reads it, "what the player
+can see" becomes "what the world does" and view state enters the fingerprint. A deliberate exclusion, not
+something discovered when a replay diverges.
+
+One consequence for shadows: a caster in unexplored ground casting onto explored ground leaks terrain the
+player has not scouted. Most games ignore it. Decide it in the per-cascade caster cull rather than by
+accident.
