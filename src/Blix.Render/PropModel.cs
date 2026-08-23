@@ -273,6 +273,39 @@ public sealed class PropModel : IDisposable
         foreach (var part in casters) part.Caster!.End(pass);
     }
 
+    /// <summary>
+    /// Casts the same instances again, into another pass, under another matrix.
+    /// </summary>
+    /// <remarks>
+    /// <b>For cascaded shadow maps, where the geometry is one set and the projections are several.</b>
+    /// <see cref="Stage"/> begins each caster batch with a single shadow push, which is exactly right for one
+    /// map and one short of the answer for three. This re-begins from the instances already collected, so the
+    /// scene-side staging is not repeated and the instance list is walked once per cascade rather than rebuilt.
+    /// <para>
+    /// Only valid after <see cref="DrawShadow"/> has closed the staged batch — a batch cannot be begun while
+    /// active, and that rule is worth keeping loud rather than working around.
+    /// </para>
+    /// </remarks>
+    public void DrawShadow(RenderPassBuilder pass, ReadOnlySpan<byte> shadowPush)
+    {
+        foreach (var part in parts)
+        {
+            if (part.Caster is null) continue;
+            part.Caster.Begin(shadowPush);
+            part.Caster.SetInstances(
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances));
+            part.Caster.End(pass);
+        }
+
+        foreach (var part in casters)
+        {
+            part.Caster!.Begin(shadowPush);
+            part.Caster.SetInstances(
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances));
+            part.Caster.End(pass);
+        }
+    }
+
     public void Dispose()
     {
         foreach (var part in parts)

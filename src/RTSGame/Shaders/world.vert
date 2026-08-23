@@ -49,19 +49,37 @@ layout(push_constant) uniform Push {
     // Declared but unread here: one block, one layout, every stage.
     vec4 uHearth;
     vec4 uHearths[12];
+    // <b>The other two cascades, appended rather than inserted.</b> The block's tail is a variable-length
+    // array of hearth lights, so anything new goes after it: putting the matrices in the middle would move
+    // every offset below them in RtsGameLoop for no gain. Cascade 0 is uSunShadowVP above, which keeps its
+    // name and its place — see the note on CascadeBlockOffset.
+    mat4 uCascade1VP;
+    mat4 uCascade2VP;
+    // xyz = each cascade's box width in metres; xyz = one texel as a fraction of its own map. Both per
+    // cascade, because the bias is measured in texels and the three maps are neither the same width nor the
+    // same resolution. uCascadeSide.w turns the debug tint on.
+    vec4 uCascadeSide;
+    vec4 uCascadeTexel;
+    // xyz = how far along the view each cascade reaches, in metres. This is what picks the cascade; the boxes
+    // only get to veto. See the note in RtsGameLoop on why containment alone does not work.
+    vec4 uCascadeSplit;
+    // xyz = the camera's unit forward, the axis those distances are measured along.
+    vec4 uCameraAhead;
 };
 
 layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec4 vTint;
 layout(location = 2) out vec3 vWorldPos;
-layout(location = 3) out vec4 vSunShadowCoord;
-layout(location = 4) out vec2 vGround;
+layout(location = 3) out vec2 vGround;
 
-// The normal-offset technique — src/Blix.Shaders/shadow.glsl. Applied here rather than in
-// the fragment stage on purpose: the offset is a property of the surface, so interpolating
-// the already-offset light-space position across a triangle is both cheaper and smoother
-// than offsetting per pixel.
-#include "shadow.glsl"
+// <b>The light-space position used to be computed here, and cascades are why it moved.</b> Offsetting along
+// the normal and projecting in the vertex stage was cheaper and smoother — the offset is a property of the
+// surface, so interpolating an already-offset position beats offsetting per pixel. But the offset is scaled
+// by how many metres a shadow texel covers, and with three boxes of three widths on three maps that is three
+// different numbers; a vertex cannot know which one applies, because which cascade a fragment falls in is a
+// fact about the fragment. So the fragment stage now does both, from vWorldPos and vNormal, which it already
+// had. What that costs is a normalize and a matrix multiply per pixel; what it buys is a far cascade whose
+// bias is scaled to its own texels instead of to the near cascade's.
 // The material classes — Shaders/materials.glsl, shared with the fragment stage.
 #include "materials.glsl"
 
@@ -121,9 +139,4 @@ void main() {
     vTint = inst.tint;
     vWorldPos = world.xyz;
     vGround = inGround;
-
-    float ndotl = max(dot(normal, normalize(uSunDir.xyz)), 0.0);
-    vec3 offset = blix_shadow_normal_offset(
-        world.xyz, normal, ndotl, uShadow.x * uShadow.y, uShadow.w);
-    vSunShadowCoord = uSunShadowVP * vec4(offset, 1.0);
 }

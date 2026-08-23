@@ -786,6 +786,12 @@ internal sealed class SettlementArt : IDisposable
         foreach (var model in owned) model.DrawScene(pass, textures);
     }
 
+    /// <summary>Casts every model again into another pass under another matrix. See PropModel.DrawShadow.</summary>
+    public void DrawShadow(RenderPassBuilder pass, ReadOnlySpan<byte> shadowPush)
+    {
+        foreach (var model in owned) model.DrawShadow(pass, shadowPush);
+    }
+
     public void DrawShadow(RenderPassBuilder pass)
     {
         foreach (var model in owned) model.DrawShadow(pass);

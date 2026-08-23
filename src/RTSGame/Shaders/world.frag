@@ -13,8 +13,7 @@
 layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec4 vTint;
 layout(location = 2) in vec3 vWorldPos;
-layout(location = 3) in vec4 vSunShadowCoord;
-layout(location = 4) in vec2 vGround;
+layout(location = 3) in vec2 vGround;
 
 layout(location = 0) out vec4 outColor;
 
@@ -22,6 +21,12 @@ layout(set = 0, binding = 0) uniform sampler2D uSunShadowMap;
 // Where people have been walking. One channel, three metres a texel, smooth-sampled — see
 // RtsGameLoop.AdvanceWear for what fills it and why it is not simulation state.
 layout(set = 0, binding = 1) uniform sampler2D uWear;
+// The two further cascades. uSunShadowMap above is cascade 0 — the sharp one, covering whatever is nearest —
+// and these two carry the middle distance and the far. Binding 1 stays the wear texture rather than being
+// renumbered to sit beside its siblings; a binding that works and a shader that agrees with its interface are
+// worth more than a tidy numbering.
+layout(set = 0, binding = 2) uniform sampler2D uCascade1Map;
+layout(set = 0, binding = 3) uniform sampler2D uCascade2Map;
 
 layout(push_constant) uniform Push {
     mat4 uViewProjection;
@@ -50,6 +55,22 @@ layout(push_constant) uniform Push {
     // colour is shared and stays below with the other hues. Twelve of them, nearest first — see
     // Hearths.CollectLights for why that cannot pop.
     vec4 uHearths[12];
+    // <b>The other two cascades, appended rather than inserted.</b> The block's tail is a variable-length
+    // array of hearth lights, so anything new goes after it: putting the matrices in the middle would move
+    // every offset below them in RtsGameLoop for no gain. Cascade 0 is uSunShadowVP above, which keeps its
+    // name and its place — see the note on CascadeBlockOffset.
+    mat4 uCascade1VP;
+    mat4 uCascade2VP;
+    // xyz = each cascade's box width in metres; xyz = one texel as a fraction of its own map. Both per
+    // cascade, because the bias is measured in texels and the three maps are neither the same width nor the
+    // same resolution. uCascadeSide.w turns the debug tint on.
+    vec4 uCascadeSide;
+    vec4 uCascadeTexel;
+    // xyz = how far along the view each cascade reaches, in metres. This is what picks the cascade; the boxes
+    // only get to veto. See the note in RtsGameLoop on why containment alone does not work.
+    vec4 uCascadeSplit;
+    // xyz = the camera's unit forward, the axis those distances are measured along.
+    vec4 uCameraAhead;
 };
 
 // The hues stay here and the intensities do not. A colour is a decision about what kind of
@@ -68,6 +89,84 @@ layout(push_constant) uniform Push {
 
 // The material classes — Shaders/materials.glsl, shared with the vertex stage.
 #include "materials.glsl"
+
+// <b>Which of the three maps has this fragment, decided by whether it is inside the box rather than by how
+// far away it is.</b> A depth split would be the usual answer and needs the splits passed down and kept in
+// step with the fit; containment needs nothing passed down and cannot disagree with the fit, because the fit
+// is what it tests. The margin keeps the soft filter's own taps inside the map — a fragment right at the edge
+// of cascade 0 reads texels that do not exist, and the artefact is a bright fringe along a line that moves
+// with the camera.
+//
+// Returns false when the fragment is outside this box, in which case `lit` is untouched and the caller tries
+// the next one out. Past the last one, nothing is shadowed — which is correct rather than a fallback: the
+// cascades cover the shadowed depth, and past it the scene is fog anyway.
+bool rts_cascade(
+        sampler2D map, mat4 lightVP, float side, float texel,
+        vec3 normal, float ndotl, vec2 pixel, out float lit) {
+    // The normal offset in this cascade's own texels — see the note in world.vert on why it is here.
+    vec3 offset = blix_shadow_normal_offset(vWorldPos, normal, ndotl, side * texel, uShadow.w);
+    vec4 coord = lightVP * vec4(offset, 1.0);
+    vec3 ndc = coord.xyz / coord.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    float margin = uShadow.z * texel + 0.002;
+    lit = 1.0;
+    if (any(lessThan(uv, vec2(margin))) || any(greaterThan(uv, vec2(1.0 - margin)))
+            || ndc.z < 0.0 || ndc.z > 1.0) {
+        return false;
+    }
+    lit = blix_sun_shadow_soft(map, coord, ndotl, texel, uShadow.z, pixel);
+    return true;
+}
+
+// Which cascade the last call to rts_sun_shadow read, or 3 for none. Only the debug tint uses it — see
+// ShadowCascades.ShowSelection for why looking at the boxes is not the same as looking at the choice.
+int gCascade = 3;
+
+// One cascade by index. A sampler cannot be indexed out of an array portably, so the branch is written out —
+// the same shape SponzaLoop's shader uses, and for the same reason.
+bool rts_cascade_at(int cascade, vec3 normal, float ndotl, vec2 pixel, out float lit) {
+    if (cascade == 0) {
+        return rts_cascade(uSunShadowMap, uSunShadowVP, uCascadeSide.x, uCascadeTexel.x,
+                           normal, ndotl, pixel, lit);
+    }
+    if (cascade == 1) {
+        return rts_cascade(uCascade1Map, uCascade1VP, uCascadeSide.y, uCascadeTexel.y,
+                           normal, ndotl, pixel, lit);
+    }
+    return rts_cascade(uCascade2Map, uCascade2VP, uCascadeSide.z, uCascadeTexel.z,
+                       normal, ndotl, pixel, lit);
+}
+
+float rts_sun_shadow(vec3 normal, float ndotl, vec2 pixel) {
+    // How far along the view this fragment is, which is what the splits are in.
+    float viewDepth = dot(vWorldPos - uCamPos.xyz, uCameraAhead.xyz);
+    int first = viewDepth <= uCascadeSplit.x ? 0 : (viewDepth <= uCascadeSplit.y ? 1 : 2);
+
+    // <b>Outward from the chosen one, never inward.</b> The band a fragment falls in names the cascade whose
+    // texels are sized for it; if that box happens not to contain the fragment — near a split, or on ground
+    // that rises out of the slice its distance implies — the next box out is bigger and may. Falling inward
+    // would be wrong in both directions: a nearer box is smaller, so it is less likely to contain anything,
+    // and if it did the fragment would be sampling a map fitted to a slice it is not in.
+    float lit;
+    for (int c = first; c < 3; c++) {
+        if (rts_cascade_at(c, normal, ndotl, pixel, lit)) {
+            gCascade = c;
+            return lit;
+        }
+    }
+
+    gCascade = 3;
+    return 1.0;
+}
+
+// The tint, matching ShadowCascades.TintOf so a box and the pixels it shaded are the same colour. Grey for
+// ground no cascade claimed, which is the case worth spotting.
+vec3 rts_cascade_tint(int cascade) {
+    if (cascade == 0) return vec3(1.0, 0.35, 0.35);
+    if (cascade == 1) return vec3(0.35, 1.0, 0.40);
+    if (cascade == 2) return vec3(0.40, 0.55, 1.0);
+    return vec3(0.55);
+}
 
 // The colour of a wood fire seen at night, which is a hue and therefore stays in the shader — the
 // intensities are on sliders and these are not.
@@ -88,8 +187,7 @@ void main() {
     vec3 n = normalize(vNormal);
     float sunDot = dot(n, normalize(uSunDir.xyz));
     float ndotl = max(sunDot, 0.0);
-    float shadow = blix_sun_shadow_soft(
-        uSunShadowMap, vSunShadowCoord, ndotl, uShadow.x, uShadow.z, gl_FragCoord.xy);
+    float shadow = rts_sun_shadow(n, ndotl, gl_FragCoord.xy);
 
     // A wrapped terminator. Straight N.L puts a hard line across every curved surface at
     // exactly the angle the sun grazes it, which on low-poly geometry lands on a facet
@@ -284,5 +382,16 @@ void main() {
     // at five per cent. Terrain reports how much of this class covers the pixel; everything else is opaque
     // and says so.
     float coverage = isTerrain(surface) ? clamp(vGround.x, 0.0, 1.0) : 1.0;
-    outColor = vec4(mix(lit, hazeColor, fog), coverage);
+    // <b>It replaces the colour, it does not multiply it.</b> Multiplying was the first version and it failed
+    // as a diagnostic: red over grass is a brown that reads as soil, green over grass is grass, and the answer
+    // to "is cascade 0 being picked at all" was a judgement call about a hue. A debug view whose output can be
+    // mistaken for the scene is not telling you anything. So the hue is the cascade and nothing else, and the
+    // only thing kept from the lighting is the shadow term — which is what makes it possible to see that a
+    // band's shadows are sharp while looking at which band it is.
+    //
+    // Applied after the fog for the same reason it is not mixed: the far cascade must not fade toward the same
+    // grey that means no cascade at all.
+    vec3 shown = mix(lit, hazeColor, fog);
+    if (uCascadeSide.w > 0.5) shown = rts_cascade_tint(gCascade) * (0.30 + 0.70 * shadow);
+    outColor = vec4(shown, coverage);
 }

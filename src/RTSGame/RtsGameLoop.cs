@@ -303,8 +303,22 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     // its footprint and its distance from its neighbour are all unreadable. Shadows are how
     // a box becomes a building.
     private RenderGraph graph = null!;
-    private GraphResourceHandle hdrHandle, hdrMsaaHandle, sceneDepthHandle, sunShadowHandle;
-    private PassHandle shadowPassHandle, scenePassHandle;
+    private GraphResourceHandle hdrHandle, hdrMsaaHandle, sceneDepthHandle;
+    private PassHandle scenePassHandle;
+
+    /// <summary>One depth target and one pass per cascade. See ShadowCascades for why three.</summary>
+    private readonly GraphResourceHandle[] cascadeTargets = new GraphResourceHandle[ShadowCascades.Count];
+    private readonly PassHandle[] cascadePasses = new PassHandle[ShadowCascades.Count];
+
+    /// <summary>Each cascade's shadow push, which is its own fitted view-projection.</summary>
+    private readonly byte[][] cascadePush = BuildCascadePushes();
+
+    private static byte[][] BuildCascadePushes()
+    {
+        var pushes = new byte[ShadowCascades.Count][];
+        for (var c = 0; c < pushes.Length; c++) pushes[c] = new byte[64];
+        return pushes;
+    }
     private PipelineHandle casterPipeline, skyPipeline, presentPipeline;
     private ShaderProgramHandle casterShader;
     private FullscreenPass fullscreen = null!;
@@ -481,16 +495,27 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     // entries used to be a constant in
     // world.frag, which is why a year looked like one afternoon — see Rendering/Atmosphere.cs. This length
     // is also the declared push-constant range, in OnLoad, so the two cannot drift apart.
-    private readonly byte[] worldPush = new byte[336 + Hearths.MaximumLights * 16];
+    /// <summary>
+    /// Where the cascade block starts in <see cref="worldPush"/>: after the hearth lights, which are the
+    /// block's variable-length tail. Appended rather than inserted so not one existing offset moves — the
+    /// alternative renumbers thirteen writes and two shader declarations to save nothing.
+    /// </summary>
+    private const int CascadeBlockOffset = 336 + Hearths.MaximumLights * 16;
+
+    /// <summary>
+    /// Two further view-projections (the third is uSunShadowVP at 96), then the sides, the texel fractions,
+    /// the split distances and the camera's own axis.
+    /// </summary>
+    private const int CascadeBlockSize = 64 * 2 + 16 * 4;
+
+    private readonly byte[] worldPush = new byte[CascadeBlockOffset + CascadeBlockSize];
     private readonly byte[] skyPush = new byte[128];     // invViewProj, camPos, sunDir, zenith, horizon
-    private readonly byte[] shadowPush = new byte[64];   // sun shadow VP
     private readonly byte[] gradePush = new byte[32];    // grade, then the eye's night response
 
     /// <summary>A coarse bound on how far a tree is worth frustum-testing, squared. Not a visibility rule.</summary>
     private float treeCullBoundSquared = 1f;
 
     /// <summary>How far from the focus the sun's box still contains a caster, squared.</summary>
-    private float shadowBoxRadiusSquared = 1f;
 
     /// <summary>Ground colouring the built instances were made with, so a slider forces a rebuild.</summary>
 
@@ -738,6 +763,45 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
     }
 
+    /// <summary>
+    /// The span of view-ray distances over which this camera can see ground at all, in metres.
+    /// </summary>
+    /// <remarks>
+    /// <b>The cascades split this, not the frustum, and the difference is two wasted cascades.</b> Slicing
+    /// 0 to the shadowed depth is what every CSM tutorial does, and it assumes a camera standing among the
+    /// things it looks at. This one is not: it hangs a hundred metres back at forty-seven degrees, so the
+    /// nearest ground on screen is already most of the way to the focus, and a slice from half a metre to
+    /// thirty is empty air. Painted by cascade, that showed as no red anywhere on the map and the coarsest
+    /// map shading nearly everything — three cascades costing three passes and doing one cascade's work.
+    /// <para>
+    /// Flat-ground trigonometry, which is the whole of what this file keeps getting wrong, so the relief span
+    /// is applied to both ends: a hill rising toward the camera brings the near edge in, and one falling away
+    /// pushes the far edge out. Same correction VisibleReach makes, for the same reason.
+    /// </para>
+    /// </remarks>
+    private (float Near, float Far) GroundBand
+    {
+        get
+        {
+            var half = camera.VerticalFieldOfView * 0.5f;
+            var pitch = MathF.Max(half + 0.05f, CameraElevation);
+            var eyeHeight = MathF.Sin(pitch) * cameraDistance;
+            // <b>The relief pad is capped at a share of the standoff, and it has to be.</b> Taken raw, a 30 m
+            // map under a camera 34 m up says the nearest ground could be four metres away — which is true if
+            // a hilltop happens to sit directly beneath the eye, and if it does the camera is inside the
+            // terrain and worse things are already wrong. Uncapped it hands the near cascade nearly the whole
+            // band back, which is the bug this property exists to fix.
+            var span = MathF.Min(labFloorSpan.Span, eyeHeight * 0.4f);
+            // The bottom of the screen looks down most steeply, so it strikes the ground nearest.
+            var near = MathF.Max(2f, eyeHeight - span) / MathF.Sin(pitch + half);
+            // The far end keeps the whole span, uncapped: ground falling away from the camera really is that
+            // much further along the ray, and cutting the far edge short is what leaves a wood unshadowed.
+            var far = (eyeHeight + labFloorSpan.Span) / MathF.Sin(MathF.Max(0.04f, pitch - half));
+            far = MathF.Min(far, camera.FarPlane);
+            return (Math.Clamp(near, 1f, far * 0.75f), far);
+        }
+    }
+
     /// <summary>Coarse bound on ground chunks, as a share of what can be seen. The frustum decides.</summary>
     /// <remarks>
     /// Twice, because it is no longer a visibility rule — chunks are frustum-tested against their own height
@@ -782,10 +846,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private const float ContactShare = 0.7f;
 
-    // <b>SunOrthoExtent is gone.</b> It was 2 x DetailRadius — a square sized from a flat-plane radius around
-    // the focus — and the box is now fitted to the camera frustum's own corners in the light's frame. See
-    // SunShadowViewProjection. What the box measures is reported by sunBoxSideMetres, which is the width the
-    // matrix was actually built with rather than a second estimate of it.
+    // <b>SunOrthoExtent is gone, and so is the single box that replaced it.</b> The extent was 2 x
+    // DetailRadius — a square sized from a flat-plane radius around the focus. Then it was one box fitted to
+    // the whole frustum's corners, which was correct and could not be sharp: one box wide enough to reach the
+    // far corners is a box whose texels are too coarse near the camera, and capping its width to keep the
+    // texels left the far corners unshadowed. Three boxes is the answer to that, not a better single one.
+    // See FitCascade and ShadowCascades; what each box measures is reported by cascadeSideMetres.
 
     private const float SunDistance = 220f;
 
@@ -1044,6 +1110,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Which map to generate is the live question; the sun's seventeen knobs are settled.
         tunables = new ObjectTunables(
             mapTuning,
+            cascades,
             bodyFeel,
             clock,
             woodland,
@@ -1455,6 +1522,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             {
                 new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 new DescriptorSetSlot(0, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                // The two further cascades. Binding 1 stays the wear texture rather than being renumbered,
+                // because renaming a binding that works is how a shader and its interface drift apart.
+                new DescriptorSetSlot(0, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                new DescriptorSetSlot(0, 3, ShaderResourceType.SampledImage, ShaderStages.Fragment),
                 InstanceBuffer.Slot,
             },
             PushConstants: new[]
@@ -1471,6 +1542,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, worldPush.Length),
             });
 
+        // See the remarks on ShadowCascades.Count: the shader has three of these written out by name.
+        if (ShadowCascades.Count != 3)
+        {
+            throw new InvalidOperationException(
+                $"world.frag samples three cascades by name; ShadowCascades.Count is {ShadowCascades.Count}. " +
+                "Change both or neither.");
+        }
+
         var shaderDirectory = Path.Combine(AppContext.BaseDirectory, "Shaders");
         byte[] Spv(string name) => File.ReadAllBytes(Path.Combine(shaderDirectory, name));
 
@@ -1480,7 +1559,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // roof the same shade of nothing.
         graph = new RenderGraph(vk);
         var fullSize = new MatchSwapchainGraphSize(1.0f);
-        sunShadowHandle = graph.DepthTarget("sun-shadow", new FixedGraphSize(ShadowMapSize, ShadowMapSize));
+        // One depth target per cascade, each at the resolution CascadeMapSize gives it.
+        for (var c = 0; c < ShadowCascades.Count; c++)
+        {
+            var side = CascadeMapSize(c);
+            cascadeTargets[c] = graph.DepthTarget(
+                $"sun-cascade-{c}", new FixedGraphSize(side, side));
+        }
         // The scene renders at 4x and resolves to 1x for the present. Everything in this world is
         // untextured geometry, so <b>every</b> edge in the frame is a geometric edge and there is nothing
         // else for the eye to look at — which is why an unresolved frame reads as jagged here far more
@@ -1520,15 +1605,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             },
             PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 32) });
 
-        shadowPassHandle = graph.GraphicsPass("sun-shadow")
-            .Depth(sunShadowHandle, LoadOp.Clear, StoreOp.Store)
-            .Shader(casterInterface)
-            .Handle;
+        for (var c = 0; c < ShadowCascades.Count; c++)
+        {
+            cascadePasses[c] = graph.GraphicsPass($"sun-cascade-{c}")
+                .Depth(cascadeTargets[c], LoadOp.Clear, StoreOp.Store)
+                .Shader(casterInterface)
+                .Handle;
+        }
         scenePassHandle = graph.GraphicsPass("scene")
             .Target(hdrMsaaHandle, LoadOp.Clear, StoreOp.Store)
             .ResolveColor(hdrHandle)
             .Depth(sceneDepthHandle, LoadOp.Clear, StoreOp.Store)
-            .Read(sunShadowHandle)
+            .Read(cascadeTargets[0])
+            .Read(cascadeTargets[1])
+            .Read(cascadeTargets[2])
             .Shader(skyInterface, shaderInterface, smokeInterface, contactInterface)
             .Handle;
         graph.Compile();
@@ -1573,7 +1663,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 // inside of.
                 RasterizerState.NoCulling,
                 Array.Empty<BlendState>(),
-                RenderTarget: graph.GetPassSurface(shadowPassHandle)),
+                RenderTarget: graph.GetPassSurface(cascadePasses[0])),
             "rts-caster");
         contactShader = vk.CreateShaderProgramFromSpv(
             Spv("contact.vert.spv"), Spv("contact.frag.spv"), contactInterface, "rts-contact");
@@ -2821,6 +2911,48 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public string DebugName => "rts-movement";
 
+    /// <summary>
+    /// Draws each cascade's fitted box and the slice of camera frustum it was fitted to.
+    /// </summary>
+    /// <remarks>
+    /// <b>Both shapes, because the failure mode is the two disagreeing.</b> A box that does not contain its
+    /// slice produces shadows that stop somewhere in the middle of the view — which is exactly the bug the
+    /// single box had twice, and which took four rounds of screenshots to characterise each time. Drawn
+    /// together, "the green box does not reach the green slice" is a glance.
+    /// <para>
+    /// The slice is drawn as a frustum of its own, built from the same near and far the box was fitted to, so
+    /// the two gizmos cannot disagree about what the slice is even if the fit is wrong.
+    /// </para>
+    /// </remarks>
+    private void ShowCascades(DebugContext debug)
+    {
+        if (!cascades.ShowBoxes) return;
+        debug.Draw.ViewProjection = camera.GetViewProjection(aspect);
+        debug.Draw.Arrow(
+            "sun/dir",
+            new Vector3(cameraFocus.X, simulation.Terrain.SampleHeight(cameraFocus) + 30f, cameraFocus.Y),
+            new Vector3(cameraFocus.X, simulation.Terrain.SampleHeight(cameraFocus), cameraFocus.Y),
+            new GraphicsColor(1f, 0.92f, 0.3f, 1f));
+
+        using (debug.Scope("cascades"))
+        {
+            for (var c = 0; c < ShadowCascades.Count; c++)
+            {
+                var tint = ShadowCascades.TintOf(c);
+                debug.Draw.Frustum($"box/{c}", cascadeViewProjection[c], tint);
+                // The slice itself: the same camera, clipped to this cascade's near and far.
+                debug.Draw.Frustum(
+                    $"slice/{c}",
+                    camera.GetViewProjection(aspect, cascadeEdges[c], cascadeEdges[c + 1]),
+                    new GraphicsColor(tint.Red * 0.55f, tint.Green * 0.55f, tint.Blue * 0.55f, 0.6f));
+                debug.Values.Value(
+                    $"cascade {c}",
+                    $"{cascadeEdges[c]:F0}-{cascadeEdges[c + 1]:F0} m, box {cascadeSideMetres[c]:F0} m, " +
+                    $"texel {cascadeSideMetres[c] / ShadowMapSize * 100f:F1} cm");
+            }
+        }
+    }
+
     public void Debug(DebugContext debug)
     {
         // Always on for this testbed — it exists to be watched. The backtick key still
@@ -2847,6 +2979,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             debug.Stats.Gauge("congestion-peak", simulation.Congestion.Peak);
         }
 
+        ShowCascades(debug);
         ReportJobs(debug);
         ReportEconomy(debug);
     }
@@ -3383,10 +3516,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// term, because frustum corners carry no assumption about where the ground is.
     /// </para>
     /// <para>
-    /// The frustum is truncated at <see cref="ShadowDepthMetres"/> first, because the camera's own far plane runs
-    /// to several hundred metres and fitting the whole of it would spend every texel on ground nobody is looking
-    /// at closely. That truncation is the single cascade of a cascaded shadow map, and splitting it into three
-    /// is the next step rather than a different design.
+    /// <b>What it is fitted to is a slice, and which slices there are is the interesting question.</b> One box
+    /// over the whole frustum has to be truncated somewhere or it spends every texel on ground nobody is
+    /// looking at — and truncating it is what left the far corners in flat light. Three boxes over three
+    /// slices of <see cref="GroundBand"/> is the answer, and the band matters as much as the count: slices of
+    /// the raw frustum put two of the three in empty air above the terrain.
     /// </para>
     /// <para>
     /// Still snapped to its own texel grid, and it has to be: a box that slides continuously slides in sub-texel
@@ -3396,89 +3530,163 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// texels were on.
     /// </para>
     /// </remarks>
-    private Matrix4x4 SunShadowViewProjection()
+    /// <summary>
+    /// Fits a box to one slice of the camera frustum, in the light's frame.
+    /// </summary>
+    /// <remarks>
+    /// <b>A bounding sphere of the slice's corners rather than an axis-aligned fit, which is what the Sponza
+    /// implementation does and is better than what I wrote for the single box.</b> A sphere is invariant under
+    /// rotation, so the box stops changing size as the camera turns — and a box that resizes as you pan changes
+    /// its texel size every frame, which makes every shadow edge in the scene breathe. An axis-aligned fit to
+    /// the same corners does not have that property.
+    /// </remarks>
+    private Matrix4x4 FitCascade(float near, float far, int mapSize, int cascadeIndex, out float side)
     {
-        var toLight = Vector3.Normalize(SunDirection);
-        var up = MathF.Abs(toLight.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
-        // The light's frame: looking along -toLight, i.e. from the sun toward the scene.
-        var forward = -toLight;
-        var right = Vector3.Normalize(Vector3.Cross(up, forward));
-        var above = Vector3.Cross(forward, right);
-
-        // <b>Built from the camera's own basis and trigonometry, not by unprojecting NDC.</b> The first version
-        // unprojected the NDC cube's corners and picked its far slice as <c>reach / farPlane</c> — treating NDC
-        // depth as linear in distance, which it emphatically is not. At a 592 m far plane that fraction
-        // unprojects to about seventeen centimetres in front of the eye, and the box collapsed to its 40 m
-        // minimum with 2 cm texels: a shadow map spending everything on the camera's shoelaces.
-        //
-        // A frustum's corners are four points at each of two distances, and the half-extents at a distance are
-        // just <c>d x tan(halfFov)</c> and that times the aspect. No matrix, no inversion, no depth convention
-        // to get wrong.
         var eye = camera.Transform.Position;
         var ahead = camera.Transform.Forward;
         var sideways = camera.Transform.Right;
         var overhead = camera.Transform.Up;
-        var halfFov = camera.VerticalFieldOfView * 0.5f;
-        var tangent = MathF.Tan(halfFov);
+        var tall = MathF.Tan(camera.VerticalFieldOfView * 0.5f);
+        var wide = tall * aspect;
 
-        var low = new Vector3(float.MaxValue);
-        var high = new Vector3(float.MinValue);
-        var reach = MathF.Min(ShadowDepthMetres, camera.FarPlane);
-        Span<float> slices = stackalloc float[] { 0.5f, reach };
-        foreach (var away2 in slices)
+        Span<Vector3> corners = stackalloc Vector3[8];
+        var at = 0;
+        for (var slice = 0; slice < 2; slice++)
         {
-            var tall = away2 * tangent;
-            var wide = tall * aspect;
-            var middleOfSlice = eye + ahead * away2;
-            for (var corner = 0; corner < 4; corner++)
-            {
-                var at = middleOfSlice
-                         + sideways * ((corner & 1) == 0 ? -wide : wide)
-                         + overhead * ((corner & 2) == 0 ? -tall : tall);
-                var inLight = new Vector3(
-                    Vector3.Dot(at, right),
-                    Vector3.Dot(at, above),
-                    Vector3.Dot(at, forward));
-                low = Vector3.Min(low, inLight);
-                high = Vector3.Max(high, inLight);
-            }
+            var away = slice == 0 ? near : far;
+            var middle = eye + ahead * away;
+            var h = away * tall;
+            var w = away * wide;
+            corners[at++] = middle - sideways * w - overhead * h;
+            corners[at++] = middle + sideways * w - overhead * h;
+            corners[at++] = middle - sideways * w + overhead * h;
+            corners[at++] = middle + sideways * w + overhead * h;
         }
 
-        if (low.X > high.X) return GraphicsMatrices.SunShadowViewProjection(
-            SunDirection, Vector3.Zero, SunDistance, 200f, 20f, SunDistance + 200f);
+        var centre = Vector3.Zero;
+        for (var i = 0; i < corners.Length; i++) centre += corners[i];
+        centre /= corners.Length;
+        var radius = 0f;
+        for (var i = 0; i < corners.Length; i++)
+        {
+            radius = MathF.Max(radius, Vector3.Distance(corners[i], centre));
+        }
 
-        // A square, because the map is square and a rectangle would make texels of two different sizes.
-        var side = MathF.Max(high.X - low.X, high.Y - low.Y);
-        side = MathF.Max(40f, side + ShadowReachMetres * 2f);
-        var texel = side / ShadowMapSize;
-        var middle = (low + high) * 0.5f;
-        // Snapped on the light's own axes, which is the grid the texels are actually on.
-        var centre = right * (MathF.Round(middle.X / texel) * texel) +
-                     above * (MathF.Round(middle.Y / texel) * texel) +
-                     forward * middle.Z;
+        radius = MathF.Ceiling(radius);
+        side = MathF.Max(20f, radius * 2f + ShadowReachMetres);
 
-        sunBoxSideMetres = side;
-        var away = (high.Z - low.Z) * 0.5f + SunDistance;
+        var toLight = Vector3.Normalize(SunDirection);
+        var up = MathF.Abs(toLight.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
+        var forward = -toLight;
+        var right = Vector3.Normalize(Vector3.Cross(up, forward));
+        var above = Vector3.Cross(forward, right);
+        // Snapped on the light's own axes, which is the grid the texels are on. Snapping the centre in world XZ
+        // — as the single box did — snaps to a grid the texels are not aligned with unless the sun happens to
+        // be axis-aligned, so the shimmer it is meant to stop only partly stops.
+        var texel = side / mapSize;
+        var snapped =
+            right * (MathF.Round(Vector3.Dot(centre, right) / texel) * texel) +
+            above * (MathF.Round(Vector3.Dot(centre, above) / texel) * texel) +
+            forward * Vector3.Dot(centre, forward);
+
+        cascadeCentre[cascadeIndex] = snapped;
+        var away2 = radius + SunDistance;
         return GraphicsMatrices.SunShadowViewProjection(
-            SunDirection, centre, away, side, 20f, away * 2f + side);
+            SunDirection, snapped, away2, side, 20f, away2 * 2f + side);
     }
 
-    /// <summary>How far along the camera frustum the sun's box is fitted, in metres.</summary>
-    /// <remarks>
-    /// The camera's far plane runs to several hundred metres and fitting all of it would spend every texel on
-    /// ground nobody is looking at closely. This is the one cascade split there is; the number is what the texel
-    /// budget affords at the shadow map's resolution.
-    /// </remarks>
-    private float ShadowDepthMetres => CoarsestShadowReachMetres;
+    /// <summary>Fits every cascade for this frame. Cheap: eight corners and a sphere each.</summary>
+    private void FitCascades()
+    {
+        var band = GroundBand;
+        cascades.Slices(band.Near, band.Far, cascadeEdges);
+        for (var c = 0; c < ShadowCascades.Count; c++)
+        {
+            cascadeViewProjection[c] = FitCascade(
+                cascadeEdges[c], cascadeEdges[c + 1], CascadeMapSize(c), c, out var side);
+            cascadeSideMetres[c] = side;
+            // <b>What a caster is tested against, and it has to be the box rather than the focus.</b> The
+            // single box was centred on the focus, so a radius round the focus was the box; these are fitted
+            // to slices of frustum lying away down the view, and the same radius culls a tree that is well
+            // inside the far cascade for being far from the camera's own centre. That is the flat-ground
+            // constant in yet another costume — a bound derived from where the camera is standing, applied to
+            // geometry positioned by where it is looking.
+            //
+            // A radius rather than the square, because the box was fitted to a sphere of exactly this size:
+            // the corners of the square hold nothing the sphere did not.
+            cascadeCastAt[c] = new Vector2(cascadeCentre[c].X, cascadeCentre[c].Z);
+            cascadeCastRadiusSquared[c] = side * 0.48f * side * 0.48f;
+            MemoryMarshal.Write(cascadePush[c].AsSpan(0, 64), in cascadeViewProjection[c]);
+        }
+    }
 
-    /// <summary>The fitted box's side, in metres, for the geometry report and the caster cull.</summary>
-    private float sunBoxSideMetres = 200f;
+    /// <summary>Where the shadowed depth is split, and whether to draw the boxes. See ShadowCascades.</summary>
+    private readonly ShadowCascades cascades = new();
+
+    /// <summary>Each cascade's fitted view-projection, kept for the gizmos and, later, for the passes.</summary>
+    private readonly Matrix4x4[] cascadeViewProjection = new Matrix4x4[ShadowCascades.Count];
+
+    /// <summary>Each cascade's near and far distance along the view, in metres.</summary>
+    private readonly float[] cascadeEdges = new float[ShadowCascades.Count + 1];
+
+    /// <summary>Each cascade's box side in metres, which is what its texel size is computed from.</summary>
+    private readonly float[] cascadeSideMetres = new float[ShadowCascades.Count];
+
+    /// <summary>Each cascade's box centre in world space, snapped to its own texel grid.</summary>
+    private readonly Vector3[] cascadeCentre = new Vector3[ShadowCascades.Count];
+
+    /// <summary>Each box as a circle on the ground, which is what the caster test needs.</summary>
+    private readonly Vector2[] cascadeCastAt = new Vector2[ShadowCascades.Count];
+
+    private readonly float[] cascadeCastRadiusSquared = new float[ShadowCascades.Count];
+
+    /// <summary>Whether anything at <paramref name="at"/> can appear in any cascade's map.</summary>
+    /// <remarks>
+    /// Outside all three, a caster rasterises into nothing and the work has nowhere to go — which was worth
+    /// 32 ms when the single box's version of this was added. Inside one of them it is drawn into all three,
+    /// which is the redraw this does not yet fix: see the note on the cascade passes.
+    /// </remarks>
+    private bool CastsIntoAnyCascade(Vector2 at)
+    {
+        for (var c = 0; c < ShadowCascades.Count; c++)
+        {
+            if (Vector2.DistanceSquared(at, cascadeCastAt[c]) <= cascadeCastRadiusSquared[c]) return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>How many texels a side cascade <paramref name="cascade"/>'s map has.</summary>
+    /// <remarks>
+    /// <b>Full resolution for the first two and half for the last</b>, which is what Sponza settled on and not
+    /// what I reached for first. Halving outward is the tidy answer and it is wrong in the middle: sharpness is
+    /// a box's width over its texel count, and the middle cascade is already three times the near one's width,
+    /// so halving its map puts it six times coarser rather than three. The near cascade is the one that can
+    /// afford to be over-sharp, because its box is small; the middle distance is most of what a player looks at
+    /// in this game and gets kept.
+    /// <para>
+    /// What it costs: 2048² + 2048² + 1024² of depth, about 36 MB. What the alternative costs is a visible
+    /// coarsening at the first split, which is a line across the ground that moves with the camera.
+    /// </para>
+    /// </remarks>
+    private static int CascadeMapSize(int cascade) => cascade switch
+    {
+        0 => ShadowMapSize,
+        1 => ShadowMapSize,
+        2 => ShadowMapSize / 2,
+        _ => throw new ArgumentOutOfRangeException(nameof(cascade), cascade, "There are three cascades."),
+    };
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
         frameCount++;
+        // Fitted every frame whether or not the cascades are rendered yet, because the gizmos are the point
+        // of this stage: the boxes have to be watchable before three passes are wired to them.
+        FitCascades();
         var viewProjection = camera.GetViewProjection(aspect);
-        var sunViewProjection = SunShadowViewProjection();
+        // Cascade 0 rides in the slot the single box used to occupy, so uSunShadowVP keeps its offset and
+        // its meaning — the map covering whatever is nearest — and only the other two are new.
+        var sunViewProjection = cascadeViewProjection[0];
         var cameraPosition = new Vector4(camera.Transform.Position, 1f);
         var sun = new Vector4(SunDirection, 0f);
         // Aerial perspective sized to the camera rather than to the map: what it is for is
@@ -3509,10 +3717,32 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // wrong by that ratio — quietly, as acne or peter-panning rather than as anything that looks like a
         // mismatch.
         var shadow = new Vector4(
-            1f / ShadowMapSize,
-            sunBoxSideMetres,
+            1f / CascadeMapSize(0),
+            cascadeSideMetres[0],
             look.ShadowPenumbraTexels,
             look.ShadowNormalOffsetTexels);
+        // <b>Each cascade's own geometry, because the bias is measured in texels and a texel is not one size
+        // any more.</b> Three boxes of different widths on maps of different resolutions means three different
+        // world sizes for a texel — and handing the far cascade the near one's figure is the same mistake as
+        // handing the shaders an estimate of a fitted box, in a fourth costume.
+        var cascadeSides = new Vector4(
+            cascadeSideMetres[0],
+            cascadeSideMetres[1],
+            cascadeSideMetres[2],
+            cascades.ShowSelection ? 1f : 0f);
+        var cascadeTexels = new Vector4(
+            1f / CascadeMapSize(0), 1f / CascadeMapSize(1), 1f / CascadeMapSize(2), 0f);
+        // <b>Which cascade a fragment belongs to is decided by depth, not by which box happens to contain
+        // it.</b> Containment was the first answer here and it degenerates: every box is a bounding sphere of
+        // its slice plus a margin, so the middle cascade's box is wide enough to hold the whole visible ground,
+        // wins every test, and the outer cascade is never sampled at all. Painted by cascade that showed as two
+        // colours where there should be three, and a boundary that curved with the box rather than running
+        // across the view. Depth first, containment only to fall outward when the chosen box misses — which is
+        // what SponzaLoop's shader does, arrived at the long way round.
+        var cascadeSplits = new Vector4(cascadeEdges[1], cascadeEdges[2], cascadeEdges[3], 0f);
+        // The axis those distances are measured along. Without it the shader can only measure radially from the
+        // eye, which is a different quantity by up to a fifth at the corners of the screen.
+        var cameraAhead = new Vector4(camera.Transform.Forward, 0f);
         var following = look.SunFollowsTheYear;
         var light = new Vector4(
             (following ? sky.SunIntensity : look.SunIntensity) * look.SunScale,
@@ -3585,6 +3815,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var hearth = new Vector4(
             nightness, look.HearthReach, look.HearthSpark, hearthLightCount);
         MemoryMarshal.Write(worldPush.AsSpan(320, 16), in hearth);
+        MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset, 64), in cascadeViewProjection[1]);
+        MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 64, 64), in cascadeViewProjection[2]);
+        MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 128, 16), in cascadeSides);
+        MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 144, 16), in cascadeTexels);
+        MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 160, 16), in cascadeSplits);
+        MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 176, 16), in cameraAhead);
         for (var i = 0; i < Hearths.MaximumLights; i++)
         {
             // The tail is zeroed rather than left stale: the count bounds the loop, but a light left in the
@@ -3638,7 +3874,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var horizon = new Vector4(following ? sky.SkyHorizon : new Vector3(0.64f, 0.78f, 0.92f), 0f);
         MemoryMarshal.Write(skyPush.AsSpan(96, 16), in zenith);
         MemoryMarshal.Write(skyPush.AsSpan(112, 16), in horizon);
-        MemoryMarshal.Write(shadowPush.AsSpan(0, 64), in sunViewProjection);
         MemoryMarshal.Write(gradePush.AsSpan(0, 16), in grade);
         var night = new Vector4(look.ScotopicShift, 0f, 0f, 0f);
         MemoryMarshal.Write(gradePush.AsSpan(16, 16), in night);
@@ -3675,10 +3910,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // drawing every tree on the map, thirty-four thousand of them, costs five to ten frames a second, so
         // the bound was never buying much and was costing correctness the whole time.
         var treeDrawRadius = camera.FarPlane;
-        // The sun's box reaches half its own width from the focus, so this is where casting stops meaning
-        // anything. A hair inside it, because a caster on the boundary is half outside.
-        var shadowBoxRadius = sunBoxSideMetres * 0.48f;
-        shadowBoxRadiusSquared = shadowBoxRadius * shadowBoxRadius;
+        // Whether a thing casts is now CastsIntoAnyCascade, which asks the boxes rather than a radius round
+        // the focus. What is still one number is the redraw: a caster inside any box is drawn into all three
+        // passes, so passes/sun-cascade-N/triangles prints the same figure three times — and measured, that is
+        // 59k triangles a cascade against a 488k frame, so it is not what the frame is spent on. The partition
+        // that would fix it — cast into cascade c only outside cascade c-1's box, since a receiver reads the
+        // first box that contains it — needs an InstanceBuffer per cascade as well as a list per cascade, for
+        // the reason given where the passes are recorded. Not worth it at 59k.
         treeCullBoundSquared = treeDrawRadius * treeDrawRadius;
 
         // <b>Render-side phase timings, because the simulation's own breakdown cannot see any of this.</b>
@@ -3724,31 +3962,65 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         unitBatch.SetInstances(units);
         canopyBatch.Begin(worldPush);
         canopyBatch.SetInstances(canopies);
-        propCaster.Begin(shadowPush);
+        propCaster.Begin(cascadePush[0]);
         propCaster.SetInstances(props);
-        unitCaster.Begin(shadowPush);
+        unitCaster.Begin(cascadePush[0]);
         unitCaster.SetInstances(units);
-        canopyCaster.Begin(shadowPush);
+        canopyCaster.Begin(cascadePush[0]);
         canopyCaster.SetInstances(canopies);
-        art?.Stage(worldPush, shadowPush);
+        art?.Stage(worldPush, cascadePush[0]);
         var stageMs = buildClock.Elapsed.TotalMilliseconds;
         buildClock.Restart();
 
         // Shadow depth: only the solids. The ground is a receiver and not a caster — a large
         // near-flat mesh shadowing itself is all acne and no shadow — and the overlays are
         // annotations on top of the world rather than things in it.
-        graph.Pass(shadowPassHandle, scope =>
+        //
+        // <b>Three passes over the same geometry, differing only in the matrix.</b> The staged batches carry
+        // cascade 0's, so the first pass just closes them; the other two re-open from the same instance lists
+        // under their own. Order matters and is the order these are declared in: a batch cannot be begun while
+        // it is still open, so each pass has to have ended before the next one starts.
+        graph.Pass(cascadePasses[0], scope =>
         {
             propCaster.End(scope);
             unitCaster.End(scope);
             canopyCaster.End(scope);
             art?.DrawShadow(scope);
         });
+        // <b>Re-staging the same instances is safe; staging different ones would not be.</b> All three passes
+        // share one InstanceBuffer per batch, and InstanceBuffer.Write targets one GPU buffer per frame slot —
+        // so every cascade's draw reads whatever was written last. Identical instance sets make that a no-op,
+        // which is exactly why it would go unnoticed: the moment a cascade is given its own subset (the
+        // partition that would stop the threefold redraw), all three passes would silently draw the last
+        // subset. That change needs a buffer per cascade, not just a list per cascade.
+        for (var c = 1; c < ShadowCascades.Count; c++)
+        {
+            var cascade = c;
+            graph.Pass(cascadePasses[cascade], scope =>
+            {
+                var push = cascadePush[cascade];
+                propCaster.Begin(push);
+                propCaster.SetInstances(CollectionsMarshal.AsSpan(propInstances));
+                propCaster.End(scope);
+                unitCaster.Begin(push);
+                unitCaster.SetInstances(CollectionsMarshal.AsSpan(unitInstances));
+                unitCaster.End(scope);
+                canopyCaster.Begin(push);
+                canopyCaster.SetInstances(CollectionsMarshal.AsSpan(canopyInstances));
+                canopyCaster.End(scope);
+                art?.DrawShadow(scope, push);
+            });
+        }
 
         var shadowBinding = new[]
         {
-            new ShaderTextureBinding("uSunShadowMap", graph.GetDepthTexture(sunShadowHandle), Slot: 0),
+            new ShaderTextureBinding(
+                "uSunShadowMap", graph.GetDepthTexture(cascadeTargets[0]), Slot: 0),
             new ShaderTextureBinding("uWear", wearTexture, Slot: 1),
+            new ShaderTextureBinding(
+                "uCascade1Map", graph.GetDepthTexture(cascadeTargets[1]), Slot: 2),
+            new ShaderTextureBinding(
+                "uCascade2Map", graph.GetDepthTexture(cascadeTargets[2]), Slot: 3),
         };
         graph.Pass(scenePassHandle, scope =>
         {
@@ -5271,7 +5543,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // No visual cost by construction — a shadow that lands outside the map was never on screen. This is
             // the same mistake as the instance upload earlier today, in a different currency: work whose result
             // has nowhere to go.
-            var casts = Vector2.DistanceSquared(tree.Position, cameraFocus) <= shadowBoxRadiusSquared;
+            var casts = CastsIntoAnyCascade(tree.Position);
             var kind = TreeKindAt(tree.Position, tree.Id.Value);
             var placement = SettlementArt.Placement(
                 tree.Position, ground, width, SettlementArt.FreeYawOf(tree.Id.Value));
@@ -6390,11 +6662,36 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private void DrawColliderOverlay()
     {
         if (colliderOverlay < 2) return;
+        // <b>Frustum-tested and capped, because removing the draw radius made this crash.</b> The overlay
+        // shared treeCullBoundSquared, which is now the far plane rather than a disc round the focus — so on a
+        // wooded map every collider on the map queued up and overran the prop batch. A hard exception on a
+        // debug toggle, which is the worst place for one: the toggle exists to diagnose, and it took the
+        // process down instead.
+        //
+        // The frustum is the right test for the same reason it is right for the trees. The cap is here because
+        // a debug overlay must not be able to end the run whatever the frustum contains — twenty thousand
+        // wireframe plates were never legible anyway, so what it drops it was not communicating.
+        var room = propBuffer.Capacity - propInstances.Count;
+        collidersDrawn = 0;
+        collidersDropped = 0;
         foreach (var proxy in simulation.Colliders.All)
         {
             // Bodies already draw their own four, in their own colours, when selected.
             if ((proxy.Layer & ColliderLayer.Agent) != 0) continue;
             if (Vector2.DistanceSquared(proxy.Center, cameraFocus) > treeCullBoundSquared) continue;
+            if (!InView(proxy.Center, simulation.Terrain.SampleHeight(proxy.Center), 0.5f,
+                    MathF.Max(proxy.Shape.Radius, proxy.Shape.HalfExtents.Length())))
+            {
+                continue;
+            }
+
+            if (collidersDrawn >= room)
+            {
+                collidersDropped++;
+                continue;
+            }
+
+            collidersDrawn++;
 
             var role = (proxy.Roles & ColliderRole.MovementSolid) != 0
                 ? SolidColliderColor
@@ -6413,6 +6710,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 role));
         }
     }
+
+    /// <summary>How many collider plates the overlay drew, and how many it had no room for.</summary>
+    private int collidersDrawn, collidersDropped;
 
     /// <summary>
     /// The distances that are supposed to agree with each other, on one line.
@@ -6433,15 +6733,27 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // that zoom and 0.69x — too small — at the far one. A tie-together line whose terms are not
         // commensurable invents mismatches and hides real ones.
         var seen = Sees;
-        var half = sunBoxSideMetres * 0.5f;
-        var texelCentimetres = sunBoxSideMetres / ShadowMapSize * 100f;
+        // <b>The last cascade's reach and each cascade's texel</b>, which are the numbers a cascaded map lives
+        // or dies by: how far anything is shadowed at all, and how sharp it is at each of the three bands.
+        var shadowReach = cascadeEdges[ShadowCascades.Count];
+        var texels =
+            $"{cascadeSideMetres[0] / CascadeMapSize(0) * 100f:F1}/" +
+            $"{cascadeSideMetres[1] / CascadeMapSize(1) * 100f:F1}/" +
+            $"{cascadeSideMetres[2] / CascadeMapSize(2) * 100f:F1}";
         return
             $"SEES {seen:F0} m (reach {VisibleReach:F0}) · DETAIL {DetailRadius:F0} m " +
             $"({DetailRadius / seen:F2}x) · " +
-            // <b>The two numbers that have to agree, side by side.</b> A tree drawn past the box's half-width
-            // stands in flat light, so TREES must not exceed SHADOW — which is the check this line exists for
-            // and could not make while one was derived from the flat reach and the other from the corrected one.
-            $"SHADOW {half:F0} m (texel {texelCentimetres:F1} cm) · " +
+            // <b>The two numbers that have to agree, side by side.</b> A tree drawn past where the cascades
+            // reach stands in flat light, so TREES exceeding SHADOW is ground drawn unshadowed — which is now
+            // expected rather than a bug, because the cascades cover the depth the texel budget affords and
+            // the far plane covers everything the frustum can hold. What the line is for is the size of the
+            // gap: a little is fog, and a lot is a wood standing in flat light.
+            // <b>The band's near edge leads, because it is the number that says whether cascade 0 is used at
+            // all.</b> The splits alone cannot tell you: 85/137/198 looks healthy whether the nearest visible
+            // ground is at 37 m — a third of the frame in the near cascade — or at 140 m, in which case the
+            // near cascade is shading empty air and this reads exactly the same.
+            $"SHADOW {GroundBand.Near:F0}>{cascadeEdges[1]:F0}>{cascadeEdges[2]:F0}>" +
+            $"{shadowReach:F0} m (texels {texels} cm) · " +
             $"TREES {MathF.Sqrt(treeCullBoundSquared):F0} m · " +
             $"FOG {sentFog.X:F0}-{sentFog.Y:F0} m at {sentFog.Z:F2} · " +
             // What the dressing is spending, on the same line as what can be seen, because both of the
@@ -6452,6 +6764,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"record {buildPhases.Record:F1} ms · " +
             $"LOAD {stagedLoad.Instances:N0} instances = {stagedLoad.Triangles / 1000L:N0}k triangles " +
             $"+ {stagedLoad.Casters / 1000L:N0}k cast · " +
+            (colliderOverlay >= 2
+                ? $"COLLIDERS {collidersDrawn:N0} drawn" +
+                  (collidersDropped > 0 ? $", {collidersDropped:N0} over budget · " : " · ")
+                : string.Empty) +
             $"STONE {outcropsDrawn} of {outcropsSeen} outcrops drawn · " +
             $"TREENODES {treeNodesAlive} alive, {treesOffered} offered, {treesOutOfView} out of view " +
             $"({treesNearRejected} of them within 20 m of the eye), " +

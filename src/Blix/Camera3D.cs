@@ -26,6 +26,19 @@ public sealed class Camera3D
 
     public Matrix4x4 GetViewProjection(float aspectRatio) => GetView() * GetProjection(aspectRatio);
 
+    // The same camera clipped to a nearer near and a nearer far — one slice of its own frustum. What a
+    // cascaded shadow map is split into, and what a debug gizmo has to draw if "does this cascade's box
+    // contain its slice" is to be a question anybody can answer by looking.
+    //
+    // Not a second camera: the pose and the field of view are this camera's, and only the depth range differs.
+    // A slice built from a copied camera is a slice that can disagree with the camera it came from.
+    public Matrix4x4 GetViewProjection(float aspectRatio, float nearPlane, float farPlane) =>
+        GetView() * GraphicsMatrices.CreatePerspectiveVulkan(
+            VerticalFieldOfView,
+            aspectRatio,
+            MathF.Max(0.01f, nearPlane),
+            MathF.Max(nearPlane + 0.02f, farPlane));
+
     // Build a world-space Ray from a screen-pixel position. Screen coordinates use
     // top-left origin (screen Y grows downward, the window-system convention),
     // which matches Vulkan's Y-down NDC, so the screen→NDC map needs no Y flip.

@@ -23,6 +23,24 @@ public sealed class InstancedBatch
     private int count;
     private bool inBatch;
 
+    /// <summary>
+    /// Whether the current push array has already been handed to a recorded draw.
+    /// </summary>
+    /// <remarks>
+    /// <b>A recorded draw keeps the reference, not a copy, so re-Begin cannot write over it.</b> The command
+    /// record holds <c>byte[] PushConstants</c>, and Begin used to copy new bytes into this same array whenever
+    /// the length matched — which was invisible while every batch was begun once per frame, and wrong the
+    /// moment one was begun twice. Cascaded shadows are the first caller to do that: three passes over one
+    /// batch, each with its own light matrix, and all three draws ended up pointing at the last matrix written.
+    /// The symptom is a shadow map rasterised with one projection and sampled with another — shadows detached
+    /// from their casters, at the wrong scale, which reads as "shadows are broken" and not as "a batch aliased
+    /// its push constants".
+    /// <para>
+    /// Allocating only when a batch is genuinely re-begun within a frame keeps the common path allocation-free.
+    /// </para>
+    /// </remarks>
+    private bool pushHandedOff;
+
     public InstancedBatch(Mesh mesh, PipelineHandle pipeline, InstanceBuffer buffer)
     {
         ArgumentNullException.ThrowIfNull(mesh);
@@ -45,9 +63,10 @@ public sealed class InstancedBatch
         {
             throw new InvalidOperationException("InstancedBatch.Begin called while a batch is already active. Call End first.");
         }
-        if (this.pushConstants.Length != pushConstants.Length)
+        if (pushHandedOff || this.pushConstants.Length != pushConstants.Length)
         {
             this.pushConstants = new byte[pushConstants.Length];
+            pushHandedOff = false;
         }
         pushConstants.CopyTo(this.pushConstants);
         count = 0;
@@ -106,5 +125,6 @@ public sealed class InstancedBatch
             textures ?? Array.Empty<ShaderTextureBinding>(),
             perDrawMaterial: buffer.Material,
             pushConstants: pushConstants);
+        pushHandedOff = true;
     }
 }
