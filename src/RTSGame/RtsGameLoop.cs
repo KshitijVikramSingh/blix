@@ -102,6 +102,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private static readonly Vector4 SelectedUnitColor = new(0.98f, 0.72f, 0.24f, 1f);
     private static readonly Vector4 RaiderColor = new(0.62f, 0.10f, 0.09f, 1f);
     private static readonly Vector4 SelectionColor = new(0.26f, 0.86f, 0.94f, 1f);
+
+    /// <summary>
+    /// The one colour anything picked is marked in.
+    /// </summary>
+    /// <remarks>
+    /// <b>One hue, two alphas, and no per-kind colours at all.</b> There were three in play — orange on a
+    /// selected body, dark teal on a hovered one, pale cyan on the mark underneath — so the same state looked
+    /// different depending on what you had picked. Hover and selected differ by <em>strength</em>, which is the
+    /// one axis that does not need learning.
+    /// <para>
+    /// Deeper and more saturated than the pale cyan it replaces, because that washed out against lit grass at
+    /// the alphas a see-through marker wants. A marker that has to be hunted for is not a marker.
+    /// </para>
+    /// </remarks>
+    private static readonly Vector4 HighlightColor = new(0.10f, 0.62f, 0.95f, 1f);
     private static readonly Vector4 DestinationColor = new(0.98f, 0.82f, 0.32f, 1f);
     private static readonly Vector4 ObstacleColor = new(0.33f, 0.35f, 0.37f, 1f);
     // A store, a field and a woodlot, told apart at a glance because the whole point of the
@@ -309,7 +324,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private ShaderProgramHandle contactShader;
     private PipelineHandle contactPipeline;
     private InstanceBuffer contactBuffer = null!;
+    private InstanceBuffer selectionBuffer = null!;
+    private InstanceBuffer selectionPlateBuffer = null!;
     private InstancedBatch contactBatch = null!;
+
+    private PipelineHandle selectionDecalPipeline;
+    private ShaderProgramHandle selectionDecalShader;
+    private InstancedBatch selectionDecalBatch = null!;
+    private InstancedBatch selectionPlateBatch = null!;
+    private readonly List<InstanceData> selectionInstances = new();
+
+    /// <summary>Square markers, kept apart from the round ones because they are a different mesh.</summary>
+    private readonly List<InstanceData> selectionPlateInstances = new();
     // <b>The far level of detail for trees, and the reason a screenful of them stopped being nine
     // seconds.</b> Measured at a wide zoom: 9,330 trees in view at 5,940 triangles each is 55M triangles a
     // frame, drawn again for the shadow map, for a frame time of 125 ms. Eight triangles each is 75k.
@@ -338,6 +364,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private int hearthLightCount;
     private int habitationLights;
     private int treesDrawn;
+
+    /// <summary>Tree nodes in the world, tree nodes the draw loop reached, and trees actually drawn.</summary>
+    /// <remarks>
+    /// Three counts because the gaps between them are the question: alive-minus-offered is what the loop skipped
+    /// before ever calling DrawTree, and offered-minus-drawn is what DrawTree itself refused.
+    /// </remarks>
+    private int treeNodesAlive;
+    private int treesOffered;
 
     /// <summary>
     /// The camera's frustum, as six outward planes, rebuilt each frame.
@@ -436,8 +470,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private readonly byte[] shadowPush = new byte[64];   // sun shadow VP
     private readonly byte[] gradePush = new byte[32];    // grade, then the eye's night response
 
-    /// <summary>How far from the camera's focus a tree is still drawn, squared.</summary>
-    private float treeDrawRadiusSquared = 1f;
+    /// <summary>A coarse bound on how far a tree is worth frustum-testing, squared. Not a visibility rule.</summary>
+    private float treeCullBoundSquared = 1f;
 
     /// <summary>Ground colouring the built instances were made with, so a slider forces a rebuild.</summary>
 
@@ -769,7 +803,37 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private int frameCount;
     private int rolledAt = -1;
     private (float Floor, float Span) labFloorSpan;
+
+    /// <summary>
+    /// The node under the pointer, decided once a frame.
+    /// </summary>
+    /// <remarks>
+    /// <b>Computed here rather than in the HUD, because two answers to "what is the pointer over" is one
+    /// answer too many.</b> The panel picked its own with its own radius; the marker on the ground would have
+    /// picked another. That is the shape of half the bugs in this file — a number correct in the layer that
+    /// owns it and disagreeing with the same number next door — and a hover highlight that lights a different
+    /// building from the one the panel is describing is exactly how it would show up.
+    /// </remarks>
+    private NodeId hoveredNode = NodeId.None;
+
+    /// <summary>What the player has clicked on, which is the beginning of the building layer.</summary>
+    /// <remarks>
+    /// Buildings were selectable only in the sense that the panel described whatever the pointer happened to
+    /// be over — nothing was <em>held</em>, so there was nothing to issue an order to and nothing to look at
+    /// while deciding. A site you are about to commit timber to is the first thing that needs to stay picked
+    /// while you move the mouse somewhere else.
+    /// </remarks>
+    private NodeId selectedNode = NodeId.None;
+
+    /// <summary>The body under the pointer, so hovering reads the same on a villager as on a building.</summary>
+    private AgentId? hoveredAgent;
     private float furthestChunk;
+    private double groundSubmitMs;
+    private int groundLayersDrawn;
+
+    /// <summary>Outcrops offered to the frustum, and how many survived it. "Can I see any stone from here."</summary>
+    private int outcropsSeen;
+    private int outcropsDrawn;
     private int rolls;
     private double nextTimingReport;
 
@@ -858,9 +922,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // The amplitude matters more. Every calibrated scenario runs on flat ground, so a hard-coded 32 on the
         // dial would mean one keypress silently generated terrain under a measurement that was taken without
         // it — the dial reads zero on a flat village, and stays there until somebody asks otherwise.
+        // <b>The village plays a generated map; only the headless runs want a plain.</b> --relief-amplitude
+        // defaults to zero, which is exactly right for the calibrated scenarios — every rate in the economy was
+        // measured on flat ground and a fertility of exactly one depends on there being no soil field — and
+        // exactly wrong for the thing a person opens to look at. It is why the map on screen kept reading
+        // FLAT GROUND and 0 M RELIEF, why there was never any stone (bare rock needs relief to be bare on),
+        // and why the woodland never showed its shaped form.
+        //
+        // The flag still wins when given, and so does the panel. This is only what happens when nobody said.
+        if (startVillage && reliefAmplitudeMetres <= 0f) this.reliefAmplitudeMetres = DefaultVillageRelief;
         mapTuning.Archetype = labArchetype;
         mapTuning.Region = labRegion;
-        mapTuning.ReliefMetres = reliefAmplitudeMetres;
+        mapTuning.ReliefMetres = this.reliefAmplitudeMetres;
         this.startingZoomMetres = startingZoomMetres;
         movementTrace = traceMovement || debugAll ? new LiveMovementTrace() : null;
         if (debugAll)
@@ -1361,6 +1434,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             "rts-caster");
         contactShader = vk.CreateShaderProgramFromSpv(
             Spv("contact.vert.spv"), Spv("contact.frag.spv"), contactInterface, "rts-contact");
+        selectionDecalShader = vk.CreateShaderProgramFromSpv(
+            Spv("selection.vert.spv"), Spv("selection.frag.spv"), contactInterface, "rts-selection");
+        selectionDecalPipeline = vk.CreatePipeline(
+            new PipelineDescription(
+                selectionDecalShader,
+                decalLayout,
+                PrimitiveTopology.Triangles,
+                // The same decal discipline the contact shadow uses, and for the same reasons: tested against
+                // the ground so it cannot float over a wall, writing no depth because it is not a thing, and
+                // uncoulled so a disc on a slope does not wink out at a grazing angle.
+                DepthState.LessEqualNoWrite,
+                RasterizerState.NoCulling,
+                new[] { BlendState.AlphaBlend },
+                RenderTarget: graph.GetPassSurface(scenePassHandle)),
+            "rts-selection");
         contactPipeline = vk.CreatePipeline(
             new PipelineDescription(
                 contactShader,
@@ -1438,7 +1526,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // The same sphere the greybox canopies use, which is what a puff of smoke wants to be.
         var discMesh = CreateMesh(vk, "contact-disc", Disc.Vertices, Disc.Indices);
         contactBuffer = new InstanceBuffer(vk, contactShader, "rts-contact");
+        selectionBuffer = new InstanceBuffer(vk, selectionDecalShader, "rts-selection");
+        selectionPlateBuffer = new InstanceBuffer(vk, selectionDecalShader, "rts-selection-plate");
         contactBatch = new InstancedBatch(discMesh, contactPipeline, contactBuffer);
+        selectionDecalBatch = new InstancedBatch(discMesh, selectionDecalPipeline, selectionBuffer);
+        var plateMesh = CreateMesh(vk, "selection-plate", SquarePlate.Vertices, SquarePlate.Indices);
+        selectionPlateBatch = new InstancedBatch(plateMesh, selectionDecalPipeline, selectionPlateBuffer);
         smokeBuffer = new InstanceBuffer(vk, smokeShader, "rts-smoke");
         smokeBatch = new InstancedBatch(canopyMesh, smokePipeline, smokeBuffer);
         canopyCasterBuffer = new InstanceBuffer(vk, casterShader, "rts-canopies-caster");
@@ -1463,10 +1556,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         foreach (var tree in art.TreesMid) midTriangles += tree.TriangleCount;
         var farTriangles = 0;
         foreach (var tree in art.TreesFar) farTriangles += tree.TriangleCount;
+        // <b>The deep tier was missing from its own report.</b> Four tiers exist and three were printed, so the
+        // one a dense wood actually uses — the tier every tree in a thick stand is drawn at — was the one nobody
+        // could see a number for. An instrument that omits a case is how "the log about drawing is lying" gets
+        // to be true while every line in it is correct.
+        var deepTriangles = 0;
+        foreach (var tree in art.TreesDeep) deepTriangles += tree.TriangleCount;
         Console.WriteLine(
             $"  art: a tree is {treeTriangles / MathF.Max(1, art.Trees.Length):F0} triangles near, " +
-            $"{midTriangles / MathF.Max(1, art.TreesMid.Length):F0} at the middle level and " +
-            $"{farTriangles / MathF.Max(1, art.TreesFar.Length):F0} far ({art.Trees.Length} species); " +
+            $"{midTriangles / MathF.Max(1, art.TreesMid.Length):F0} at the middle level, " +
+            $"{farTriangles / MathF.Max(1, art.TreesFar.Length):F0} far and " +
+            $"{deepTriangles / MathF.Max(1, art.TreesDeep.Length):F0} deep " +
+            $"({art.Trees.Length} species, deep tier has {art.TreesDeep.Length}); " +
             $"cover {coverTriangles / MathF.Max(1, art.Scatter.Length):F0}, " +
             $"undergrowth {underTriangles / MathF.Max(1, art.Undergrowth.Length):F0}, " +
             $"villager {art.Villager?.TriangleCount ?? 0}, granary {art.Granary.TriangleCount}; " +
@@ -1565,7 +1666,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (!built)
         {
             Console.WriteLine(
-                $"  {kind} site: wants {Construction.TimberFor(kind)} timber carried out and " +
+                $"  {kind} site: wants {Construction.TimberFor(kind)} timber" +
+                (Construction.StoneFor(kind) > 0 ? $" and {Construction.StoneFor(kind)} stone" : string.Empty) +
+                $" carried out and " +
                 $"{Construction.LabourFor(kind):F0} labour-seconds — post villagers on it with U");
         }
 
@@ -1708,6 +1811,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private const float RoutePickRadius = 6f;
 
+
     private AgentId[] AllAgentIds()
     {
         var ids = new AgentId[simulation.Agents.Count];
@@ -1810,6 +1914,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     /// <summary>How tall the window is, so ground detail can be judged in pixels rather than in metres.</summary>
     private float viewportPixels;
+
+
 
     /// <summary>The chunks close enough for their transition coats to be worth drawing.</summary>
     private readonly HashSet<(int X, int Z)> blendedChunks = new();
@@ -2677,7 +2783,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         {
             if (!node.IsAlive || !node.IsUnderConstruction) continue;
             sites++;
-            if (worst.Length == 0 || node.TimberWanted > 0) worst = Construction.StateOf(in node);
+            if (worst.Length == 0 || node.WantsMaterials) worst = Construction.StateOf(in node);
         }
 
         if (sites > 0) debug.Values.Value("building sites", $"{sites} — {worst}");
@@ -3303,8 +3409,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // drew trees to 150 m against 64 m of visible ground — <b>2.3× as far as anybody can see</b>, and
         // more than twice as far as the box that decides whether they cast anything. Pulled in it is now
         // 73 m, which is the same picture for a quarter of the trees.
-        var treeDrawRadius = DetailRadius;
-        treeDrawRadiusSquared = treeDrawRadius * treeDrawRadius;
+        // <b>As far as the ground is drawn, not as far as the shadow box reaches.</b> The tree radius was the
+        // detail radius, which is capped by a look dial because it also sizes the sun's box — and once the
+        // ground culling was fixed to follow the frustum, the ground began reaching past that cap. So trees
+        // stopped in an arc *inside* the visible field: a hard curved edge with grass beyond it, which is
+        // exactly the artefact this file's own LOD note calls the one thing an LOD scheme must not have.
+        //
+        // Trees past the shadow box simply do not cast, which is what already happened to everything beyond the
+        // detail radius. A missing shadow at 150 m is not noticeable; a wall where the forest ends is.
+        // Twice what can be seen, so nothing in view is ever outside it and the loop still refuses the far
+        // half of a big map. Not a decision about visibility — see the note at its use.
+        var treeDrawRadius = MathF.Max(DetailRadius, VisibleGroundRadius * 2f + 24f);
+        treeCullBoundSquared = treeDrawRadius * treeDrawRadius;
 
         // <b>Render-side phase timings, because the simulation's own breakdown cannot see any of this.</b>
         // A frame went from sixty-odd to five and the sim tick had not moved, which says the cost is in
@@ -3378,6 +3494,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         graph.Pass(scenePassHandle, scope =>
         {
             fullscreen.Draw(scope, skyPipeline, Array.Empty<ShaderTextureBinding>(), skyPush);
+            var groundClock = Stopwatch.StartNew();
+            var groundDraws = 0;
             foreach (var chunk in drawnChunks)
             foreach (var layer in groundChunks[chunk])
             {
@@ -3390,12 +3508,27 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 if (layer.Blend && !blendedChunks.Contains(chunk)) continue;
 
                 layer.Batch.End(scope, shadowBinding);
+                groundDraws++;
             }
+
+            // <b>Timed on its own, because the last attribution was arithmetic rather than measurement.</b>
+            // Ground layers went from 8 to 96 between a flat map and a hilly one while `record` grew 4.4 ms,
+            // and dividing one by the other gave 50 microseconds a draw — a figure far too large to believe and
+            // arrived at by assuming every extra millisecond belonged to the ground. This says what the ground
+            // actually costs.
+            groundSubmitMs = groundClock.Elapsed.TotalMilliseconds;
+            groundLayersDrawn = groundDraws;
 
             // After the ground and before anything standing on it: a contact shadow is a mark on the ground,
             // and the object that casts it draws over its own middle.
             contactBatch.SetInstances(CollectionsMarshal.AsSpan(contactInstances));
             contactBatch.End(scope);
+            // After the contact shadows, so a selected thing's plate sits over its own occlusion rather than
+            // being mottled by it.
+            selectionDecalBatch.SetInstances(CollectionsMarshal.AsSpan(selectionInstances));
+            selectionDecalBatch.End(scope);
+            selectionPlateBatch.SetInstances(CollectionsMarshal.AsSpan(selectionPlateInstances));
+            selectionPlateBatch.End(scope);
 
             propBatch.End(scope, shadowBinding);
             unitBatch.End(scope, shadowBinding);
@@ -3439,6 +3572,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                         : null,
                     colliderOverlay > 0 ? GeometryLine() : null,
                     mapLab ? LabStatus() : MapStatus(),
+                    hoveredNode,
+                    selectedNode,
                     frame.Width,
                     frame.Height);
             });
@@ -3446,6 +3581,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (timingDebug && frameCount % 60 == 0)
         {
             Console.WriteLine(
+                $"  window: logical {host.LogicalSize.Width}x{host.LogicalSize.Height}, " +
+                $"frame {windowSize.Width}x{windowSize.Height}, " +
+                $"scale {windowSize.Width / MathF.Max(1f, host.LogicalSize.Width):F2}\n" +
                 $"  ground: {drawnChunks.Count} chunks drawn, {blendedChunks.Count} blended, " +
                 $"furthest {furthestChunk:F0} m against a flat-horizon reach of {GroundDrawRadius:F0} m " +
                 $"over {labFloorSpan.Span:F0} m of relief, zoom {cameraDistance:F0} m");
@@ -3469,6 +3607,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
 
         contactBatch.Begin(contactPush);
+        selectionDecalBatch.Begin(contactPush);
+        selectionPlateBatch.Begin(contactPush);
         EnsureGroundChunks();
         // <b>Built everywhere, drawn where it can be seen.</b> Meshing the whole map is cheap — it happens
         // once per terrain change and the chunks are kept — but <em>drawing</em> it all is not: measured,
@@ -3497,6 +3637,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Frame constants, computed once. Cheap now that the window size is cached, and still wrong to
         // recompute per chunk — a number about the camera does not vary between chunks.
         furthestChunk = 0f;
+        outcropsSeen = 0;
+        outcropsDrawn = 0;
+        hoveredNode = PickNode();
+        hoveredAgent = PickAgent();
+        if (selectedNode.IsValid && !simulation.Nodes.Contains(selectedNode)) selectedNode = NodeId.None;
         var visible = VisibleGroundRadius;
         var groundReach = GroundDrawRadius;
         // How much further a hill can enter the view than flat ground at the same bearing. The bottom edge of
@@ -3564,9 +3709,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Before the nodes are built, because that is what draws the trees and therefore their skirts.
         undergrowthDrawn = 0;
         treesDrawn = 0;
+        treeNodesAlive = 0;
+        treesOffered = 0;
         treeTiers = (0, 0, 0, 0);
         habitationLights = 0;
         contactInstances.Clear();
+        selectionInstances.Clear();
+        selectionPlateInstances.Clear();
         BuildObstacleInstances();
         DrawWindow();
         var nodeClock = Stopwatch.StartNew();
@@ -3711,6 +3860,47 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 continue;
             }
 
+            // Picked out by colour, the way a body is. Decided before the per-kind branches so every kind can
+            // use it, and passed down rather than drawn here, because what a building is <em>made of</em> is
+            // the thing being overridden.
+            // <b>No tint on anything the player did not build out of one material.</b> Repainting was too
+            // strong and it had to be: world.frag reads a tint as `albedo = vTint.rgb; surface = vTint.a`, so
+            // an override does not highlight a building, it <em>replaces</em> it — six materials flattened to
+            // one flat colour, and the material class swapped along with them. That is why a hovered granary
+            // came out looking like a painted block rather than a lit one.
+            //
+            // A villager survives being tinted because a villager is already one colour; a building is not.
+            // So the plate carries both states, faint for hover and full for selected, and the model is left
+            // to look like itself. A real highlight — mixing toward a colour while keeping the materials —
+            // wants a term in the shader rather than a value smuggled through the albedo, and the tint
+            // plumbing is gone rather than left switched off: a dead path that still works is the thing
+            // somebody reaches for next time.
+            if ((node.Id == selectedNode || node.Id == hoveredNode) && IsDrawnThisFrame(in node))
+            {
+                // <b>Sized from the thing, not from a per-kind fudge.</b> A building's and a field's extent is
+                // the footprint the simulation enforces, so the mark is that plus a hair — which is also the
+                // honest answer to the observation that a model can sit well inside its cell: the square is
+                // the ground the thing <em>owns</em>, and owning it is what the marker is about.
+                //
+                // A tree or a rock has a nominal footprint far smaller than the thing you see, so those are
+                // sized to what is drawn instead. Nothing here is a magic number per kind; each is the extent
+                // that kind is actually described by.
+                var square = node.Kind is NodeKind.Granary or NodeKind.ForwardDepot
+                    or NodeKind.House or NodeKind.Farm;
+                var radius = node.Kind switch
+                {
+                    NodeKind.Tree => 2.2f,
+                    NodeKind.Outcrop => 3.0f,
+                    NodeKind.Pile => 1.3f,
+                    _ => MathF.Max(1.6f, node.HalfExtent + 0.35f),
+                };
+                DrawSelectionMark(
+                    node.Position,
+                    radius,
+                    node.Id == selectedNode ? SelectionPlateAlpha : HoverPlateAlpha,
+                    square);
+            }
+
             if (node.Kind == NodeKind.Farm)
             {
                 DrawField(in node);
@@ -3719,21 +3909,46 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
             if (node.IsStanding)
             {
+                treeNodesAlive++;
+                // <b>The frustum decides whether a tree is drawn; this only keeps the far field out.</b>
+                // A radius used to decide it, and a radius cannot: VisibleGroundRadius is frustum trigonometry
+                // measured from the <em>camera</em> — eye height, tan(pitch − halfFov), slant, aspect — and it
+                // was then applied as a distance from <em>cameraFocus</em>, which is a different point. The
+                // visible ground is an asymmetric trapezoid reaching well past the focus, so a circle centred
+                // there under-covers its far side, and under-covers it more the closer the camera gets, because
+                // the focus sits proportionally deeper into the view.
+                //
+                // Since the ground began following the frustum this session, the two disagreed visibly: grass
+                // drawn where trees were culled, and trees vanishing as you zoomed in. The cap is deliberately
+                // generous — twice the visible radius — because its only job now is to stop the loop
+                // frustum-testing the whole map at maximum zoom-out. Everything inside it is InView's call.
                 // Culled against what the camera is looking at, because a dense woodland is thousands of
                 // models and the camera can see about ninety metres of it. The radius has to cover the
                 // shadow box as well as the view — a tree behind the camera still casts into the frame —
                 // so it is compared against both. Not an optimisation so much as the thing that makes a
                 // forest affordable at all: without it the frame draws the whole map every frame.
-                if (Vector2.DistanceSquared(node.Position, cameraFocus) > treeDrawRadiusSquared) continue;
+                if (Vector2.DistanceSquared(node.Position, cameraFocus) > treeCullBoundSquared) continue;
+                treesOffered++;
                 DrawTree(in node);
                 continue;
             }
 
             if (node.Kind == NodeKind.Outcrop)
             {
-                // Same cull as a tree and for the same reason, though there are two orders of magnitude
-                // fewer of them: a map has a few dozen outcrops against a few thousand trunks.
-                if (Vector2.DistanceSquared(node.Position, cameraFocus) > treeDrawRadiusSquared) continue;
+                // <b>Not the tree cull, and my own comment here used to say why while doing the opposite.</b>
+                // It read "same cull as a tree and for the same reason, though there are two orders of magnitude
+                // fewer of them" — which is the argument <em>against</em> that cull, written down and then not
+                // followed. The tree radius exists because a woodland is thousands of models and the camera can
+                // see ninety metres of it; a map has fifteen to thirty outcrops. Culling them to the foliage
+                // budget bought nothing and cost the thing they are for.
+                //
+                // Reported from the chair as not being able to see stone on any map, and on the village's
+                // default map the nearest rock is 282 m from the village against a ~130 m tree radius — so
+                // every outcrop on it was invisible from anywhere a player would stand. <b>A quarry is a
+                // landmark.</b> You are supposed to see the rock from across the valley and decide to go
+                // there, which is the whole of how an unreachable resource becomes a reason to expand.
+                //
+                // The frustum still decides, inside DrawOutcrop.
                 DrawOutcrop(in node);
                 continue;
             }
@@ -3902,8 +4117,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private void DrawSite(in EconomyNode site, float ground, float width, float yaw)
     {
-        var timber = Construction.TimberFor(site.Kind);
-        var delivered = timber <= 0 ? 1f : MathF.Min(1f, site.Stock.Wood / (float)timber);
+        // <b>How far along the delivery is, across every material rather than the timber alone.</b> A granary
+        // waiting on its last stone would otherwise have shown a full stack of logs and read as ready.
+        var cost = Construction.CostFor(site.Kind);
+        var owed = cost.Total;
+        var here = 0;
+        foreach (var resource in Resources.All) here += Math.Min(cost[resource], site.Stock[resource]);
+        var delivered = owed <= 0 ? 1f : MathF.Min(1f, here / (float)owed);
+        var timber = cost.Wood;
         if (delivered > 0.02f && art!.WoodHeap is { } logs)
         {
             // Stacked round the footprint rather than in the middle of it, because the middle is where the
@@ -4032,6 +4253,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var placement = SettlementArt.Placement(field.Position, ground + FieldPlotLift, width, yaw);
             // Tilled earth, lifted off the pack's near-black dirt. See LookSettings.SoilBrightness: the
             // stripes were the contrast between 0.09 soil and 0.38 wheat, not a misalignment.
+            // The plot carries the tint when there is one, because a field's own colour <em>is</em> a tint —
+            // there is no material to override, so the override is simply a different colour.
             art.FieldPlot.Add(placement, new Vector4(TilledEarth * look.SoilBrightness, 1f));
             if (standing > 0.02f)
             {
@@ -4227,7 +4450,24 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private readonly MapTuning mapTuning = new();
 
-    private Archetype labArchetype = Archetype.DiagonalRiver;
+    /// <summary>How much relief the village generates when nobody has said. See the constructor.</summary>
+    /// <remarks>
+    /// Thirty-two metres over 600 is the amplitude every archetype was judged at in <c>--shapes</c> and the one
+    /// the gate's generated-terrain leg uses, give or take two. A number already argued about is a better
+    /// default than a new one.
+    /// </remarks>
+    private const float DefaultVillageRelief = 32f;
+
+    /// <summary>
+    /// Which map the village opens on.
+    /// </summary>
+    /// <remarks>
+    /// <b>Three valleys meeting at a lowland junction, because it is the archetype whose woods read.</b> The
+    /// default was DiagonalRiver, and on the default seed that archetype's intensity roll comes up open pastoral
+    /// — 16% of the map at closed canopy against YValley's 54% on the same seed. A first impression should not
+    /// be the sparsest thing the generator makes.
+    /// </remarks>
+    private Archetype labArchetype = Archetype.YValley;
 
     /// <summary>
     /// Whether the canvas is filled with one archetype or with the whole family.
@@ -4410,21 +4650,325 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// still read as a substantial rock rather than as half a rock.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// A perimeter on the ground around a node, following the ground.
+    /// </summary>
+    /// <remarks>
+    /// <b>Four bars rather than one plate, and each sampled at its own midpoint.</b> A single quad at the
+    /// node's centre height is right on the flat and wrong everywhere else — on a slope one edge floats and
+    /// the opposite edge is buried, which is the same flat-ground assumption this file has already been caught
+    /// making four times about view distances. Sampling each bar where it actually lies costs four height
+    /// lookups for a thing there is at most a handful of on screen.
+    /// <para>
+    /// A perimeter and not a filled plate because the ground under a building is worth seeing: what is being
+    /// answered is "which one is picked", not "what colour is this square". It is drawn a little outside the
+    /// footprint the simulation enforces, so the outline reads as a boundary around the thing rather than as
+    /// part of it.
+    /// </para>
+    /// </remarks>
+    /// <summary>
+    /// What the pointer is actually on, tested against the objects rather than against the ground.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because the ground under the cursor is not the thing the cursor is over.</b> This used to pick with
+    /// <c>NodeAt</c>: raycast the terrain, then find the nearest node to where the ray met the ground. That is
+    /// right for a flat marker painted on the earth and wrong for anything that stands up out of it — the ray
+    /// goes through the granary's roof and lands on the ground <em>behind</em> the granary, overshooting its
+    /// centre by about <c>height / tan(pitch)</c>. For a four-metre building at this camera's pitch that is
+    /// 5.7 m, which is further than the six-metre pick radius was ever going to forgive: you point at the
+    /// building and select nothing, or select its neighbour.
+    /// <para>
+    /// Reported from the chair as the mouse not lining up with the screen, and "not as deep as Vulkan — more
+    /// like elevation or camera angle", which is exactly right. Two other candidates were measured and killed
+    /// first: the drawn ground departs from the simulation's heightfield by <b>under two centimetres</b> on a
+    /// 2 m mesh, so the mesh is not the culprit, and the raycast's 64 m ceiling is not breached either — 60 m
+    /// of relief tops out at 55. Neither could have produced an error you can see.
+    /// </para>
+    /// <para>
+    /// So the pointer is tested against each node as a box standing on the ground, and the nearest one along
+    /// the ray wins. A box rather than the model: the footprint is what the simulation enforces and what the
+    /// selection marker draws, so picking the same box means the thing you click is the thing that lights up.
+    /// </para>
+    /// </remarks>
+    /// <summary>
+    /// The body under the pointer, tested against the body rather than against the ground beneath it.
+    /// </summary>
+    /// <remarks>
+    /// Same test and the same reason as <see cref="PickNode"/>: a villager is 1.7 m tall, so the ray that
+    /// passes through its chest lands on the ground well behind its feet. Note this is only the <em>hover</em>
+    /// — clicking still goes through SelectionController, which projects each body to the screen and now does
+    /// it at the height the body is actually standing at.
+    /// </remarks>
+    private AgentId? PickAgent()
+    {
+        if (!pointerOnTerrain) return null;
+        var (width, height) = host.LogicalSize;
+        if (width <= 0 || height <= 0) return null;
+        var ray = camera.ScreenPointToRay(mouseX, mouseY, width, height);
+        var ground = GroundHitDistance(ray);
+
+        AgentId? best = null;
+        var nearest = float.MaxValue;
+        foreach (ref readonly var agent in simulation.Agents.All)
+        {
+            if (!agent.IsAlive || agent.Sheltered) continue;
+            if (Vector2.DistanceSquared(agent.Position, pointerWorld) > NodePickSweep * NodePickSweep) continue;
+            var floor = simulation.Terrain.SampleHeight(agent.Position);
+            var half = MathF.Max(0.35f, agent.Radius);
+            if (!RayHitsBox(ray, agent.Position, half, floor, floor + AgentDefaults.BodyHeight, out var away))
+            {
+                continue;
+            }
+
+            // Behind the terrain is behind the terrain. See the same test in PickNode.
+            if (away > ground) continue;
+            if (away >= nearest) continue;
+            nearest = away;
+            best = agent.Id;
+        }
+
+        return best;
+    }
+
+    private NodeId PickNode()
+    {
+        if (!pointerOnTerrain) return NodeId.None;
+        var (width, height) = host.LogicalSize;
+        if (width <= 0 || height <= 0) return NodeId.None;
+        var ray = camera.ScreenPointToRay(mouseX, mouseY, width, height);
+        var ground = GroundHitDistance(ray);
+
+        var best = NodeId.None;
+        var nearest = float.MaxValue;
+        foreach (ref readonly var node in simulation.Nodes.All)
+        {
+            if (!node.IsAlive || !IsDrawnThisFrame(in node)) continue;
+            // Only what is near the ray's ground hit is worth the arithmetic; the box test then decides. The
+            // margin is generous because the overshoot this exists to fix is exactly what makes the ground hit
+            // a poor filter.
+            if (Vector2.DistanceSquared(node.Position, pointerWorld) > NodePickSweep * NodePickSweep) continue;
+
+            var (half, tall) = PickBoxOf(node.Kind, node.HalfExtent);
+            var floor = simulation.Terrain.SampleHeight(node.Position);
+            if (!RayHitsBox(ray, node.Position, half, floor, floor + tall, out var away)) continue;
+            // <b>The ground is opaque, and the box test did not know it.</b> A ray fired at a nearby hillside
+            // carries on through it and keeps hitting boxes on the far side, so the pointer picked things it
+            // was pointing <em>at the back of a hill</em> — reported from the chair as cutting through the
+            // surface and selecting what the cursor cannot see. Anything the ray reaches after it has already
+            // met the terrain is behind the terrain.
+            if (away > ground) continue;
+            if (away >= nearest) continue;
+            nearest = away;
+            best = node.Id;
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// The box a kind is picked by: as near as possible to the space its model actually occupies.
+    /// </summary>
+    /// <remarks>
+    /// <b>A box taller than the model is empty air that can be clicked, and at a shallow camera angle it is
+    /// clicked from a long way off.</b> Trees had 7 m of height against a drawn tree of about 4.5, on the
+    /// reasoning that a generous box makes the leaves easy to hit. What it actually bought was two metres of
+    /// sky above every trunk: the ray descends slowly at this pitch, so on its way to the ground under the
+    /// cursor it clips that sky over a tree metres to one side and picks it. Measured from the chair: a tree
+    /// picked <b>11.1 m from where the pointer met the ground</b>, with nothing under the cursor at all.
+    /// <para>
+    /// So each box is the model's own extent, and generosity is bought sideways rather than upward — width
+    /// costs a near miss, height costs a distant false hit. The pick was never wrong about the ray; the box
+    /// was wrong about the tree.
+    /// </para>
+    /// </remarks>
+    private static (float Half, float Tall) PickBoxOf(NodeKind kind, float footprintHalf) => kind switch
+    {
+        // A canopy is about 2.2 m across and around 4.5 m up. Wider than the trunk the simulation routes
+        // around, because what you aim at is the leaves.
+        NodeKind.Tree => (1.15f, 4.4f),
+        NodeKind.Outcrop => (2.0f, 2.4f),
+        NodeKind.Farm => (MathF.Max(1.6f, footprintHalf), 0.6f),
+        NodeKind.Pile => (1.0f, 1.0f),
+        _ => (MathF.Max(1.2f, footprintHalf), MathF.Max(3.0f, footprintHalf * 1.2f)),
+    };
+
+    /// <summary>
+    /// How far from the ray's ground hit a node may be and still be worth testing.
+    /// </summary>
+    /// <remarks>
+    /// Sized from the overshoot it exists to forgive rather than picked: a thing of height <c>h</c> has its base
+    /// up to <c>h / tan(pitch)</c> beyond where the ray through its top meets the ground, which for the tallest
+    /// box here is about seven metres. Sixteen was twice what any box could justify, and every surplus metre is
+    /// a chance to pick something the cursor is nowhere near.
+    /// </remarks>
+    private const float NodePickSweep = 9f;
+
+    /// <summary>
+    /// Whether this node has a model on screen, which is the only thing the pointer may find.
+    /// </summary>
+    /// <remarks>
+    /// <b>A pointer that can pick what is not drawn is a pointer that lies.</b> Trees are culled to the detail
+    /// radius, about 130 m, because a woodland is thousands of models — while the ground is drawn as far as the
+    /// frustum reaches, which since the culling fix is 246 m on a hilly map. So the far third of the visible
+    /// ground carries tree <em>nodes</em> with no trunks on them, and the picker found them: the panel said
+    /// "tree" and the marker lit an empty patch of grass, reported from the chair as random empty spots that
+    /// misalign with the cursor.
+    /// <para>
+    /// The cull and the pick have to be the same test, so this is the test, asked by both. Nothing else is
+    /// distance-culled — outcrops are drawn map-wide because there are a few dozen of them, and buildings
+    /// likewise — so this reduces to the one kind that is.
+    /// </para>
+    /// </remarks>
+    private bool IsDrawnThisFrame(in EconomyNode node) =>
+        node.Kind != NodeKind.Tree ||
+        Vector2.DistanceSquared(node.Position, cameraFocus) <= treeCullBoundSquared;
+
+    /// <summary>
+    /// How far along the ray the ground is, which is as far as anything can be seen.
+    /// </summary>
+    /// <remarks>
+    /// Derived from the terrain hit the pointer already has rather than raycast a second time: the point is
+    /// known, so the distance is a projection onto the ray. A small allowance past it, because a thing standing
+    /// on the ground has its base <em>at</em> the surface and floating-point equality is not a thing to bet a
+    /// selection on.
+    /// </remarks>
+    private float GroundHitDistance(Ray ray)
+    {
+        var hit = new Vector3(
+            pointerWorld.X,
+            simulation.Terrain.SampleHeight(pointerWorld),
+            pointerWorld.Y);
+        return Vector3.Dot(hit - ray.Origin, ray.Direction) + 1.5f;
+    }
+
+    /// <summary>Slab test: the nearest positive distance at which a ray enters an axis-aligned box.</summary>
+    private static bool RayHitsBox(
+        Ray ray,
+        Vector2 centre,
+        float half,
+        float low,
+        float high,
+        out float away)
+    {
+        away = 0f;
+        var enter = 0f;
+        var exit = float.MaxValue;
+
+        // Three slabs, one per axis. A direction component of zero means the ray is parallel to that pair of
+        // faces, so it either starts between them or can never be inside.
+        Span<float> from = stackalloc float[] { centre.X - half, low, centre.Y - half };
+        Span<float> to = stackalloc float[] { centre.X + half, high, centre.Y + half };
+        Span<float> origin = stackalloc float[] { ray.Origin.X, ray.Origin.Y, ray.Origin.Z };
+        Span<float> step = stackalloc float[] { ray.Direction.X, ray.Direction.Y, ray.Direction.Z };
+        for (var axis = 0; axis < 3; axis++)
+        {
+            if (MathF.Abs(step[axis]) < 1e-6f)
+            {
+                if (origin[axis] < from[axis] || origin[axis] > to[axis]) return false;
+                continue;
+            }
+
+            var first = (from[axis] - origin[axis]) / step[axis];
+            var second = (to[axis] - origin[axis]) / step[axis];
+            if (first > second) (first, second) = (second, first);
+            enter = MathF.Max(enter, first);
+            exit = MathF.Min(exit, second);
+            if (exit < enter) return false;
+        }
+
+        away = enter;
+        return true;
+    }
+
+
+
+    /// <summary>
+    /// A translucent disc on the ground under something that is selected.
+    /// </summary>
+    /// <remarks>
+    /// <b>The contact-shadow decal, borrowed, and its own docstring is the argument for using it here.</b> That
+    /// pipeline exists to draw "a mark on the thing under it" rather than a thing in the world: alpha-blended,
+    /// depth-tested but not depth-writing, and drawn with no culling so a disc on a slope survives a grazing
+    /// camera. Every one of those is a property the outline I removed did not have — it was solid geometry
+    /// standing on the ground, which is why at any thickness it read as a strip laid there rather than as a
+    /// highlight belonging to the thing.
+    /// <para>
+    /// A circle rather than a square, matching the disc under a selected villager: the marker says "this one",
+    /// and it should not be trying to also say how big the footprint is — the model already does that.
+    /// </para>
+    /// </remarks>
+    /// <summary>
+    /// A marker on the ground under something picked: round for what grew there, square for what was built.
+    /// </summary>
+    /// <remarks>
+    /// <b>Shape says what kind of thing it is.</b> A tree, a rock and a villager occupy a patch of ground with
+    /// no orientation to it, and a circle is the honest description of that. A building and a field occupy a
+    /// square of the placement grid — that <em>is</em> their extent, it is what bodies route around, and a
+    /// circle drawn round it either cuts the corners off or floats clear of the walls. So one shader draws both
+    /// and the mesh decides which: see <see cref="SquarePlate"/> for how a square carries its own
+    /// distance-to-edge in the channel a disc uses for radius.
+    /// <para>
+    /// <b>Leaned onto the ground rather than laid flat on it</b>, using the same shear the contact shadows use:
+    /// x and z stay unit length so the footprint is exact and only y tilts. A horizontal disc on a hillside
+    /// buries one edge and floats the other, which on this terrain is most of the map.
+    /// </para>
+    /// </remarks>
+    private void DrawSelectionMark(Vector2 at, float radius, float alpha, bool square)
+    {
+        var ground = simulation.Terrain.SampleHeight(at);
+        var normal = simulation.Terrain.SampleNormal(at);
+        var lean = Matrix4x4.Identity;
+        lean.M12 = -normal.X / MathF.Max(0.2f, normal.Y);
+        lean.M32 = -normal.Z / MathF.Max(0.2f, normal.Y);
+        var instance = new InstanceData(
+            Matrix4x4.CreateScale(radius, 1f, radius) * lean *
+            Matrix4x4.CreateTranslation(at.X, ground + 0.06f, at.Y),
+            new Vector4(HighlightColor.X, HighlightColor.Y, HighlightColor.Z, alpha));
+        if (square) selectionPlateInstances.Add(instance);
+        else selectionInstances.Add(instance);
+    }
+
+    /// <summary>How see-through a selection plate is.</summary>
+    /// <remarks>
+    /// Enough to read as a highlight and not enough to hide what it is drawn on, which is the whole difference
+    /// between a marker and a patch of paint.
+    /// </remarks>
+    private const float SelectionPlateAlpha = 0.95f;
+
+    /// <summary>How see-through a hover mark is. Present, but plainly not the chosen thing.</summary>
+    private const float HoverPlateAlpha = 0.55f;
+
+    // <b>The ground outline is gone, and it was mine to try and mine to withdraw.</b> A perimeter of four
+    // bars around a footprint was the wrong answer to a right question: at any thickness it read as a strip
+    // laid on the earth rather than as a property of the thing it surrounded, and making it screen-constant
+    // fixed the arithmetic without fixing that. What replaced it is the mechanism this game already had and
+    // that already works — a body is tinted when selected, so a building is too.
+
     private void DrawOutcrop(in EconomyNode rock)
     {
         if (art is null || art.Rocks.Length == 0) return;
+        outcropsSeen++;
         var ground = simulation.Terrain.SampleHeight(rock.Position);
         var left = MathF.Max(0.22f, rock.Stock.Stone / MathF.Max(1f, Quarrying.StonePerOutcrop));
         // Varied by id, so the same outcrop is the same outcrop across a save.
         var spread = 0.90f + (rock.Id.Value * 29 % 11) / 11f * 0.45f;
         var width = 5.2f * spread * MathF.Cbrt(left);
         if (!InView(rock.Position, ground, width * 1.2f, width * 0.7f)) return;
-        // Its own materials, not a tint: the pack's stone already reads as stone, and the material classifier
-        // routes it through MaterialClass.Stone for the specular response.
+        outcropsDrawn++;
+        // Its own materials unless it is the thing being pointed at: the pack's stone already reads as stone,
+        // and the classifier routes it through MaterialClass.Stone for the specular response.
         art.Rocks[rock.Id.Value % art.Rocks.Length].Add(
             SettlementArt.Placement(
                 rock.Position, ground, width, SettlementArt.FreeYawOf(rock.Id.Value)));
     }
+
+    /// <summary>The most any tree can measure across or stand, for a conservative early cull.</summary>
+    /// <remarks>
+    /// Above every term that scales a crown — the widest spread, a full stock, the most open canopy — so a tree
+    /// this test rejects is a tree no exact test could keep. Deliberately not derived from those terms: a bound
+    /// that tracked them exactly would need them computed, which is the cost this exists to avoid.
+    /// </remarks>
+    private const float WidestTreeMetres = 9f;
 
     private void DrawTree(in EconomyNode tree)
     {
@@ -4445,11 +4989,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             //
             // A fifth either side. Small enough that no single tree looks wrong and large enough that a
             // hillside of them does not look stamped.
+            // <b>Culled before anything is computed about it, on the largest a tree can be.</b> The frustum
+            // test used to come after the crown width, which needs the woodland field — so every tree the
+            // frustum was about to reject still cost a WoodlandCover lookup first. Now that the frustum is the
+            // only thing deciding visibility, that would have been every tree within the coarse bound, on every
+            // frame.
+            //
+            // Conservative on purpose: a fixed generous extent, so the early test can only ever reject a tree
+            // the exact test would also have rejected. A cheap conservative cull followed by an exact one is
+            // the whole trick, and getting it backwards is what made the ordering matter.
+            if (!InView(tree.Position, ground, WidestTreeMetres, WidestTreeMetres * 0.5f)) return;
             var canopy = simulation.Terrain.Woodland is { } cover
                 ? 1.22f - 0.34f * Math.Clamp(cover.At(tree.Position), 0f, 1.2f)
                 : 1f;
             var width = NodeFootprint.TreeHalfExtent * 2f * 3.1f * spread * MathF.Sqrt(left) * canopy;
-            if (!InView(tree.Position, ground, width * 1.4f, width * 0.6f)) return;
             var kind = TreeKindAt(tree.Position, tree.Id.Value);
             var placement = SettlementArt.Placement(
                 tree.Position, ground, width, SettlementArt.FreeYawOf(tree.Id.Value));
@@ -4468,9 +5021,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // own is looked at and keeps every triangle at any distance; a tree in a thicket is texture.
             // It also spends the detail where a settlement is, since the ground round a village is cleared.
             //
-            // The far limit is <c>treeDrawRadiusSquared</c>, and it stays a limit rather than a ladder:
+            // The far limit is <c>treeCullBoundSquared</c>, and it stays a limit rather than a ladder:
             // beyond what the camera can see, and soon beyond what the player has scouted.
             var tier = CanopyTierAt(tree.Position);
+
 
             if (tier == 0)
             {
@@ -4641,7 +5195,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // A hundred and ten metres is past anything a player is looking at when they can see individual
         // plants at all, and it takes the grid to about eight thousand cells. The trees keep the full detail
         // radius, because a tree at two hundred metres is still a tree.
-        var radius = MathF.Min(MathF.Sqrt(treeDrawRadiusSquared), ScatterRadiusMetres);
+        var radius = MathF.Min(MathF.Sqrt(treeCullBoundSquared), ScatterRadiusMetres);
         // Tighter than the trees, because a tuft of grass is a few centimetres and stops being a tuft well
         // before a trunk stops being a trunk.
         const float spacing = 2.4f;
@@ -4905,6 +5459,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     }
 
     /// <summary>Which level of detail the crowding here earns: 0 full, 1 middle, 2 coarse.</summary>
+    // <b>The drawn-density cap is out again, and it is worth recording why.</b> It capped how many trees a
+    // canopy cell draws and widened the survivors, on the reasoning that a closed roof stops changing long
+    // before the trees under it stop being added. It did what it claimed — 4,130 trees and 4.1M triangles down
+    // to 1,915 and 2.45M — and the frame went 85.2 ms to 74.4 ms, which is nothing. So it cost two thousand
+    // visible trees and bought almost no time: whatever this frame is spending itself on, it is not tree
+    // geometry, and thinning the forest to find out was the wrong order of operations.
+
     private int CanopyTierAt(Vector2 at)
     {
         if (canopyCells == 0) return 0;
@@ -5125,7 +5686,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (art is null) return;
         foreach (var where in simulation.RecentFellings)
         {
-            if (Vector2.DistanceSquared(where, cameraFocus) > treeDrawRadiusSquared) continue;
+            if (Vector2.DistanceSquared(where, cameraFocus) > treeCullBoundSquared) continue;
             var ground = simulation.Terrain.SampleHeight(where);
             // Small: a stump is what is left of a trunk, not what is left of a canopy, so it is sized off
             // the footprint the simulation routed bodies around rather than off the tree that was drawn.
@@ -5398,9 +5959,27 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             }
             else if (selected)
             {
-                var ringModel = Matrix4x4.CreateScale(bodyScale * 1.42f, 0.055f, bodyScale * 1.42f) *
-                                Matrix4x4.CreateTranslation(position.X, height + 0.035f, position.Y);
-                unitInstances.Add(new InstanceData(ringModel, SelectionColor));
+                // <b>Sized off the body's radius in metres, which is not what bodyScale is.</b> That is a
+                // ratio against the default villager, so multiplying it by 1.1 produced 1.1 m for a villager
+                // — nearly three times the body — and 2.6 m for a wagon. A dimensionless number used as a
+                // length: right magnitude by luck at the default size and wrong everywhere else.
+                DrawSelectionMark(
+                    position,
+                    MathF.Max(0.42f, agent.Radius * 1.45f),
+                    SelectionPlateAlpha,
+                    square: false);
+            }
+            else if (hoveredAgent == agent.Id)
+            {
+                // <b>The half of the pair I left out.</b> Removing the hover tint took the only thing a hovered
+                // body had, because the mark was written for the selected case and never given the other one —
+                // so villagers alone had a hover state that showed nothing while every node had one. Same mark,
+                // same size, the weaker alpha.
+                DrawSelectionMark(
+                    position,
+                    MathF.Max(0.42f, agent.Radius * 1.45f),
+                    HoverPlateAlpha,
+                    square: false);
             }
 
             // Width is the footprint; height is not. Height used to track radius one for one, which was
@@ -5438,7 +6017,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 // Hostile bodies in a hostile colour, which is the one thing about a body that has to be
                 // readable before anything else on the screen is.
                 if (agent.Faction.Value != 0) person.Add(placement, RaiderColor);
-                else if (selected) person.Add(placement, SelectedUnitColor);
+                // <b>No tint on a body either, and the reason is consistency rather than taste.</b> A selected
+                // villager was repainted the old orange while nothing else was, and a hovered one went dark
+                // teal — so a villager spoke two colours no other object spoke, and the marker underneath it
+                // spoke a third. One language: everything picked gets the same mark on the ground, at two
+                // strengths, and models keep their own materials.
                 else person.Add(placement);
 
                 // The cart, drawn behind them, because a carter has to be findable in a crowd. A wider
@@ -5474,7 +6057,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 ? QueuedUnitColor
                 : agent.StuckSeconds > 0.35f ? StuckUnitColor
                 : stateDebug ? StateColor(agent.LocomotionState)
-                : selected ? SelectedUnitColor : UnitColor;
+                : UnitColor;
             // The cylinder still draws whenever it is carrying information the model cannot: a body
             // yielding under crowd pressure, a body failing to make progress, or the state overlay. Those
             // are the colours the whole locomotion layer is judged by and they must not be lost to an art
@@ -5534,7 +6117,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         {
             // Bodies already draw their own four, in their own colours, when selected.
             if ((proxy.Layer & ColliderLayer.Agent) != 0) continue;
-            if (Vector2.DistanceSquared(proxy.Center, cameraFocus) > treeDrawRadiusSquared) continue;
+            if (Vector2.DistanceSquared(proxy.Center, cameraFocus) > treeCullBoundSquared) continue;
 
             var role = (proxy.Roles & ColliderRole.MovementSolid) != 0
                 ? SolidColliderColor
@@ -5587,9 +6170,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"record {buildPhases.Record:F1} ms · " +
             $"LOAD {stagedLoad.Instances:N0} instances = {stagedLoad.Triangles / 1000L:N0}k triangles " +
             $"+ {stagedLoad.Casters / 1000L:N0}k cast · " +
+            $"STONE {outcropsDrawn} of {outcropsSeen} outcrops drawn · " +
+            $"TREENODES {treeNodesAlive} alive, {treesOffered} offered, {treesDrawn} drawn · " +
             $"TREES {treeTiers.Near}/{treeTiers.Mid}/{treeTiers.Far}/{treeTiers.Deep} near/mid/far/deep over " +
             $"{look.TreeCrowdMid:F0}/{look.TreeCrowdFar:F0} per {CanopyCellMetres:F0} m · " +
             $"{undergrowthDrawn} under · " +
+            $"GROUNDSUBMIT {groundLayersDrawn} layers in {groundSubmitMs:F2} ms · " +
             $"GROUND {drawnChunks.Count} of {groundChunks.Count} chunks, " +
             $"{drawnChunks.Sum(chunk => groundChunks[chunk].Count(layer => !layer.Blend && !layer.Water))} coats " +
             $"+ {blendedChunks.Sum(chunk => groundChunks[chunk].Count(layer => layer.Blend))} blends " +
@@ -5659,6 +6245,44 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void OnMouseUp(MouseButton button)
     {
+        // <b>Where the pointer thinks it is, in every space at once.</b> Reported from the chair as the mouse
+        // not lining up with the screen, and it is not answerable by reading: every link in the chain is
+        // self-consistent — the marquee, the ground raycast and ImGui all pair the cursor with the window's
+        // logical size — <em>provided the cursor is delivered in logical points</em>. On a HiDPI display, if
+        // the window library reports it in physical pixels instead, everything downstream is wrong by the
+        // scale factor and every piece of it looks correct in isolation.
+        //
+        // So: click the bottom-right corner. If the pointer reads near the frame size rather than near the
+        // logical size, the cursor is in physical pixels and that is the bug.
+        if (timingDebug)
+        {
+            var (lw, lh) = host.LogicalSize;
+            Console.WriteLine(
+                $"  pointer ({mouseX:F0}, {mouseY:F0}) · logical {lw}x{lh} · frame " +
+                $"{windowSize.Width}x{windowSize.Height} · scale {windowSize.Width / (float)MathF.Max(1, lw):F2} " +
+                $"· on terrain {pointerOnTerrain} at ({pointerWorld.X:F1}, {pointerWorld.Y:F1})");
+        }
+
+        // <b>Why the thing you clicked is or is not on screen.</b> Three theories about ghost markers were
+        // wrong — the tree draw radius, stale instance lists, a species failing to load — and each cost a round
+        // trip to the chair. This prints the whole drawing story of whatever was picked, so the next answer
+        // comes from one click instead of a guess.
+        if (timingDebug && hoveredNode.IsValid && simulation.Nodes.Contains(hoveredNode))
+        {
+            ref readonly var it = ref simulation.Nodes.Get(hoveredNode);
+            var ground = simulation.Terrain.SampleHeight(it.Position);
+            var away = Vector2.Distance(it.Position, cameraFocus);
+            var species = it.Kind == NodeKind.Tree ? TreeKindAt(it.Position, it.Id.Value) : -1;
+            var tier = it.Kind == NodeKind.Tree ? CanopyTierAt(it.Position) : -1;
+            var pressure = simulation.Terrain.Woodland?.At(it.Position) ?? -1f;
+            Console.WriteLine(
+                $"  picked {it.Kind} #{it.Id.Value} at ({it.Position.X:F1}, {it.Position.Y:F1}) " +
+                $"ground {ground:F2} m, {away:F0} m from focus (tree radius {MathF.Sqrt(treeCullBoundSquared):F0}) " +
+                $"· species {species} tier {tier} pressure {pressure:F2} " +
+                $"· stock {it.Stock.Wood}w/{it.Stock.Stone}s · drawn-test {IsDrawnThisFrame(in it)} " +
+                $"· pointer at ({pointerWorld.X:F1}, {pointerWorld.Y:F1}), {Vector2.Distance(it.Position, pointerWorld):F1} m away");
+        }
+
         if (button == MouseButton.Middle) draggingCamera = false;
         if (obstacleEditMode) return;
         if (button != MouseButton.Left) return;
@@ -5666,10 +6290,28 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var (width, height) = host.LogicalSize;
         selection.End(
             simulation.Agents,
+            simulation.Terrain.SampleHeight,
             camera.GetViewProjection(aspect),
             width,
             height,
             additiveSelection);
+
+        // <b>A click that caught no bodies, on something on the ground, picks that instead.</b> Ordered after
+        // the marquee on purpose: dragging a box is about units and must not be hijacked, and a drag that
+        // selected units has already answered the question. Only a click that came up empty falls through to
+        // the map.
+        if (selection.Selected.Count > 0)
+        {
+            selectedNode = NodeId.None;
+            return;
+        }
+
+        selectedNode = hoveredNode;
+        if (selectedNode.IsValid)
+        {
+            ref readonly var picked = ref simulation.Nodes.Get(selectedNode);
+            Console.WriteLine($"  picked {picked.Kind} at ({picked.Position.X:F0}, {picked.Position.Y:F0})");
+        }
     }
 
     public void OnMouseWheel(float offsetX, float offsetY)

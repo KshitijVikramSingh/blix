@@ -25,14 +25,20 @@ namespace RTSGame.Simulation.Economy;
 /// </remarks>
 internal static class Quarrying
 {
-    /// <summary>Units of stone one outcrop is worth.</summary>
+    /// <summary>Units of stone one block of an outcrop is worth.</summary>
     /// <remarks>
-    /// Deliberately larger than a tree's ninety. A wood is many small stocks and a quarry is one big one —
-    /// felling is a thing you do to a forest, quarrying is a thing you do to a <em>place</em>, and a deposit
-    /// that ran out in an afternoon would be a large rock rather than a quarry. At 300 it is ten villager
-    /// loads, so working one out is a job that spans seasons and is worth putting a depot beside.
+    /// <b>Per block, and it used to be per deposit, which is the same number meaning two different things.</b>
+    /// At 300 a deposit was one boulder holding ten villager loads. Deposits are clusters now — several blocks
+    /// standing together as one working — so leaving it at 300 quadrupled how much stone a map held without
+    /// anybody choosing that.
+    /// <para>
+    /// At 120 a block is four loads and a middling quarry of four or five blocks holds about what a single
+    /// deposit used to, which puts a map's total back where it was judged to be right. Still comfortably
+    /// larger than a tree's ninety, and still the same claim: a wood is many small stocks and a quarry is one
+    /// big one you go to.
+    /// </para>
     /// </remarks>
-    internal static float StonePerOutcrop = 300f;
+    internal static float StonePerOutcrop = 120f;
 
     /// <summary>
     /// Share of its year a quarrier may spend walking, which is a cutter's share because it is the same year.

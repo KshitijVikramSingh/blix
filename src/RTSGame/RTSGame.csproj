@@ -42,6 +42,8 @@
     <GlslShader Include="Shaders\shadow_caster.vert" />
     <GlslShader Include="Shaders\shadow_caster.frag" />
     <GlslShader Include="Shaders\contact.vert" />
+    <GlslShader Include="Shaders\selection.vert" />
+    <GlslShader Include="Shaders\selection.frag" />
     <GlslShader Include="Shaders\contact.frag" />
     <GlslShader Include="Shaders\smoke.vert" />
     <GlslShader Include="Shaders\smoke.frag" />

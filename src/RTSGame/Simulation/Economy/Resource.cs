@@ -99,7 +99,25 @@ internal struct NodeStock
         }
     }
 
-    public readonly int Total
+    /// <summary>
+    /// Everything here, whatever it is.
+    /// </summary>
+    /// <remarks>
+    /// <b>Named fields rather than a loop over <see cref="Resources.All"/>, and it is the one place in this file
+    /// that earns the exception.</b> Written as a loop it is correct by construction and it is also the hottest
+    /// arithmetic in the simulation: <c>SweepSpentNodes</c> asks it for every node on every tick, so on a map
+    /// with thirty thousand trees that is a million indexer calls a second through a switch. Measured, the
+    /// settlement year went from minutes to not finishing.
+    /// <para>
+    /// The exchange is that a new resource has to be added here by hand, which is exactly the silent hole this
+    /// file's remarks warn about — so it is pinned by a self-test that compares this against the loop. The rule
+    /// is not "never write it out", it is "never write it out without something checking".
+    /// </para>
+    /// </remarks>
+    public readonly int Total => Grain + Wood + Stone;
+
+    /// <summary>The same sum, computed generically, for the test that pins <see cref="Total"/>.</summary>
+    public readonly int TotalBySweep
     {
         get
         {
@@ -114,20 +132,30 @@ internal struct NodeStock
     /// Conservation asks this, and it has to ask it per resource: a drift of one unit of grain appearing and
     /// one unit of wood vanishing sums to nothing, and is two broken ledgers rather than none.
     /// </remarks>
-    public readonly bool IsZero
-    {
-        get
-        {
-            foreach (var resource in Resources.All)
-            {
-                if (this[resource] != 0) return false;
-            }
-
-            return true;
-        }
-    }
+    public readonly bool IsZero => Grain == 0 && Wood == 0 && Stone == 0;
 
     public void Add(Resource resource, int amount) => this[resource] += amount;
+
+    /// <summary>
+    /// Adds another stock to this one, field by field.
+    /// </summary>
+    /// <remarks>
+    /// <b>The same exception <see cref="Total"/> earns, and for the same measured reason.</b> Written as a loop
+    /// over <see cref="Resources.All"/> it costs six indexer calls through a switch per node, and the callers
+    /// are <c>TotalStored</c> and <c>TotalHeld</c> — swept once per node per tick by the conservation check. On
+    /// a four-thousand-node map that is a hundred thousand switch dispatches a second, and it took the
+    /// settlement year's tick from 1.1 ms to somewhere north of 2.5.
+    /// <para>
+    /// Pinned by the same self-test that pins Total, so a resource added to the enum and not to this line is
+    /// caught rather than silently dropped from every conservation sum in the game.
+    /// </para>
+    /// </remarks>
+    public void Add(in NodeStock other)
+    {
+        Grain += other.Grain;
+        Wood += other.Wood;
+        Stone += other.Stone;
+    }
 }
 
 /// <summary>Sub-unit accumulation, so a continuous rate can fill an integer store.</summary>

@@ -94,6 +94,8 @@ internal sealed class SettlementHud : IDisposable
         string? light,
         string? geometry,
         string? lab,
+        NodeId pointed,
+        NodeId picked,
         int width,
         int height)
     {
@@ -188,13 +190,18 @@ internal sealed class SettlementHud : IDisposable
         // Bottom left: what is selected, what is under the pointer, and what to press.
         lines.Clear();
         Describe(world, selected);
-        var hovered = pointerOnTerrain
-            ? EconomySystem.NodeAt(world.Nodes, pointer, PickRadius)
-            : NodeId.None;
-        if (world.Nodes.Contains(hovered)) DescribeNode(world, hovered);
+        // <b>Given, not picked again.</b> This used to run its own NodeAt with its own radius, which was fine
+        // while the panel was the only thing that cared. It stopped being fine the moment a marker was drawn on
+        // the ground: two picks means two answers, and a highlight under one building while the panel describes
+        // another is the failure that would follow. The loop decides; both readers agree by construction.
+        var hovered = pointerOnTerrain ? pointed : NodeId.None;
+        // What is held outranks what the pointer happens to be crossing — the panel should not change under
+        // you while you move the mouse toward a key.
+        var described = world.Nodes.Contains(picked) ? picked : hovered;
+        if (world.Nodes.Contains(described)) DescribeNode(world, described);
         // The settlement's prompts are about a settlement. In the lab there is not one, and offering to
         // build a granary is worse than offering nothing.
-        if (lab is null) Prompts(world, selected, hovered, additive, routeSource);
+        if (lab is null) Prompts(world, selected, described, additive, routeSource);
 
         var blockHeight = lines.Count * step;
         Block(size, new Vector2(pad, height - pad - blockHeight), step);
@@ -202,7 +209,7 @@ internal sealed class SettlementHud : IDisposable
     }
 
     /// <summary>How near the pointer counts as pointing at a node. Matches the route key's reach.</summary>
-    private const float PickRadius = 6f;
+
 
     private void Describe(SimulationWorld world, IReadOnlyCollection<AgentId> selected)
     {
@@ -285,7 +292,7 @@ internal sealed class SettlementHud : IDisposable
         {
             lines.Add((
                 $"{name} SITE · {Construction.StateOf(in node)}",
-                node.TimberWanted > 0 ? Warning : Action));
+                node.WantsMaterials ? Warning : Action));
             return;
         }
 
@@ -349,7 +356,7 @@ internal sealed class SettlementHud : IDisposable
             else if (node.Kind == NodeKind.Farm) lines.Add(("U — WORK THIS FIELD", Action));
             else if (node.Kind == NodeKind.Tree) lines.Add(("U — CUT THIS TREE", Action));
 
-            var haulable = node.Stores || node.IsPile || node.TimberWanted > 0;
+            var haulable = node.Stores || node.IsPile || node.WantsMaterials;
             if (haulable)
             {
                 lines.Add((

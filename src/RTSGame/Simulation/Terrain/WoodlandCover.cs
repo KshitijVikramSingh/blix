@@ -78,10 +78,154 @@ internal sealed class WoodlandCover
             transform.Height * transform.CellSize);
         cells = Math.Max(2, (int)MathF.Ceiling(extent / cellMetres) + 1);
         baked = new float[cells * cells];
+        // <b>Two fields, because they answer two different questions.</b> Geography says <em>where a wood is</em>
+        // and is coherent over hundreds of metres; ground, shelter, aspect and soil say <em>what kind</em> and
+        // vary cell to cell. Baked apart so the first can decide the shape and the second can only vary the
+        // density inside it — see Concentrate for why mixing them first destroyed the shape.
+        var shape = new float[cells * cells];
+        var kind = new float[cells * cells];
         for (var z = 0; z < cells; z++)
         for (var x = 0; x < cells; x++)
         {
-            baked[z * cells + x] = Compute(origin + new Vector2(x, z) * cellMetres);
+            var at = origin + new Vector2(x, z) * cellMetres;
+            shape[z * cells + x] = ShapeOf(at);
+            kind[z * cells + x] = Ground(at) * Shelter(at) * Aspect(at) * Soil(at);
+        }
+
+        Concentrate(shape, kind, layout?.Woodedness ?? 1f);
+    }
+
+    /// <summary>
+    /// Rescales the baked field against its own distribution, so a share of the map is genuinely wooded.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reported from the chair: no stretches of forest on any archetype, relief or seed — only small groups
+    /// lying around.</b> Measured, the field explains it exactly. Across three archetypes the median pressure
+    /// was 0.02–0.03, p90 was 0.04–0.53, and the share of the map at closed-canopy pressure was <b>0%, 1% and
+    /// 3%</b>. There was nothing for a forest to be.
+    /// <para>
+    /// <b>Two causes, and the second is the structural one.</b> The floor was too low, which is a dial. But
+    /// <see cref="Compute"/> is a product of five sub-unity terms — geography, ground, shelter, aspect, soil —
+    /// and a product of five such factors is small almost everywhere: the median came out at 0.02 from a
+    /// geography floor of 0.10, so the other four multiplied to about a fifth. Worse, a high value needs all
+    /// five to agree at once, and the five have <em>different spatial patterns</em>, so agreement happens at
+    /// isolated points rather than over regions. Isolated points are clumps. <b>Forest is a region, and a
+    /// product of unrelated fields does not make regions.</b>
+    /// </para>
+    /// <para>
+    /// <b>So the field is renormalised against itself rather than re-tuned.</b> Take the share of the map that
+    /// should be wooded, find the value at that quantile, and stretch everything above it into closed-canopy
+    /// pressure and everything below it into scattered. The underlying field is spatially coherent — two noise
+    /// octaves at 230 m and 95 m — so thresholding it yields connected blobs, which is what a wood is. The five
+    /// terms keep their whole say over <em>where</em> the wood goes; what they lose is their accidental veto
+    /// over whether any wood exists at all.
+    /// </para>
+    /// <para>
+    /// Exactly the device §60 arrived at for the biome thresholds and §62 for the regions: <b>a rank within
+    /// this landscape's own distribution, not an absolute value</b>. An absolute threshold on a product of five
+    /// factors is a threshold nobody can predict; a quantile is a statement about area, which is the thing
+    /// actually being chosen.
+    /// </para>
+    /// </remarks>
+    /// <summary>One box pass over the grid, in place, so a threshold has something coherent to cut.</summary>
+    private void Blur(float[] field)
+    {
+        var copy = (float[])field.Clone();
+        for (var z = 0; z < cells; z++)
+        for (var x = 0; x < cells; x++)
+        {
+            var total = 0f;
+            var taken = 0;
+            for (var dz = -1; dz <= 1; dz++)
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                var nx = x + dx;
+                var nz = z + dz;
+                if (nx < 0 || nz < 0 || nx >= cells || nz >= cells) continue;
+                total += copy[nz * cells + nx];
+                taken++;
+            }
+
+            field[z * cells + x] = total / MathF.Max(1, taken);
+        }
+    }
+
+    private void Concentrate(float[] shape, float[] kind, float woodedness)
+    {
+        if (baked.Length < 16) return;
+
+        // What share of the map is wood. Pastoral country keeps its copses and hedgerow trees; deeply wooded
+        // country is wood with fields in it. Both ends are places, which "a few per cent" was not.
+        var share = Math.Clamp(0.12f + 0.34f * Math.Clamp(woodedness, 0f, 1.6f), 0.06f, 0.68f);
+
+        // <b>A map with no relief has no woodland geography, because it has no geography.</b> Every term that
+        // decides where a wood belongs — slope, shelter, aspect, height, soil depth — is constant on a plain, so
+        // the only thing left shaping it is noise, and thresholding noise at two-thirds gives two-thirds of the
+        // map under closed canopy for no reason anybody can see.
+        // <para>
+        // That matters because the flat map is not a place, it is the fixture every economic rate was
+        // calibrated on. It carried about 4,500 trees historically and concentrating woodland took it to
+        // 28,976 — a sixfold change to the thing §22's numbers were measured against, arrived at as a side
+        // effect of making relief maps read better.
+        //
+        // (The tick did get dearer with those trees, and I mis-blamed it for the settlement year overrunning a
+        // timeout. The timeout was mine: the gate imposes none, and that leg has always taken longer than the
+        // ten minutes I gave it. The fixture belongs near its calibrated count either way, which is why this
+        // stays.)
+        // </para>
+        // <para>
+        // So the share follows the relief that would justify it. <c>strength</c> is already this class's measure
+        // of whether the ground has shape worth reading — zero on a plain, one past eight metres of range — and
+        // it is the honest multiplier: no shape, no forest, just trees.
+        // </para>
+        // Tuned so the flat fixture lands near the 4,500 trees every economic rate was measured against, rather
+        // than near a number that merely looks reasonable: see §22 for what depends on it.
+        share *= 0.10f + 0.90f * strength;
+
+        // <b>Thresholded on the shape alone, and that is the whole correction.</b> Renormalising the product
+        // fixed the distribution and left the structure exactly as speckled as it was: 54% of the map came out
+        // at closed-canopy pressure and read, correctly, as "an area with a lot of trees around" rather than as
+        // forest — because the product's spatial pattern is the fine terms' pattern, and slope, aspect and
+        // biome change every cell. Thresholding a speckled field gives more speckles.
+        //
+        // Geography is two noise octaves at 230 m and 95 m, so its level sets are blobs hundreds of metres
+        // across. Cut that, and the wood has an outline.
+        // <b>Smoothed before it is cut, because a threshold on a noisy field frays into specks.</b> Measured
+        // before this: 17 patches of which 94% were under a third of a hectare — one real wood and sixteen
+        // bits of lint, which is the "bunches of 3-4 tiles" case exactly. The 95 m octave is what does it: it
+        // rides on the 230 m one and wanders back and forth across the cut, and every wobble near the line
+        // becomes its own island.
+        //
+        // Two box passes over an 8 m grid is a blur of roughly 40 m, which is small against a wood and large
+        // against a speck. What survives it is what was a wood before it.
+        Blur(shape);
+        Blur(shape);
+
+        var sorted = (float[])shape.Clone();
+        Array.Sort(sorted);
+        var threshold = sorted[Math.Clamp((int)(sorted.Length * (1f - share)), 0, sorted.Length - 1)];
+        // The top of the distribution rather than the single highest cell, so one freak value cannot flatten
+        // the whole rescale.
+        var ceiling = sorted[Math.Clamp((int)(sorted.Length * 0.995f), 0, sorted.Length - 1)];
+        var headroom = MathF.Max(1e-4f, ceiling - threshold);
+
+        for (var i = 0; i < baked.Length; i++)
+        {
+            var here = shape[i];
+            // <b>The other four terms modulate, they no longer veto.</b> Compressed into [0.62, 1] so the
+            // thinnest ground inside a wood still carries a wood — a north-facing scree shoulder in the middle
+            // of a forest is a thinner part of the forest, not a hole in it. Their old power to multiply the
+            // answer to nothing is what made agreement between five fields the price of any tree at all.
+            var vary = 0.55f + 0.45f * Math.Clamp(kind[i], 0f, 1f);
+            baked[i] = here >= threshold
+                // <b>Inside a wood it is a wood, and the modifiers only decide how thick.</b> They multiplied
+                // the whole band before, which put the thinner parts of a forest back under the closed-canopy
+                // line — so the share of the map that read as wood came out at 3% where 29% was asked for. Now
+                // 0.88 is the floor of being wooded and everything above it is what the ground makes of it.
+                ? 0.88f + 1.02f * MathF.Min(1f, (here - threshold) / headroom) * vary
+                // Below it, open country that still has something in it: hedgerow trees and copses, relative to
+                // where this map's wood actually starts.
+                : 0.34f * (threshold <= 1e-4f ? 0f : here / threshold) * vary;
         }
     }
 
@@ -129,13 +273,6 @@ internal sealed class WoodlandCover
         return (a + (b - a) * tx) * (1f - tz) + (c + (d - c) * tx) * tz;
     }
 
-    /// <summary>The honest computation, run once per grid cell at construction and never per query.</summary>
-    private float Compute(Vector2 at)
-    {
-        var ground = Ground(at);
-        if (ground <= 0f) return 0f;
-        return Geography(at) * ground * Shelter(at) * Aspect(at) * Soil(at);
-    }
 
     /// <summary>
     /// What the ground is made of, as woodland sees it: enough soil, and neither too dry nor too wet.
@@ -190,32 +327,35 @@ internal sealed class WoodlandCover
     /// able to empty ground the noise wanted full.
     /// </para>
     /// </remarks>
-    public float Geography(Vector2 at)
+    /// <summary>
+    /// The raw shape of where woodland belongs: two noise octaves, plus whatever the layout authored.
+    /// </summary>
+    /// <remarks>
+    /// <b>Separated from <see cref="Geography"/> because a quantile needs a field with spread, and Geography's
+    /// output is deliberately flat over most of a pastoral map.</b> Its window clamps the shaped noise to zero
+    /// below a threshold and adds a floor, so on an open roll almost every cell reads exactly that floor —
+    /// which made the cut land on the floor and pass <em>everything</em>. Measured: DiagonalRiver came out 100%
+    /// closed canopy, one wood over the whole map.
+    /// <para>
+    /// The raw noise is spread across its range by construction, so a quantile on it means what a quantile
+    /// should. The window and the floor were doing the same job the share now does — deciding how much of the
+    /// map is wood — and doing it in units nobody could predict.
+    /// </para>
+    /// <para>
+    /// The authored features stay in, and belong here rather than after: a wood the layout asked for should
+    /// clear the threshold on that account, and a clearing should fail it. Applied afterwards, a clearing would
+    /// sit inside a wood at closed-canopy pressure with its trees taken out by a second rule.
+    /// </para>
+    /// </remarks>
+    private float ShapeOf(Vector2 at)
     {
         var broad = LatticeNoise.Value(at * (1f / 230f) + new Vector2(11.3f, 47.9f));
         var fine = LatticeNoise.Value(at * (1f / 95f) + new Vector2(83.1f, 5.7f));
         var n = broad * 0.72f + fine * 0.28f;
-
-        // <b>Woodedness moves the threshold; it does not scale the amplitude.</b> Scaling was the obvious
-        // reading and it did almost nothing, for a reason worth keeping: where the noise already calls forest
-        // the pressure is over one and the placement saturates, so multiplying changes nothing there — it only
-        // lifts middling ground, and middling ground is capped by the spacing rule from becoming forest. So a
-        // "deeply wooded" map came out at half open with a few more stragglers.
-        //
-        // Shifting the window changes <em>how much of the map is forest at all</em>, which is the thing being
-        // asked for. A fifth of the window either way: pastoral country needs the noise near its peak before a
-        // wood happens, deeply wooded country takes almost any excuse.
-        var woodedness = layout?.Woodedness ?? 1f;
-        var shift = (woodedness - 1f) * 0.19f;
-        var t = Math.Clamp((n - (0.50f - shift)) / 0.21f, 0f, 1f);
-        t = t * t * (3f - 2f * t);
-        var cover = 0.012f + 1.9f * t * t;
-        if (layout is not { } plan) return cover;
-        // The authored woods still scale, mildly, so a pastoral map's wooded ridge is a copse on a ridge rather
-        // than a full belt — the statement survives at the size the country allows.
-        var asked = cover + plan.WoodBoost(at) * MathF.Min(1.3f, woodedness);
-        return MathF.Max(0f, asked - plan.Clearing(at) * 1.4f);
+        if (layout is not { } plan) return n;
+        return n + plan.WoodBoost(at) * 0.45f - plan.Clearing(at) * 0.60f;
     }
+
 
     /// <summary>What the ground itself will carry: its country, its slope, its height, its climate.</summary>
     private float Ground(Vector2 at)
@@ -243,6 +383,12 @@ internal sealed class WoodlandCover
     /// a hollow, on a lee slope, behind a ridge, and fails on an exposed top. Forty metres because a hollow
     /// between two tufts shelters nothing and a whole valley is a climate rather than a shelter.
     /// </remarks>
+    // <b>Compute and Geography are gone, and their replacement is why.</b> Compute multiplied five fields into
+    // one pressure and Geography shaped the noise with a window and a floor. Both are superseded by the split
+    // in the constructor — ShapeOf decides where a wood is and the four remaining terms decide how thick it is
+    // inside one — and keeping them would have left a working implementation of the design that could not make
+    // a forest, one call away from whoever next touches this file.
+
     private float Shelter(Vector2 at)
     {
         const float reach = 40f;

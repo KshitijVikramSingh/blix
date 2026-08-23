@@ -6873,3 +6873,197 @@ three dimensions and a trunk is felled in one.
 does not exist — enough to prove stone moves out of the rock, into a pair of hands, into a store, with
 conservation holding across a resource that has no production term. What it is *for* belongs to the placement
 and building chain, which is where stone stops being a stock and becomes a cost.
+
+## 72. Six bugs behind one another, and a library fix worth more than all of them
+
+> the villager idea is good, let's extend that to the default interface
+> tint is way too strong, disc invisible
+> looks weird and inconsistent … the picker also tends to cut through the surface
+> bug - no relief above 0 generates any trees beyond tiny groups
+> if 54% of the map is at closed canopy but that 54% is spread out across the entire map in bunches of
+> 3-4 tiles it won't actually read as a forest, only as an area with a lot of trees around
+
+A long session of reported symptoms, each of which turned out to be sitting on top of the next. Recorded in
+the order they were *found*, which is not the order they were reported.
+
+### The selection layer, and three wrong attempts at it
+
+Asked for "an on ground perimeter/background so I can see selected sites". Built an outline of four bars.
+Withdrawn on report — at any thickness it read as a strip laid on the earth rather than a property of the
+thing. Tried tinting the model instead, which is what a selected villager already does; also withdrawn,
+because `world.frag` reads a tint as `albedo = vTint.rgb; surface = vTint.a`, so a tint does not highlight a
+building, it **replaces** it — six materials flattened to one colour and the material class swapped along
+with them. There was no weaker version available.
+
+Third attempt: a translucent decal. Reused the contact-shadow pipeline, whose docstring is the argument for
+it — "a disc is not a thing in the world, it is a mark on the thing under it". Invisible, because
+`contact.frag` hard-codes `vec4(0,0,0,…)` and reads the instance colour not at all. Its own shader, then —
+and rebalanced twice, first too faint and then, over-correcting, a near-solid blob.
+
+**What survived:** one colour at two alphas, round for what grew and square for what was built, leaned onto
+the ground with the same shear the contact shadows use. The square needed a mesh that carries *Chebyshev*
+distance in the channel a disc uses for radius, so one shader draws both — tessellated, because Chebyshev
+distance is not linear across a quad.
+
+### Picking: three fixes, each exposing the next
+
+- **The ground under the cursor is not the thing the cursor is over.** `NodeAt` picked by distance from where
+  the ray met the terrain, and a ray goes through a granary's roof to land ~5.7 m behind it at this pitch.
+  Replaced with ray-versus-box.
+- **The box was a lie about the tree.** 7 m tall against a 4.5 m tree, so the ray clipped two metres of empty
+  sky above a tree ten metres to one side. Measured from the chair: a tree picked **11.1 m from where the
+  pointer met the ground**. Generosity belongs sideways, not upward — width costs a near miss, height costs a
+  distant false hit.
+- **The ray did not know the ground is opaque.** Anything it reached after meeting the terrain was behind the
+  terrain, and was being picked.
+
+And the one that mattered most: `TryProject` transformed every agent at a hard-coded world **y = 0.8**.
+Correct at y = 0, which is why it survived; on ground running −21 m to +55 m it projected villagers tens of
+metres from where they are drawn, and click and marquee both went through it. **The sixth flat-ground
+constant in a world with hills**, after the far plane, the detail radius, the ground draw radius, the shadow
+box and the site scorer's grade gate.
+
+### The deep tier never drew anything
+
+Reported as trees missing and the log lying. Both true. `treesDeep` was absent from `owned` — the list
+`Stage` submits from and `Begin` clears — so every tree in the deepest crowding tier was staged into a model
+that is never submitted and never reset: counted as drawn, invisible, and accumulating instances for the life
+of the process. Diagnosed from the chair by pushing both crowding thresholds to 12 and 20, which keeps every
+tree in a tier that *is* in that list.
+
+It also makes a docstring in that file false. The deep tier was justified by "78 ms against 21 ms"; it
+delivered that saving by drawing nothing, so the number was never improved on.
+
+**Adding a tier is three edits — the array, the branch that fills it, and the registration — and only two
+have a compiler behind them.**
+
+### The instance upload, which was worth more than everything else here
+
+Ground coats are one instance each, and there were 85 of them on a hilly map costing 3.0 ms. Thirty-five
+microseconds for one draw of one instance is absurd, and the cause was not the draw: `InstanceBuffer.Write`
+uploaded its **whole 16,384-instance capacity** every call, because `MaterialBindings.WriteBuffer` demanded a
+payload exactly the size of the block. 1.31 MB per batch per frame, 111 MB a frame for the ground alone.
+
+```
+                     before      after
+ground submit       3.01 ms     0.07 ms
+record             11.5  ms     1.0  ms
+frame @ zoom 118   40.1  ms    19.3  ms
+```
+
+A library fix: every batch in every demo was paying it. And the two follow-ups I had proposed — a compact
+tree index, caching species per tree — were sized against a frame that no longer existed, so they were
+dropped rather than done. **Work whose justification evaporates should be abandoned, not delivered.**
+
+### Forest: share is not shape
+
+Three rounds, and the first two were wrong in instructive ways.
+
+1. **The floor.** A pastoral roll left `cover = 0.012 + 1.9t²` sitting on its floor almost everywhere: 267
+   trees on a 600 m map. Raised the floor — and made it worse, because lifting the whole field uniformly
+   spreads trees more evenly, which is the opposite of forest.
+2. **Renormalising the product.** Took the baked field's own distribution and stretched a chosen share into
+   closed canopy. The share became honest and the structure did not: 54% of the map at closed canopy, in **17
+   patches of which 94% were under a third of a hectare**. Reported exactly: "it won't actually read as a
+   forest, only as an area with a lot of trees around."
+
+   The instrument was the problem too — "% at closed canopy" cannot tell one wood from a hundred specks.
+   Replaced with a flood fill over connected closed-canopy cells, four-connected so touching corners do not
+   flatter it.
+3. **The cut was on the wrong field.** `Compute` multiplies five sub-unity terms, and a product of unrelated
+   fields makes *spikes*, not regions: a high value needs all five to agree, and they have different spatial
+   patterns. Geography alone is coherent at 230 m and 95 m, so its level sets are blobs. Cut that, blur it
+   twice first so a threshold does not fray into islands, and let the other four vary thickness *inside* a
+   wood without being able to veto it.
+
+   Even then the cut field has to be the raw noise, not `Geography`'s output — that clamps to a floor over
+   most of a pastoral map, so the quantile landed on the floor and passed everything. DiagonalRiver came out
+   100% forest.
+
+**Result:** 15–20 ha connected woods, 23% of the map wooded on a pastoral roll and 66% on a deeply wooded
+one. `Compute` and `Geography` deleted rather than left switched off.
+
+### Two dials re-measured twice, in both directions
+
+The anchor budget was 62,000/km² when acceptance was 2–3%; it was really a division by the acceptance rate.
+Renormalising raised acceptance tenfold and the same budget produced 31,000–57,000 trees. Cut to 6,000 to
+hold the old *total* — which was the wrong target, because the old total spread thinly over a whole map is
+woodland pasture when concentrated into two thirds of one. Reported: "our older maps were at least 2-3x more
+dense." Raised to 25,000, and acceptance squared so that a bigger budget fills woods instead of peppering the
+open — where a scattered tree is the expensive kind, because LOD is by crowding and a tree standing alone is
+drawn at full detail.
+
+**The number to aim at is density inside a wood, not a total across a map.**
+
+### A negative result worth keeping
+
+Capped drawn trees per canopy cell and widened the survivors, on the deep tier's own argument. It worked as
+claimed — 4,130 trees and 4.1M triangles down to 1,915 and 2.45M — and the frame went 85.2 to 74.4 ms, which
+is nothing. Reverted. **Whatever that frame is spending itself on, it is not tree geometry**, and thinning the
+forest to discover that was the wrong order of operations.
+
+### Culling, and what it says about the architecture
+
+Trees were culled by a radius from `cameraFocus`, where `VisibleGroundRadius` is frustum trigonometry
+measured from the **camera**. Two different points: the visible ground is an asymmetric trapezoid reaching
+past the focus, so a circle centred there under-covers its far side — and under-covers more the closer the
+camera gets. Once the ground began following the frustum this session, the two disagreed visibly: grass drawn
+where trees were culled, trees vanishing on zoom-in.
+
+Trees now answer to `InView`, with the radius demoted to a coarse bound at twice the visible extent whose
+only job is to keep the far half of a big map out of the loop. The frustum test also moved *ahead* of the
+crown width, which needs a woodland lookup — a cheap conservative cull before an exact one, which is the
+whole trick and was backwards.
+
+**The general shape**, agreed for the next arc: there are a dozen independent camera-centred scalars —
+`VisibleGroundRadius`, `GroundDrawRadius`, `DetailRadius`, `SunOrthoExtent`, the tree bound,
+`ScatterRadiusMetres`, `ContactRadiusMetres`, `ShadowReachMetres`, `FrustumMarginMetres`, the far plane — and
+`GeometryLine()` exists solely to print "the distances that are supposed to agree with each other", which is
+this file already admitting the problem. Every one collapses 3D frustum information into a 2D distance, which
+is the flat-ground bug class at its source. Next: one far plane feeding every distance as a fraction, then
+delete the radius prefilters wherever `InView` already decides.
+
+### Stone got a sink
+
+Construction costs are per material — `Construction.CostFor(kind)` returns a `NodeStock`, and
+`TimberWanted` became `Wanted(resource)` plus `WantsMaterials`. The old member was **deleted** rather than
+kept as a shim, so the compiler named all seven callers including one in the self-tests.
+
+A granary needs 8 sacks of stone against 18 of timber. A cottage is timber and thatch; the depot stays
+timber-only for the reason already written above its cost — it is the answer to a receding wood line and
+cannot be priced in a resource some maps put 88 m out of reach.
+
+Three places would have half-worked: the hauling board collected demand for wood only, `Raise` consumed only
+the timber, and the site's visual measured delivery as wood-over-timber so a granary waiting on stone showed
+a full stack of logs.
+
+### And the village was playing a calibration map
+
+`--relief-amplitude` defaults to zero, which is right for the headless runs — every rate was measured on a
+plain and a fertility of exactly 1.00 depends on there being no soil field — and wrong for the thing a person
+opens. It is why the HUD kept reading FLAT GROUND, why there was never any stone (bare rock needs relief to
+be bare on), and why the woodland never showed its shaped form. The village defaults to 32 m now, and to
+YValley, because DiagonalRiver's roll on the default seed is the sparsest thing the generator makes.
+
+### The gate splits in two
+
+Two of the five legs are simulated years — 162,000 ticks, sweeping every node on each for conservation — and
+they gate every change including the ones that cannot possibly affect them. Reported from the chair: they
+"take impractically long". The failure mode of a slow gate is not waiting, it is **not running it**, which is
+strictly worse.
+
+So: three quick legs by default (a broken rule, a defence that stops defending, a generator that only works
+at one setting — everything whose failure is a property of a tick or a single run) and `--years` for the two
+that answer "does this economy still feed itself", which no assertion can, because starving in the fourth
+season is a property of a year. Quick tier: 341 s. The summary line names what was skipped, because a gate
+that quietly runs less than it used to is a gate that lies.
+
+**And a regression found by the split.** Chasing why the year leg had slowed from 1.13 ms/tick to 2.5–4.4, I
+first blamed my own timeout, then the tree count, then a retry storm in the job layer — all wrong. It was
+`TotalStored` and `TotalHeld` looping `Resources.All` through the switch-based indexer, twice per resource per
+node, swept once per node per tick by the conservation check. A hundred thousand switch dispatches a second.
+
+Back to `Add(in NodeStock)` with named fields, and `WantsMaterials` checks `IsBuilt` once rather than per
+resource. 1.465 ms/tick. **Third time in one session that a loop over `Resources.All` — correct by
+construction — was far too slow where it was actually called.** The rule now written in the code: a
+hand-written sum is allowed only with a self-test pinning it to the generic one, and there is one.

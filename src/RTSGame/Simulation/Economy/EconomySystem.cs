@@ -55,18 +55,7 @@ internal struct ResourceTotals
     }
 
     /// <summary>Whether every resource is exactly zero. See <see cref="NodeStock.IsZero"/>.</summary>
-    public readonly bool IsZero
-    {
-        get
-        {
-            foreach (var resource in Resources.All)
-            {
-                if (this[resource] != 0) return false;
-            }
-
-            return true;
-        }
-    }
+    public readonly bool IsZero => Grain == 0 && Wood == 0 && Stone == 0;
 
     public void Add(Resource resource, long amount) => this[resource] += amount;
 }
@@ -746,16 +735,22 @@ internal sealed class EconomySystem
             if (!site.IsAlive || site.IsBuilt) continue;
             // Materials first: hands standing at a site with no timber are hands doing nothing, which is
             // the difference between a hauling problem and a labour problem and the report says which.
-            if (site.TimberWanted > 0 || site.Hands <= 0) continue;
+            if (site.WantsMaterials || site.Hands <= 0) continue;
 
             site.BuildWork += site.Hands * deltaSeconds;
             if (!site.IsBuilt) continue;
 
-            // Finished. The timber stops being timber, so it leaves the world through the same door a loaf
-            // does and the identity still closes.
-            var timber = Construction.TimberFor(site.Kind);
-            site.Stock.Add(Resource.Wood, -timber);
-            consumed.Add(Resource.Wood, timber);
+            // Finished. Every material stops being material, so it leaves the world through the same door a
+            // loaf does and the identity still closes — all of them, because consuming only the timber would
+            // have left the stone sitting in a finished building as stock nobody can reach and conservation
+            // would have been right about it forever.
+            var cost = Construction.CostFor(site.Kind);
+            foreach (var resource in Resources.All)
+            {
+                if (cost[resource] <= 0) continue;
+                site.Stock.Add(resource, -cost[resource]);
+                consumed.Add(resource, cost[resource]);
+            }
             site.BuildWork = Construction.LabourFor(site.Kind);
             Raised++;
         }
@@ -1481,17 +1476,26 @@ internal sealed class EconomySystem
     {
         foreach (ref readonly var site in nodes.All)
         {
-            if (!site.IsAlive || site.TimberWanted <= 0) continue;
-            var from = NearestStoreWith(
-                nodes,
-                Resource.Wood,
-                Math.Min(site.TimberWanted, Math.Max(1, worthLoad)),
-                site.Faction,
-                site.Position);
-            if (!nodes.Contains(from)) continue;
-            // Above a producer's overflowing yard, which is 2.0 at its worst: idle labour costs more than
-            // stalled production, because a farm that stops producing still has its hands doing something.
-            tasks.Add(new HaulTask(from, site.Id, Resource.Wood, 2.5f));
+            if (!site.IsAlive || !site.WantsMaterials) continue;
+            // <b>One task per material still owed, not one for timber.</b> A granary needs stone as well now,
+            // and a board that only ever offered wood would leave a site standing at "wants 8 stone" forever
+            // with hands beside it and no cart coming — the exact failure this whole layer exists to prevent,
+            // reproduced for the new material.
+            foreach (var resource in Resources.All)
+            {
+                var owed = site.Wanted(resource);
+                if (owed <= 0) continue;
+                var from = NearestStoreWith(
+                    nodes,
+                    resource,
+                    Math.Min(owed, Math.Max(1, worthLoad)),
+                    site.Faction,
+                    site.Position);
+                if (!nodes.Contains(from)) continue;
+                // Above a producer's overflowing yard, which is 2.0 at its worst: idle labour costs more than
+                // stalled production, because a farm that stops producing still has its hands doing something.
+                tasks.Add(new HaulTask(from, site.Id, resource, 2.5f));
+            }
         }
     }
 

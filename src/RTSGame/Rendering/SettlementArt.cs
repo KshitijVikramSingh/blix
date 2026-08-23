@@ -82,6 +82,19 @@ internal sealed class SettlementArt : IDisposable
         owned.AddRange(trees);
         owned.AddRange(treesMid);
         owned.AddRange(treesFar);
+        // <b>The deep tier belongs here too, and its absence was invisible in the worst way.</b> This list is
+        // what Stage submits and what Begin clears, so a model outside it accepts instances, reports them, and
+        // draws none of them — every tree in a thick stand was counted as drawn and never rendered, while its
+        // instance list grew for the life of the process because nothing reset it.
+        //
+        // Nothing about it looked wrong: the tier had geometry (603 triangles across ten species), the counts
+        // added up, the frustum and radius culls were innocent. Diagnosed from the chair by pushing the two
+        // crowding thresholds to 12 and 20, which keeps every tree in a tier that <em>is</em> in this list —
+        // "all trees render, and the frame drops to 35 fps". That is the whole bug in one sentence.
+        //
+        // <b>Adding a tier is three edits and one of them is here.</b> The array, the branch that fills it, and
+        // this line — and only the third has no compiler or reviewer to catch it.
+        owned.AddRange(treesDeep);
         if (villager is not null) owned.Add(villager);
     }
 
@@ -367,6 +380,24 @@ internal sealed class SettlementArt : IDisposable
                         surface)))
                 .ToArray();
             var bounds = parts.Select(part => part.Mesh).CombinedBounds();
+            // <b>How much of its blocked ground this model actually stands on.</b> A prop normalised on its
+            // longer axis fills its footprint that way and leaves the other axis short — and the ground it
+            // leaves short is still blocked, so the difference is walkable-looking ground a body refuses to
+            // enter. Printed because the alternative is judging it by eye from a camera forty metres up.
+            var footprintSize = bounds.Max - bounds.Min;
+            var fill = footprintSize.X > 1e-4f && footprintSize.Z > 1e-4f
+                ? MathF.Min(footprintSize.X, footprintSize.Z) / MathF.Max(footprintSize.X, footprintSize.Z)
+                : 1f;
+            // Only the ones that fall short unstretched. It is a fact rather than a fault: a prop that does
+            // not block its ground may be whatever shape it likes, and a heap of logs is not a building. What
+            // it is for is catching the case that <em>does</em> matter — a prop whose footprint the simulation
+            // enforces, drawn smaller than the ground it closes off.
+            if (!stretchToSquare && fill < 0.88f)
+            {
+                Console.WriteLine(
+                    $"    art {file} covers {fill * 100f:F0}% of its square " +
+                    $"({footprintSize.X:F2} x {footprintSize.Z:F2}) — check it blocks no ground");
+            }
             var bake = stretchToSquare
                 ? StretchToUnitSquare(bounds)
                 : PropModel.NormaliseToUnitFootprint(bounds);
@@ -422,11 +453,20 @@ internal sealed class SettlementArt : IDisposable
         var art = new SettlementArt(
             granary: Prop("Storage_SecondAge_Level3", stretchToSquare: true),
             depot: Prop("Storage_SecondAge_Level1", stretchToSquare: true),
+            // <b>Stretched like the stores, and for the identical reason.</b> A house blocks its cells, so
+            // ground inside its square that has no wall on it is ground a body refuses to walk over and the
+            // player cannot see why. Measured: the three cottages cover 95%, <b>76%</b> and 93% of their
+            // squares unstretched, so one of them left a quarter of its footprint bare — reported from the
+            // chair as collision happening on the cell rather than on the model.
+            //
+            // The cost is the same trade the barn already took: up to a 24% stretch in depth on one cottage,
+            // which is a cottage slightly the wrong shape, against a wall a body stops at for no visible
+            // reason. Much the cheaper of the two lies.
             houses: new[]
             {
-                Prop("Houses_SecondAge_1_Level2"),
-                Prop("Houses_SecondAge_2_Level2"),
-                Prop("Houses_SecondAge_3_Level2"),
+                Prop("Houses_SecondAge_1_Level2", stretchToSquare: true),
+                Prop("Houses_SecondAge_2_Level2", stretchToSquare: true),
+                Prop("Houses_SecondAge_3_Level2", stretchToSquare: true),
             },
             fieldPlot: Prop("Farm_FirstAge_Level3", casts: false, stretchToSquare: true, surface: MaterialClass.Terrain),
             crop: new[]

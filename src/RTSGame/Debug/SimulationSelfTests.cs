@@ -127,6 +127,7 @@ internal static class SimulationSelfTests
         Check("dropped cargo stays in the world and is recovered", DroppedCargoStaysInTheWorld());
         Check("a crop is three windows of labour", ACropIsThreeWindowsOfLabour());
         Check("a field yields what its labour earned it", AFieldYieldsWhatItsLabourEarned());
+        Check("every resource is counted by the sums that name their fields", EveryResourceIsCounted());
         Check("wood comes out of trees, and trees run out", WoodComesOutOfTreesAndTreesRunOut());
         Check(
             "a lumber camp is a store nobody eats from, and that is what makes haulers",
@@ -526,6 +527,8 @@ internal static class SimulationSelfTests
         selection.Update(60f, 60f);
         selection.End(
             agents,
+            // Flat, which is what this fixture's hand-built projection assumes.
+            _ => 0f,
             projection,
             100,
             100,
@@ -3583,6 +3586,53 @@ internal static class SimulationSelfTests
     /// crop because somebody broke its ground in a season that has already passed. Nothing visible at
     /// harvest distinguishes them except what the field says about itself.
     /// </remarks>
+    /// <summary>
+    /// The hand-written sums agree with the generic ones, for every resource there is.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the guard that lets <c>NodeStock.Total</c> name its fields.</b> Writing it as a loop over
+    /// <see cref="Resources.All"/> is correct by construction and far too slow where it is actually called —
+    /// once per node per tick in the spent-node sweep, which on a thirty-thousand-tree map stopped the
+    /// settlement year finishing at all. So it names its fields, and this notices if a resource is ever added
+    /// to the enum and not to the sum.
+    /// <para>
+    /// Deliberately checking the property that would break rather than the code that would be missing: a value
+    /// in one resource must show up in the total and must make it non-zero, whichever resource it is. A test
+    /// that listed the resources by hand would have the same hole as the code.
+    /// </para>
+    /// </remarks>
+    private static bool EveryResourceIsCounted()
+    {
+        var report = new List<string>();
+        var counted = true;
+        foreach (var resource in Resources.All)
+        {
+            var stock = default(NodeStock);
+            stock.Add(resource, 7);
+            var direct = stock.Total;
+            var swept = stock.TotalBySweep;
+            var zero = stock.IsZero;
+            if (direct != 7 || swept != 7 || zero)
+            {
+                counted = false;
+                report.Add($"{resource}: total {direct}, swept {swept}, zero {zero}");
+            }
+        }
+
+        var empty = default(NodeStock);
+        if (empty.Total != 0 || !empty.IsZero)
+        {
+            counted = false;
+            report.Add($"empty: total {empty.Total}, zero {empty.IsZero}");
+        }
+
+        Console.WriteLine(
+            "    " + (report.Count == 0
+                ? $"all {Resources.All.Length} resources counted by Total, TotalBySweep and IsZero"
+                : string.Join("; ", report)));
+        return counted;
+    }
+
     private static bool AFieldYieldsWhatItsLabourEarned()
     {
         var world = new SimulationWorld();
@@ -3940,7 +3990,7 @@ internal static class SimulationSelfTests
             drift = discrepancy.Fault;
             if (drift != 0) break;
             if (!world.Nodes.Contains(site)) break;
-            if (deliveredAt < 0f && world.Nodes.Get(site).TimberWanted == 0)
+            if (deliveredAt < 0f && !world.Nodes.Get(site).WantsMaterials)
             {
                 deliveredAt = tick / 30f;
             }

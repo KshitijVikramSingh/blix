@@ -1,3 +1,4 @@
+using System.Numerics;
 using RTSGame.Simulation;
 using RTSGame.Simulation.Terrain;
 
@@ -76,6 +77,94 @@ internal static class MapSweep
         return faults.Count > 0 ? 1 : 0;
     }
 
+    /// <summary>
+    /// How far the ground the player sees departs from the ground the simulation has.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because "the mouse does not line up, something to do with elevation" is a feeling until it is
+    /// arithmetic.</b> The pointer is turned into a world position by raycasting the <em>simulation's</em>
+    /// heightfield — marched at 20 cm and bisected ten times, so accurate to a fraction of a millimetre. The
+    /// ground on screen is a different surface: a mesh whose vertices sit every
+    /// <c>GroundRenderStep</c> navigation cells, two metres apart on a 600 m map, with straight lines between
+    /// them. Where the true ground curves between two vertices — a ridge crest, a gully — the drawn triangle
+    /// cuts the corner and the two surfaces disagree.
+    /// <para>
+    /// That vertical disagreement becomes a <em>horizontal</em> one under the cursor, because the ray arrives at
+    /// an angle: an error of <c>dh</c> displaces the apparent hit by roughly <c>dh / tan(pitch)</c>. So the
+    /// symptom is exactly what was reported — it grows with relief, and it grows as the camera flattens.
+    /// </para>
+    /// <para>
+    /// Reported rather than asserted. Whether it is worth spending triangles on is a judgement about how much
+    /// slop a pointer may have, and that belongs to whoever is holding the mouse; what this owes them is the
+    /// number.
+    /// </para>
+    /// </remarks>
+    private static void MeasureDrawnGroundError(SimulationWorld world, float amplitude)
+    {
+        var transform = world.Navigation.Transform;
+        // The same step the ground mesh uses: see RtsGameLoop.GroundRenderStep.
+        var step = Math.Clamp((int)MathF.Ceiling(transform.Width / 316f), 1, 16);
+        var lattice = transform.CellSize * step;
+        var worst = 0f;
+        var total = 0.0;
+        var samples = 0;
+        var reach = world.ExtentMeters * 0.45f;
+        // Offset by a third of a cell on both axes so the samples land between lattice points rather than on
+        // them: on a vertex the two surfaces agree by construction, which would measure zero and prove nothing.
+        for (var z = -reach; z <= reach; z += lattice)
+        for (var x = -reach; x <= reach; x += lattice)
+        {
+            var at = new Vector2(x + lattice / 3f, z + lattice / 3f);
+            if (!world.Terrain.Contains(at)) continue;
+            var drawn = BilinearOnLattice(world, at, lattice);
+            var error = MathF.Abs(drawn - world.Terrain.SampleHeight(at));
+            worst = MathF.Max(worst, error);
+            total += error;
+            samples++;
+        }
+
+        if (samples == 0) return;
+        var mean = (float)(total / samples);
+        // A pointer error, at the pitch the camera actually sits at.
+        const float pitchRadians = 0.62f;
+        var slip = worst / MathF.Tan(pitchRadians);
+        // <b>And the ceiling the pointer's raycast assumes.</b> TerrainMap.TryRaycast starts its march from
+        // "nothing on this map is higher than this", a constant 64 m written when the relief dial did not exist.
+        // A summit above it means the ray begins <em>inside</em> the hill, misses the near slope entirely and
+        // reports the far side — which is an elevation-dependent pointer error of tens of metres, not
+        // centimetres.
+        var highest = float.MinValue;
+        var lowest = float.MaxValue;
+        for (var z = -reach; z <= reach; z += lattice * 2f)
+        for (var x = -reach; x <= reach; x += lattice * 2f)
+        {
+            var here = world.Terrain.SampleHeight(new Vector2(x, z));
+            highest = MathF.Max(highest, here);
+            lowest = MathF.Min(lowest, here);
+        }
+
+        Console.WriteLine(
+            $"    at {amplitude:F0} m relief: drawn ground departs by {mean * 100f:F0} cm mean / " +
+            $"{worst * 100f:F0} cm worst on a {lattice:F1} m mesh ({slip:F2} m of pointer slip); " +
+            $"ground runs {lowest:F0} to {highest:F0} m against the raycast's 64 m ceiling" +
+            (highest > 64f ? "  <-- OVER THE CEILING" : string.Empty));
+    }
+
+    /// <summary>The height the ground mesh would draw at a point: its four lattice corners, interpolated.</summary>
+    private static float BilinearOnLattice(SimulationWorld world, Vector2 at, float lattice)
+    {
+        var cell = at / lattice;
+        var x0 = MathF.Floor(cell.X) * lattice;
+        var z0 = MathF.Floor(cell.Y) * lattice;
+        var tx = (at.X - x0) / lattice;
+        var tz = (at.Y - z0) / lattice;
+        var h00 = world.Terrain.SampleHeight(new Vector2(x0, z0));
+        var h10 = world.Terrain.SampleHeight(new Vector2(x0 + lattice, z0));
+        var h01 = world.Terrain.SampleHeight(new Vector2(x0, z0 + lattice));
+        var h11 = world.Terrain.SampleHeight(new Vector2(x0 + lattice, z0 + lattice));
+        return (h00 * (1f - tx) + h10 * tx) * (1f - tz) + (h01 * (1f - tx) + h11 * tx) * tz;
+    }
+
     private static void Try(
         Archetype archetype,
         Region region,
@@ -99,6 +188,7 @@ internal static class MapSweep
             var (floor, span) = SettlementScenarios.InteriorReliefOf(world);
             if (!float.IsFinite(floor) || !float.IsFinite(span)) faults.Add($"{what}: relief is not finite");
             else if (span < 0f) faults.Add($"{what}: negative relief span {span:F2}");
+            MeasureDrawnGroundError(world, amplitude);
         }
         catch (Exception error)
         {

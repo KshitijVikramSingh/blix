@@ -1089,6 +1089,37 @@ internal static class SettlementScenarios
             if (node.IsAlive && node.Kind == NodeKind.Farm) fertility.Add(node.Fertility);
         }
 
+        // <b>What the woodland field actually offers, as a distribution.</b> "No stretches of forest, only small
+        // groups" is a claim about the shape of this curve: forest needs a sustained high tail, and clumps
+        // scattered everywhere is what a curve with no tail and a raised floor produces.
+        if (world.Terrain.Woodland is { } cover)
+        {
+            var samples = new List<float>();
+            var reach = world.ExtentMeters * 0.46f;
+            for (var z = -reach; z <= reach; z += 6f)
+            for (var x = -reach; x <= reach; x += 6f)
+            {
+                if (world.Terrain.Contains(new Vector2(x, z))) samples.Add(cover.At(new Vector2(x, z)));
+            }
+
+            if (samples.Count > 0)
+            {
+                samples.Sort();
+                float Q(float q) => samples[Math.Clamp((int)(samples.Count * q), 0, samples.Count - 1)];
+                var wooded = 0;
+                foreach (var one in samples)
+                {
+                    if (one >= 0.85f) wooded++;
+                }
+
+                Console.WriteLine(
+                    $"    woodland cover: median {Q(0.5f):F2}, p75 {Q(0.75f):F2}, p90 {Q(0.90f):F2}, " +
+                    $"p99 {Q(0.99f):F2}, max {samples[^1]:F2} — {wooded * 100f / samples.Count:F0}% of the " +
+                    "map is at closed-canopy pressure");
+                ReportWoodPatches(world);
+            }
+        }
+
         if (fertility.Count == 0) return;
         // <b>How far the wood actually is, which is the question the pressure field cannot answer.</b>
         // Woodland pressure says a wood belongs here; a cutter needs a trunk to be standing at a distance he
@@ -1129,11 +1160,15 @@ internal static class SettlementScenarios
                 rock = MathF.Min(rock, Vector2.Distance(node.Position, store));
             }
 
+            // <b>Quarries and blocks are different counts and the line said only one of them.</b> Once a
+            // deposit became a cluster, "72 outcrops" was true of the rocks and useless about the map — the
+            // number that decides whether stone is a place you go to is how many <em>workings</em> there are.
             Console.WriteLine(
                 outcrops == 0
-                    ? "    the stone line: no outcrop anywhere on this map — nothing here is crag or scree"
-                    : $"    the stone line: {outcrops} outcrops holding {stone:N0} stone, nearest " +
-                      $"{rock:F0} m from the store — a quarrier reaches {Quarrying.ReachMetres:F0} m");
+                    ? "    the stone line: no outcrop anywhere on this map — nothing here has bare enough ground"
+                    : $"    the stone line: {SeededOutcrops} quarries of {outcrops} blocks holding " +
+                      $"{stone:N0} stone, nearest {rock:F0} m from the store — a quarrier reaches " +
+                      $"{Quarrying.ReachMetres:F0} m");
 
             Console.WriteLine(
                 $"    the wood line: nearest tree {nearest:F0} m from the store, and within " +
@@ -1159,6 +1194,91 @@ internal static class SettlementScenarios
             $"    farmland: {fertility.Count} fields at {fertility[0]:F2}–{fertility[^1]:F2} " +
             $"fertility, median {median:F2} — {grain:N0} grain a year at full potential, " +
             $"which feeds {mouths:F0}");
+    }
+
+    /// <summary>
+    /// How big this map's woods are, as connected patches rather than as a share.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because a share is not a shape, and the share was the only thing being measured.</b> Reported from the
+    /// chair: "if 54% of the map is at closed canopy but that 54% is spread out across the entire map in bunches
+    /// of 3-4 tiles it won't actually read as a forest, only as an area with a lot of trees around." Exactly
+    /// right, and the previous instrument could not tell those two apart — both give 54%.
+    /// <para>
+    /// So this floods connected regions of closed-canopy ground and reports how large they are. A forest is a
+    /// patch you can walk into and lose sight of the edge of, which on a 600 m map means hectares, not tiles.
+    /// Four-connected on purpose: diagonal linking would thread separate copses into one "patch" through a
+    /// single touching corner, which is the measurement flattering itself.
+    /// </para>
+    /// </remarks>
+    private static void ReportWoodPatches(SimulationWorld world)
+    {
+        if (world.Terrain.Woodland is not { } cover) return;
+        const float cellMetres = 8f;
+        var reach = world.ExtentMeters * 0.46f;
+        var across = Math.Max(2, (int)MathF.Round(reach * 2f / cellMetres));
+        var closed = new bool[across * across];
+        for (var z = 0; z < across; z++)
+        for (var x = 0; x < across; x++)
+        {
+            var at = new Vector2(-reach + x * cellMetres, -reach + z * cellMetres);
+            closed[z * across + x] = world.Terrain.Contains(at) && cover.At(at) >= 0.85f;
+        }
+
+        var seen = new bool[closed.Length];
+        var patches = new List<int>();
+        var frontier = new Stack<int>();
+        for (var start = 0; start < closed.Length; start++)
+        {
+            if (!closed[start] || seen[start]) continue;
+            var size = 0;
+            frontier.Push(start);
+            seen[start] = true;
+            while (frontier.Count > 0)
+            {
+                var here = frontier.Pop();
+                size++;
+                var hx = here % across;
+                var hz = here / across;
+                void Visit(int nx, int nz)
+                {
+                    if (nx < 0 || nz < 0 || nx >= across || nz >= across) return;
+                    var next = nz * across + nx;
+                    if (!closed[next] || seen[next]) return;
+                    seen[next] = true;
+                    frontier.Push(next);
+                }
+
+                Visit(hx - 1, hz);
+                Visit(hx + 1, hz);
+                Visit(hx, hz - 1);
+                Visit(hx, hz + 1);
+            }
+
+            patches.Add(size);
+        }
+
+        if (patches.Count == 0)
+        {
+            Console.WriteLine("    woods: no closed-canopy patch anywhere");
+            return;
+        }
+
+        patches.Sort();
+        var perCell = cellMetres * cellMetres / 10_000f;
+        var biggest = patches[^1] * perCell;
+        var median = patches[patches.Count / 2] * perCell;
+        var tiny = 0;
+        foreach (var one in patches)
+        {
+            // Under a third of a hectare is a copse at best — the "bunches of 3-4 tiles" case, counted so it
+            // cannot hide inside an average.
+            if (one * perCell < 0.35f) tiny++;
+        }
+
+        Console.WriteLine(
+            $"    woods: {patches.Count} patches, biggest {biggest:F1} ha, median {median:F2} ha, " +
+            $"{tiny * 100f / patches.Count:F0}% of them under a third of a hectare");
     }
 
     /// <summary>The interior's floor and span, for callers outside the scenario. See InteriorRelief.</summary>
@@ -1289,7 +1409,32 @@ internal static class SettlementScenarios
     /// comes out at the density §22's constants were measured against, because on flat ground every term in the
     /// density is one. What changes on a map with relief is <em>where</em> they go.
     /// </remarks>
-    private const int WoodAnchorsPerSquareKilometre = 62_000;
+    /// <summary>
+    /// Candidate wood anchors per square kilometre, before the pressure field accepts or refuses them.
+    /// </summary>
+    /// <remarks>
+    /// <b>Cut from 62,000 because the thing it feeds changed underneath it.</b> An anchor is accepted with
+    /// probability equal to the local pressure, and that pressure used to sit at 0.02–0.03 across most of a
+    /// map — so sixty-two thousand candidates yielded a few thousand trees, and the budget was really a
+    /// division by the acceptance rate. Renormalising the field (see <c>WoodlandCover.Concentrate</c>) raised
+    /// acceptance by more than an order of magnitude and the same budget produced 31,000 to 57,000 trees.
+    /// <para>
+    /// <b>Then measured back up, because matching the old total was the wrong target.</b> Cutting to 6,000 held
+    /// the count where it used to be — but the old count was spread thinly over the whole map, and the same
+    /// count concentrated into two thirds of it is one tree per twenty square metres. That is woodland pasture.
+    /// Reported from the chair: the densest area on the map, and the older maps were two or three times denser.
+    /// <para>
+    /// At 25,000 a deeply wooded map carries 36,569 trees, which inside its 20 ha wood is one tree per 6.6 m² —
+    /// a canopy you cannot see through, which is what a forest is. The spacing test caps how tightly they pack,
+    /// so raising this fills woods rather than peppering open ground: acceptance out there is still low.
+    /// </para>
+    /// <para>
+    /// <b>A budget that only means something in combination with an acceptance rate has to be re-measured
+    /// whenever the rate moves</b> — twice now, in both directions, and the lesson is that the number to aim at
+    /// is density inside a wood rather than a total across a map.
+    /// </para>
+    /// </remarks>
+    private const int WoodAnchorsPerSquareKilometre = 25_000;
 
     /// <summary>
     /// Stone, placed where the rock is and nowhere else.
@@ -1318,8 +1463,17 @@ internal static class SettlementScenarios
         var (floor, span) = InteriorRelief(world);
         if (span < 1f) return;
 
-        // Wide enough that two outcrops read as two quarries rather than as a stone field.
-        const float spacingMetres = 34f;
+        // <b>Rockier country spreads its quarries further apart and makes each one bigger, and those two
+        // cancel.</b> A region's rockiness used to scale only the cluster size, so upland heath simply had
+        // more stone than downland — the map type changed the <em>quantity</em>. What it should change is the
+        // <em>shape</em>: heath has a few large workings, downland has more small ones, and both come out with
+        // roughly the same amount of rock on the map.
+        //
+        // The arithmetic is deliberate rather than tuned. One anchor claims an area of spacing squared, so
+        // scaling the spacing by the square root of rockiness makes the number of anchors fall as 1/rockiness,
+        // while the cluster grows as rockiness — and blocks, being anchors times cluster, stays put.
+        var rocky = MathF.Max(0.25f, RegionProfile.For(world.Terrain.Region).Rockiness);
+        var spacingMetres = StoneSpacingMetres * MathF.Sqrt(rocky);
         // Coarse, because what is being looked for is a region of broken ground rather than a cell of it.
         const float stepMetres = 12f;
         var reach = InteriorExtent(world.ExtentMeters);
@@ -1345,8 +1499,24 @@ internal static class SettlementScenarios
                 (x + Next() - 0.5f) / across - 0.5f,
                 (z + Next() - 0.5f) / across - 0.5f) * reach;
             if (!world.Terrain.Contains(at)) continue;
+            // <b>Rock shows where the soil is thin, which is a wider and truer rule than "crag or scree".</b>
+            // Keyed to those two biomes, stone existed on 3% of a downland map and nowhere else — clumped on
+            // the highest tops, so whole maps had none within reach of anywhere a village could stand: 282 m
+            // on the village's own default map, against 34 m on BrokenRidge. A resource that half the maps
+            // simply do not have is not a hard choice, it is a coin toss before the game starts.
+            //
+            // Soil depth is the honest criterion and the terrain already computes it: bare rock and scree read
+            // near zero by their bed values, and so does any ground steep enough to have lost its soil, which
+            // is where you actually find stone showing through. It also composes with everything else the soil
+            // field knows — a dry region's thin ground carries more visible rock than a fen's, without a word
+            // about regions here.
+            //
+            // Still never in the fertile valley the village wants, because that ground is deep by definition.
+            // The map decides how much stone a country has; it just no longer decides on 3% of the evidence.
             var biome = Biomes.At(world.Terrain, at, floor, span);
-            if (biome is not (Biome.Crag or Biome.Scree)) continue;
+            if (biome is Biome.Water) continue;
+            var depth = world.Terrain.Soil is { } soil ? soil.DepthAt(at) : 1f;
+            if (depth > ThinSoilForStone) continue;
 
             var clear = true;
             foreach (var other in placed)
@@ -1357,13 +1527,89 @@ internal static class SettlementScenarios
             }
 
             if (!clear) continue;
-            var node = world.AddNode(NodeKind.Outcrop, at, capacity: (int)Quarrying.StonePerOutcrop);
-            world.SeedStock(node, Resource.Stone, (int)Quarrying.StonePerOutcrop);
-            placed.Add(world.Nodes.Get(node).Position);
+            placed.Add(at);
+
+            // <b>How rich this deposit is, from how bare the ground is and what country it is in.</b> Reported
+            // from the chair: a deposit was always one lone block, wherever it was, so a map's stone read as
+            // scattered pebbles and no place was a quarry. Two terms, and both are already known — how far
+            // under the threshold the soil is here, which says how completely the rock has broken through, and
+            // the region's own rockiness, which says whether this is heath or fen.
+            //
+            // <b>What falls out is the thing worth having.</b> Rock is abundant on thin, steep, high ground;
+            // thin ground is poor farmland; the site scorer wants fertile ground — so the biggest quarries are
+            // furthest from anywhere a village wants to be, and the country you settle in decides whether stone
+            // is a short cart ride or an expedition. Marginal ground still carries the odd single block, which
+            // is what "less concentrated, smaller, more spread out" means in numbers.
+            var bareness = 1f - Math.Clamp(depth / ThinSoilForStone, 0f, 1f);
+            var richness = bareness * rocky;
+            var blocks = 1 + (int)MathF.Floor(Math.Clamp(richness, 0f, 1.6f) * StoneBlocksPerQuarry);
+
+            for (var block = 0; block < blocks; block++)
+            {
+                // The first block is the anchor itself; the rest ring it close enough to read as one working.
+                var where = block == 0
+                    ? at
+                    : at + Polar(Next(), StoneBlockSpacing * 0.7f, StoneBlockSpacing * 2.2f, Next());
+                if (!world.Terrain.Contains(where)) continue;
+                // Not in the water, and not on ground that has since turned out to be deep: a cluster spreads
+                // off its anchor and may cross the line the anchor passed.
+                if (Biomes.At(world.Terrain, where, floor, span) is Biome.Water) continue;
+                var node = world.AddNode(NodeKind.Outcrop, where, capacity: (int)Quarrying.StonePerOutcrop);
+                world.SeedStock(node, Resource.Stone, (int)Quarrying.StonePerOutcrop);
+            }
         }
 
         SeededOutcrops = placed.Count;
     }
+
+    /// <summary>
+    /// Soil depth at or below which bare rock shows, and an outcrop can stand.
+    /// </summary>
+    /// <remarks>
+    /// Chosen from the measured distribution rather than picked, and it took three passes to land. Keyed to
+    /// crag-or-scree it was 3% of a downland map and the nearest rock ran to 282 m; at a 0.16 depth it went
+    /// the other way, 79 outcrops on SplitValley with the nearest 22 m from the granary, which is abundance
+    /// where scarcity was the entire point.
+    /// <para>
+    /// <b>The threshold decides where stone can be and the spacing decides how much of it there is</b>, and
+    /// separating those two is what made this tunable. This one stays low so stone stays a property of thin
+    /// ground; <see cref="StoneSpacingMetres"/> does the thinning.
+    /// </remarks>
+    private const float ThinSoilForStone = 0.10f;
+
+    /// <summary>How far apart two outcrops must stand, which is what decides how much stone a map has.</summary>
+    /// <remarks>
+    /// <b>A quarry is a place, not a scatter</b> — the point of stone is that you go somewhere for it, and a
+    /// field of rocks is not somewhere. Measured across four archetypes: 44 m gives 25–45 outcrops, which reads
+    /// as broken ground everywhere; 95 m gives <b>10–16, and they read as quarries.</b>
+    /// <para>
+    /// The distance spread survives the thinning, which is the property worth keeping: nearest rock 36 m on
+    /// SplitValley and 46 m on BrokenRidge against a quarrier's 60 m reach, 80 m on DiagonalRiver and 88 m on
+    /// YValley beyond it. So some maps are worked from home and some want a depot at the rock, and which kind
+    /// you are on is the map's answer rather than a dial's.
+    /// </para>
+    /// <para>
+    /// Each deposit is unchanged at 300 — about fifteen months of one pair of hands — so a map now carries
+    /// 3,000 to 4,800 stone against a forest's 400,000 wood. Whether that is the right quantity is not
+    /// answerable until something is built of it, which is the next arc.
+    /// </para>
+    /// </remarks>
+    private const float StoneSpacingMetres = 118f;
+
+    /// <summary>How many extra blocks the richest ground adds to a quarry, beyond the one it always has.</summary>
+    /// <remarks>
+    /// So the poorest qualifying ground carries a single boulder and the best carries a working face of several.
+    /// The <em>count</em> of quarries is still <see cref="StoneSpacingMetres"/>'s business — this decides how
+    /// much of a place each one is, which is the axis that was missing when every deposit was one block.
+    /// </remarks>
+    private const int StoneBlocksPerQuarry = 5;
+
+    /// <summary>How close together the blocks of one quarry stand.</summary>
+    /// <remarks>
+    /// Small against the 95 m between quarries, which is the whole point: near enough that a cluster is one
+    /// place a quarrier works, far enough apart that the rocks are distinct objects rather than one lump.
+    /// </remarks>
+    private const float StoneBlockSpacing = 4.5f;
 
     /// <summary>How many outcrops the map had, so working them out can be reported against it.</summary>
     private static int SeededOutcrops;
@@ -1516,7 +1762,16 @@ internal static class SettlementScenarios
                 // CanRoot, since "nothing grows in a river" is a term in the same product rather than a
                 // separate rule that could disagree with it.
                 var density = pressure.At(anchor);
-                if (Next() > density) continue;
+                // <b>Squared, so raising the budget fills woods instead of peppering the open.</b> Linear
+                // acceptance means every extra candidate lands in proportion to the local pressure, so
+                // quadrupling the budget quadruples the <em>scattered</em> trees too — and a scattered tree is
+                // the expensive kind: level of detail here is by crowding, so a tree standing alone is drawn at
+                // full detail. Measured, 531 near-tier trees at 5,940 triangles each was 3.1M of a 6.4M frame.
+                //
+                // Squaring leaves a closed wood untouched — pressure there is at or above one — and cuts open
+                // ground hard: a fifth becomes a twenty-fifth. Which is also the honest shape of the thing.
+                // Trees in the open are survivors, and survivors are rare.
+                if (Next() > density * density) continue;
 
                 // Denser ground carries bigger stands. Eleven was the old forest clump and three the old
                 // fringe; the same range, now decided by the place rather than by the radius.

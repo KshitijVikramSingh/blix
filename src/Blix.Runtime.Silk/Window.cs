@@ -295,7 +295,18 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     private void OnMouseUp(IMouse mouse, SilkMouseButton button)
     {
-        if (OverlayWantsMouse) return;
+        // <b>A release is always delivered, even when the overlay owns the cursor, and the asymmetry with
+        // OnMouseDown above is the point.</b> A press decides who owns the gesture; a release only ends
+        // something, and the thing it ends belongs to whoever the press went to.
+        //
+        // Guarded, this dropped the release whenever the pointer happened to be over a debug panel when the
+        // button came up — so a drag begun in the world and finished over the panel left the game believing the
+        // button was still down. The marquee stays live, anchored to a point the cursor has long left, and
+        // follows it around: reported from the chair as the mouse not lining up with the screen. Nothing about
+        // that looks like a missing event.
+        //
+        // It costs the overlay nothing: ImGui does not learn the button state from these callbacks at all, it
+        // polls IsButtonPressed in BeginFrame. The guard was protecting something that was never listening.
         inputHandler?.OnMouseUp(MapMouseButton(button));
     }
 

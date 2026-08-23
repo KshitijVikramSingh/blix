@@ -43,6 +43,7 @@ internal sealed class SelectionController
 
     public void End(
         AgentStore agents,
+        Func<Vector2, float> groundAt,
         Matrix4x4 viewProjection,
         int width,
         int height,
@@ -54,7 +55,7 @@ internal sealed class SelectionController
 
         if (Vector2.DistanceSquared(DragStart, DragCurrent) <= DragThreshold * DragThreshold)
         {
-            SelectClick(agents, viewProjection, width, height, additive);
+            SelectClick(agents, groundAt, viewProjection, width, height, additive);
             return;
         }
 
@@ -62,7 +63,11 @@ internal sealed class SelectionController
         var maximum = Vector2.Max(DragStart, DragCurrent);
         foreach (ref readonly var agent in agents.All)
         {
-            if (!TryProject(agent.Position, viewProjection, width, height, out var screen)) continue;
+            if (!TryProject(agent.Position, groundAt(agent.Position), viewProjection, width, height, out var screen))
+            {
+                continue;
+            }
+
             if (screen.X >= minimum.X && screen.X <= maximum.X &&
                 screen.Y >= minimum.Y && screen.Y <= maximum.Y)
             {
@@ -77,13 +82,22 @@ internal sealed class SelectionController
         IsPointerDown = false;
     }
 
-    private void SelectClick(AgentStore agents, Matrix4x4 viewProjection, int width, int height, bool additive)
+    private void SelectClick(
+        AgentStore agents,
+        Func<Vector2, float> groundAt,
+        Matrix4x4 viewProjection,
+        int width,
+        int height,
+        bool additive)
     {
         AgentId? nearest = null;
         var nearestDistanceSquared = ClickRadius * ClickRadius;
         foreach (ref readonly var agent in agents.All)
         {
-            if (!TryProject(agent.Position, viewProjection, width, height, out var screen)) continue;
+            if (!TryProject(agent.Position, groundAt(agent.Position), viewProjection, width, height, out var screen))
+            {
+                continue;
+            }
             var distanceSquared = Vector2.DistanceSquared(screen, DragCurrent);
             if (distanceSquared > nearestDistanceSquared) continue;
             nearestDistanceSquared = distanceSquared;
@@ -95,14 +109,33 @@ internal sealed class SelectionController
         else selected.Add(id);
     }
 
+    /// <summary>
+    /// Where a body appears on screen, at the height it is actually standing.
+    /// </summary>
+    /// <remarks>
+    /// <b>The Y was the constant 0.8 — mid-chest on flat ground, and flat ground is the only place it was
+    /// right.</b> Every selection this class makes went through here, so on generated terrain a villager on a
+    /// hill was projected as though it were standing at the bottom of the map: the click radius and the marquee
+    /// both tested a screen position tens of metres from the body being drawn. Reported from the chair as
+    /// villager selection being "most weird" while buildings and trees read fine, which is precisely the split
+    /// it would produce — those two are picked against boxes that sample the ground, and this was not.
+    /// <para>
+    /// The sixth flat-ground constant this project has found in a world that has hills in it, after the far
+    /// plane, the detail radius, the ground draw radius, the shadow box and the site scorer's grade gate. The
+    /// tell is always the same: a number that is correct at <c>y = 0</c> and never questioned, because for a
+    /// long time <c>y</c> was always zero.
+    /// </para>
+    /// </remarks>
     private static bool TryProject(
         Vector2 position,
+        float ground,
         Matrix4x4 viewProjection,
         int width,
         int height,
         out Vector2 screen)
     {
-        var clip = Vector4.Transform(new Vector4(position.X, 0.8f, position.Y, 1f), viewProjection);
+        var clip = Vector4.Transform(
+            new Vector4(position.X, ground + 0.8f, position.Y, 1f), viewProjection);
         if (clip.W <= 0f)
         {
             screen = default;

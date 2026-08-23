@@ -359,10 +359,36 @@ internal struct EconomyNode
     /// <summary>A site: placed, standing on its ground, and not yet a building.</summary>
     public readonly bool IsUnderConstruction => !IsBuilt;
 
-    /// <summary>Timber still wanted on site before work can begin.</summary>
-    public readonly int TimberWanted => IsBuilt
+    /// <summary>One material still wanted on site before work can begin.</summary>
+    public readonly int Wanted(Resource resource) => IsBuilt
         ? 0
-        : Math.Max(0, Construction.TimberFor(Kind) - Stock.Wood);
+        : Math.Max(0, Construction.CostFor(Kind)[resource] - Stock[resource]);
+
+    /// <summary>
+    /// Whether this site is still short of anything at all.
+    /// </summary>
+    /// <remarks>
+    /// Replaces <c>TimberWanted &gt; 0</c>, which was the same question while timber was the only material and
+    /// silently became a narrower one the moment stone could be owed — a site waiting on stone would have read
+    /// as a site with everything it needs and no hands, which is a different problem with a different fix.
+    /// </remarks>
+    public readonly bool WantsMaterials
+    {
+        get
+        {
+            // Built first and once. Asking Wanted per resource asked IsBuilt per resource, and this is swept
+            // over every node every tick by the hauling board — where all but a handful of nodes are trees,
+            // which are built by definition.
+            if (IsBuilt) return false;
+            var cost = Construction.CostFor(Kind);
+            foreach (var resource in Resources.All)
+            {
+                if (cost[resource] > Stock[resource]) return true;
+            }
+
+            return false;
+        }
+    }
 
     /// <summary>A place worked for what it yields. Fields; nothing else, now that wood is trees.</summary>
     public readonly bool Produces_ => IsBuilt && Kind == NodeKind.Farm;
@@ -413,7 +439,7 @@ internal struct EconomyNode
     public readonly bool Stores => IsBuilt && Kind is NodeKind.Granary or NodeKind.ForwardDepot;
 
     /// <summary>Somewhere a cart can unload — a store, or a site waiting for its materials.</summary>
-    public readonly bool AcceptsDeliveries => Stores || TimberWanted > 0;
+    public readonly bool AcceptsDeliveries => Stores || WantsMaterials;
 
     public readonly bool OwnsCatchment => IsBuilt && Kind is NodeKind.Granary or NodeKind.ForwardDepot;
 
@@ -441,7 +467,7 @@ internal struct EconomyNode
     /// finished building will hold, and the limit while it is a site is computed from what it is becoming.
     /// </remarks>
     public readonly int RoomFor(Resource resource) => IsUnderConstruction
-        ? resource == Resource.Wood ? TimberWanted : 0
+        ? Wanted(resource)
         : Math.Max(0, Capacity - Stock[resource]);
 }
 
@@ -534,7 +560,7 @@ internal sealed class NodeStore
         foreach (ref readonly var node in All)
         {
             if (!node.IsAlive) continue;
-            foreach (var resource in Resources.All) total.Add(resource, node.Stock[resource]);
+            total.Add(in node.Stock);
         }
 
         return total;
@@ -547,7 +573,7 @@ internal sealed class NodeStore
         foreach (ref readonly var node in All)
         {
             if (!node.IsAlive || node.IsNaturalDeposit) continue;
-            foreach (var resource in Resources.All) total.Add(resource, node.Stock[resource]);
+            total.Add(in node.Stock);
         }
 
         return total;

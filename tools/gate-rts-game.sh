@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The RTS game's gate: the five headless runs that have to be green before a change lands.
+# The RTS game's gate. Three quick runs by default; --years adds the two simulated years.
 #
 # They cover different failure modes on purpose, and none of them subsumes another:
 #
@@ -39,8 +39,31 @@ run() {
     fi
 }
 
+# <b>Two tiers, because two of these legs are minutes-scale simulations and three are not.</b> A simulated
+# year steps 162,000 ticks and sweeps every node on each of them for conservation; at four thousand nodes that
+# is minutes, and at thirty thousand it is a good deal more. Gating a comment change on it means either waiting
+# or — what actually happened — not running the gate at all, which is worse than a slower gate.
+#
+# So the default is the tier that answers in a couple of minutes, and the years are opt-in with --years. What
+# each tier is FOR:
+#
+#   default   a broken rule, a defence that stops defending, a generator that only works at one setting.
+#             Everything whose failure is a property of a tick or of a single run.
+#   --years   an economy that stops feeding itself, which no assertion can catch because "the settlement
+#             starves in the fourth season" is a property of a year. Run before landing anything that touches
+#             rates, jobs, hauling or construction — and in downtime otherwise.
+#
+# <b>The split is a scheduling decision, not a licence.</b> The year legs are the only thing that has ever
+# caught an economy regression, and §51 exists because Stage E shipped without the raid leg. Skipping them
+# before an economy change is skipping the only instrument that would say so.
+years=0
+for arg in "$@"; do
+    case "$arg" in
+        --years|--full) years=1 ;;
+    esac
+done
+
 run "self-test" --selftest
-run "a year of settlement" --settlement --years 1
 run "a settlement under raid" --raidtest --minutes 6 --every 45
 # <b>The same year again, on ground the generator actually makes.</b> The three legs above run on flat ground,
 # which is where every economic constant was measured and is therefore the control: it says whether a change
@@ -48,7 +71,10 @@ run "a settlement under raid" --raidtest --minutes 6 --every 45
 # coupled to biome, path cost to surface, climb charged per edge — and it is a different question. First run of
 # it came out at 270 grain per person per year against a nominal 270, so the coupling costs nothing; the point
 # of keeping it is that nobody would notice when it starts to.
-run "a year on generated terrain" --settlement --years 1 --relief-amplitude 30
+if [ "$years" -eq 1 ]; then
+    run "a year of settlement" --settlement --years 1
+    run "a year on generated terrain" --settlement --years 1 --relief-amplitude 30
+fi
 # <b>Every map the panel can ask for, which is not the map this gate used to test.</b> The leg above generates
 # terrain at exactly one point — one archetype, one region, thirty metres — and that was the whole of the
 # generator's coverage while the map was chosen by a flag: the tested set and the reachable set were the same
@@ -60,9 +86,15 @@ run "a year on generated terrain" --settlement --years 1 --relief-amplitude 30
 run "every map the panel can ask for" --mapsweep
 
 echo
+legs=3
+[ "$years" -eq 1 ] && legs=5
 if [ "$failed" -eq 0 ]; then
-    echo "gate: all five green"
+    if [ "$years" -eq 1 ]; then
+        echo "gate: all $legs green, years included"
+    else
+        echo "gate: all $legs green — years NOT run, use --years before an economy change"
+    fi
 else
-    echo "gate: $failed of 5 FAILED"
+    echo "gate: $failed of $legs FAILED"
 fi
 exit "$failed"

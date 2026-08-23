@@ -57,6 +57,7 @@ internal readonly record struct RegionProfile(
     float ScreeGrade,
     float WaterScale,
     float TreeDensity,
+    float Rockiness,
     float ConiferShare,
     float Lushness,
     Vector4 Pasture,
@@ -79,6 +80,15 @@ internal readonly record struct RegionProfile(
     /// <c>wetness &lt; quantile(MoorRank)</c>, so it is the share of the landscape dry enough to count — a
     /// <em>higher</em> number is more moor. Set backwards, upland heath came out with less heather on it than
     /// downland, which is the kind of inversion that is invisible in the code and obvious in one measurement.
+    /// </para>
+    /// <para>
+    /// <b><c>Rockiness</c> is how much of this country's stone is above ground, and it reads off the same
+    /// descriptions.</b> Upland heath is "thin soil, stone breaking through" and dry scrub is "straw grass over
+    /// pale stone" — both were already saying it in prose, and a fen was already saying the opposite. It scales
+    /// how big a deposit is rather than whether one is there, so a rocky country has real quarries and a wet one
+    /// has the odd boulder. Note what follows without being written down: stone lives on thin soil, thin soil is
+    /// poor farmland, and the site scorer wants fertile ground — <b>so the countries richest in stone are the
+    /// ones a settlement least wants to sit in</b>, and that tension is the mechanic rather than a side effect.
     /// </para>
     /// <para>
     /// <b><c>WaterScale</c> is the climate acting on the composition rather than on the picture.</b> Every
@@ -111,6 +121,7 @@ internal readonly record struct RegionProfile(
             ScreeGrade: 0.30f,
             WaterScale: 1.00f,
             TreeDensity: 1.00f,
+            Rockiness: 1.00f,
             ConiferShare: 0.25f,
             Lushness: 1.00f,
             Pasture: new Vector4(0.144f, 0.195f, 0.075f, 1f),
@@ -130,6 +141,9 @@ internal readonly record struct RegionProfile(
             ScreeGrade: 0.38f,
             WaterScale: 1.40f,
             TreeDensity: 0.55f,
+            // Wet levels, and the one place in this table where the ground is deep everywhere: peat and silt
+            // over more peat. What little stone a fen has, somebody carted in.
+            Rockiness: 0.30f,
             ConiferShare: 0.05f,
             Lushness: 1.30f,
             Pasture: new Vector4(0.118f, 0.183f, 0.098f, 1f),
@@ -149,6 +163,8 @@ internal readonly record struct RegionProfile(
             ScreeGrade: 0.22f,
             WaterScale: 0.90f,
             TreeDensity: 0.32f,
+            // "Heather and thin soil, stone breaking through" — its own description, now a number.
+            Rockiness: 1.75f,
             ConiferShare: 0.60f,
             Lushness: 0.70f,
             Pasture: new Vector4(0.132f, 0.166f, 0.086f, 1f),
@@ -170,6 +186,8 @@ internal readonly record struct RegionProfile(
             ScreeGrade: 0.24f,
             WaterScale: 0.42f,
             TreeDensity: 0.22f,
+            // "Straw grass over pale stone." Dry country sheds its soil and shows what is underneath.
+            Rockiness: 1.55f,
             ConiferShare: 0.35f,
             Lushness: 0.52f,
             Pasture: new Vector4(0.242f, 0.216f, 0.106f, 1f),
@@ -189,6 +207,8 @@ internal readonly record struct RegionProfile(
             ScreeGrade: 0.34f,
             WaterScale: 1.15f,
             TreeDensity: 1.65f,
+            // Glaciated: plenty of bare rock, but moss and bog fill the hollows between it.
+            Rockiness: 1.10f,
             ConiferShare: 0.92f,
             Lushness: 0.92f,
             Pasture: new Vector4(0.098f, 0.154f, 0.086f, 1f),

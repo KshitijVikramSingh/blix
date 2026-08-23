@@ -55,6 +55,46 @@ internal static class Construction
     };
 
     /// <summary>
+    /// Stone a building needs delivered, in whole units.
+    /// </summary>
+    /// <remarks>
+    /// <b>Stone's first sink, and the granary is the right one to be it.</b> A resource with no demand is
+    /// bookkeeping — the objection <see cref="Resource"/>'s own remarks raised against a third resource — and
+    /// until now stone came out of the rock and sat in a store with nothing to spend it on.
+    /// <para>
+    /// <b>Only the granary.</b> A cottage is timber and thatch and always was. The depot must stay cheap for
+    /// the reason written above it: it is the answer to a receding wood line, and an answer that needs a
+    /// resource you may have no reachable deposit of is no answer at all — on some maps the nearest quarry is
+    /// 88 m from anywhere a village can stand, so a depot priced in stone would be unbuildable exactly where
+    /// it is most needed.
+    /// </para>
+    /// <para>
+    /// So the cost lands on the one building that is a <em>statement of permanence</em>: a second granary is a
+    /// second centre, the thing a settlement builds when it means to stay. Eight sacks against the granary's
+    /// eighteen of timber — enough that a quarry has to be working, not enough to gate the building behind an
+    /// expedition.
+    /// </para>
+    /// </remarks>
+    public static int StoneFor(NodeKind kind) => kind switch
+    {
+        NodeKind.Granary => Sacks(8),
+        _ => 0,
+    };
+
+    /// <summary>Everything a building needs on site before work can start.</summary>
+    /// <remarks>
+    /// One place that answers "what does this cost", so a new material is a line here rather than a hunt
+    /// through every caller that used to ask about timber by name.
+    /// </remarks>
+    public static NodeStock CostFor(NodeKind kind)
+    {
+        var cost = default(NodeStock);
+        cost.Wood = TimberFor(kind);
+        cost.Stone = StoneFor(kind);
+        return cost;
+    }
+
+    /// <summary>
     /// Labour-seconds of standing at a site that finishes it, once its timber is there.
     /// </summary>
     /// <remarks>
@@ -90,8 +130,15 @@ internal static class Construction
     public static string StateOf(in EconomyNode node)
     {
         if (node.IsBuilt) return "built";
-        var timber = TimberFor(node.Kind);
-        if (node.Stock.Wood < timber) return $"wants {timber - node.Stock.Wood} timber";
+        // Named per material, because "wants materials" tells a player nothing about which cart to send.
+        var missing = new List<string>();
+        foreach (var resource in Resources.All)
+        {
+            var short_ = node.Wanted(resource);
+            if (short_ > 0) missing.Add($"{short_} {(resource == Resource.Wood ? "timber" : resource.ToString().ToLowerInvariant())}");
+        }
+
+        if (missing.Count > 0) return $"wants {string.Join(" and ", missing)}";
         var labour = LabourFor(node.Kind);
         return node.Hands == 0
             ? "idle site"
