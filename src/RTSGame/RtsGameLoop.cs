@@ -521,9 +521,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// <summary>How many trees each level of detail drew, which is the shape of the frame's tree budget.</summary>
     private (int Near, int Mid, int Far, int Deep) treeTiers;
     private (int Instances, long Triangles, long Casters) stagedLoad;
-    // viewProj, camPos, sunDir, sunLight, skyLight, fog, haze. As with the world block, this length is
-    // also the declared push-constant range, so the two cannot disagree.
-    private readonly byte[] smokePush = new byte[160];
+    // viewProj, camPos, sunDir, sunLight, skyLight, fog, haze, then the fog of war's four dial blocks and the
+    // wind. As with the world block, this length is also the declared push-constant range, so the two cannot
+    // disagree.
+    //
+    // <b>Smoke carries the veil's dials because it is hidden by the veil.</b> It was the last thing on the map
+    // still escaping it — a chimney is a settlement's position and a plume shows from further off than the
+    // building under it — and the arithmetic is shared with world.frag through Shaders/veil.glsl rather than
+    // copied, for the reason lean.glsl exists: the two shaders have different push layouts, so a function that
+    // read the dials out of a block could only ever live in one of them.
+    private readonly byte[] smokePush = new byte[240];
 
     // Solid things: buildings, heaps, hand-built walls, trees. Held as a list rather than
     // batched directly because each one is drawn twice — once lit into the scene and once
@@ -1684,7 +1691,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, contactPush.Length),
             });
         var smokeInterface = new ShaderInterface(
-            Slots: new[] { InstanceBuffer.Slot },
+            // The scouted mask, so a plume can be hidden by the same cloud that hides the ground under it.
+            Slots: new[]
+            {
+                new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
+                InstanceBuffer.Slot,
+            },
             PushConstants: new[]
             {
                 new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, smokePush.Length),
@@ -4043,7 +4055,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         MemoryMarshal.Write(smokePush.AsSpan(96, 16), in sunLight);
         MemoryMarshal.Write(smokePush.AsSpan(112, 16), in skyLight);
         MemoryMarshal.Write(smokePush.AsSpan(128, 16), in fog);
-        MemoryMarshal.Write(smokePush.AsSpan(144, 16), in hazeAway);
+        // <b>The extent rides in the spare fourth channel.</b> Smoke's uHaze means something different from the
+        // world shader's — a colour rather than four scalars — so the one number the shared veil function needs
+        // and this block did not have goes where there was room, rather than growing a vec4 to hold a float.
+        var smokeHaze = new Vector4(hazeAway.X, hazeAway.Y, hazeAway.Z, simulation.ExtentMeters);
+        MemoryMarshal.Write(smokePush.AsSpan(144, 16), in smokeHaze);
+        MemoryMarshal.Write(smokePush.AsSpan(160, 16), in scoutedDials);
+        MemoryMarshal.Write(smokePush.AsSpan(176, 16), in veil);
+        MemoryMarshal.Write(smokePush.AsSpan(192, 16), in veilAir);
+        MemoryMarshal.Write(smokePush.AsSpan(208, 16), in veilDeep);
+        MemoryMarshal.Write(smokePush.AsSpan(224, 16), in wind);
 
         // <b>The plumes, which are dressing and therefore derived rather than stepped.</b> Advance only
         // decides whether a chimney's turn has come round; where a puff has got to is a function of its
@@ -4210,6 +4231,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             });
         }
 
+        var smokeBinding = new[] { new ShaderTextureBinding("uScoutedMap", fogTexture, Slot: 0) };
         var shadowBinding = new[]
         {
             new ShaderTextureBinding(
@@ -4267,7 +4289,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // After every opaque thing and before the annotations: smoke blends over a finished frame, and
             // an overlay is a mark on the picture rather than something in the world for smoke to drift in
             // front of.
-            smokeBatch.End(scope);
+            smokeBatch.End(scope, smokeBinding);
             overlayBatch.End(scope, shadowBinding);
         });
         graph.Execute(commandList);

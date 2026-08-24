@@ -26,6 +26,9 @@ layout(location = 2) in vec3 vWorldPos;
 
 layout(location = 0) out vec4 outColor;
 
+// What the player has scouted, and what they are watching. Same texture the world shader reads.
+layout(set = 0, binding = 0) uniform sampler2D uScoutedMap;
+
 layout(push_constant) uniform Push {
     mat4 uViewProjection;
     vec4 uCamPos;
@@ -33,8 +36,18 @@ layout(push_constant) uniform Push {
     vec4 uSunLight;
     vec4 uSkyLight;
     vec4 uFog;
-    vec4 uHaze;
+    vec4 uHaze;     // rgb = what the distance goes to, w = the map extent, which the veil needs
+    // The fog of war's dials, laid out exactly as world.frag has them so one shared function can read both.
+    vec4 uScouted;
+    vec4 uVeil;
+    vec4 uVeilAir;
+    vec4 uVeilDeep;
+    vec4 uWind;     // y = the simulated clock, z = gust rate, w = bearing
 };
+
+// Where the fog of war is — shared with world.frag rather than reimplemented, because a puff hanging in
+// clear air over ground the cloud has covered is exactly what a second copy of that arithmetic buys.
+#include "veil.glsl"
 
 void main() {
     vec3 n = normalize(vNormal);
@@ -52,5 +65,18 @@ void main() {
 
     float dist = length(vWorldPos - uCamPos.xyz);
     float fog = smoothstep(uFog.x, uFog.y, dist) * uFog.z;
-    outColor = vec4(mix(lit, uHaze.rgb, fog), vTint.a * soft);
+
+    // <b>Hidden by giving up alpha, not by mixing toward the cloud.</b> Smoke was the last thing on the map
+    // still escaping the veil — water and lit windows were caught earlier, and this is the same class of leak
+    // with the worst payload: a chimney is a settlement's position, and a plume is visible from much further
+    // than the building under it. Alpha rather than colour because this pipeline blends: mixing cloud into it
+    // would paint cloud-coloured smoke over the fog rather than take any smoke away.
+    //
+    // Both layers count, and they multiply rather than add — two things each letting some light past is what
+    // a product means, and a sum would go opaque early and clip.
+    vec2 density = blix_rts_veil_density(
+        uScoutedMap, vWorldPos, uHaze.w, uScouted, uVeil, uVeilAir, uVeilDeep, uWind);
+    float through = (1.0 - density.x) * (1.0 - density.y);
+
+    outColor = vec4(mix(lit, uHaze.rgb, fog), vTint.a * soft * through);
 }

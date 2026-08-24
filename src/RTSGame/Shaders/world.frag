@@ -113,6 +113,9 @@ layout(push_constant) uniform Push {
 // The material classes — Shaders/materials.glsl, shared with the vertex stage.
 #include "materials.glsl"
 
+// Where the fog of war is. Shared with smoke.frag, which is the whole reason it is a file — see veil.glsl.
+#include "veil.glsl"
+
 // <b>Which of the three maps has this fragment, decided by whether it is inside the box rather than by how
 // far away it is.</b> A depth split would be the usual answer and needs the splits passed down and kept in
 // step with the fit; containment needs nothing passed down and cannot disagree with the fit, because the fit
@@ -225,98 +228,28 @@ const vec3 kHearthColor = vec3(1.00, 0.29, 0.075);
 // colour, and the first cut applied the veil only after that return — so every lake on the map sat in clear
 // view in the middle of unexplored ground, which is exactly the information the fog exists to withhold.
 vec3 rts_veil(vec3 shown, vec3 worldPos) {
-    // Offset by the map extent, scaled by one over the grid span. Derived rather than asserted: cell i covers
-    // world [i*c - e/2, (i+1)*c - e/2) and centres at (i+0.5)*c - e/2, so a texel-centre lookup wants
-    // uv = (world + e/2) / (cells*c). Both denominators are e for the wear texture above, which is why this
-    // looks like it does not need deriving. RtsGameLoop asserts this agrees with the masks, per cell.
-    // <b>Sampled in wind-aligned coordinates, so the cloud can be a shape that has a direction.</b> Along the
-    // wind and across it, with the along axis compressed — which stretches what comes out of the noise
-    // downwind. Isotropic noise that merely translates reads as a texture sliding over the map; a bank pulled
-    // out along its own motion reads as weather sweeping across it, and that is the whole difference.
-    vec2 heading = vec2(cos(uWind.w), sin(uWind.w));
-    vec2 across = vec2(-heading.y, heading.x);
-    float travelled = uWind.y * uVeil.z;
-    vec2 alongAcross = vec2(dot(worldPos.xz, heading) + travelled, dot(worldPos.xz, across));
-    vec2 p = vec2(alongAcross.x * uVeilAir.z, alongAcross.y) * uVeil.x;
-
-    // Two octaves at different sizes, the finer one carried further downwind than the broad one, which is
-    // what puts a parallax between the layers instead of scaling one of them. Both on the wind's own clock, so
-    // the cloud, the canopy and the water's ripples agree about the weather rather than holding three
-    // opinions about it.
-    float cloud =
-        blix_fbm2(p) * 0.62 +
-        blix_fbm2(p * 2.30 + vec2(travelled * uVeil.x * uVeilAir.z * 1.35, 0.0)) * 0.38;
-
-    // <b>The gust, in bands running across the wind.</b> A single global pulse would make the whole map
-    // breathe in unison, which nothing does; a wave travelling along the wind thickens one band while the next
-    // is thinning, and that is what reads as rolling. On uWind.z because that is the gust rate the canopy
-    // already sways to.
-    cloud *= 1.0 + uVeilAir.w * sin(uWind.y * uWind.z * 0.55 - alongAcross.x * uVeil.x * 1.7);
-
-    // <b>The boundary is displaced before it is read, which is what makes it seep rather than step.</b>
-    // Thinning a veil with noise varies how thick it is and leaves the <em>shape</em> of its edge exactly
-    // where the mask put it — so a ten-metre grid stays legible as a grid however much the density wobbles,
-    // which is what "blocky" meant. Warping the lookup instead moves the edge itself: the same fog, asked
-    // about a point a few metres off, and the answer wanders in and out of the cells in fingers.
-    //
-    // Derived from the wispiness rather than given a dial of its own, and at a fraction of a billow, because
-    // the two are one statement — how ragged is this cloud — and a second slider would only let them
-    // disagree. A warp approaching a full billow tears holes through to unscouted ground.
-    // Displaced in world axes, from noise sampled in the wind's, so the fingers it tears also lie downwind.
-    vec2 warpAmount = vec2(
-        blix_fbm2(p * 1.7 + vec2(11.3, 4.1)) - 0.5,
-        blix_fbm2(p * 1.7 + vec2(2.7, 19.6)) - 0.5) * uVeil.y * 0.9 / uVeil.x;
-    vec2 warp = heading * warpAmount.x + across * warpAmount.y;
-
-    vec2 scoutUv = (worldPos.xz + warp + uHaze.z * 0.5) * uScouted.x;
-    vec2 scouted = texture(uScoutedMap, scoutUv).rg;
-    // <b>Smoothed again on the way out, because a linear ramp has a corner in it.</b> The mask is blurred on
-    // the CPU and the sampler interpolates it linearly, and linear interpolation is continuous in value but
-    // not in slope — and it is the slope the eye reads. Two applications of the cubic ease flatten those
-    // corners at both ends of the ramp, which is the difference between a soft edge and a faceted one.
-    scouted = scouted * scouted * (3.0 - 2.0 * scouted);
-    scouted = scouted * scouted * (3.0 - 2.0 * scouted);
-
-    // <b>Two layers, composited, rather than one number lerped through three tiers.</b> The ramp version
-    // could not be tuned: unknown and remembered shared a scalar, so the only way to make unscouted ground
-    // properly opaque was to drag the whole ramp and pay for it in visibility on ground the player had
-    // already scouted — which is a real cost, because the memory tier is most of the frame.
-    //
-    // Split, each layer answers one question and the answers do not have to be traded off. The memory layer
-    // lives on ground that is known and unwatched; the deep bank lives where nothing is known. On fully known
-    // ground the deep term is <em>identically zero</em>, so its density is free to go as high as it likes.
-    //
-    // The blur that keeps the boundary soft is the one place they still meet, and uVeilDeep.w is what that
-    // costs: an exponent above one concentrates the bank in genuinely unscouted ground and pulls it back off
-    // the fringe of the known.
-    float known = scouted.r;
-    float watched = scouted.g;
-    float memory = known * (1.0 - watched) * uScouted.y;
-    float deep = pow(1.0 - known, uVeilDeep.w) * uScouted.z;
-    if (memory + deep <= 0.002) return shown;
-
-    // The noise thins and thickens both layers on top of the warp: the warp decides where the edge is, this
-    // decides how solid the middle is. At zero wispiness it is a flat sheet of exactly the two densities,
-    // which keeps them in charge of how much is hidden.
-    float wisp = mix(1.0 - uVeil.y, 1.0 + uVeil.y, cloud);
-    float memoryDensity = clamp(memory * wisp, 0.0, 1.0);
-    // <b>The same cloud, curved rather than a second field.</b> Below one it fills the thin parts in while
-    // leaving the thick ones, so the bank reads as a mass that has texture instead of as the mist turned up.
-    // One weather system: two independent noise fields drifting over each other never resolve into a sky.
-    float deepDensity = clamp(deep * pow(clamp(wisp, 0.0, 2.0), uVeilDeep.z), 0.0, 1.0);
+    // Where the fog is comes from Shaders/veil.glsl, shared with smoke.frag. What is left here is how an
+    // opaque pixel is hidden, which is genuinely this shader's own business: smoke is translucent and gives
+    // up alpha instead, because mixing cloud into an additive primitive paints cloud-coloured smoke rather
+    // than hiding any.
+    vec2 density = blix_rts_veil_density(
+        uScoutedMap, worldPos, uHaze.z, uScouted, uVeil, uVeilAir, uVeilDeep, uWind);
+    float memoryDensity = density.x;
+    float deepDensity = density.y;
+    if (memoryDensity + deepDensity <= 0.002) return shown;
 
     // <b>Lit as the same air the distance haze is made of.</b> It was mixing toward flat sky ambient, which
     // is why it sat on top of the scene instead of in it: the one thing every other bit of atmosphere in this
     // shader does is pick between a cold scatter away from the sun and a warm glow toward it, and the veil was
-    // the only air on screen with no opinion about where the sun was. Sharing the pair also means Atmosphere.cs
-    // drives it — so the fog is the right colour for the season and the hour without a second palette, and it
-    // cannot disagree with the haze standing next to it.
+    // the only air on screen with no opinion about where the sun was. Sharing the pair also means
+    // Atmosphere.cs drives it — so the fog is right for the season and the hour without a second palette, and
+    // it cannot disagree with the haze standing next to it.
     vec3 toFragment = worldPos - uCamPos.xyz;
     float towardSun = max(dot(normalize(toFragment), normalize(uSunDir.xyz)), 0.0);
     vec3 veilColor = mix(uHazeAway.rgb, uHazeToward.rgb, towardSun * uVeilAir.x);
-    // Forward scatter, which is the most recognisable thing fog does with light: a bank between the eye and a
-    // low sun is brighter than the lit ground beside it. Tight, so it is a glow about the sun's bearing rather
-    // than a general lift — a broad one only washes the veil out and loses the shape of the cloud.
+    // Forward scatter, the most recognisable thing fog does with light: a bank between the eye and a low sun
+    // is brighter than the lit ground beside it. Tight, so it is a glow about the sun's bearing rather than a
+    // general lift — a broad one only washes the veil out and loses the shape of the cloud.
     veilColor += uSunTint.rgb * uLight.x * uVeilAir.y * pow(towardSun, 6.0);
 
     // The deep bank keeps only a share of that directional colouring, and the physics is the reason rather

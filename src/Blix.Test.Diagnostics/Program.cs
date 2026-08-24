@@ -415,6 +415,45 @@ var t = new TestRunner();
     t.ExpectTrue("Per-pass build timer present (shadow)", shadowBuild.CallCount == 1 && shadowBuild.TotalMs >= 0.0);
 }
 
+// -- DiagnosticsFrameRecorder: instanced draws count every instance ----------
+// The regression this exists for: OnDraw took indexCount/3 and ignored
+// InstanceCount, so an instanced draw of four thousand trees reported one
+// tree's worth of triangles. A frame read 246k where the geometry submitted
+// was 2.8M, and nothing about the figure looked wrong -- RTSGame sized shadow
+// work against it. A counter nobody can tell is lying is worse than none.
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    var recorder = new DiagnosticsFrameRecorder(sys);
+
+    sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
+    var commandList = new RenderCommandList(recorder);
+    commandList.Pass("instanced", new RenderPassDescription(
+        RenderSurfaceHandle.Default,
+        ClearColors: Array.Empty<GraphicsColor?>(),
+        ClearDepth: false),
+        pass =>
+        {
+            // 4 triangles a mesh, 250 instances = 1,000 triangles.
+            pass.DrawIndexedInstanced(new VertexBufferHandle(0), new IndexBufferHandle(0),
+                new PipelineHandle(0), indexCount: 12, instanceCount: 250,
+                Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(),
+                new MaterialHandle(0), Array.Empty<byte>());
+            // And a plain draw alongside it, so the two paths are known to agree
+            // about what one instance means: 3 triangles, not 3 x nothing.
+            pass.DrawIndexed(new VertexBufferHandle(0), new IndexBufferHandle(0),
+                new PipelineHandle(0), indexCount: 9,
+                Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>());
+        });
+    sys.EndFrame();
+
+    var frame = sys.LatestFrame!;
+    var tris = frame.Stats.First(e => e.Path == "passes/instanced/triangles");
+    var draws = frame.Stats.First(e => e.Path == "passes/instanced/draws");
+    // 1,000 + 3. Before the fix this read 4 + 3 = 7.
+    t.ExpectTrue("Instanced triangles count every instance", tris.Value == 1003.0);
+    t.ExpectTrue("Instanced draw is still one draw", draws.Value == 2.0);
+}
+
 // -- Recorder: OnPassEnd fires even if the record delegate throws ------------
 // Without finally-protection on Pass(), the recorder's pass scope would
 // leak past the throwing pass and subsequent OnDraw calls would attribute

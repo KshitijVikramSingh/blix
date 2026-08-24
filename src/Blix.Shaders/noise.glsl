@@ -1,3 +1,10 @@
+// <b>A guard that the compiler actually honours.</b> glslc does not implement #pragma once — it warns and
+// includes the file again — so the pragma below is documentation, not protection. That went unnoticed for as
+// long as nothing included this twice; the moment a shared library started including it as well as the shader
+// that uses it, every function in here was redefined and the build failed on "function already has a body".
+#ifndef BLIX_NOISE_GLSL
+#define BLIX_NOISE_GLSL
+
 #pragma once
 
 // Hash + value-noise primitives. Cheap, deterministic, no texture lookups.
@@ -103,3 +110,5 @@ float blix_fbm3(vec3 p)
     }
     return v;
 }
+
+#endif // BLIX_NOISE_GLSL

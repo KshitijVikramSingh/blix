@@ -23,7 +23,14 @@ layout(push_constant) uniform Push {
     vec4 uSunLight;   // rgb = the sun's colour times its intensity
     vec4 uSkyLight;   // rgb = the sky's ambient times its scale
     vec4 uFog;        // x = start (m), y = end (m), z = strength
-    vec4 uHaze;       // rgb = what the distance goes to
+    vec4 uHaze;       // rgb = what the distance goes to, w = the map extent, which the veil needs
+    // Declared and unread here, as uWind is in the world vertex stage: one block, one layout, every stage.
+    // See smoke.frag for what the fog of war does with them.
+    vec4 uScouted;
+    vec4 uVeil;
+    vec4 uVeilAir;
+    vec4 uVeilDeep;
+    vec4 uWind;
 };
 
 layout(location = 0) out vec3 vNormal;

@@ -7,6 +7,9 @@ namespace Blix.Diagnostics;
 //
 // Per draw it writes both a top-level total ("draws", "triangles") and a
 // per-pass attribution ("passes/<name>/draws", "passes/<name>/triangles").
+// "triangles" means triangles actually submitted -- index count over three,
+// times the instance count. See OnDraw for what it meant before, and why
+// that was worth a comment this long.
 // The double-counting is intentional: it removes the need for sinks to
 // aggregate across pass rows to show a frame total, and the channels'
 // path-keyed aggregation is fast enough that two Stats writes per draw
@@ -27,6 +30,11 @@ public sealed class DiagnosticsFrameRecorder : IFrameRecorder
     private const string PassesRoot = "passes";
     private const string DrawsStat = "draws";
     private const string TrianglesStat = "triangles";
+
+    // <b>Reported next to the triangles because the two together are checkable and either alone is not.</b>
+    // The instance-count bug below hid behind exactly that: a triangle figure with nothing to divide it by
+    // looks equally plausible whether or not the instances were counted.
+    private const string InstancesStat = "instances";
     private const string PassBuildTimer = "build";
 
     private readonly DebugSystem system;
@@ -81,10 +89,30 @@ public sealed class DiagnosticsFrameRecorder : IFrameRecorder
         // Triangle-list assumption matches every pipeline in the engine
         // today. If line/point primitives appear later this becomes a
         // pipeline-aware lookup, but for now indexCount/3 is honest.
-        var triangles = command.IndexCount / 3;
+        //
+        // MULTIPLIED BY THE INSTANCE COUNT, which it was not, and the
+        // omission made this counter quietly useless for exactly the
+        // content it is most often pointed at. An instanced draw of four
+        // thousand trees reported one tree's worth of triangles, so a
+        // frame measured here read 246k while the geometry actually
+        // submitted was 2.8M -- an eleven-fold undercount, and the number
+        // looked entirely plausible.
+        //
+        // The cost of that is not the wrong figure, it is the decisions
+        // taken against it: RTSGame concluded from these rows that its
+        // shadow casters were cheap at "59k triangles per cascade" and
+        // sized work accordingly. A counter nobody can tell is wrong is
+        // worse than no counter, because it is believed.
+        //
+        // long, because the product overflows int on frames this engine
+        // already draws: 16,384 instances is the batch ceiling and a
+        // canopy is several thousand triangles.
+        var instances = Math.Max(1, command.InstanceCount);
+        var triangles = (long)(command.IndexCount / 3) * instances;
 
         ctx.Stats.Increment(DrawsStat);
         ctx.Stats.Count(TrianglesStat, triangles);
+        ctx.Stats.Count(InstancesStat, instances);
 
         if (currentPass is null)
         {
@@ -96,6 +124,7 @@ public sealed class DiagnosticsFrameRecorder : IFrameRecorder
         {
             ctx.Stats.Increment(DrawsStat);
             ctx.Stats.Count(TrianglesStat, triangles);
+            ctx.Stats.Count(InstancesStat, instances);
         }
     }
 }
