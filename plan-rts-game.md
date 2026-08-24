@@ -7233,3 +7233,187 @@ something discovered when a replay diverges.
 One consequence for shadows: a caster in unexplored ground casting onto explored ground leaks terrain the
 player has not scouted. Most games ignore it. Decide it in the per-cascade caster cull rather than by
 accident.
+
+## 75. Fog of war, and the camera that was aiming at sea level
+
+> we'll be starting with fog of war exploration/implementation/design first, then get back to perf!
+
+### The vision system already existed
+
+`SimulationWorld.CanSee` was already there — per-body, forest-occluded, ray-marched at the navigation
+raster, with exactly the "per hostile rather than per pair" budget §28 specified — and `ThreatSystem` was
+already using it to leash pursuit. So item 1 of the combat arc's order of work, "a detection radius, occluded
+by forest", was built. §31's line saying otherwise is stale.
+
+That decided the shape of everything else. Fog derives from that predicate rather than from a radius of its
+own, which means the fog and the simulation cannot disagree about what a wood hides — and it inherits forest
+occlusion for nothing. §26 promised that a settlement's cut gaps would be "both the ways in and the only ways
+it can watch"; this is where that arrives, and dense woodland interiors become permanent unknowns you can
+only open by cutting, because `CanSee` stops at Forest and the interior is impassable anyway.
+
+### The seam, stated as a direction
+
+**Fog may read the simulation; the simulation may never read fog.** §74 had it as a location — fog stays
+outside — which is right about exploration and cannot survive contact with combat: a §30 defence deciding
+whether it is needed must read what its faction *knows*, and in a lockstep world that knowledge is carried
+state that has to be fingerprinted. And §5's acceptance test forbids vision cheats, so the AI has to read the
+same structure the player's fog is drawn from.
+
+So the sharper form: **what the camera dims is view state and excluded; what a faction knows is simulation
+state and fingerprinted.** They are different structures. The second is not built. When it is, the player's
+fog should be *derived* from it rather than computed alongside it, or the two drift in the one way a player
+notices — seeing a unit the simulation has decided is hidden.
+
+The rule holds cheaply because what crosses the seam is a pure predicate rather than state. `DeterminismCheck`
+records the exclusion, and its census alarm now reads that list: a session adding state to the world is
+offered a fourth answer besides Carried, Derived and WallClock — that it belongs to the renderer.
+
+### Two masks, on the canopy grid, because the gate has to read both
+
+Ten metre cells, indexed by the canopy density field's own arithmetic — `CanopyIndex` delegates to it and
+`CanopyCellMetres` is an alias. Two ten-metre grids computed by two copies of one formula is this file's
+signature failure in a sixth costume, and it would have surfaced as trees popping along a boundary the player
+can *see the fog at*.
+
+`explored` is monotonic, which is what makes the round-robin refresh safe: a partial update can only add, so
+there is no frame where scouted ground reads unscouted because its watcher's turn has not come. `visible` is
+accumulated into a scratch mask and swapped when a cycle closes, so it is never read half-stamped.
+
+Watchers are refreshed a few per frame for a real reason rather than out of caution: `CanSee` marches at half
+a metre, so one granary asking about its 105 m reach is some three hundred and fifty cells at up to two
+hundred samples each. And they are collected once per *cycle*, not per frame, because finding the buildings
+means sweeping all thirty-four thousand nodes — adding a second full sweep per frame to feed the thing meant
+to remove the first would have been its own joke. An empty watcher list has to be guarded or it sweeps every
+frame looking for a granary that is not there.
+
+### What the fog hides, and the reversal that settled it
+
+> how about we start all unexplored, explored then becomes dimmed, and what pushes for scouting is not
+> resources already visible on the map, it's requirements/pressures?
+
+I had recommended the opposite — geography always visible, fog hiding only what people have done — on the
+grounds that it protects §71's "a quarry is a landmark". The reversal is better and for a reason I had not
+weighed: need-driven discovery is a stronger loop than window-shopping from a map you have always been able
+to read. And it does not undo §71 so much as *gate* it. §71's actual complaint was that stone was invisible
+from anywhere a player would stand; invisible until you have been there is a different and defensible thing.
+
+The other half of that exchange was a question about whether rendering cost should influence the choice:
+
+> or should I not let that influence this or vice-versa?
+
+It should not, and this file has already paid to learn it twice. §72's drawn-density cap did exactly what
+"cheap out on dimmed regions" would do — 4,130 trees to 1,915, and the frame went 85.2 ms to 74.4, which is
+nothing. And the choice that is better for the look turned out to be better for the cost anyway: if unexplored
+means hidden, unexplored cells submit no geometry at all, which is not a quality trade but a refusal to draw
+what nobody can see.
+
+### The two tiers had to become two layers
+
+> unknown needs to be much stronger and denser than it is today — layering the unknown atop the known might
+> look nice, but trying to blend them might reduce visibility in known areas
+
+Exactly right, and it was a real defect rather than a tuning complaint. One scalar lerped through three tiers
+means unknown and remembered share a ramp, so the only way to make unscouted ground properly opaque is to drag
+the whole ramp — paying for it in visibility on ground already scouted, which after the opening reveal is most
+of the frame.
+
+Composited instead: the memory layer, then the deep bank over the top of it. What that buys is a guarantee
+rather than a compromise — on fully known ground the deep term is *identically zero*, so its density is free to
+go as high as it likes. The blur that keeps the boundary soft is the only place the two still meet, and an
+edge-falloff exponent is what that costs.
+
+### The veil is weather, and it was the only air on screen with no opinion about the sun
+
+Twenty lines above it, the aerial perspective picks between a cold scatter away from the sun and a warm glow
+toward it. The veil was mixing toward flat sky ambient, which is precisely why it read as something laid over
+the scene rather than as part of it. It shares that pair now, at its own intensity — a bank on the ground and
+kilometres of distance haze are not the same thickness of air — so `Atmosphere.cs` drives the fog and it cannot
+disagree with the haze standing beside it.
+
+Two findings worth keeping. **Multiplying toward black could only ever make a darker version of the same
+picture**, which is why more of it looked like less weather; mixing toward light is what made it read as
+overcast. And **isotropic noise that merely translates reads as a texture sliding** however fast it moves — the
+noise is sampled in wind-aligned coordinates with the along-wind axis compressed, so the billows are drawn out
+downwind, and the gust arrives as bands *across* the wind because nothing breathes in unison.
+
+### Blocky was three faults, not one
+
+> the edges are too blocky especially the dim to lit transition
+
+A binary mask interpolated linearly is continuous in value and not in slope, and it is the slope the eye reads
+as a facet. Three fixes, and none of them alone was enough: blur the mask into the texture and never back into
+it (the wear texture's rule, for the wear texture's reason); **warp the lookup** with the cloud noise so the
+edge itself wanders rather than its thickness varying — thinning a veil leaves a ten-metre grid legible *as* a
+grid; and ease the shown masks per frame, so the boundary stops stepping a whole cell every time a refresh
+cycle closes eight frames apart.
+
+### Three shader paths returned before the veil, and all three leaked
+
+Water had its own early exit, so every lake sat in clear view inside unexplored ground. Worse was the lit
+window: a night settlement would have announced itself as a row of bright dots on black. Water gives away
+terrain; a window gives away people. The veil is a function called from all three now. `smoke.frag` is a
+separate pipeline with no mask bound and still escapes — harmless until there is a second settlement, and the
+same class of bug.
+
+### The camera was aiming at sea level
+
+> I feel like I can't zoom beyond a certain level that's a bit too high, and also after a certain zoom the
+> camera speed massively slows down
+
+Two complaints, one bug, and it took a wrong guess first — I read it as zooming out and blamed the 118 m cap.
+The focus was pinned to `y = 0` while the village's ground sits at **-47.7 m**. So the camera aimed at a point
+forty-eight metres up in clear air, and at full zoom-in its eye — 5.9 m above the focus — stood *fifty-three
+metres above the terrain*. Hence the closest available view being a middle-distance one. And pan speed is a
+share of the standoff, so at that zoom it panned at 8.8 m/s while looking at a hundred metres of ground. No
+pan-speed change was needed once the datum was right, which is the tell that it was one bug.
+
+It also puts every derived reach on its proper datum. `VisibleGroundRadius` and `GroundBand` both take the eye
+height as `sin(pitch) x cameraDistance` — the height above *that point* — so with the focus off the ground,
+every draw distance in §69's "one reach for every draw distance" was computed for a camera much lower than the
+one drawing them. The ground-chunk cull's own comment had already described the symptom without naming the
+cause: the far edge of the view comes from intersecting the frustum with a plane at the focus height, "exactly
+right on the flat ground it was written against and wrong the moment the map has hills in it".
+
+### The gate, and the measurement that cancelled its other half
+
+The gate is one test above every per-kind branch, which is what §74 settled while it was still a design: static
+things keyed to explored, because a tree does not move and where it stands is knowledge the player keeps;
+bodies keyed to watched, because where a body was is not where it is. It reads the *blurred* masks, which
+reverses a note I had written three commits earlier — "a gate wants a decision and not a gradient" is true of
+the output and wrong about the input, since the veil is drawn from the blurred mask and a gate keyed to the
+sharp one hides props three cells inside ground the cloud has already thinned over.
+
+Two censuses started lying within one frame of it landing. `TREENODES` reported 4,295 trees alive on a map
+holding 34,337, because the alive count sat inside the tree branch and the gate now runs above it. It did not
+become wrong; it became a different number wearing the same label.
+
+**And then the tree index grid was cancelled by measurement.** Two controlled runs at fixed zoom: the whole CPU
+build is **7.7 ms of an 83 ms frame** — ground 0.5, nodes 3.6, agents 0.0, scatter 0.9, stage 0.1, record 2.6.
+So the index could at best recover four per cent. §72's lesson arriving a third time: whatever this frame is
+spending itself on, it is not tree geometry. What the gate did change is the *cost model* — tree work is now
+bounded by explored area rather than by map size, identically 4,295 offered at both zooms against 30,058
+veiled.
+
+Where the rest of the frame goes is still unknown, and saying so is the honest end of this. `FRAME` is a
+smoothed average of `time.Delta`, so it is the frame *period* and includes any block on present — which means
+"GPU-bound" is not established, only "outside every CPU build phase". Frame time does not track zoom at all:
+the fastest sample in one run, 42.5 ms, was at the furthest standoff, against 92 ms averaged at the same
+standoff. The variance turned out to be the camera being panned, which fires chunk builds and ground-cover
+rebuilds:
+
+> I was moving it around too - the perf honestly looks ok right now to me
+
+### Two instruments, and one of them is lying
+
+`MappingFault` asserts the world-to-texel mapping per cell, because that mapping has two implementations and
+one of them is in a shader that cannot be read, screenshotted or reasoned about from a log — a veil half a cell
+out looks exactly like a veil. Which is not hypothetical: the grid spans `cells x CellMetres` and **not** the
+map extent, and I wrote the comment warning about that and then used the span for both the offset and the
+divisor.
+
+The one still lying is not fog's. **The two triangle counters disagree by about eleven times.**
+`StagedLoad` multiplies by instance count, so the readout's `LOAD` figure is real geometry at 2.8M;
+`passes/scene/triangles` sums base-mesh triangles per draw call and does not multiply, so it reads 246k for the
+same frame. Any conclusion drawn from the pass counters about instanced content understated its load —
+including §73's "the threefold caster redraw is cheap, 0.38 ms and 59k triangles per cascade". Nothing should be
+optimised against either number until one of them is relabelled.
