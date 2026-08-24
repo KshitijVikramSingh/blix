@@ -469,7 +469,26 @@ internal sealed class FogOfWar
     private float[] shownExplored = Array.Empty<float>();
     private float[] shownVisible = Array.Empty<float>();
     private float[] blurFront = Array.Empty<float>();
-    private float[] blurBack = Array.Empty<float>();
+
+    /// <summary>
+    /// The blurred masks, kept as floats, because the draw gate has to read exactly what the shader reads.
+    /// </summary>
+    /// <remarks>
+    /// <b>This reverses something I wrote three commits ago and the reversal is the point.</b> The note on the
+    /// blur said the gate would read the sharp binary masks, "because a gate wants a decision and not a
+    /// gradient". That is true about the <em>output</em> — a tree is drawn or it is not — and wrong about the
+    /// input: the veil is drawn from the blurred mask, so a gate keyed to the sharp one hides props up to three
+    /// cells inside ground the cloud has already thinned over. Which is a pop, in the one place the player is
+    /// looking.
+    /// <para>
+    /// So the gate reads these, at a deliberately generous threshold: it draws wherever the veil is not fully
+    /// opaque, and errs toward drawing something invisible rather than toward not drawing something visible.
+    /// One authority again — the same numbers reach the gate and the sampler, so they cannot disagree about
+    /// where the edge is.
+    /// </para>
+    /// </remarks>
+    private float[] softExplored = Array.Empty<float>();
+    private float[] softVisible = Array.Empty<float>();
 
     /// <summary>The image, ready to upload.</summary>
     public ReadOnlySpan<byte> Texels => texels;
@@ -505,8 +524,8 @@ internal sealed class FogOfWar
             shownVisible[i] += (visible[i] - shownVisible[i]) * step;
         }
 
-        Soften(shownExplored, 0);
-        Soften(shownVisible, 1);
+        Soften(shownExplored, 0, softExplored);
+        Soften(shownVisible, 1, softVisible);
         TexelsDirty = true;
     }
 
@@ -517,13 +536,13 @@ internal sealed class FogOfWar
     /// reusing the nearest row, so the map's border does not fade to unexplored and put a false frontier round
     /// the outside of the world.
     /// </remarks>
-    private void Soften(float[] source, int channel)
+    private void Soften(float[] source, int channel, float[] softened)
     {
         Pass(source, blurFront);
-        Pass(blurFront, blurBack);
-        for (var i = 0; i < blurBack.Length; i++)
+        Pass(blurFront, softened);
+        for (var i = 0; i < softened.Length; i++)
         {
-            texels[i * 4 + channel] = (byte)Math.Clamp((int)(blurBack[i] * 255f + 0.5f), 0, 255);
+            texels[i * 4 + channel] = (byte)Math.Clamp((int)(softened[i] * 255f + 0.5f), 0, 255);
             texels[i * 4 + 3] = 255;
         }
 
@@ -617,7 +636,8 @@ internal sealed class FogOfWar
             shownExplored = new float[total];
             shownVisible = new float[total];
             blurFront = new float[total];
-            blurBack = new float[total];
+            softExplored = new float[total];
+            softVisible = new float[total];
             blurScratch = new float[total];
             texels = new byte[total * 4];
         }
@@ -669,6 +689,31 @@ internal sealed class FogOfWar
             (x + 0.5f) * CellMetres - extent * 0.5f,
             (z + 0.5f) * CellMetres - extent * 0.5f);
     }
+
+    /// <summary>
+    /// How much of the veil has to have lifted before a thing is worth submitting.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately near zero, so the gate is generous: it draws wherever the cloud is not entirely solid. The
+    /// two mistakes are not symmetrical — drawing something the cloud then hides costs a few instances nobody
+    /// sees, and failing to draw something the cloud does not hide is a hole in the world.
+    /// </remarks>
+    private const float GateThreshold = 0.015f;
+
+    /// <summary>Whether something that stays put should be drawn here.</summary>
+    /// <remarks>
+    /// Keyed to explored rather than to watched, because a building or a tree does not move: once seen, where
+    /// it stands is knowledge the player keeps. This is what makes the memory tier a memory rather than a
+    /// dimmer.
+    /// </remarks>
+    public bool DrawsStatic(Vector2 at) => softExplored[Index(at)] > GateThreshold;
+
+    /// <summary>Whether something that moves should be drawn here.</summary>
+    /// <remarks>
+    /// Keyed to watched, because where a body was is not where it is — the whole reason the tiers are two masks
+    /// and not one. The player's own bodies pass this by construction: they are what makes a cell watched.
+    /// </remarks>
+    public bool DrawsMobile(Vector2 at) => softVisible[Index(at)] > GateThreshold;
 
     /// <summary>What the player is entitled to be shown of a place.</summary>
     public FogTier TierAt(Vector2 at) => TierOf(Index(at));

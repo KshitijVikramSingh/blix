@@ -4660,9 +4660,34 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private void BuildNodeInstances()
     {
         DrawStumps();
+        nodesBehindTheVeil = 0;
         foreach (ref readonly var node in simulation.Nodes.All)
         {
             if (!node.IsAlive) continue;
+            // <b>Counted before the gate, because this is a census and the gate is a decision.</b> It was
+            // inside the tree branch below, which put it after the veil test — so the first frame the gate ran,
+            // TREENODES reported four thousand trees alive on a map holding thirty-four thousand. The number
+            // did not become wrong, it became a different number wearing the same label, which is the failure
+            // this file keeps producing and the one an instrument can least afford.
+            if (node.IsStanding) treeNodesAlive++;
+            // Same reason, and the same denominator: "5 of 21 outcrops drawn" is only worth printing if the 21
+            // is every rock on the map rather than every rock the veil already let through.
+            if (node.Kind == NodeKind.Outcrop) outcropsSeen++;
+            // <b>Above every per-kind branch, which is the whole argument for it being here.</b> §74 settled
+            // this while it was still a design: fog gates trees, buildings, heaps and stone by one rule, and
+            // this file's signature failure is a rule implemented locally at each call site until the copies
+            // disagree — seven instances of a flat-ground constant, each written on its own. One test, before
+            // the loop knows what kind of thing it is holding.
+            //
+            // Keyed to explored and not to watched: a tree does not move, so once it has been seen, where it
+            // stands is knowledge the player keeps. That is what makes the memory tier a memory rather than a
+            // dimmer, and it is why the masks are two and not one.
+            if (!scouted.DrawsStatic(node.Position))
+            {
+                nodesBehindTheVeil++;
+                continue;
+            }
+
             if (node.IsPile)
             {
                 DrawPile(in node);
@@ -4718,7 +4743,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
             if (node.IsStanding)
             {
-                treeNodesAlive++;
                 // <b>The frustum decides whether a tree is drawn; this only keeps the far field out.</b>
                 // A radius used to decide it, and a radius cannot: VisibleGroundRadius is frustum trigonometry
                 // measured from the <em>camera</em> — eye height, tan(pitch − halfFov), slant, aspect — and it
@@ -5744,7 +5768,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private void DrawOutcrop(in EconomyNode rock)
     {
         if (art is null || art.Rocks.Length == 0) return;
-        outcropsSeen++;
         var ground = simulation.Terrain.SampleHeight(rock.Position);
         var left = MathF.Max(0.22f, rock.Stock.Stone / MathF.Max(1f, Quarrying.StonePerOutcrop));
         // Varied by id, so the same outcrop is the same outcrop across a save.
@@ -6790,6 +6813,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private void BuildAgentInstances(float totalSeconds)
     {
         var interpolation = (float)(simulationAccumulator / SimulationWorld.FixedDeltaSeconds);
+        agentsBehindTheVeil = 0;
 
         foreach (ref readonly var agent in simulation.Agents.All)
         {
@@ -6797,6 +6821,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // know it is in there is that it went in and has not come out — see AgentState.Sheltered.
             if (!agent.IsAlive || agent.Sheltered) continue;
             var position = Vector2.Lerp(agent.PreviousPosition, agent.Position, interpolation);
+            // Keyed to watched rather than explored, because where a body <em>was</em> is not where it is —
+            // which is the entire reason the fog keeps two masks. The player's own bodies pass this by
+            // construction, since a body is what makes the cell it stands in watched; what it actually hides is
+            // somebody else's.
+            if (!scouted.DrawsMobile(position))
+            {
+                agentsBehindTheVeil++;
+                continue;
+            }
+
             var height = simulation.Terrain.SampleHeight(position);
             var selected = selection.Contains(agent.Id);
             var bodyScale = agent.Radius / AgentDefaults.Radius;
@@ -7015,6 +7049,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     /// <summary>How many collider plates the overlay drew, and how many it had no room for.</summary>
     private int collidersDrawn, collidersDropped;
+
+    /// <summary>
+    /// What the fog refused this frame: nodes never offered, and bodies never drawn.
+    /// </summary>
+    /// <remarks>
+    /// Reported because a gate is the one kind of optimisation whose success and whose bug look identical from
+    /// the chair — in both cases something is not on the screen. A count that moves with the fog and returns to
+    /// zero when the fog is off is the difference between the two.
+    /// </remarks>
+    private int nodesBehindTheVeil, agentsBehindTheVeil;
 
     /// <summary>Sizes the fog to the current map, forgetting whatever was known about the last one.</summary>
     /// <remarks>
@@ -7238,7 +7282,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"{scouted.WatcherCount.Bodies} bodies + {scouted.WatcherCount.Buildings} buildings watching, " +
             $"{scouted.QueriesLastFrame:N0} asks in " +
             $"{scouted.MillisecondsLastFrame:F2} ms, cycle asked {scouted.LastCycle.Asked:N0} granted " +
-            $"{scouted.LastCycle.Granted:N0}, widest reach {scouted.LastCycle.WidestReach:F0} m)" +
+            $"{scouted.LastCycle.Granted:N0}, widest reach {scouted.LastCycle.WidestReach:F0} m) · " +
+            // Zero with the fog off, which is the check that the gate is a consequence of the fog and not a
+            // second opinion about what is worth drawing.
+            $"VEILED {nodesBehindTheVeil:N0} nodes + {agentsBehindTheVeil:N0} bodies not offered" +
             (fogSettings.ShowCells
                 ? $" · FOGCELLS {fogCellsDrawn:N0} drawn" +
                   (fogCellsDropped > 0 ? $", {fogCellsDropped:N0} over budget" : string.Empty)
