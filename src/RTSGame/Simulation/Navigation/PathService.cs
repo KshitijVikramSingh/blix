@@ -429,6 +429,20 @@ internal sealed partial class PathService
     /// <summary>Flow fields built since construction. A proxy for route churn:
     /// if this climbs steeply the congestion field is invalidating routes faster
     /// than the crowd can act on them.</summary>
+    /// <summary>Cells closed by the cell-level A*, cumulatively, and the worst single search.</summary>
+    public long PathExpansions { get; private set; }
+
+    public long PathExpansionsWorst { get; private set; }
+
+    /// <summary>Searches that emptied the open set without reaching the goal — i.e. exhausted the map.</summary>
+    public long PathFailures { get; private set; }
+
+    /// <summary>Searches stopped by the expansion budget, which returned a partial route. See ExpansionBudget.</summary>
+    public long PathBudgetStops { get; private set; }
+
+    /// <summary>Cells in the navigation grid, so an expansion count can be read as a share of the map.</summary>
+    public int GridCells => grid.Width * grid.Height;
+
     public int FlowFieldBuilds { get; private set; }
 
     internal long FieldSetupTicks;
@@ -1648,15 +1662,19 @@ internal sealed partial class PathService
         Array.Clear(closed);
         searchQueue.Clear();
 
+        var expansionsAtEntry = PathExpansions;
         var startIndex = grid.Transform.Index(start);
         var goalIndex = grid.Transform.Index(goal);
+        var bestIndex = startIndex;
+        var bestReach = float.PositiveInfinity;
         var open = searchQueue;
         cost[startIndex] = 0f;
         // Costs are seconds now, so the heuristic has to be too: cells to go,
         // at the speed of the quickest ground that exists. Anything larger stops
         // being a lower bound and A* would return non-optimal routes.
         var heuristicScale = SecondsPerCell *
-                             (terrain.Revision == 0 ? 1f : TerrainSurfaceRules.MinimumPathCost);
+                             (terrain.Revision == 0 ? 1f : TerrainSurfaceRules.MinimumPathCost) *
+                             HeuristicWeight;
         open.Enqueue(start, Heuristic(start, goal) * heuristicScale);
 
         while (open.TryDequeue(out var current, out _))
@@ -1664,7 +1682,37 @@ internal sealed partial class PathService
             var currentIndex = grid.Transform.Index(current);
             if (closed[currentIndex]) continue;
             closed[currentIndex] = true;
-            if (currentIndex == goalIndex) return Reconstruct(cameFrom, startIndex, goalIndex);
+            // <b>Counted, because 1.8 seconds a search is either a weak heuristic or an exhausted map</b> and
+            // the two want opposite fixes. Expansions against the grid's cell count says which: a search that
+            // closes most of the map either could not reach its goal or was steered by a heuristic that had
+            // stopped steering.
+            PathExpansions++;
+            if (currentIndex == goalIndex)
+            {
+                PathExpansionsWorst = Math.Max(PathExpansionsWorst, PathExpansions - expansionsAtEntry);
+                return Reconstruct(cameFrom, startIndex, goalIndex);
+            }
+
+            // <b>The closest thing seen to the goal, kept so a bounded search has something to hand back.</b>
+            // Straight-line distance rather than cost: this is asking "which of the cells I reached is nearest
+            // the thing I was sent to", and a cost-to-here says nothing about that.
+            var reach = Heuristic(current, goal);
+            if (reach < bestReach)
+            {
+                bestReach = reach;
+                bestIndex = currentIndex;
+            }
+
+            if (PathExpansions - expansionsAtEntry >= ExpansionBudget)
+            {
+                // Out of budget with the goal unreached. Handing back the partial route beats both
+                // alternatives: a null makes a reachable destination look unreachable and the body gives up,
+                // and carrying on takes the frame. The body walks the part that was solved and asks again from
+                // there, which is also what it would do if the world had changed under it.
+                PathBudgetStops++;
+                PathExpansionsWorst = Math.Max(PathExpansionsWorst, PathExpansions - expansionsAtEntry);
+                return bestIndex == startIndex ? null : Reconstruct(cameFrom, startIndex, bestIndex);
+            }
 
             for (var directionIndex = 0; directionIndex < NeighborOffsets.Length; directionIndex++)
             {
@@ -1694,6 +1742,12 @@ internal sealed partial class PathService
                 open.Enqueue(next, nextCost + Heuristic(next, goal) * heuristicScale);
             }
         }
+
+        // Fell out of the loop: the open set emptied without reaching the goal, so every cell reachable from
+        // the start is now closed. That is the worst case a grid search has, and it is silent — the caller
+        // gets a null and no indication that answering it cost the whole map.
+        PathFailures++;
+        PathExpansionsWorst = Math.Max(PathExpansionsWorst, PathExpansions - expansionsAtEntry);
         return null;
     }
 
@@ -1940,6 +1994,69 @@ internal sealed partial class PathService
         }
         return directionIndex;
     }
+
+    /// <summary>
+    /// How hard the heuristic pushes, as a multiple of the admissible estimate.
+    /// </summary>
+    /// <remarks>
+    /// <b>One is the textbook answer, and raising it broke two invariants for nothing.</b> Left at one after
+    /// the sweep below: at 2.2 the pen-escape and determinism-fingerprint self-tests fail, and the stall does
+    /// not improve at any weight. Kept as a named constant rather than deleted because the reasoning is worth
+    /// having on the record, and because the day the fallback is fixed this becomes worth re-testing.
+    /// <para>
+    /// The original note follows, and its conclusion was wrong.
+    /// </para>
+    /// <b>One is the textbook answer and it cost 1.8 seconds a search on a real village.</b> Measured with
+    /// --pathprofile: two cross-map paths closed 1,348,421 cells between them, 94% of the grid, and neither
+    /// failed — so the searches were not exhausting an unreachable map, they were barely steering. The reason
+    /// is that the estimate prices a cell at the cheapest SURFACE cost that exists while the real step charges
+    /// surface, elevation, turning and congestion on top; on sculpted ground the true cost runs several times
+    /// the estimate everywhere, which is the definition of a heuristic that has stopped working.
+    /// <para>
+    /// So this is weighted A*: the returned route may cost up to this factor more than optimal, and in exchange
+    /// the search explores something like a corridor instead of half a map. The trade is the right way round
+    /// for a game — a body that walks a slightly longer way is invisible, and a second-long freeze is not — but
+    /// it IS a trade, and the number is here rather than buried so it can be argued with. Anything above one
+    /// forfeits the optimality guarantee the old scale was preserving at that price.
+    /// </para>
+    /// <para>
+    /// <b>And it is worth less than it looks.</b> Swept at 2.2, 3.0, 4.5 and 6.0, the stall window does not
+    /// move — every cross-map search still runs out of budget at the same place. So the weak heuristic was not
+    /// what made those searches cost 676,000 expansions each; a heuristic that was steering would have found
+    /// the goal sooner as the push increased, and this one does not. What is left is that a cross-map route on
+    /// a 1,200-cell grid is the wrong question to ask a cell search at all, and this project already built the
+    /// right one — the rectangle hierarchy and its flow fields. The weight stays because it is free and 2.2
+    /// beat 1.0; the real fix is upstream of here.
+    /// </para>
+    /// </remarks>
+    private const float HeuristicWeight = 1f;
+
+    /// <summary>
+    /// Cells one search may close before it gives up and hands back what it has.
+    /// </summary>
+    /// <remarks>
+    /// <b>A ceiling on the worst case, and NOT a cure for the freeze — those turned out to be different
+    /// numbers.</b> An expansion costs about 2.6 microseconds here, so this is roughly 650 ms: half of what
+    /// the worst measured cross-map search took, and the thing that stops a bigger map taking fifteen seconds
+    /// (a 1200 m world is 5.76M cells).
+    /// <para>
+    /// It is not smaller because the fallback is a truncated route, and truncation costs an invariant. Swept
+    /// against the self-tests and --pathprofile:
+    /// </para>
+    /// <list type="bullet">
+    /// <item>30,000 — the stall window drops from 300 ms a tick to 34, and "a group crosses region borders
+    /// without swinging" fails.</item>
+    /// <item>100,000 — 105 ms a tick, and it still fails.</item>
+    /// <item>250,000 — every test passes and the stall is 262 ms a tick, which is barely an improvement.</item>
+    /// </list>
+    /// <para>
+    /// So a bound tight enough to fix the freeze hands bodies partial routes, and a body that re-plans from
+    /// the end of a partial route swings where the old one did not. The bound is not the fix; the FALLBACK is.
+    /// A body whose search ran out should stay on the cohort's flow field — the coarse layer already holds a
+    /// non-swinging answer for that goal — rather than be given a polyline that stops halfway. That is the
+    /// next slice, and until it lands this constant is a ceiling and not a solution.
+    /// </remarks>
+    private const int ExpansionBudget = 250_000;
 
     private static float Heuristic(GridCell from, GridCell to)
     {

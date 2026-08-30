@@ -8798,3 +8798,56 @@ sculpted, and the first `--pathprofile` before phase timings were printed. Each 
 each omitted the term that mattered — the update half in §83, the fog upload in §85, `FindPath` here. **A
 split that only covers the structures you suspected will always blame one of them.** The fix, every time, was
 to make the frame or the tick close against its own total, and then look at the residue.
+
+## 95. The bound and the invariant are in conflict, and the fallback is why
+
+§94's first item was "cap and slice A\*, to stop the bleeding". The cap works and the bleeding does not stop,
+which is a more useful result than it sounds.
+
+### What was tried
+
+Two changes, measured with `--pathprofile` on the real village and gated against the self-tests:
+
+**A weighted heuristic.** The estimate prices a cell at the cheapest surface cost that exists, while the real
+step charges surface, elevation, turning and congestion — so on sculpted ground the true cost runs several
+times the estimate and A\* barely steers. That was the diagnosis, and the sweep refuted it: at weights of 2.2,
+3.0, 4.5 and 6.0 the stall window does not move at all, every cross-map search still runs out of budget in the
+same place. A heuristic that was steering would find the goal sooner as the push increased. This one does not.
+At 2.2 it also fails two self-tests — the pen escape and the determinism fingerprint. **Left at one.**
+
+**An expansion budget** with the partial route as its fallback. This works, and the price is exact:
+
+```
+budget      stall window        self-tests
+ 30,000     34 ms/tick  (9x)    "a group crosses region borders without swinging" FAILS
+100,000    105 ms/tick  (3x)    still fails
+250,000    262 ms/tick  (~0)    all pass
+```
+
+A bound tight enough to fix the freeze hands bodies truncated routes, and a body that re-plans from the end of
+a truncated route swings where it used to hold a line. That invariant was won in the locomotion arc and is not
+for trading against a hitch.
+
+### What that says
+
+**The bound is not the fix — the fallback is.** A search that runs out should not hand back half a polyline; it
+should leave the body on the cohort's flow field, which already holds a non-swinging answer for that goal and
+which the order tick has already paid for. The field is the coarse layer's whole purpose, and the A\* fallback
+is currently going around it.
+
+So the budget ships at 250,000 as a **ceiling and not a solution**: it caps a pathological search at about 650
+ms against the 1.8 seconds measured, and it matters much more on a larger map — a 1200 m world is 5.76M cells,
+where the same search would run for fifteen seconds. The 600 m freeze is untouched, deliberately, because the
+alternative was shipping a locomotion regression to make a number look better.
+
+### The next slice, now precisely stated
+
+1. **Make the fallback the field, not a fragment.** `AssignPath` needs to know a search was bounded and choose
+   transit instead of a partial route. Then the budget can come down to where it fixes the freeze.
+2. **And ask why cell A\* is running for a cross-map order at all.** Order 4's field was already built and
+   cached; the bodies were on transit; something moved them off it. Five queries in twenty ticks says whatever
+   that is, it happens repeatedly. Finding it may remove the need for a fallback rather than improve one.
+
+Also recorded, because it is the third time in two arcs: a fix that improves a number and breaks a test is not
+a trade to make quietly. The measurement said 9x and the gate said no, and the gate is the one that knows what
+the game is supposed to do.

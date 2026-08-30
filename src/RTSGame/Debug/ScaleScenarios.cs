@@ -252,6 +252,10 @@ internal static class ScaleScenarios
             // actually start moving and ask for what the order did not build.
             var quiet = Stopwatch.GetTimestamp();
             var quietBefore = world.RoutingCost;
+            var queriesBefore = world.PathQueries;
+            var expansionsBefore = world.PathSearch.Expansions;
+            var failuresBefore = world.PathSearch.Failures;
+            var searchesQuietBefore = world.RegionSearches;
             for (var tick = 0; tick < 20; tick++) world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             var quietAfter = world.RoutingCost;
             Console.WriteLine(
@@ -272,6 +276,24 @@ internal static class ScaleScenarios
                 $"recovery {world.Timings.AverageOf(SimulationPhase.CongestionRecovery),6:F2} " +
                 $"jobs {world.Timings.AverageOf(SimulationPhase.Jobs),6:F2} " +
                 $"commands {world.Timings.AverageOf(SimulationPhase.Commands),6:F2} ms");
+            // <b>Calls, not just milliseconds.</b> 315 ms a tick is twenty bodies asking once or one body
+            // asking twenty times, and those want opposite fixes — a per-tick cap, or a search that stops
+            // being asked.
+            var queries = world.PathQueries - queriesBefore;
+            var search = world.PathSearch;
+            Console.WriteLine(
+                $"           | A* {queries:N0} queries over 20 ticks " +
+                $"({queries / 20.0:F1} a tick, " +
+                $"{(queries > 0 ? world.Timings.AverageOf(SimulationPhase.Pathfinding) * 20.0 / queries : 0.0):F2} " +
+                $"ms each) | region searches {world.RegionSearches - searchesQuietBefore:N0}");
+            if (queries > 0)
+            {
+                Console.WriteLine(
+                    $"           | expansions {search.Expansions - expansionsBefore:N0} " +
+                    $"({(search.Expansions - expansionsBefore) / (double)search.GridCells * 100.0:F0}% of the " +
+                    $"grid's {search.GridCells:N0} cells), worst single {search.Worst:N0}, " +
+                    $"{search.Failures - failuresBefore} exhausted the map");
+            }
         }
 
         return 0;

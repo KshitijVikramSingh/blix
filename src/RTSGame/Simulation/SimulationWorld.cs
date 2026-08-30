@@ -198,6 +198,11 @@ internal sealed class SimulationWorld
     }
     public long PathQueries => pathService.PathQueries;
 
+    /// <summary>What the cell search actually explored. See PathService.PathExpansions.</summary>
+    public (long Expansions, long Worst, long Failures, int GridCells) PathSearch =>
+        (pathService.PathExpansions, pathService.PathExpansionsWorst,
+         pathService.PathFailures, pathService.GridCells);
+
     /// <summary>Where routing's time went, split three ways. See PathService.RoutingCost.</summary>
     public (double MeshMs, int MeshBuilds, int MeshCacheHits, int MeshRectangles,
             double TileMs, long TileFills, double FieldMs, int Fields) RoutingCost =>
