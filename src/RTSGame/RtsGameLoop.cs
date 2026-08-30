@@ -1127,7 +1127,27 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// a hundred and sixty-five — the settlement, its fields, its tree line and the shoulder of the nearest
     /// high ground, which is everything a decision is made against.
     /// </remarks>
+    /// <remarks>
+    /// <b>No longer the ceiling, as of §86 — it is the floor of the ceiling.</b> §82 said in as many words
+    /// that the 6-118 m limits were prior judgements rather than protected facts, and stage 0 then moved the
+    /// frame twice: the coarse cascades stopped casting real geometry (§84, off by default) and the fog upload
+    /// stopped draining the queue (§85, about 10 ms back at every standoff). A cap measured against the frame
+    /// as it was in §73 has no authority over the frame as it is now, and holding it while the envelope is
+    /// being re-measured means the measurement cannot see past the answer it is trying to check. What the
+    /// wheel obeys is now derived from the map; see <see cref="cameraFurthest"/>.
+    /// </remarks>
     private const float CameraFurthestDistance = 118f;
+
+    /// <summary>
+    /// Share of the world the camera may stand back by, when nothing says otherwise.
+    /// </summary>
+    /// <remarks>
+    /// The map lab's own rule, generalised: the camera sees roughly one and two fifths of its own standoff on
+    /// the ground at this pitch, so three quarters of the extent puts the whole map in frame and no more. It
+    /// is a bound about the map's size rather than a judgement about what is worth drawing — the judgement is
+    /// what --zoom-limit is for, once there is a measured one to pin.
+    /// </remarks>
+    private const float FurthestShareOfExtent = 0.75f;
 
     /// <summary>
     /// How far back the camera may actually stand, which the map lab raises.
@@ -1273,7 +1293,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         bool performanceVsync = false,
         int performanceCascades = -1,
         bool shadowProxies = false,
-        bool performanceBlockingUpload = false)
+        bool performanceBlockingUpload = false,
+        float zoomLimitMetres = 0f)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
@@ -1317,7 +1338,6 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         if (mapSeed is { } given) labSeed = given;
         worldExtentMeters = extentMeters;
-        if (startMapLab) cameraFurthest = MathF.Max(CameraFurthestDistance, extentMeters * 0.75f);
         clock.Compression = compression;
         // A camera sized for a thirty-metre square shows a kilometre map as a patch of
         // ground, which is the one thing this session must not do — the body has to be
@@ -1379,6 +1399,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         mapTuning.Region = labRegion;
         mapTuning.ReliefMetres = this.reliefAmplitudeMetres;
         this.startingZoomMetres = startingZoomMetres;
+        // <b>The wheel's ceiling, derived rather than declared.</b> Three things feed it, and each has been a
+        // bug on its own: the map's extent (a canvas three times the map wide cannot be judged through a hole
+        // showing a seventh of it), an explicit --zoom-limit (so a measured envelope can be pinned without a
+        // rebuild), and the requested opening standoff — because --zoom 150 opening at 150 and then having the
+        // first notch of wheel refuse to return there is the worst of both answers, and is exactly what
+        // happened.
+        cameraFurthest = zoomLimitMetres > 0f
+            ? MathF.Max(CameraNearestDistance + 1f, zoomLimitMetres)
+            : MathF.Max(
+                MathF.Max(CameraFurthestDistance, worldExtentMeters * FurthestShareOfExtent),
+                startingZoomMetres);
         if (performanceRun)
         {
             // <b>The label is the case.</b> Two runs whose numbers differ and whose labels do not are two
@@ -2202,7 +2233,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Console.WriteLine("  J: cycle pen-escape variants (main exit + random alternates)");
         Console.WriteLine("  L: load terrain laboratory (ramp, cliff, road, mud, rough, pond)");
         Console.WriteLine("  blue unit: yielding under crowd pressure   red unit: navigation progress failure");
-        Console.WriteLine("  arrows: pan   middle-drag: drag the ground   Q/E: rotate 90°   wheel: zoom");
+        Console.WriteLine(
+            $"  arrows: pan   middle-drag: drag the ground   Q/E: rotate 90°   " +
+            $"wheel: zoom {CameraNearestDistance:F0}-{cameraFurthest:F0} m" +
+            (cameraFurthest > CameraFurthestDistance
+                ? $" (past the old {CameraFurthestDistance:F0} m cap — --zoom-limit pins it)"
+                : string.Empty));
         Console.WriteLine("  Z: camera follows the selection (off by default)   Esc: quit");
         Console.WriteLine($"  {simulation.Agents.Count} agents   simulation: 30 Hz fixed step");
         Console.WriteLine("  placement grid: 1.5 m   navigation grid: 0.5 m   collider hash: 2.0 m");

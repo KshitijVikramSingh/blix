@@ -361,6 +361,11 @@ public static class Program
         var shadowProxies = args.Contains("--shadow-proxy");
         // The old, queue-draining fog upload, kept so the fix has something to be measured against.
         var performanceBlockingUpload = args.Contains("--perf-blocking-upload");
+        // <b>Pins the wheel's ceiling.</b> Unset, the camera may stand back as far as the map can be seen
+        // from — the 118 m cap was a §73 judgement about a frame that has since changed twice, and §82 put
+        // the limits explicitly back in play. Give this a number to hold a measured envelope, including the
+        // old one: --zoom-limit 118.
+        var zoomLimit = Value(args, "--zoom-limit") is { } limit ? float.Parse(limit) : 0f;
         if (performanceCascades > 3)
         {
             throw new ArgumentOutOfRangeException(
@@ -430,7 +435,8 @@ public static class Program
             performanceVsync,
             performanceCascades,
             shadowProxies,
-            performanceBlockingUpload);
+            performanceBlockingUpload,
+            zoomLimit);
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
     }

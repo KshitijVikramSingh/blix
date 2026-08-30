@@ -8264,3 +8264,43 @@ optimising the thing.** Three of the four findings above were invisible until an
   deliberately — its residency bookkeeping is written against the drain's guarantee, and the argument that the
   queued path is safe there is the same barrier argument made here but wants Sponza's streaming run to prove
   it rather than an assertion in this file.
+
+## 86. The zoom cap comes off, and the fog turns out to bound the wide view
+
+§82 put the 6-118 m limits explicitly back in play; §84 and §85 then moved the frame twice. A cap measured
+against §73's frame has no authority over this one, and holding it while the envelope is being re-measured
+means the measurement cannot see past the answer it is checking. So the wheel's ceiling is now derived:
+
+    cameraFurthest = --zoom-limit, else max(118 m, extent x 0.75, the requested --zoom)
+
+On the 600 m village that is **6-450 m**, printed in the startup control list. Three inputs, each of which
+had been a bug on its own: the map's extent (the lab's own rule, now general, because a canvas three times the
+map wide cannot be judged through a hole showing a seventh of it); an explicit `--zoom-limit`, so a measured
+envelope can be pinned without a rebuild; and the requested opening standoff, because `--zoom 150` opening at
+150 m and then having the first notch of wheel refuse to return there is the worst of both answers, and is
+what actually happened.
+
+### What the far end costs, now that it is reachable
+
+Sealed, still, noon, fog on, village default map:
+
+```
+standoff   frame p50      trees   scene tri   cast tri   chunks   outside
+118 m      26-28 ms       4,239      4.20M      6.20M      19      15.2 ms
+250 m      22.5 ms        4,295      4.32M      8.50M      24      16.4 ms
+450 m      16.7 ms        4,295      4.32M      8.91M      25      11.0 ms
+```
+
+**The staged geometry is identical at 250 and 450 m, and the frame gets cheaper as the camera pulls back.**
+With fog on, the revealed region bounds what can be drawn, so zooming out past roughly 150 m adds dark ground
+and no content while every tree covers fewer pixels. §83's "zoom sets the cost" is true between 24 and 118 m,
+where pulling back progressively fills the revealed area, and stops being true past it.
+
+Which means the 118 m cap was not standing in front of a cliff. The reason to have a far limit is what §73
+said it was — a settlement becomes a smudge and the shadow map is spread thin — and that is a legibility
+argument, not a frame-budget one. It should be settled by looking, at a standoff the wheel can now actually
+reach.
+
+Two things to check by eye at the far end, neither of which a log can answer: whether the ground runs out
+before the map does (chunks drawn were flat at 24-25 across both wide standoffs, so the ground draw radius may
+cap before the extent does), and whether a settlement at 450 m is worth being able to see at all.
