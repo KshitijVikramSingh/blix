@@ -8304,3 +8304,71 @@ reach.
 Two things to check by eye at the far end, neither of which a log can answer: whether the ground runs out
 before the map does (chunks drawn were flat at 24-25 across both wide standoffs, so the ground draw radius may
 cap before the extent does), and whether a settlement at 450 m is worth being able to see at all.
+
+## 87. The ceiling is free, the middle distance is not, and §86's plateau was one map's
+
+A claim from the chair: *the max zoom affects the frame more than the current zoom does.* Worth taking
+seriously — the chair has been right twice in this arc and the code reading wrong twice.
+
+### The ceiling, measured fairly
+
+`cameraFurthest` feeds three things and none of them is a draw bound: the scroll clamp, the lab's opening
+standoff, and the sealed zoom motion. Every bound comes from the current distance through `VisibleReach` and
+`DetailRadius`, and ground chunks are meshed map-wide regardless of the camera. So there should be no
+coupling — but that is a code reading, and the point of this arc is that code readings lose to measurements.
+
+The first measurement appeared to support the claim: at a fixed 78 m standoff, the 450 m ceiling came out
+5 and 11 ms worse in two of three pairs. **It was the harness.** Each pair ran 118 first and 450 second, into
+a machine that heats — the very error §84 was written about, committed by the script written to avoid it.
+Re-run ABBA:
+
+```
+ceiling   frame p50 over four runs        staged geometry
+118 m     36.5  40.5  43.9  46.3  (40.5)  6,729,150 scene / 11,511,072 cast
+450 m     39.8  41.6  45.0  48.0  (41.6)  identical, byte for byte
+```
+
+About a millisecond apart, inside a spread that climbs from 36 to 48 ms across the sequence whichever arm is
+running. **The ceiling costs nothing at a fixed standoff**, and the identical geometry says so mechanically as
+well as statistically.
+
+> A paired A/B is only paired if the order alternates. Fixed A-then-B against a drifting machine measures the
+> drift and attributes it to B.
+
+### But the cost is not monotonic in standoff
+
+Sealed, still, noon, fog on, pinned heavy seed, ascending then descending so drift shows as a gap between
+passes rather than a trend within one:
+
+```
+standoff   up      down    trees    scene tri   cast tri
+ 24 m      33.5    29.9     4,723      4.3M        4.5M
+ 60 m      37.1    34.1     6,783      6.0M        9.1M
+118 m      50.0    54.3     9,238      8.1M       16.7M
+200 m      86.6    71.7    11,398      9.9M       23.1M
+300 m      73.1    71.5    12,585     10.7M       27.3M
+450 m      50.1    60.5    12,754     10.8M       27.6M
+```
+
+**The worst place to stand is the middle distance**, and both sweep directions agree on the shape even though
+their absolute figures differ by 10-15 ms. Submitted geometry rises monotonically the whole way, so this is
+fill rather than triangles: at 200-300 m the trees are still large enough on screen to cost pixels and already
+numerous, while at 450 m each one is tiny. A far limit chosen to protect the frame would therefore have to
+be a *band* exclusion, which is absurd — confirming §86's conclusion from the other direction: the far limit
+is a legibility decision, not a frame-budget one.
+
+It also explains the chair's report without contradicting it. Raising the ceiling gave access to the worst
+band, and the heat persists after leaving it: the same fixed 78 m view drifted from 28 to 48 ms across fifteen
+runs today. You return to where you were and it is slower, which reads exactly as the ceiling having done it.
+
+### §86's plateau was a property of one map
+
+§86 reported staged geometry identical at 250 and 450 m and concluded that the fog bounds the wide view. That
+was measured on the **village default seed**, where the revealed region does plateau at about 4,295 trees. On
+the pinned heavy seed it keeps climbing to 12,754. The plateau belongs to that map's revealed area, not to
+fog in general, and §86 should be read with the seed named.
+
+Which is the same lesson as §83's heavy-map absolutes, arriving a second time: **every figure in this arc is
+a figure about one map at one standoff on one thermal state**, and the only claims that have survived are the
+ones about mechanism — a queue drain, a byte-identical instance list, a shape that both sweep directions agree
+on.
