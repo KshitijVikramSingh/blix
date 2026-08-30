@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Numerics;
 using RTSGame.Simulation.Persistence;
 using RTSGame.Simulation.Placement;
@@ -429,6 +430,22 @@ internal sealed partial class PathService
     /// if this climbs steeply the congestion field is invalidating routes faster
     /// than the crowd can act on them.</summary>
     public int FlowFieldBuilds { get; private set; }
+
+    internal long FieldSetupTicks;
+
+    /// <summary>
+    /// What routing has spent, split into the three places an order's time can go.
+    /// </summary>
+    /// <remarks>
+    /// Cumulative, so a caller measuring one order snapshots and subtracts. Milliseconds rather than ticks
+    /// because every consumer is a report, and the counts travel with them: 340 ms over one mesh build and
+    /// 340 ms over forty tile fills are different problems wearing one number.
+    /// </remarks>
+    public (double MeshMs, int MeshBuilds, int MeshCacheHits, int MeshRectangles,
+            double TileMs, long TileFills, double FieldMs, int Fields) RoutingCost =>
+        (MeshBuildTicks * 1000.0 / Stopwatch.Frequency, MeshBuilds, MeshCacheHits, MeshRectangles,
+         TileFillTicks * 1000.0 / Stopwatch.Frequency, TileRefinements,
+         FieldSetupTicks * 1000.0 / Stopwatch.Frequency, FlowFieldBuilds);
     /// <summary>Tiles adopted whole from the previous field for the same goal.</summary>
     public long InheritedTiles { get; private set; }
     /// <summary>A* queries served, for attributing pathfinding cost.</summary>
@@ -1305,6 +1322,8 @@ internal sealed partial class PathService
         // something asks, and are what keeps the gradient continuous.
         var lineage = (goalIndex, radiusKey, speedKey, grid.Revision, chargeTurns);
         var (mesh, meshIndex) = Mesh(agentRadius);
+        // After Mesh, so the decomposition's own cost is charged to it and not to the field.
+        var fieldStart = Stopwatch.GetTimestamp();
         costs = new RectangleFlowField(
             mesh,
             meshIndex,
@@ -1317,6 +1336,7 @@ internal sealed partial class PathService
             agentRadius,
             speedScale,
             chargeTurns);
+        FieldSetupTicks += Stopwatch.GetTimestamp() - fieldStart;
         FlowFieldBuilds++;
         flowFields[key] = costs;
         latestFields[lineage] = costs;

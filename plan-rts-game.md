@@ -8685,3 +8685,61 @@ CPU side.
 `--cheap-trees` proxied whether or not `--shadow-proxy` was given, and the two arms of that comparison were the
 same configuration. The third measurement failure of exactly this shape today — two arms, one behaviour — and
 all three were caught by an exact column rather than by a timing. Keep the exact columns.
+
+## 93. The freeze, attributed: two flow fields an order at 150 ms each
+
+Reported from the chair: pathfinding can freeze the app for seconds on real maps, across larger distances or
+for larger groups, independently. The report is right about the freeze and wrong about both causes, which is
+worth stating carefully because the wrong causes are the plausible ones.
+
+`--ordertest` already existed for this — "the order tick, and the ten ticks after it, as a player would feel
+them". It says:
+
+- **Not distance.** A 29 m order and a 559 m order cost the same to the millisecond.
+- **Not group size.** Thirteen agents and fifty agents cost the same.
+- **Not A\*.** Three region searches per order, and `PathQueries` barely moves.
+- **Map area and terrain detail.** 600 m costs 260 ms, 1200 m costs 930 ms; flat repeat orders cost 28 ms and
+  sculpted ones 340 ms.
+
+Three counters were added to say which of the three candidate structures owns it — the rectangle mesh, the
+region tiles, the field — because "probably the mesh" is not a diagnosis. On a sculpted 600 m map, per order:
+
+```
+order 1 | 568 ms | mesh 233 ms (1 build, 562 rects) | tiles 33 ms (3 fills) | field 301 ms (2 built)
+order 2 | 336 ms | mesh   0 ms (cache hit)          | tiles 34 ms (3 fills) | field 301 ms (2 built)
+...
+order 8 | 337 ms | mesh   0 ms (cache hit)          | tiles 34 ms (3 fills) | field 303 ms (2 built)
+```
+
+**About 150 ms per flow field, two fields per order, every order, forever.** The mesh cache does work — it is
+paid once at 233 ms and then hits — and the tiles are a tenth of the problem. The field is the freeze.
+
+What a field's constructor does is a Dijkstra over the rectangle mesh's crossing corners: 562 rectangles and,
+by the file's own note, on the order of 1,682 crossings. At 150 ms that is roughly ninety microseconds per
+corner settled, which is two orders of magnitude more than a Dijkstra relaxation should cost — so the
+suspicion is not the algorithm's shape but what `LegBetween` does per edge. That is the next measurement, not
+the next assumption.
+
+And the 233 ms mesh build is not retired by being cached: it is keyed on `grid.Revision`, and construction
+changes the placement grid, which re-rasterises navigation, which bumps the revision. On a village that is
+actively building, the 233 ms comes back — at 905 ms on a 1200 m map. That is the shape of "frozen for
+seconds": a mesh rebuild and a pair of field builds landing in the same tick.
+
+### What the fix has to separate
+
+1. **Why a field costs 150 ms.** Measure `LegBetween` and the crossing graph's real size before restructuring
+   anything. If a field can be built in five milliseconds, most of this problem stops existing and the rest of
+   the list changes shape.
+2. **Why two fields per order** rather than one. One is the cohort's shared transit field; the other is
+   probably slot reachability at the class radius, or a second radius key. If they can share, the freeze
+   halves for free.
+3. **Nothing this size belongs on the tick.** Even at five milliseconds, a whole-map structure built
+   synchronously inside a command is a stall waiting for a bigger map. It wants a budget and a slice across
+   ticks, with bodies moving on a provisional heading until the field lands — which is a behaviour question as
+   much as a performance one, and therefore belongs with groups.
+4. **The mesh wants to survive a nav change.** A building finished in one corner of the map should not
+   invalidate a decomposition of the whole of it. Region-local invalidation, or a mesh keyed per region.
+
+Order matters here: (1) is a measurement, (2) is possibly free, (3) is the durable fix and needs the group
+work beside it, and (4) is the one the village actually trips over. Stage 0's rule applies unchanged — measure
+the instrument, then the mechanism, then change something.

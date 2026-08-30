@@ -197,6 +197,11 @@ internal sealed class SimulationWorld
         return pathService.MeasureRectangleFidelity(goal, agentRadius);
     }
     public long PathQueries => pathService.PathQueries;
+
+    /// <summary>Where routing's time went, split three ways. See PathService.RoutingCost.</summary>
+    public (double MeshMs, int MeshBuilds, int MeshCacheHits, int MeshRectangles,
+            double TileMs, long TileFills, double FieldMs, int Fields) RoutingCost =>
+        pathService.RoutingCost;
     public long AvoidanceSolves => steeringSystem.Solver.Solves;
     public long AvoidanceInfeasible => steeringSystem.Solver.InfeasibleSolves;
     public long AvoidanceTerrainFallbacks => steeringSystem.Solver.TerrainFallbacks;

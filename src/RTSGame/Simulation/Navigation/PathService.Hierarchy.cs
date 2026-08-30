@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using RTSGame.Simulation.Spatial;
 
 namespace RTSGame.Simulation.Navigation;
@@ -72,18 +73,38 @@ internal sealed partial class PathService
     internal (WalkableRectangles Mesh, RectangleIndex Index) Mesh(float agentRadius)
     {
         var key = (grid.Revision, RadiusKey(agentRadius));
-        if (meshes.TryGetValue(key, out var existing)) return existing;
+        if (meshes.TryGetValue(key, out var existing))
+        {
+            MeshCacheHits++;
+            return existing;
+        }
 
         foreach (var stale in meshes.Keys.Where(k => k.Nav != grid.Revision).ToArray())
         {
             meshes.Remove(stale);
         }
 
+        // <b>Timed and counted, because a stall has to be able to name itself.</b> An order on a real map was
+        // measured at 340 ms against 28 on flat ground, with only three region searches in it — so the cost is
+        // in one of three places (this decomposition, the tiles filled off it, or the field around them) and
+        // "probably the mesh" is not a diagnosis. Cache hits are counted too: a mesh rebuilt every order and a
+        // mesh reused look identical from outside and want opposite fixes.
+        var meshStart = Stopwatch.GetTimestamp();
         var mesh = WalkableRectangles.Build(grid, agentRadius);
         var built = (mesh, new RectangleIndex(mesh, grid.Width, grid.Height));
+        MeshBuildTicks += Stopwatch.GetTimestamp() - meshStart;
+        MeshBuilds++;
+        MeshRectangles = mesh.Count;
         meshes[key] = built;
         return built;
     }
+
+    /// <summary>Where an order's time actually goes, split three ways. See Mesh and FillRectangleTile.</summary>
+    internal long MeshBuildTicks;
+    internal int MeshBuilds;
+    internal int MeshCacheHits;
+    internal int MeshRectangles;
+    internal long TileFillTicks;
 
     /// <summary>
     /// Fills one region's tile from the rectangle field, by seeding its edge and searching in.
@@ -97,6 +118,19 @@ internal sealed partial class PathService
     /// still arithmetic over corners.
     /// </remarks>
     internal float[] FillRectangleTile(RectangleFlowField field, int region)
+    {
+        var fillStart = Stopwatch.GetTimestamp();
+        try
+        {
+            return FillRectangleTileCore(field, region);
+        }
+        finally
+        {
+            TileFillTicks += Stopwatch.GetTimestamp() - fillStart;
+        }
+    }
+
+    private float[] FillRectangleTileCore(RectangleFlowField field, int region)
     {
         partition.Bounds(region, out var minimumX, out var minimumZ, out var maximumX, out var maximumZ);
         var seeds = new List<(GridCell Cell, float Cost)>();

@@ -223,11 +223,13 @@ internal static class ScaleScenarios
             var distance = (half * 2f - 12f) * fraction;
             var target = new Vector2(-half + 6f + distance, 0f);
             var searchesBefore = world.RegionSearches;
+            var routingBefore = world.RoutingCost;
             world.QueueMove(ids, target);
             var orderStart = Stopwatch.GetTimestamp();
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             var orderMilliseconds = Stopwatch.GetElapsedTime(orderStart).TotalMilliseconds;
+            var routing = world.RoutingCost;
 
             var followStart = Stopwatch.GetTimestamp();
             for (var tick = 0; tick < 10; tick++)
@@ -241,6 +243,18 @@ internal static class ScaleScenarios
                 $"next ticks {followMilliseconds,7:F2} ms | " +
                 $"searches {world.RegionSearches - searchesBefore,6:N0} | " +
                 $"tiles {world.TileRefinements:N0}");
+            // <b>Where the order's milliseconds went, split three ways.</b> The total alone said only that a
+            // real map costs twelve times a flat one; these three say which of the mesh, the tiles or the
+            // field is doing it, which is the difference between a fix and a guess.
+            Console.WriteLine(
+                $"          | mesh {routing.MeshMs - routingBefore.MeshMs,7:F1} ms " +
+                $"({routing.MeshBuilds - routingBefore.MeshBuilds} builds, " +
+                $"{routing.MeshCacheHits - routingBefore.MeshCacheHits} hits, " +
+                $"{routing.MeshRectangles:N0} rects) | " +
+                $"tiles {routing.TileMs - routingBefore.TileMs,7:F1} ms " +
+                $"({routing.TileFills - routingBefore.TileFills} fills) | " +
+                $"field {routing.FieldMs - routingBefore.FieldMs,6:F1} ms " +
+                $"({routing.Fields - routingBefore.Fields} built)");
         }
 
 
@@ -270,12 +284,25 @@ internal static class ScaleScenarios
             repeated.QueueMove(
                 crowd,
                 new Vector2(MathF.Cos(angle) * reach, MathF.Sin(angle) * reach));
+            var routingBefore = repeated.RoutingCost;
             var start = Stopwatch.GetTimestamp();
             repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);
             repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            var routing = repeated.RoutingCost;
+            // The split matters more here than in the table above: this is the case a player is in — the same
+            // world, order after order — and "every click hitches" has to be attributable to one of three
+            // things before it can be fixed.
             Console.WriteLine(
                 $"  order {order + 1} | {Stopwatch.GetElapsedTime(start).TotalMilliseconds,8:F1} ms | " +
-                $"searches {repeated.RegionSearches - searchesBefore,6:N0}");
+                $"searches {repeated.RegionSearches - searchesBefore,6:N0} | " +
+                $"mesh {routing.MeshMs - routingBefore.MeshMs,7:F1} ms " +
+                $"({routing.MeshBuilds - routingBefore.MeshBuilds} builds, " +
+                $"{routing.MeshCacheHits - routingBefore.MeshCacheHits} hits, " +
+                $"{routing.MeshRectangles:N0} rects) | " +
+                $"tiles {routing.TileMs - routingBefore.TileMs,6:F1} ms " +
+                $"({routing.TileFills - routingBefore.TileFills} fills) | " +
+                $"field {routing.FieldMs - routingBefore.FieldMs,7:F1} ms " +
+                $"({routing.Fields - routingBefore.Fields} built)");
             for (var tick = 0; tick < 20; tick++)
             {
                 repeated.Tick((float)SimulationWorld.FixedDeltaSeconds);
