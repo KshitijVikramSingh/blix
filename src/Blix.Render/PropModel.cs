@@ -46,16 +46,33 @@ namespace Blix.Render;
 public sealed class PropModel : IDisposable
 {
     private readonly Part[] parts;
-    private readonly Part[] casters;
 
-    private PropModel(string name, Part[] parts, Part[] casters, Bounds3 bounds, int triangles, int casterTriangles)
+    /// <summary>
+    /// One entry per shadow pass, each owning its own geometry, buffers and instance list.
+    /// </summary>
+    /// <remarks>
+    /// <b>Per pass rather than per part, because the far cascades want cheaper geometry than the near one.</b>
+    /// The previous shape hung an array of batches off each part and pointed all of them at one mesh, which
+    /// gave each cascade its own instances and forced the same triangles on all three. Measured on a wooded
+    /// map at the 118 m standoff: 16.7M submitted caster triangles against the scene's 8.1M, and an ablation
+    /// that denied the two coarse cascades their casters returned 12.2 ms of a 46 ms frame. A shadow is a
+    /// silhouette resolved to that map's texels — 45 cm in the far cascade — so it can afford geometry the
+    /// near map could not, and the only way to say so is to let each pass own its own mesh set.
+    /// <para>
+    /// The instances are also kept once per pass rather than once per part per pass, which is what the old
+    /// shape did: a two-material caster stored every placement twice and appended to both lists.
+    /// </para>
+    /// </remarks>
+    private readonly CasterPass[] casterPasses;
+
+    private PropModel(
+        string name, Part[] parts, CasterPass[] casterPasses, Bounds3 bounds, int triangles)
     {
         Name = name;
         this.parts = parts;
-        this.casters = casters;
+        this.casterPasses = casterPasses;
         Bounds = bounds;
         TriangleCount = triangles;
-        CasterTriangleCount = casterTriangles;
     }
 
     public string Name { get; }
@@ -71,7 +88,16 @@ public sealed class PropModel : IDisposable
     // gave the caster its own geometry. Worth reporting separately: the shadow pass draws
     // every caster in the box whether or not the camera can see it, so this is often the
     // larger of the two numbers and the one a frame budget trips over.
-    public int CasterTriangleCount { get; }
+    //
+    // <b>This is the FIRST pass's figure.</b> Once a caller gives the later passes coarser geometry the
+    // model no longer has one caster cost, and a load computed as instances x this number understates the
+    // cheap passes and overstates nothing — which is a lie in the safe direction and still a lie. Anything
+    // reporting a total wants CasterTriangleCountIn per pass; see StagedCasterLoad in RTSGame.
+    public int CasterTriangleCount => casterPasses.Length > 0 ? casterPasses[0].TriangleCount : 0;
+
+    /// <summary>Triangles one copy costs ONE shadow pass, which differs per pass once geometry does.</summary>
+    public int CasterTriangleCountIn(int pass) =>
+        pass >= 0 && pass < casterPasses.Length ? casterPasses[pass].TriangleCount : 0;
 
     public int PartCount => parts.Length;
 
@@ -92,17 +118,14 @@ public sealed class PropModel : IDisposable
     {
         get
         {
-            var source = casters.Length > 0 ? casters[0] : parts.FirstOrDefault(part => part.Casters.Length > 0);
-            return source?.CasterInstances.Sum(instances => instances.Count) ?? 0;
+            var total = 0;
+            foreach (var pass in casterPasses) total += pass.Instances.Count;
+            return total;
         }
     }
 
-    /// <summary>How many shadow passes this model's caster was built for, which is the cascade count.</summary>
-    private Part? CasterSource =>
-        casters.Length > 0 ? casters[0] : parts.FirstOrDefault(part => part.Casters.Length > 0);
-
-    /// <summary>How many passes the caster lists are kept per, so a caller can walk them by index.</summary>
-    public int CasterPassCount => CasterSource?.CasterInstances.Length ?? 0;
+    /// <summary>How many passes the caster geometry is kept per, so a caller can walk them by index.</summary>
+    public int CasterPassCount => casterPasses.Length;
 
     /// <summary>
     /// How many copies are casting into ONE pass this frame.
@@ -113,12 +136,8 @@ public sealed class PropModel : IDisposable
     /// did anything: three cascades holding the same 2.9M triangles and three holding 0.8M/2.6M/2.9M sum to
     /// figures a total cannot tell apart. A per-cascade partition can only be judged per cascade.
     /// </remarks>
-    public int CasterInstanceCountIn(int pass)
-    {
-        var lists = CasterSource?.CasterInstances;
-        if (lists is null || pass < 0 || pass >= lists.Length) return 0;
-        return lists[pass].Count;
-    }
+    public int CasterInstanceCountIn(int pass) =>
+        pass >= 0 && pass < casterPasses.Length ? casterPasses[pass].Instances.Count : 0;
 
     // Build from a set of (mesh, tint) parts — one per material of the source asset.
     //
@@ -144,7 +163,8 @@ public sealed class PropModel : IDisposable
         PipelineHandle? casterPipeline = null,
         Matrix4x4? bake = null,
         IEnumerable<MeshData>? casterParts = null,
-        int casterPassCount = 1)
+        int casterPassCount = 1,
+        IReadOnlyList<IEnumerable<MeshData>?>? casterPartsByPass = null)
     {
         ArgumentNullException.ThrowIfNull(device);
         ArgumentNullException.ThrowIfNull(parts);
@@ -160,15 +180,27 @@ public sealed class PropModel : IDisposable
             throw new ArgumentOutOfRangeException(
                 nameof(casterPassCount), casterPassCount, "A prop needs between one and thirty caster passes.");
         }
+        if (casterPartsByPass is not null && casterPartsByPass.Count != casterPassCount)
+        {
+            throw new ArgumentException(
+                $"Per-pass caster geometry must cover every pass: {casterPartsByPass.Count} sets were given " +
+                $"for {casterPassCount} passes. A pass with no entry would cast nothing, which is a missing " +
+                "shadow rather than a saving.",
+                nameof(casterPartsByPass));
+        }
+        if (casterPartsByPass is not null && casterParts is not null)
+        {
+            throw new ArgumentException(
+                "Give either one caster geometry for every pass or one per pass, not both.",
+                nameof(casterPartsByPass));
+        }
 
         var built = new List<Part>();
         var meshes = new List<MeshData>();
+        var sceneUploads = new List<Mesh>();
         var triangles = 0;
         var index = 0;
         var casting = casterShader is not null && casterPipeline is not null;
-        // Only when the caller substituted geometry; otherwise the caster shares the scene mesh's upload,
-        // which is the whole reason the default costs nothing.
-        var substitutes = casting && casterParts is not null ? casterParts.ToArray() : null;
         foreach (var (source, tint) in parts)
         {
             var mesh = bake is { } transform
@@ -178,6 +210,7 @@ public sealed class PropModel : IDisposable
             meshes.Add(mesh);
             triangles += mesh.IndexCount / 3;
             var uploaded = Upload(device, mesh);
+            sceneUploads.Add(uploaded);
             var sceneBuffer = new InstanceBuffer(device, sceneShader, $"{name}.{index}.scene");
             var part = new Part
             {
@@ -190,52 +223,90 @@ public sealed class PropModel : IDisposable
                 SceneBuffer = sceneBuffer,
                 Scene = new InstancedBatch(uploaded, scenePipeline, sceneBuffer),
             };
-            if (substitutes is null && casterShader is { } cs && casterPipeline is { } cp)
-            {
-                part.CreateCasters(device, uploaded, cs, cp, $"{name}.{index}.caster", casterPassCount);
-            }
-
             built.Add(part);
             index++;
         }
 
-        // Substituted casters are their own parts rather than a second batch hung off the scene parts,
-        // because a decimated model need not have the same number of primitives as the model it came from
-        // — pruning can drop one entirely — and pairing them by index would silently mis-tint or crash.
-        var casters = new List<Part>();
-        var casterTriangles = 0;
-        if (substitutes is { Length: > 0 } && casterShader is { } shader && casterPipeline is { } pipeline)
+        // <b>Substituted caster geometry is its own set rather than a second batch hung off the scene parts,
+        // because a decimated model need not have the same number of primitives as the model it came from</b>
+        // — pruning can drop one entirely, and a synthesised proxy has no relation to the original's parts at
+        // all — so pairing them by index would silently mis-tint or crash.
+        var passes = new List<CasterPass>();
+        if (casting && casterShader is { } shader && casterPipeline is { } pipeline)
         {
-            var slot = 0;
-            foreach (var source in substitutes)
+            // One upload per distinct MeshData, so the common cases stay free: every pass sharing one
+            // substitute uploads it once, and a pass that takes the scene geometry reuses the scene's upload
+            // rather than putting the same vertices on the device twice.
+            // Keyed on the RAW source mesh, before the bake: the bake is the same transform for every pass,
+            // so two passes handed the same source want one upload — but each would call Transformed for
+            // itself and produce a different object, which a key on the baked mesh would never match.
+            var uploads = new List<(MeshData Source, Mesh Uploaded)>();
+            for (var c = 0; c < casterPassCount; c++)
             {
-                var mesh = bake is { } transform
-                    ? source.Transformed(transform, $"{name}.caster.{slot}")
-                    : source;
-                if (mesh.IndexCount == 0) continue;
-                casterTriangles += mesh.IndexCount / 3;
-                var part = new Part();
-                part.CreateCasters(
-                    device, Upload(device, mesh), shader, pipeline, $"{name}.{slot}.caster", casterPassCount);
-                casters.Add(part);
-                slot++;
+                // A null entry means this pass casts from the scene geometry, which is the same thing
+                // passing no substitute at all means — and it is worth having, because it is how a near
+                // cascade keeps the real silhouette while the coarse ones take a stand-in, without the
+                // caller having to hand back geometry that is already on the device.
+                var source = casterPartsByPass is not null
+                    ? casterPartsByPass[c]
+                    : casterParts;
+                var pass = new CasterPass();
+                if (source is null)
+                {
+                    // No substitute: this pass casts from the scene geometry it was built beside.
+                    pass.Create(device, sceneUploads, shader, pipeline, $"{name}.caster.{c}");
+                    pass.TriangleCount = triangles;
+                }
+                else
+                {
+                    var passMeshes = new List<Mesh>();
+                    var passTriangles = 0;
+                    var slot = 0;
+                    foreach (var raw in source)
+                    {
+                        var cached = uploads.FindIndex(entry => ReferenceEquals(entry.Source, raw));
+                        Mesh uploaded;
+                        if (cached >= 0)
+                        {
+                            uploaded = uploads[cached].Uploaded;
+                            passTriangles += uploaded.IndexCount / 3;
+                        }
+                        else
+                        {
+                            var mesh = bake is { } transform
+                                ? raw.Transformed(transform, $"{name}.caster.{c}.{slot}")
+                                : raw;
+                            if (mesh.IndexCount == 0) continue;
+                            passTriangles += mesh.IndexCount / 3;
+                            uploaded = Upload(device, mesh);
+                            uploads.Add((raw, uploaded));
+                        }
+
+                        passMeshes.Add(uploaded);
+                        slot++;
+                    }
+
+                    pass.Create(device, passMeshes, shader, pipeline, $"{name}.caster.{c}");
+                    pass.TriangleCount = passTriangles;
+                }
+
+                passes.Add(pass);
             }
         }
 
         return new PropModel(
             name,
             built.ToArray(),
-            casters.ToArray(),
+            passes.ToArray(),
             meshes.CombinedBounds(),
-            triangles,
-            casters.Count > 0 ? casterTriangles : casting ? triangles : 0);
+            triangles);
     }
 
     // Drop every copy staged last frame. Call once, before the frame's Adds.
     public void Begin()
     {
         foreach (var part in parts) part.Clear();
-        foreach (var part in casters) part.Clear();
+        foreach (var pass in casterPasses) pass.Instances.Clear();
     }
 
     // Place one copy. The transform is whatever the caller's shader expects to multiply
@@ -254,8 +325,19 @@ public sealed class PropModel : IDisposable
     /// </remarks>
     public void Add(Matrix4x4 model, int casterMask)
     {
-        foreach (var part in parts) part.Add(new InstanceData(model, part.Tint), casterMask, scene: true);
-        foreach (var part in casters) part.Add(new InstanceData(model, part.Tint), casterMask, scene: false);
+        foreach (var part in parts) part.Instances.Add(new InstanceData(model, part.Tint));
+        // <b>One caster instance per pass, not per part per pass.</b> The tint goes along because the
+        // instance layout carries one; a depth-only pass never reads it, so the first part's is as good as
+        // any and better than inventing a colour.
+        AddCasters(model, parts.Length > 0 ? parts[0].Tint : Vector4.Zero, casterMask);
+    }
+
+    private void AddCasters(Matrix4x4 model, Vector4 tint, int casterMask)
+    {
+        for (var c = 0; c < casterPasses.Length; c++)
+        {
+            if ((casterMask & (1 << c)) != 0) casterPasses[c].Instances.Add(new InstanceData(model, tint));
+        }
     }
 
     /// <summary>
@@ -285,8 +367,8 @@ public sealed class PropModel : IDisposable
 
     public void Add(Matrix4x4 model, Vector4 tint, int casterMask)
     {
-        foreach (var part in parts) part.Add(new InstanceData(model, tint), casterMask, scene: true);
-        foreach (var part in casters) part.Add(new InstanceData(model, tint), casterMask, scene: false);
+        foreach (var part in parts) part.Instances.Add(new InstanceData(model, tint));
+        AddCasters(model, tint, casterMask);
     }
 
     // Hand this frame's instances and push payloads to the batches. Split from the draws
@@ -296,34 +378,31 @@ public sealed class PropModel : IDisposable
     {
         foreach (var part in parts)
         {
-            var instances = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances);
             part.Scene!.Begin(scenePush);
-            part.Scene.SetInstances(instances);
-            if (part.Casters.Length == 0) continue;
-            part.Casters[0].Begin(shadowPush);
-            part.Casters[0].SetInstances(
-                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.CasterInstances[0]));
+            part.Scene.SetInstances(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances));
         }
 
-        foreach (var part in casters)
-        {
-            var instances = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.CasterInstances[0]);
-            part.Casters[0].Begin(shadowPush);
-            part.Casters[0].SetInstances(instances);
-        }
+        if (casterPasses.Length > 0) casterPasses[0].Stage(shadowPush);
     }
 
     /// <summary>Stages distinct caster storage for every shadow pass.</summary>
     public void StageCascades(ReadOnlySpan<byte> scenePush, IReadOnlyList<byte[]> shadowPushes)
     {
+        if (casterPasses.Length > 0 && casterPasses.Length != shadowPushes.Count)
+        {
+            throw new ArgumentException(
+                $"Prop caster has {casterPasses.Length} passes but received {shadowPushes.Count} push " +
+                "payloads.",
+                nameof(shadowPushes));
+        }
+
         foreach (var part in parts)
         {
             part.Scene!.Begin(scenePush);
             part.Scene.SetInstances(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances));
-            StageCasters(part, shadowPushes);
         }
 
-        foreach (var part in casters) StageCasters(part, shadowPushes);
+        for (var c = 0; c < casterPasses.Length; c++) casterPasses[c].Stage(shadowPushes[c]);
     }
 
     public void DrawScene(RenderPassBuilder pass, IReadOnlyList<ShaderTextureBinding>? textures = null)
@@ -339,11 +418,8 @@ public sealed class PropModel : IDisposable
     /// <summary>Closes the already-staged caster batch for one shadow pass.</summary>
     public void DrawShadow(RenderPassBuilder pass, int casterPass)
     {
-        foreach (var part in parts)
-        {
-            if (casterPass < part.Casters.Length) part.Casters[casterPass].End(pass);
-        }
-        foreach (var part in casters) part.Casters[casterPass].End(pass);
+        if (casterPass < 0 || casterPass >= casterPasses.Length) return;
+        casterPasses[casterPass].Draw(pass);
     }
 
     /// <summary>
@@ -361,53 +437,17 @@ public sealed class PropModel : IDisposable
     /// </remarks>
     public void DrawShadow(RenderPassBuilder pass, ReadOnlySpan<byte> shadowPush)
     {
-        foreach (var part in parts)
-        {
-            if (part.Casters.Length == 0) continue;
-            part.Casters[0].Begin(shadowPush);
-            part.Casters[0].SetInstances(
-                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.CasterInstances[0]));
-            part.Casters[0].End(pass);
-        }
-
-        foreach (var part in casters)
-        {
-            part.Casters[0].Begin(shadowPush);
-            part.Casters[0].SetInstances(
-                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.CasterInstances[0]));
-            part.Casters[0].End(pass);
-        }
+        if (casterPasses.Length == 0) return;
+        casterPasses[0].Stage(shadowPush);
+        casterPasses[0].Draw(pass);
     }
 
     public void Dispose()
     {
-        foreach (var part in parts)
+        foreach (var part in parts) part.SceneBuffer?.Dispose();
+        foreach (var pass in casterPasses)
         {
-            part.SceneBuffer?.Dispose();
-            foreach (var buffer in part.CasterBuffers) buffer.Dispose();
-        }
-
-        foreach (var part in casters)
-        {
-            foreach (var buffer in part.CasterBuffers) buffer.Dispose();
-        }
-    }
-
-    private static void StageCasters(Part part, IReadOnlyList<byte[]> shadowPushes)
-    {
-        if (part.Casters.Length == 0) return;
-        if (part.Casters.Length != shadowPushes.Count)
-        {
-            throw new ArgumentException(
-                $"Prop caster has {part.Casters.Length} passes but received {shadowPushes.Count} push payloads.",
-                nameof(shadowPushes));
-        }
-
-        for (var c = 0; c < part.Casters.Length; c++)
-        {
-            part.Casters[c].Begin(shadowPushes[c]);
-            part.Casters[c].SetInstances(
-                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.CasterInstances[c]));
+            foreach (var buffer in pass.Buffers) buffer.Dispose();
         }
     }
 
@@ -453,44 +493,61 @@ public sealed class PropModel : IDisposable
         public Vector4 Tint;
         public InstanceBuffer? SceneBuffer;
         public InstancedBatch? Scene;
-        public InstanceBuffer[] CasterBuffers = Array.Empty<InstanceBuffer>();
-        public InstancedBatch[] Casters = Array.Empty<InstancedBatch>();
-        public List<InstanceData>[] CasterInstances = Array.Empty<List<InstanceData>>();
         public readonly List<InstanceData> Instances = new();
 
-        public void CreateCasters(
+        public void Clear() => Instances.Clear();
+    }
+
+    /// <summary>One shadow pass's geometry, buffers and instances.</summary>
+    /// <remarks>
+    /// A pass may hold several meshes — one per material of the substituted geometry, or per material of the
+    /// scene model when nothing was substituted — and they all take the same instance list, because they are
+    /// parts of one thing standing in one place. That is the invariant the old per-part arrangement kept by
+    /// appending to several lists in step; keeping one list is the same property without the bookkeeping.
+    /// </remarks>
+    private sealed class CasterPass
+    {
+        public InstanceBuffer[] Buffers = Array.Empty<InstanceBuffer>();
+        public InstancedBatch[] Batches = Array.Empty<InstancedBatch>();
+
+        /// <summary>Triangles one copy costs THIS pass.</summary>
+        public int TriangleCount;
+
+        public readonly List<InstanceData> Instances = new();
+
+        public void Create(
             VulkanGraphicsDevice device,
-            Mesh mesh,
+            IReadOnlyList<Mesh> meshes,
             ShaderProgramHandle shader,
             PipelineHandle pipeline,
-            string name,
-            int count)
+            string name)
         {
-            CasterBuffers = new InstanceBuffer[count];
-            Casters = new InstancedBatch[count];
-            CasterInstances = new List<InstanceData>[count];
-            for (var c = 0; c < count; c++)
+            Buffers = new InstanceBuffer[meshes.Count];
+            Batches = new InstancedBatch[meshes.Count];
+            for (var i = 0; i < meshes.Count; i++)
             {
-                var buffer = new InstanceBuffer(device, shader, $"{name}.{c}");
-                CasterBuffers[c] = buffer;
-                Casters[c] = new InstancedBatch(mesh, pipeline, buffer);
-                CasterInstances[c] = new List<InstanceData>();
+                // <b>A buffer per mesh, not per pass.</b> InstanceBuffer writes one current-frame slot, so
+                // two batches sharing one buffer would both draw whatever was uploaded last — which is the
+                // same failure the per-cascade split was made to avoid, one level down.
+                var buffer = new InstanceBuffer(device, shader, $"{name}.{i}");
+                Buffers[i] = buffer;
+                Batches[i] = new InstancedBatch(meshes[i], pipeline, buffer);
             }
         }
 
-        public void Clear()
+        public void Stage(ReadOnlySpan<byte> push)
         {
-            Instances.Clear();
-            foreach (var instances in CasterInstances) instances.Clear();
+            var instances = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(Instances);
+            foreach (var batch in Batches)
+            {
+                batch.Begin(push);
+                batch.SetInstances(instances);
+            }
         }
 
-        public void Add(InstanceData instance, int casterMask, bool scene)
+        public void Draw(RenderPassBuilder pass)
         {
-            if (scene) Instances.Add(instance);
-            for (var c = 0; c < CasterInstances.Length; c++)
-            {
-                if ((casterMask & (1 << c)) != 0) CasterInstances[c].Add(instance);
-            }
+            foreach (var batch in Batches) batch.End(pass);
         }
     }
 }

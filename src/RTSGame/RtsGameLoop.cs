@@ -297,6 +297,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private readonly bool performanceVsync;
 
+    /// <summary>
+    /// Denies the coarse cascades their proxy geometry, for the A/B that justified giving it to them.
+    /// </summary>
+    /// <remarks>
+    /// <b>One binary holding both configurations, because the alternative measured the weather.</b> The first
+    /// attempt compared a matrix taken before the proxy against one taken after, and the second matrix came
+    /// out slower everywhere — including in the node phase, which is CPU work neither version touches. Twelve
+    /// minutes of uncapped GPU load on a laptop moves every figure by a quarter, so a before-and-after
+    /// separated by a rebuild is a comparison between two thermal states. Interleaved A/B/A/B inside one
+    /// session is the only version of this measurement that means anything.
+    /// </remarks>
+    private readonly bool performanceNoProxy;
+
     /// <summary>The recorder for a sealed run, absent otherwise. See PerformanceRun.</summary>
     private readonly PerformanceRun? performance;
 
@@ -1248,12 +1261,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         bool performanceRun = false,
         PerformanceCameraMotion performanceCameraMotion = PerformanceCameraMotion.Still,
         float performanceHour = -1f,
-        bool performanceVsync = false)
+        bool performanceVsync = false,
+        int performanceCascades = -1,
+        bool performanceNoProxy = false)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
         this.performanceHour = performanceHour;
         this.performanceVsync = performanceVsync;
+        this.performanceNoProxy = performanceNoProxy;
+        if (performanceCascades >= 0)
+        {
+            performanceCascadeMask = (1 << Math.Min(performanceCascades, ShadowCascades.Count)) - 1;
+        }
         this.rollEveryFrames = rollEveryFrames;
         // <b>Reachable from the command line because the panel cannot be clicked from a gate.</b> The fog's
         // masks are checked by reading the SCOUTED counts out of a run. A village is the playable game and
@@ -1357,7 +1377,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var light = performanceHour >= 0f ? $"{performanceHour:F0}h" : "live";
             var label =
                 $"{performanceCameraMotion.ToString().ToLowerInvariant()}-{light}-" +
-                $"{standoff:F0}m-fog{(fogSettings.Enabled ? "on" : "off")}";
+                $"{standoff:F0}m-fog{(fogSettings.Enabled ? "on" : "off")}" +
+                (performanceCascades >= 0 ? $"-cast{performanceCascades}" : string.Empty) +
+                (performanceNoProxy ? "-noproxy" : string.Empty);
             // A quarter of the run, capped: long enough to cover first presentation, terrain meshing and the
             // first cover resolve, short enough that a sixty-frame smoke still reports a steady window.
             var warmUpFrames = exitAfterFrames > 0 ? Math.Clamp(exitAfterFrames / 4, 1, 120) : 120;
@@ -2019,7 +2041,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         smokeBuffer = new InstanceBuffer(vk, smokeShader, "rts-smoke");
         smokeBatch = new InstancedBatch(canopyMesh, smokePipeline, smokeBuffer);
         art = SettlementArt.Load(
-            vk, worldShader, worldPipeline, casterShader, casterPipeline, ShadowCascades.Count);
+            vk, worldShader, worldPipeline, casterShader, casterPipeline, ShadowCascades.Count,
+            distantShadowProxies: !performanceNoProxy);
         // <b>What the buildings measured, because two bugs came out of assuming it.</b> A fitted model's
         // bounding box is its roof and its height is whatever its proportions gave it — so anything hung on
         // a building (a lit window, a lantern, a chimney) has to be placed against numbers from the asset
@@ -2069,6 +2092,31 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"undergrowth {underTriangles / MathF.Max(1, art.Undergrowth.Length):F0}, " +
             $"villager {art.Villager?.TriangleCount ?? 0}, granary {art.Granary.TriangleCount}; " +
             $"decimation error {art.MidError:F2} m at the middle level and {art.FarError:F2} m far");
+        // <b>What a tree costs each of the sun's three passes, which stopped being one number.</b> The near
+        // cascade takes the tier's own decimated silhouette; the coarse two take a sixteen-triangle proxy,
+        // because at 16 and 45 cm texels over 124-284 m there is no silhouette left to read. Printed per
+        // cascade for the same reason the tier triangle counts above are printed at all: a caster cost that
+        // nobody can see a number for is a caster cost that quietly returns to the near geometry the next
+        // time somebody adds a tier. If these three ever read the same again, the proxy has been lost.
+        var casterByCascade = new long[ShadowCascades.Count];
+        foreach (var tier in new[] { art.Trees, art.TreesMid, art.TreesFar, art.TreesDeep })
+        {
+            foreach (var tree in tier)
+            {
+                for (var c = 0; c < ShadowCascades.Count && c < tree.CasterPassCount; c++)
+                {
+                    casterByCascade[c] += tree.CasterTriangleCountIn(c);
+                }
+            }
+        }
+
+        var tierSpecies = MathF.Max(
+            1,
+            art.Trees.Length + art.TreesMid.Length + art.TreesFar.Length + art.TreesDeep.Length);
+        Console.WriteLine(
+            $"  art: a tree casts {casterByCascade[0] / tierSpecies:F0} triangles into the near cascade, " +
+            $"{casterByCascade[1] / tierSpecies:F0} into the middle and " +
+            $"{casterByCascade[2] / tierSpecies:F0} into the far one (averaged over all four tiers)");
 
         foreach (var (name, model) in new[]
                  {
@@ -4082,6 +4130,25 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         return result;
     }
 
+    /// <summary>
+    /// Which cascades a sealed run is allowed to record casters into.
+    /// </summary>
+    /// <remarks>
+    /// <b>An ablation, and the cheapest one available: the whole caster path passes through one mask.</b>
+    /// §83 left the frame attributed to the GPU by inference and named per-cascade caster geometry as the
+    /// largest lever — 16.7M submitted caster triangles against the scene's 8.1M at the wide view. Then the
+    /// art turned out to be casting from the coarsest level its chain holds already (454 triangles a tree,
+    /// <c>casterLod: 3</c>), so there is no coarser mesh to give the far boxes and the 16.7M is three copies
+    /// of a mesh that is already as cheap as the cook made it.
+    /// <para>
+    /// Which makes the question "what would the two coarse cascades be worth if their casters cost nothing" —
+    /// and that is the ceiling on any proxy-geometry work, measurable in an afternoon instead of assumed after
+    /// building one. Masking here rather than skipping the draws keeps the batches' Begin/End pairing intact:
+    /// a batch begun and not ended is a different bug wearing this experiment's clothes.
+    /// </para>
+    /// </remarks>
+    private int performanceCascadeMask = -1;
+
     /// <summary>Every fitted shadow box which can receive a caster at this ground position.</summary>
     private int CascadeMaskAt(Vector2 at)
     {
@@ -4094,7 +4161,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             }
         }
 
-        return mask;
+        return mask & performanceCascadeMask;
     }
 
     /// <summary>Whether anything at <paramref name="at"/> can appear in any cascade's map.</summary>

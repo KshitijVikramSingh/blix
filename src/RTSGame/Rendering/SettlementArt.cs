@@ -146,7 +146,13 @@ internal sealed class SettlementArt : IDisposable
             if (count <= 0) continue;
             instances += count;
             triangles += (long)count * model.TriangleCount;
-            casters += (long)model.CasterInstanceCount * model.CasterTriangleCount;
+            // Per pass, because a model's caster cost stopped being one number the moment the coarse
+            // cascades were given their own geometry. Instances x the first pass's triangles would report
+            // the near silhouette three times and hide the whole saving. See PropModel.CasterPass.
+            for (var c = 0; c < model.CasterPassCount; c++)
+            {
+                casters += (long)model.CasterInstanceCountIn(c) * model.CasterTriangleCountIn(c);
+            }
         }
 
         return (instances, triangles, casters);
@@ -173,7 +179,7 @@ internal sealed class SettlementArt : IDisposable
                 var count = model.CasterInstanceCountIn(c);
                 if (count <= 0) continue;
                 instancesPerCascade[c] += count;
-                trianglesPerCascade[c] += (long)count * model.CasterTriangleCount;
+                trianglesPerCascade[c] += (long)count * model.CasterTriangleCountIn(c);
             }
         }
     }
@@ -261,7 +267,8 @@ internal sealed class SettlementArt : IDisposable
         PipelineHandle scenePipeline,
         ShaderProgramHandle casterShader,
         PipelineHandle casterPipeline,
-        int casterPassCount = 1)
+        int casterPassCount = 1,
+        bool distantShadowProxies = true)
     {
         var directory = Path.Combine(AppContext.BaseDirectory, "Assets", "models");
         var measured = new List<(PropModel Model, Bounds3 Walls)>();
@@ -339,13 +346,21 @@ internal sealed class SettlementArt : IDisposable
         // silhouette resolved to an eleven-centimetre texel, so it survives geometry the camera would not
         // accept — and the sun's pass draws every caster in the box whether or not the camera can see it,
         // which makes it the pass a woodland actually costs. Zero means the caster shares the scene mesh.
+        // <b>distantProxy hands the coarse cascades a stand-in instead of the model.</b> Only meaningful
+        // with more than one caster pass, and only defensible because the coarse maps resolve at 16 and 45 cm
+        // over 124-284 m — see ShadowProxy for the measurement that justified it and the earlier blob
+        // substitution it is careful not to repeat.
         PropModel Kit(
             string file,
             bool casts = false,
             float surface = MaterialClass.Foliage,
             int lod = 0,
-            int casterLod = 0)
+            int casterLod = 0,
+            bool distantProxy = false)
         {
+            // The measurement switch, resolved once here rather than at forty call sites: A and B have to be
+            // the same binary or the comparison is between two thermal states of a laptop. See §84.
+            distantProxy &= distantShadowProxies;
             var path = Path.Combine(directory, "kit", file + ".gltf");
             if (!File.Exists(path))
             {
@@ -374,10 +389,24 @@ internal sealed class SettlementArt : IDisposable
             var shadowParts = casts && casterLod > lod
                 ? model.Primitives.Select(prim => AtLevel(prim.Mesh, casterLod, out _)).ToArray()
                 : null;
+            // The near pass keeps whatever the tier casts today — its own level, or the scene geometry when
+            // the chain has nothing coarser to offer, which a null entry says without re-uploading it. Every
+            // later pass takes the proxy.
+            IReadOnlyList<IEnumerable<MeshData>?>? shadowByPass = null;
+            if (casts && distantProxy && casterPassCount > 1)
+            {
+                var proxy = new[] { ShadowProxy(bounds, $"{file}.shadow-proxy") };
+                var byPass = new List<IEnumerable<MeshData>?> { shadowParts };
+                for (var c = 1; c < casterPassCount; c++) byPass.Add(proxy);
+                shadowByPass = byPass;
+            }
+
             var built = PropModel.Create(
                 device, file, parts, sceneShader, scenePipeline,
-                casts ? casterShader : null, casts ? casterPipeline : null, bake, shadowParts,
-                casterPassCount);
+                casts ? casterShader : null, casts ? casterPipeline : null, bake,
+                shadowByPass is null ? shadowParts : null,
+                casterPassCount,
+                shadowByPass);
             measured.Add((built, LowerExtent(parts.Select(part => part.Mesh), bounds, bake)));
             return built;
         }
@@ -517,11 +546,11 @@ internal sealed class SettlementArt : IDisposable
             // and far bands cost index lists and nothing else.
             treesMid: new[]
             {
-                Kit("CommonTree_1", casts: true, lod: 1, casterLod: 3), Kit("CommonTree_2", casts: true, lod: 1, casterLod: 3),
-                Kit("CommonTree_3", casts: true, lod: 1, casterLod: 3), Kit("Pine_1", casts: true, lod: 1, casterLod: 3),
-                Kit("Pine_2", casts: true, lod: 1, casterLod: 3), Kit("Pine_3", casts: true, lod: 1, casterLod: 3),
-                Kit("TwistedTree_1", casts: true, lod: 1, casterLod: 3), Kit("TwistedTree_2", casts: true, lod: 1, casterLod: 3),
-                Kit("DeadTree_1", casts: true, lod: 1, casterLod: 3), Kit("DeadTree_2", casts: true, lod: 1, casterLod: 3),
+                Kit("CommonTree_1", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("CommonTree_2", casts: true, lod: 1, casterLod: 3, distantProxy: true),
+                Kit("CommonTree_3", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("Pine_1", casts: true, lod: 1, casterLod: 3, distantProxy: true),
+                Kit("Pine_2", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("Pine_3", casts: true, lod: 1, casterLod: 3, distantProxy: true),
+                Kit("TwistedTree_1", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("TwistedTree_2", casts: true, lod: 1, casterLod: 3, distantProxy: true),
+                Kit("DeadTree_1", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("DeadTree_2", casts: true, lod: 1, casterLod: 3, distantProxy: true),
             },
             treesFar: new[]
             {
@@ -530,11 +559,11 @@ internal sealed class SettlementArt : IDisposable
                 // is four thousand trees, which is most of the sun's pass for a contribution nobody can
                 // see. The near and middle bands cast their own geometry, which is already decimated, so
                 // the shadow map gets the same level of detail the scene does for nothing.
-                Kit("CommonTree_1", casts: true, lod: 2, casterLod: 3), Kit("CommonTree_2", casts: true, lod: 2, casterLod: 3),
-                Kit("CommonTree_3", casts: true, lod: 2, casterLod: 3), Kit("Pine_1", casts: true, lod: 2, casterLod: 3),
-                Kit("Pine_2", casts: true, lod: 2, casterLod: 3), Kit("Pine_3", casts: true, lod: 2, casterLod: 3),
-                Kit("TwistedTree_1", casts: true, lod: 2, casterLod: 3), Kit("TwistedTree_2", casts: true, lod: 2, casterLod: 3),
-                Kit("DeadTree_1", casts: true, lod: 2, casterLod: 3), Kit("DeadTree_2", casts: true, lod: 2, casterLod: 3),
+                Kit("CommonTree_1", casts: true, lod: 2, casterLod: 3, distantProxy: true), Kit("CommonTree_2", casts: true, lod: 2, casterLod: 3, distantProxy: true),
+                Kit("CommonTree_3", casts: true, lod: 2, casterLod: 3, distantProxy: true), Kit("Pine_1", casts: true, lod: 2, casterLod: 3, distantProxy: true),
+                Kit("Pine_2", casts: true, lod: 2, casterLod: 3, distantProxy: true), Kit("Pine_3", casts: true, lod: 2, casterLod: 3, distantProxy: true),
+                Kit("TwistedTree_1", casts: true, lod: 2, casterLod: 3, distantProxy: true), Kit("TwistedTree_2", casts: true, lod: 2, casterLod: 3, distantProxy: true),
+                Kit("DeadTree_1", casts: true, lod: 2, casterLod: 3, distantProxy: true), Kit("DeadTree_2", casts: true, lod: 2, casterLod: 3, distantProxy: true),
             },
             treesDeep: new[]
             {
@@ -552,27 +581,27 @@ internal sealed class SettlementArt : IDisposable
                 //
                 // Casts, and from its own geometry, because a deep wood is precisely where the shadow is doing
                 // the most work — the darkness under a thick canopy is most of what makes it read as thick.
-                Kit("CommonTree_1", casts: true, lod: 3), Kit("CommonTree_2", casts: true, lod: 3),
-                Kit("CommonTree_3", casts: true, lod: 3), Kit("Pine_1", casts: true, lod: 3),
-                Kit("Pine_2", casts: true, lod: 3), Kit("Pine_3", casts: true, lod: 3),
-                Kit("TwistedTree_1", casts: true, lod: 3), Kit("TwistedTree_2", casts: true, lod: 3),
-                Kit("DeadTree_1", casts: true, lod: 3), Kit("DeadTree_2", casts: true, lod: 3),
+                Kit("CommonTree_1", casts: true, lod: 3, distantProxy: true), Kit("CommonTree_2", casts: true, lod: 3, distantProxy: true),
+                Kit("CommonTree_3", casts: true, lod: 3, distantProxy: true), Kit("Pine_1", casts: true, lod: 3, distantProxy: true),
+                Kit("Pine_2", casts: true, lod: 3, distantProxy: true), Kit("Pine_3", casts: true, lod: 3, distantProxy: true),
+                Kit("TwistedTree_1", casts: true, lod: 3, distantProxy: true), Kit("TwistedTree_2", casts: true, lod: 3, distantProxy: true),
+                Kit("DeadTree_1", casts: true, lod: 3, distantProxy: true), Kit("DeadTree_2", casts: true, lod: 3, distantProxy: true),
             },
             trees: new[]
             {
                 // <b>Each level casts its own shadow.</b> The blob substitution that stood in for this is
                 // gone: a tier already costs what its own level of detail costs, so the sun's pass gets the
                 // decimated geometry for free and there is nothing left for a stand-in to save.
-                Kit("CommonTree_1", casts: true, casterLod: 2),
-                Kit("CommonTree_2", casts: true, casterLod: 2),
-                Kit("CommonTree_3", casts: true, casterLod: 2),
-                Kit("Pine_1", casts: true, casterLod: 2),
-                Kit("Pine_2", casts: true, casterLod: 2),
-                Kit("Pine_3", casts: true, casterLod: 2),
-                Kit("TwistedTree_1", casts: true, casterLod: 2),
-                Kit("TwistedTree_2", casts: true, casterLod: 2),
-                Kit("DeadTree_1", casts: true, casterLod: 2),
-                Kit("DeadTree_2", casts: true, casterLod: 2),
+                Kit("CommonTree_1", casts: true, casterLod: 2, distantProxy: true),
+                Kit("CommonTree_2", casts: true, casterLod: 2, distantProxy: true),
+                Kit("CommonTree_3", casts: true, casterLod: 2, distantProxy: true),
+                Kit("Pine_1", casts: true, casterLod: 2, distantProxy: true),
+                Kit("Pine_2", casts: true, casterLod: 2, distantProxy: true),
+                Kit("Pine_3", casts: true, casterLod: 2, distantProxy: true),
+                Kit("TwistedTree_1", casts: true, casterLod: 2, distantProxy: true),
+                Kit("TwistedTree_2", casts: true, casterLod: 2, distantProxy: true),
+                Kit("DeadTree_1", casts: true, casterLod: 2, distantProxy: true),
+                Kit("DeadTree_2", casts: true, casterLod: 2, distantProxy: true),
             },
             // A real stump, at last: Resource_Tree_Group_Cut was a cluster of cut trunks standing in for one.
             stumps: Nature("TreeStump", casts: false, surface: MaterialClass.Timber),
@@ -894,6 +923,83 @@ internal sealed class SettlementArt : IDisposable
     /// record copy rather than a re-import. The chain rides along in <c>MeshData.Lods</c> whenever a cooked
     /// .blixmesh sits beside the glTF; without one there is a single level and every request clamps to it.
     /// </remarks>
+    /// <summary>
+    /// A sixteen-triangle stand-in for one model's shadow, sized from its own bounds.
+    /// </summary>
+    /// <remarks>
+    /// <b>A blob shadow, which this file has had before and deliberately removed — and the difference is
+    /// which cascade gets it.</b> The old substitution replaced a tree's shadow everywhere, including under
+    /// the camera, and it read as a smudge because at a near map's eleven-centimetre texel the silhouette is
+    /// exactly what the eye is reading. What made this reachable again is the per-cascade caster split: at the
+    /// 118 m standoff the three maps resolve at 11.7, 15.9 and 45.1 cm, and the coarse two cover 124-284 m.
+    /// A tree canopy is nine to eighteen texels across in the far map. There is no silhouette there to lose.
+    /// <para>
+    /// Measured before building it, by masking the coarse cascades' casters away entirely: 12.2 ms of a 46 ms
+    /// frame at 118 m and 6.7 ms of 33 at 60 m, with p95 falling from 107 ms to 58. That ablation is the
+    /// ceiling this is trying to reach, and the reason it is worth reaching for is that the art has no coarser
+    /// level to give — the tree chain ends at 454 triangles and the caster tiers already ask for it.
+    /// </para>
+    /// <para>
+    /// An octagonal bipyramid rather than a box: a box's corners stand outside the canopy and its shadow is
+    /// visibly square where two of them fall along the light. The waist sits at 55% of the height, which is
+    /// roughly where a crown is widest for every species in this kit.
+    /// </para>
+    /// </remarks>
+    private static MeshData ShadowProxy(Bounds3 bounds, string name)
+    {
+        const int sides = 8;
+        var size = bounds.Max - bounds.Min;
+        var centre = (bounds.Min + bounds.Max) * 0.5f;
+        var radiusX = MathF.Max(size.X * 0.5f, 1e-3f);
+        var radiusZ = MathF.Max(size.Z * 0.5f, 1e-3f);
+        var waistY = bounds.Min.Y + size.Y * 0.55f;
+
+        // position(3) + normal(3) + uv(2), which is what every pipeline in this game takes. The caster
+        // shader reads position alone, but a vertex buffer whose stride disagrees with the pipeline's
+        // layout fails at draw time with a length mismatch and no mention of the mesh.
+        var floats = new List<float>((sides + 2) * 8);
+        void Vertex(Vector3 at, Vector3 normal)
+        {
+            floats.Add(at.X); floats.Add(at.Y); floats.Add(at.Z);
+            floats.Add(normal.X); floats.Add(normal.Y); floats.Add(normal.Z);
+            floats.Add(0f); floats.Add(0f);
+        }
+
+        for (var i = 0; i < sides; i++)
+        {
+            var angle = i / (float)sides * MathF.Tau;
+            var offset = new Vector3(MathF.Cos(angle) * radiusX, 0f, MathF.Sin(angle) * radiusZ);
+            Vertex(
+                new Vector3(centre.X + offset.X, waistY, centre.Z + offset.Z),
+                Vector3.Normalize(new Vector3(MathF.Cos(angle), 0f, MathF.Sin(angle))));
+        }
+
+        Vertex(new Vector3(centre.X, bounds.Max.Y, centre.Z), Vector3.UnitY);
+        Vertex(new Vector3(centre.X, bounds.Min.Y, centre.Z), -Vector3.UnitY);
+        var apex = (ushort)sides;
+        var nadir = (ushort)(sides + 1);
+
+        var indices = new List<ushort>(sides * 6);
+        for (var i = 0; i < sides; i++)
+        {
+            var a = (ushort)i;
+            var b = (ushort)((i + 1) % sides);
+            indices.Add(a); indices.Add(b); indices.Add(apex);
+            indices.Add(b); indices.Add(a); indices.Add(nadir);
+        }
+
+        var bytes = new byte[floats.Count * sizeof(float)];
+        Buffer.BlockCopy(floats.ToArray(), 0, bytes, 0, bytes.Length);
+        return new MeshData(
+            name,
+            bytes,
+            indices.ToArray(),
+            VertexPosition3NormalTexture.Layout,
+            new Bounds3(
+                new Vector3(centre.X - radiusX, bounds.Min.Y, centre.Z - radiusZ),
+                new Vector3(centre.X + radiusX, bounds.Max.Y, centre.Z + radiusZ)));
+    }
+
     private static MeshData AtLevel(MeshData mesh, int lod, out float error)
     {
         error = 0f;

@@ -8076,3 +8076,95 @@ Three reasons, all of them measurement rather than taste:
 3. **Then** repeats, the vsync-on pacing pass — which is a real and different question, because the choppiness
    a player feels *is* which refresh intervals get missed — and only then the supported envelope, with 6-118 m
    re-argued against a measured frame budget.
+
+## 84. The coarse cascades get a stand-in, and the laptop turns out to be part of the instrument
+
+§83 named per-cascade caster geometry as the largest lever the tables pointed at and left it unbuilt. This
+section builds it — and the first thing it found was that the art had already taken the obvious half of the
+saving years ago.
+
+### The lever was not where §83 said it was
+
+The tree tiers ask for `casterLod: 3` — the coarsest level the cooked chain holds, 454 triangles against the
+scene's 4,345 — so the shadow geometry was already as cheap as decimation could make it. The 16.7M submitted
+caster triangles at the 118 m standoff were **three copies of an already-coarse mesh**, and there was no
+coarser level left to give the far boxes. "Give each cascade its own geometry" was therefore not a
+one-parameter change; it needed geometry that does not exist in the asset.
+
+So the ceiling was measured before anything was built. `--perf-cascades N` masks casters out of every cascade
+past the first N — one line, because the whole caster path passes through `CascadeMaskAt`:
+
+```
+standoff   casters into 3      into 1              into none
+118 m      46.4 ms, 16.7M      34.2 ms, 3.4M       31.0 ms, 0
+ 60 m      32.8 ms,  9.1M      26.1 ms, 1.4M       26.2 ms, 0
+```
+
+**12.2 ms of a 46 ms frame at 118 m, 6.7 ms of 33 at 60 m, and p95 falling from 107 ms to 58.** That is the
+most a proxy could ever return, and it is worth having. It also settles §83's open inference: 13.3M triangles
+removed for 12.2 ms recovered is about 1.1M submitted triangles per millisecond, which is a geometry-bound
+frame rather than merely a GPU-shaped suspicion.
+
+### What the coarse cascades get
+
+`PropModel` now keeps caster state per shadow pass rather than per part: each pass owns its geometry, its
+buffers, its batches and one instance list. Two consequences beyond the obvious one — a pass may hold a mesh
+set with no relation to the scene model's parts, and a placement is stored once per pass instead of once per
+part per pass, which the old shape did.
+
+The stand-in is a sixteen-triangle octagonal bipyramid sized from each model's own bounds, waisted at 55% of
+its height. **This file has had a blob shadow before and deliberately removed it**, and the difference is
+which cascade receives it: at the 118 m standoff the three maps resolve at 11.7, 15.9 and 45.1 cm and the
+coarse two cover 124-284 m, where a tree canopy is nine to eighteen texels across. The near cascade keeps the
+real silhouette, because 11.7 cm is precisely where the eye reads one. A box was rejected for its corners —
+two of them along the light make a visibly square shadow.
+
+Buildings, rocks and units keep real geometry in every cascade. They are few, and theirs are the shadows a
+player actually reads.
+
+The load figures had to change with it: a model's caster cost stopped being one number, so `StagedLoad` and
+`StagedCasterLoad` sum instances x triangles **per pass**. Reporting it the old way would have shown the near
+silhouette three times and hidden the entire saving — the same class of error as §75's pass counter, which is
+why the art report now prints what a tree casts into each cascade separately. If those three numbers ever read
+the same again, the proxy has been lost.
+
+### The measurement that had to be thrown away
+
+The first attempt compared a twenty-case matrix taken before the change against one taken after. The second
+matrix came out **slower nearly everywhere** — `still-12h-118m-fogon` at 47.6 ms against 44.6 before — which
+would have read as the proxy making things worse. The tell was the node phase: 6.8 ms before, 11.2 ms after,
+for CPU work neither version touches. Twelve minutes of uncapped GPU load on this laptop moves every figure in
+the table by a quarter, and the same case measured in isolation ten minutes earlier had come out at 35.6 ms.
+
+> **A before-and-after separated by a rebuild is a comparison between two thermal states.** Two long matrices
+> cannot be compared to each other at all, and a long matrix cannot be compared to a short run.
+
+So `--perf-noproxy` puts both arms in one binary and the comparison is interleaved A/B/A/B in one session:
+
+```
+118 m   proxy   35.66  48.98  62.67      noproxy  45.29  69.02  64.39
+ 60 m   proxy   36.63  36.65  36.20      noproxy  43.90  41.71  45.34
+```
+
+**Every pair favours the proxy** — by 9.6, 20.0 and 1.7 ms at 118 m and by 7.3, 5.1 and 9.1 ms at 60 m. The
+drift is visible in the rows: the 118 m block ran first and climbed throughout, while the 60 m proxy arm is
+flat to half a millisecond across three runs and its noproxy partner is not, which is what a heavier arm
+hitting a power limit looks like. Submitted caster triangles, which no thermal state can move, fell from
+16.73M to 3.91M at 118 m and 9.11M to 1.84M at 60 m, and the per-cascade split went from 3354k/6562k/6813k to
+3354k/274k/280k.
+
+Call it **7-10 ms at both standoffs**, and do not quote a single absolute frame figure from a long run again.
+
+### What this costs and what is still owed
+
+- **The look is unverified by anything but arithmetic.** The texel sizes say the coarse maps cannot resolve a
+  silhouette, but nobody has yet sat at 60 and 118 m and looked at the shadows under a wood. That is the one
+  acceptance this section cannot do from a log, and it comes before the change is trusted.
+- **The measurement protocol changes.** Long matrices are for relative reads within one run of one case;
+  anything comparing two configurations must interleave them in one session. §83's absolute table should be
+  re-read with that in mind — its ordering biases the later cases against the earlier ones.
+- **The near cascade is now the caster cost**, at 3.35M triangles and about 3.2 ms by the ablation. Coarsening
+  it is a look decision at 11.7 cm texels rather than a free win.
+- **Still owed from §83:** the vsync-on pacing pass, repeats with error bars, per-pass GPU timestamps, and only
+  then the supported camera envelope. The envelope is still not set, and after this section the frame it would
+  be set against has moved again — which is exactly why it was not set earlier.

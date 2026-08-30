@@ -350,6 +350,17 @@ public static class Program
         // The opt-in half of the vsync question: keep the display's cadence and measure pacing as a player
         // feels it, rather than what the frame cost. See RtsGameLoop.performanceVsync.
         var performanceVsync = args.Contains("--perf-vsync");
+        // The caster ablation: how many cascades are allowed to receive casters at all. Default -1 leaves
+        // every cascade alone. See RtsGameLoop.performanceCascadeMask for what it is bounding.
+        var performanceCascades = Value(args, "--perf-cascades") is { } casc ? int.Parse(casc) : -1;
+        // The other arm of the A/B: the coarse cascades cast the real geometry again, as they did before
+        // §84. Both arms in one binary — see RtsGameLoop.performanceNoProxy.
+        var performanceNoProxy = args.Contains("--perf-noproxy");
+        if (performanceCascades > 3)
+        {
+            throw new ArgumentOutOfRangeException(
+                "--perf-cascades", performanceCascades, "There are three cascades; 0 casts from none.");
+        }
         if (performanceHour is < -1f or > 24f)
         {
             throw new ArgumentOutOfRangeException("--perf-hour", performanceHour, "Hour must be between 0 and 24.");
@@ -359,7 +370,8 @@ public static class Program
             Console.WriteLine(
                 $"  performance fixture: camera {performanceCamera.ToString().ToLowerInvariant()}, " +
                 $"light {(performanceHour >= 0f ? $"{performanceHour:F1}:00" : "live")}, " +
-                $"vsync {(performanceVsync ? "on" : "off")}");
+                $"vsync {(performanceVsync ? "on" : "off")}" +
+                (performanceCascades >= 0 ? $", casters into {performanceCascades} of 3 cascades" : string.Empty));
         }
         // <b>Timings without the overlays.</b> --debug-all turns on the collider overlay too, which draws a
         // disc per body and per tree — 17 ms of it with five thousand trees in view — so a frame measured
@@ -402,7 +414,9 @@ public static class Program
             performanceRun,
             performanceCamera,
             performanceHour,
-            performanceVsync);
+            performanceVsync,
+            performanceCascades,
+            performanceNoProxy);
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
     }
