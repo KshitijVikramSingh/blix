@@ -371,6 +371,12 @@ public static class Program
         // <b>The fill lever, and it has to be the window because the scene target is sized from it.</b>
         // Fragment cost scales with pixels and geometry does not, so a run at a quarter of the area is the
         // one measurement that can tell the two apart. 1280x720 is what every figure in §83-87 was taken at.
+        // <b>MSAA, all the way off if asked.</b> §88 measured the 200-300 m band as fragment-bound, and a 4x
+        // resolve of subpixel foliage is the most expensive fragment work in the frame at exactly that
+        // standoff. --msaa 1 renders straight into the present's source with no resolve declared at all; 2 and
+        // 8 are there because the interesting question is where the look stops being worth the milliseconds,
+        // and that is not a yes/no.
+        var msaa = Value(args, "--msaa") is { } samples ? int.Parse(samples) : 4;
         var windowWidth = Value(args, "--width") is { } w ? int.Parse(w) : 1280;
         var windowHeight = Value(args, "--height") is { } h ? int.Parse(h) : 720;
         if (performanceCascades > 3)
@@ -444,7 +450,8 @@ public static class Program
             shadowProxies,
             performanceBlockingUpload,
             zoomLimit,
-            tierBias);
+            tierBias,
+            msaa);
         using var window = new Window(
             game, new WindowOptions("RTSGame — Greybox Kingdom", windowWidth, windowHeight));
         window.Run();

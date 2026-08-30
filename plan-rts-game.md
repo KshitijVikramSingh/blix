@@ -8439,3 +8439,47 @@ The baseline arm's own spread was 50 to 80 ms within one session, after hours of
 absolute figure in §87 and §88 should be read as "this machine, this afternoon, in this order". What survives
 is the paired deltas and the CPU/GPU signature flip — which is the same conclusion §84 reached about
 thermals, reached again the hard way, and the reason this arc's trustworthy findings are all mechanisms.
+
+## 89. MSAA is free here, so §88's recommendation was wrong
+
+§88 ended by pointing at MSAA: the 200-300 m band is fragment-bound, and a 4x resolve of subpixel foliage is
+the case where antialiasing costs most and buys least. `--msaa 1|2|4|8` makes that testable — at one sample
+the scene renders straight into the target the present pass samples, with no resolve attachment declared,
+because a single-sample source with a resolve is invalid and the graph does not check.
+
+The first measurement said MSAA off was **19 ms slower**, which is absurd on its face and was the ordering
+mistake again: 4, 2, 1 in fixed order into a warming machine, for the third time in one afternoon. Rotated
+ABBA over two rounds:
+
+```
+msaa 4    50.30  50.30  50.42  66.73   median 50.30 ms
+msaa 1    50.51  50.62  65.56  66.58   median 50.62 ms
+```
+
+Once the machine settles every run lands at 50.3-50.6 ms whatever the sample count; the two 66 ms figures are
+the first runs of the sequence rather than an arm. **MSAA 4x is free on this GPU**, and the reason is
+architectural: Apple Silicon resolves in tile memory, and standard MSAA shades per pixel rather than per
+sample, so 4x buys coverage and a tile resolve and costs neither shading nor main-memory bandwidth.
+
+So §88's closing recommendation is dead, and the fill it correctly identified has to be paid for somewhere
+else. What is left, given a quarter of the pixels bought 30% and a quarter of the samples bought nothing:
+
+- **per-pixel shader cost** — `world.frag` samples three cascades, applies fog, the veil and aerial
+  perspective for every fragment, at every standoff; and
+- **overdraw** — there is no depth pre-pass, so a fragment shaded behind a tree is shaded for nothing, and a
+  wood at 200 m is many layers of tree.
+
+A depth pre-pass is the same lever the Sponza work already had on its list, and overdraw is the term that
+grows exactly where §87 found the peak: many mid-size trees, deep in each other's way. That is where the next
+fill measurement belongs — not in the sample count.
+
+### Three ordering mistakes in one afternoon
+
+§84 established that this machine's absolute figures drift 25-75% under sustained load and that configurations
+must therefore be compared interleaved. Three separate scripts written after that finding still ran their arms
+in fixed A-then-B order, and each time the second arm came out worse: the shadow proxy (reversed by ABBA), the
+zoom ceiling (reversed by ABBA), and MSAA (reversed by rotation). Every one of those false results was
+directionally the same — the arm that ran last lost — which is the signature to watch for.
+
+**A harness that knows about drift is not a harness that cancels it.** The rule is not "interleave", it is
+"alternate the order and check that the effect survives reversal".

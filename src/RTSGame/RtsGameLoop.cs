@@ -712,7 +712,22 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// almost nothing over four for four times the bandwidth on a frame that is already resolving a
     /// 16-bit-per-channel target.
     /// </remarks>
-    private const int MsaaSamples = 4;
+    /// <summary>
+    /// Scene multisampling, four unless a run says otherwise.
+    /// </summary>
+    /// <remarks>
+    /// <b>A setting rather than a constant since §88 pointed at fragments.</b> The peak at 200-300 m is
+    /// fragment-bound, and the most expensive fragment work in the frame is a 4x resolve of a scene whose
+    /// content at that standoff is a mush of subpixel trees — the case where antialiasing costs most and buys
+    /// least. Whether that trade is worth changing is a look judgement, so this exists to let the look be
+    /// judged at each setting rather than argued about at one.
+    /// <para>
+    /// One sample is not "MSAA off with a spare resolve": there is nothing to resolve, so the scene renders
+    /// straight into the target the present pass samples and the resolve attachment is not declared at all. A
+    /// single-sample source with a resolve declared is invalid, and the graph does not check.
+    /// </para>
+    /// </remarks>
+    private readonly int msaaSamples = 4;
 
     // The penumbra width and the normal-offset distance both live in the shaders, next to the ambient
     // and the sun, because they are part of a look rather than facts about the scene. What the shaders
@@ -1304,7 +1319,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         bool shadowProxies = false,
         bool performanceBlockingUpload = false,
         float zoomLimitMetres = 0f,
-        int performanceTierBias = 0)
+        int performanceTierBias = 0,
+        int msaaSamples = 4)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
@@ -1313,6 +1329,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         this.shadowProxies = shadowProxies;
         this.performanceBlockingUpload = performanceBlockingUpload;
         this.performanceTierBias = Math.Clamp(performanceTierBias, 0, 3);
+        // Powers of two only, and only the ones a device is required to support for a colour target.
+        this.msaaSamples = msaaSamples switch
+        {
+            1 or 2 or 4 or 8 => msaaSamples,
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(msaaSamples), msaaSamples, "MSAA must be 1, 2, 4 or 8 samples."),
+        };
         if (performanceCascades >= 0)
         {
             performanceCascadeMask = (1 << Math.Min(performanceCascades, ShadowCascades.Count)) - 1;
@@ -1434,7 +1457,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 (performanceCascades >= 0 ? $"-cast{performanceCascades}" : string.Empty) +
                 (shadowProxies ? "-proxy" : string.Empty) +
                 (performanceBlockingUpload ? "-blockingupload" : string.Empty) +
-                (performanceTierBias > 0 ? $"-tier+{performanceTierBias}" : string.Empty);
+                (performanceTierBias > 0 ? $"-tier+{performanceTierBias}" : string.Empty) +
+                (this.msaaSamples != 4 ? $"-msaa{this.msaaSamples}" : string.Empty);
             // A quarter of the run, capped: long enough to cover first presentation, terrain meshing and the
             // first cover resolve, short enough that a sixty-frame smoke still reports a steady window.
             var warmUpFrames = exitAfterFrames > 0 ? Math.Clamp(exitAfterFrames / 4, 1, 120) : 120;
@@ -1883,9 +1907,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // and on this device it is <b>slower</b>: 14.2 ms of GPU work against 10.2 for the wider format,
         // repeatably. Presumably the resolve path for it is not the fast one here. Worth re-measuring on
         // other hardware before copying this choice anywhere.
-        hdrMsaaHandle = graph.ColorTarget("hdr-msaa", TextureFormat.R11G11B10F, fullSize, samples: MsaaSamples);
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.R11G11B10F, fullSize);
-        sceneDepthHandle = graph.DepthTarget("scene-depth", fullSize, samples: MsaaSamples);
+        if (msaaSamples > 1)
+        {
+            hdrMsaaHandle = graph.ColorTarget(
+                "hdr-msaa", TextureFormat.R11G11B10F, fullSize, samples: msaaSamples);
+        }
+
+        sceneDepthHandle = graph.DepthTarget("scene-depth", fullSize, samples: msaaSamples);
 
         var casterInterface = new ShaderInterface(
             Slots: new[] { InstanceBuffer.Slot },
@@ -1929,9 +1958,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 .Shader(casterInterface)
                 .Handle;
         }
-        scenePassHandle = graph.GraphicsPass("scene")
-            .Target(hdrMsaaHandle, LoadOp.Clear, StoreOp.Store)
-            .ResolveColor(hdrHandle)
+        // <b>The pipelines' sample count comes from this pass's colour target</b> — the graph reads it off the
+        // first one and registers the surface with it — so switching the target is the whole of switching
+        // MSAA. Nothing below needs to know, which is why this branch is two lines rather than a second path.
+        var scenePass = graph.GraphicsPass("scene");
+        scenePass = msaaSamples > 1
+            ? scenePass.Target(hdrMsaaHandle, LoadOp.Clear, StoreOp.Store).ResolveColor(hdrHandle)
+            : scenePass.Target(hdrHandle, LoadOp.Clear, StoreOp.Store);
+        scenePassHandle = scenePass
             .Depth(sceneDepthHandle, LoadOp.Clear, StoreOp.Store)
             .Read(cascadeTargets[0])
             .Read(cascadeTargets[1])
@@ -2245,6 +2279,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Console.WriteLine("  J: cycle pen-escape variants (main exit + random alternates)");
         Console.WriteLine("  L: load terrain laboratory (ramp, cliff, road, mud, rough, pond)");
         Console.WriteLine("  blue unit: yielding under crowd pressure   red unit: navigation progress failure");
+        Console.WriteLine(
+            msaaSamples > 1
+                ? $"  scene: {msaaSamples}x MSAA, resolved for the present"
+                : "  scene: MSAA OFF (--msaa 1) — no resolve, every edge is a hard geometric edge");
         Console.WriteLine(
             $"  arrows: pan   middle-drag: drag the ground   Q/E: rotate 90°   " +
             $"wheel: zoom {CameraNearestDistance:F0}-{cameraFurthest:F0} m" +
