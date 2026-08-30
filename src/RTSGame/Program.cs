@@ -359,6 +359,8 @@ public static class Program
         // machinery stays because it is measured and may be wanted on weaker hardware or a larger map, but it
         // is a switch now and not a default. Both arms in one binary — see RtsGameLoop.shadowProxies.
         var shadowProxies = args.Contains("--shadow-proxy");
+        // The old, queue-draining fog upload, kept so the fix has something to be measured against.
+        var performanceBlockingUpload = args.Contains("--perf-blocking-upload");
         if (performanceCascades > 3)
         {
             throw new ArgumentOutOfRangeException(
@@ -427,7 +429,8 @@ public static class Program
             performanceHour,
             performanceVsync,
             performanceCascades,
-            shadowProxies);
+            shadowProxies,
+            performanceBlockingUpload);
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
     }

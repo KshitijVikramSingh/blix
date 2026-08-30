@@ -573,6 +573,11 @@ public sealed partial class VulkanGraphicsDevice
         }
         var nextQueryIndex = slotQueryBase;
 
+        // <b>Before any render pass opens, because a buffer-to-image copy cannot be inside one.</b>
+        // This is where a per-frame texture upload belongs: recorded with the frame's own commands
+        // instead of submitted on its own and waited for. See QueueTextureUpload.
+        RecordQueuedTextureUploads(f.CommandBuffer);
+
         // One stackalloc shared across passes (CA2014 — no per-iteration
         // alloc). 8 = 7 color + 1 depth; bump for wider MRT passes.
         var clearValues = stackalloc ClearValue[8];
@@ -769,6 +774,7 @@ public sealed partial class VulkanGraphicsDevice
         // newly-current slot (GPU-complete) so next frame's AllocVertices starts
         // clean. Same race-free reasoning as the indirect ring.
         AdvanceArenaSlot();
+        AdvanceTextureUploadSlot();
         return defaultPasses > 0;
     }
 

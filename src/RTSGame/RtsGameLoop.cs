@@ -311,6 +311,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private readonly bool shadowProxies;
 
+    /// <summary>Restores the queue-draining fog upload, so the fix can be measured against itself.</summary>
+    /// <remarks>
+    /// Kept for the same reason <see cref="shadowProxies"/> is a switch rather than a rewrite: a change of
+    /// this size has to be provable in one session, on one thermal state, by alternating the two arms. The
+    /// old path is also still the right one everywhere its guarantee is needed — see QueueTextureUpload.
+    /// </remarks>
+    private readonly bool performanceBlockingUpload;
+
     /// <summary>The recorder for a sealed run, absent otherwise. See PerformanceRun.</summary>
     private readonly PerformanceRun? performance;
 
@@ -1264,13 +1272,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         float performanceHour = -1f,
         bool performanceVsync = false,
         int performanceCascades = -1,
-        bool shadowProxies = false)
+        bool shadowProxies = false,
+        bool performanceBlockingUpload = false)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
         this.performanceHour = performanceHour;
         this.performanceVsync = performanceVsync;
         this.shadowProxies = shadowProxies;
+        this.performanceBlockingUpload = performanceBlockingUpload;
         if (performanceCascades >= 0)
         {
             performanceCascadeMask = (1 << Math.Min(performanceCascades, ShadowCascades.Count)) - 1;
@@ -1380,7 +1390,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 $"{performanceCameraMotion.ToString().ToLowerInvariant()}-{light}-" +
                 $"{standoff:F0}m-fog{(fogSettings.Enabled ? "on" : "off")}" +
                 (performanceCascades >= 0 ? $"-cast{performanceCascades}" : string.Empty) +
-                (shadowProxies ? "-proxy" : string.Empty);
+                (shadowProxies ? "-proxy" : string.Empty) +
+                (performanceBlockingUpload ? "-blockingupload" : string.Empty);
             // A quarter of the run, capped: long enough to cover first presentation, terrain meshing and the
             // first cover resolve, short enough that a sixty-frame smoke still reports a steady window.
             var warmUpFrames = exitAfterFrames > 0 ? Math.Clamp(exitAfterFrames / 4, 1, 120) : 120;
@@ -7045,7 +7056,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             wear[z * WearCells + x] = (byte)(Math.Clamp(total / weight, 0f, 1f) * 255f);
         }
 
-        graphicsDevice.UploadTextureMip(wearTexture, 0, wear);
+        // Queued, not uploaded: see IGraphicsDevice.QueueTextureUpload. Every fifteenth frame is rare
+        // enough that the old drain was survivable here, which is exactly why the fog's — every frame —
+        // was not, and why this one was hiding in plain sight beside it.
+        graphicsDevice.QueueTextureUpload(wearTexture, 0, wear);
     }
 
     /// <summary>How many pieces of ground cover one frame may draw.</summary>
@@ -7655,7 +7669,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             return;
         }
 
-        graphicsDevice.UploadTextureMip(fogTexture, 0, scouted.Texels.ToArray());
+        // <b>The single most expensive line in the frame, until it stopped draining the queue.</b>
+        // UploadTextureMip waits for the whole graphics queue to go idle, which on a mask reuploaded
+        // every frame the fog changes meant the frame never overlapped CPU and GPU at all: 20 ms of a
+        // 28 ms frame at a wide standoff, and about 7 ms on the frames that happened to find the mask
+        // clean. Queued into the frame's own commands, the wait is gone and the veil is a frame late,
+        // which is a frame nobody can see at the rate fog eases.
+        if (performanceBlockingUpload)
+        {
+            graphicsDevice.UploadTextureMip(fogTexture, 0, scouted.Texels.ToArray());
+        }
+        else
+        {
+            graphicsDevice.QueueTextureUpload(fogTexture, 0, scouted.Texels.ToArray());
+        }
         scouted.MarkUploaded();
         fogUploads++;
     }

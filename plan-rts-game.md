@@ -8168,3 +8168,99 @@ Call it **7-10 ms at both standoffs**, and do not quote a single absolute frame 
 - **Still owed from §83:** the vsync-on pacing pass, repeats with error bars, per-pass GPU timestamps, and only
   then the supported camera envelope. The envelope is still not set, and after this section the frame it would
   be set against has moved again — which is exactly why it was not set earlier.
+
+## 85. The frame was waiting on nothing: a queue drain inside the fog upload
+
+Somebody sat in the chair, which is how this section exists.
+
+### The eye's verdict on §84
+
+§84's proxy was measured at 7-10 ms and shipped with one unverified claim: nobody had looked. Looked at, at
+118 m, the real geometry's tree shadows read plainly better — and the frame was comfortable either way. So
+**the proxy is off by default**, behind `--shadow-proxy`. The machinery stays: the measurement stands, a
+weaker machine or a bigger map may want it, and keeping both arms in one binary is the only kind of
+comparison §84 established as trustworthy.
+
+That is the whole point of an acceptance the log cannot perform. A 26% frame saving lost to a look nobody
+had checked would have been a good trade badly made.
+
+### The same person reported 150 fps where the fixture reported 22
+
+Which is a six-fold disagreement about one build, so one of us was wrong. Two suspects were cleared first,
+in this order, because an instrument is guilty until measured:
+
+1. **The fixture was turning on the diagnostics producer.** `--perf-run` forced `--timings`, and
+   `timingDebug` keeps the whole producer alive whether or not a panel is drawn — `ReportDebug`'s own comment
+   says `ReportEconomy` alone costs over four milliseconds in a wide frame. Interleaved, it came to 0.35 ms
+   of 44 (44.37 clean against 44.72 instrumented), so §83 and §84 survive. The fixture no longer implies
+   timings regardless: it had no business carrying the risk.
+2. **The recorder might have been reading the wrong clock.** It samples `OnUpdate`'s delta; the engine's F1
+   HUD counts `OnRender`'s. Both are now recorded and reported side by side, and they agree to a hundredth
+   of a millisecond.
+
+Which left the code. `UploadTextureMip` submits through `EndSingleTimeCommands`, and that ends in
+**`vkQueueWaitIdle`**. The fog mask is uploaded on every frame its texels change, so most frames drained the
+entire graphics queue in the middle of the update.
+
+> **A frame that drains the queue costs CPU + GPU instead of max(CPU, GPU)**, and the wait is charged to
+> whatever touched the device first rather than to the work it was waiting for.
+
+That is the mechanism behind §83's "33 ms of fog" and its 1 ms `outside` column, and §83 named the symptom
+without naming the cause. It also explains the argument: when the mask happens to be clean the upload is
+skipped, the frame pipelines normally and runs at about 7 ms. **The frame was bimodal and the mode was set by
+a dirty flag.** Both observers were right about the build they were looking at.
+
+The wear mask takes the same path and escaped only by uploading every fifteenth frame — hiding in plain
+sight beside the one that did not.
+
+### The fix, and what it returned
+
+`IGraphicsDevice.QueueTextureUpload` stages bytes into a ring of host-visible buffers and records the copy and
+its barriers into the frame's own command buffer, before any render pass opens. Nothing waits. The ring is
+`MaxFramesInFlight + 1` deep for the same reason the transient vertex arena and the indirect ring are —
+uploads are queued during encode, before `Execute`'s fence wait — and it is built lazily, because it is twelve
+megabytes and most Blix apps upload everything they need at load time.
+
+`UploadTextureMip` stays exactly as it is. Its drain is what makes it safe to sample on the caller's next
+line, which is what a streamed mip chain wants. The two now differ by their guarantee rather than by
+accident.
+
+Interleaved against `--perf-blocking-upload`, three rounds per standoff, one session:
+
+```
+             fog column        frame p50 (queued vs draining)
+118 m    20.3 → 0.27 ms        27.1→16.7   28.8→19.8   36.9→26.6
+ 60 m    19.9 → 0.65 ms        33.9→24.7   33.2→25.3   34.1→25.4
+```
+
+**About 10 ms at both standoffs**, every pair, and 118 m goes from 37 to 60 fps on the village default map.
+Validation-clean over twelve sealed runs; 389/389 graphics tests; gate 3/3 green. The remaining wait moved to
+`outside` — 11-17 ms of honest GPU-bound waiting at acquire, where it can be attributed to the passes that
+earn it instead of to a mask upload.
+
+### What stage 0 has actually learned
+
+Every real finding in §83-85 was an instrument or a mechanism, not a tuning knob:
+
+- the frame did not close against its own halves, so 82% of it was unattributed (§83);
+- absolute figures drift 25-75% under sustained load on this machine, so configurations must be compared
+  interleaved in one session and never across two long matrices (§84);
+- the art was already casting from the coarsest level it had, so the "obvious" lever was spent (§84);
+- and the largest single cost in the frame was a device drain nobody had asked for (§85).
+
+The pattern is consistent enough to state as a rule: **on this project, measure the instrument before
+optimising the thing.** Three of the four findings above were invisible until an instrument was doubted.
+
+### Still owed
+
+- **The camera envelope**, still unset, and now for a better reason than before: the frame it would be set
+  against has changed twice today. It wants the vsync-on pacing pass, repeats with error bars, and per-pass
+  GPU timestamps to attribute the 11-17 ms that is left.
+- **`outside` needs breaking down.** It is now the frame's largest term and it means "acquire, submit, or
+  wait" — three different answers wearing one label, which is the same shape of hole §83 opened this arc by
+  finding.
+- **`Blix.Render/ResourceUploader` is the other per-frame caller**, and it is the streamed mip path: it drips
+  levels in over frames, so a streaming frame drains the queue exactly as the fog did. It was left alone
+  deliberately — its residency bookkeeping is written against the drain's guarantee, and the argument that the
+  queued path is safe there is the same barrier argument made here but wants Sponza's streaming run to prove
+  it rather than an assertion in this file.
