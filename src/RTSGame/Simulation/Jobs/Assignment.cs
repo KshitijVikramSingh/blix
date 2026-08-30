@@ -29,7 +29,7 @@ internal enum AssignmentKind
     Haul,
 
     /// <summary>
-    /// Run a route: carry one resource from a source node to a sink node until the source is empty.
+    /// Run a route: carry whichever useful resource is available from one node to another.
     /// </summary>
     /// <remarks>
     /// <b>A haul the player authored, as against a haul the board auctioned.</b> The difference is not
@@ -39,9 +39,10 @@ internal enum AssignmentKind
     /// a body that kept a route for life would be priced once, at the moment it was hired, and the promise
     /// that a jammed lane makes a different body cheaper would be a promise about a decision nobody ever
     /// revisits. Collect, deliver, go back on the board.</item>
-    /// <item>A <see cref="Carry"/> is a <em>standing commitment</em>: this person, this route, until the
-    /// source runs dry or you tell them otherwise. Nobody re-auctions it because nobody is meant to. It is
-    /// the player saying "these three are on the timber run", which is the shape of decision §2 wants
+    /// <item>A <see cref="Carry"/> is a <em>standing commitment</em>: this person, this route, until you
+    /// tell them otherwise. An empty source or a destination with no present need makes them wait at the
+    /// source; it does not erase the player's arrangement. Nobody re-auctions it because nobody is meant
+    /// to. It is the player saying "these three are on the run", which is the shape of decision §2 wants
     /// attention spent on.</item>
     /// </list>
     /// <para>
@@ -65,6 +66,22 @@ internal enum AssignmentKind
     /// </para>
     /// </remarks>
     Work,
+
+    /// <summary>
+    /// Supply and raise one building project, then return any surplus to storage.
+    /// </summary>
+    /// <remarks>
+    /// Leg zero is the current stock source and leg one is the project site. The source and cargo may
+    /// change between trips; the sink remains the stable node being built until completion. Unlike
+    /// <see cref="Work"/>, nothing is produced into the builder's hands — it carries existing physical
+    /// stock inward and labour consumes it into the structure.
+    /// </remarks>
+    Build,
+
+    /// <summary>
+    /// Carry militia equipment to one barracks, then remain there until this same villager is trained.
+    /// </summary>
+    Train,
 }
 
 /// <summary>What a unit is doing at this instant, in service of its assignment.</summary>
@@ -167,7 +184,9 @@ internal readonly record struct Assignment(
     /// <summary>Which node a leg of a haul or a shift of work is served at.</summary>
     public NodeId NodeOfLeg(int leg) => leg % 2 != 0 ? Sink : Source;
 
-    /// <summary>Run <paramref name="cargo"/> from one node to another until the source is empty.</summary>
+    /// <summary>
+    /// Run useful goods from one node to another, beginning with <paramref name="cargo"/>.
+    /// </summary>
     public static Assignment Carry(
         NodeId source,
         Vector2 sourcePosition,
@@ -195,6 +214,44 @@ internal readonly record struct Assignment(
         new(
             AssignmentKind.Work, sitePosition, sitePosition, shiftSeconds, site, NodeId.None, output,
             siteExtent, siteExtent, handoverSeconds);
+
+    /// <summary>Supply and build <paramref name="site"/> until the project and its cleanup are done.</summary>
+    public static Assignment Build(
+        NodeId site,
+        Vector2 sitePosition,
+        float siteExtent,
+        float handoverSeconds,
+        float workShiftSeconds) =>
+        new(
+            AssignmentKind.Build,
+            sitePosition,
+            sitePosition,
+            handoverSeconds,
+            site,
+            site,
+            Resource.Wood,
+            siteExtent,
+            siteExtent,
+            workShiftSeconds);
+
+    /// <summary>Equip and train this body at one completed barracks.</summary>
+    public static Assignment Train(
+        NodeId barracks,
+        Vector2 position,
+        float extent,
+        float handoverSeconds,
+        float trainingShiftSeconds) =>
+        new(
+            AssignmentKind.Train,
+            position,
+            position,
+            handoverSeconds,
+            barracks,
+            barracks,
+            Resource.Wood,
+            extent,
+            extent,
+            trainingShiftSeconds);
 
     /// <summary>How long the work at a given leg takes.</summary>
     public float DwellOfLeg(int leg) => HasTwoEnds && leg % 2 != 0 && FarDwellSeconds >= 0f
@@ -240,7 +297,8 @@ internal readonly record struct Assignment(
 
     /// <summary>Whether this assignment alternates between two places.</summary>
     public bool HasTwoEnds =>
-        Kind is AssignmentKind.Shuttle or AssignmentKind.Haul or AssignmentKind.Carry or AssignmentKind.Work;
+        Kind is AssignmentKind.Shuttle or AssignmentKind.Haul or AssignmentKind.Carry or AssignmentKind.Work or
+            AssignmentKind.Build or AssignmentKind.Train;
 
     /// <summary>
     /// Whether the assignment goes on indefinitely, or ends when its last leg does.
@@ -252,7 +310,8 @@ internal readonly record struct Assignment(
     /// promise about a decision nobody ever revisits. Collect, deliver, and go back on the board.
     /// </remarks>
     public bool RepeatsForever =>
-        Kind is AssignmentKind.Hold or AssignmentKind.Shuttle or AssignmentKind.Carry or AssignmentKind.Work;
+        Kind is AssignmentKind.Hold or AssignmentKind.Shuttle or AssignmentKind.Carry or AssignmentKind.Work or
+            AssignmentKind.Build or AssignmentKind.Train;
 }
 
 /// <summary>
@@ -274,6 +333,13 @@ internal readonly record struct Assignment(
 internal struct AgentJobs
 {
     public Assignment Assignment;
+
+    /// <summary>The stable building project served by a <see cref="AssignmentKind.Build"/> assignment.</summary>
+    /// <remarks>
+    /// Kept separately from the assignment's current source and sink because cleanup turns those endpoints
+    /// into project-to-store while the commitment still needs to remember which node it belongs to.
+    /// </remarks>
+    public NodeId Project;
 
     /// <summary>Which leg of the assignment is being served. Progress, not activity.</summary>
     public int Leg;
@@ -355,6 +421,19 @@ internal struct AgentJobs
 
     /// <summary>Whole units on this body's back. Neither stored nor consumed until delivered.</summary>
     public int CarriedUnits;
+
+    /// <summary>
+    /// Units this body has claimed at a source for its next construction load.
+    /// </summary>
+    /// <remarks>
+    /// A promise, not stock: it is excluded from conservation and exists only so two builders do not both
+    /// answer the same final thirty-unit deficit. Cleared when the source is reached, and saved and
+    /// fingerprinted with the rest of the job so a mid-trip save resumes the same allocation.
+    /// </remarks>
+    public int ReservedUnits;
+
+    /// <summary>Seconds this same villager has spent training at its barracks.</summary>
+    public float TrainingWork;
 
     /// <summary>The assignment has run its course and will be cleared on the next tick.</summary>
     public bool Finished;

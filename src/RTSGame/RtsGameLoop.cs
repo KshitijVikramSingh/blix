@@ -22,6 +22,14 @@ using RTSGame.Simulation.Terrain;
 
 namespace RTSGame;
 
+internal enum PerformanceCameraMotion
+{
+    Still,
+    Pan,
+    Rotate,
+    Zoom,
+}
+
 internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisposable
 {
     // Body feel is judged by eye, not by the benchmark: a crowd can score well on route
@@ -83,6 +91,22 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// load builds a seventh; comparing the reference catches all of them without a hook in each.
     /// </remarks>
     private SimulationWorld? fogWorld;
+
+    /// <summary>
+    /// Static renderables bucketed by the same ten-metre cells as the information mask.
+    /// </summary>
+    /// <remarks>
+    /// A wooded Village has roughly thirty-four thousand nodes and only four thousand of them are on known
+    /// ground. Walking every tree merely to ask the fog whether it is hidden cost five to nine milliseconds
+    /// per frame. The index is renderer-owned and rebuilt whenever the node population changes; simulation
+    /// continues to own the nodes and never reads this cache.
+    /// </remarks>
+    private List<NodeId>[] renderNodeCells = Array.Empty<List<NodeId>>();
+    private SimulationWorld? renderNodeWorld;
+    private int renderNodeSlots = -1;
+    private int renderNodeLive = -1;
+    private int indexedStandingTrees;
+    private int indexedOutcrops;
     private readonly RaidSettings raids = new();
 
     /// <summary>
@@ -123,6 +147,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private static readonly Vector4 UnitColor = new(0.74f, 0.40f, 0.18f, 1f);
     private static readonly Vector4 SelectedUnitColor = new(0.98f, 0.72f, 0.24f, 1f);
     private static readonly Vector4 RaiderColor = new(0.62f, 0.10f, 0.09f, 1f);
+    private static readonly Vector4 MilitiaColor = new(0.30f, 0.38f, 0.46f, 1f);
     private static readonly Vector4 SelectionColor = new(0.26f, 0.86f, 0.94f, 1f);
 
     /// <summary>
@@ -183,6 +208,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     /// <summary>Pale, cool and desaturated: the one thing in this palette that is not earth or leaf.</summary>
     private static readonly Vector4 StoneColor = new(0.300f, 0.306f, 0.318f, 1f);
+    private static readonly Vector4 PalisadeWallColor = new(0.34f, 0.20f, 0.09f, 1f);
+    private static readonly Vector4 StoneWallColor = new(0.36f, 0.37f, 0.39f, 1f);
     private static readonly Vector4 BuildValidColor = new(0.30f, 0.84f, 0.72f, 1f);
     private static readonly Vector4 BuildRemoveColor = new(0.96f, 0.53f, 0.28f, 1f);
     private static readonly Vector4 BuildInvalidColor = new(0.82f, 0.24f, 0.22f, 1f);
@@ -245,6 +272,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private static readonly int[] StressScenarioCounts = { 50, 200, 500, 30 };
 
     private readonly int exitAfterFrames;
+
+    /// <summary>A sealed, input-independent run used to compare frame costs.</summary>
+    private readonly bool performanceRun;
+    private readonly PerformanceCameraMotion performanceCameraMotion;
+    private readonly float performanceHour;
+    private bool performanceCameraInitialized;
+    private Vector2 performanceCameraOrigin;
+    private float performanceCameraYaw;
+    private bool debugStateInitialized;
 
     /// <summary>
     /// Rolls a new map every so many frames, so the regeneration path can be soaked without a keyboard.
@@ -547,10 +583,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     // shadow map and once into the scene. The greybox boxes and cylinders below are what these replaced,
     // and they are still what a debug overlay is drawn with.
     private SettlementArt? art;
-    private InstancedBatch propBatch = null!, propCaster = null!, unitCaster = null!;
-    private InstancedBatch canopyBatch = null!, canopyCaster = null!;
-    private InstanceBuffer propBuffer = null!, propCasterBuffer = null!, unitCasterBuffer = null!;
-    private InstanceBuffer canopyBuffer = null!, canopyCasterBuffer = null!;
+    private InstancedBatch propBatch = null!;
+    private InstancedBatch canopyBatch = null!;
+    private InstancedBatch[] propCasters = null!, unitCasters = null!, canopyCasters = null!;
+    private InstanceBuffer propBuffer = null!;
+    private InstanceBuffer canopyBuffer = null!;
+    private InstanceBuffer[] propCasterBuffers = null!, unitCasterBuffers = null!, canopyCasterBuffers = null!;
+    private readonly List<InstanceData>[] propCasterInstances = CascadeInstanceLists();
+    private readonly List<InstanceData>[] unitCasterInstances = CascadeInstanceLists();
+    private readonly List<InstanceData>[] canopyCasterInstances = CascadeInstanceLists();
 
     // viewProj, camPos, sunDir, sunVP, fog, shadow, light, haze, sunTint, skyAmbient, groundAmbient,
     // hazeAway, hazeToward, wind, hearth, then a vec4 per fire in the village. Every one of the five palette
@@ -900,6 +941,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private const float ScatterShare = 0.85f;
 
+    // Ground-cover placement is deterministic and the expensive questions behind it — patch noise, country,
+    // slope, hollow and occupancy — have exactly the same answers while the camera and map stand still. Cache
+    // the resulting placements; the PropModels are still repopulated each frame because their buffers are
+    // frame-local, but the eight-thousand-cell procedural search is not repeated for an unchanged view.
+    private readonly List<(int Kind, Matrix4x4 Model)> scatterPlacements = new();
+    private SimulationWorld? scatterWorld;
+    private int scatterTerrainRevision = -1;
+    private int scatterPlacementRevision = -1;
+    private Vector2 scatterFocus = new(float.NaN, float.NaN);
+    private float scatterRadius = float.NaN;
+
     /// <summary>
     /// How far contact shadows are paid for, as a share of what can be seen.
     /// </summary>
@@ -1142,14 +1194,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         int rollEveryFrames = 0,
         bool profileTreeWork = false,
         bool fogOfWar = false,
-        bool showFogCells = false)
+        bool showFogCells = false,
+        bool performanceRun = false,
+        PerformanceCameraMotion performanceCameraMotion = PerformanceCameraMotion.Still,
+        float performanceHour = -1f)
     {
+        this.performanceRun = performanceRun;
+        this.performanceCameraMotion = performanceCameraMotion;
+        this.performanceHour = performanceHour;
         this.rollEveryFrames = rollEveryFrames;
         // <b>Reachable from the command line because the panel cannot be clicked from a gate.</b> The fog's
-        // masks are checked by reading the SCOUTED counts out of a run, and a default-off feature that can
-        // only be switched on by hand is a feature no automated run ever exercises. --fogcells adds the
-        // overlay and turns on the timings that print the line.
-        fogSettings.Enabled = fogOfWar || showFogCells;
+        // masks are checked by reading the SCOUTED counts out of a run. A village is the playable game and
+        // therefore starts with its information boundary in force; bare movement and map-lab runs stay clear
+        // unless a fixture asks for fog explicitly. --fogcells adds the overlay and turns on the timings that
+        // print the line, while the ordinary village default does not turn the diagnostic panel on.
+        fogSettings.Enabled = startVillage || fogOfWar || showFogCells;
         fogSettings.ShowCells = showFogCells;
         if (fogOfWar || showFogCells) timingDebug = true;
         // The ablation starts at the cheapest level and works up, so nothing it measures was warmed by the
@@ -1307,7 +1366,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (additiveSelection) spare.AddRange(selection.Selected);
         foreach (ref readonly var agent in simulation.Agents.All)
         {
-            if (!agent.IsAlive || agent.Faction.Value != 0) continue;
+            if (!agent.IsAlive || agent.Faction.Value != 0 || agent.Role != AgentRole.Villager) continue;
             if (agent.Jobs.HasAssignment || agent.Jobs.IsInterrupted) continue;
             spare.Add(agent.Id);
         }
@@ -1853,10 +1912,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         propBatch = new InstancedBatch(cubeMesh, worldPipeline, propBuffer);
         // A caster batch needs its own instance buffer: the buffer's material is created
         // against a shader, and the caster's shader is not the world's.
-        propCasterBuffer = new InstanceBuffer(vk, casterShader, "rts-props-caster");
-        propCaster = new InstancedBatch(cubeMesh, casterPipeline, propCasterBuffer);
-        unitCasterBuffer = new InstanceBuffer(vk, casterShader, "rts-agents-caster");
-        unitCaster = new InstancedBatch(cylinderMesh, casterPipeline, unitCasterBuffer);
+        propCasterBuffers = new InstanceBuffer[ShadowCascades.Count];
+        unitCasterBuffers = new InstanceBuffer[ShadowCascades.Count];
+        canopyCasterBuffers = new InstanceBuffer[ShadowCascades.Count];
+        propCasters = new InstancedBatch[ShadowCascades.Count];
+        unitCasters = new InstancedBatch[ShadowCascades.Count];
+        canopyCasters = new InstancedBatch[ShadowCascades.Count];
+        for (var c = 0; c < ShadowCascades.Count; c++)
+        {
+            propCasterBuffers[c] = new InstanceBuffer(vk, casterShader, $"rts-props-caster-{c}");
+            propCasters[c] = new InstancedBatch(cubeMesh, casterPipeline, propCasterBuffers[c]);
+            unitCasterBuffers[c] = new InstanceBuffer(vk, casterShader, $"rts-agents-caster-{c}");
+            unitCasters[c] = new InstancedBatch(cylinderMesh, casterPipeline, unitCasterBuffers[c]);
+            canopyCasterBuffers[c] = new InstanceBuffer(vk, casterShader, $"rts-canopies-caster-{c}");
+            canopyCasters[c] = new InstancedBatch(canopyMesh, casterPipeline, canopyCasterBuffers[c]);
+        }
         canopyBuffer = new InstanceBuffer(vk, worldShader, "rts-canopies");
         canopyBatch = new InstancedBatch(canopyMesh, worldPipeline, canopyBuffer);
         // The same sphere the greybox canopies use, which is what a puff of smoke wants to be.
@@ -1870,9 +1940,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         selectionPlateBatch = new InstancedBatch(plateMesh, selectionDecalPipeline, selectionPlateBuffer);
         smokeBuffer = new InstanceBuffer(vk, smokeShader, "rts-smoke");
         smokeBatch = new InstancedBatch(canopyMesh, smokePipeline, smokeBuffer);
-        canopyCasterBuffer = new InstanceBuffer(vk, casterShader, "rts-canopies-caster");
-        canopyCaster = new InstancedBatch(canopyMesh, casterPipeline, canopyCasterBuffer);
-        art = SettlementArt.Load(vk, worldShader, worldPipeline, casterShader, casterPipeline);
+        art = SettlementArt.Load(
+            vk, worldShader, worldPipeline, casterShader, casterPipeline, ShadowCascades.Count);
         // <b>What the buildings measured, because two bugs came out of assuming it.</b> A fitted model's
         // bounding box is its roof and its height is whatever its proportions gave it — so anything hung on
         // a building (a lit window, a lantern, a chimney) has to be placed against numbers from the asset
@@ -1976,12 +2045,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
 
         Console.WriteLine("RTSGame — Agent Movement Layer");
-        Console.WriteLine("  left-click/drag: select   Ctrl: additive selection   right-click: group move");
+        Console.WriteLine("  left-click/drag: select   Ctrl: additive selection   right-click: move / work target");
         Console.WriteLine("  B: toggle block-edit mode   left-click in block mode: add/remove block");
         Console.WriteLine("  S: stop   F: follow   P: patrol to pointer   H: chase   X: flee   Backspace: despawn selected");
         Console.WriteLine("  U: post selected at pointer   O: shuttle (press twice for both ends)   Y: off work");
-        Console.WriteLine("  D: granary at pointer   A: farm   Ctrl+A: house   W: forward depot (lumber camp)");
-        Console.WriteLine("  U: post a villager — on a field it farms it, on a tree it cuts it");
+        Console.WriteLine("  D: storehouse   Ctrl+D: barracks   A: farm   Ctrl+A: house   W: camp   Ctrl+W: palisade");
+        Console.WriteLine("  Ctrl+right-click a sound palisade to upgrade it; damaged structures repair first");
+        Console.WriteLine("  right-click a site, field, tree or outcrop to work it; U explicitly posts");
         Console.WriteLine("  Ctrl+O: haul route — press on the source node, then on the destination node");
         Console.WriteLine("     hauling is a job, not a unit: it costs wood, and Y takes the cart away");
         Console.WriteLine("  houses are the only things that eat: one outside every catchment goes hungry");
@@ -2030,12 +2100,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 $"  {kind} site: wants {Construction.TimberFor(kind)} timber" +
                 (Construction.StoneFor(kind) > 0 ? $" and {Construction.StoneFor(kind)} stone" : string.Empty) +
                 $" carried out and " +
-                $"{Construction.LabourFor(kind):F0} labour-seconds — post villagers on it with U");
+                $"{Construction.LabourFor(kind):F0} labour-seconds — right-click it with villagers selected");
         }
 
         Console.WriteLine(
             $"  {kind} at ({pointerWorld.X:F0}, {pointerWorld.Y:F0}) — " +
-            $"{simulation.Nodes.LiveCount} node(s). Post hands with U; carts find their own work");
+            $"{simulation.Nodes.LiveCount} node(s). Right-click to assign hands; carts find their own work");
         if (kind != NodeKind.Granary) return;
 
         var carts = 0;
@@ -2054,13 +2124,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     }
 
     /// <summary>Puts the selection to work standing at the pointer.</summary>
-    private void AssignPost()
+    private void AssignPost(NodeId? explicitNode = null)
     {
         if (!pointerOnTerrain || selection.Selected.Count == 0) return;
         shuttleAnchor = null;
         // Posting on a building posts at the building: the place is its centre and its extent is its
         // footprint, so hands gather round the yard instead of trying to occupy the middle of it.
-        var node = EconomySystem.NodeAt(simulation.Nodes, pointerWorld, radius: 3.5f);
+        var node = explicitNode is { } picked && simulation.Nodes.Contains(picked)
+            ? picked
+            : EconomySystem.NodeAt(simulation.Nodes, pointerWorld, radius: 3.5f);
         var at = simulation.Nodes.Contains(node) ? simulation.Nodes.Get(node).Position : pointerWorld;
         var extent = simulation.Nodes.Contains(node)
             ? simulation.Nodes.Get(node).FootprintRadius
@@ -2069,6 +2141,64 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         Console.WriteLine(
             $"  {selection.Selected.Count} unit(s) posted at ({at.X:F1}, {at.Y:F1})" +
             (extent > 0f ? $" — working the {simulation.Nodes.Get(node).Kind}" : string.Empty));
+    }
+
+    /// <summary>Right-click works what it visibly targets; otherwise it remains the ordinary move command.</summary>
+    /// <remarks>
+    /// A construction site is a command target, not merely a coordinate. Sending villagers to its ground
+    /// with a move order produced the most literal possible interface failure: they arrived, stood beside the
+    /// work and never acquired the standing project assignment. The contextual command uses the same visual
+    /// pick as the hover marker and HUD, then enters through <see cref="AssignPost"/> so fields, deposits and
+    /// unfinished buildings retain one assignment seam. Empty ground still means move and therefore remains
+    /// a temporary interrupt rather than silently replacing a standing job.
+    /// </remarks>
+    private void IssueContextCommand()
+    {
+        if (!pointerOnTerrain) return;
+        var target = PickNode();
+        if (simulation.Nodes.Contains(target))
+        {
+            ref readonly var node = ref simulation.Nodes.Get(target);
+            if (additiveSelection && node.IsStructure && !node.HasStructuralProject)
+            {
+                var began = node.Condition < node.MaxCondition - 0.0001f
+                    ? simulation.BeginRepair(target)
+                    : simulation.BeginUpgrade(target, NodeKind.StoneWall);
+                if (began)
+                {
+                    AssignPost(target);
+                    ref readonly var project = ref simulation.Nodes.Get(target);
+                    Console.WriteLine(
+                        project.StructuralProject == StructuralProjectKind.Repair
+                            ? $"  repairing {project.Kind} #{target.Value}"
+                            : $"  upgrading {project.Kind} #{target.Value} to {project.StructuralTarget}");
+                    return;
+                }
+            }
+
+            if (!additiveSelection && node.Kind == NodeKind.Barracks && node.IsBuilt)
+            {
+                var villagers = selection.Snapshot().Where(id =>
+                    simulation.Agents.Contains(id) &&
+                    simulation.Agents.Get(id).Role == AgentRole.Villager).ToArray();
+                if (villagers.Length > 0)
+                {
+                    simulation.QueueTrainMilitia(villagers, target);
+                    Console.WriteLine(
+                        $"  {villagers.Length} villager(s) committed to militia training " +
+                        $"at barracks #{target.Value}");
+                    return;
+                }
+            }
+
+            if (node.IsWorkSite)
+            {
+                AssignPost(target);
+                return;
+            }
+        }
+
+        simulation.QueueMove(selection.Snapshot(), pointerWorld);
     }
 
     /// <summary>
@@ -2145,20 +2275,23 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             return;
         }
 
-        // Whatever the source actually holds, preferring wood, because that is what a route is usually
-        // for: a lumber camp fills with timber nobody lives near and somebody has to bring it in.
         ref readonly var from = ref simulation.Nodes.Get(source);
-        var cargo = from.Stock.Wood >= from.Stock.Grain ? Resource.Wood : Resource.Grain;
+        ref readonly var to = ref simulation.Nodes.Get(node);
+        if (!simulation.TryChooseRouteCargo(source, node, Resource.Grain, out var nextCargo))
+        {
+            Console.WriteLine($"  route: {to.Kind} cannot receive anything from {from.Kind}");
+            return;
+        }
         var put = 0;
         var refused = 0;
         foreach (var id in selection.Snapshot())
         {
-            if (simulation.TryAssignRoute(id, source, node, cargo)) put++;
+            if (simulation.TryAssignRoute(id, source, node)) put++;
             else refused++;
         }
 
         Console.WriteLine(
-            $"  route: {put} carting {cargo} from {from.Kind} to {simulation.Nodes.Get(node).Kind}" +
+            $"  route: {put} carting useful goods from {from.Kind} to {to.Kind}; next load {nextCargo}" +
             (refused > 0
                 ? $"; {refused} refused — a cart costs {SimulationWorld.CartTimber} wood and no store " +
                   "within reach has it"
@@ -3086,6 +3219,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Always on for this testbed — it exists to be watched. The backtick key still
         // hides the panels, and freezing them does not stop a slider taking effect.
         debug.State.Enabled = true;
+        if (!debugStateInitialized)
+        {
+            // A performance run still feeds the timing sink, but drawing and populating the interactive
+            // panels would make the instrument part of the thing being measured.
+            if (performanceRun) debug.State.ShowOverlay = false;
+            debugStateInitialized = true;
+        }
+
+        // Closing the panel should close its producer too. ReportEconomy in particular asks several
+        // settlement-wide questions; continuing to answer them while nothing can display the answers cost
+        // more than four milliseconds in a wide Village frame. --timings deliberately keeps the producer
+        // alive because its console sink is the requested output.
+        if (!debug.State.ShowOverlay && !timingDebug) return;
         tunables.BuildControls(debug);
         crowdMetrics.Report(debug);
         ReportBodyScale(debug);
@@ -3141,8 +3287,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             debug.Stats.Gauge($"{resource} stored", outlook.Stored);
         }
 
-        var hands = 0;
-        foreach (ref readonly var node in simulation.Nodes.All) hands += node.Hands;
+        var hands = simulation.Economy.HandsAtWork(simulation.Nodes);
 
         // Who is here, how much room is left for more, and whether the settlement can afford another
         // mouth. Readiness is the number worth watching: it is the brake on growth and it is continuous,
@@ -3151,9 +3296,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // the count of people waiting to be given something to do.
         var room = 0;
         var hungry = 0;
-        foreach (ref readonly var node in simulation.Nodes.All)
+        foreach (var id in simulation.Nodes.SettlementNodes)
         {
-            if (!node.IsAlive || !node.IsSink) continue;
+            ref readonly var node = ref simulation.Nodes.Get(id);
+            if (!node.IsSink) continue;
             room += node.Housing;
             if (node.Privation > 0.5f) hungry++;
         }
@@ -3164,7 +3310,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         {
             if (!body.IsAlive) continue;
             if (body.HasCart) carts++;
-            if (!body.Jobs.HasAssignment && !body.Jobs.IsInterrupted) spare++;
+            if (body.Role == AgentRole.Villager && !body.Jobs.HasAssignment && !body.Jobs.IsInterrupted) spare++;
         }
 
         debug.Values.Value("people", simulation.Agents.LiveCount);
@@ -3177,7 +3323,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         debug.Values.Value("spare hands", spare);
         debug.Values.Value("carts", carts);
 
-        // What the building sites are waiting for, because "wants timber" and "idle site" are two
+        // What structural projects are waiting for, because "wants timber" and "idle site" are two
         // different problems fixed by opposite actions — one wants a cart, the other wants people — and a
         // settlement with no carter cannot get materials anywhere at all. Silence on this was the one gap
         // in the loop: a site with nobody to carry to it simply sat there.
@@ -3185,12 +3331,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var worst = string.Empty;
         foreach (ref readonly var node in simulation.Nodes.All)
         {
-            if (!node.IsAlive || !node.IsUnderConstruction) continue;
+            if (!node.IsAlive || !node.HasStructuralProject) continue;
             sites++;
-            if (worst.Length == 0 || node.WantsMaterials) worst = Construction.StateOf(in node);
+            if (worst.Length == 0 || node.WantsMaterials) worst = StructuralProjects.StateOf(in node);
         }
 
-        if (sites > 0) debug.Values.Value("building sites", $"{sites} — {worst}");
+        if (sites > 0) debug.Values.Value("structural projects", $"{sites} — {worst}");
         debug.Values.Value("unhoused", simulation.UnhousedCount);
         debug.Values.Value("nodes", simulation.Nodes.LiveCount);
         debug.Values.Value("hauls", simulation.Economy.HaulsAssigned);
@@ -3405,9 +3551,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Simulated seconds, not wall time: the calendar runs on the tick count, so anything meant to keep
         // step with it has to read the same clock. At three times compression the wall clock advances a
         // third as fast as the date does.
+        var skySeconds = performanceHour >= 0f
+            ? performanceHour / 24f * Atmosphere.DayLengthSeconds
+            : simulation.TickNumber / 30.0;
         sky = Atmosphere.For(
             simulation.Date,
-            simulation.TickNumber / 30.0,
+            skySeconds,
             look.SunBearingDegrees,
             look.Seasonality);
         AdvanceWear(frame);
@@ -3417,6 +3566,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         ApplyWoodlandCover(frame);
         TurnAndZoom(frame);
         PanCamera(frame);
+        ApplyPerformanceCameraMotion();
         UpdateCameraFocus(frame);
         UpdateCamera();
         UpdatePointerWorld();
@@ -3605,6 +3755,45 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (move.LengthSquared() > 1f) move = Vector2.Normalize(move);
         cameraFocus = simulation.Terrain.ClampPosition(
             cameraFocus + move * (cameraDistance * CameraPanSharePerSecond * deltaSeconds));
+    }
+
+    /// <summary>Moves a sealed performance run without accepting live input.</summary>
+    private void ApplyPerformanceCameraMotion()
+    {
+        if (!performanceRun || performanceCameraMotion == PerformanceCameraMotion.Still) return;
+        if (!performanceCameraInitialized)
+        {
+            performanceCameraOrigin = cameraFocus;
+            performanceCameraYaw = cameraYaw;
+            performanceCameraInitialized = true;
+        }
+
+        // Frame-derived rather than wall-time-derived: two runs visit the same view on the same frame even
+        // when the very performance difference being measured changes how long that frame took.
+        var phase = frameCount * 0.035f;
+        switch (performanceCameraMotion)
+        {
+            case PerformanceCameraMotion.Pan:
+            {
+                var right = new Vector2(MathF.Cos(performanceCameraYaw), -MathF.Sin(performanceCameraYaw));
+                cameraFocus = simulation.Terrain.ClampPosition(
+                    performanceCameraOrigin + right * (MathF.Sin(phase) * cameraDistance * 0.42f));
+                break;
+            }
+            case PerformanceCameraMotion.Rotate:
+                cameraYaw = performanceCameraYaw + frameCount * 1.5f * MathF.PI / 180f;
+                break;
+            case PerformanceCameraMotion.Zoom:
+            {
+                var far = MathF.Max(46f, MathF.Min(cameraFurthest, startingZoomMetres > 0f
+                    ? startingZoomMetres
+                    : cameraFurthest));
+                const float near = 24f;
+                cameraDistance = cameraDistanceTarget =
+                    near + (far - near) * (0.5f + 0.5f * MathF.Sin(phase));
+                break;
+            }
+        }
     }
 
     /// <summary>How hard the pointer is pushing against one axis, from -1 to 1.</summary>
@@ -3803,20 +3992,49 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private readonly float[] cascadeCastRadiusSquared = new float[ShadowCascades.Count];
 
+    private static List<InstanceData>[] CascadeInstanceLists()
+    {
+        var result = new List<InstanceData>[ShadowCascades.Count];
+        for (var c = 0; c < result.Length; c++) result[c] = new List<InstanceData>();
+        return result;
+    }
+
+    /// <summary>Every fitted shadow box which can receive a caster at this ground position.</summary>
+    private int CascadeMaskAt(Vector2 at)
+    {
+        var mask = 0;
+        for (var c = 0; c < ShadowCascades.Count; c++)
+        {
+            if (Vector2.DistanceSquared(at, cascadeCastAt[c]) <= cascadeCastRadiusSquared[c])
+            {
+                mask |= 1 << c;
+            }
+        }
+
+        return mask;
+    }
+
     /// <summary>Whether anything at <paramref name="at"/> can appear in any cascade's map.</summary>
     /// <remarks>
     /// Outside all three, a caster rasterises into nothing and the work has nowhere to go — which was worth
     /// 32 ms when the single box's version of this was added. Inside one of them it is drawn into all three,
     /// which is the redraw this does not yet fix: see the note on the cascade passes.
     /// </remarks>
-    private bool CastsIntoAnyCascade(Vector2 at)
-    {
-        for (var c = 0; c < ShadowCascades.Count; c++)
-        {
-            if (Vector2.DistanceSquared(at, cascadeCastAt[c]) <= cascadeCastRadiusSquared[c]) return true;
-        }
+    private bool CastsIntoAnyCascade(Vector2 at) => CascadeMaskAt(at) != 0;
 
-        return false;
+    private void PartitionCasters(
+        ReadOnlySpan<InstanceData> source,
+        IReadOnlyList<List<InstanceData>> cascaded)
+    {
+        foreach (var instances in cascaded) instances.Clear();
+        foreach (ref readonly var instance in source)
+        {
+            var mask = CascadeMaskAt(new Vector2(instance.Model.M41, instance.Model.M43));
+            for (var c = 0; c < ShadowCascades.Count; c++)
+            {
+                if ((mask & (1 << c)) != 0) cascaded[c].Add(instance);
+            }
+        }
     }
 
     /// <summary>How many texels a side cascade <paramref name="cascade"/>'s map has.</summary>
@@ -4175,19 +4393,25 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var props = CollectionsMarshal.AsSpan(propInstances);
         var units = CollectionsMarshal.AsSpan(unitInstances);
         var canopies = CollectionsMarshal.AsSpan(canopyInstances);
+        PartitionCasters(props, propCasterInstances);
+        PartitionCasters(units, unitCasterInstances);
+        PartitionCasters(canopies, canopyCasterInstances);
         propBatch.Begin(worldPush);
         propBatch.SetInstances(props);
         unitBatch.Begin(worldPush);
         unitBatch.SetInstances(units);
         canopyBatch.Begin(worldPush);
         canopyBatch.SetInstances(canopies);
-        propCaster.Begin(cascadePush[0]);
-        propCaster.SetInstances(props);
-        unitCaster.Begin(cascadePush[0]);
-        unitCaster.SetInstances(units);
-        canopyCaster.Begin(cascadePush[0]);
-        canopyCaster.SetInstances(canopies);
-        art?.Stage(worldPush, cascadePush[0]);
+        for (var c = 0; c < ShadowCascades.Count; c++)
+        {
+            propCasters[c].Begin(cascadePush[c]);
+            propCasters[c].SetInstances(CollectionsMarshal.AsSpan(propCasterInstances[c]));
+            unitCasters[c].Begin(cascadePush[c]);
+            unitCasters[c].SetInstances(CollectionsMarshal.AsSpan(unitCasterInstances[c]));
+            canopyCasters[c].Begin(cascadePush[c]);
+            canopyCasters[c].SetInstances(CollectionsMarshal.AsSpan(canopyCasterInstances[c]));
+        }
+        art?.StageCascades(worldPush, cascadePush);
         var stageMs = buildClock.Elapsed.TotalMilliseconds;
         buildClock.Restart();
 
@@ -4195,39 +4419,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // near-flat mesh shadowing itself is all acne and no shadow — and the overlays are
         // annotations on top of the world rather than things in it.
         //
-        // <b>Three passes over the same geometry, differing only in the matrix.</b> The staged batches carry
-        // cascade 0's, so the first pass just closes them; the other two re-open from the same instance lists
-        // under their own. Order matters and is the order these are declared in: a batch cannot be begun while
-        // it is still open, so each pass has to have ended before the next one starts.
-        graph.Pass(cascadePasses[0], scope =>
-        {
-            propCaster.End(scope);
-            unitCaster.End(scope);
-            canopyCaster.End(scope);
-            art?.DrawShadow(scope);
-        });
-        // <b>Re-staging the same instances is safe; staging different ones would not be.</b> All three passes
-        // share one InstanceBuffer per batch, and InstanceBuffer.Write targets one GPU buffer per frame slot —
-        // so every cascade's draw reads whatever was written last. Identical instance sets make that a no-op,
-        // which is exactly why it would go unnoticed: the moment a cascade is given its own subset (the
-        // partition that would stop the threefold redraw), all three passes would silently draw the last
-        // subset. That change needs a buffer per cascade, not just a list per cascade.
-        for (var c = 1; c < ShadowCascades.Count; c++)
+        // <b>A list and a GPU buffer per cascade.</b> InstanceBuffer writes one current-frame slot, so sharing
+        // a buffer between different subsets makes every recorded draw see the last upload. Distinct storage
+        // is the correctness condition that lets the fitted boxes stop the old threefold redraw.
+        for (var c = 0; c < ShadowCascades.Count; c++)
         {
             var cascade = c;
             graph.Pass(cascadePasses[cascade], scope =>
             {
-                var push = cascadePush[cascade];
-                propCaster.Begin(push);
-                propCaster.SetInstances(CollectionsMarshal.AsSpan(propInstances));
-                propCaster.End(scope);
-                unitCaster.Begin(push);
-                unitCaster.SetInstances(CollectionsMarshal.AsSpan(unitInstances));
-                unitCaster.End(scope);
-                canopyCaster.Begin(push);
-                canopyCaster.SetInstances(CollectionsMarshal.AsSpan(canopyInstances));
-                canopyCaster.End(scope);
-                art?.DrawShadow(scope, push);
+                propCasters[cascade].End(scope);
+                unitCasters[cascade].End(scope);
+                canopyCasters[cascade].End(scope);
+                art?.DrawShadow(scope, cascade);
             });
         }
 
@@ -4679,36 +4882,50 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         host.RequestClose();
     }
 
+    private void EnsureRenderNodeIndex()
+    {
+        var nodes = simulation.Nodes;
+        var cellCount = scouted.Cells * scouted.Cells;
+        if (renderNodeWorld == simulation && renderNodeSlots == nodes.Count &&
+            renderNodeLive == nodes.LiveCount && renderNodeCells.Length == cellCount)
+        {
+            return;
+        }
+
+        renderNodeCells = new List<NodeId>[cellCount];
+        for (var i = 0; i < renderNodeCells.Length; i++) renderNodeCells[i] = new List<NodeId>();
+        indexedStandingTrees = 0;
+        indexedOutcrops = 0;
+        foreach (ref readonly var node in nodes.All)
+        {
+            if (!node.IsAlive) continue;
+            renderNodeCells[scouted.Index(node.Position)].Add(node.Id);
+            if (node.IsStanding) indexedStandingTrees++;
+            if (node.Kind == NodeKind.Outcrop) indexedOutcrops++;
+        }
+
+        renderNodeWorld = simulation;
+        renderNodeSlots = nodes.Count;
+        renderNodeLive = nodes.LiveCount;
+    }
+
     private void BuildNodeInstances()
     {
         DrawStumps();
-        nodesBehindTheVeil = 0;
-        foreach (ref readonly var node in simulation.Nodes.All)
+        EnsureRenderNodeIndex();
+        treeNodesAlive = indexedStandingTrees;
+        outcropsSeen = indexedOutcrops;
+        var nodesAllowedByFog = 0;
+        for (var cell = 0; cell < renderNodeCells.Length; cell++)
         {
-            if (!node.IsAlive) continue;
-            // <b>Counted before the gate, because this is a census and the gate is a decision.</b> It was
-            // inside the tree branch below, which put it after the veil test — so the first frame the gate ran,
-            // TREENODES reported four thousand trees alive on a map holding thirty-four thousand. The number
-            // did not become wrong, it became a different number wearing the same label, which is the failure
-            // this file keeps producing and the one an instrument can least afford.
-            if (node.IsStanding) treeNodesAlive++;
-            // Same reason, and the same denominator: "5 of 21 outcrops drawn" is only worth printing if the 21
-            // is every rock on the map rather than every rock the veil already let through.
-            if (node.Kind == NodeKind.Outcrop) outcropsSeen++;
-            // <b>Above every per-kind branch, which is the whole argument for it being here.</b> §74 settled
-            // this while it was still a design: fog gates trees, buildings, heaps and stone by one rule, and
-            // this file's signature failure is a rule implemented locally at each call site until the copies
-            // disagree — seven instances of a flat-ground constant, each written on its own. One test, before
-            // the loop knows what kind of thing it is holding.
-            //
-            // Keyed to explored and not to watched: a tree does not move, so once it has been seen, where it
-            // stands is knowledge the player keeps. That is what makes the memory tier a memory rather than a
-            // dimmer, and it is why the masks are two and not one.
-            if (!scouted.DrawsStatic(node.Position))
+            // One fog decision per ten-metre cell instead of one per node. Every static thing in a cell reads
+            // the same mask texel, so repeating the lookup for each of its trees cannot change the answer.
+            if (!scouted.DrawsStaticCell(cell)) continue;
+            foreach (var id in renderNodeCells[cell])
             {
-                nodesBehindTheVeil++;
-                continue;
-            }
+                if (!simulation.Nodes.Contains(id)) continue;
+                ref readonly var node = ref simulation.Nodes.Get(id);
+                nodesAllowedByFog++;
 
             if (node.IsPile)
             {
@@ -4741,8 +4958,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 // A tree or a rock has a nominal footprint far smaller than the thing you see, so those are
                 // sized to what is drawn instead. Nothing here is a magic number per kind; each is the extent
                 // that kind is actually described by.
-                var square = node.Kind is NodeKind.Granary or NodeKind.ForwardDepot
-                    or NodeKind.House or NodeKind.Farm;
+                var square = node.Kind is NodeKind.Granary or NodeKind.ForwardDepot or NodeKind.Barracks
+                    or NodeKind.House or NodeKind.Farm or NodeKind.PalisadeWall or NodeKind.StoneWall;
                 var radius = node.Kind switch
                 {
                     NodeKind.Tree => 2.2f,
@@ -4832,6 +5049,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
             var ground = simulation.Terrain.SampleHeight(node.Position);
             var width = node.HalfExtent * 2f;
+            if (node.Kind is NodeKind.PalisadeWall or NodeKind.StoneWall)
+            {
+                DrawWall(in node, ground, width);
+                continue;
+            }
+
             if (art is not null)
             {
                 // Scaled to the footprint the simulation enforces rather than to anything about the
@@ -4858,21 +5081,29 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 switch (node.Kind)
                 {
                     case NodeKind.Granary:
-                        art.Granary.Add(placement);
+                        AddCascaded(art.Granary, placement);
+                        continue;
+                    case NodeKind.Barracks:
+                        AddCascaded(art.Granary, placement);
                         continue;
                     case NodeKind.House:
                         // A village of one cottage repeated is a village nobody believes — see HouseFor,
                         // which owns the id-to-cottage rule for all four callers of it.
-                        art.HouseFor(node.Id.Value).Add(placement);
+                        AddCascaded(art.HouseFor(node.Id.Value), placement);
                         continue;
                     default:
-                        art.Depot.Add(placement);
+                        AddCascaded(art.Depot, placement);
                         continue;
                 }
             }
 
-            DrawGreyboxBuilding(in node, ground, width);
+                DrawGreyboxBuilding(in node, ground, width);
+            }
         }
+
+        // Exact without revisiting hidden buckets: every live node is indexed, and the count above names
+        // precisely those admitted by the shared static gate.
+        nodesBehindTheVeil = simulation.Nodes.LiveCount - nodesAllowedByFog;
     }
 
     /// <summary>
@@ -4909,7 +5140,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // hung it half a metre off the side of the building on one axis out of two, and at a height that
         // was above the roof of anything squat. The bounds are baked, so they are exactly the extents the
         // placement will scale.
-        var model = node.Kind == NodeKind.Granary
+        var model = node.Kind is NodeKind.Granary or NodeKind.Barracks
             ? art.Granary
             : node.IsSink ? art.HouseFor(node.Id.Value) : art.Depot;
         // The walls, measured at load rather than assumed from the bounding box — which for this pack turns
@@ -4954,7 +5185,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             return;
         }
 
-        if (node.Kind == NodeKind.Granary)
+        if (node.Kind is NodeKind.Granary or NodeKind.Barracks)
         {
             AddEmber(
                 node.Position, ground, width, yaw,
@@ -4986,33 +5217,32 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// A building site: the timber lying on it, and the walls as far up as they have got.
     /// </summary>
     /// <remarks>
-    /// Two things a player needs at a glance and they are two different problems. <b>Timber on the
-    /// ground</b> says the materials have arrived, and its absence says a cart is wanted; <b>height</b> says
-    /// how far the labour has got, and a site that has stopped rising has nobody standing at it. Collapsing
-    /// them into one "under construction" marker would leave the player unable to tell a hauling problem
-    /// from a labour one, which are fixed by opposite actions.
+    /// Two things a player needs at a glance and they are two different facts. <b>Material on the ground</b>
+    /// shows the unspent loads physically waiting to be incorporated; <b>height</b> shows how far labour has
+    /// advanced the structure. Collapsing them into one "under construction" marker would hide whether the
+    /// project needs more material, more hands, or simply time from the hands already present.
     /// </remarks>
     private void DrawSite(in EconomyNode site, float ground, float width, float yaw)
     {
-        // <b>How far along the delivery is, across every material rather than the timber alone.</b> A granary
-        // waiting on its last stone would otherwise have shown a full stack of logs and read as ready.
+        // <b>Unspent material physically waiting at the site.</b> The stacks grow as loads arrive and shrink
+        // as builders incorporate them; finished structure progress is drawn independently below.
         var cost = Construction.CostFor(site.Kind);
         var owed = cost.Total;
         var here = 0;
         foreach (var resource in Resources.All) here += Math.Min(cost[resource], site.Stock[resource]);
-        var delivered = owed <= 0 ? 1f : MathF.Min(1f, here / (float)owed);
+        var waiting = owed <= 0 ? 0f : MathF.Min(1f, here / (float)owed);
         var timber = cost.Wood;
-        if (delivered > 0.02f && art!.WoodHeap is { } logs)
+        if (waiting > 0.02f && art!.WoodHeap is { } logs)
         {
             // Stacked round the footprint rather than in the middle of it, because the middle is where the
             // walls are going and because a stack that grows outward reads as materials arriving.
-            var stacks = 1 + (int)(delivered * 3.99f);
+            var stacks = 1 + (int)(waiting * 3.99f);
             for (var i = 0; i < stacks; i++)
             {
                 var angle = yaw + (i + 0.5f) / stacks * MathF.Tau;
                 var at = site.Position +
                          new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * (width * 0.42f);
-                logs.Add(SettlementArt.Placement(at, ground, width * 0.30f, angle));
+                AddCascaded(logs, SettlementArt.Placement(at, ground, width * 0.30f, angle));
             }
         }
 
@@ -5023,10 +5253,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var model = site.Kind switch
         {
             NodeKind.Granary => art!.Granary,
+            NodeKind.Barracks => art!.Granary,
             NodeKind.House => art!.HouseFor(site.Id.Value),
             _ => art!.Depot,
         };
-        model.Add(rising);
+        AddCascaded(model, rising);
     }
 
     /// <summary>
@@ -5043,6 +5274,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var (wall, roof) = node.Kind switch
         {
             NodeKind.Granary => (GranaryColor, GranaryRoofColor),
+            NodeKind.Barracks => (GranaryColor, GranaryRoofColor),
             NodeKind.House => (HouseColor, HouseRoofColor),
             _ => (DepotColor, DepotRoofColor),
         };
@@ -5061,6 +5293,57 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             Matrix4x4.CreateTranslation(
                 node.Position.X, ground + height + roofThickness * 0.35f, node.Position.Y),
             roof));
+    }
+
+    /// <summary>A stable wall segment whose material changes only when its upgrade completes.</summary>
+    private void DrawWall(in EconomyNode node, float ground, float width)
+    {
+        var labour = StructuralProjects.LabourFor(in node);
+        var projectShare = node.HasStructuralProject && labour > 0f
+            ? Math.Clamp(StructuralProjects.WorkFor(in node) / labour, 0f, 1f)
+            : 1f;
+        var palisadeShare = node.Kind == NodeKind.PalisadeWall
+            ? node.IsUnderConstruction ? projectShare : 1f
+            : 0f;
+        const float wallHeight = 2.25f;
+
+        if (palisadeShare > 0.01f)
+        {
+            var height = wallHeight * palisadeShare;
+            // Eight rough posts around a square make the segment orientation-free for this first proof. The
+            // footprint, collision and later stone shell are the same square; authored wall runs can decide
+            // connection art when content work reaches them without reopening the structural operation.
+            for (var i = 0; i < 8; i++)
+            {
+                var edge = i / 2;
+                var side = i % 2 == 0 ? -0.34f : 0.34f;
+                var local = edge switch
+                {
+                    0 => new Vector2(side, -0.38f),
+                    1 => new Vector2(0.38f, side),
+                    2 => new Vector2(-side, 0.38f),
+                    _ => new Vector2(-0.38f, -side),
+                };
+                propInstances.Add(new InstanceData(
+                    Matrix4x4.CreateScale(width * 0.16f, height, width * 0.16f) *
+                    Matrix4x4.CreateTranslation(
+                        node.Position.X + local.X * width,
+                        ground + height * 0.5f,
+                        node.Position.Y + local.Y * width),
+                    PalisadeWallColor));
+            }
+        }
+
+        var stoneShare = node.Kind == NodeKind.StoneWall
+            ? 1f
+            : node.StructuralProject == StructuralProjectKind.Upgrade ? projectShare : 0f;
+        if (stoneShare <= 0.01f) return;
+        var stoneHeight = wallHeight * stoneShare;
+        propInstances.Add(new InstanceData(
+            Matrix4x4.CreateScale(width * 0.92f, stoneHeight, width * 0.92f) *
+            Matrix4x4.CreateTranslation(
+                node.Position.X, ground + stoneHeight * 0.5f, node.Position.Y),
+            StoneWallColor));
     }
 
     /// <summary>
@@ -5132,11 +5415,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // stripes were the contrast between 0.09 soil and 0.38 wheat, not a misalignment.
             // The plot carries the tint when there is one, because a field's own colour <em>is</em> a tint —
             // there is no material to override, so the override is simply a different colour.
-            art.FieldPlot.Add(placement, new Vector4(TilledEarth * look.SoilBrightness, 1f));
+            AddCascaded(art.FieldPlot, placement, new Vector4(TilledEarth * look.SoilBrightness, 1f));
             if (standing > 0.02f)
             {
                 var stage = standing >= 0.66f ? 2 : standing >= 0.33f ? 1 : 0;
-                art.Crop[stage].Add(placement);
+                AddCascaded(art.Crop[stage], placement);
             }
 
             return;
@@ -5799,7 +6082,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         outcropsDrawn++;
         // Its own materials unless it is the thing being pointed at: the pack's stone already reads as stone,
         // and the classifier routes it through MaterialClass.Stone for the specular response.
-        art.Rocks[rock.Id.Value % art.Rocks.Length].Add(
+        AddCascaded(
+            art.Rocks[rock.Id.Value % art.Rocks.Length],
             SettlementArt.Placement(
                 rock.Position, ground, width, SettlementArt.FreeYawOf(rock.Id.Value)));
     }
@@ -5813,10 +6097,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private const float WidestTreeMetres = 9f;
 
     /// <summary>Places a prop, with or without its shadow, depending on whether the light can see it.</summary>
-    private static void Cast(PropModel model, Matrix4x4 placement, bool casts)
+    private void Cast(PropModel model, Matrix4x4 placement, bool casts)
     {
-        if (casts) model.Add(placement);
+        if (casts) AddCascaded(model, placement);
         else model.AddUnlit(placement);
+    }
+
+    private void AddCascaded(PropModel model, Matrix4x4 placement)
+    {
+        model.Add(placement, CascadeMaskAt(new Vector2(placement.M41, placement.M43)));
+    }
+
+    private void AddCascaded(PropModel model, Matrix4x4 placement, Vector4 tint)
+    {
+        model.Add(placement, tint, CascadeMaskAt(new Vector2(placement.M41, placement.M43)));
     }
 
     private void DrawTree(in EconomyNode tree)
@@ -6099,11 +6393,28 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var cells = (int)MathF.Ceiling(radius / spacing);
         var originX = MathF.Floor(cameraFocus.X / spacing);
         var originZ = MathF.Floor(cameraFocus.Y / spacing);
+        var cacheValid = scatterWorld == simulation &&
+                         scatterTerrainRevision == simulation.Terrain.Revision &&
+                         scatterPlacementRevision == simulation.Placement.Revision &&
+                         scatterFocus == cameraFocus &&
+                         scatterRadius == radius;
+        if (cacheValid)
+        {
+            foreach (var (kind, model) in scatterPlacements) art.Scatter[kind].Add(model);
+            return;
+        }
+
+        scatterPlacements.Clear();
+        scatterWorld = simulation;
+        scatterTerrainRevision = simulation.Terrain.Revision;
+        scatterPlacementRevision = simulation.Placement.Revision;
+        scatterFocus = cameraFocus;
+        scatterRadius = radius;
         var placed = 0;
         for (var dz = -cells; dz <= cells; dz++)
         for (var dx = -cells; dx <= cells; dx++)
         {
-            if (placed >= ScatterBudget) return;
+            if (placed >= ScatterBudget) goto Replay;
             var cx = (int)originX + dx;
             var cz = (int)originZ + dz;
 
@@ -6218,13 +6529,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             }
 
             if (kind < 0) continue;
-            art.Scatter[kind].Add(SettlementArt.Placement(
+            scatterPlacements.Add((kind, SettlementArt.Placement(
                 at,
                 simulation.Terrain.SampleHeight(at),
                 width,
-                SettlementArt.FreeYawOf(cx * 73 + cz * 179)));
+                SettlementArt.FreeYawOf(cx * 73 + cz * 179))));
             placed++;
         }
+
+        Replay:
+        foreach (var (kind, model) in scatterPlacements) art.Scatter[kind].Add(model);
     }
 
     /// <summary>
@@ -6628,7 +6942,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                     Resource.Stone when art.Rocks.Length > 0 => art.Rocks[0],
                     _ => art.WoodHeap,
                 };
-                model.Add(SettlementArt.Placement(
+                AddCascaded(model, SettlementArt.Placement(
                     pile.Position, ground, spread, SettlementArt.FreeYawOf(pile.Id.Value + (int)resource)));
                 continue;
             }
@@ -6923,13 +7237,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 // findable at a glance, which is the thing the greybox did for free by being one colour.
                 // Hostile bodies in a hostile colour, which is the one thing about a body that has to be
                 // readable before anything else on the screen is.
-                if (agent.Faction.Value != 0) person.Add(placement, RaiderColor);
+                if (agent.Faction.Value != 0) AddCascaded(person, placement, RaiderColor);
+                else if (agent.Role == AgentRole.Militia) AddCascaded(person, placement, MilitiaColor);
                 // <b>No tint on a body either, and the reason is consistency rather than taste.</b> A selected
                 // villager was repainted the old orange while nothing else was, and a hovered one went dark
                 // teal — so a villager spoke two colours no other object spoke, and the marker underneath it
                 // spoke a third. One language: everything picked gets the same mark on the ground, at two
                 // strengths, and models keep their own materials.
-                else person.Add(placement);
+                else AddCascaded(person, placement);
 
                 // The cart, drawn behind them, because a carter has to be findable in a crowd. A wider
                 // body is the honest difference — 0.37 m to 0.55 — and at this camera distance it is
@@ -6939,7 +7254,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 if (agent.HasCart && art!.GrainHeap is { } cart)
                 {
                     var behind = position - agent.Facing * (agent.Radius + 0.42f);
-                    cart.Add(SettlementArt.Placement(behind, height, agent.Radius * 1.7f, yaw));
+                    AddCascaded(cart, SettlementArt.Placement(behind, height, agent.Radius * 1.7f, yaw));
                 }
             }
             // A load is physically on the body, so it is drawn on the body: a cart you can see is loaded
@@ -7345,6 +7660,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void OnMouseMove(float x, float y, float deltaX, float deltaY)
     {
+        if (performanceRun) return;
         // Middle-drag grabs the ground. Both ends of the drag are raycast against the terrain with the
         // <em>same</em> camera, so the world moves exactly as far under the cursor as the cursor moved —
         // which is the only version of this that feels like dragging a map rather than nudging a dial.
@@ -7365,6 +7681,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void OnMouseDown(MouseButton button)
     {
+        if (performanceRun) return;
         if (obstacleEditMode)
         {
             if (button == MouseButton.Left && pointerOnTerrain) simulation.QueueToggleObstacle(pointerWorld);
@@ -7382,12 +7699,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         else if (button == MouseButton.Right)
         {
             UpdatePointerWorld();
-            if (pointerOnTerrain) simulation.QueueMove(selection.Snapshot(), pointerWorld);
+            IssueContextCommand();
         }
     }
 
     public void OnMouseUp(MouseButton button)
     {
+        if (performanceRun) return;
         // <b>Where the pointer thinks it is, in every space at once.</b> Reported from the chair as the mouse
         // not lining up with the screen, and it is not answerable by reading: every link in the chain is
         // self-consistent — the marquee, the ground raycast and ImGui all pair the cursor with the window's
@@ -7459,6 +7777,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void OnMouseWheel(float offsetX, float offsetY)
     {
+        if (performanceRun) return;
         // Zoom steps proportionally, so pulling back over a kilometre does not take a
         // hundred notches of wheel that were sized for a thirty-metre square.
         var step = MathF.Max(2f, cameraDistanceTarget * 0.12f);
@@ -7504,6 +7823,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void OnKeyDown(Key key)
     {
+        if (performanceRun && key != Key.Escape) return;
         // <b>Every key that arrives, and whether a modifier was up when it did.</b> Whether Ctrl+letter reaches
         // a game is not answerable by reading: the mapping table can be correct, the dispatch unfiltered, and
         // the combination still swallowed by the window library or the OS. One line per press settles it, and
@@ -7675,7 +7995,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 Console.WriteLine($"  {selection.Selected.Count} unit(s) taken off work");
                 break;
             case Key.D:
-                Build(NodeKind.Granary, capacity: 2000, Resource.Grain);
+                if (additiveSelection) Build(NodeKind.Barracks, capacity: 0, Resource.Wood);
+                else Build(NodeKind.Granary, capacity: 2000, Resource.Grain);
                 break;
             case Key.A:
                 // Ctrl to place the sink rather than the source: houses are the only thing in the
@@ -7687,7 +8008,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 // A lumber camp is a forward depot at the tree line. It is not a special building: it
                 // is a store, and the reason it works is that nobody lives near it — so the wood in it
                 // is stranded, and stranded stock is what the hauling board collects.
-                Build(NodeKind.ForwardDepot, capacity: 400, Resource.Wood);
+                if (additiveSelection) Build(NodeKind.PalisadeWall, capacity: 0, Resource.Wood);
+                else Build(NodeKind.ForwardDepot, capacity: 400, Resource.Wood);
                 break;
             case Key.Tab:
                 SelectSpareHands();
@@ -7721,6 +8043,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void OnKeyUp(Key key)
     {
+        if (performanceRun) return;
         if (key is Key.LeftControl or Key.RightControl) additiveSelection = false;
         // Held rather than edge-triggered: key events fire once, and a pan has to keep going for as long
         // as the key is down, so the state lives here and PanCamera reads it every frame.
@@ -7740,10 +8063,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         overlayBuffer?.Dispose();
         unitBuffer?.Dispose();
         propBuffer?.Dispose();
-        propCasterBuffer?.Dispose();
-        unitCasterBuffer?.Dispose();
+        if (propCasterBuffers is not null)
+        {
+            foreach (var buffer in propCasterBuffers) buffer?.Dispose();
+        }
+        if (unitCasterBuffers is not null)
+        {
+            foreach (var buffer in unitCasterBuffers) buffer?.Dispose();
+        }
         canopyBuffer?.Dispose();
-        canopyCasterBuffer?.Dispose();
+        if (canopyCasterBuffers is not null)
+        {
+            foreach (var buffer in canopyCasterBuffers) buffer?.Dispose();
+        }
         if (vk is not null)
         {
             foreach (var chunk in groundChunks.Keys.ToArray()) DisposeGroundChunk(chunk);

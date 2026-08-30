@@ -1,5 +1,6 @@
 using System.Numerics;
 using RTSGame.Simulation.Agents;
+using RTSGame.Simulation.Economy;
 
 namespace RTSGame.Simulation.Jobs;
 
@@ -209,6 +210,10 @@ internal static class JobSystem
             Assignment = assignment,
             Carrying = agent.Jobs.Carrying,
             CarriedUnits = agent.Jobs.CarriedUnits,
+            ReservedUnits = 0,
+            Project = assignment.Kind is AssignmentKind.Build or AssignmentKind.Train
+                ? assignment.Sink
+                : NodeId.None,
         };
     }
 

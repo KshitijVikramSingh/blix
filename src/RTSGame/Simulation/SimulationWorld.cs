@@ -265,6 +265,9 @@ internal sealed class SimulationWorld
             // that already exists — a fixture that had to wait a season for its granary would be testing
             // construction rather than whatever it was about. The game's own build key passes false.
             BuildWork = built ? Construction.LabourFor(kind) : 0f,
+            MaxCondition = StructuralProjects.MaxConditionFor(kind),
+            Condition = built ? StructuralProjects.MaxConditionFor(kind) : 0f,
+            StructuralTarget = kind,
             // <b>What this ground is worth, asked once, here.</b> The single place nodes are made, so every
             // caller gets it — scenarios, self-tests and the player's own build key alike — and no caller has
             // to remember. A map with no relief has no soil field, which is how the flat ground every
@@ -292,6 +295,35 @@ internal sealed class SimulationWorld
         // map every time a cart is destroyed would be both wrong and expensive.
         if (NodeFootprint.Blocks(kind)) OccupyFootprint(id);
         return id;
+    }
+
+    /// <summary>Applies structural damage without deciding yet what zero condition means in combat.</summary>
+    /// <remarks>
+    /// This is the prepared seam, not ambient gameplay damage. Condition remains separate from construction,
+    /// and a zero-condition node stays present and blocking until the later combat/destruction arc settles
+    /// breach rules. Headless repair fixtures use this same entrance future weapons will use.
+    /// </remarks>
+    public bool DamageStructure(NodeId id, float amount)
+    {
+        if (amount <= 0f || !Nodes.Contains(id)) return false;
+        ref var node = ref Nodes.Get(id);
+        if (!node.IsBuilt || !node.IsStructure) return false;
+        node.Condition = MathF.Max(0f, node.Condition - amount);
+        return true;
+    }
+
+    /// <summary>Opens a physical repair project on a damaged completed structure.</summary>
+    public bool BeginRepair(NodeId id)
+    {
+        if (!Nodes.Contains(id)) return false;
+        return StructuralProjects.BeginRepair(ref Nodes.Get(id));
+    }
+
+    /// <summary>Opens the proved same-footprint upgrade while retaining the node and present wall.</summary>
+    public bool BeginUpgrade(NodeId id, NodeKind target)
+    {
+        if (!Nodes.Contains(id)) return false;
+        return StructuralProjects.BeginUpgrade(ref Nodes.Get(id), target);
     }
 
     /// <summary>
@@ -398,10 +430,11 @@ internal sealed class SimulationWorld
     /// commitment the player made and nobody should re-auction.
     /// </para>
     /// </remarks>
-    public bool TryAssignRoute(AgentId body, NodeId source, NodeId sink, Resource cargo)
+    public bool TryAssignRoute(AgentId body, NodeId source, NodeId sink)
     {
         if (!Agents.Contains(body) || !Nodes.Contains(source) || !Nodes.Contains(sink)) return false;
         if (source == sink) return false;
+        if (!TryChooseRouteCargo(source, sink, Resource.Grain, out var cargo)) return false;
         ref var agent = ref Agents.Get(body);
         // Already carting: the cart is bought and paid for, so a new route is free. Changing where
         // somebody drives is not a new cart.
@@ -413,6 +446,57 @@ internal sealed class SimulationWorld
             source, from.Position, sink, to.Position, cargo, EconomySystem.HandoverSeconds,
             from.FootprintRadius, to.FootprintRadius));
         return true;
+    }
+
+    /// <summary>
+    /// Chooses the next useful load for a player-authored route.
+    /// </summary>
+    /// <remarks>
+    /// A route is a commitment between two places, not one permanent commodity. A building site asks for
+    /// whichever missing material the source can best answer; an ordinary store takes whichever available
+    /// stock makes the fullest useful load. If the source is empty, the route keeps the best outstanding
+    /// demand and waits rather than disappearing, so a forward depot may be routed before its next load
+    /// arrives. Ties retain the current cargo, then fall back to resource order, which makes the decision
+    /// stable and deterministic.
+    /// </remarks>
+    public bool TryChooseRouteCargo(
+        NodeId source,
+        NodeId sink,
+        Resource preferred,
+        out Resource cargo)
+    {
+        cargo = preferred;
+        if (!Nodes.Contains(source) || !Nodes.Contains(sink) || source == sink) return false;
+        return TryChooseRouteCargo(in Nodes.Get(source), in Nodes.Get(sink), preferred, out cargo);
+    }
+
+    private static bool TryChooseRouteCargo(
+        in EconomyNode source,
+        in EconomyNode sink,
+        Resource preferred,
+        out Resource cargo)
+    {
+        cargo = preferred;
+        var found = false;
+        var bestAvailable = -1;
+        var bestDemand = -1;
+        foreach (var resource in Resources.All)
+        {
+            var demand = sink.HasStructuralProject ? sink.Wanted(resource) : sink.RoomFor(resource);
+            if (demand <= 0) continue;
+            var available = Math.Min(source.Stock[resource], demand);
+            var keepsCurrent = resource == preferred;
+            var better = available > bestAvailable ||
+                         available == bestAvailable && demand > bestDemand ||
+                         available == bestAvailable && demand == bestDemand && keepsCurrent && cargo != preferred;
+            if (!better) continue;
+            cargo = resource;
+            bestAvailable = available;
+            bestDemand = demand;
+            found = true;
+        }
+
+        return found;
     }
 
     /// <summary>
@@ -789,10 +873,14 @@ internal sealed class SimulationWorld
         // A site first, whatever it is going to be: posting somebody on a half-built granary means "help
         // put this up", not "work here", and the same key does both because the difference is a fact about
         // the building rather than about the order.
-        if (site.IsUnderConstruction)
+        if (site.HasStructuralProject)
         {
-            return Assignment.Post(
-                at, site.Position, site.FootprintRadius, EconomySystem.WorkShiftSeconds);
+            return Assignment.Build(
+                at,
+                site.Position,
+                site.FootprintRadius,
+                EconomySystem.HandoverSeconds,
+                EconomySystem.WorkShiftSeconds);
         }
 
         return site.Kind switch
@@ -1067,7 +1155,8 @@ internal sealed class SimulationWorld
             type.Appetite,
             type.SightMetres,
             type.Strength,
-            type.Health);
+            type.Health,
+            role: UnitType.RoleOf(type));
 
     public AgentId SpawnAgent(
         Vector2 position,
@@ -1081,7 +1170,8 @@ internal sealed class SimulationWorld
         float sightMetres = 22f,
         float strength = 1f,
         float health = 20f,
-        bool allowEmbedded = false)
+        bool allowEmbedded = false,
+        AgentRole role = AgentRole.Villager)
     {
         position = Terrain.ClampPosition(position, radius + BodyFootprint.NavigationMargin);
         // Off built ground unless the caller is deliberately testing what happens on it. Two self-tests
@@ -1091,7 +1181,7 @@ internal sealed class SimulationWorld
         var resolvedFaction = faction ?? new FactionId(0);
         var id = Agents.Spawn(
             position, resolvedFaction, radius, maximumSpeed, navigationRadius, turningRadius,
-            carryCapacity, appetite, sightMetres, strength, health);
+            carryCapacity, appetite, sightMetres, strength, health, role);
         var owner = ColliderOwner.Agent(id);
         ref var agent = ref Agents.Get(id);
         agent.Colliders = new AgentColliderSet(
@@ -1129,6 +1219,22 @@ internal sealed class SimulationWorld
     {
         var snapshot = agents.Distinct().OrderBy(id => id.Value).ToArray();
         if (snapshot.Length > 0) commands.Enqueue(new AssignGroupCommand(snapshot, assignment));
+    }
+
+    /// <summary>Commits existing villagers to permanent militia conversion at a completed barracks.</summary>
+    public void QueueTrainMilitia(IEnumerable<AgentId> agents, NodeId barracks)
+    {
+        if (!Nodes.Contains(barracks)) return;
+        ref readonly var site = ref Nodes.Get(barracks);
+        if (!site.IsBuilt || site.Kind != NodeKind.Barracks) return;
+        QueueAssign(
+            agents,
+            Assignment.Train(
+                barracks,
+                site.Position,
+                site.FootprintRadius,
+                EconomySystem.HandoverSeconds,
+                trainingShiftSeconds: 1f));
     }
 
     /// <summary>Removes units from the world and releases everything they own.</summary>
@@ -1854,12 +1960,28 @@ internal sealed class SimulationWorld
             if (!Agents.Contains(id)) continue;
             ref var agent = ref Agents.Get(id);
             var job = PostedOnAWorkSite(in agent, resolved);
+            if (job.Kind is AssignmentKind.Work or AssignmentKind.Build or AssignmentKind.Train &&
+                agent.Role != AgentRole.Villager)
+            {
+                continue;
+            }
             // Asked to do something that is not carrying: the cart goes. Which is the whole of "they keep
             // hauling until they are asked to do something else" — an interrupt is not being asked to do
             // something else, because an interrupt never touches the assignment, so a carter given a
             // direct order walks where it is told and comes back to its route with its cart.
             if (!job.MovesCargo) ScrapCart(ref agent);
             JobSystem.Assign(ref agent, job);
+            if (job.Kind == AssignmentKind.Build)
+            {
+                // Begin with the useful trip, not a ceremonial visit to the site. A carried recipe load
+                // still lands first and material already waiting can be worked immediately; otherwise the
+                // same planner used between shifts reserves a load and sends this builder to its source.
+                ChooseBuilderNextStep(ref agent, agent.Jobs.Project);
+            }
+            else if (job.Kind == AssignmentKind.Train)
+            {
+                ChooseTraineeNextStep(ref agent, agent.Jobs.Project);
+            }
             // A unit taken off work stops where it stands rather than finishing the walk it
             // was on. Being given work, on the other hand, does not need a halt: the jobs
             // layer will send it where it is now needed on this same tick.
@@ -1969,6 +2091,18 @@ internal sealed class SimulationWorld
     /// </remarks>
     private void Handover(ref AgentState agent, int leg)
     {
+        if (agent.Jobs.Assignment.Kind == AssignmentKind.Build)
+        {
+            BuilderHandover(ref agent, leg);
+            return;
+        }
+
+        if (agent.Jobs.Assignment.Kind == AssignmentKind.Train)
+        {
+            TraineeHandover(ref agent, leg);
+            return;
+        }
+
         if (agent.Jobs.Assignment.Kind == AssignmentKind.Work)
         {
             WorkHandover(ref agent, leg);
@@ -1988,8 +2122,39 @@ internal sealed class SimulationWorld
         if (nodeId == jobs.Assignment.Source)
         {
             if (jobs.CarriedUnits > 0) return;
+            if (jobs.Assignment.Kind == AssignmentKind.Carry)
+            {
+                if (!TryChooseRouteCargo(
+                        jobs.Assignment.Source,
+                        jobs.Assignment.Sink,
+                        jobs.Assignment.Cargo,
+                        out cargo))
+                {
+                    // No useful demand just now. This is a standing route, so stay at the source and ask
+                    // again after another handover interval rather than driving an empty leg or silently
+                    // deleting the player's arrangement.
+                    JobSystem.Retarget(ref agent, jobs.Assignment, leg: 0);
+                    return;
+                }
+
+                if (cargo != jobs.Assignment.Cargo)
+                {
+                    jobs.Assignment = jobs.Assignment with { Cargo = cargo };
+                }
+            }
+
             var taken = Math.Min(agent.CarryCapacity, node.Stock[cargo]);
-            if (taken <= 0) return;
+            if (taken <= 0)
+            {
+                if (jobs.Assignment.Kind == AssignmentKind.Carry)
+                {
+                    // The route may be authored before the forward store's next load arrives. Wait here,
+                    // preserving both endpoints and the currently preferred cargo.
+                    JobSystem.Retarget(ref agent, jobs.Assignment, leg: 0);
+                }
+
+                return;
+            }
             node.Stock.Add(cargo, -taken);
             jobs.Carrying = cargo;
             jobs.CarriedUnits = taken;
@@ -2016,6 +2181,689 @@ internal sealed class SimulationWorld
                 FarPlaceExtent = Nodes.Get(target).FootprintRadius,
             },
             leg: 1);
+    }
+
+    /// <summary>Closes one builder's collect, deliver, build and cleanup loop.</summary>
+    /// <remarks>
+    /// The project is stable in <see cref="AgentJobs.Project"/> while the assignment endpoints describe
+    /// this trip. Leg zero collects one resource from one physical source; leg one is normally the site,
+    /// and becomes a store only while surplus is being returned. All choices are made here, in agent-id
+    /// order through <see cref="UpdateJobs"/>, so reservations made by an earlier builder are visible to
+    /// the next one on the same tick.
+    /// </remarks>
+    private void BuilderHandover(ref AgentState agent, int leg)
+    {
+        ref var jobs = ref agent.Jobs;
+        var projectId = jobs.Project;
+        if (!Nodes.Contains(projectId))
+        {
+            ReturnBuilderCargoOrClear(ref agent);
+            return;
+        }
+
+        ref readonly var project = ref Nodes.Get(projectId);
+        if (!project.HasStructuralProject)
+        {
+            CleanupBuilder(ref agent, leg);
+            return;
+        }
+
+        // Surplus from an active project is a temporary outward trip. Put it down, then resume the same
+        // stable project rather than reading this store visit as another construction shift.
+        if (leg % 2 != 0 && jobs.Assignment.Sink != projectId)
+        {
+            if (Nodes.Contains(jobs.Assignment.Sink) && jobs.CarriedUnits > 0)
+            {
+                ref var store = ref Nodes.Get(jobs.Assignment.Sink);
+                var delivered = Math.Min(jobs.CarriedUnits, store.RoomFor(jobs.Carrying));
+                store.Stock.Add(jobs.Carrying, delivered);
+                jobs.CarriedUnits -= delivered;
+            }
+
+            if (jobs.CarriedUnits > 0) SendBuilderCargoToStore(ref agent, projectId);
+            else ChooseBuilderNextStep(ref agent, projectId);
+            return;
+        }
+
+        if (leg % 2 == 0)
+        {
+            // The claimed source has been reached. Claims prevent deliberate over-fetching, but stock may
+            // still have moved since the claim was made, so the physical source remains the final authority.
+            if (jobs.CarriedUnits <= 0 && jobs.ReservedUnits > 0 && Nodes.Contains(jobs.Assignment.Source))
+            {
+                ref var source = ref Nodes.Get(jobs.Assignment.Source);
+                var taken = Math.Min(
+                    jobs.ReservedUnits,
+                    Math.Min(agent.CarryCapacity, source.Stock[jobs.Assignment.Cargo]));
+                if (taken > 0)
+                {
+                    source.Stock.Add(jobs.Assignment.Cargo, -taken);
+                    jobs.Carrying = jobs.Assignment.Cargo;
+                    jobs.CarriedUnits = taken;
+                }
+            }
+
+            jobs.ReservedUnits = 0;
+            if (jobs.CarriedUnits > 0)
+            {
+                RetargetBuilderToProject(ref agent, projectId);
+                return;
+            }
+
+            ChooseBuilderNextStep(ref agent, projectId);
+            return;
+        }
+
+        // Builder loads are deposited on arrival by EconomySystem, before their labour is counted. Anything
+        // left in hand is therefore surplus and has to remain physical on the way back to storage.
+        if (jobs.CarriedUnits > 0)
+        {
+            SendBuilderCargoToStore(ref agent, projectId);
+            return;
+        }
+
+        ChooseBuilderNextStep(ref agent, projectId);
+    }
+
+    /// <summary>Delivers held material, works an available front, claims a load, or waits at the project.</summary>
+    private void ChooseBuilderNextStep(ref AgentState agent, NodeId projectId)
+    {
+        if (!Nodes.Contains(projectId))
+        {
+            ReturnBuilderCargoOrClear(ref agent);
+            return;
+        }
+
+        ref readonly var project = ref Nodes.Get(projectId);
+        if (!project.HasStructuralProject)
+        {
+            CleanupBuilder(ref agent, leg: 1);
+            return;
+        }
+
+        // Assignment replacement preserves physical cargo. A useful load therefore goes directly to the
+        // project; an unrelated one goes back to the nearest store before this decision is made again.
+        // Doing this here, rather than only in ApplyAssignment, keeps the decision seam honest if a future
+        // interruption or cancellation re-enters it with something still in hand.
+        if (agent.Jobs.CarriedUnits > 0)
+        {
+            if (project.Wanted(agent.Jobs.Carrying) > 0)
+            {
+                RetargetBuilderToProject(ref agent, projectId);
+            }
+            else
+            {
+                SendBuilderCargoToStore(ref agent, projectId);
+            }
+
+            return;
+        }
+
+        if (ProjectHasBuildFront(in project))
+        {
+            RetargetBuilderToProject(ref agent, projectId);
+            return;
+        }
+
+        if (TryClaimBuilderLoad(ref agent, projectId)) return;
+
+        // There is demand but no reachable held stock, or every missing unit is already inbound with another
+        // body. Stay committed at the site and reconsider after one shift rather than becoming idle or
+        // walking empty laps.
+        RetargetBuilderToProject(ref agent, projectId);
+    }
+
+    /// <summary>Whether delivered material permits at least another fraction of a labour-second.</summary>
+    private static bool ProjectHasBuildFront(in EconomyNode project)
+    {
+        var labour = StructuralProjects.LabourFor(in project);
+        var limit = labour;
+        var cost = StructuralProjects.CostFor(in project);
+        foreach (var resource in Resources.All)
+        {
+            var required = cost[resource];
+            if (required <= 0) continue;
+            var available = StructuralProjects.ConsumedFor(in project, resource) + project.Stock[resource];
+            limit = MathF.Min(limit, labour * available / required);
+        }
+
+        return limit > StructuralProjects.WorkFor(in project) + 0.0001f;
+    }
+
+    /// <summary>Claims one load, preferring the least-covered material and then the nearest source.</summary>
+    private bool TryClaimBuilderLoad(ref AgentState agent, NodeId projectId)
+    {
+        ref readonly var project = ref Nodes.Get(projectId);
+        var cost = StructuralProjects.CostFor(in project);
+        var bestSource = NodeId.None;
+        var bestCargo = Resource.Grain;
+        var bestUnits = 0;
+        var bestCoverage = float.PositiveInfinity;
+        var bestSeconds = float.PositiveInfinity;
+
+        foreach (var resource in Resources.All)
+        {
+            var required = cost[resource];
+            if (required <= 0) continue;
+            var incoming = IncomingToProject(projectId, resource, agent.Id);
+            var remaining = project.Wanted(resource) - incoming;
+            if (remaining <= 0) continue;
+            var coverage = (StructuralProjects.ConsumedFor(in project, resource) +
+                            project.Stock[resource] + incoming) /
+                           (float)required;
+
+            foreach (ref readonly var source in Nodes.All)
+            {
+                if (!source.IsAlive || source.Id == projectId || source.Faction != agent.Faction) continue;
+                if (!source.Stores && !source.IsPile) continue;
+                var available = source.Stock[resource] - ReservedAtSource(source.Id, resource, agent.Id);
+                if (available <= 0) continue;
+                if (!TryTravelSeconds(
+                        agent.Position,
+                        source.Position,
+                        agent.NavigationRadius,
+                        out var seconds))
+                {
+                    continue;
+                }
+
+                var units = Math.Min(agent.CarryCapacity, Math.Min(remaining, available));
+                if (units <= 0) continue;
+                var better = coverage < bestCoverage - 0.0001f ||
+                             MathF.Abs(coverage - bestCoverage) <= 0.0001f && seconds < bestSeconds - 0.0001f ||
+                             MathF.Abs(coverage - bestCoverage) <= 0.0001f &&
+                             MathF.Abs(seconds - bestSeconds) <= 0.0001f &&
+                             ((int)resource < (int)bestCargo ||
+                              resource == bestCargo && source.Id.Value < bestSource.Value);
+                if (!better) continue;
+                bestSource = source.Id;
+                bestCargo = resource;
+                bestUnits = units;
+                bestCoverage = coverage;
+                bestSeconds = seconds;
+            }
+        }
+
+        if (!bestSource.IsValid) return false;
+        ref readonly var from = ref Nodes.Get(bestSource);
+        ref readonly var site = ref Nodes.Get(projectId);
+        agent.Jobs.ReservedUnits = bestUnits;
+        var assignment = agent.Jobs.Assignment with
+        {
+            Source = bestSource,
+            Anchor = from.Position,
+            PlaceExtent = from.FootprintRadius,
+            Sink = projectId,
+            FarAnchor = site.Position,
+            FarPlaceExtent = site.FootprintRadius,
+            Cargo = bestCargo,
+        };
+        JobSystem.Retarget(ref agent, assignment, leg: 0);
+        return true;
+    }
+
+    /// <summary>Material already on its way to one project, in bodies or in their explicit claims.</summary>
+    private int IncomingToProject(NodeId project, Resource resource, AgentId except)
+    {
+        var incoming = 0;
+        foreach (ref readonly var body in Agents.All)
+        {
+            if (!body.IsAlive || body.Id == except) continue;
+            if (body.Jobs.Assignment.Kind == AssignmentKind.Build && body.Jobs.Project == project)
+            {
+                if (body.Jobs.CarriedUnits > 0 && body.Jobs.Carrying == resource)
+                {
+                    incoming += body.Jobs.CarriedUnits;
+                }
+                else if (body.Jobs.Assignment.Cargo == resource)
+                {
+                    incoming += body.Jobs.ReservedUnits;
+                }
+
+                continue;
+            }
+
+            if (!body.Jobs.Assignment.MovesCargo || body.Jobs.Assignment.Sink != project ||
+                body.Jobs.Assignment.Cargo != resource)
+            {
+                continue;
+            }
+
+            incoming += body.Jobs.CarriedUnits > 0
+                ? body.Jobs.CarriedUnits
+                : Math.Min(
+                    body.CarryCapacity,
+                    Nodes.Contains(body.Jobs.Assignment.Source)
+                        ? Nodes.Get(body.Jobs.Assignment.Source).Stock[resource]
+                        : 0);
+        }
+
+        return incoming;
+    }
+
+    /// <summary>Stock at a source already promised to another builder or cargo run.</summary>
+    private int ReservedAtSource(NodeId source, Resource resource, AgentId except)
+    {
+        var reserved = 0;
+        foreach (ref readonly var body in Agents.All)
+        {
+            if (!body.IsAlive || body.Id == except || body.Jobs.CarriedUnits > 0) continue;
+            if (body.Jobs.Assignment.Source != source || body.Jobs.Assignment.Cargo != resource) continue;
+            if (body.Jobs.Assignment.Kind is AssignmentKind.Build or AssignmentKind.Train)
+            {
+                reserved += body.Jobs.ReservedUnits;
+            }
+            else if (body.Jobs.Assignment.MovesCargo)
+            {
+                reserved += body.CarryCapacity;
+            }
+        }
+
+        return reserved;
+    }
+
+    private void RetargetBuilderToProject(ref AgentState agent, NodeId projectId)
+    {
+        ref readonly var site = ref Nodes.Get(projectId);
+        var assignment = agent.Jobs.Assignment with
+        {
+            Sink = projectId,
+            FarAnchor = site.Position,
+            FarPlaceExtent = site.FootprintRadius,
+        };
+        JobSystem.Retarget(ref agent, assignment, leg: 1);
+    }
+
+    /// <summary>Returns a builder's surplus to the nearest generic store with room.</summary>
+    private void SendBuilderCargoToStore(ref AgentState agent, NodeId projectId)
+    {
+        ref var jobs = ref agent.Jobs;
+        if (jobs.CarriedUnits <= 0)
+        {
+            ChooseBuilderNextStep(ref agent, projectId);
+            return;
+        }
+
+        var store = EconomySystem.NearestStoreWithRoom(
+            Nodes, jobs.Carrying, agent.Faction, agent.Position);
+        if (!Nodes.Contains(store))
+        {
+            RetargetBuilderToProject(ref agent, projectId);
+            return;
+        }
+
+        ref readonly var target = ref Nodes.Get(store);
+        var assignment = jobs.Assignment with
+        {
+            Source = projectId,
+            Anchor = Nodes.Get(projectId).Position,
+            PlaceExtent = Nodes.Get(projectId).FootprintRadius,
+            Sink = store,
+            FarAnchor = target.Position,
+            FarPlaceExtent = target.FootprintRadius,
+        };
+        JobSystem.Retarget(ref agent, assignment, leg: 1);
+    }
+
+    /// <summary>Clears surplus after completion, leaving stock in a newly completed store where it lies.</summary>
+    private void CleanupBuilder(ref AgentState agent, int leg)
+    {
+        ref var jobs = ref agent.Jobs;
+        var projectId = jobs.Project;
+
+        if (leg % 2 == 0 && jobs.Assignment.Source == projectId && jobs.ReservedUnits > 0 &&
+            Nodes.Contains(projectId))
+        {
+            ref var source = ref Nodes.Get(projectId);
+            var taken = Math.Min(
+                jobs.ReservedUnits,
+                Math.Min(agent.CarryCapacity, source.Stock[jobs.Assignment.Cargo]));
+            jobs.ReservedUnits = 0;
+            if (taken > 0)
+            {
+                source.Stock.Add(jobs.Assignment.Cargo, -taken);
+                jobs.Carrying = jobs.Assignment.Cargo;
+                jobs.CarriedUnits = taken;
+                JobSystem.Retarget(ref agent, jobs.Assignment, leg: 1);
+                return;
+            }
+        }
+
+        // A cleanup delivery has reached its store.
+        if (leg % 2 != 0 && jobs.Assignment.Sink != projectId && Nodes.Contains(jobs.Assignment.Sink) &&
+            jobs.CarriedUnits > 0)
+        {
+            ref var store = ref Nodes.Get(jobs.Assignment.Sink);
+            var delivered = Math.Min(jobs.CarriedUnits, store.RoomFor(jobs.Carrying));
+            store.Stock.Add(jobs.Carrying, delivered);
+            jobs.CarriedUnits -= delivered;
+        }
+
+        if (jobs.CarriedUnits > 0 && Nodes.Contains(projectId) && Nodes.Get(projectId).Stores)
+        {
+            ref var completedStore = ref Nodes.Get(projectId);
+            var delivered = Math.Min(jobs.CarriedUnits, completedStore.RoomFor(jobs.Carrying));
+            completedStore.Stock.Add(jobs.Carrying, delivered);
+            jobs.CarriedUnits -= delivered;
+        }
+
+        if (jobs.CarriedUnits > 0)
+        {
+            SendBuilderCargoToStore(ref agent, projectId);
+            return;
+        }
+
+        if (!Nodes.Contains(projectId) || Nodes.Get(projectId).Stores)
+        {
+            JobSystem.Assign(ref agent, Assignment.None);
+            return;
+        }
+
+        // Exact reservations normally leave no surplus. This path is for a project completed by another
+        // worker while a final load was inbound, and for future cancellation: physical stock is cleared one
+        // resource per trip, never refunded or deleted.
+        ref readonly var project = ref Nodes.Get(projectId);
+        foreach (var resource in Resources.All)
+        {
+            var available = project.Stock[resource] - ReservedAtSource(projectId, resource, agent.Id);
+            if (available <= 0) continue;
+            var store = EconomySystem.NearestStoreWithRoom(
+                Nodes, resource, agent.Faction, project.Position);
+            if (!Nodes.Contains(store)) break;
+            ref readonly var target = ref Nodes.Get(store);
+            jobs.ReservedUnits = Math.Min(agent.CarryCapacity, available);
+            var assignment = jobs.Assignment with
+            {
+                Source = projectId,
+                Anchor = project.Position,
+                PlaceExtent = project.FootprintRadius,
+                Sink = store,
+                FarAnchor = target.Position,
+                FarPlaceExtent = target.FootprintRadius,
+                Cargo = resource,
+            };
+            JobSystem.Retarget(ref agent, assignment, leg: 0);
+            return;
+        }
+
+        JobSystem.Assign(ref agent, Assignment.None);
+    }
+
+    private void ReturnBuilderCargoOrClear(ref AgentState agent)
+    {
+        if (agent.Jobs.CarriedUnits <= 0)
+        {
+            JobSystem.Assign(ref agent, Assignment.None);
+            return;
+        }
+
+        var store = EconomySystem.NearestStoreWithRoom(
+            Nodes, agent.Jobs.Carrying, agent.Faction, agent.Position);
+        if (!Nodes.Contains(store)) return;
+        ref readonly var target = ref Nodes.Get(store);
+        // Once the project is gone there is no building commitment to resume. Turn the physical load into
+        // an ordinary one-trip delivery with no live source; carried cargo makes ReleaseStaleHauls leave it
+        // alone until Handover puts it down, and the non-repeating haul then clears itself.
+        var assignment = Assignment.Haul(
+            NodeId.None,
+            agent.Position,
+            store,
+            target.Position,
+            agent.Jobs.Carrying,
+            EconomySystem.HandoverSeconds,
+            0f,
+            target.FootprintRadius);
+        JobSystem.Assign(ref agent, assignment);
+        JobSystem.Retarget(ref agent, assignment, leg: 1);
+    }
+
+    /// <summary>Closes one villager's fetch, equip and train loop.</summary>
+    private void TraineeHandover(ref AgentState agent, int leg)
+    {
+        ref var jobs = ref agent.Jobs;
+        var barracksId = jobs.Project;
+        if (!IsUsableBarracks(barracksId))
+        {
+            ReturnTraineeCargoOrClear(ref agent);
+            return;
+        }
+
+        if (leg % 2 == 0)
+        {
+            if (jobs.CarriedUnits <= 0 && jobs.ReservedUnits > 0 && Nodes.Contains(jobs.Assignment.Source))
+            {
+                ref var source = ref Nodes.Get(jobs.Assignment.Source);
+                var taken = Math.Min(
+                    jobs.ReservedUnits,
+                    Math.Min(agent.CarryCapacity, source.Stock[jobs.Assignment.Cargo]));
+                if (taken > 0)
+                {
+                    source.Stock.Add(jobs.Assignment.Cargo, -taken);
+                    jobs.Carrying = jobs.Assignment.Cargo;
+                    jobs.CarriedUnits = taken;
+                }
+            }
+
+            jobs.ReservedUnits = 0;
+            ChooseTraineeNextStep(ref agent, barracksId);
+            return;
+        }
+
+        ref var barracks = ref Nodes.Get(barracksId);
+        if (jobs.CarriedUnits > 0)
+        {
+            var useful = Math.Max(0, TrainingDemand(barracksId, jobs.Carrying, agent.Id));
+            var delivered = Math.Min(jobs.CarriedUnits, useful);
+            barracks.Stock.Add(jobs.Carrying, delivered);
+            jobs.CarriedUnits -= delivered;
+            if (jobs.CarriedUnits > 0)
+            {
+                ReturnTraineeCargoOrClear(ref agent);
+                return;
+            }
+        }
+        else if (EquipmentIsReadyForTrainees(barracksId))
+        {
+            jobs.TrainingWork = MathF.Min(
+                MilitiaTraining.Seconds,
+                jobs.TrainingWork + jobs.Assignment.DwellOfLeg(leg));
+            if (jobs.TrainingWork >= MilitiaTraining.Seconds && MilitiaTraining.CanPay(in barracks))
+            {
+                foreach (var resource in Resources.All)
+                {
+                    var cost = MilitiaTraining.CostOf(resource);
+                    if (cost <= 0) continue;
+                    barracks.Stock.Add(resource, -cost);
+                    economy.RecordConsumed(resource, cost);
+                }
+
+                BecomeMilitia(ref agent);
+                return;
+            }
+        }
+
+        ChooseTraineeNextStep(ref agent, barracksId);
+    }
+
+    /// <summary>Uses carried equipment, claims a missing load, or stays at the barracks to train.</summary>
+    private void ChooseTraineeNextStep(ref AgentState agent, NodeId barracksId)
+    {
+        if (!IsUsableBarracks(barracksId) || agent.Role != AgentRole.Villager)
+        {
+            ReturnTraineeCargoOrClear(ref agent);
+            return;
+        }
+
+        if (agent.Jobs.CarriedUnits > 0)
+        {
+            if (MilitiaTraining.CostOf(agent.Jobs.Carrying) > 0 &&
+                TrainingDemand(barracksId, agent.Jobs.Carrying, agent.Id) > 0)
+            {
+                RetargetTraineeToBarracks(ref agent, barracksId);
+            }
+            else
+            {
+                ReturnTraineeCargoOrClear(ref agent);
+            }
+            return;
+        }
+
+        if (TryClaimTrainingLoad(ref agent, barracksId)) return;
+        RetargetTraineeToBarracks(ref agent, barracksId);
+    }
+
+    private bool TryClaimTrainingLoad(ref AgentState agent, NodeId barracksId)
+    {
+        var bestSource = NodeId.None;
+        var bestCargo = Resource.Grain;
+        var bestUnits = 0;
+        var bestSeconds = float.PositiveInfinity;
+        foreach (var resource in Resources.All)
+        {
+            var remaining = TrainingDemand(barracksId, resource, agent.Id);
+            if (remaining <= 0) continue;
+            foreach (ref readonly var source in Nodes.All)
+            {
+                if (!source.IsAlive || source.Id == barracksId || source.Faction != agent.Faction) continue;
+                if (!source.Stores && !source.IsPile) continue;
+                var available = source.Stock[resource] - ReservedAtSource(source.Id, resource, agent.Id);
+                if (available <= 0) continue;
+                if (!TryTravelSeconds(agent.Position, source.Position, agent.NavigationRadius, out var seconds))
+                {
+                    continue;
+                }
+
+                var units = Math.Min(agent.CarryCapacity, Math.Min(remaining, available));
+                var better = seconds < bestSeconds - 0.0001f ||
+                             MathF.Abs(seconds - bestSeconds) <= 0.0001f &&
+                             ((int)resource < (int)bestCargo ||
+                              resource == bestCargo && source.Id.Value < bestSource.Value);
+                if (!better) continue;
+                bestSource = source.Id;
+                bestCargo = resource;
+                bestUnits = units;
+                bestSeconds = seconds;
+            }
+        }
+
+        if (!bestSource.IsValid || bestUnits <= 0) return false;
+        ref readonly var sourceNode = ref Nodes.Get(bestSource);
+        ref readonly var barracks = ref Nodes.Get(barracksId);
+        agent.Jobs.ReservedUnits = bestUnits;
+        var assignment = agent.Jobs.Assignment with
+        {
+            Source = bestSource,
+            Anchor = sourceNode.Position,
+            PlaceExtent = sourceNode.FootprintRadius,
+            Sink = barracksId,
+            FarAnchor = barracks.Position,
+            FarPlaceExtent = barracks.FootprintRadius,
+            Cargo = bestCargo,
+        };
+        JobSystem.Retarget(ref agent, assignment, leg: 0);
+        return true;
+    }
+
+    private int TrainingDemand(NodeId barracks, Resource resource, AgentId except)
+    {
+        if (!Nodes.Contains(barracks)) return 0;
+        var trainees = 0;
+        var incoming = 0;
+        foreach (ref readonly var body in Agents.All)
+        {
+            if (!body.IsAlive || body.Jobs.Assignment.Kind != AssignmentKind.Train ||
+                body.Jobs.Project != barracks)
+            {
+                continue;
+            }
+
+            trainees++;
+            if (body.Id == except) continue;
+            if (body.Jobs.CarriedUnits > 0 && body.Jobs.Carrying == resource)
+                incoming += body.Jobs.CarriedUnits;
+            else if (body.Jobs.Assignment.Cargo == resource)
+                incoming += body.Jobs.ReservedUnits;
+        }
+
+        return Math.Max(
+            0,
+            trainees * MilitiaTraining.CostOf(resource) - Nodes.Get(barracks).Stock[resource] - incoming);
+    }
+
+    private bool EquipmentIsReadyForTrainees(NodeId barracks)
+    {
+        if (!Nodes.Contains(barracks)) return false;
+        var trainees = 0;
+        foreach (ref readonly var body in Agents.All)
+        {
+            if (body.IsAlive && body.Jobs.Assignment.Kind == AssignmentKind.Train &&
+                body.Jobs.Project == barracks)
+            {
+                trainees++;
+            }
+        }
+
+        ref readonly var node = ref Nodes.Get(barracks);
+        foreach (var resource in Resources.All)
+        {
+            if (node.Stock[resource] < trainees * MilitiaTraining.CostOf(resource)) return false;
+        }
+
+        return trainees > 0;
+    }
+
+    private bool IsUsableBarracks(NodeId id) =>
+        Nodes.Contains(id) && Nodes.Get(id).Kind == NodeKind.Barracks && Nodes.Get(id).IsBuilt;
+
+    private void RetargetTraineeToBarracks(ref AgentState agent, NodeId barracksId)
+    {
+        ref readonly var barracks = ref Nodes.Get(barracksId);
+        var assignment = agent.Jobs.Assignment with
+        {
+            Sink = barracksId,
+            FarAnchor = barracks.Position,
+            FarPlaceExtent = barracks.FootprintRadius,
+        };
+        JobSystem.Retarget(ref agent, assignment, leg: 1);
+    }
+
+    private void ReturnTraineeCargoOrClear(ref AgentState agent)
+    {
+        if (agent.Jobs.CarriedUnits <= 0)
+        {
+            JobSystem.Assign(ref agent, Assignment.None);
+            return;
+        }
+
+        var store = EconomySystem.NearestStoreWithRoom(
+            Nodes, agent.Jobs.Carrying, agent.Faction, agent.Position);
+        if (!Nodes.Contains(store)) return;
+        ref readonly var target = ref Nodes.Get(store);
+        var assignment = Assignment.Haul(
+            NodeId.None,
+            agent.Position,
+            store,
+            target.Position,
+            agent.Jobs.Carrying,
+            EconomySystem.HandoverSeconds,
+            0f,
+            target.FootprintRadius);
+        JobSystem.Assign(ref agent, assignment);
+        JobSystem.Retarget(ref agent, assignment, leg: 1);
+    }
+
+    /// <summary>Changes the body frame and durable role without changing its stable id or household.</summary>
+    private void BecomeMilitia(ref AgentState agent)
+    {
+        ScrapCart(ref agent);
+        WearBody(ref agent, UnitType.Militia);
+        agent.Role = AgentRole.Militia;
+        agent.Appetite = UnitType.Militia.Appetite;
+        agent.SightMetres = UnitType.Militia.SightMetres;
+        agent.Strength = UnitType.Militia.Strength;
+        agent.Health = UnitType.Militia.Health;
+        JobSystem.Assign(ref agent, Assignment.None);
+        HaltMovement(ref agent);
     }
 
     /// <summary>

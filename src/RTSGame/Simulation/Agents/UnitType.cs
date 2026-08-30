@@ -1,5 +1,14 @@
 namespace RTSGame.Simulation.Agents;
 
+/// <summary>The durable economic/military identity of a body, independent of its current job or equipment.</summary>
+internal enum AgentRole
+{
+    Villager,
+    Militia,
+    Raider,
+    Other,
+}
+
 /// <summary>
 /// Everything about a unit that is a property of what it is rather than of what it is doing.
 /// </summary>
@@ -87,8 +96,8 @@ internal sealed record UnitType(
     /// <summary>
     /// Slower than a villager, which is the intended ordering: kit costs pace.
     /// </summary>
-    public static readonly UnitType Soldier =
-        new("soldier", AgentDefaults.Radius, 1.70f, 0f, 0, Appetite: 1.35f, Strength: 3f, Health: 45f);
+    public static readonly UnitType Militia =
+        new("militia", AgentDefaults.Radius, 1.70f, 0f, 0, Appetite: 1.35f, Strength: 3f, Health: 45f);
 
     /// <summary>
     /// The handcart — a <em>frame a villager wears</em>, not a unit anybody spawns.
@@ -178,6 +187,11 @@ internal sealed record UnitType(
     /// <summary>Every type, for the tests that have to hold for all of them.</summary>
     public static readonly UnitType[] All =
     {
-        Villager, Soldier, Raider, HaulerCart, LightCavalry, HeavyCavalry,
+        Villager, Militia, Raider, HaulerCart, LightCavalry, HeavyCavalry,
     };
+
+    public static AgentRole RoleOf(UnitType type) =>
+        ReferenceEquals(type, Villager) || ReferenceEquals(type, HaulerCart) ? AgentRole.Villager :
+        ReferenceEquals(type, Militia) ? AgentRole.Militia :
+        ReferenceEquals(type, Raider) ? AgentRole.Raider : AgentRole.Other;
 }

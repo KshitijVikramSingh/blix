@@ -1,7 +1,7 @@
 namespace RTSGame.Simulation.Economy;
 
 /// <summary>
-/// What a building costs to put up: timber on site, and hands standing at it.
+/// What a building costs to put up: physical material at the site, and hands standing at it.
 /// </summary>
 /// <remarks>
 /// <b>This is where attention converts into infrastructure</b>, which is the whole of §2's identity read
@@ -27,7 +27,7 @@ namespace RTSGame.Simulation.Economy;
 internal static class Construction
 {
     /// <summary>
-    /// Timber a building needs delivered before work can start, in whole units.
+    /// Timber a building needs incorporated while work advances, in whole units.
     /// </summary>
     /// <remarks>
     /// In sacks, because a villager's carry is the unit everything else in this economy is measured in and
@@ -51,6 +51,8 @@ internal static class Construction
         // exactly when it is wanted, and it is the pressure that makes acting early rather than late a
         // real decision instead of a hint.
         NodeKind.ForwardDepot => Sacks(4),
+        NodeKind.PalisadeWall => Sacks(2),
+        NodeKind.Barracks => Sacks(10),
         _ => 0,
     };
 
@@ -78,10 +80,11 @@ internal static class Construction
     public static int StoneFor(NodeKind kind) => kind switch
     {
         NodeKind.Granary => Sacks(8),
+        NodeKind.Barracks => Sacks(4),
         _ => 0,
     };
 
-    /// <summary>Everything a building needs on site before work can start.</summary>
+    /// <summary>Everything a completed building incorporates.</summary>
     /// <remarks>
     /// One place that answers "what does this cost", so a new material is a line here rather than a hunt
     /// through every caller that used to ask about timber by name.
@@ -95,7 +98,7 @@ internal static class Construction
     }
 
     /// <summary>
-    /// Labour-seconds of standing at a site that finishes it, once its timber is there.
+    /// Labour-seconds of standing at a site that finishes it as material is supplied.
     /// </summary>
     /// <remarks>
     /// Sized against the seasons, like the crop windows: a house is 1,200 against a 1,200-second spring, so
@@ -114,18 +117,20 @@ internal static class Construction
         NodeKind.Granary => 3_600f,
         NodeKind.House => 1_200f,
         NodeKind.ForwardDepot => 600f,
+        NodeKind.PalisadeWall => 300f,
+        NodeKind.Barracks => 1_800f,
         _ => 0f,
     };
 
     /// <summary>Whether this kind of node has to be built at all.</summary>
-    public static bool NeedsBuilding(NodeKind kind) => LabourFor(kind) > 0f || TimberFor(kind) > 0;
+    public static bool NeedsBuilding(NodeKind kind) => LabourFor(kind) > 0f || CostFor(kind).Total > 0;
 
     /// <summary>What a site says about itself, which is what the player needs to read.</summary>
     /// <remarks>
-    /// Three states and they are three different problems. <em>Wanting timber</em> is a hauling problem —
-    /// nobody has carried the materials out. <em>Idle</em> is a labour problem: the timber is there and
-    /// nobody is working. <em>Building</em> is neither, and the number is how far along. A single "under
-    /// construction" would collapse the three and leave the player guessing which one they have.
+    /// Progress and shortages are independent facts now that work can follow partial deliveries. The state
+    /// therefore says whether hands are working or paused, how far the structure has advanced, and which
+    /// physical materials remain outstanding. A single "under construction" would collapse those facts and
+    /// leave the player guessing which action is needed.
     /// </remarks>
     public static string StateOf(in EconomyNode node)
     {
@@ -138,11 +143,12 @@ internal static class Construction
             if (short_ > 0) missing.Add($"{short_} {(resource == Resource.Wood ? "timber" : resource.ToString().ToLowerInvariant())}");
         }
 
-        if (missing.Count > 0) return $"wants {string.Join(" and ", missing)}";
         var labour = LabourFor(node.Kind);
-        return node.Hands == 0
-            ? "idle site"
-            : $"building {node.BuildWork / MathF.Max(1f, labour) * 100f:F0}%";
+        var progress = node.BuildWork / MathF.Max(1f, labour) * 100f;
+        var state = node.Hands == 0
+            ? progress > 0f ? $"paused at {progress:F0}%" : "waiting for hands"
+            : $"building {progress:F0}%";
+        return missing.Count > 0 ? $"{state}, needs {string.Join(" and ", missing)}" : state;
     }
 
     /// <summary>Timber in villagers' sacks, which is the unit everything else here is measured in.</summary>

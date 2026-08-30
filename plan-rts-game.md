@@ -7417,3 +7417,539 @@ The one still lying is not fog's. **The two triangle counters disagree by about 
 same frame. Any conclusion drawn from the pass counters about instanced content understated its load —
 including §73's "the threefold caster redraw is cheap, 0.38 ms and 59k triangles per cascade". Nothing should be
 optimised against either number until one of them is relabelled.
+
+## 76. The way to content is one settlement-development arc
+
+Two lines immediately above are stale by one commit and are left where they were because this file is a
+record rather than a rewritten verdict. `7329467` put smoke behind the veil, multiplied the pass counter by
+the instance count and added the number of instances beside it. The quick three-leg gate was green there.
+The two year legs are still owed after the terrain and stone work, before the next change that touches the
+economy.
+
+The next broad order is settled:
+
+1. **Close the shader-include seam.** Make Blix's GLSL preprocessor the build-time owner of inclusion, make
+   `#pragma once` real there, and only then remove the file-level `#ifndef` guards. A guard around a symbol
+   such as `BLIX_PI` is not a file guard and stays.
+2. **Pull the gameplay arcs forward as one vertical settlement-development arc:** gathering and hauling,
+   construction, repair as a prepared structure, one real upgrade, and barracks training into militia.
+3. **Return to fog with the actors that give it semantics:** factions, enemy knowledge and what is remembered
+   when a body leaves sight.
+4. **Build the enemy / strategic AI / soak / combat-bot arc on the player's verbs**, then tie it through
+   vision and militia combat.
+5. Only then begin multiplying the game's content — more military types, buildings, upgrades and the map
+   content that gives those systems cases to answer.
+
+This is an overarching order, not five sealed projects. The first arc is one causal chain:
+
+> find wood and stone → establish work and hauling → build a barracks → turn a villager into militia →
+> improve and, later, repair what the settlement built
+
+That chain is the gate. Each mechanism gets a consumer as soon as it exists, and the result is a small game
+loop rather than five foundations waiting for one another.
+
+### What gathering means here
+
+The simulation already has the difficult half: crops as seasonal labour, finite trees and outcrops, stores,
+reach, depots, paid carts, standing routes and exact conservation. This arc is not permission to add another
+resource. It makes the existing three **authorable and legible from the chair**:
+
+- point at the actual fertility or deposit and understand what is there;
+- post people to it deliberately;
+- put a depot where distance has made one necessary;
+- establish the route that moves the resulting stock;
+- see why a job, route or project is waiting without reading the terminal; and
+- save in the middle of all of it and continue as the same world.
+
+Enough interface to playtest those verbs is part of the system. A general command UI, production framework or
+finished presentation pass is not. Add the prompt, selection state, cost/progress line and queue display the
+current verb needs, then stop.
+
+### Construction, repair and upgrade share a physical rule, not necessarily a class
+
+Materials are hauled to the structure first. Work then consumes them as it advances. The part already spent
+has become the structure; the unspent part is still physical stock at the site. Cancelling, changing a project
+or losing the site cannot refund consumed material and cannot delete unconsumed material — somebody must haul
+the latter somewhere else. Conservation should be able to describe every intermediate tick without a refund
+exception.
+
+The existing construction implementation currently waits for the full cost and consumes it at completion.
+Bringing construction and repair under the rule above is therefore part of this arc, not an assumption that
+the code already behaves that way.
+
+Do not represent damage as negative construction. A completed building, its structural condition and the work
+of changing it are three different facts. Keep the same stable `NodeId` through all of them, and make a save in
+the middle of each operation continue identically. A shared project representation is earned if construction,
+repair and upgrade actually need the same carried state; it is not a prerequisite to writing the second one.
+
+**Repair is designed now and exercised later.** The state, material-flow seam, assignment and persistence
+surface should exist so combat does not force a structural rewrite. There is no invented weather damage or
+debug-facing gameplay loop merely to make the button useful. A deterministic headless fixture may damage a
+wall to prove the rule; real use waits for something in the game that can harm one.
+
+### The first upgrade is a wall becoming a wall
+
+There is no generic ladder in which every granary, house and depot wants a level number. The first and only
+upgrade needed to prove the mechanism is:
+
+> **palisade wall → stone wall**
+
+It is a material change the player can see, it gives stone a second honest sink, and it sits directly on §2's
+attention ladder rather than improving a storage number because an upgrade system wants a target. For this
+first pass the upgraded wall keeps its identity and footprint. A later upgrade that changes footprint reopens
+placement, navigation and what happens to bodies standing beside it; it is not smuggled into this proof.
+
+The gate is stronger than “level became two”: timber and stone arrive physically, work consumes them, the
+same node becomes the stone wall only when the project completes, its blocking geometry never disagrees with
+what is drawn, and save/load through the middle has the same future.
+
+### A barracks trains people; it does not manufacture them
+
+The prototype's rule stands: training converts an existing villager. Population still comes from housing and
+food; a barracks does not create a second population source hidden inside a production queue. The body keeps
+its stable `AgentId`, leaves the workforce and becomes **militia**, permanently for this pass.
+
+That makes training a real economic decision before combat balance exists:
+
+- the settlement pays material and training time;
+- one fewer body farms, cuts, quarries, builds or hauls;
+- militia appetite and military capability replace the villager's economic capability; and
+- the conversion, including one in progress, is fingerprinted and saved.
+
+The barracks is the first new building this arc needs. It exists because training needs a legible place and
+because constructing the thing that unlocks the roster closes the vertical chain. Training is a deliberate
+standing reassignment, not a temporary manual-order interrupt. Demobilisation may eventually be useful, but
+it is not part of this pass and no refund rule is invented for it yet.
+
+Only militia is buildable. The existing roster entries beyond it remain movement fixtures or scaffolding
+until content work reaches them. The arc needs enough contact behaviour to assert that a trained militia body
+has the intended type, persists and can participate in the later combat seam; it does not tune spears, bows,
+horses or the micro multiplier early.
+
+### What follows, and why fog waits for it
+
+Fog's visual layer is in place. Its next questions are not visual dials: exploration per faction, allied
+sharing, remembered structures, vanished bodies, last-known information and what an AI is allowed to know.
+Those questions need a second actor. The standing direction remains absolute: **fog may read the simulation;
+the simulation may never read fog.** AI decisions read authoritative sight and knowledge, never the blurred
+veil or a render mask.
+
+The first strategic AI then plays through the same construct, gather, haul, upgrade and train verbs as the
+player, without free stock, special placement or special vision. That AI and the soak harness are the same
+artefact for the reason §35 kept: a soak is shaped by what it soaks, and an economic AI is validated by what it
+does over years. Small deterministic fixtures still land with every earlier mechanism; “soak later” never
+means “verification later”.
+
+Enemy pressure and the competent combat bot come after militia and sight are real enough to read. The bot is
+built alongside the automatic combat layer and measures §12's still-open 1.5–2× micro multiplier. At that
+point the systems are in place and adding a spear, bow, stable, tower or workshop is content extending a known
+loop rather than another foundational rewrite.
+
+## 77. Shader inclusion has one owner now
+
+The prerequisite at the head of §76 is complete. The old split was not merely untidy: runtime shader loading
+expanded includes through `GlslPreprocessor`, while every offline `CompileSpirV` target handed the authored
+files straight to `glslc`. The latter warns about `#pragma once` and does not honour it, so the exact diamond
+Providence now has — `world.frag` reaching `noise.glsl` directly and through `veil.glsl` — needed a second,
+compiler-specific set of `#ifndef` file guards.
+
+`Blix.Tools.Shader` is now the build-only front door for all thirteen shader-bearing projects. It asks
+`ShaderLoader.PreprocessFile` for one expanded source and then invokes `glslc`; Runner's variants enter as
+Blix defines at the same seam and Sponza still reflects the resulting module afterward. The file-backed
+resolver is relative to the file making each request, not forever relative to the root shader, so nested
+local includes now mean what their spelling says. Canonical identities also make the once-only decision about
+the file reached rather than the text used to reach it.
+
+`#pragma once` is a Blix directive. The preprocessor consumes it, preserves its physical line for diagnostics,
+and never emits it to the compiler. The redundant file guards are gone from `noise.glsl`, `materials.glsl`
+and `veil.glsl`; the `BLIX_PI` and `PI` conditional definitions remain because they guard symbols, not files.
+`veil.glsl` is also an explicit RTS build input now, closing the stale-output hole where editing it alone did
+not necessarily recook `world.frag`.
+
+The proof is deliberately at three levels:
+
+- `Blix.Test.Graphics` is **389/389**: the new cases cover a once-only diamond, two spellings with one identity,
+  repeatable files without the pragma, directive consumption and cycle detection;
+- the whole Debug solution builds with **0 warnings / 0 errors**, exercising the shared engine shaders,
+  Providence, Runner's base and FOG variants, and Sponza compilation plus reflection; and
+- the Providence quick gate is **3/3**: simulation self-test, the six-minute raid and all 55 map-panel maps.
+  The two simulated-year legs were not run because this change touches build-time shader preparation rather
+  than economy rates, jobs, hauling or construction.
+
+The next work therefore starts the vertical arc itself. Its first useful slice should expose and exercise the
+existing resource sources and standing work from the chair, then use that same gathering/hauling path to feed
+the construction material-flow change. That keeps the first new interface attached to a verb the barracks,
+wall upgrade and later repair will all depend on.
+
+## 78. Gathering and hauling can now be authored from the chair
+
+The first slice of §76's settlement-development arc is complete. It did not add a second economy beside the
+one the simulation already had; it closed the concrete seams that kept the existing grain, timber and stone
+rules from being a playable loop.
+
+Posting with `U` now treats an outcrop exactly as it treats a field or tree: the generic post becomes a
+standing stone-work assignment, the quarrier works at the visible face, carries whole units to the nearest
+eligible store and returns until that deposit is exhausted. Outcrops remain non-blocking terrain props, but
+their interaction and workplace footprint now describes the rock the player can actually see rather than a
+zero-sized point at its centre.
+
+The chair also says what the arrangement means. Pointing at open ground reports field fertility before a
+field is placed; a selected field reports its stored fertility and crop state; trees and outcrops name their
+nearest eligible delivery store; work sites report assigned and presently working hands; selected people
+separate farmers, cutters, quarriers, builders and delivery workers, including work they cannot reach. This is
+the playtest interface §76 asked for, not a generic production panel.
+
+### A route is between places, not permanently between commodities
+
+The old route command chose wood or grain once when it was issued and never considered stone. A player now
+authors the useful relationship instead: **move goods from this source to this destination**. At each pickup,
+the route chooses among all three resources. A construction site prioritises missing material; an ordinary
+store accepts whichever available stock makes the strongest useful load. Stable ties keep the previous cargo,
+so the choice is deterministic and does not oscillate.
+
+That distinction settles the route's lifetime too. The board's `Haul` remains one priced trip for one cargo
+and is dropped when that trip is stale. The player's `Carry` is a standing commitment: an empty source or a
+destination with no present demand makes the carter wait at the source and recheck, not drive empty laps and
+not erase the player's arrangement. Only losing one of the two named nodes ends it. A single route can
+therefore take the timber a site needs, change to stone when timber is satisfied, and remain ready for later
+stock without a second order.
+
+### The proof follows the physical goods
+
+Two end-to-end assertions were added at the same seams the player uses. Posting at an outcrop now works and
+delivers a 30-stone hand load with every unit accounted for. One standing route supplies a granary site with
+all **540 timber and 240 stone**, carries both resource kinds, survives a save round-trip with an identical
+300-tick future, remains assigned after the site's demand is satisfied and closes the conservation ledger at
+zero drift.
+
+The full gate is green, including the two year legs §76 still owed before this hauling change: simulation
+self-test, six-minute raid, flat settlement year, generated-terrain settlement year and all 55 map-panel maps.
+The generated year quarried 244 stone and ended with all **4,440 / 4,440** units in outcrops, stores or hands.
+The whole Debug solution also builds with zero warnings and zero errors.
+
+One #0 integration fault surfaced before that gate could run. A self-contained Providence publish was trying
+to publish the build-only shader compiler beside the game, first without the app host .NET requires and then
+with duplicate runtime files. Shader projects now keep the compiler as a non-private build-order dependency:
+normal builds still produce it before shader preprocessing, while publish traversal neither ships nor
+collides with its output. The self-contained publish path and the full solution build both pass.
+
+The next slice is the construction material-flow correction from §76: deliver first, then consume timber and
+stone incrementally as labour advances, leaving every unspent unit physically recoverable. The gathering and
+route verbs that feed that rule are now in place.
+
+## 79. Builders now own the physical construction loop
+
+The construction correction at the end of §78 is complete. A posted builder is no longer a hand waiting at a
+site for a cart to solve the whole material problem. The post is a stable project commitment with a small,
+deterministic loop:
+
+1. honour a useful load already being carried;
+2. otherwise claim one still-needed material, up to the body's carrying capacity;
+3. take it from the nearest reachable store or loose pile;
+4. deliver only what the project still wants, then work at the site; and
+5. when the material front catches the labour front, repeat until the building is complete.
+
+Several builders can follow that loop together. Their source reservations, loads on backs and cart loads on
+the road all count as incoming material, so two workers do not promise the same stone and the hauling board
+does not dispatch a cart for a load a builder has already claimed. Material choice is the least-covered part
+of the recipe first, then the nearest source, with stable resource and node ties. The existing one-resource
+cargo invariant remains intact.
+
+### Work follows deliveries instead of waiting behind them
+
+`BuildConsumed` is now a persistent fact on the site: material already incorporated into the structure, as
+distinct from unspent stock physically lying beside it. Labour may advance as far as the supplied fraction of
+every recipe material allows. Crossing a whole-unit progress threshold moves that unit from site stock into
+the consumed ledger immediately; completion incorporates the exact recipe and never performs a second bulk
+charge.
+
+This makes every intermediate state honest. A rising building can still need timber or stone. The visible
+material stack grows when a load arrives and shrinks as it is incorporated, independently of the structure's
+height. Selection reports the recipe as incorporated, on site, incoming and still unclaimed, while the plain
+state line combines progress with whichever material shortage remains.
+
+Surplus remains physical. A builder who brought an unrelated load first returns it to the nearest generic
+store before fetching project material. Any recipe stock left at a finished non-storage building is cleared
+the same way; a storehouse may retain what is left because the completed project has become a valid store.
+The cancellation/lost-project seam likewise converts carried material into a real return trip rather than a
+refund or deletion.
+
+### Storage names now describe the design
+
+The internal `Granary` kind remains unchanged for save and code continuity, but the chair now calls it a
+**Storehouse**. Both a storehouse and a **Camp** are generic drop points for grain, timber and stone. Resource
+type belongs to the deposit and to the project recipe, not to the building receiving the load. This is why a
+single camp can support a wood line, quarry or future construction front without becoming three nearly
+identical depot types.
+
+Housing remains the population source. People appear through houses with room and food readiness; the civic
+centre stays deferred until it has a distinct role rather than duplicating either housing or storage. That
+keeps this layer attached to the decisions already settled in §76 instead of inventing a second population
+rule while construction is being corrected.
+
+### The proof is shared work, replay and conservation
+
+The new end-to-end fixture assigns four villagers through the same generic player post used at a real site.
+It observes concurrent timber and stone claims, both material kinds actually carried, work advancing before
+the full recipe is present, and an unrelated grain load returned. The storehouse consumes exactly **540
+timber and 240 stone**, every builder clears on completion, and a save made mid-project has an identical
+300-tick future. A second case deliberately puts 13 surplus timber at a house site and proves the completed
+house is emptied back into storage with zero drift.
+
+The older cart-fed construction fixture remains green as the other entrance to the same demand: a camp 40 m
+out receives 120 timber by 129 seconds and two builders finish its 600 labour-seconds by 340 seconds. The full
+gate is **5/5 green, years included**. The generated-terrain year quarried 244 stone and closed with 240 in
+storage, 4 on backs and 4,196 in its remaining outcrops — all **4,440 / 4,440** accounted for. All 55 map-panel
+maps generated, the whole Debug solution built with zero warnings and errors, and a self-contained arm64 game
+publish contained the cooked world shaders. The persisted simulation layout is version 4 because both the
+site and job records gained state that must survive the middle of this loop.
+
+A chair correction followed immediately: right-click now means "do the useful thing under the cursor" for a
+construction site, field, tree or outcrop, while ordinary ground still issues a temporary move order. The old
+`U` post remains as an explicit/debug shortcut. This closes the live gap where villagers could be sent to a
+site and then stand there without ever being assigned to the project. The full simulation self-test and a
+200-frame self-contained village smoke are green.
+
+The first builder journey is useful now as well. Assigning empty hands to an unfed project immediately enters
+the shared material decision: each builder reserves one needed load, walks to its chosen stocked store, fills
+to its carrying capacity and only then approaches the site. A builder already holding recipe material goes
+straight to the project; one holding unrelated cargo returns it to the nearest generic store first; and a
+project with a workable material front still receives hands immediately. The focused proof asserts all three
+starts after the assignment's first tick, including exact source/site legs and a zero-drift physical ledger.
+
+The next slice can now put the same physical rule behind a structural operation rather than another building:
+prepare condition/repair state without manufacturing gameplay damage, then prove the first real upgrade as a
+palisade wall becoming a stone wall on the same stable node. Barracks construction and permanent
+villager-to-militia training follow that project seam before fog and the enemy/AI arc resume.
+
+## 80. Condition is not construction, and a palisade becomes stone in place
+
+The structural-operation seam is now real. A node carries present and maximum condition independently of the
+labour that originally built it, plus an explicit repair-or-upgrade project when a completed structure is
+being changed. Construction keeps its established state for continuity; all three operations expose one
+physical recipe, incorporated amount, labour front and material demand to builders and carts. The save layout
+is version **5** because condition and the active operation must survive the middle of the work.
+
+There is still no ambient, weather or combat damage. `DamageStructure` is the prepared simulation entrance and
+is exercised only by the deterministic fixture until a real attacker has earned the verb. Repair captures the
+starting condition, scales a fixed material-and-labour scope from the missing share, then restores condition
+only as delivered material is incorporated. In the proof, a half-damaged stone wall rises from **125/250** to
+**250/250** condition while consuming exactly **30 stone**. Builders carry the stone, a mid-repair save has an
+identical 300-tick future, the same node and collider remain, every hand clears, and discrepancy stays zero.
+
+The first real upgrade is exactly the one §76 named. A palisade is a one-cell blocking structure built from
+**60 timber and 300 labour-seconds**. Its upgrade costs **120 stone and 600 labour-seconds**. Throughout that
+project the node remains a palisade with its existing identity, collider, footprint and blocking ground; the
+stone shell rises visibly over it, but the kind changes atomically only on completion. The proof observes
+progress while the kind is still `PalisadeWall`, round-trips a save in that state, and closes as `StoneWall` on
+the same `NodeId`. It also deliberately leaves 13 surplus stone at a project and proves a builder returns it
+to storage rather than refunding or deleting it.
+
+The chair can exercise the slice without a debug panel. **Ctrl+W** places a palisade. **Ctrl+right-click** on a
+sound completed palisade opens the stone upgrade and posts the selected villagers through the same generic
+structural assignment used by construction. A damaged structure takes the repair branch first. Ordinary
+right-click on an active construction, repair or upgrade project assigns more hands, and the HUD names the
+operation, condition, incorporated/on-site/incoming/unclaimed material and current work state.
+
+The full gate is **5/5 green, years included**. Both new focused proofs are green, the six-minute raid remains
+green, both settlement years complete, and all 55 panel maps generate. The generated-terrain ledger again
+closes stone at **4,440/4,440**: 244 quarried, 240 stored, 4 carried and 4,196 left in 35 outcrops. The next
+vertical slice is now the barracks and permanent villager-to-militia conversion: construct the place, pay the
+training cost and time, preserve the body id through conversion, and make the lost economic hand visible.
+
+## 81. A barracks converts hands into militia; it does not add bodies
+
+The settlement-development arc in §76 is complete through its first combat-roster seam. A barracks is a real
+five-cell blocking structure, placed with **Ctrl+D**, and follows the same physical construction rule as every
+other building: **300 timber, 120 stone and 1,800 labour-seconds** are hauled, delivered and incorporated while
+the building rises. It is deliberately using the granary-scale art as a readable placeholder; distinct barracks
+content belongs to the later building-content pass, not to proving the system.
+
+Right-clicking a completed barracks with villagers selected creates a persistent `Train` commitment on each
+selected body. It does not enqueue new population. Each trainee reserves missing equipment against real source
+stock, carries it to the barracks and trains there once the cohort's equipment is present. The first recipe is
+one visible sack each of timber and stone — **30 + 30** — and **16 seconds**, preserving the prototype's training
+time. Several villagers can join at once without claiming the same last sack. Equipment already delivered stays
+physical at the barracks if the commitment is cancelled; equipment still on a body stays on that body. There is
+no refund exception and no resource leaves the conservation ledger until a conversion actually completes.
+
+### Identity is explicit now
+
+An agent now carries a durable role rather than letting callers infer what it is from speed, appetite or carry
+capacity. The conversion changes that role from villager to militia and swaps the same body's frame in place:
+the same stable `AgentId`, collider handles, household and headcount remain, while pace becomes 1.70 m/s, carry
+capacity becomes zero, appetite becomes 1.35, strength becomes 3 and health becomes 45. No demobilisation path
+exists in this pass. Militia may still receive movement and garrison posts, but posting one on a field does not
+turn it back into a farmhand and contributes zero economic hands.
+
+That durable role also closes the interface seam. The settlement's spare-hands count and Tab selection include
+villagers only; selected units report training and militia separately; a barracks reports trainee count, average
+training time and the timber/stone equipment physically present. Militia use the existing person mesh with a
+cool steel tint so the conversion is legible before dedicated military art arrives. Barracks are included in
+the renderer's existing fog bookkeeping without allowing the simulation to read the fog.
+
+### The proof constructs, equips, converts and resumes identically
+
+The vertical fixture first constructs the barracks through the ordinary builder command and observes timber and
+stone on builders' backs. It then commits two existing villagers together. Both fetch physical equipment, both
+retain their ids, the live-agent count does not rise, both acquire the militia frame, and construction plus two
+training recipes are consumed exactly with zero discrepancy. A save taken after training has begun has an
+identical 300-tick future; a save after completion preserves both military roles. The same fixture posts one of
+them on a field and proves it remains a garrison rather than entering the civilian work loop.
+
+That save exposed an older adjacent hole: `Raised` was fingerprinted but not serialized, so the first save taken
+after a building had completed diverged immediately. `Raised`, `Born` and `Emigrated` are now written with the
+rest of the economy counters, and the raw-layout save version is **6** for the new role and training progress.
+
+The full gate is **5/5 green, years included**: simulation self-test, six-minute raid, flat settlement year,
+generated-terrain settlement year and all 55 map-panel maps. The generated year again closes stone at
+**4,440/4,440** — 244 quarried, 240 stored, 4 carried and 4,196 still in 35 outcrops. The Debug build has zero
+warnings and errors, and the self-contained arm64 village package completed a 200-frame live smoke with the new
+control and HUD path active.
+
+The causal chain is now playable through gathering, hauling, constructing, repairing, upgrading and training.
+The next arc returns to fog with a real military actor: faction knowledge, memory and last-known information,
+then the enemy/strategic-AI/soak/combat-bot work using the same player verbs.
+
+## 82. Experience recovery changes the order: performance, groups, time, then Providence
+
+The last sentence of §81 is no longer the immediate order. The settlement-development arc made the simulation
+more complete and exposed that the thing on screen has accumulated enough local proofs to stop feeling like one
+game. Before adding another semantic layer, the existing game has to become responsive, coherent in how people
+are handled, and temporally readable.
+
+One boundary is settled first:
+
+> **Village remains the systems sandbox. Providence is a separate player-facing app / entry point.**
+
+Village may expose direct keys, diagnostics, scenario controls, arbitrary maps and unfinished mechanics because
+its job is to let a system be exercised from the chair. Providence will compose those systems into an opening,
+an action language and an attention hierarchy. Trying to make one executable be both has been making sandbox
+affordances carry product-experience responsibilities they were never designed for.
+
+### 0. Performance and the camera envelope come first
+
+The game is presently choppy enough that judgement of movement, fog, interaction and time is contaminated by
+the frame itself. This pass is not “optimise later” housekeeping; it is the prerequisite for being able to tell
+whether every later experience change is good.
+
+Measure distinct cases rather than one average:
+
+- first presentation and map generation, separately from steady state;
+- a still camera, panning, rotating and zooming, because camera motion rebuilds and exposes different work;
+- nearest, normal and furthest useful gameplay views, with fog on and off;
+- day, dusk and night, including hearths, smoke, shadows and the veil; and
+- a quiet settlement against a selected moving group, active construction and later combat.
+
+The output is both a bottleneck account and a **supported camera envelope**. Minimum and maximum zoom are game
+design: too close can make selection and command context unusable; too far makes people subpixel, exposes more
+terrain and foliage than the renderer can sustain, and turns a settlement into an unreadable mark. The existing
+6–118 m limits are prior judgements, not protected facts. Re-measure them against what Providence needs to see.
+
+Do not thin the world or weaken the look before establishing where the time actually goes. Earlier passes have
+already shown tree triangle count, CPU submission, present wait, startup rebuilds and camera-driven ground work
+masquerading as one another. This pass ends with an agreed frame budget on the current machine, stable pacing
+inside the supported view, and instrumentation that distinguishes a steady regression from a startup frame.
+
+**First measured landing, 30 August 2026.** `--perf-run` now seals a frame run from real input, leaves the
+interactive diagnostics panels out of the measurement and keeps the requested timing sink. On the current
+34,374-node wooded Village, the quiet fixed tick had regressed to roughly 8-9.5 ms after warm-up: about 3.6-4.2
+ms of settlement passes rediscovering a few dozen buildings among 34,337 trees, plus roughly 4.2-5.1 ms in the
+defence layer rebuilding guarded resources once per villager when no enemy faction existed. Settlement nodes now have a stable derived
+index, working-hand clearing touches only last tick's work sites, and peace is proved before any guarded-resource
+search. The same run now spends roughly 0.18-0.30 ms on the whole steady tick, commonly 0.03-0.09 ms in economy
+and 0.02-0.04 ms in threat. The full determinism, save/future, economy, construction and threat suite passes.
+
+The first renderer cuts keep the look intact: static nodes are bucketed by the fog grid instead of asking the
+same mask texel tens of thousands of times, and an unchanged camera reuses resolved procedural ground-cover
+placements. At the 118 m stress view, steady command construction fell from roughly 16-29 ms samples to about
+12 ms in the comparable sealed run, with scatter falling from 5-8 ms to effectively zero while still staging
+the same instances. This is a landing, not the end of stage 0. Wide-view pacing is now dominated by the roughly
+4.2 million scene triangles plus the same 2.9 million caster triangles recorded into each of three cascades;
+the next decision is a per-cascade caster partition (which requires genuinely separate instance buffers), then
+the still/pan/rotate/daylight camera matrix and the supported zoom envelope. Do not hide that remaining work by
+calling the simulation win a complete frame-budget pass.
+
+### 1. “Groups” is four linked problems, not merely a formation
+
+Groups were deferred while individual locomotion and basic movement fixtures were being settled. That debt now
+appears in four places at once:
+
+1. **Behaviour:** bodies given one intention need shared direction, coherent transit and an arrival that reads as
+   one action rather than a trail of independent ants.
+2. **Affordance:** the player needs to create, recall, inspect and command a set without repeatedly reconstructing
+   it by marquee selection.
+3. **Organisation:** a persistent crew or military party needs a stable identity that can survive other commands,
+   save/load and changes in membership.
+4. **Performance:** common intent, routing and observation should be computed at group resolution where the answer
+   is genuinely shared, rather than rediscovered per body.
+
+The implementation discussion must keep four related representations distinct:
+
+- a transient selection;
+- the command cohort produced when that selection receives one order;
+- a persistent player-authored group or crew; and
+- a combat formation, which adds spatial roles and can wait until the combat arc needs it.
+
+Collapsing all four into `Group` would make a control group accidentally own locomotion or a work crew
+accidentally become a formation. The first pass should earn the minimum durable representation that solves
+coherent commands, recall and shared computation. Formation geometry, facing and combat ranks remain a later
+consumer, not a prerequisite.
+
+Group acceptance must be experiential as well as mechanical: command-frame latency, shared directional intent,
+cohesion through gates and around terrain, interruption and resumption, loose/blocked arrivals, membership edits
+and persistence. Aggregate simulation timing cannot declare success while the first visible response hangs or
+the cohort moves like unrelated agents.
+
+### 2. The day/night cycle needs a time design, not another colour pass
+
+The day/night cycle originally made Village feel alive. It now makes it feel fast, awkward and confusing. The
+reason is explicit: `WorldCalendar.DaySeconds` is 20 simulated seconds, the sun was resynchronised to that period,
+and the default game compression is 1.5x. A complete visual day therefore passes in about thirteen seconds of
+wall time. The calendar and sky agree, but the player cannot inhabit either.
+
+Re-open the relationship among three clocks:
+
+- the fixed simulation step;
+- the economic calendar that defines crop windows, consumption and seasons; and
+- the perceptual day that moves light through dawn, day, dusk and night.
+
+Changing one constant without naming which clock it belongs to will reproduce the confusion. The pass must
+decide whether a visible solar day is an economic day, a slower presentation cycle over several ration-days, or
+whether the economic calendar itself needs retiming. Whichever survives must keep seasons predictable, give each
+lighting state enough wall time to be experienced, and avoid cycling from noon through night while the player is
+still carrying out one ordinary command. Village remains the tuning ground; Providence receives the settled
+cadence rather than the experiment.
+
+### 3. Providence is the composed vertical slice
+
+Only after the substrate above is comfortable to operate should Providence become its own executable / entry
+point. It reuses the same simulation and rendering systems; it does not fork their rules. What differs is the
+composition:
+
+- a deliberate opening, readable light and an already-resolved founding reveal;
+- one pressure the player can understand before several simultaneous shortages;
+- contextual right-click as the ordinary verb, with a small stable action/build surface and shortcuts behind it;
+- an attention queue expressed as **what needs me, where, and how long until it matters**;
+- group and workplace affordances instead of repeated individual hunting; and
+- diagnostics and tuning controls absent unless the app is explicitly launched in a development mode.
+
+This is where the experience-recovery items from the audit belong. Village should not be polished into an
+onboarding flow and Providence should not inherit the movement test bench's alphabet as its primary interface.
+
+### Revised road forward
+
+0. **Performance and supported camera envelope**, measured in Village.
+1. **Groups**, first as coherent command/recall/shared work, with formations left for their real consumer.
+2. **Day/night and time cadence**, settled across economic and perceptual clocks.
+3. **Providence vertical slice**, as its own entry point with the composed opening, action surface and attention
+   interface.
+4. **Fog with actors:** faction knowledge, memory, allied sharing and last-known information.
+5. **Enemy / strategic AI / soak / combat bot**, using the same construct, gather, haul, group, upgrade and train
+   verbs as the player and giving militia, walls, sight and alarms their payoff.
+6. **Content proper:** more units, buildings, upgrades and map content extending systems whose experience is now
+   known.
+
+This does not discard §76's direction. It protects it: the physical economic chain remains the spine, while the
+new order makes it fast enough to feel, organised enough to command, paced enough to read and finally composed
+as Providence rather than presented as a sandbox proof.

@@ -168,6 +168,8 @@ internal sealed class EconomySystem
     private readonly List<AgentId> idleHaulers = new();
     private readonly HashSet<(NodeId Source, Resource Resource)> claimed = new();
     private readonly HashSet<NodeId> drawnOn = new();
+    private readonly List<NodeId> nodesWithHands = new();
+    private bool handsInitialized;
     private float boardCooldown;
 
     /// <summary>Everything ever produced, consumed, or seeded into the world by hand.</summary>
@@ -198,7 +200,7 @@ internal sealed class EconomySystem
     /// <summary>Haul jobs dropped because the source emptied or the sink filled.</summary>
     public long HaulsAbandoned { get; private set; }
 
-    /// <summary>Standing routes that ran their source dry, which is a route ending as designed.</summary>
+    /// <summary>Standing routes ended because one of their named places disappeared.</summary>
     public long RoutesFinished { get; private set; }
 
     /// <summary>Seconds until the board next looks for work, which two runs have to agree on.</summary>
@@ -238,9 +240,10 @@ internal sealed class EconomySystem
     {
         var best = NodeId.None;
         var bestDistance = float.PositiveInfinity;
-        foreach (ref readonly var node in nodes.All)
+        foreach (var id in nodes.SettlementNodes)
         {
-            if (!node.IsAlive || !node.Stores || node.Faction != faction) continue;
+            ref readonly var node = ref nodes.Get(id);
+            if (!node.Stores || node.Faction != faction) continue;
             if (node.Stock[resource] < units) continue;
             var distance = Vector2.DistanceSquared(node.Position, from);
             if (distance >= bestDistance) continue;
@@ -266,9 +269,10 @@ internal sealed class EconomySystem
     {
         var best = NodeId.None;
         var bestDistance = float.PositiveInfinity;
-        foreach (ref readonly var node in nodes.All)
+        foreach (var id in nodes.SettlementNodes)
         {
-            if (!node.IsAlive || !node.Stores || node.Faction != faction) continue;
+            ref readonly var node = ref nodes.Get(id);
+            if (!node.Stores || node.Faction != faction) continue;
             if (node.RoomFor(resource) <= 0) continue;
             var distance = Vector2.DistanceSquared(node.Position, from);
             if (distance >= bestDistance) continue;
@@ -288,9 +292,10 @@ internal sealed class EconomySystem
     {
         var best = NodeId.None;
         var bestRoom = 0;
-        foreach (ref readonly var node in nodes.All)
+        foreach (var id in nodes.SettlementNodes)
         {
-            if (!node.IsAlive || !node.Stores || node.Id == except || node.Faction != faction) continue;
+            ref readonly var node = ref nodes.Get(id);
+            if (!node.Stores || node.Id == except || node.Faction != faction) continue;
             var room = node.RoomFor(resource);
             if (room <= bestRoom) continue;
             bestRoom = room;
@@ -347,18 +352,20 @@ internal sealed class EconomySystem
         // will the stores last" with a statement about the forest.
         var stored = nodes.TotalHeld()[resource];
         var draw = 0f;
-        foreach (ref readonly var node in nodes.All)
+        foreach (var id in nodes.SettlementNodes)
         {
-            if (!node.IsAlive || !node.IsSink) continue;
+            ref readonly var node = ref nodes.Get(id);
+            if (!node.IsSink) continue;
             draw += EconomyRates.DrawPerSecond(resource, season, node.AppetiteSum);
         }
 
         var produced = 0f;
         if (resource == Resource.Grain)
         {
-            foreach (ref readonly var node in nodes.All)
+            foreach (var id in nodes.SettlementNodes)
             {
-                if (!node.IsAlive || node.Kind != NodeKind.Farm) continue;
+                ref readonly var node = ref nodes.Get(id);
+                if (node.Kind != NodeKind.Farm) continue;
                 // A field's contribution is what it will still yield this year spread over what is left of
                 // it, which is the honest answer to "how long will the stores last": a field standing
                 // unreaped in harvest is income, and the same field in winter is not.
@@ -401,12 +408,13 @@ internal sealed class EconomySystem
         Felled? felled = null)
     {
         var season = date.Season;
+        DeliverBuilderLoads(nodes, agents);
         CountHands(nodes, agents);
         RollCrops(nodes, date.Year);
         // Everything that is produced is produced by labour standing at the thing, now that wood is
         // trees. There is no longer a pass in which a node accrues output on its own.
         WorkSites(nodes, agents, season, deltaSeconds);
-        Raise(nodes, deltaSeconds);
+        Raise(nodes, agents, deltaSeconds);
         BindHomes(nodes, agents, deltaSeconds);
         BindCatchments(nodes, price);
         Consume(nodes, season, deltaSeconds);
@@ -467,19 +475,19 @@ internal sealed class EconomySystem
     {
         var held = nodes.TotalHeld();
         var mouths = 0f;
-        foreach (ref readonly var sink in nodes.All)
+        foreach (var id in nodes.SettlementNodes)
         {
-            if (!sink.IsAlive || !sink.IsSink) continue;
+            ref readonly var sink = ref nodes.Get(id);
+            if (!sink.IsSink) continue;
             mouths += sink.AppetiteSum;
         }
 
         Readiness = Population.Readiness(held.Grain, held.Wood, mouths, season);
 
-        var houses = nodes.MutableSpan();
-        for (var i = 0; i < houses.Length; i++)
+        foreach (var id in nodes.SettlementNodes)
         {
-            ref var house = ref houses[i];
-            if (!house.IsAlive || !house.IsSink) continue;
+            ref var house = ref nodes.Get(id);
+            if (!house.IsSink) continue;
 
             // Privation first, because a house losing people is not a house gaining them, and a household
             // that is starving should not be accruing growth from a settlement-wide readiness figure.
@@ -535,6 +543,18 @@ internal sealed class EconomySystem
     /// <summary>People who left because their household went hungry too long.</summary>
     public long Emigrated { get; private set; }
 
+    /// <summary>Current working hands, read from the small derived set maintained by <see cref="CountHands"/>.</summary>
+    public int HandsAtWork(NodeStore nodes)
+    {
+        var hands = 0;
+        foreach (var id in nodesWithHands)
+        {
+            if (nodes.Contains(id)) hands += nodes.Get(id).Hands;
+        }
+
+        return hands;
+    }
+
     /// <summary>
     /// Counts the pairs of hands standing at each node.
     /// </summary>
@@ -545,15 +565,31 @@ internal sealed class EconomySystem
     /// pulling it away with an order stops production for exactly as long as the order lasts. §2's
     /// identity — labour and attention are substitutes — falls out of that rather than being modelled.
     /// </remarks>
-    private static void CountHands(NodeStore nodes, AgentStore agents)
+    private void CountHands(NodeStore nodes, AgentStore agents)
     {
-        var mutable = nodes.MutableSpan();
-        for (var i = 0; i < mutable.Length; i++) mutable[i].Hands = 0;
+        if (!handsInitialized)
+        {
+            // Hands is derived state and a loaded checkpoint may contain last tick's values. Pay one full
+            // reset when this economy first runs, then touch only nodes that actually had a hand on them.
+            var mutable = nodes.MutableSpan();
+            for (var i = 0; i < mutable.Length; i++) mutable[i].Hands = 0;
+            handsInitialized = true;
+        }
+        else
+        {
+            foreach (var id in nodesWithHands)
+            {
+                if (nodes.Contains(id)) nodes.Get(id).Hands = 0;
+            }
+        }
+
+        nodesWithHands.Clear();
 
         foreach (ref readonly var agent in agents.All)
         {
             if (!agent.IsAlive) continue;
-            if (agent.Jobs.Assignment.Kind is not (AssignmentKind.Hold or AssignmentKind.Work)) continue;
+            if (agent.Jobs.Assignment.Kind is not
+                (AssignmentKind.Hold or AssignmentKind.Work or AssignmentKind.Build)) continue;
             if (agent.Jobs.Activity == ActivityKind.None || agent.Jobs.IsInterrupted) continue;
             // <b>The site this body was assigned to, and then whether it is actually standing there.</b>
             // Both halves matter. A hauler unloading in a farmyard is emphatically not a farmhand, which
@@ -566,13 +602,49 @@ internal sealed class EconomySystem
             // array is thirty-odd megabytes of streaming per tick, and the settlement gate went from a
             // fifth of a millisecond a tick to one and three quarters the moment the forest got dense.
             // Asking the assignment is O(1) and is also the sharper question.
-            var site = agent.Jobs.Assignment.Source;
+            var site = agent.Jobs.Assignment.Kind == AssignmentKind.Build
+                ? agent.Jobs.Project
+                : agent.Jobs.Assignment.Source;
+            if (agent.Jobs.Assignment.Kind == AssignmentKind.Build && agent.Jobs.Leg % 2 == 0) continue;
             if (!nodes.Contains(site)) continue;
             ref var node = ref nodes.Get(site);
             // A field and a tree both count, because both are places labour is spent at. A store is not:
             // a cutter putting a load down in a granary is not employed by the granary.
             if (!node.IsWorkSite) continue;
-            if (IsStandingAt(in node, in agent)) node.Hands++;
+            if (!IsStandingAt(in node, in agent)) continue;
+            if (node.Hands == 0) nodesWithHands.Add(node.Id);
+            node.Hands++;
+        }
+    }
+
+    /// <summary>Moves a builder's arrived load from its hands onto the project before labour is counted.</summary>
+    /// <remarks>
+    /// Jobs report a leg after its dwell, which is right for a four-second handover and wrong for a builder
+    /// arriving to begin a work shift: the material must be on the site before that shift can consume it.
+    /// This is therefore an arrival transfer, detected by the same exact at-place predicate that counts the
+    /// body as a hand. What no longer fits stays on the body and is returned during cleanup.
+    /// </remarks>
+    private static void DeliverBuilderLoads(NodeStore nodes, AgentStore agents)
+    {
+        var bodies = agents.MutableSpan();
+        for (var i = 0; i < bodies.Length; i++)
+        {
+            ref var body = ref bodies[i];
+            if (!body.IsAlive || body.Jobs.Assignment.Kind != AssignmentKind.Build) continue;
+            if (body.Jobs.IsInterrupted || body.Jobs.Leg % 2 == 0 || body.Jobs.Activity == ActivityKind.None)
+            {
+                continue;
+            }
+
+            var siteId = body.Jobs.Project;
+            if (!nodes.Contains(siteId) || !nodes.Get(siteId).HasStructuralProject) continue;
+            if (!JobSystem.IsWorking(in body) || body.Jobs.CarriedUnits <= 0) continue;
+
+            ref var site = ref nodes.Get(siteId);
+            var delivered = Math.Min(body.Jobs.CarriedUnits, site.Wanted(body.Jobs.Carrying));
+            if (delivered <= 0) continue;
+            site.Stock.Add(body.Jobs.Carrying, delivered);
+            body.Jobs.CarriedUnits -= delivered;
         }
     }
 
@@ -608,11 +680,10 @@ internal sealed class EconomySystem
         // had already worked the current year, never reset, and the second harvest reaped a crop the first
         // one had already taken. Two years of production came to exactly one year's worth, which is the
         // kind of number that gives itself away.
-        var fields = nodes.MutableSpan();
-        for (var i = 0; i < fields.Length; i++)
+        foreach (var id in nodes.SettlementNodes)
         {
-            ref var field = ref fields[i];
-            if (!field.IsAlive || field.Kind != NodeKind.Farm) continue;
+            ref var field = ref nodes.Get(id);
+            if (field.Kind != NodeKind.Farm) continue;
             if (field.CycleYear == year) continue;
             field.CycleYear = year;
             field.PrepareWork = 0f;
@@ -711,51 +782,91 @@ internal sealed class EconomySystem
     }
 
     /// <summary>
-    /// Puts up the buildings that have their timber and somebody standing at them.
+    /// Advances construction, repair and upgrades as delivered material permits the hands to proceed.
     /// </summary>
     /// <remarks>
     /// Per site from the hands at it, rather than per body like a crop: a building has no output, so there
     /// is nothing to attribute to whoever did the work and four builders are simply four times the work.
     /// <para>
-    /// The timber is <b>consumed on completion</b> and not before, which is one decision worth stating.
-    /// Spending it gradually would be more physical and would mean a half-built house had half its timber
-    /// in it and half of it gone — and then abandoning a site would have destroyed material, so there would
-    /// have to be a rule about salvage. Consuming it at the end means an unfinished site is simply timber
-    /// standing on the ground where somebody left it, which is what conservation already knows how to
-    /// describe and what a player would expect if they knocked the site down.
+    /// Every material is consumed in proportion to progress. The least-covered ingredient is the front the
+    /// work cannot cross: thirty timber at a granary permits one eighteenth of its labour only after some
+    /// stone has arrived too. Unconsumed stock remains physical at the site and can be carried away; consumed
+    /// stock has become the building and is never refunded.
     /// </para>
     /// </remarks>
-    private void Raise(NodeStore nodes, float deltaSeconds)
+    private void Raise(NodeStore nodes, AgentStore agents, float deltaSeconds)
     {
         var consumed = Consumed;
-        var sites = nodes.MutableSpan();
-        for (var i = 0; i < sites.Length; i++)
+        foreach (var id in nodes.SettlementNodes)
         {
-            ref var site = ref sites[i];
-            if (!site.IsAlive || site.IsBuilt) continue;
-            // Materials first: hands standing at a site with no timber are hands doing nothing, which is
-            // the difference between a hauling problem and a labour problem and the report says which.
-            if (site.WantsMaterials || site.Hands <= 0) continue;
+            ref var site = ref nodes.Get(id);
+            if (!site.HasStructuralProject) continue;
+            if (site.Hands <= 0) continue;
 
-            site.BuildWork += site.Hands * deltaSeconds;
-            if (!site.IsBuilt) continue;
-
-            // Finished. Every material stops being material, so it leaves the world through the same door a
-            // loaf does and the identity still closes — all of them, because consuming only the timber would
-            // have left the stone sitting in a finished building as stock nobody can reach and conservation
-            // would have been right about it forever.
-            var cost = Construction.CostFor(site.Kind);
+            var construction = site.IsUnderConstruction;
+            var cost = StructuralProjects.CostFor(in site);
+            var labour = StructuralProjects.LabourFor(in site);
+            if (labour <= 0f) continue;
+            var materialLimit = labour;
             foreach (var resource in Resources.All)
             {
-                if (cost[resource] <= 0) continue;
-                site.Stock.Add(resource, -cost[resource]);
-                consumed.Add(resource, cost[resource]);
+                var required = cost[resource];
+                if (required <= 0) continue;
+                var available = StructuralProjects.ConsumedFor(in site, resource) + site.Stock[resource];
+                materialLimit = MathF.Min(materialLimit, labour * available / required);
             }
-            site.BuildWork = Construction.LabourFor(site.Kind);
-            Raised++;
+
+            var attempted = MathF.Min(
+                labour,
+                StructuralProjects.WorkFor(in site) + site.Hands * deltaSeconds);
+            var advanced = MathF.Min(attempted, materialLimit);
+
+            // Cross whole-unit thresholds as the work crosses them. At completion take the exact recipe,
+            // avoiding a floating-point value one ulp below the final threshold leaving one unit unspent.
+            foreach (var resource in Resources.All)
+            {
+                var required = cost[resource];
+                if (required <= 0) continue;
+                var shouldBeConsumed = advanced >= labour
+                    ? required
+                    : Math.Min(required, (int)MathF.Floor(required * advanced / labour + 0.0001f));
+                var newlyConsumed = shouldBeConsumed - StructuralProjects.ConsumedFor(in site, resource);
+                if (newlyConsumed <= 0) continue;
+                newlyConsumed = Math.Min(newlyConsumed, site.Stock[resource]);
+                site.Stock.Add(resource, -newlyConsumed);
+                StructuralProjects.AddConsumed(ref site, resource, newlyConsumed);
+                consumed.Add(resource, newlyConsumed);
+            }
+
+            // Written after material so construction's final tick is still unmistakably construction while
+            // its incorporated ledger is chosen. Setting BuildWork to the labour target makes IsBuilt true;
+            // doing that first would route the last units into the repair/upgrade ledger instead.
+            StructuralProjects.SetWork(ref site, advanced);
+            StructuralProjects.ApplyProgress(ref site, advanced, labour);
+
+            var blockedByMaterial = advanced + 0.0001f < attempted;
+            if (blockedByMaterial || advanced >= labour)
+            {
+                EndBuilderShifts(agents, site.Id);
+            }
+
+            if (advanced >= labour && StructuralProjects.Complete(ref site, construction)) Raised++;
         }
 
         Consumed = consumed;
+    }
+
+    /// <summary>Sends builders back through their decision seam when a material front or completion is met.</summary>
+    private static void EndBuilderShifts(AgentStore agents, NodeId site)
+    {
+        var bodies = agents.MutableSpan();
+        for (var i = 0; i < bodies.Length; i++)
+        {
+            ref var body = ref bodies[i];
+            if (!body.IsAlive || body.Jobs.Assignment.Kind != AssignmentKind.Build) continue;
+            if (body.Jobs.Project != site || body.Jobs.Leg % 2 == 0) continue;
+            JobSystem.EndShift(ref body);
+        }
     }
 
     /// <summary>Buildings finished since the world began.</summary>
@@ -820,12 +931,12 @@ internal sealed class EconomySystem
     /// </remarks>
     private static void BindHomes(NodeStore nodes, AgentStore agents, float deltaSeconds)
     {
-        var houses = nodes.MutableSpan();
-        for (var i = 0; i < houses.Length; i++)
+        foreach (var id in nodes.SettlementNodes)
         {
-            if (!houses[i].IsSink) continue;
-            houses[i].Occupants = 0;
-            houses[i].AppetiteSum = 0f;
+            ref var house = ref nodes.Get(id);
+            if (!house.IsSink) continue;
+            house.Occupants = 0;
+            house.AppetiteSum = 0f;
         }
 
 
@@ -849,9 +960,10 @@ internal sealed class EconomySystem
             agent.Home.Revision = nodes.Revision;
             agent.Home.House = NodeId.None;
             var nearest = float.PositiveInfinity;
-            foreach (ref readonly var house in nodes.All)
+            foreach (var id in nodes.SettlementNodes)
             {
-                if (!house.IsAlive || !house.IsSink || house.Faction != agent.Faction) continue;
+                ref readonly var house = ref nodes.Get(id);
+                if (!house.IsSink || house.Faction != agent.Faction) continue;
                 if (house.Housing <= 0) continue;
                 var distance = Vector2.DistanceSquared(house.Position, agent.Position);
                 if (distance >= nearest) continue;
@@ -866,9 +978,10 @@ internal sealed class EconomySystem
         // and there is no household. Without this it keeps whatever it had when the last occupant left,
         // and the next person to move in inherits a full measure of somebody else's famine and walks
         // straight back out again.
-        for (var i = 0; i < houses.Length; i++)
+        foreach (var id in nodes.SettlementNodes)
         {
-            if (houses[i].IsSink && houses[i].Occupants == 0) houses[i].Privation = 0f;
+            ref var house = ref nodes.Get(id);
+            if (house.IsSink && house.Occupants == 0) house.Privation = 0f;
         }
     }
 
@@ -895,11 +1008,10 @@ internal sealed class EconomySystem
     /// </remarks>
     private static void BindCatchments(NodeStore nodes, TravelPrice price)
     {
-        var sinks = nodes.MutableSpan();
-        for (var i = 0; i < sinks.Length; i++)
+        foreach (var id in nodes.SettlementNodes)
         {
-            ref var sink = ref sinks[i];
-            if (!sink.IsAlive || !sink.IsSink) continue;
+            ref var sink = ref nodes.Get(id);
+            if (!sink.IsSink) continue;
             var bound = sink.Supply.IsValid && nodes.Contains(sink.Supply);
             if (bound && sink.SupplyRevision == nodes.Revision) continue;
 
@@ -907,9 +1019,10 @@ internal sealed class EconomySystem
             sink.Supply = NodeId.None;
             sink.SupplySeconds = 0f;
             var best = float.PositiveInfinity;
-            foreach (ref readonly var store in nodes.All)
+            foreach (var storeId in nodes.SettlementNodes)
             {
-                if (!store.IsAlive || !store.OwnsCatchment || store.Faction != sink.Faction) continue;
+                ref readonly var store = ref nodes.Get(storeId);
+                if (!store.OwnsCatchment || store.Faction != sink.Faction) continue;
                 if (!price(sink.Position, store.Position, HaulerNavigationRadius, out var seconds))
                 {
                     continue;
@@ -950,11 +1063,10 @@ internal sealed class EconomySystem
     {
         var consumed = Consumed;
         var unmet = Unmet;
-        var sinks = nodes.MutableSpan();
-        for (var i = 0; i < sinks.Length; i++)
+        foreach (var id in nodes.SettlementNodes)
         {
-            ref var sink = ref sinks[i];
-            if (!sink.IsAlive || !sink.IsSink || sink.Occupants <= 0) continue;
+            ref var sink = ref nodes.Get(id);
+            if (!sink.IsSink || sink.Occupants <= 0) continue;
             var wentWithout = false;
             foreach (var resource in Resources.All)
             {
@@ -1013,17 +1125,27 @@ internal sealed class EconomySystem
     {
         ReleaseStaleHauls(nodes, agents);
         MarkStoresSomebodyEatsFrom(nodes);
-        CollectTasks(nodes, (int)(SmallestCapacity(agents) * WorthFetchingShare));
+        CollectTasks(nodes, agents, (int)(SmallestCapacity(agents) * WorthFetchingShare));
         if (tasks.Count == 0) return;
 
         idleHaulers.Clear();
         claimed.Clear();
         foreach (ref readonly var agent in agents.All)
         {
+            if (!agent.IsAlive) continue;
+            if (agent.Jobs.Assignment.Kind is AssignmentKind.Build or AssignmentKind.Train &&
+                agent.Jobs.ReservedUnits > 0)
+            {
+                // A builder's promised sack is as physical a claim on a yard as a cart dispatched there.
+                // The board may still serve a different resource or source, but it must not sell the same
+                // final units twice merely because the player assigned the first carrier directly.
+                claimed.Add((agent.Jobs.Assignment.Source, agent.Jobs.Assignment.Cargo));
+            }
+
             // Only bodies that actually have a cart. Every villager has a carry capacity now — a reaper
             // walks its own crop in — so capacity is no longer what makes somebody a hauler, and reading
             // it as one would have put the board's stranded-stock journeys on farmhands.
-            if (!agent.IsAlive || !agent.HasCart) continue;
+            if (!agent.HasCart) continue;
             // A yard already being collected from is not offered to a second cart. The alternative is
             // reserving units, which is more bookkeeping for the same effect: without either, two carts
             // are sent for the same grain and one of them arrives to an empty yard, which is what half
@@ -1033,7 +1155,19 @@ internal sealed class EconomySystem
                 // A standing route counts as a claim on its source too: two carters sent for the same
                 // stock is the same waste whoever sent them, and the player's route is the one the board
                 // should defer to.
-                claimed.Add((agent.Jobs.Assignment.Source, agent.Jobs.Assignment.Cargo));
+                if (agent.Jobs.Assignment.Kind == AssignmentKind.Carry)
+                {
+                    // A player route can choose a different useful cargo on its next collection leg, so it
+                    // owns the source rather than only the load it happens to be carrying now.
+                    foreach (var resource in Resources.All)
+                    {
+                        claimed.Add((agent.Jobs.Assignment.Source, resource));
+                    }
+                }
+                else
+                {
+                    claimed.Add((agent.Jobs.Assignment.Source, agent.Jobs.Assignment.Cargo));
+                }
                 continue;
             }
 
@@ -1282,9 +1416,10 @@ internal sealed class EconomySystem
         var bestStore = NodeId.None;
         var bestTree = NodeId.None;
         var bestDistance = float.PositiveInfinity;
-        foreach (ref readonly var store in nodes.All)
+        foreach (var id in nodes.SettlementNodes)
         {
-            if (!store.IsAlive || !store.Stores || store.Faction != faction) continue;
+            ref readonly var store = ref nodes.Get(id);
+            if (!store.Stores || store.Faction != faction) continue;
             if (store.RoomFor(resource) <= 0) continue;
             var tree = NearestDeposit(nodes, agents, store.Position, resource, reachMetres, self, reachable);
             if (!tree.IsValid) continue;
@@ -1298,7 +1433,7 @@ internal sealed class EconomySystem
         return (bestStore, bestTree);
     }
 
-    /// <summary>Drops a haul whose source has emptied or whose sink has filled.</summary>
+    /// <summary>Drops a board haul that is no longer useful, or any cargo run with a lost endpoint.</summary>
     private void ReleaseStaleHauls(NodeStore nodes, AgentStore agents)
     {
         var bodies = agents.MutableSpan();
@@ -1312,23 +1447,21 @@ internal sealed class EconomySystem
 
             var assignment = agent.Jobs.Assignment;
             var stale = !nodes.Contains(assignment.Source) || !nodes.Contains(assignment.Sink);
-            if (!stale)
+            // A board haul names one trip and one commodity, so an empty source or full sink makes that
+            // priced trip stale. A player route names a standing relationship between two places: it
+            // waits through an empty source or absent demand and chooses its next useful cargo when more
+            // stock arrives. Only losing an endpoint ends that arrangement.
+            if (!stale && assignment.Kind == AssignmentKind.Haul)
             {
                 ref readonly var source = ref nodes.Get(assignment.Source);
                 ref readonly var sink = ref nodes.Get(assignment.Sink);
                 stale = source.Stock[assignment.Cargo] <= 0 || sink.RoomFor(assignment.Cargo) <= 0;
-                // A finished building has no room for timber, which is correct and would otherwise strand
-                // a cart mid-journey holding materials for a wall that no longer needs them. It is not
-                // stale — it is a delivery that should be redirected — and Handover already does that when
-                // the load arrives and will not fit.
-                if (stale && sink.IsBuilt && assignment.Cargo == Resource.Wood) stale = false;
             }
 
             if (!stale) continue;
-            // A route that has run dry is not an abandoned haul, it is a job finished — "they keep hauling
-            // till the source exhausts" is the route ending on its own terms, and counting it as a
-            // failure would make the abandoned column meaningless. The cart stays: a carter between
-            // routes is a carter, and the board will find it stranded stock or a heap to fetch.
+            // A player route reaches this point only if one of its named places disappeared. That is not
+            // a failed board auction, and the cart stays: this body is still a carter and may be given a
+            // new route without paying for another cart.
             if (agent.Jobs.Assignment.Kind == AssignmentKind.Carry) RoutesFinished++;
             else HaulsAbandoned++;
             JobSystem.Assign(ref agent, Assignment.None);
@@ -1348,9 +1481,10 @@ internal sealed class EconomySystem
     private void MarkStoresSomebodyEatsFrom(NodeStore nodes)
     {
         drawnOn.Clear();
-        foreach (ref readonly var sink in nodes.All)
+        foreach (var id in nodes.SettlementNodes)
         {
-            if (!sink.IsAlive || !sink.IsSink || sink.Occupants <= 0) continue;
+            ref readonly var sink = ref nodes.Get(id);
+            if (!sink.IsSink || sink.Occupants <= 0) continue;
             if (sink.Supply.IsValid) drawnOn.Add(sink.Supply);
         }
     }
@@ -1381,17 +1515,18 @@ internal sealed class EconomySystem
     /// question is not how full a store is. It is whether anybody can reach what is in it.
     /// </para>
     /// </remarks>
-    private void CollectTasks(NodeStore nodes, int worthLoad)
+    private void CollectTasks(NodeStore nodes, AgentStore agents, int worthLoad)
     {
         tasks.Clear();
-        foreach (ref readonly var source in nodes.All)
+        foreach (var sourceId in nodes.SettlementNodes)
         {
+            ref readonly var source = ref nodes.Get(sourceId);
             // A tree is not a delivery. Standing timber is released by an axe, not collected by a cart,
             // and a woodland is two orders of magnitude more numerous than the buildings — so it is
             // skipped first, before the per-resource sweep, rather than falling through every test.
-            if (!source.IsAlive || source.IsNaturalDeposit) continue;
+            if (source.IsNaturalDeposit) continue;
             // Nor is a site a source. It is holding timber that is about to become a wall.
-            if (source.IsUnderConstruction) continue;
+            if (source.HasStructuralProject) continue;
             var stranded = source.Stores && !drawnOn.Contains(source.Id);
             foreach (var resource in Resources.All)
             {
@@ -1412,9 +1547,10 @@ internal sealed class EconomySystem
 
                 var bestSink = NodeId.None;
                 var bestNeed = 0f;
-                foreach (ref readonly var sink in nodes.All)
+                foreach (var sinkId in nodes.SettlementNodes)
                 {
-                    if (!sink.IsAlive || !sink.Stores || sink.Id == source.Id) continue;
+                    ref readonly var sink = ref nodes.Get(sinkId);
+                    if (!sink.Stores || sink.Id == source.Id) continue;
                     // A heap belongs to nobody, so anybody's store is a valid destination for it. That
                     // one relaxation is the whole of looting: an enemy's dropped grain is collected by
                     // the same board, priced the same way, with no rule about theft anywhere.
@@ -1453,11 +1589,11 @@ internal sealed class EconomySystem
             }
         }
 
-        CollectSiteDemand(nodes, worthLoad);
+        CollectSiteDemand(nodes, agents, worthLoad);
     }
 
     /// <summary>
-    /// Timber wanted at building sites, which is the one task the board reads backwards.
+    /// Material wanted at building sites, which is the one task the board reads backwards.
     /// </summary>
     /// <remarks>
     /// Every other journey on the board starts from goods in the wrong place and looks for somewhere better
@@ -1467,23 +1603,24 @@ internal sealed class EconomySystem
     /// hands standing at a site with no materials are hands doing nothing at all, which is worse than any
     /// amount of stock sitting still.
     /// <para>
-    /// This is also the thing that makes a cart necessary rather than merely useful. A settlement with no
-    /// carter cannot get timber to a site, and a cart costs timber — so the first cart comes out of the
-    /// founding stores, and after that the hauling network is what lets the settlement build at all.
+    /// Builders can answer this demand themselves one carried load at a time. Carts answer the same demand
+    /// in larger loads and remain the settlement's distance multiplier; both paths share incoming claims so
+    /// they do not reserve the same missing material twice.
     /// </para>
     /// </remarks>
-    private void CollectSiteDemand(NodeStore nodes, int worthLoad)
+    private void CollectSiteDemand(NodeStore nodes, AgentStore agents, int worthLoad)
     {
-        foreach (ref readonly var site in nodes.All)
+        foreach (var id in nodes.SettlementNodes)
         {
-            if (!site.IsAlive || !site.WantsMaterials) continue;
+            ref readonly var site = ref nodes.Get(id);
+            if (!site.WantsMaterials) continue;
             // <b>One task per material still owed, not one for timber.</b> A granary needs stone as well now,
             // and a board that only ever offered wood would leave a site standing at "wants 8 stone" forever
             // with hands beside it and no cart coming — the exact failure this whole layer exists to prevent,
             // reproduced for the new material.
             foreach (var resource in Resources.All)
             {
-                var owed = site.Wanted(resource);
+                var owed = site.Wanted(resource) - IncomingToSite(nodes, agents, site.Id, resource);
                 if (owed <= 0) continue;
                 var from = NearestStoreWith(
                     nodes,
@@ -1497,6 +1634,43 @@ internal sealed class EconomySystem
                 tasks.Add(new HaulTask(from, site.Id, resource, 2.5f));
             }
         }
+    }
+
+    /// <summary>Units already promised to a site by builders, board hauls or standing routes.</summary>
+    private static int IncomingToSite(
+        NodeStore nodes,
+        AgentStore agents,
+        NodeId site,
+        Resource resource)
+    {
+        var incoming = 0;
+        foreach (ref readonly var body in agents.All)
+        {
+            if (!body.IsAlive) continue;
+            if (body.Jobs.Assignment.Kind == AssignmentKind.Build && body.Jobs.Project == site)
+            {
+                incoming += body.Jobs.CarriedUnits > 0 && body.Jobs.Carrying == resource
+                    ? body.Jobs.CarriedUnits
+                    : body.Jobs.Assignment.Cargo == resource ? body.Jobs.ReservedUnits : 0;
+                continue;
+            }
+
+            if (!body.Jobs.Assignment.MovesCargo || body.Jobs.Assignment.Sink != site ||
+                body.Jobs.Assignment.Cargo != resource)
+            {
+                continue;
+            }
+
+            incoming += body.Jobs.CarriedUnits > 0
+                ? body.Jobs.CarriedUnits
+                : Math.Min(
+                    body.CarryCapacity,
+                    nodes.Contains(body.Jobs.Assignment.Source)
+                        ? nodes.Get(body.Jobs.Assignment.Source).Stock[resource]
+                        : 0);
+        }
+
+        return incoming;
     }
 
     /// <summary>
@@ -1545,6 +1719,9 @@ internal sealed class EconomySystem
         writer.Float(boardCooldown);
         writer.Long(HaulsAssigned);
         writer.Long(HaulsAbandoned);
+        writer.Long(Born);
+        writer.Long(Emigrated);
+        writer.Long(Raised);
         foreach (var resource in Resources.All)
         {
             writer.Long(Produced[resource]);
@@ -1556,9 +1733,14 @@ internal sealed class EconomySystem
 
     internal void Read(WorldReader reader)
     {
+        nodesWithHands.Clear();
+        handsInitialized = false;
         boardCooldown = reader.Float();
         HaulsAssigned = reader.Long();
         HaulsAbandoned = reader.Long();
+        Born = reader.Long();
+        Emigrated = reader.Long();
+        Raised = reader.Long();
         var produced = default(ResourceTotals);
         var consumed = default(ResourceTotals);
         var seeded = default(ResourceTotals);

@@ -334,10 +334,29 @@ public static class Program
             : (Simulation.Terrain.Archetype?)null;
         var labSeed = Value(args, "--mapseed") is { } ms ? uint.Parse(ms) : (uint?)null;
         var debugAll = args.Contains("--debug-all");
+        // A frame run used to keep accepting the real mouse and keyboard. That made a recorded wide-view
+        // sample depend on where the pointer happened to be and on whether somebody touched the wheel while
+        // it ran. --perf-run is the sealed version: timings are on, the panel is not rendered, and the game
+        // ignores live input until the requested frame count closes it.
+        var performanceRun = args.Contains("--perf-run");
+        var performanceCamera = Value(args, "--perf-camera") is { } cameraMotion
+            ? Enum.Parse<PerformanceCameraMotion>(cameraMotion, ignoreCase: true)
+            : PerformanceCameraMotion.Still;
+        var performanceHour = Value(args, "--perf-hour") is { } hour ? float.Parse(hour) : -1f;
+        if (performanceHour is < -1f or > 24f)
+        {
+            throw new ArgumentOutOfRangeException("--perf-hour", performanceHour, "Hour must be between 0 and 24.");
+        }
+        if (performanceRun)
+        {
+            Console.WriteLine(
+                $"  performance fixture: camera {performanceCamera.ToString().ToLowerInvariant()}, " +
+                $"light {(performanceHour >= 0f ? $"{performanceHour:F1}:00" : "live")}");
+        }
         // <b>Timings without the overlays.</b> --debug-all turns on the collider overlay too, which draws a
         // disc per body and per tree — 17 ms of it with five thousand trees in view — so a frame measured
         // that way is measuring the instrument. This asks for the numbers and nothing else.
-        var timingsOnly = args.Contains("--timings");
+        var timingsOnly = args.Contains("--timings") || performanceRun;
         var extent = Value(args, "--extent") is { } raw
             ? float.Parse(raw)
             : RtsGameLoop.DefaultWorldExtentMeters;
@@ -370,7 +389,10 @@ public static class Program
             rollEvery,
             args.Contains("--treeprofile"),
             args.Contains("--fog"),
-            args.Contains("--fogcells"));
+            args.Contains("--fogcells"),
+            performanceRun,
+            performanceCamera,
+            performanceHour);
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
     }

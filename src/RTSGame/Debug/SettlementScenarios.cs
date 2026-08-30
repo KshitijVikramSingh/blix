@@ -2348,7 +2348,7 @@ internal static class SettlementScenarios
         Console.WriteLine(
             $"  hauling: {carts} carts built, {economy.HaulsAssigned:N0} board jobs given out, " +
             $"{economy.HaulsAbandoned:N0} dropped when the source emptied or the sink filled, " +
-            $"{economy.RoutesFinished:N0} standing routes run dry");
+            $"{economy.RoutesFinished:N0} standing routes lost an endpoint");
         // <b>Why no wood was cut, said out loud, because the number alone reads as a bug.</b> A year that
         // produces nothing and goes short seventeen hundred looks like a broken economy, and this one is a
         // working economy in a state it has never been in: no store has a tree inside a cutter's reach, so

@@ -88,7 +88,14 @@ public sealed class PropModel : IDisposable
     /// cast" — which is a fair question and not the one being asked when you are trying to find out whether
     /// the cull worked.
     /// </remarks>
-    public int CasterInstanceCount => casters.Length == 0 ? 0 : casters[0].Instances.Count;
+    public int CasterInstanceCount
+    {
+        get
+        {
+            var source = casters.Length > 0 ? casters[0] : parts.FirstOrDefault(part => part.Casters.Length > 0);
+            return source?.CasterInstances.Sum(instances => instances.Count) ?? 0;
+        }
+    }
 
     // Build from a set of (mesh, tint) parts — one per material of the source asset.
     //
@@ -113,7 +120,8 @@ public sealed class PropModel : IDisposable
         ShaderProgramHandle? casterShader = null,
         PipelineHandle? casterPipeline = null,
         Matrix4x4? bake = null,
-        IEnumerable<MeshData>? casterParts = null)
+        IEnumerable<MeshData>? casterParts = null,
+        int casterPassCount = 1)
     {
         ArgumentNullException.ThrowIfNull(device);
         ArgumentNullException.ThrowIfNull(parts);
@@ -123,6 +131,11 @@ public sealed class PropModel : IDisposable
                 "A shadow caster needs both a shader and a pipeline: the instance buffer's material is " +
                 "created against the shader, and the draw is recorded against the pipeline.",
                 nameof(casterPipeline));
+        }
+        if (casterPassCount is < 1 or > 30)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(casterPassCount), casterPassCount, "A prop needs between one and thirty caster passes.");
         }
 
         var built = new List<Part>();
@@ -156,8 +169,7 @@ public sealed class PropModel : IDisposable
             };
             if (substitutes is null && casterShader is { } cs && casterPipeline is { } cp)
             {
-                part.CasterBuffer = new InstanceBuffer(device, cs, $"{name}.{index}.caster");
-                part.Caster = new InstancedBatch(uploaded, cp, part.CasterBuffer);
+                part.CreateCasters(device, uploaded, cs, cp, $"{name}.{index}.caster", casterPassCount);
             }
 
             built.Add(part);
@@ -179,12 +191,10 @@ public sealed class PropModel : IDisposable
                     : source;
                 if (mesh.IndexCount == 0) continue;
                 casterTriangles += mesh.IndexCount / 3;
-                var buffer = new InstanceBuffer(device, shader, $"{name}.{slot}.caster");
-                casters.Add(new Part
-                {
-                    CasterBuffer = buffer,
-                    Caster = new InstancedBatch(Upload(device, mesh), pipeline, buffer),
-                });
+                var part = new Part();
+                part.CreateCasters(
+                    device, Upload(device, mesh), shader, pipeline, $"{name}.{slot}.caster", casterPassCount);
+                casters.Add(part);
                 slot++;
             }
         }
@@ -201,16 +211,28 @@ public sealed class PropModel : IDisposable
     // Drop every copy staged last frame. Call once, before the frame's Adds.
     public void Begin()
     {
-        foreach (var part in parts) part.Instances.Clear();
-        foreach (var part in casters) part.Instances.Clear();
+        foreach (var part in parts) part.Clear();
+        foreach (var part in casters) part.Clear();
     }
 
     // Place one copy. The transform is whatever the caller's shader expects to multiply
     // a vertex by — this class never reads it.
     public void Add(Matrix4x4 model)
     {
-        foreach (var part in parts) part.Instances.Add(new InstanceData(model, part.Tint));
-        foreach (var part in casters) part.Instances.Add(new InstanceData(model, part.Tint));
+        Add(model, int.MaxValue);
+    }
+
+    /// <summary>
+    /// Places one copy and casts it only into the passes selected by <paramref name="casterMask"/>.
+    /// </summary>
+    /// <remarks>
+    /// A distinct list and GPU buffer belong to every pass. Sharing the buffer is subtly incorrect: writes
+    /// target the current frame slot, so every recorded draw would otherwise see the final subset uploaded.
+    /// </remarks>
+    public void Add(Matrix4x4 model, int casterMask)
+    {
+        foreach (var part in parts) part.Add(new InstanceData(model, part.Tint), casterMask, scene: true);
+        foreach (var part in casters) part.Add(new InstanceData(model, part.Tint), casterMask, scene: false);
     }
 
     /// <summary>
@@ -235,8 +257,13 @@ public sealed class PropModel : IDisposable
     // a highlight, or a ghost — the cases where the asset's own palette is not wanted.
     public void Add(Matrix4x4 model, Vector4 tint)
     {
-        foreach (var part in parts) part.Instances.Add(new InstanceData(model, tint));
-        foreach (var part in casters) part.Instances.Add(new InstanceData(model, tint));
+        Add(model, tint, int.MaxValue);
+    }
+
+    public void Add(Matrix4x4 model, Vector4 tint, int casterMask)
+    {
+        foreach (var part in parts) part.Add(new InstanceData(model, tint), casterMask, scene: true);
+        foreach (var part in casters) part.Add(new InstanceData(model, tint), casterMask, scene: false);
     }
 
     // Hand this frame's instances and push payloads to the batches. Split from the draws
@@ -249,17 +276,31 @@ public sealed class PropModel : IDisposable
             var instances = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances);
             part.Scene!.Begin(scenePush);
             part.Scene.SetInstances(instances);
-            if (part.Caster is null) continue;
-            part.Caster.Begin(shadowPush);
-            part.Caster.SetInstances(instances);
+            if (part.Casters.Length == 0) continue;
+            part.Casters[0].Begin(shadowPush);
+            part.Casters[0].SetInstances(
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.CasterInstances[0]));
         }
 
         foreach (var part in casters)
         {
-            var instances = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances);
-            part.Caster!.Begin(shadowPush);
-            part.Caster.SetInstances(instances);
+            var instances = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.CasterInstances[0]);
+            part.Casters[0].Begin(shadowPush);
+            part.Casters[0].SetInstances(instances);
         }
+    }
+
+    /// <summary>Stages distinct caster storage for every shadow pass.</summary>
+    public void StageCascades(ReadOnlySpan<byte> scenePush, IReadOnlyList<byte[]> shadowPushes)
+    {
+        foreach (var part in parts)
+        {
+            part.Scene!.Begin(scenePush);
+            part.Scene.SetInstances(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances));
+            StageCasters(part, shadowPushes);
+        }
+
+        foreach (var part in casters) StageCasters(part, shadowPushes);
     }
 
     public void DrawScene(RenderPassBuilder pass, IReadOnlyList<ShaderTextureBinding>? textures = null)
@@ -269,8 +310,17 @@ public sealed class PropModel : IDisposable
 
     public void DrawShadow(RenderPassBuilder pass)
     {
-        foreach (var part in parts) part.Caster?.End(pass);
-        foreach (var part in casters) part.Caster!.End(pass);
+        DrawShadow(pass, 0);
+    }
+
+    /// <summary>Closes the already-staged caster batch for one shadow pass.</summary>
+    public void DrawShadow(RenderPassBuilder pass, int casterPass)
+    {
+        foreach (var part in parts)
+        {
+            if (casterPass < part.Casters.Length) part.Casters[casterPass].End(pass);
+        }
+        foreach (var part in casters) part.Casters[casterPass].End(pass);
     }
 
     /// <summary>
@@ -290,19 +340,19 @@ public sealed class PropModel : IDisposable
     {
         foreach (var part in parts)
         {
-            if (part.Caster is null) continue;
-            part.Caster.Begin(shadowPush);
-            part.Caster.SetInstances(
-                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances));
-            part.Caster.End(pass);
+            if (part.Casters.Length == 0) continue;
+            part.Casters[0].Begin(shadowPush);
+            part.Casters[0].SetInstances(
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.CasterInstances[0]));
+            part.Casters[0].End(pass);
         }
 
         foreach (var part in casters)
         {
-            part.Caster!.Begin(shadowPush);
-            part.Caster.SetInstances(
-                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances));
-            part.Caster.End(pass);
+            part.Casters[0].Begin(shadowPush);
+            part.Casters[0].SetInstances(
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.CasterInstances[0]));
+            part.Casters[0].End(pass);
         }
     }
 
@@ -311,10 +361,31 @@ public sealed class PropModel : IDisposable
         foreach (var part in parts)
         {
             part.SceneBuffer?.Dispose();
-            part.CasterBuffer?.Dispose();
+            foreach (var buffer in part.CasterBuffers) buffer.Dispose();
         }
 
-        foreach (var part in casters) part.CasterBuffer?.Dispose();
+        foreach (var part in casters)
+        {
+            foreach (var buffer in part.CasterBuffers) buffer.Dispose();
+        }
+    }
+
+    private static void StageCasters(Part part, IReadOnlyList<byte[]> shadowPushes)
+    {
+        if (part.Casters.Length == 0) return;
+        if (part.Casters.Length != shadowPushes.Count)
+        {
+            throw new ArgumentException(
+                $"Prop caster has {part.Casters.Length} passes but received {shadowPushes.Count} push payloads.",
+                nameof(shadowPushes));
+        }
+
+        for (var c = 0; c < part.Casters.Length; c++)
+        {
+            part.Casters[c].Begin(shadowPushes[c]);
+            part.Casters[c].SetInstances(
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.CasterInstances[c]));
+        }
     }
 
     // A transform that normalises an asset the way a game placing it on the ground
@@ -358,9 +429,45 @@ public sealed class PropModel : IDisposable
     {
         public Vector4 Tint;
         public InstanceBuffer? SceneBuffer;
-        public InstanceBuffer? CasterBuffer;
         public InstancedBatch? Scene;
-        public InstancedBatch? Caster;
+        public InstanceBuffer[] CasterBuffers = Array.Empty<InstanceBuffer>();
+        public InstancedBatch[] Casters = Array.Empty<InstancedBatch>();
+        public List<InstanceData>[] CasterInstances = Array.Empty<List<InstanceData>>();
         public readonly List<InstanceData> Instances = new();
+
+        public void CreateCasters(
+            VulkanGraphicsDevice device,
+            Mesh mesh,
+            ShaderProgramHandle shader,
+            PipelineHandle pipeline,
+            string name,
+            int count)
+        {
+            CasterBuffers = new InstanceBuffer[count];
+            Casters = new InstancedBatch[count];
+            CasterInstances = new List<InstanceData>[count];
+            for (var c = 0; c < count; c++)
+            {
+                var buffer = new InstanceBuffer(device, shader, $"{name}.{c}");
+                CasterBuffers[c] = buffer;
+                Casters[c] = new InstancedBatch(mesh, pipeline, buffer);
+                CasterInstances[c] = new List<InstanceData>();
+            }
+        }
+
+        public void Clear()
+        {
+            Instances.Clear();
+            foreach (var instances in CasterInstances) instances.Clear();
+        }
+
+        public void Add(InstanceData instance, int casterMask, bool scene)
+        {
+            if (scene) Instances.Add(instance);
+            for (var c = 0; c < CasterInstances.Length; c++)
+            {
+                if ((casterMask & (1 << c)) != 0) CasterInstances[c].Add(instance);
+            }
+        }
     }
 }

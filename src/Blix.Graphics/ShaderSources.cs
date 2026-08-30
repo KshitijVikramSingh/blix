@@ -31,7 +31,7 @@ public sealed record ShaderSource(
     string Source,
     string? Name = null,
     // Source-id -> filename map produced by GlslPreprocessor's #line emission.
-    // When set, the OpenGL compile-error formatter prints this alongside the
+    // When set, the compile-error formatter prints this alongside the
     // info log so messages like "ERROR: 1:42: ..." resolve to a real file.
     IReadOnlyList<string>? SourceMap = null);
 

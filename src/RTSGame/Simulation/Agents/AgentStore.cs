@@ -41,7 +41,8 @@ internal sealed class AgentStore
         type.Appetite,
         type.SightMetres,
         type.Strength,
-        type.Health);
+        type.Health,
+        UnitType.RoleOf(type));
 
     public AgentId Spawn(
         Vector2 position,
@@ -54,13 +55,15 @@ internal sealed class AgentStore
         float appetite = 1f,
         float sightMetres = 22f,
         float strength = 1f,
-        float health = 20f)
+        float health = 20f,
+        AgentRole role = AgentRole.Villager)
     {
         EnsureCapacity(Count + 1);
         var id = new AgentId(Count);
         agents[Count++] = new AgentState
         {
             Id = id,
+            Role = role,
             LocomotionState = AgentLocomotionState.Idle,
             Faction = faction,
             PreviousPosition = position,

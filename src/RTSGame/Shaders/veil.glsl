@@ -1,7 +1,7 @@
-// A guard the compiler honours: glslc ignores #pragma once, so this file and noise.glsl below both need the
-// real thing — world.frag includes noise.glsl on its own account as well as getting it through here.
-#ifndef RTS_VEIL_GLSL
-#define RTS_VEIL_GLSL
+#pragma once
+
+// world.frag reaches noise.glsl directly and through this file. Blix consumes
+// the pragma and deduplicates the canonical include before glslc sees it.
 
 // <b>Where the fog of war is, shared by everything that has to be hidden by it.</b>
 //
@@ -107,5 +107,3 @@ vec2 blix_rts_veil_density(
         clamp(memory * wisp, 0.0, 1.0),
         clamp(bank * pow(clamp(wisp, 0.0, 2.0), deep.z), 0.0, 1.0));
 }
-
-#endif // RTS_VEIL_GLSL

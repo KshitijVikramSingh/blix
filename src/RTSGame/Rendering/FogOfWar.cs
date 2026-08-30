@@ -708,6 +708,9 @@ internal sealed class FogOfWar
     /// </remarks>
     public bool DrawsStatic(Vector2 at) => softExplored[Index(at)] > GateThreshold;
 
+    /// <summary>Cell form of <see cref="DrawsStatic(Vector2)"/> for spatially bucketed static props.</summary>
+    public bool DrawsStaticCell(int index) => softExplored[index] > GateThreshold;
+
     /// <summary>Whether something that moves should be drawn here.</summary>
     /// <remarks>
     /// Keyed to watched, because where a body was is not where it is — the whole reason the tiers are two masks
@@ -862,7 +865,7 @@ internal sealed class FogOfWar
         {
             if (!node.IsAlive || !node.IsBuilt || node.Faction != Player) continue;
             if (node.Kind is not (NodeKind.Granary or NodeKind.ForwardDepot
-                or NodeKind.House or NodeKind.Farm))
+                or NodeKind.House or NodeKind.Farm or NodeKind.Barracks))
             {
                 continue;
             }
@@ -917,7 +920,7 @@ internal sealed class FogOfWar
             {
                 NodeKind.Granary => settings.GranarySightMetres,
                 NodeKind.ForwardDepot => settings.DepotSightMetres,
-                NodeKind.House or NodeKind.Farm => settings.DwellingSightMetres,
+                NodeKind.House or NodeKind.Farm or NodeKind.Barracks => settings.DwellingSightMetres,
                 _ => 0f,
             };
             if (sight > 0f) watchers.Add((node.Position, sight));

@@ -377,6 +377,49 @@ internal sealed class ThreatSystem
             if (bodies[i].IsAlive && bodies[i].Strength > 0f) hostiles.Add(i);
         }
 
+        // Peace is the overwhelmingly common case, and it has a much cheaper proof than a full defence
+        // decision. Previously each villager rebuilt the list of guarded stores by walking every node in
+        // the world — including tens of thousands of trees — even when every living body was an ally. One
+        // faction comparison per body pair proves there can be no alarm at all and avoids those scans.
+        var enemyPresent = false;
+        foreach (var hostileIndex in hostiles)
+        {
+            ref readonly var hostile = ref bodies[hostileIndex];
+            for (var i = 0; i < bodies.Length; i++)
+            {
+                if (i == hostileIndex || !bodies[i].IsAlive) continue;
+                if ((factions.Between(hostile.Faction, bodies[i].Faction) & RelationMask.Enemy) == 0)
+                {
+                    continue;
+                }
+
+                enemyPresent = true;
+                break;
+            }
+
+            if (enemyPresent) break;
+        }
+
+        if (!enemyPresent)
+        {
+            for (var i = 0; i < bodies.Length; i++)
+            {
+                ref var body = ref bodies[i];
+                if (!body.IsAlive || body.Directed || body.Sheltered) continue;
+                body.Resolve = MathF.Max(0f, body.Resolve - deltaSeconds);
+                body.HasQuarry = false;
+                if (body.Resolve > 0f)
+                {
+                    body.Resolve = 0f;
+                    halt(body.Id);
+                }
+
+                body.Standing = false;
+            }
+
+            return;
+        }
+
         for (var i = 0; i < bodies.Length; i++)
         {
             ref var body = ref bodies[i];

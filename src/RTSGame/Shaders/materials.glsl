@@ -8,8 +8,7 @@
 // constants is a table that will drift. Game-specific on purpose, so it lives here and not in
 // src/Blix.Shaders, which is the engine's library and has no opinion about wheat.
 
-#ifndef RTS_MATERIALS_GLSL
-#define RTS_MATERIALS_GLSL
+#pragma once
 
 const float kTerrain = 0.05;
 const float kCrafted = 0.15;
@@ -40,5 +39,3 @@ bool isTerrain(float carried) { return isClass(carried, kTerrain); }
 
 // Whether this is the surface of a body of water rather than the bed under it.
 bool isWater(float carried) { return isClass(carried, kWater); }
-
-#endif

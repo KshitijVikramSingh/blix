@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <UseAppHost>false</UseAppHost>
+    <IsPublishable>false</IsPublishable>
+    <!-- Project references inherit a self-contained publish from the game. The tool is still invoked
+         through its DLL during normal builds, but a self-contained publish requires an app host for
+         every executable in the project graph. -->
+    <UseAppHost Condition="'$(SelfContained)' == 'true'">true</UseAppHost>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

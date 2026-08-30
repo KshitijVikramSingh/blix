@@ -54,8 +54,9 @@ Blix.Graphics.Images           ← image decode + HDR IBL bake pipeline
                                   (StbImageSharp, EquirectangularToCubemap,
                                    PbrIblBaker, HdrSunFinder)
 Blix.Shaders                   ← engine-level GLSL library (no csproj; .glsl
-                                  included by demo shaders, resolved via a
-                                  glslc -I path; pbr/tonemap/noise/fullscreen/bloom)
+                                  included by game/demo shaders and expanded by
+                                  Blix.Tools.Shader; pbr/tonemap/noise/fullscreen/bloom)
+Blix.Tools.Shader              ← build-only GLSL preprocessor + glslc driver
 Blix.Diagnostics               ← contribution-based debug system
         ↑                         (DebugFrame snapshots + history ring,
                                    Values/Controls/Draw/Stats/Timers/Events
@@ -79,7 +80,7 @@ The renderer's defining choice is that the binding model is *derived*, not decla
 
 The Vulkan path is now the sole renderer, and in `VulkanSponza` it has moved well past the old GL feature set: that SPIR-V-reflected binding model, per-material descriptor sets, push constants, per-draw transient descriptor pools, a declarative render graph (`Blix.Graphics.Vulkan/RenderGraph.cs`), glTF + skinning (via the existing `Blix.Assets` importers), PBR + IBL (procedural-sky or cooked-probe environment + irradiance cube + split-sum BRDF LUT), HDR + ACES/AgX tonemap, and a separable-Gaussian bloom chain. `VulkanSponza` adds cascaded directional shadows (texel-snapped + cached), a depth pre-pass, froxel volumetric fog, GPU-driven indirect rendering, screen-space-error LOD over meshopt chains, and the cooked-asset pipeline (`.blixmesh`/`.blixtex`/`.blixprobe`) streamed through the engine's `GltfTextureLoader` + `AsyncLoadQueue` + `MeshBundler`. The 2D path (`SpriteBatch` + `Font`, used by `Pong`) was rebuilt on the Vulkan binding model. SSR and the dual-filter bloom were GL-only techniques and did not survive the sunset; froxel fog now lives on Vulkan in VulkanSponza.
 
-`Blix.Shaders` isn't a code project — it's a folder of `blix_`-prefixed `.glsl` library files. Demo shaders `#include "<file>.glsl"`; each demo's `CompileSpirV` target passes `glslc -I <src/Blix.Shaders>` so the include resolves at cook time, and lists the library files in the target's `Inputs` so edits retrigger the cook (see **Shader library** under Conventions below).
+`Blix.Shaders` isn't a code project — it's a folder of `blix_`-prefixed `.glsl` library files. Game and demo shaders `#include "<file>.glsl"`; each shader-bearing project's `CompileSpirV` target runs the build-only `Blix.Tools.Shader`, which expands the source with the same Blix preprocessor before invoking `glslc`. Library files stay in the target's `Inputs` so edits retrigger the cook (see **Shader library** under Conventions below).
 
 ## Host contracts
 
@@ -113,11 +114,11 @@ The Vulkan backend uploads these row-major bytes **untransposed**. GLSL's std140
 
 **Pixel coordinates.** `IRenderHost.LogicalSize` returns the window's client area in logical pixels (same coordinate system as mouse events). `RenderFrameContext.Width/Height` is the framebuffer in physical pixels (typically 2× on Retina). Don't mix them — `Camera3D.ScreenPointToRay` needs logical pixels because mouse coords are logical.
 
-**GLSL includes.** `Blix.Graphics.GlslPreprocessor.PreprocessDetailed` resolves `#include "filename"` directives by inlining the referenced content. Recursive, cycle-detected, honors `#pragma once`. Emits `#line N <source-id>` directives around every inclusion so shader compile errors report the original file's line numbers; the source-id-to-filename map flows through `ShaderSources` to the diagnostic formatter, which prints a `--- Source map ---` block before the info log so messages like `1:42: ...` decode to a real file. File I/O stays in the caller via a `readInclude` callback.
+**GLSL includes.** `Blix.Graphics.GlslPreprocessor.PreprocessDetailed` resolves `#include "filename"` directives by inlining the referenced content. It is recursive, cycle-detected, and consumes Blix-owned `#pragma once` directives rather than sending them to `glslc`; stable source identities deduplicate the same canonical file even when it is reached through different relative spellings. It emits `#line N <source-id>` directives around every inclusion so shader compile errors report the original file's line numbers; the source-id-to-filename map flows through `ShaderSources` to diagnostic formatting. File I/O stays in the caller via a source-aware resolver, and `ShaderLoader.PreprocessFile(...)` supplies the canonical file implementation used at build time.
 
 `Blix.Graphics.ShaderLoader.LoadVertexFragment(vertPath, fragPath, includeDirs?, defines?)` bundles read + preprocess + naming + source-map plumbing. The optional `defines` dictionary injects `#define KEY VALUE` lines right after `#version` so the same library function can serve multiple variants.
 
-**Shader library.** Engine-shared GLSL lives at `src/Blix.Shaders/*.glsl` with a `blix_` prefix on every symbol. Demo shaders consume them with `#include "<file>.glsl"`, resolved by the `glslc -I <src/Blix.Shaders>` path each demo's `CompileSpirV` target passes (the library files are also in that target's `Inputs`, so editing one re-cooks every dependent shader). New library files start with `#pragma once`.
+**Shader library.** Engine-shared GLSL lives at `src/Blix.Shaders/*.glsl` with a `blix_` prefix on every symbol. Games and demos consume it with `#include "<file>.glsl"`; `Blix.Tools.Shader` expands those includes before invoking `glslc` (the library files are also in each target's `Inputs`, so editing one re-cooks every dependent shader). New library files start with `#pragma once`; do not add parallel `#ifndef` file guards.
 
 **GLSL ASCII only.** Shaders are compiled offline to SPIR-V with `glslc` (Khronos); the old Apple GL 4.1 compiler quirks no longer apply at runtime. Pure ASCII remains the `glslc`-portability convention for the shader library — keep shader files pure ASCII.
 

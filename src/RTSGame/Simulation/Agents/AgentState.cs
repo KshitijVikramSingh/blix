@@ -9,6 +9,8 @@ namespace RTSGame.Simulation.Agents;
 internal struct AgentState
 {
     public AgentId Id;
+    /// <summary>What this person permanently is; jobs and temporary equipment never infer or replace it.</summary>
+    public AgentRole Role;
     public AgentLocomotionState LocomotionState;
     public FactionId Faction;
     public AgentColliderSet Colliders;

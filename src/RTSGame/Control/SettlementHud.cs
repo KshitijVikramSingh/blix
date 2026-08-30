@@ -140,7 +140,7 @@ internal sealed class SettlementHud : IDisposable
         {
             if (!body.IsAlive || body.Faction.Value != 0) continue;
             people++;
-            if (body.CarryCapacity <= 0) continue;
+            if (body.Role != AgentRole.Villager) continue;
             if (!body.Jobs.HasAssignment && !body.Jobs.IsInterrupted) spare++;
         }
 
@@ -199,6 +199,7 @@ internal sealed class SettlementHud : IDisposable
         // you while you move the mouse toward a key.
         var described = world.Nodes.Contains(picked) ? picked : hovered;
         if (world.Nodes.Contains(described)) DescribeNode(world, described);
+        else if (pointerOnTerrain) DescribeGround(world, pointer);
         // The settlement's prompts are about a settlement. In the lab there is not one, and offering to
         // build a granary is worse than offering nothing.
         if (lab is null) Prompts(world, selected, described, additive, routeSource);
@@ -221,8 +222,17 @@ internal sealed class SettlementHud : IDisposable
 
         var farming = 0;
         var cutting = 0;
+        var quarrying = 0;
         var carting = 0;
         var building = 0;
+        var training = 0;
+        var militia = 0;
+        var collectingMaterials = 0;
+        var carryingMaterials = 0;
+        var posted = 0;
+        var delivering = 0;
+        var unable = 0;
+        var routeCargo = new int[Resources.All.Length];
         var idle = 0;
         var carried = 0;
         var carts = 0;
@@ -232,37 +242,76 @@ internal sealed class SettlementHud : IDisposable
             ref readonly var body = ref world.Agents.Get(id);
             if (!body.IsAlive) continue;
             carried += body.Jobs.CarriedUnits;
+            if (body.Role == AgentRole.Militia) militia++;
             if (body.HasCart) carts++;
+            if (body.Jobs.CannotReachWork) unable++;
             switch (body.Jobs.Assignment.Kind)
             {
                 case AssignmentKind.Work when body.Jobs.Assignment.Cargo == Resource.Wood:
                     cutting++;
                     break;
-                case AssignmentKind.Work:
+                case AssignmentKind.Work when body.Jobs.Assignment.Cargo == Resource.Stone:
+                    quarrying++;
+                    break;
+                case AssignmentKind.Work when body.Jobs.Assignment.Cargo == Resource.Grain:
                     farming++;
                     break;
                 case AssignmentKind.Haul:
                 case AssignmentKind.Carry:
                     carting++;
+                    routeCargo[(int)body.Jobs.Assignment.Cargo]++;
+                    break;
+                case AssignmentKind.Hold when
+                    world.Nodes.Contains(body.Jobs.Assignment.Source) &&
+                    world.Nodes.Get(body.Jobs.Assignment.Source).HasStructuralProject:
+                    building++;
+                    break;
+                case AssignmentKind.Build:
+                    building++;
+                    if (body.Jobs.CarriedUnits > 0) carryingMaterials++;
+                    else if (body.Jobs.ReservedUnits > 0) collectingMaterials++;
+                    break;
+                case AssignmentKind.Train:
+                    training++;
+                    if (body.Jobs.CarriedUnits > 0) carryingMaterials++;
+                    else if (body.Jobs.ReservedUnits > 0) collectingMaterials++;
                     break;
                 case AssignmentKind.Hold:
-                    building++;
+                    posted++;
                     break;
                 default:
                     idle++;
                     break;
             }
+            if (body.Jobs.Assignment.Kind == AssignmentKind.Work && body.Jobs.Leg % 2 != 0) delivering++;
         }
 
         var doing = new List<string>();
         if (farming > 0) doing.Add($"{farming} farming");
         if (cutting > 0) doing.Add($"{cutting} cutting");
+        if (quarrying > 0) doing.Add($"{quarrying} quarrying");
         if (carting > 0) doing.Add($"{carting} carting");
-        if (building > 0) doing.Add($"{building} posted");
+        if (building > 0) doing.Add($"{building} building");
+        if (training > 0) doing.Add($"{training} training");
+        if (militia > 0) doing.Add($"{militia} militia");
+        if (posted > 0) doing.Add($"{posted} posted");
         if (idle > 0) doing.Add($"{idle} idle");
         var summary = $"{selected.Count} SELECTED";
         if (doing.Count > 0) summary += " · " + string.Join(", ", doing);
         if (carts > 0) summary += $" · {carts} with carts";
+        var nextLoads = new List<string>();
+        foreach (var resource in Resources.All)
+        {
+            if (routeCargo[(int)resource] > 0)
+            {
+                nextLoads.Add($"{routeCargo[(int)resource]} {resource.ToString().ToLowerInvariant()}");
+            }
+        }
+        if (nextLoads.Count > 0) summary += $" · next {string.Join(", ", nextLoads)}";
+        if (delivering > 0) summary += $" · {delivering} delivering";
+        if (collectingMaterials > 0) summary += $" · {collectingMaterials} collecting materials";
+        if (carryingMaterials > 0) summary += $" · {carryingMaterials} carrying to site";
+        if (unable > 0) summary += $" · {unable} cannot reach work";
         if (carried > 0) summary += $" · carrying {carried}";
         lines.Add((summary, Heading));
     }
@@ -280,29 +329,54 @@ internal sealed class SettlementHud : IDisposable
         ref readonly var node = ref world.Nodes.Get(id);
         var name = node.Kind switch
         {
-            NodeKind.Granary => "GRANARY",
-            NodeKind.ForwardDepot => "DEPOT",
+            NodeKind.Granary => "STOREHOUSE",
+            NodeKind.ForwardDepot => "CAMP",
             NodeKind.Farm => "FIELD",
             NodeKind.House => "HOUSE",
             NodeKind.Tree => "TREE",
+            NodeKind.Outcrop => "OUTCROP",
+            NodeKind.PalisadeWall => "PALISADE WALL",
+            NodeKind.StoneWall => "STONE WALL",
+            NodeKind.Barracks => "BARRACKS",
             _ => "HEAP",
         };
 
-        if (node.IsUnderConstruction)
+        if (node.HasStructuralProject)
         {
+            var siteAssigned = AssignedTo(world, id);
+            var projectName = node.IsUnderConstruction
+                ? $"{name} SITE"
+                : node.StructuralProject == StructuralProjectKind.Repair
+                    ? $"{name} REPAIR"
+                    : $"{name} → {node.StructuralTarget.ToString().ToUpperInvariant()}";
             lines.Add((
-                $"{name} SITE · {Construction.StateOf(in node)}",
+                $"{projectName} · {StructuralProjects.StateOf(in node)} · " +
+                $"{siteAssigned} assigned, {node.Hands} working",
                 node.WantsMaterials ? Warning : Action));
+            var cost = StructuralProjects.CostFor(in node);
+            foreach (var resource in Resources.All)
+            {
+                if (cost[resource] <= 0) continue;
+                var incoming = IncomingTo(world, id, resource);
+                var label = resource == Resource.Wood ? "TIMBER" : resource.ToString().ToUpperInvariant();
+                lines.Add((
+                    $"{label} · {StructuralProjects.ConsumedFor(in node, resource)}/{cost[resource]} incorporated · " +
+                    $"{node.Stock[resource]} on site · {incoming} incoming · " +
+                    $"{Math.Max(0, node.Wanted(resource) - incoming)} unclaimed",
+                    node.Wanted(resource) > incoming ? Warning : Body));
+            }
             return;
         }
 
         var says = node.Kind switch
         {
-            NodeKind.Farm => CropCycle.StateOf(in node, world.Date.Season),
+            NodeKind.Farm =>
+                $"{node.Fertility * 100f:F0}% fertility, {CropCycle.StateOf(in node, world.Date.Season)}",
             NodeKind.Tree => $"{Woodland.StateOf(in node)}, {node.Stock.Wood} wood",
             NodeKind.Outcrop => $"{Quarrying.StateOf(in node)}, {node.Stock.Stone} stone",
             NodeKind.House => $"{node.Occupants}/{node.Occupancy} living here" +
                               (node.Privation > 0.5f ? " · GOING HUNGRY" : string.Empty),
+            NodeKind.Barracks => BarracksState(world, id),
             // <b>Total, not two named fields.</b> Both of these read the resources rather than listing them,
             // because a panel that names the resources it knows about is a panel that silently stops mentioning
             // the next one — a stone pile read "0 lying on the ground" and a store holding nothing but stone
@@ -312,9 +386,119 @@ internal sealed class SettlementHud : IDisposable
             _ => Held(in node),
         };
 
-        var hands = node.Hands > 0 ? $" · {node.Hands} at work" : string.Empty;
+        var assigned = AssignedTo(world, id);
+        var hands = node.IsWorkSite
+            ? $" · {assigned} assigned, {node.Hands} working"
+            : string.Empty;
+        var delivery = DeliversTo(world, in node);
         var hungry = node.IsSink && node.Privation > 0.5f;
-        lines.Add(($"{name} · {says}{hands}", hungry ? Warning : Body));
+        var condition = node.IsStructure
+            ? $" · condition {node.Condition:F0}/{node.MaxCondition:F0}"
+            : string.Empty;
+        lines.Add(($"{name} · {says}{condition}{hands}{delivery}", hungry ? Warning : Body));
+    }
+
+    /// <summary>The country under the pointer before a field is committed to it.</summary>
+    private void DescribeGround(SimulationWorld world, Vector2 pointer)
+    {
+        var fertility = world.Terrain.Soil?.FertilityAt(pointer) ?? 1f;
+        var surface = world.Terrain.SampleSurface(pointer).ToString().ToUpperInvariant();
+        lines.Add(($"GROUND · {surface} · FIELD FERTILITY {fertility * 100f:F0}%", Body));
+    }
+
+    private static int AssignedTo(SimulationWorld world, NodeId site)
+    {
+        var assigned = 0;
+        foreach (ref readonly var body in world.Agents.All)
+        {
+            if (!body.IsAlive) continue;
+            if (body.Jobs.Assignment.Kind == AssignmentKind.Build && body.Jobs.Project == site)
+            {
+                assigned++;
+                continue;
+            }
+
+            if (body.Jobs.Assignment.Source != site) continue;
+            if (body.Jobs.Assignment.Kind is AssignmentKind.Work or AssignmentKind.Hold) assigned++;
+        }
+        return assigned;
+    }
+
+    private static int IncomingTo(SimulationWorld world, NodeId site, Resource resource)
+    {
+        var incoming = 0;
+        foreach (ref readonly var body in world.Agents.All)
+        {
+            if (!body.IsAlive) continue;
+            if (body.Jobs.Assignment.Kind == AssignmentKind.Build && body.Jobs.Project == site)
+            {
+                incoming += body.Jobs.CarriedUnits > 0 && body.Jobs.Carrying == resource
+                    ? body.Jobs.CarriedUnits
+                    : body.Jobs.Assignment.Cargo == resource ? body.Jobs.ReservedUnits : 0;
+                continue;
+            }
+
+            if (!body.Jobs.Assignment.MovesCargo || body.Jobs.Assignment.Sink != site ||
+                body.Jobs.Assignment.Cargo != resource)
+            {
+                continue;
+            }
+
+            incoming += body.Jobs.CarriedUnits > 0
+                ? body.Jobs.CarriedUnits
+                : Math.Min(
+                    body.CarryCapacity,
+                    world.Nodes.Contains(body.Jobs.Assignment.Source)
+                        ? world.Nodes.Get(body.Jobs.Assignment.Source).Stock[resource]
+                        : 0);
+        }
+
+        return incoming;
+    }
+
+    private static string DeliversTo(SimulationWorld world, in EconomyNode node)
+    {
+        var resource = node.Kind switch
+        {
+            NodeKind.Farm => Resource.Grain,
+            NodeKind.Tree => Resource.Wood,
+            NodeKind.Outcrop => Resource.Stone,
+            _ => (Resource?)null,
+        };
+        if (resource is not { } cargo) return string.Empty;
+        var store = EconomySystem.NearestStoreWithRoom(world.Nodes, cargo, node.Faction, node.Position);
+        return world.Nodes.Contains(store)
+            ? $" · delivers to {world.Nodes.Get(store).Kind.ToString().ToLowerInvariant()}"
+            : " · no store has room";
+    }
+
+    private static string BarracksState(SimulationWorld world, NodeId barracks)
+    {
+        var trainees = 0;
+        var progress = 0f;
+        foreach (ref readonly var body in world.Agents.All)
+        {
+            if (!body.IsAlive || body.Jobs.Assignment.Kind != AssignmentKind.Train ||
+                body.Jobs.Project != barracks)
+            {
+                continue;
+            }
+
+            trainees++;
+            progress += body.Jobs.TrainingWork;
+        }
+
+        ref readonly var node = ref world.Nodes.Get(barracks);
+        var cost = MilitiaTraining.Cost;
+        if (trainees == 0)
+        {
+            return $"ready · militia costs {cost.Wood} timber + {cost.Stone} stone + " +
+                   $"{MilitiaTraining.Seconds:F0} s · {node.Stock.Wood} timber, {node.Stock.Stone} stone on hand";
+        }
+
+        var state = $"{trainees} training · {progress / trainees:F0}/{MilitiaTraining.Seconds:F0} s average";
+        return $"{state} · equipment {node.Stock.Wood}/{trainees * cost.Wood} timber, " +
+               $"{node.Stock.Stone}/{trainees * cost.Stone} stone";
     }
 
     /// <summary>
@@ -324,7 +508,7 @@ internal sealed class SettlementHud : IDisposable
     /// The whole point of the panel. What a player wants after clicking a villager is not the twenty keys
     /// the game has, it is the two that apply to a villager standing next to a tree — so a prompt appears
     /// only when its precondition holds, and it says what it will <em>do</em> rather than what it is called.
-    /// "U — CUT THIS TREE" rather than "U: post".
+    /// "RIGHT-CLICK — CUT THIS TREE" rather than "context command".
     /// </remarks>
     private void Prompts(
         SimulationWorld world,
@@ -338,7 +522,7 @@ internal sealed class SettlementHud : IDisposable
             // Tab first, because it is the answer to the question the panel above just raised by saying
             // how many people are spare.
             lines.Add((
-                "TAB SPARE HANDS · DRAG TO SELECT · D GRANARY · A FIELD · CTRL+A HOUSE · W DEPOT",
+                "TAB SPARE HANDS · DRAG SELECT · D STOREHOUSE · CTRL+D BARRACKS · A FIELD · CTRL+A HOUSE · W CAMP · CTRL+W PALISADE",
                 Action));
             // The map keys, on the line below, because they are about the world rather than about the
             // settlement — and because eight bindings nobody can be expected to remember is what the lab
@@ -352,9 +536,24 @@ internal sealed class SettlementHud : IDisposable
         if (world.Nodes.Contains(hovered))
         {
             ref readonly var node = ref world.Nodes.Get(hovered);
-            if (node.IsUnderConstruction) lines.Add(("U — BUILD THIS", Action));
-            else if (node.Kind == NodeKind.Farm) lines.Add(("U — WORK THIS FIELD", Action));
-            else if (node.Kind == NodeKind.Tree) lines.Add(("U — CUT THIS TREE", Action));
+            if (node.HasStructuralProject)
+            {
+                var verb = node.IsUnderConstruction
+                    ? "BUILD THIS"
+                    : node.StructuralProject == StructuralProjectKind.Repair ? "REPAIR THIS" : "UPGRADE THIS";
+                lines.Add(($"RIGHT-CLICK — {verb}", Action));
+            }
+            else if (node.Kind == NodeKind.Farm) lines.Add(("RIGHT-CLICK — WORK THIS FIELD", Action));
+            else if (node.Kind == NodeKind.Tree) lines.Add(("RIGHT-CLICK — CUT THIS TREE", Action));
+            else if (node.Kind == NodeKind.Outcrop) lines.Add(("RIGHT-CLICK — QUARRY THIS OUTCROP", Action));
+            else if (node.Kind == NodeKind.Barracks && selected.Any(id =>
+                         world.Agents.Contains(id) && world.Agents.Get(id).Role == AgentRole.Villager))
+                lines.Add(("RIGHT-CLICK — TRAIN SELECTED VILLAGERS AS MILITIA", Action));
+            else if (node.IsStructure && node.Condition < node.MaxCondition - 0.0001f)
+                lines.Add(("CTRL+RIGHT-CLICK — BEGIN REPAIR", Action));
+            else if (node.Kind == NodeKind.PalisadeWall)
+                lines.Add(("CTRL+RIGHT-CLICK — UPGRADE TO STONE", Action));
+            else lines.Add(("RIGHT-CLICK — MOVE HERE", Action));
 
             var haulable = node.Stores || node.IsPile || node.WantsMaterials;
             if (haulable)
@@ -362,18 +561,23 @@ internal sealed class SettlementHud : IDisposable
                 lines.Add((
                     routeSource is null
                         ? $"CTRL+O — HAUL FROM HERE ({SimulationWorld.CartTimber} WOOD A CART)"
-                        : "CTRL+O — DELIVER HERE",
+                        : RouteDestinationPrompt(world, routeSource.Value, hovered),
                     Action));
             }
         }
         else
         {
-            lines.Add(("U — POST HERE · RIGHT-CLICK TO MOVE", Action));
+            lines.Add(("RIGHT-CLICK — MOVE HERE · U — POST HERE", Action));
         }
 
         lines.Add(("S STOP · Y OFF WORK · Z FOLLOW CAMERA", Body));
         if (additive) lines.Add(("CTRL HELD — ADDING TO SELECTION", Body));
     }
+
+    private static string RouteDestinationPrompt(SimulationWorld world, NodeId source, NodeId sink) =>
+        world.TryChooseRouteCargo(source, sink, Resource.Grain, out var cargo)
+            ? $"CTRL+O — DELIVER HERE · NEXT {cargo.ToString().ToUpperInvariant()}"
+            : "CTRL+O — THIS PLACE CANNOT RECEIVE THAT STOCK";
 
     /// <summary>
     /// Draws the staged lines, each over a dark plate so it reads on any ground.

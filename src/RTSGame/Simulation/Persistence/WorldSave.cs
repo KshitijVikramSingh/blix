@@ -45,7 +45,7 @@ internal static class WorldSave
     /// <summary>
     /// Bumped whenever the byte layout changes in a way an older save cannot satisfy.
     /// </summary>
-    private const int Version = 3;
+    private const int Version = 6;
 
     /// <summary>
     /// Kinds of order that can be sitting in the queue when a save is taken.

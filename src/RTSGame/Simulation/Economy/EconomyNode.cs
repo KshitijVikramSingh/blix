@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 using RTSGame.Simulation.Collision;
 using RTSGame.Simulation.Persistence;
 
@@ -114,6 +115,15 @@ internal enum NodeKind
     /// </para>
     /// </remarks>
     Pile,
+
+    /// <summary>A timber defensive segment, built in place and upgradeable without changing identity.</summary>
+    PalisadeWall,
+
+    /// <summary>The stone form of a palisade segment: the same footprint and stable node.</summary>
+    StoneWall,
+
+    /// <summary>A constructed institution where an existing villager can train into militia.</summary>
+    Barracks,
 }
 
 /// <summary>
@@ -150,6 +160,9 @@ internal static class NodeFootprint
         NodeKind.ForwardDepot => 3,
         NodeKind.Farm => 3,
         NodeKind.House => 3,
+        NodeKind.Barracks => 5,
+        NodeKind.PalisadeWall => 1,
+        NodeKind.StoneWall => 1,
         _ => 0,
     };
 
@@ -161,10 +174,20 @@ internal static class NodeFootprint
     /// </remarks>
     internal const float TreeHalfExtent = 0.45f;
 
+    /// <summary>Half the working face of an outcrop cluster.</summary>
+    /// <remarks>
+    /// It still does not block. This is the extent used for picking, arrival and counting hands, and it has
+    /// to describe the same visible rock for all three. Zero made the jobs layer accept a quarrier within
+    /// its point-arrival tolerance while the economy's hands counter required it to stand almost exactly on
+    /// the centre, so a body could visibly quarry stone while the outcrop reported nobody working there.
+    /// </remarks>
+    internal const float OutcropHalfExtent = 1.1f;
+
     /// <summary>Half the width of a node's own footprint, in metres.</summary>
     public static float HalfExtentOf(NodeKind kind) => kind switch
     {
         NodeKind.Tree => TreeHalfExtent,
+        NodeKind.Outcrop => OutcropHalfExtent,
         _ => CellsOf(kind) * SimulationWorld.PlacementCellSize * 0.5f,
     };
 
@@ -200,7 +223,8 @@ internal static class NodeFootprint
     /// </para>
     /// </remarks>
     public static bool Blocks(NodeKind kind) =>
-        kind is NodeKind.Granary or NodeKind.ForwardDepot or NodeKind.House;
+        kind is NodeKind.Granary or NodeKind.ForwardDepot or NodeKind.House or
+            NodeKind.PalisadeWall or NodeKind.StoneWall or NodeKind.Barracks;
 }
 
 /// <summary>
@@ -247,6 +271,36 @@ internal struct EconomyNode
     /// site and completion re-rasterises nothing.
     /// </remarks>
     public float BuildWork;
+
+    /// <summary>Whole units already incorporated into this building project.</summary>
+    /// <remarks>
+    /// Separate from <see cref="Stock"/> because the two are on opposite sides of conservation: stock is
+    /// still physical and can be carried away, while incorporated material has become the structure and
+    /// is recorded in the economy's consumed ledger. Keeping the per-project total here makes a half-built
+    /// node fully saveable and lets its remaining demand be derived without a side table.
+    /// </remarks>
+    public NodeStock BuildConsumed;
+
+    /// <summary>Present structural integrity, independent of whether the building was ever completed.</summary>
+    public float Condition;
+
+    /// <summary>Integrity at which this structure is fully sound.</summary>
+    public float MaxCondition;
+
+    /// <summary>The operation changing a completed structure, if one is active.</summary>
+    public StructuralProjectKind StructuralProject;
+
+    /// <summary>The kind this node becomes when an upgrade completes; otherwise its present kind.</summary>
+    public NodeKind StructuralTarget;
+
+    /// <summary>Labour-seconds spent on the active repair or upgrade.</summary>
+    public float StructuralWork;
+
+    /// <summary>Whole units incorporated into the active repair or upgrade.</summary>
+    public NodeStock StructuralConsumed;
+
+    /// <summary>Condition captured when repair began, making its scope stable and saveable.</summary>
+    public float StructuralStartCondition;
 
     /// <summary>
     /// How well this ground grows grain, as a multiple of what level neutral ground grows.
@@ -359,10 +413,19 @@ internal struct EconomyNode
     /// <summary>A site: placed, standing on its ground, and not yet a building.</summary>
     public readonly bool IsUnderConstruction => !IsBuilt;
 
-    /// <summary>One material still wanted on site before work can begin.</summary>
-    public readonly int Wanted(Resource resource) => IsBuilt
+    /// <summary>Construction, repair or upgrade currently accepting material and hands.</summary>
+    public readonly bool HasStructuralProject => IsUnderConstruction || StructuralProject != StructuralProjectKind.None;
+
+    /// <summary>Whether this node has structural condition at all.</summary>
+    public readonly bool IsStructure => MaxCondition > 0f;
+
+    /// <summary>One material not yet incorporated or physically waiting at the site.</summary>
+    public readonly int Wanted(Resource resource) => !HasStructuralProject
         ? 0
-        : Math.Max(0, Construction.CostFor(Kind)[resource] - Stock[resource]);
+        : Math.Max(
+            0,
+            StructuralProjects.CostFor(in this)[resource] -
+            StructuralProjects.ConsumedFor(in this, resource) - Stock[resource]);
 
     /// <summary>
     /// Whether this site is still short of anything at all.
@@ -379,11 +442,14 @@ internal struct EconomyNode
             // Built first and once. Asking Wanted per resource asked IsBuilt per resource, and this is swept
             // over every node every tick by the hauling board — where all but a handful of nodes are trees,
             // which are built by definition.
-            if (IsBuilt) return false;
-            var cost = Construction.CostFor(Kind);
+            if (!HasStructuralProject) return false;
+            var cost = StructuralProjects.CostFor(in this);
             foreach (var resource in Resources.All)
             {
-                if (cost[resource] > Stock[resource]) return true;
+                if (cost[resource] > StructuralProjects.ConsumedFor(in this, resource) + Stock[resource])
+                {
+                    return true;
+                }
             }
 
             return false;
@@ -394,10 +460,10 @@ internal struct EconomyNode
     public readonly bool Produces_ => IsBuilt && Kind == NodeKind.Farm;
 
     /// <summary>
-    /// A place labour is spent at: a field to be worked, a tree to be cut, or a building to be raised.
+    /// A place labour is spent at: a field to be worked, a deposit to be taken, or a building to be raised.
     /// </summary>
     public readonly bool IsWorkSite =>
-        IsUnderConstruction || Kind is NodeKind.Farm or NodeKind.Tree;
+        HasStructuralProject || Kind is NodeKind.Farm or NodeKind.Tree or NodeKind.Outcrop;
 
     /// <summary>
     /// Stock that is not yet a resource — timber still standing in a tree.
@@ -462,11 +528,12 @@ internal struct EconomyNode
     /// Room left for more of this resource.
     /// </summary>
     /// <remarks>
-    /// A site takes exactly its timber and nothing else, which is what makes it a valid destination for a
-    /// haul without needing a second capacity field: <see cref="Capacity"/> goes on meaning what the
-    /// finished building will hold, and the limit while it is a site is computed from what it is becoming.
+    /// A site takes exactly the still-uncovered part of its recipe for this material, which makes it a valid
+    /// destination without needing a second capacity field. <see cref="Capacity"/> goes on meaning what the
+    /// finished building will hold; while unfinished, room comes from the recipe, incorporated material and
+    /// unspent stock already lying at the site.
     /// </remarks>
-    public readonly int RoomFor(Resource resource) => IsUnderConstruction
+    public readonly int RoomFor(Resource resource) => HasStructuralProject
         ? Wanted(resource)
         : Math.Max(0, Capacity - Stock[resource]);
 }
@@ -483,6 +550,10 @@ internal struct EconomyNode
 internal sealed class NodeStore
 {
     private EconomyNode[] nodes = new EconomyNode[16];
+    // Trees and outcrops make up virtually the whole store, but most economy questions are about the few
+    // dozen buildings, sites and heaps that constitute a settlement. Keep that smaller population derived
+    // here, in stable node order, instead of making every house and stock pass rediscover it at 30 Hz.
+    private readonly List<NodeId> settlementNodes = new();
 
     /// <summary>Slots ever allocated. Iteration bounds; not the number of nodes.</summary>
     public int Count { get; private set; }
@@ -496,6 +567,8 @@ internal sealed class NodeStore
     public ReadOnlySpan<EconomyNode> All => nodes.AsSpan(0, Count);
 
     public Span<EconomyNode> MutableSpan() => nodes.AsSpan(0, Count);
+
+    public ReadOnlySpan<NodeId> SettlementNodes => CollectionsMarshal.AsSpan(settlementNodes);
 
     public bool Contains(NodeId id) =>
         id.Value >= 0 && id.Value < Count && nodes[id.Value].IsAlive;
@@ -514,6 +587,7 @@ internal sealed class NodeStore
         node.IsAlive = true;
         nodes[Count++] = node;
         LiveCount++;
+        if (!node.IsNaturalDeposit) settlementNodes.Add(id);
         // Only a node that feeds somebody changes who is fed by what. A sack of grain appearing on the
         // road does not, and bumping the revision for one would send every body in the world to
         // reconsider which granary supplies it every time a cart was destroyed.
@@ -526,6 +600,7 @@ internal sealed class NodeStore
         if (!Contains(id)) return false;
         ref var node = ref nodes[id.Value];
         var fed = node.OwnsCatchment;
+        if (!node.IsNaturalDeposit) settlementNodes.Remove(id);
         node.IsAlive = false;
         node.Stock = default;
         node.Pending = default;
@@ -538,6 +613,14 @@ internal sealed class NodeStore
         node.Growth = 0f;
         node.Privation = 0f;
         node.BuildWork = 0f;
+        node.BuildConsumed = default;
+        node.Condition = 0f;
+        node.MaxCondition = 0f;
+        node.StructuralProject = StructuralProjectKind.None;
+        node.StructuralTarget = default;
+        node.StructuralWork = 0f;
+        node.StructuralConsumed = default;
+        node.StructuralStartCondition = 0f;
         LiveCount--;
         if (fed) Revision++;
         return true;
@@ -570,9 +653,9 @@ internal sealed class NodeStore
     public NodeStock TotalHeld()
     {
         var total = default(NodeStock);
-        foreach (ref readonly var node in All)
+        foreach (var id in settlementNodes)
         {
-            if (!node.IsAlive || node.IsNaturalDeposit) continue;
+            ref readonly var node = ref nodes[id.Value];
             total.Add(in node.Stock);
         }
 
@@ -608,5 +691,10 @@ internal sealed class NodeStore
         var loaded = reader.Blob<EconomyNode>();
         nodes = loaded.Length == 0 ? new EconomyNode[16] : loaded;
         Count = loaded.Length;
+        settlementNodes.Clear();
+        for (var i = 0; i < Count; i++)
+        {
+            if (nodes[i].IsAlive && !nodes[i].IsNaturalDeposit) settlementNodes.Add(nodes[i].Id);
+        }
     }
 }

@@ -234,7 +234,8 @@ internal sealed class SettlementArt : IDisposable
         ShaderProgramHandle sceneShader,
         PipelineHandle scenePipeline,
         ShaderProgramHandle casterShader,
-        PipelineHandle casterPipeline)
+        PipelineHandle casterPipeline,
+        int casterPassCount = 1)
     {
         var directory = Path.Combine(AppContext.BaseDirectory, "Assets", "models");
         var measured = new List<(PropModel Model, Bounds3 Walls)>();
@@ -267,7 +268,7 @@ internal sealed class SettlementArt : IDisposable
             return PropModel.Create(
                 device, file, parts, sceneShader, scenePipeline,
                 casts ? casterShader : null, casts ? casterPipeline : null,
-                PropModel.NormaliseToUnitFootprint(bounds));
+                PropModel.NormaliseToUnitFootprint(bounds), casterPassCount: casterPassCount);
         }
 
         // <b>The nature kit's models come in for their geometry and are coloured here by hand.</b> Its
@@ -349,7 +350,8 @@ internal sealed class SettlementArt : IDisposable
                 : null;
             var built = PropModel.Create(
                 device, file, parts, sceneShader, scenePipeline,
-                casts ? casterShader : null, casts ? casterPipeline : null, bake, shadowParts);
+                casts ? casterShader : null, casts ? casterPipeline : null, bake, shadowParts,
+                casterPassCount);
             measured.Add((built, LowerExtent(parts.Select(part => part.Mesh), bounds, bake)));
             return built;
         }
@@ -403,7 +405,8 @@ internal sealed class SettlementArt : IDisposable
                 : PropModel.NormaliseToUnitFootprint(bounds);
             var built = PropModel.Create(
                 device, file, parts, sceneShader, scenePipeline,
-                casts ? casterShader : null, casts ? casterPipeline : null, bake);
+                casts ? casterShader : null, casts ? casterPipeline : null, bake,
+                casterPassCount: casterPassCount);
             // What anything hung on this building has to be placed against, rather than its bounding box.
             // See WallsOf: the widest part of a cottage is its roof.
             measured.Add((built, LowerExtent(parts.Select(part => part.Mesh), bounds, bake)));
@@ -595,7 +598,8 @@ internal sealed class SettlementArt : IDisposable
             // houses. A single crate is very nearly cubic, so a metre across is a metre tall.
             grainHeap: Prop("Crate", surface: MaterialClass.Timber),
             woodHeap: Prop("Logs", surface: MaterialClass.Timber),
-            villager: LoadVillager(device, directory, sceneShader, scenePipeline, casterShader, casterPipeline));
+            villager: LoadVillager(
+                device, directory, sceneShader, scenePipeline, casterShader, casterPipeline, casterPassCount));
         foreach (var (model, extent) in measured) art.walls[model] = extent;
         art.MidError = midError;
         art.FarError = farError;
@@ -621,7 +625,8 @@ internal sealed class SettlementArt : IDisposable
         ShaderProgramHandle sceneShader,
         PipelineHandle scenePipeline,
         ShaderProgramHandle casterShader,
-        PipelineHandle casterPipeline)
+        PipelineHandle casterPipeline,
+        int casterPassCount)
     {
         var path = Path.Combine(directory, "Villager.obj");
         if (!File.Exists(path)) return null;
@@ -639,7 +644,8 @@ internal sealed class SettlementArt : IDisposable
             scenePipeline,
             casterShader,
             casterPipeline,
-            bake);
+            bake,
+            casterPassCount: casterPassCount);
     }
 
     /// <summary>
@@ -781,6 +787,11 @@ internal sealed class SettlementArt : IDisposable
         foreach (var model in owned) model.Stage(scenePush, shadowPush);
     }
 
+    public void StageCascades(ReadOnlySpan<byte> scenePush, IReadOnlyList<byte[]> shadowPushes)
+    {
+        foreach (var model in owned) model.StageCascades(scenePush, shadowPushes);
+    }
+
     public void DrawScene(RenderPassBuilder pass, IReadOnlyList<ShaderTextureBinding>? textures)
     {
         foreach (var model in owned) model.DrawScene(pass, textures);
@@ -795,6 +806,11 @@ internal sealed class SettlementArt : IDisposable
     public void DrawShadow(RenderPassBuilder pass)
     {
         foreach (var model in owned) model.DrawShadow(pass);
+    }
+
+    public void DrawShadow(RenderPassBuilder pass, int casterPass)
+    {
+        foreach (var model in owned) model.DrawShadow(pass, casterPass);
     }
 
     /// <summary>

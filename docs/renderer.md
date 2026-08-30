@@ -98,9 +98,9 @@ Vertex layouts (`src/Blix.Graphics/`): `VertexPosition3Color`, `VertexPosition3T
 
 Shaders are authored in GLSL and compiled offline to SPIR-V with `glslc`. The Vulkan binding model is then **reflected** from the compiled `.spv` (spirv-cross JSON sidecars) into a `ShaderInterface` — descriptor sets + std140 UBO layouts + push-constant ranges — by `ShaderReflection` (`src/Blix.Graphics.Vulkan/ShaderReflection.cs`). There is no hand-maintained binding table to drift out of sync with the shader source.
 
-`GlslPreprocessor.PreprocessDetailed` resolves `#include "<file>.glsl"` (recursive, cycle-detected, `#pragma once`) and emits `#line` directives so compile errors report the original file + line. `ShaderLoader.LoadVertexFragment(vert, frag, includeDirs?, defines?)` bundles read + preprocess + source-map plumbing; `defines` injects `#define` lines after `#version` so one library function serves multiple variants.
+`GlslPreprocessor.PreprocessDetailed` resolves `#include "<file>.glsl"` recursively, detects cycles, and consumes Blix-owned `#pragma once` directives. Canonical source identities make once-only inclusion hold across different relative spellings of the same file. It emits `#line` directives so compile errors report the original file + line. `ShaderLoader.LoadVertexFragment(vert, frag, includeDirs?, defines?)` bundles read + preprocess + source-map plumbing for runtime callers; `ShaderLoader.PreprocessFile(...)` is the file-backed entry used by offline compilation. `defines` injects `#define` lines after `#version` so one library function serves multiple variants.
 
-The shared library (`src/Blix.Shaders/`, every symbol `blix_`-prefixed) is deliberately small. Demo shaders consume it with `#include "<file>.glsl"`; each demo's `CompileSpirV` target passes `glslc -I <src/Blix.Shaders>` so the include resolves, and lists the library files in the target's `Inputs` so edits retrigger the cook.
+The shared library (`src/Blix.Shaders/`, every symbol `blix_`-prefixed) is deliberately small. Demo shaders consume it with `#include "<file>.glsl"`; each shader-bearing project's `CompileSpirV` target runs `Blix.Tools.Shader`, which expands includes and variants with the same Blix preprocessor before invoking `glslc`. Included library files remain in the target's `Inputs` so edits retrigger the cook.
 
 | File | Provides |
 | --- | --- |

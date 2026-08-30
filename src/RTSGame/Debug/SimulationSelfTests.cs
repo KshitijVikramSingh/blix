@@ -133,7 +133,14 @@ internal static class SimulationSelfTests
             "a lumber camp is a store nobody eats from, and that is what makes haulers",
             TheWoodLineDecidesWhetherHaulersAreNeeded());
         Check("a cart is a job a villager takes, and pays for", ACartIsAJobAndNotAUnit());
+        Check("posting at an outcrop establishes quarry work", PostingAtAnOutcropEstablishesQuarryWork());
+        Check("one route supplies every material a site needs", OneRouteSuppliesEveryMaterial());
+        Check("a new builder's first trip is useful", ANewBuildersFirstTripIsUseful());
+        Check("builders fetch, share, consume and clear a project", BuildersFetchShareConsumeAndClear());
         Check("a building costs timber carried out and hands standing at it", ABuildingCostsLabour());
+        Check("repair consumes delivered material as condition returns", RepairConsumesAsConditionReturns());
+        Check("a palisade becomes stone on the same stable node", APalisadeBecomesStoneOnTheSameNode());
+        Check("a barracks turns the same villager into militia", ABarracksTrainsTheSameVillager());
         Check("housing caps a population and food brakes it", PeopleArriveWhenThereIsRoomAndFood());
         Check("a household that goes hungry loses somebody", PrivationSpendsItselfAsEmigration());
         Check("a wood hides what walks through it", TreesBlockSight());
@@ -3879,8 +3886,8 @@ internal static class SimulationSelfTests
 
         // Exactly one cart's worth of timber in the world, so the first route is granted and the second
         // is refused for want of it.
-        var granted = world.TryAssignRoute(villager, depot, granary, Resource.Grain);
-        var refused = !world.TryAssignRoute(pauper, depot, granary, Resource.Grain);
+        var granted = world.TryAssignRoute(villager, depot, granary);
+        var refused = !world.TryAssignRoute(pauper, depot, granary);
         var paid = woodBefore - world.Nodes.Get(granary).Stock.Wood == SimulationWorld.CartTimber &&
                    world.Economy.Consumed.Wood - consumedBefore == SimulationWorld.CartTimber;
 
@@ -3929,6 +3936,304 @@ internal static class SimulationSelfTests
             $"moved {moved} grain, still standing={stillOnRoute}; kept through an order=" +
             $"{keptThroughAnOrder}, scrapped when taken off work={scrapped}; drift {drift.Grain}/{drift.Wood}");
         return passed;
+    }
+
+    /// <summary>
+    /// The chair's generic post command recognises stone exactly as it recognises a field or tree.
+    /// </summary>
+    private static bool PostingAtAnOutcropEstablishesQuarryWork()
+    {
+        var world = new SimulationWorld();
+        var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 4000);
+        var rock = world.AddNode(
+            NodeKind.Outcrop,
+            new Vector2(8f, 0f),
+            capacity: (int)Quarrying.StonePerOutcrop);
+        world.SeedStock(rock, Resource.Stone, (int)Quarrying.StonePerOutcrop);
+        var quarrier = world.SpawnAgent(new Vector2(6f, 0f), UnitType.Villager);
+
+        ref readonly var outcrop = ref world.Nodes.Get(rock);
+        // This is the same Hold the U key queues; SimulationWorld turns it into the work belonging to
+        // the node under the post.
+        world.QueueAssign(
+            new[] { quarrier },
+            Assignment.Hold(outcrop.Position, EconomySystem.WorkShiftSeconds, outcrop.FootprintRadius));
+
+        var mostHands = 0;
+        var drift = default(ResourceTotals);
+        for (var tick = 0; tick < 30 * 800; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            if (world.Nodes.Contains(rock)) mostHands = Math.Max(mostHands, world.Nodes.Get(rock).Hands);
+            drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (!drift.IsZero || world.Nodes.Get(granary).Stock.Stone > 0) break;
+        }
+
+        ref readonly var body = ref world.Agents.Get(quarrier);
+        var assigned = body.Jobs.Assignment.Kind == AssignmentKind.Work &&
+                       body.Jobs.Assignment.Cargo == Resource.Stone;
+        var stored = world.Nodes.Get(granary).Stock.Stone;
+        var passed = assigned && mostHands == 1 && stored > 0 &&
+                     world.Economy.Produced.Stone == 0 && drift.IsZero;
+        Console.WriteLine(
+            $"    assignment={body.Jobs.Assignment.Kind}/{body.Jobs.Assignment.Cargo}, " +
+            $"hands at face={mostHands}, delivered={stored}, produced={world.Economy.Produced.Stone}, " +
+            $"drift={drift.Stone}");
+        return passed;
+    }
+
+    /// <summary>
+    /// A player route is between places, and changes cargo when the destination's useful demand changes.
+    /// </summary>
+    private static bool OneRouteSuppliesEveryMaterial()
+    {
+        var world = new SimulationWorld();
+        var source = world.AddNode(NodeKind.ForwardDepot, new Vector2(-7f, 0f), capacity: 4000);
+        var site = world.AddNode(NodeKind.Granary, new Vector2(7f, 0f), capacity: 4000, built: false);
+        var woodCost = Construction.TimberFor(NodeKind.Granary);
+        var stoneCost = Construction.StoneFor(NodeKind.Granary);
+        world.SeedStock(source, Resource.Wood, woodCost + SimulationWorld.CartTimber + 80);
+        world.SeedStock(source, Resource.Stone, stoneCost + 80);
+        var carter = world.SpawnAgent(new Vector2(-3f, 3f), UnitType.Villager);
+        var granted = world.TryAssignRoute(carter, source, site);
+
+        var carriedWood = false;
+        var carriedStone = false;
+        var checkedSave = false;
+        string? divergence = null;
+        var drift = default(ResourceTotals);
+        for (var tick = 0; tick < 30 * 900; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            ref readonly var body = ref world.Agents.Get(carter);
+            if (body.Jobs.CarriedUnits > 0)
+            {
+                carriedWood |= body.Jobs.Carrying == Resource.Wood;
+                carriedStone |= body.Jobs.Carrying == Resource.Stone;
+            }
+
+            ref readonly var building = ref world.Nodes.Get(site);
+            if (!checkedSave && building.Stock.Wood > 0)
+            {
+                var loaded = WorldSave.RoundTrip(world);
+                divergence = DeterminismCheck.Diverges(world, loaded, ticks: 300);
+                checkedSave = true;
+                if (divergence is not null) break;
+            }
+
+            drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (!drift.IsZero || building.Stock.Wood == woodCost && building.Stock.Stone == stoneCost) break;
+        }
+
+        ref readonly var supplied = ref world.Nodes.Get(site);
+        var standing = world.Agents.Get(carter).Jobs.Assignment.Kind == AssignmentKind.Carry;
+        var passed = granted && carriedWood && carriedStone && checkedSave && divergence is null &&
+                     supplied.Stock.Wood == woodCost && supplied.Stock.Stone == stoneCost && standing &&
+                     drift.IsZero;
+        Console.WriteLine(
+            $"    site received {supplied.Stock.Wood}/{woodCost} timber and " +
+            $"{supplied.Stock.Stone}/{stoneCost} stone; carried wood={carriedWood}, stone={carriedStone}; " +
+            $"route still standing={standing}; " +
+            $"save future={(divergence is null ? "identical" : divergence)}; " +
+            $"drift={drift.Wood}/{drift.Stone}");
+        return passed;
+    }
+
+    /// <summary>A build order begins with the useful journey rather than an empty visit to the site.</summary>
+    private static bool ANewBuildersFirstTripIsUseful()
+    {
+        var world = new SimulationWorld();
+        var store = world.AddNode(NodeKind.Granary, new Vector2(-12f, 0f), capacity: 5000);
+        var site = world.AddNode(NodeKind.Granary, new Vector2(12f, 0f), capacity: 5000, built: false);
+        world.SeedStock(store, Resource.Wood, Construction.TimberFor(NodeKind.Granary) + 120);
+        world.SeedStock(store, Resource.Stone, Construction.StoneFor(NodeKind.Granary) + 120);
+        world.SeedStock(store, Resource.Grain, 17);
+
+        var empty = world.SpawnAgent(new Vector2(0f, -2f), UnitType.Villager);
+        var useful = world.SpawnAgent(Vector2.Zero, UnitType.Villager);
+        var unrelated = world.SpawnAgent(new Vector2(0f, 2f), UnitType.Villager);
+        var usefulLoad = Math.Min(40, world.Agents.Get(useful).CarryCapacity);
+        world.Nodes.Get(store).Stock.Add(Resource.Wood, -usefulLoad);
+        world.Agents.Get(useful).Jobs.Carrying = Resource.Wood;
+        world.Agents.Get(useful).Jobs.CarriedUnits = usefulLoad;
+        world.Nodes.Get(store).Stock.Add(Resource.Grain, -17);
+        world.Agents.Get(unrelated).Jobs.Carrying = Resource.Grain;
+        world.Agents.Get(unrelated).Jobs.CarriedUnits = 17;
+
+        ref readonly var project = ref world.Nodes.Get(site);
+        world.QueueAssign(
+            new[] { empty, useful, unrelated },
+            Assignment.Hold(project.Position, EconomySystem.WorkShiftSeconds, project.FootprintRadius));
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+
+        ref readonly var fetching = ref world.Agents.Get(empty);
+        ref readonly var delivering = ref world.Agents.Get(useful);
+        ref readonly var returning = ref world.Agents.Get(unrelated);
+        var fetchesFirst = fetching.Jobs.Assignment.Kind == AssignmentKind.Build &&
+                           fetching.Jobs.Project == site && fetching.Jobs.Leg % 2 == 0 &&
+                           fetching.Jobs.Assignment.Source == store &&
+                           fetching.Jobs.Assignment.Sink == site &&
+                           fetching.Jobs.ReservedUnits > 0 &&
+                           Construction.CostFor(NodeKind.Granary)[fetching.Jobs.Assignment.Cargo] > 0;
+        var usefulGoesToSite = delivering.Jobs.Assignment.Kind == AssignmentKind.Build &&
+                               delivering.Jobs.Project == site && delivering.Jobs.Leg % 2 != 0 &&
+                               delivering.Jobs.Assignment.Sink == site &&
+                               delivering.Jobs.Carrying == Resource.Wood &&
+                               delivering.Jobs.CarriedUnits == usefulLoad;
+        var unrelatedGoesHome = returning.Jobs.Assignment.Kind == AssignmentKind.Build &&
+                                returning.Jobs.Project == site && returning.Jobs.Leg % 2 != 0 &&
+                                returning.Jobs.Assignment.Sink == store &&
+                                returning.Jobs.Carrying == Resource.Grain &&
+                                returning.Jobs.CarriedUnits == 17;
+        var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+        Console.WriteLine(
+            $"    empty hand source-first={fetchesFirst} ({fetching.Jobs.Assignment.Cargo}, " +
+            $"{fetching.Jobs.ReservedUnits} reserved); useful load site-first={usefulGoesToSite}; " +
+            $"unrelated load store-first={unrelatedGoesHome}; drift={drift.Grain}/{drift.Wood}/{drift.Stone}");
+        return fetchesFirst && usefulGoesToSite && unrelatedGoesHome && drift.IsZero;
+    }
+
+    /// <summary>
+    /// Builders themselves close the physical loop: claim distinct useful loads, deliver, consume as they
+    /// work, return an unrelated carried load, and leave no material or assignment in limbo at completion.
+    /// </summary>
+    private static bool BuildersFetchShareConsumeAndClear()
+    {
+        var world = new SimulationWorld();
+        var store = world.AddNode(NodeKind.Granary, new Vector2(-9f, 0f), capacity: 5000);
+        var site = world.AddNode(NodeKind.Granary, new Vector2(9f, 0f), capacity: 5000, built: false);
+        var woodCost = Construction.TimberFor(NodeKind.Granary);
+        var stoneCost = Construction.StoneFor(NodeKind.Granary);
+        world.SeedStock(store, Resource.Wood, woodCost + 90);
+        world.SeedStock(store, Resource.Stone, stoneCost + 90);
+        world.SeedStock(store, Resource.Grain, 17);
+
+        var builders = new[]
+        {
+            world.SpawnAgent(new Vector2(5f, -3f), UnitType.Villager),
+            world.SpawnAgent(new Vector2(5f, -1f), UnitType.Villager),
+            world.SpawnAgent(new Vector2(5f, 1f), UnitType.Villager),
+            world.SpawnAgent(new Vector2(5f, 3f), UnitType.Villager),
+        };
+        // An irrelevant physical load must be returned, not deleted and not mistaken for project material.
+        world.Nodes.Get(store).Stock.Add(Resource.Grain, -17);
+        world.Agents.Get(builders[0]).Jobs.Carrying = Resource.Grain;
+        world.Agents.Get(builders[0]).Jobs.CarriedUnits = 17;
+
+        ref readonly var project = ref world.Nodes.Get(site);
+        world.QueueAssign(
+            builders,
+            Assignment.Hold(project.Position, EconomySystem.WorkShiftSeconds, project.FootprintRadius));
+
+        var carriedWood = false;
+        var carriedStone = false;
+        var sharedClaims = false;
+        var incremental = false;
+        var returnedIrrelevant = false;
+        var checkedSave = false;
+        string? divergence = null;
+        var drift = default(ResourceTotals);
+        for (var tick = 0; tick < 30 * 1_800; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+
+            var woodClaims = 0;
+            var stoneClaims = 0;
+            foreach (var id in builders)
+            {
+                ref readonly var body = ref world.Agents.Get(id);
+                if (body.Jobs.CarriedUnits > 0)
+                {
+                    carriedWood |= body.Jobs.Carrying == Resource.Wood;
+                    carriedStone |= body.Jobs.Carrying == Resource.Stone;
+                }
+
+                if (body.Jobs.Assignment.Kind != AssignmentKind.Build) continue;
+                if (body.Jobs.Assignment.Cargo == Resource.Wood && body.Jobs.ReservedUnits > 0) woodClaims++;
+                if (body.Jobs.Assignment.Cargo == Resource.Stone && body.Jobs.ReservedUnits > 0) stoneClaims++;
+            }
+
+            sharedClaims |= woodClaims > 0 && stoneClaims > 0;
+            returnedIrrelevant |= world.Nodes.Get(store).Stock.Grain == 17;
+            ref readonly var building = ref world.Nodes.Get(site);
+            incremental |= building.BuildWork > 0f && building.IsUnderConstruction &&
+                           building.BuildConsumed.Total > 0 && building.WantsMaterials;
+
+            if (!checkedSave && building.BuildConsumed.Total > 0 && building.IsUnderConstruction)
+            {
+                var loaded = WorldSave.RoundTrip(world);
+                divergence = DeterminismCheck.Diverges(world, loaded, ticks: 300);
+                checkedSave = true;
+                if (divergence is not null) break;
+            }
+
+            drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (!drift.IsZero) break;
+            if (!building.IsBuilt) continue;
+            var cleared = builders.All(id =>
+                world.Agents.Get(id).Jobs.Assignment.Kind != AssignmentKind.Build &&
+                world.Agents.Get(id).Jobs.CarriedUnits == 0);
+            if (cleared) break;
+        }
+
+        ref readonly var finished = ref world.Nodes.Get(site);
+        var allCleared = builders.All(id =>
+            world.Agents.Get(id).Jobs.Assignment.Kind != AssignmentKind.Build &&
+            world.Agents.Get(id).Jobs.CarriedUnits == 0);
+        var exactRecipe = finished.BuildConsumed.Wood == woodCost &&
+                          finished.BuildConsumed.Stone == stoneCost &&
+                          world.Economy.Consumed.Wood == woodCost &&
+                          world.Economy.Consumed.Stone == stoneCost;
+        var surplusCleared = SurplusLeavesFinishedHouse();
+        var passed = finished.IsBuilt && incremental && carriedWood && carriedStone && sharedClaims &&
+                     returnedIrrelevant && allCleared && exactRecipe && finished.Stock.Total == 0 &&
+                     checkedSave && divergence is null && drift.IsZero && surplusCleared;
+        Console.WriteLine(
+            $"    incremental={incremental}, shared wood/stone claims={sharedClaims}, " +
+            $"carried={carriedWood}/{carriedStone}, returned unrelated grain={returnedIrrelevant}; " +
+            $"consumed {finished.BuildConsumed.Wood}/{woodCost} timber and " +
+            $"{finished.BuildConsumed.Stone}/{stoneCost} stone; cleared={allCleared}; " +
+            $"surplus house cleared={surplusCleared}; " +
+            $"save future={(divergence is null ? "identical" : divergence)}; " +
+            $"drift={drift.Wood}/{drift.Stone}");
+        return passed;
+    }
+
+    private static bool SurplusLeavesFinishedHouse()
+    {
+        var world = new SimulationWorld();
+        var store = world.AddNode(NodeKind.Granary, new Vector2(-7f, 0f), capacity: 2000);
+        var site = world.AddNode(NodeKind.House, new Vector2(7f, 0f), capacity: 0, occupancy: 4, built: false);
+        var cost = Construction.TimberFor(NodeKind.House);
+        const int surplus = 13;
+        world.SeedStock(store, Resource.Wood, cost + surplus);
+        // A legacy over-delivery or cancelled parallel trip: physical, accounted stock already at the site.
+        world.Nodes.Get(store).Stock.Add(Resource.Wood, -(cost + surplus));
+        world.Nodes.Get(site).Stock.Add(Resource.Wood, cost + surplus);
+        var builder = world.SpawnAgent(new Vector2(4f, 0f), UnitType.Villager);
+        ref readonly var project = ref world.Nodes.Get(site);
+        world.QueueAssign(
+            new[] { builder },
+            Assignment.Hold(project.Position, EconomySystem.WorkShiftSeconds, project.FootprintRadius));
+
+        var drift = default(ResourceTotals);
+        for (var tick = 0; tick < 30 * 1_500; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (!drift.IsZero) break;
+            if (world.Nodes.Get(site).IsBuilt && world.Nodes.Get(site).Stock.Wood == 0 &&
+                world.Nodes.Get(store).Stock.Wood == surplus &&
+                world.Agents.Get(builder).Jobs.Assignment.Kind == AssignmentKind.None)
+            {
+                break;
+            }
+        }
+
+        return world.Nodes.Get(site).IsBuilt && world.Nodes.Get(site).Stock.Wood == 0 &&
+               world.Nodes.Get(store).Stock.Wood == surplus &&
+               world.Economy.Consumed.Wood == cost &&
+               world.Agents.Get(builder).Jobs.CarriedUnits == 0 && drift.IsZero;
     }
 
     /// <summary>
@@ -4009,6 +4314,318 @@ internal static class SimulationSelfTests
             $"{deliveredAt:F0} s, two builders finished {Construction.LabourFor(NodeKind.ForwardDepot):F0} " +
             $"labour-seconds by {raisedAt:F0} s, then it stores and owns a catchment={works}; timber " +
             $"consumed into the wall={spent}; drift {drift}");
+        return passed;
+    }
+
+    /// <summary>Damage is not negative construction: repair has its own saved work, cost and condition.</summary>
+    private static bool RepairConsumesAsConditionReturns()
+    {
+        var world = new SimulationWorld();
+        var store = world.AddNode(NodeKind.Granary, new Vector2(-9f, 0f), capacity: 3000);
+        var wall = world.AddNode(NodeKind.StoneWall, new Vector2(9f, 0f), capacity: 0);
+        world.SeedStock(store, Resource.Stone, 300);
+        var originalId = wall;
+        var originalCollider = world.Nodes.Get(wall).Collider;
+        var maximum = world.Nodes.Get(wall).MaxCondition;
+        var damaged = world.DamageStructure(wall, maximum * 0.5f);
+        var start = world.Nodes.Get(wall).Condition;
+        var began = world.BeginRepair(wall);
+        var recipe = StructuralProjects.CostFor(in world.Nodes.Get(wall));
+        var labour = StructuralProjects.LabourFor(in world.Nodes.Get(wall));
+        var consumedBefore = world.Economy.Consumed.Stone;
+        var builders = new[]
+        {
+            world.SpawnAgent(new Vector2(-5f, -1f), UnitType.Villager),
+            world.SpawnAgent(new Vector2(-5f, 1f), UnitType.Villager),
+        };
+        ref readonly var project = ref world.Nodes.Get(wall);
+        world.QueueAssign(
+            builders,
+            Assignment.Hold(project.Position, EconomySystem.WorkShiftSeconds, project.FootprintRadius));
+
+        var carried = false;
+        var incremental = false;
+        var checkedSave = false;
+        string? divergence = null;
+        var drift = default(ResourceTotals);
+        for (var tick = 0; tick < 30 * 900; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            foreach (var id in builders)
+            {
+                ref readonly var body = ref world.Agents.Get(id);
+                carried |= body.Jobs.CarriedUnits > 0 && body.Jobs.Carrying == Resource.Stone;
+            }
+
+            ref readonly var structure = ref world.Nodes.Get(wall);
+            incremental |= structure.StructuralProject == StructuralProjectKind.Repair &&
+                           structure.Condition > start && structure.Condition < maximum &&
+                           structure.StructuralConsumed.Stone > 0;
+            if (!checkedSave && incremental)
+            {
+                var loaded = WorldSave.RoundTrip(world);
+                divergence = DeterminismCheck.Diverges(world, loaded, ticks: 300);
+                checkedSave = true;
+                if (divergence is not null) break;
+            }
+
+            drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (!drift.IsZero) break;
+            if (structure.StructuralProject == StructuralProjectKind.None &&
+                builders.All(id => world.Agents.Get(id).Jobs.Assignment.Kind != AssignmentKind.Build))
+            {
+                break;
+            }
+        }
+
+        ref readonly var repaired = ref world.Nodes.Get(wall);
+        var exact = world.Economy.Consumed.Stone - consumedBefore == recipe.Stone;
+        var stable = repaired.Id == originalId && repaired.Collider == originalCollider &&
+                     repaired.Kind == NodeKind.StoneWall;
+        var cleared = builders.All(id => world.Agents.Get(id).Jobs.Assignment.Kind != AssignmentKind.Build &&
+                                               world.Agents.Get(id).Jobs.CarriedUnits == 0);
+        var passed = damaged && began && recipe.Stone > 0 && labour > 0f && carried && incremental &&
+                     repaired.StructuralProject == StructuralProjectKind.None &&
+                     MathF.Abs(repaired.Condition - maximum) < 0.001f && exact && stable && cleared &&
+                     checkedSave && divergence is null && drift.IsZero;
+        Console.WriteLine(
+            $"    condition {start:F0}->{repaired.Condition:F0}/{maximum:F0}, " +
+            $"stone {recipe.Stone} consumed exactly={exact}, incremental={incremental}, carried={carried}; " +
+            $"same node/collider={stable}, cleared={cleared}; " +
+            $"save future={(divergence is null ? "identical" : divergence)}; drift={drift.Stone}");
+        return passed;
+    }
+
+    /// <summary>The wall remains a palisade throughout work and swaps material only at completion.</summary>
+    private static bool APalisadeBecomesStoneOnTheSameNode()
+    {
+        var world = new SimulationWorld();
+        var store = world.AddNode(NodeKind.Granary, new Vector2(-10f, 0f), capacity: 4000);
+        var wall = world.AddNode(NodeKind.PalisadeWall, new Vector2(10f, 0f), capacity: 0);
+        world.SeedStock(store, Resource.Stone, 400);
+        var originalCollider = world.Nodes.Get(wall).Collider;
+        var originalHalfExtent = world.Nodes.Get(wall).HalfExtent;
+        var began = world.BeginUpgrade(wall, NodeKind.StoneWall);
+        var recipe = StructuralProjects.CostFor(in world.Nodes.Get(wall));
+        var consumedBefore = world.Economy.Consumed.Stone;
+        var builders = new[]
+        {
+            world.SpawnAgent(new Vector2(-5f, -2f), UnitType.Villager),
+            world.SpawnAgent(new Vector2(-5f, 0f), UnitType.Villager),
+            world.SpawnAgent(new Vector2(-5f, 2f), UnitType.Villager),
+        };
+        ref readonly var project = ref world.Nodes.Get(wall);
+        world.QueueAssign(
+            builders,
+            Assignment.Hold(project.Position, EconomySystem.WorkShiftSeconds, project.FootprintRadius));
+
+        var carriedStone = false;
+        var progressedAsPalisade = false;
+        var checkedSave = false;
+        string? divergence = null;
+        var drift = default(ResourceTotals);
+        for (var tick = 0; tick < 30 * 900; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            foreach (var id in builders)
+            {
+                ref readonly var body = ref world.Agents.Get(id);
+                carriedStone |= body.Jobs.CarriedUnits > 0 && body.Jobs.Carrying == Resource.Stone;
+            }
+
+            ref readonly var structure = ref world.Nodes.Get(wall);
+            progressedAsPalisade |= structure.StructuralProject == StructuralProjectKind.Upgrade &&
+                                    structure.StructuralWork > 0f &&
+                                    structure.Kind == NodeKind.PalisadeWall;
+            if (!checkedSave && progressedAsPalisade && structure.StructuralConsumed.Stone > 0)
+            {
+                var loaded = WorldSave.RoundTrip(world);
+                divergence = DeterminismCheck.Diverges(world, loaded, ticks: 300);
+                checkedSave = true;
+                if (divergence is not null) break;
+            }
+
+            drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (!drift.IsZero) break;
+            if (structure.Kind == NodeKind.StoneWall &&
+                builders.All(id => world.Agents.Get(id).Jobs.Assignment.Kind != AssignmentKind.Build))
+            {
+                break;
+            }
+        }
+
+        ref readonly var stone = ref world.Nodes.Get(wall);
+        var exact = world.Economy.Consumed.Stone - consumedBefore == recipe.Stone;
+        var stable = stone.Id == wall && stone.Collider == originalCollider &&
+                     MathF.Abs(stone.HalfExtent - originalHalfExtent) < 0.001f;
+        var cleared = builders.All(id => world.Agents.Get(id).Jobs.Assignment.Kind != AssignmentKind.Build &&
+                                               world.Agents.Get(id).Jobs.CarriedUnits == 0);
+        var surplusCleared = SurplusLeavesUpgradedWall();
+        var passed = began && recipe.Stone > 0 && carriedStone && progressedAsPalisade &&
+                     stone.Kind == NodeKind.StoneWall && stone.StructuralProject == StructuralProjectKind.None &&
+                     stone.Condition == stone.MaxCondition && exact && stable && cleared && surplusCleared &&
+                     checkedSave && divergence is null && drift.IsZero;
+        Console.WriteLine(
+            $"    {recipe.Stone} stone carried={carriedStone} and consumed exactly={exact}; " +
+            $"remained palisade while progressing={progressedAsPalisade}, then {stone.Kind}; " +
+            $"same node/collider/footprint={stable}, surplus returned={surplusCleared}, cleared={cleared}; " +
+            $"save future={(divergence is null ? "identical" : divergence)}; drift={drift.Stone}");
+        return passed;
+    }
+
+    private static bool SurplusLeavesUpgradedWall()
+    {
+        var world = new SimulationWorld();
+        var store = world.AddNode(NodeKind.Granary, new Vector2(-7f, 0f), capacity: 2000);
+        var wall = world.AddNode(NodeKind.PalisadeWall, new Vector2(7f, 0f), capacity: 0);
+        world.SeedStock(store, Resource.Stone, 300);
+        if (!world.BeginUpgrade(wall, NodeKind.StoneWall)) return false;
+        var cost = StructuralProjects.CostFor(in world.Nodes.Get(wall)).Stone;
+        const int surplus = 13;
+        world.Nodes.Get(store).Stock.Add(Resource.Stone, -(cost + surplus));
+        world.Nodes.Get(wall).Stock.Add(Resource.Stone, cost + surplus);
+        var builder = world.SpawnAgent(new Vector2(4f, 0f), UnitType.Villager);
+        ref readonly var project = ref world.Nodes.Get(wall);
+        world.QueueAssign(
+            new[] { builder },
+            Assignment.Hold(project.Position, EconomySystem.WorkShiftSeconds, project.FootprintRadius));
+
+        var drift = default(ResourceTotals);
+        for (var tick = 0; tick < 30 * 900; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (!drift.IsZero) break;
+            if (world.Nodes.Get(wall).Kind == NodeKind.StoneWall &&
+                world.Nodes.Get(wall).Stock.Stone == 0 &&
+                world.Nodes.Get(store).Stock.Stone == 300 - cost &&
+                world.Agents.Get(builder).Jobs.Assignment.Kind == AssignmentKind.None)
+            {
+                break;
+            }
+        }
+
+        return world.Nodes.Get(wall).Kind == NodeKind.StoneWall &&
+               world.Nodes.Get(wall).Stock.Stone == 0 &&
+               world.Nodes.Get(store).Stock.Stone == 300 - cost &&
+               world.Agents.Get(builder).Jobs.CarriedUnits == 0 && drift.IsZero;
+    }
+
+    /// <summary>The barracks is built through the ordinary project seam, then converts rather than spawns.</summary>
+    private static bool ABarracksTrainsTheSameVillager()
+    {
+        var world = new SimulationWorld(100f);
+        var store = world.AddNode(NodeKind.Granary, new Vector2(-20f, 0f), capacity: 5000);
+        var barracks = world.AddNode(NodeKind.Barracks, new Vector2(20f, 0f), capacity: 0, built: false);
+        var construction = Construction.CostFor(NodeKind.Barracks);
+        var equipment = MilitiaTraining.Cost;
+        const int traineeCount = 2;
+        world.SeedStock(store, Resource.Wood, construction.Wood + traineeCount * equipment.Wood);
+        world.SeedStock(store, Resource.Stone, construction.Stone + traineeCount * equipment.Stone);
+
+        var builders = new AgentId[4];
+        for (var i = 0; i < builders.Length; i++)
+        {
+            builders[i] = world.SpawnAgent(new Vector2(-12f, -3f + i * 2f), UnitType.Villager);
+        }
+
+        ref readonly var site = ref world.Nodes.Get(barracks);
+        world.QueueAssign(
+            builders,
+            Assignment.Hold(site.Position, EconomySystem.WorkShiftSeconds, site.FootprintRadius));
+
+        var carriedBoth = false;
+        var drift = default(ResourceTotals);
+        for (var tick = 0; tick < 30 * 1_200; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            var wood = false;
+            var stone = false;
+            foreach (var id in builders)
+            {
+                ref readonly var body = ref world.Agents.Get(id);
+                wood |= body.Jobs.CarriedUnits > 0 && body.Jobs.Carrying == Resource.Wood;
+                stone |= body.Jobs.CarriedUnits > 0 && body.Jobs.Carrying == Resource.Stone;
+            }
+            carriedBoth |= wood && stone;
+            drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (!drift.IsZero || world.Nodes.Get(barracks).IsBuilt &&
+                builders.All(id => world.Agents.Get(id).Jobs.Assignment.Kind == AssignmentKind.None))
+            {
+                break;
+            }
+        }
+
+        var trainees = builders.Take(traineeCount).ToArray();
+        var trainee = trainees[0];
+        var liveBefore = world.Agents.LiveCount;
+        world.QueueTrainMilitia(trainees, barracks);
+        var fetchedEquipment = false;
+        var savedInProgress = false;
+        string? divergence = null;
+        for (var tick = 0; tick < 30 * 300; tick++)
+        {
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            foreach (var id in trainees)
+            {
+                ref readonly var traineeBody = ref world.Agents.Get(id);
+                fetchedEquipment |= traineeBody.Jobs.CarriedUnits > 0 &&
+                                    traineeBody.Jobs.Carrying is Resource.Wood or Resource.Stone;
+            }
+
+            ref readonly var body = ref world.Agents.Get(trainee);
+            if (!savedInProgress && trainees.Any(id =>
+                    world.Agents.Get(id).Jobs.TrainingWork > 0f &&
+                    world.Agents.Get(id).Jobs.TrainingWork < MilitiaTraining.Seconds))
+            {
+                var loaded = WorldSave.RoundTrip(world);
+                divergence = DeterminismCheck.Diverges(world, loaded, ticks: 300);
+                savedInProgress = true;
+                if (divergence is not null) break;
+            }
+
+            drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (!drift.IsZero || trainees.All(id => world.Agents.Get(id).Role == AgentRole.Militia)) break;
+        }
+
+        var sameBody = world.Agents.LiveCount == liveBefore && trainees.All(id =>
+            world.Agents.Contains(id) && world.Agents.Get(id).Id == id);
+        var militaryFrame = trainees.All(id =>
+        {
+            ref readonly var militia = ref world.Agents.Get(id);
+            return militia.Role == AgentRole.Militia &&
+                   militia.CarryCapacity == UnitType.Militia.CarryCapacity &&
+                   militia.Appetite == UnitType.Militia.Appetite &&
+                   militia.Strength == UnitType.Militia.Strength &&
+                   militia.Health == UnitType.Militia.Health;
+        });
+        var exact = world.Economy.Consumed.Wood == construction.Wood + traineeCount * equipment.Wood &&
+                    world.Economy.Consumed.Stone == construction.Stone + traineeCount * equipment.Stone;
+
+        // A militia body may still receive movement orders, but it cannot silently return to the economy.
+        var field = world.AddNode(NodeKind.Farm, Vector2.Zero, capacity: 150, Resource.Grain);
+        ref readonly var work = ref world.Nodes.Get(field);
+        world.QueueAssign(
+            new[] { trainee },
+            Assignment.Hold(work.Position, EconomySystem.WorkShiftSeconds, work.FootprintRadius));
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        // A soldier may be posted on that ground as a garrison, but does not acquire its civilian work loop
+        // and is not counted as a hand merely because the post touches a field.
+        var leftWorkforce = world.Agents.Get(trainee).Jobs.Assignment.Kind != AssignmentKind.Work &&
+                            world.Nodes.Get(field).Hands == 0;
+        var completedSave = WorldSave.RoundTrip(world);
+        var rolePersists = trainees.All(id => completedSave.Agents.Get(id).Role == AgentRole.Militia);
+        drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+
+        var passed = world.Nodes.Get(barracks).IsBuilt && carriedBoth && fetchedEquipment &&
+                     savedInProgress && divergence is null && sameBody && militaryFrame && exact &&
+                     leftWorkforce && rolePersists && drift.IsZero;
+        Console.WriteLine(
+            $"    barracks built={world.Nodes.Get(barracks).IsBuilt}, construction carried wood/stone={carriedBoth}; " +
+            $"{traineeCount} trainees fetched equipment={fetchedEquipment}, same ids/headcount={sameBody}, militia frame={militaryFrame}; " +
+            $"left workforce={leftWorkforce}, exact material sink={exact}; " +
+            $"in-progress save future={(divergence is null ? "identical" : divergence)}, " +
+            $"completed role saved={rolePersists}; drift={drift.Wood}/{drift.Stone}");
         return passed;
     }
 
@@ -4832,7 +5449,7 @@ internal static class SimulationSelfTests
     {
         var cart = PathService.CongestionSpeedScale(UnitType.HaulerCart.MaximumSpeed);
         var villager = PathService.CongestionSpeedScale(UnitType.Villager.MaximumSpeed);
-        var soldier = PathService.CongestionSpeedScale(UnitType.Soldier.MaximumSpeed);
+        var soldier = PathService.CongestionSpeedScale(UnitType.Militia.MaximumSpeed);
         var scout = PathService.CongestionSpeedScale(UnitType.LightCavalry.MaximumSpeed);
 
         var ordered = cart < villager && villager < scout;

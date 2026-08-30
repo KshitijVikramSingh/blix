@@ -115,6 +115,12 @@ internal static class DeterminismCheck
         ["EconomySystem.idleHaulers"] =
             "rebuilt from the bodies by every pass of the board; who is idle is a fact about the " +
             "bodies, and those are fingerprinted.",
+        ["EconomySystem.nodesWithHands"] =
+            "cache of the nodes whose fingerprinted Hands value was nonzero last tick. It is cleared " +
+            "and rebuilt by CountHands; after a load the first pass deliberately resets every node instead.",
+        ["EconomySystem.handsInitialized"] =
+            "selects the one-time full reset after construction or load. Every later consequence lands in " +
+            "EconomyNode.Hands, which is fingerprinted, and Read always invalidates this cache.",
         ["SimulationWorld.fellings"] =
             "a ring of where trees lately came down, so a stump can be drawn there. Cosmetic: no " +
             "decision anywhere reads it, and it is deliberately not saved either.",
