@@ -30,6 +30,9 @@ internal sealed class PerformanceRun
     internal readonly record struct Sample(
         double FrameMilliseconds,
         double RenderDeltaMilliseconds,
+        double HostWait,
+        double HostEncode,
+        double HostSubmitPresent,
         double Update,
         double Fog,
         double Render,
@@ -82,6 +85,9 @@ internal sealed class PerformanceRun
 
     public int FramesSeen => warmUp.Count + steady.Count;
 
+    /// <summary>Frames recorded into the steady window, so a caller can tell when it opened.</summary>
+    public int SteadyFrames => steady.Count;
+
     public void Observe(in Sample sample)
     {
         if (Reported) return;
@@ -97,7 +103,14 @@ internal sealed class PerformanceRun
     /// figure would be a number about the smoothing.
     /// </param>
     /// <param name="agents">Bodies alive, because every per-tick figure is per this many.</param>
-    public void Report(double tickMilliseconds, int agents)
+    /// <param name="gpuPasses">
+    /// Mean resolved GPU milliseconds per pass over the steady window.
+    /// </param>
+    public void Report(
+        double tickMilliseconds,
+        int agents,
+        IReadOnlyList<(string Pass, double MeanMs)>? gpuPasses = null,
+        bool gpuTimestampsSupported = false)
     {
         if (Reported) return;
         Reported = true;
@@ -170,6 +183,38 @@ internal sealed class PerformanceRun
             $"{Percentile(body, s => s.CasterTrianglesMid, 0.50) / 1000.0:F0}k/" +
             $"{Percentile(body, s => s.CasterTrianglesFar, 0.50) / 1000.0:F0}k triangles");
 
+        // <b>The host's own three phases, which is where the pacing hides.</b> Wait is vkWaitForFences on the
+        // slot — GPU throttle AND present pacing, indistinguishable from here, which is exactly why §90's
+        // discovery took so long. Encode is command recording, the term draw COUNT drives. Submit/present is
+        // the kick and the flip.
+        Console.WriteLine(
+            $"  host p50/p95 ms: wait {Pair(body, s => s.HostWait)} · " +
+            $"encode {Pair(body, s => s.HostEncode)} · " +
+            $"submit+present {Pair(body, s => s.HostSubmitPresent)}");
+        if (gpuPasses is { Count: > 0 })
+        {
+            // <b>The first unquantised device figures this game has had.</b> A frame time paced to 16.7 ms
+            // cannot resolve a five-millisecond change; a timestamp around a pass can.
+            var total = 0.0;
+            foreach (var (_, mean) in gpuPasses) total += mean;
+            Console.WriteLine($"  gpu passes (mean ms, {total:F2} total):");
+            foreach (var (pass, mean) in gpuPasses)
+            {
+                Console.WriteLine(
+                    $"    {pass,-18} {mean,7:F3} ms  ({(total > 0.0 ? mean / total * 100.0 : 0.0),4:F1}%)");
+            }
+        }
+        else
+        {
+            // Which of the two it is matters: unsupported is a fact about the device and the wait column is
+            // then the only device figure available; supported-but-empty is a bug in the drain and worth
+            // chasing. Guessing between them is how an instrument gets trusted for the wrong reason.
+            Console.WriteLine(
+                gpuTimestampsSupported
+                    ? "  gpu passes: timestamps ARE supported but none resolved — the drain is not delivering"
+                    : "  gpu passes: this device reports no timestamp support; `wait` is the device figure");
+        }
+
         // The line the matrix script reads. Deliberately flat, single-space separated and free of the units
         // and punctuation above: a table generated from prose is a table with a parser bug in it.
         Console.WriteLine(
@@ -191,6 +236,10 @@ internal sealed class PerformanceRun
             $"overlay_p50={Percentile(body, s => s.Overlay, 0.50):F2} " +
             $"stage_p50={Percentile(body, s => s.Stage, 0.50):F2} " +
             $"record_p50={Percentile(body, s => s.Record, 0.50):F2} " +
+            $"wait_p50={Percentile(body, s => s.HostWait, 0.50):F2} " +
+            $"encode_p50={Percentile(body, s => s.HostEncode, 0.50):F2} " +
+            $"present_p50={Percentile(body, s => s.HostSubmitPresent, 0.50):F2} " +
+            $"gpu_total={(gpuPasses is null ? 0.0 : GpuTotal(gpuPasses)):F2} " +
             $"tick_ms={tickMilliseconds:F3} agents={agents} " +
             $"zoom_p50={Percentile(body, s => s.CameraDistance, 0.50):F1} " +
             $"instances={Percentile(body, s => s.Instances, 0.50):F0} " +
@@ -202,6 +251,13 @@ internal sealed class PerformanceRun
             $"trees={Percentile(body, s => s.TreesDrawn, 0.50):F0} " +
             $"chunks={Percentile(body, s => s.ChunksDrawn, 0.50):F0}");
         Console.Out.Flush();
+    }
+
+    private static double GpuTotal(IReadOnlyList<(string Pass, double MeanMs)> passes)
+    {
+        var total = 0.0;
+        foreach (var (_, mean) in passes) total += mean;
+        return total;
     }
 
     /// <summary>

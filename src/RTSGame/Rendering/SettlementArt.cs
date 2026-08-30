@@ -73,15 +73,34 @@ internal sealed class SettlementArt : IDisposable
         GrainHeap = grainHeap;
         WoodHeap = woodHeap;
         Villager = villager;
-        owned.AddRange(new[] { granary, depot, fieldPlot, stumps, grainHeap, woodHeap });
-        owned.AddRange(rocks);
-        owned.AddRange(scatter);
-        owned.AddRange(undergrowth);
-        owned.AddRange(houses);
-        owned.AddRange(crop);
-        owned.AddRange(trees);
-        owned.AddRange(treesMid);
-        owned.AddRange(treesFar);
+        // <b>Own each model once, by identity.</b> A tier array may point at the same PropModel as another —
+        // the cheap-tree swap fills all four tiers from three models — and a duplicate here is two bugs: every
+        // load figure counts it twice, and teardown disposes its buffers twice. Reference equality, not
+        // value equality: two distinct PropModels built from one file are two models.
+        void Own(params PropModel?[] models)
+        {
+            foreach (var model in models)
+            {
+                if (model is null) continue;
+                var already = false;
+                foreach (var held in owned)
+                {
+                    if (ReferenceEquals(held, model)) { already = true; break; }
+                }
+
+                if (!already) owned.Add(model);
+            }
+        }
+
+        Own(granary, depot, fieldPlot, stumps, grainHeap, woodHeap);
+        Own(rocks);
+        Own(scatter);
+        Own(undergrowth);
+        Own(houses);
+        Own(crop);
+        Own(trees);
+        Own(treesMid);
+        Own(treesFar);
         // <b>The deep tier belongs here too, and its absence was invisible in the worst way.</b> This list is
         // what Stage submits and what Begin clears, so a model outside it accepts instances, reports them, and
         // draws none of them — every tree in a thick stand was counted as drawn and never rendered, while its
@@ -94,7 +113,7 @@ internal sealed class SettlementArt : IDisposable
         //
         // <b>Adding a tier is three edits and one of them is here.</b> The array, the branch that fills it, and
         // this line — and only the third has no compiler or reviewer to catch it.
-        owned.AddRange(treesDeep);
+        Own(treesDeep);
         if (villager is not null) owned.Add(villager);
     }
 
@@ -268,7 +287,8 @@ internal sealed class SettlementArt : IDisposable
         ShaderProgramHandle casterShader,
         PipelineHandle casterPipeline,
         int casterPassCount = 1,
-        bool distantShadowProxies = false)
+        bool distantShadowProxies = false,
+        bool cheapTrees = false)
     {
         var directory = Path.Combine(AppContext.BaseDirectory, "Assets", "models");
         var measured = new List<(PropModel Model, Bounds3 Walls)>();
@@ -411,6 +431,36 @@ internal sealed class SettlementArt : IDisposable
             return built;
         }
 
+        // <b>The pre-kit trees, kept in the repo and forgotten.</b> Resource_Tree1/2 and Resource_PineTree are
+        // 552, 384 and 345 triangles against the kit's 3,947 to 9,564 — cheaper than even the kit's coarsest
+        // cooked level (603), which is what makes them the answer to a question §90 could only frame
+        // arithmetically: what if every tree drew in full, and the model were simply small? Their materials are
+        // named Wood and Green, so Classified gives them the right colour and material class for nothing.
+        PropModel Legacy(string file)
+        {
+            var path = Path.Combine(directory, file + ".gltf");
+            if (!File.Exists(path))
+            {
+                throw new FileNotFoundException(
+                    $"The cheap-tree swap wants '{file}.gltf' in src/RTSGame/Assets/models.", path);
+            }
+
+            var model = new GltfStaticImporter().Import(
+                new AssetImportContext(AssetId.Parse(file), path));
+            var parts = model.Primitives
+                .Select(prim => (
+                    prim.Mesh,
+                    Tint: Classified(
+                        prim.Material?.BaseColorFactor ?? new Vector4(0.6f, 0.6f, 0.6f, 1f),
+                        prim.Material?.Name,
+                        MaterialClass.Foliage)))
+                .ToArray();
+            var bounds = parts.Select(part => part.Mesh).CombinedBounds();
+            return PropModel.Create(
+                device, file, parts, sceneShader, scenePipeline, casterShader, casterPipeline,
+                PropModel.NormaliseToUnitFootprint(bounds), casterPassCount: casterPassCount);
+        }
+
         PropModel Prop(
             string file,
             bool casts = true,
@@ -508,6 +558,30 @@ internal sealed class SettlementArt : IDisposable
         // blocked ground with nothing standing on it. A footprint the player cannot see is a footprint they
         // walk into. The cost is a 26% stretch in depth on a barn, which is a barn slightly the wrong shape
         // — much the cheaper of the two lies.
+        // <b>One model everywhere, when asked.</b> Ten slots because TreeKindAt reads a species range off the
+        // ground — broadleaf on the level, conifer high and steep, twisted on poor exposed ground, dead in the
+        // wet — and that mapping has to survive the swap or the map stops meaning what it says. Three models
+        // cover it with the conifer range genuinely coniferous; twisted and dead lose their distinction, which
+        // is a real loss and is why this is a switch and not a decision.
+        PropModel[]? cheapTiers = null;
+        if (cheapTrees)
+        {
+            var broadleaf = Legacy("Resource_Tree1");
+            var scrub = Legacy("Resource_Tree2");
+            var conifer = Legacy("Resource_PineTree");
+            cheapTiers = new[]
+            {
+                broadleaf, scrub, broadleaf,
+                conifer, conifer, conifer,
+                scrub, scrub,
+                broadleaf, scrub,
+            };
+            Console.WriteLine(
+                $"  art: cheap trees ON — {broadleaf.TriangleCount}/{scrub.TriangleCount}/" +
+                $"{conifer.TriangleCount} triangles a tree at every tier, against the kit's thousands. " +
+                "Twisted and dead species draw as scrub and broadleaf.");
+        }
+
         var art = new SettlementArt(
             granary: Prop("Storage_SecondAge_Level3", stretchToSquare: true),
             depot: Prop("Storage_SecondAge_Level1", stretchToSquare: true),
@@ -544,7 +618,7 @@ internal sealed class SettlementArt : IDisposable
             // <b>Three levels of the same ten species, picked by distance.</b> Not three sets of models:
             // the same cooked chain read at level 0, 2 and 3, sharing one vertex buffer each, so the middle
             // and far bands cost index lists and nothing else.
-            treesMid: new[]
+            treesMid: cheapTiers ?? new[]
             {
                 Kit("CommonTree_1", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("CommonTree_2", casts: true, lod: 1, casterLod: 3, distantProxy: true),
                 Kit("CommonTree_3", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("Pine_1", casts: true, lod: 1, casterLod: 3, distantProxy: true),
@@ -552,7 +626,7 @@ internal sealed class SettlementArt : IDisposable
                 Kit("TwistedTree_1", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("TwistedTree_2", casts: true, lod: 1, casterLod: 3, distantProxy: true),
                 Kit("DeadTree_1", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("DeadTree_2", casts: true, lod: 1, casterLod: 3, distantProxy: true),
             },
-            treesFar: new[]
+            treesFar: cheapTiers ?? new[]
             {
                 // <b>The far band does not cast.</b> It begins past ninety-five metres and the haze begins
                 // at about seventy-seven, so its shadows fall on ground the fog has already taken — and it
@@ -565,7 +639,7 @@ internal sealed class SettlementArt : IDisposable
                 Kit("TwistedTree_1", casts: true, lod: 2, casterLod: 3, distantProxy: true), Kit("TwistedTree_2", casts: true, lod: 2, casterLod: 3, distantProxy: true),
                 Kit("DeadTree_1", casts: true, lod: 2, casterLod: 3, distantProxy: true), Kit("DeadTree_2", casts: true, lod: 2, casterLod: 3, distantProxy: true),
             },
-            treesDeep: new[]
+            treesDeep: cheapTiers ?? new[]
             {
                 // <b>The coarsest level, for trees buried deep enough in a wood to hide it.</b> §56 moved the
                 // far tier <em>up</em> off this level because it read too thin, and the reason that finding does
@@ -587,7 +661,7 @@ internal sealed class SettlementArt : IDisposable
                 Kit("TwistedTree_1", casts: true, lod: 3, distantProxy: true), Kit("TwistedTree_2", casts: true, lod: 3, distantProxy: true),
                 Kit("DeadTree_1", casts: true, lod: 3, distantProxy: true), Kit("DeadTree_2", casts: true, lod: 3, distantProxy: true),
             },
-            trees: new[]
+            trees: cheapTiers ?? new[]
             {
                 // <b>Each level casts its own shadow.</b> The blob substitution that stood in for this is
                 // gone: a tier already costs what its own level of detail costs, so the sun's pass gets the

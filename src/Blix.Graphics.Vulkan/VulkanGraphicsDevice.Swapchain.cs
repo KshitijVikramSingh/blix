@@ -912,6 +912,7 @@ public sealed partial class VulkanGraphicsDevice
             var deltaTicks = endTicks - startTicks;
             var deltaMs = deltaTicks * timestampPeriodNs / 1_000_000.0;
             pendingGpuTimings.Add(new VkGpuPassTiming(t.PassName, deltaMs, t.IssuedFrame));
+            AccumulateGpuPassTotal(t.PassName, deltaMs);
         }
         pending.Clear();
     }

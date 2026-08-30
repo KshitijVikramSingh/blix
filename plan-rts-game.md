@@ -8558,3 +8558,78 @@ thermals that reversed three verdicts (§84, §87, §89), the fixture that measu
 it turned out not to matter), and now the present mode that was never doing what its own console line claimed.
 The pattern has stopped being a caution and become the method: **no figure from this game is believed until the
 instrument that produced it has been attacked.**
+
+## 91. The pre-kit trees were in the repo the whole time
+
+Three things the chair asked for: separate the dressing from the tier-bias lever, get per-pass GPU timestamps,
+and swap in the cheaper tree we already own. Two landed, one is impossible on this platform, and the third was
+better than the arithmetic predicted.
+
+### The dressing no longer follows the lever
+
+`CanopyTierAt` returned the biased tier, and the same value chose the mesh *and* decided which trees get
+undergrowth and a contact shadow. So `--perf-tier-bias 3` quietly previewed a world with no ground cover,
+which made it useless for the look question it was meant to inform. The natural tier now decides the dressing
+and the biased one decides only the mesh. A measurement lever has no business changing the dressing.
+
+### Per-pass GPU timestamps: not on macOS, and the engine already said so
+
+`VulkanGraphicsDevice.Swapchain.cs:69` has carried this note since the timing pool was written: on MoltenVK
+`vkCmdWriteTimestamp` lowers to Metal counter samplers that resolve *after* the in-flight fence, so
+`vkGetQueryPoolResults` returns NotReady even with `ResultWaitBit`, and "on macOS the CPU timers carry the
+perf story". Promised before reading it; the report now distinguishes "device reports no support" from
+"supported but the drain delivers nothing", and this device says the latter.
+
+What did come out of the attempt is the substitute, and it is a good one. `VkCpuFrameTiming` splits the host's
+frame into **wait** (`vkWaitForFences` — GPU throttle and present pacing together), **encode** (command
+recording, the term draw count drives) and **submit+present**. Wait is not quantised by the 16.7 ms pacing
+§90 found, so it is the first device-side number in this arc that can resolve a small change. Per-pass
+attribution is then ablation plus wait — skip a pass, read the difference — which is what `--perf-cascades`
+already provides.
+
+### The cheap trees
+
+`Resource_Tree1/2` and `Resource_PineTree` have been sitting in `Assets/models` since before the kit: **552,
+384 and 345 triangles**, against the kit's 3,947 to 9,564 — cheaper than even the kit's coarsest cooked level
+(603). §90 reasoned that a tree at a third of the kit's count could be drawn in full everywhere for today's
+budget. The real thing is an eighth.
+
+`--cheap-trees` fills all four tiers from those three models, mapped onto the ten species slots so
+`TreeKindAt`'s ground-to-species meaning survives (twisted and dead lose their distinction, which is a real
+loss and is why this is a switch). Measured cool, rotated A B B A, reproducing to a hundredth:
+
+```
+standoff  arm     frame    wait    encode   scene tri   cast tri
+ 24 m     kit     16.66    0.06    0.34      4.31M       4.50M
+ 24 m     cheap   16.67    0.04    0.18      2.06M       2.66M
+118 m     kit     33.33   12.38    0.48      8.12M      16.73M
+118 m     cheap   16.68    0.89    0.25      4.06M       9.67M
+450 m     kit     33.39   18.27    0.51     10.84M      27.61M
+450 m     cheap   16.69    2.07    0.28      5.51M      15.95M
+```
+
+**Thirty to sixty frames a second at both wide standoffs**, and the wait — real milliseconds, unpaced —
+falls from 12.4 to 0.9 and from 18.3 to 2.1. Encode halves too, because fewer distinct models are staged. At
+24 m nothing changes: that frame was already inside one interval.
+
+So the chair's proposal is not merely affordable, it is the largest single win in stage 0, and it deletes both
+crowding thresholds, every tier boundary and three quarters of the LOD machinery on the way. What it costs is
+a look, and that is the only open question left on it — which is now a fair question to ask, because
+`--cheap-trees` keeps the undergrowth the tier bias used to take away.
+
+Note also that casters remain the dominant geometry even cheap: 9.67M of 13.7M submitted at 118 m, because
+every tree casts into up to three cascades. Cheap trees and §84's coarse-cascade proxy are complementary, not
+alternatives.
+
+### Two more instrument failures, for the record
+
+**A zsh word-splitting bug ran twelve identical configurations.** An inline `go() { ... $2 ... }` helper passed
+`"--perf-cascades 0"` as one argument, and zsh — unlike bash — does not split unquoted expansions, so the app
+saw an unknown argument and ignored it. Twelve runs of one configuration, presented as three arms of an
+ablation. Caught only because `cast_tris` was identical in all of them, which is the kind of column that
+exists for exactly this. The rule for these scripts is now: a bash script file with `"$@"`, never an inline
+zsh function.
+
+**And it accidentally produced the best variance measurement of the arc**: twelve runs, one configuration, one
+session — frame p50 from 33.4 to 51.2 ms. Fifty-five per cent, in order, monotonically upward. Any absolute
+figure quoted from a hot machine is worth about as much as that spread.

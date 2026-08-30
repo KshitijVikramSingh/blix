@@ -379,6 +379,8 @@ public static class Program
         var msaa = Value(args, "--msaa") is { } samples ? int.Parse(samples) : 4;
         // --tree-crowd mid,far (or "max") sets the two LOD thresholds for a run. See RtsGameLoop's remarks:
         // at 12,20 every tree on a village map draws in full, which is one end of the art bracket.
+        // The pre-kit trees at every tier — 345-552 triangles against the kit's thousands. See §91.
+        var cheapTrees = args.Contains("--cheap-trees");
         (float, float)? treeCrowd = null;
         if (Value(args, "--tree-crowd") is { } crowd)
         {
@@ -473,7 +475,8 @@ public static class Program
             zoomLimit,
             tierBias,
             msaa,
-            treeCrowd);
+            treeCrowd,
+            cheapTrees);
         using var window = new Window(
             game, new WindowOptions("RTSGame — Greybox Kingdom", windowWidth, windowHeight));
         window.Run();

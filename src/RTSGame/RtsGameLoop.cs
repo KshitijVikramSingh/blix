@@ -319,6 +319,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private readonly bool performanceBlockingUpload;
 
+    /// <summary>Draws every tree from the pre-kit models, at one detail level, at every distance.</summary>
+    /// <remarks>
+    /// §90 worked out arithmetically that a tree of about a third the kit's triangles could be drawn in full
+    /// everywhere for today's budget. The pre-kit art turned out to be an eighth of it — 345 to 552 triangles
+    /// — so the arithmetic can be checked against something real instead of imagined.
+    /// </remarks>
+    private readonly bool cheapTrees;
+
     /// <summary>Shifts every tree this many detail levels coarser. A lever, not a look control.</summary>
     /// <remarks>
     /// <b>The control arm for the fill question.</b> §87 found the frame peaks at 200-300 m while submitted
@@ -1321,7 +1329,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         float zoomLimitMetres = 0f,
         int performanceTierBias = 0,
         int msaaSamples = 4,
-        (float Mid, float Far)? treeCrowd = null)
+        (float Mid, float Far)? treeCrowd = null,
+        bool cheapTrees = false)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
@@ -1329,6 +1338,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         this.performanceVsync = performanceVsync;
         this.shadowProxies = shadowProxies;
         this.performanceBlockingUpload = performanceBlockingUpload;
+        this.cheapTrees = cheapTrees;
         this.performanceTierBias = Math.Clamp(performanceTierBias, 0, 3);
         // <b>The other end of the art lever.</b> These two thresholds decide when a copse stops keeping every
         // triangle; at their maxima (12 and 20) nothing on a village map is ever crowded enough to coarsen, so
@@ -1470,7 +1480,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 (performanceBlockingUpload ? "-blockingupload" : string.Empty) +
                 (performanceTierBias > 0 ? $"-tier+{performanceTierBias}" : string.Empty) +
                 (this.msaaSamples != 4 ? $"-msaa{this.msaaSamples}" : string.Empty) +
-                (treeCrowd is { } shown ? $"-crowd{shown.Mid:F0}.{shown.Far:F0}" : string.Empty);
+                (treeCrowd is { } shown ? $"-crowd{shown.Mid:F0}.{shown.Far:F0}" : string.Empty) +
+                (cheapTrees ? "-cheaptrees" : string.Empty);
             // A quarter of the run, capped: long enough to cover first presentation, terrain meshing and the
             // first cover resolve, short enough that a sixty-frame smoke still reports a steady window.
             var warmUpFrames = exitAfterFrames > 0 ? Math.Clamp(exitAfterFrames / 4, 1, 120) : 120;
@@ -2143,7 +2154,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         smokeBatch = new InstancedBatch(canopyMesh, smokePipeline, smokeBuffer);
         art = SettlementArt.Load(
             vk, worldShader, worldPipeline, casterShader, casterPipeline, ShadowCascades.Count,
-            distantShadowProxies: shadowProxies);
+            distantShadowProxies: shadowProxies,
+            cheapTrees: cheapTrees);
         // <b>What the buildings measured, because two bugs came out of assuming it.</b> A fitted model's
         // bounding box is its roof and its height is whatever its proportions gave it — so anything hung on
         // a building (a lit window, a lantern, a chimney) has to be placed against numbers from the asset
@@ -4826,9 +4838,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // OnRender's. If the host ever runs the two callbacks at different cadences those are different
         // numbers, and a frame budget argued from the wrong one is argued from nothing. Reported side by side
         // so the question is answered by the log rather than by reading Silk's loop.
+        var hostFrame = vk.LastCpuFrameTiming;
         performance?.Observe(new PerformanceRun.Sample(
             rawFrameMilliseconds,
             time.Delta * 1000.0,
+            hostFrame.WaitMs,
+            hostFrame.EncodeMs,
+            hostFrame.SubmitPresentMs,
             updateMilliseconds,
             fogMilliseconds,
             renderMilliseconds,
@@ -4851,6 +4867,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             treesDrawn,
             drawnChunks.Count,
             cameraDistance));
+        // The GPU baseline is taken on the first steady frame, so the pass means describe the same window the
+        // frame percentiles do rather than the warm-up's first presentation and terrain meshing.
+        if (performance is { SteadyFrames: 1 } && gpuBaseline is null) CaptureGpuBaseline();
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames)
         {
@@ -6503,7 +6522,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             //
             // The far limit is <c>treeCullBoundSquared</c>, and it stays a limit rather than a ladder:
             // beyond what the camera can see, and soon beyond what the player has scouted.
+            // <b>Two tiers, and they answer different questions.</b> The natural one is what the scheme says
+            // this tree's crowding deserves; the drawn one is that shifted by the measurement bias. They were
+            // one variable, which made --perf-tier-bias silently take the undergrowth and the contact shadows
+            // away with the geometry — so the geometry lever could not be looked at without also previewing a
+            // world with no ground cover, and the look question it was meant to inform could not be asked.
             var tier = CanopyTierAt(tree.Position);
+            var drawTier = Math.Min(3, tier + performanceTierBias);
 
             // Ablation level 1 stops here: everything computed about a tree, nothing submitted. See treeWork.
             if (treeWork >= 1)
@@ -6512,30 +6537,36 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 return;
             }
 
+            // The dressing goes with what the tree IS, not with which mesh was picked for it: a tree the
+            // scheme calls near-field has undergrowth at its foot and a shadow under its canopy whatever
+            // geometry the run chose to draw it with.
             if (tier == 0)
             {
-                Cast(art.Trees[kind], placement, casts);
-                treeTiers.Near++;
                 // Sized to the canopy rather than the trunk, because what shades the ground is the canopy.
                 AddContactShadow(tree.Position, width * 0.42f, 0.55f);
                 var underStart = timingDebug ? Stopwatch.GetTimestamp() : 0L;
                 DrawUndergrowth(in tree, left);
                 if (timingDebug) undergrowthTicks += Stopwatch.GetTimestamp() - underStart;
             }
-            else if (tier == 1)
+
+            switch (drawTier)
             {
-                Cast(art.TreesMid[kind], placement, casts);
-                treeTiers.Mid++;
-            }
-            else if (tier == 2)
-            {
-                Cast(art.TreesFar[kind], placement, casts);
-                treeTiers.Far++;
-            }
-            else
-            {
-                Cast(art.TreesDeep[kind], placement, casts);
-                treeTiers.Deep++;
+                case 0:
+                    Cast(art.Trees[kind], placement, casts);
+                    treeTiers.Near++;
+                    break;
+                case 1:
+                    Cast(art.TreesMid[kind], placement, casts);
+                    treeTiers.Mid++;
+                    break;
+                case 2:
+                    Cast(art.TreesFar[kind], placement, casts);
+                    treeTiers.Far++;
+                    break;
+                default:
+                    Cast(art.TreesDeep[kind], placement, casts);
+                    treeTiers.Deep++;
+                    break;
             }
 
             treesDrawn++;
@@ -6987,21 +7018,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private int CanopyTierAt(Vector2 at)
     {
-        if (scouted.Cells == 0 || canopyCounts.Length == 0) return performanceTierBias;
+        if (scouted.Cells == 0 || canopyCounts.Length == 0) return 0;
         var crowd = canopyCounts[CanopyIndex(at)];
         // <b>A fourth tier at twice the crowding the third needs.</b> The rule is the same one all the way up:
         // a coarse level loses mass and the neighbours put it back, so the deeper into a wood a tree is the
         // less its own shape is doing. Twice, rather than a new dial, because that is the statement — "twice
         // as crowded as crowded" — and a number would invite tuning where a relationship does not.
-        // The bias is a measurement lever, not a look control: it shifts every tree one or more levels
-        // coarser so the frame can be asked whether it is spending on TRIANGLES. Pixels are unaffected — a
-        // coarse tree covers the same ground — which is what makes it the control for the window-size lever
-        // rather than a duplicate of it. See §88.
-        var tier = crowd >= look.TreeCrowdFar * 2f ? 3
+        // <b>The natural tier, unbiased.</b> --perf-tier-bias is applied where the mesh is chosen, not here,
+        // because this answer also decides which trees get undergrowth and a contact shadow — and a
+        // measurement lever has no business changing the dressing.
+        return crowd >= look.TreeCrowdFar * 2f ? 3
             : crowd >= look.TreeCrowdFar ? 2
             : crowd >= look.TreeCrowdMid ? 1
             : 0;
-        return Math.Min(3, tier + performanceTierBias);
     }
 
     /// <summary>
@@ -8394,8 +8423,42 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// going away is still a run somebody was measuring, and an instrument that only reports when the exit was
     /// the expected one teaches you to distrust the exits.
     /// </remarks>
+    /// <summary>Cumulative GPU pass totals as they stood when the steady window opened.</summary>
+    /// <remarks>
+    /// Snapshot-and-subtract rather than a reset, because the device's accumulator has other readers and a
+    /// measurement that clears shared state is a measurement that breaks the next one.
+    /// </remarks>
+    private Dictionary<string, (double TotalMs, long Samples)>? gpuBaseline;
+
+    private void CaptureGpuBaseline()
+    {
+        if (vk is null) return;
+        gpuBaseline = new Dictionary<string, (double, long)>(vk.GpuPassTotals);
+    }
+
+    /// <summary>Mean GPU milliseconds per pass over the steady window, heaviest first.</summary>
+    private List<(string Pass, double MeanMs)> GpuPassMeans()
+    {
+        var means = new List<(string, double)>();
+        if (vk is null || gpuBaseline is null) return means;
+        foreach (var (pass, now) in vk.GpuPassTotals)
+        {
+            var before = gpuBaseline.TryGetValue(pass, out var found) ? found : (TotalMs: 0.0, Samples: 0L);
+            var samples = now.Samples - before.Samples;
+            if (samples <= 0) continue;
+            means.Add((pass, (now.TotalMs - before.TotalMs) / samples));
+        }
+
+        means.Sort((a, b) => b.Item2.CompareTo(a.Item2));
+        return means;
+    }
+
     private void ReportPerformanceRun() =>
-        performance?.Report(simulation.Timings.AverageOf(SimulationPhase.TotalTick), simulation.Agents.Count);
+        performance?.Report(
+            simulation.Timings.AverageOf(SimulationPhase.TotalTick),
+            simulation.Agents.Count,
+            GpuPassMeans(),
+            vk?.GpuTimestampsSupported ?? false);
 
     public void Dispose()
     {
