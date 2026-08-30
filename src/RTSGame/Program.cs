@@ -377,6 +377,27 @@ public static class Program
         // 8 are there because the interesting question is where the look stops being worth the milliseconds,
         // and that is not a yes/no.
         var msaa = Value(args, "--msaa") is { } samples ? int.Parse(samples) : 4;
+        // --tree-crowd mid,far (or "max") sets the two LOD thresholds for a run. See RtsGameLoop's remarks:
+        // at 12,20 every tree on a village map draws in full, which is one end of the art bracket.
+        (float, float)? treeCrowd = null;
+        if (Value(args, "--tree-crowd") is { } crowd)
+        {
+            if (crowd.Equals("max", StringComparison.OrdinalIgnoreCase))
+            {
+                treeCrowd = (12f, 20f);
+            }
+            else
+            {
+                var parts = crowd.Split(',');
+                if (parts.Length != 2)
+                {
+                    throw new ArgumentException(
+                        "--tree-crowd takes 'max' or two numbers: --tree-crowd 12,20", "--tree-crowd");
+                }
+
+                treeCrowd = (float.Parse(parts[0]), float.Parse(parts[1]));
+            }
+        }
         var windowWidth = Value(args, "--width") is { } w ? int.Parse(w) : 1280;
         var windowHeight = Value(args, "--height") is { } h ? int.Parse(h) : 720;
         if (performanceCascades > 3)
@@ -451,7 +472,8 @@ public static class Program
             performanceBlockingUpload,
             zoomLimit,
             tierBias,
-            msaa);
+            msaa,
+            treeCrowd);
         using var window = new Window(
             game, new WindowOptions("RTSGame — Greybox Kingdom", windowWidth, windowHeight));
         window.Run();

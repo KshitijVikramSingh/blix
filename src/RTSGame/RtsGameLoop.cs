@@ -1320,7 +1320,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         bool performanceBlockingUpload = false,
         float zoomLimitMetres = 0f,
         int performanceTierBias = 0,
-        int msaaSamples = 4)
+        int msaaSamples = 4,
+        (float Mid, float Far)? treeCrowd = null)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
@@ -1329,6 +1330,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         this.shadowProxies = shadowProxies;
         this.performanceBlockingUpload = performanceBlockingUpload;
         this.performanceTierBias = Math.Clamp(performanceTierBias, 0, 3);
+        // <b>The other end of the art lever.</b> These two thresholds decide when a copse stops keeping every
+        // triangle; at their maxima (12 and 20) nothing on a village map is ever crowded enough to coarsen, so
+        // every tree draws in full. Together with --perf-tier-bias 3, which puts every tree at the coarsest
+        // level the chain holds, they bracket what tree detail costs across the whole zoom range — which is
+        // the measurement a decision about cheaper art needs, and it does not require the art to exist yet.
+        if (treeCrowd is { } crowd)
+        {
+            look.TreeCrowdMid = Math.Clamp(crowd.Mid, 1f, 12f);
+            look.TreeCrowdFar = Math.Clamp(crowd.Far, 2f, 20f);
+        }
         // Powers of two only, and only the ones a device is required to support for a colour target.
         this.msaaSamples = msaaSamples switch
         {
@@ -1458,7 +1469,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 (shadowProxies ? "-proxy" : string.Empty) +
                 (performanceBlockingUpload ? "-blockingupload" : string.Empty) +
                 (performanceTierBias > 0 ? $"-tier+{performanceTierBias}" : string.Empty) +
-                (this.msaaSamples != 4 ? $"-msaa{this.msaaSamples}" : string.Empty);
+                (this.msaaSamples != 4 ? $"-msaa{this.msaaSamples}" : string.Empty) +
+                (treeCrowd is { } shown ? $"-crowd{shown.Mid:F0}.{shown.Far:F0}" : string.Empty);
             // A quarter of the run, capped: long enough to cover first presentation, terrain meshing and the
             // first cover resolve, short enough that a sixty-frame smoke still reports a steady window.
             var warmUpFrames = exitAfterFrames > 0 ? Math.Clamp(exitAfterFrames / 4, 1, 120) : 120;

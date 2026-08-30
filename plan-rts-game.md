@@ -8483,3 +8483,78 @@ directionally the same — the arm that ran last lost — which is the signature
 
 **A harness that knows about drift is not a harness that cancels it.** The rule is not "interleave", it is
 "alternate the order and check that the effect survives reversal".
+
+## 90. The art bracket, and the discovery that "vsync off" never turned vsync off
+
+A proposal from the chair: drop the two LOD thresholds, draw every tree in full at every distance, cull only
+by fog — and make it affordable by giving the tree substantially fewer triangles to begin with. The look is
+not settled, so the art is a lever, and it is one the renderer work had been treating as fixed.
+
+The renderer half was measurable immediately. `--tree-crowd max` puts both thresholds at their maxima (12 and
+20), which is as close to "nothing ever coarsens" as the scheme allows; `--perf-tier-bias 3` puts every tree
+at the coarsest level the chain holds. Between them they bracket what tree detail costs, without the cheaper
+art having to exist yet.
+
+Rotated A B C C B A per standoff, 250 frames each, pinned heavy seed, fog on, noon:
+
+```
+standoff   all full     current tiers   all coarsest      trees
+ 24 m      13.35M          4.31M           3.54M          4,723
+118 m      24.72M          8.12M           6.96M          9,238
+200 m      29.77M          9.87M           8.42M         11,398
+450 m      32.49M         10.84M           9.33M         12,754
+```
+
+Two findings, both from the exact column rather than the timed one:
+
+1. **The tiered scheme is already within 15% of drawing everything at the coarsest level.** Crowding sends
+   dense woodland to the far and deep tiers so aggressively that the remaining detail is a rounding error.
+   There is no triangle win left in more LOD — which retires "tune the sliders" as a performance lever for
+   good.
+2. **All-full costs about three times the current triangle budget.** That is the number the proposal needs: a
+   uniform model at roughly a third of the near model's 5,940 triangles drawn in full everywhere lands on
+   today's budget, and at a quarter it comes in under — while deleting both thresholds, every tier boundary
+   and three of the four `PropModel` sets per species. The chair's instinct is arithmetically sound.
+
+Also worth recording: `--perf-tier-bias 3` also removes undergrowth and contact shadows, which are drawn only
+for tier-0 trees. It is a fair proxy for the geometry question and **not** a fair preview of the look.
+
+### The instrument, wrong again, and this time about all of it
+
+The bracket's frame column came out suspiciously clean: 16.66, 33.33, 50.00, 66.67 ms, reproducing to a
+hundredth across repeats. Those are exactly one, two, three and four multiples of 16.667 ms.
+
+```
+                p50            p95          max
+Mailbox    33.33  33.33   33.8  33.6   49.6  34.3
+FIFO       33.37  33.40   50.2  50.1   51.0  51.3
+```
+
+**Mailbox and FIFO have the same median.** On this MoltenVK/Metal path, "vsync off" does not uncap
+presentation at all — Mailbox trims the tail and nothing more. Every `frame_p50` in §83-§89 is therefore a
+cadence rather than a cost whenever the machine was cool enough to land on a step, which is precisely the
+possibility §83 claimed to have eliminated. It passed then only because a hot machine was missing steps
+untidily enough to look unquantised.
+
+What that costs this arc, stated without softening:
+
+- **Gone:** the millisecond magnitudes taken from frame p50 — §84's proxy "7-10 ms", §85's upload fix "~10 ms",
+  §88's half-res "19 ms". Their *directions* survive where a phase split or a signature flip backed them; the
+  sizes do not.
+- **Standing:** anything measured by a stopwatch inside the frame or counted on the CPU. The fog column going
+  20.3 to 0.27 ms is a direct measurement around the call, so the queue drain and its removal are real. The
+  phase splits, the CPU/GPU signature flips, every triangle and instance count, and the byte-identical
+  geometry that killed the zoom-ceiling theory all stand.
+
+### The only instrument left worth building
+
+A 16.7 ms ruler cannot measure a change worth five. Per-pass GPU timestamps are no longer the last item on the
+list, they are the *only* way to get an unquantised figure for anything on the device — and `VkGpuPassTiming`
+already exists in the engine, with the diagnostics line already printing an `execute` figure beside
+`build-commands`. That is the next thing to build, before any further conclusion is drawn about the GPU.
+
+Which makes four instrument corrections in one arc: the frame that did not close against its halves (§83), the
+thermals that reversed three verdicts (§84, §87, §89), the fixture that measured its own diagnostics (§85, and
+it turned out not to matter), and now the present mode that was never doing what its own console line claimed.
+The pattern has stopped being a caution and become the method: **no figure from this game is believed until the
+instrument that produced it has been attacked.**
