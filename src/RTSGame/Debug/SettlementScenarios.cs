@@ -82,7 +82,7 @@ internal static class SettlementScenarios
         Archetype archetype = Archetype.SplitValley,
         uint mapSeed = 0x5EED1234u)
     {
-        var world = Build(extentMeters, out var granary, reliefAmplitudeMetres, region, archetype, mapSeed);
+        var world = BuildVillage(extentMeters, out var granary, reliefAmplitudeMetres, region, archetype, mapSeed);
         var totalTicks = (int)(years * WorldCalendar.YearSeconds * TicksPerSecond);
         var faults = new List<string>();
 
@@ -162,7 +162,7 @@ internal static class SettlementScenarios
         uint seed = 0x1B873593u,
         bool peers = false)
     {
-        var world = Build(extentMeters, out var granary);
+        var world = BuildVillage(extentMeters, out var granary);
         var settings = new RaidSettings
         {
             // Explicit, because the shipped default is off — see RaidSettings.Enabled. This scenario exists
@@ -335,7 +335,7 @@ internal static class SettlementScenarios
     /// </remarks>
     public static int RunPlacementCheck(float extentMeters, float minutes)
     {
-        var world = Build(extentMeters, out _);
+        var world = BuildVillage(extentMeters, out _);
         Console.WriteLine(
             $"RTSGame placement check — {world.ExtentMeters:F0} m, {world.Agents.LiveCount} people, " +
             $"{world.Nodes.LiveCount} nodes");
@@ -689,7 +689,15 @@ internal static class SettlementScenarios
     /// measurements answering two questions, rather than one measurement answering neither.
     /// </para>
     /// </remarks>
-    private static SimulationWorld Build(
+    /// <summary>
+    /// The village as the game builds it — terrain, layout, settlement, and every tree and outcrop on it.
+    /// </summary>
+    /// <remarks>
+    /// Internal rather than private since §94, because the routing profile has to run against THIS world and
+    /// not against a synthetic one. The difference is the whole finding: a sculpted test world decomposes into
+    /// 562 rectangles and a real village into far more, and the flow field's cost follows the rectangles.
+    /// </remarks>
+    internal static SimulationWorld BuildVillage(
         float extentMeters,
         out NodeId granary,
         float reliefAmplitudeMetres = 0f,

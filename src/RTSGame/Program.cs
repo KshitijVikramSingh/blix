@@ -247,6 +247,16 @@ public static class Program
             Environment.Exit(0);
         }
 
+        if (args.Contains("--pathprofile"))
+        {
+            var profileExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var profileRelief = Value(args, "--relief-amplitude") is { } amplitude
+                ? float.Parse(amplitude)
+                : 32f;
+            var profileOrders = Value(args, "--orders") is { } count ? int.Parse(count) : 4;
+            Environment.Exit(ScaleScenarios.RunPathProfile(profileExtent, profileRelief, profileOrders));
+        }
+
         if (args.Contains("--ordertest"))
         {
             var orderExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 1200f;

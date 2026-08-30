@@ -201,6 +201,82 @@ internal static class ScaleScenarios
     /// it settles on the way costs a region-local search. Reported here rather than assumed
     /// to be the same.
     /// </remarks>
+    /// <summary>
+    /// What one cross-map order costs on the village the game actually builds.
+    /// </summary>
+    /// <remarks>
+    /// <b>§93 measured a synthetic sculpted world and under-reported the freeze.</b> That world decomposes into
+    /// 562 rectangles; a real village carries twenty-five thousand trees and outcrops, every one of which
+    /// blocks cells and cuts the walkable area into more rectangles — and both the mesh build and the field's
+    /// corner Dijkstra scale with rectangle count. The report from the chair was an order across the whole map
+    /// on the standard 600 m village, so that is what this measures.
+    /// </remarks>
+    public static int RunPathProfile(float extentMeters, float reliefAmplitudeMetres, int orders)
+    {
+        CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
+        var world = SettlementScenarios.BuildVillage(
+            extentMeters, out _, reliefAmplitudeMetres <= 0f ? 32f : reliefAmplitudeMetres);
+        for (var warm = 0; warm < 30; warm++) world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+
+        var movers = new List<AgentId>();
+        foreach (ref readonly var agent in world.Agents.All)
+        {
+            if (agent.IsAlive) movers.Add(agent.Id);
+        }
+
+        Console.WriteLine(
+            $"RTSGame path profile — the village as built | {world.ExtentMeters:F0} m | " +
+            $"{world.Nodes.LiveCount:N0} nodes | {movers.Count} people");
+        Console.WriteLine("  one order each, across the map, as a player would click");
+        Console.WriteLine();
+
+        var half = extentMeters * 0.5f - 12f;
+        for (var order = 0; order < orders; order++)
+        {
+            // Opposite corners, alternating, so no order re-uses the last one's corridor or its goal.
+            var sign = order % 2 == 0 ? 1f : -1f;
+            var target = new Vector2(sign * half * 0.9f, -sign * half * 0.9f);
+            var before = world.RoutingCost;
+            var start = Stopwatch.GetTimestamp();
+            world.QueueMove(movers, target);
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            var orderMs = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+            var after = world.RoutingCost;
+            Console.WriteLine(
+                $"  order {order + 1} | {orderMs,8:F1} ms | " +
+                $"mesh {after.MeshMs - before.MeshMs,7:F1} ms " +
+                $"({after.MeshBuilds - before.MeshBuilds} builds, {after.MeshRectangles:N0} rects) | " +
+                $"tiles {after.TileMs - before.TileMs,7:F1} ms ({after.TileFills - before.TileFills} fills) | " +
+                $"field {after.FieldMs - before.FieldMs,8:F1} ms ({after.Fields - before.Fields} built)");
+            // Twenty quiet ticks after the order, which is where a stall would show up as the bodies
+            // actually start moving and ask for what the order did not build.
+            var quiet = Stopwatch.GetTimestamp();
+            var quietBefore = world.RoutingCost;
+            for (var tick = 0; tick < 20; tick++) world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            var quietAfter = world.RoutingCost;
+            Console.WriteLine(
+                $"           | {Stopwatch.GetElapsedTime(quiet).TotalMilliseconds / 20.0,8:F2} ms/tick over the " +
+                $"next 20 | mesh {quietAfter.MeshMs - quietBefore.MeshMs,6:F1} | " +
+                $"tiles {quietAfter.TileMs - quietBefore.TileMs,6:F1} | " +
+                $"field {quietAfter.FieldMs - quietBefore.FieldMs,7:F1} ms " +
+                $"({quietAfter.Fields - quietBefore.Fields} built)");
+            // <b>And the tick's own phases, because the first run of this profile found 317 ms a tick that the
+            // routing counters could not see.</b> A split that only covers the structures you suspected is a
+            // split that will always blame one of them.
+            Console.WriteLine(
+                $"           | phases: paths {world.Timings.AverageOf(SimulationPhase.Pathfinding),7:F2} " +
+                $"behaviors {world.Timings.AverageOf(SimulationPhase.Behaviors),6:F2} " +
+                $"steering {world.Timings.AverageOf(SimulationPhase.LocalSteering),6:F2} " +
+                $"collision {world.Timings.AverageOf(SimulationPhase.CollisionResolution),6:F2} " +
+                $"nav {world.Timings.AverageOf(SimulationPhase.NavigationRefresh),6:F2} " +
+                $"recovery {world.Timings.AverageOf(SimulationPhase.CongestionRecovery),6:F2} " +
+                $"jobs {world.Timings.AverageOf(SimulationPhase.Jobs),6:F2} " +
+                $"commands {world.Timings.AverageOf(SimulationPhase.Commands),6:F2} ms");
+        }
+
+        return 0;
+    }
+
     public static int RunOrderDistance(float extentMeters, int agentCount, bool sculpted = false)
     {
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;

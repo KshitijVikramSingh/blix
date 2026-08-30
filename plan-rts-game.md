@@ -8743,3 +8743,58 @@ seconds": a mesh rebuild and a pair of field builds landing in the same tick.
 Order matters here: (1) is a measurement, (2) is possibly free, (3) is the durable fix and needs the group
 work beside it, and (4) is the one the village actually trips over. Stage 0's rule applies unchanged — measure
 the instrument, then the mechanism, then change something.
+
+## 94. The freeze is A* after all — in the ticks after the order, not in it
+
+§93 attributed the order tick and stopped there, because the synthetic fixture said the ticks after an order
+cost 0.13 ms. On the village the game actually builds, they cost up to 315 ms each for twenty ticks. Six
+seconds, from one click.
+
+`--pathprofile` builds the real village — `SettlementScenarios.BuildVillage`, 24,933 nodes, 20 people, 32 m
+relief — and clicks the far corner, alternating corners so no order inherits the last one's goal:
+
+```
+order 1 |  435.0 ms | mesh 0 (5,871 rects) | tiles 118.5 ms (7 fills) | field 309.1 ms (2 built)
+        |    2.27 ms/tick over the next 20 | paths   0.05 ms
+order 4 |    0.3 ms | mesh 0 (5,871 rects) | tiles   0.0 ms (0 fills) | field   0.0 ms (0 built)
+        |  314.61 ms/tick over the next 20 | paths 186.87 ms
+```
+
+**The order tick and the freeze are two different problems**, and the second is the one being reported:
+
+- the order tick pays two flow fields and a handful of tile fills — 430 ms on this map;
+- the ticks *after* it pay per-agent A\*, at up to 315 ms a tick sustained, which no routing counter I added
+  could see because `RoutingCost` covers the mesh, the tiles and the field and not `FindPath`.
+
+Why the synthetic world hid it: it has few blockers, so the cohort's shared flow transit serves every member
+and nobody falls back. A real village has twenty-five thousand trees and outcrops. The walkable area cuts into
+**5,871 rectangles** against the test world's 562, transit fails for members it cannot price, and each one
+falls back to `AssignPath` → `FindPath` — a full A\* over a 1200x1200 cell grid, per body, on the tick, with no
+node budget and no per-tick cap.
+
+So the original report was right about the cause and I was wrong to retire it. What was wrong was only *when*:
+not the order, the movement that follows it.
+
+### Four stalls, and what each one wants
+
+1. **Per-agent A\* on the tick, uncapped.** The immediate freeze. Wants two bounds — a node budget per search
+   and a count budget per tick — and a rule for what a body does while its path is still pending. That rule is
+   a group-behaviour decision, which is where this arc's two halves meet.
+2. **Why transit fails at all on a village.** If the cohort's shared field served every member, no A\* would
+   run. This is the real fix and the one that removes the class of problem rather than bounding it.
+3. **Two flow fields an order at ~150 ms each** (§93), now measured at 300 ms on the real map. Still wants the
+   `LegBetween` measurement.
+4. **A 233 ms mesh rebuild on any nav change** — construction re-rasterises navigation, and this map is 5,871
+   rectangles rather than 562, so the rebuilt cost is higher than §93's figure. Wants region-local
+   invalidation.
+
+Order: (1) to stop the bleeding and make the game playable enough to judge anything, (2) because it is the
+actual bug, then (3) and (4).
+
+### The lesson, again, in the same shape
+
+Three fixtures in this arc reported that everything was fine: `--ordertest` on flat ground, `--ordertest`
+sculpted, and the first `--pathprofile` before phase timings were printed. Each was measuring a real thing and
+each omitted the term that mattered — the update half in §83, the fog upload in §85, `FindPath` here. **A
+split that only covers the structures you suspected will always blame one of them.** The fix, every time, was
+to make the frame or the tick close against its own total, and then look at the residue.
