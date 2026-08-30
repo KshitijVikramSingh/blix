@@ -436,8 +436,12 @@ internal sealed class SettlementArt : IDisposable
         // cooked level (603), which is what makes them the answer to a question §90 could only frame
         // arithmetically: what if every tree drew in full, and the model were simply small? Their materials are
         // named Wood and Green, so Classified gives them the right colour and material class for nothing.
-        PropModel Legacy(string file)
+        PropModel Legacy(string file, bool distantProxy)
         {
+            // Honour the switch, as Kit does. Without this the cheap trees proxied whether or not anybody
+            // asked, which made --cheap-trees and --cheap-trees --shadow-proxy measure the same thing and
+            // report it as two arms.
+            distantProxy &= distantShadowProxies;
             var path = Path.Combine(directory, file + ".gltf");
             if (!File.Exists(path))
             {
@@ -456,9 +460,23 @@ internal sealed class SettlementArt : IDisposable
                         MaterialClass.Foliage)))
                 .ToArray();
             var bounds = parts.Select(part => part.Mesh).CombinedBounds();
+            // The same density gate the kit tiers get: a crowded copy hands the coarse cascades a proxy, an
+            // isolated one keeps its own silhouette in every map. Two variants of a 400-triangle model is a
+            // cheaper way to express that than teaching one model about crowding.
+            IReadOnlyList<IEnumerable<MeshData>?>? shadowByPass = null;
+            if (distantProxy && casterPassCount > 1)
+            {
+                var proxy = new[] { ShadowProxy(bounds, $"{file}.shadow-proxy") };
+                var byPass = new List<IEnumerable<MeshData>?> { null };
+                for (var c = 1; c < casterPassCount; c++) byPass.Add(proxy);
+                shadowByPass = byPass;
+            }
+
             return PropModel.Create(
                 device, file, parts, sceneShader, scenePipeline, casterShader, casterPipeline,
-                PropModel.NormaliseToUnitFootprint(bounds), casterPassCount: casterPassCount);
+                PropModel.NormaliseToUnitFootprint(bounds),
+                casterPassCount: casterPassCount,
+                casterPartsByPass: shadowByPass);
         }
 
         PropModel Prop(
@@ -563,22 +581,32 @@ internal sealed class SettlementArt : IDisposable
         // wet — and that mapping has to survive the swap or the map stops meaning what it says. Three models
         // cover it with the conifer range genuinely coniferous; twisted and dead lose their distinction, which
         // is a real loss and is why this is a switch and not a decision.
-        PropModel[]? cheapTiers = null;
+        PropModel[]? cheapOpen = null;
+        PropModel[]? cheapDense = null;
         if (cheapTrees)
         {
-            var broadleaf = Legacy("Resource_Tree1");
-            var scrub = Legacy("Resource_Tree2");
-            var conifer = Legacy("Resource_PineTree");
-            cheapTiers = new[]
+            PropModel[] Species(bool distantProxy)
             {
-                broadleaf, scrub, broadleaf,
-                conifer, conifer, conifer,
-                scrub, scrub,
-                broadleaf, scrub,
-            };
+                var broadleaf = Legacy("Resource_Tree1", distantProxy);
+                var scrub = Legacy("Resource_Tree2", distantProxy);
+                var conifer = Legacy("Resource_PineTree", distantProxy);
+                return new[]
+                {
+                    broadleaf, scrub, broadleaf,
+                    conifer, conifer, conifer,
+                    scrub, scrub,
+                    broadleaf, scrub,
+                };
+            }
+
+            // Two sets, because the tiers a tree lands in ARE its crowding: the open tiers keep every
+            // silhouette, the crowded ones may be blobs in the coarse maps. Six models of about four hundred
+            // triangles, which is cheaper than the kit's single near species.
+            cheapOpen = Species(distantProxy: false);
+            cheapDense = Species(distantProxy: true);
             Console.WriteLine(
-                $"  art: cheap trees ON — {broadleaf.TriangleCount}/{scrub.TriangleCount}/" +
-                $"{conifer.TriangleCount} triangles a tree at every tier, against the kit's thousands. " +
+                $"  art: cheap trees ON — {cheapOpen[0].TriangleCount}/{cheapOpen[1].TriangleCount}/" +
+                $"{cheapOpen[3].TriangleCount} triangles a tree at every tier, against the kit's thousands. " +
                 "Twisted and dead species draw as scrub and broadleaf.");
         }
 
@@ -618,15 +646,15 @@ internal sealed class SettlementArt : IDisposable
             // <b>Three levels of the same ten species, picked by distance.</b> Not three sets of models:
             // the same cooked chain read at level 0, 2 and 3, sharing one vertex buffer each, so the middle
             // and far bands cost index lists and nothing else.
-            treesMid: cheapTiers ?? new[]
+            treesMid: cheapOpen ?? new[]
             {
-                Kit("CommonTree_1", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("CommonTree_2", casts: true, lod: 1, casterLod: 3, distantProxy: true),
-                Kit("CommonTree_3", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("Pine_1", casts: true, lod: 1, casterLod: 3, distantProxy: true),
-                Kit("Pine_2", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("Pine_3", casts: true, lod: 1, casterLod: 3, distantProxy: true),
-                Kit("TwistedTree_1", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("TwistedTree_2", casts: true, lod: 1, casterLod: 3, distantProxy: true),
-                Kit("DeadTree_1", casts: true, lod: 1, casterLod: 3, distantProxy: true), Kit("DeadTree_2", casts: true, lod: 1, casterLod: 3, distantProxy: true),
+                Kit("CommonTree_1", casts: true, lod: 1, casterLod: 3), Kit("CommonTree_2", casts: true, lod: 1, casterLod: 3),
+                Kit("CommonTree_3", casts: true, lod: 1, casterLod: 3), Kit("Pine_1", casts: true, lod: 1, casterLod: 3),
+                Kit("Pine_2", casts: true, lod: 1, casterLod: 3), Kit("Pine_3", casts: true, lod: 1, casterLod: 3),
+                Kit("TwistedTree_1", casts: true, lod: 1, casterLod: 3), Kit("TwistedTree_2", casts: true, lod: 1, casterLod: 3),
+                Kit("DeadTree_1", casts: true, lod: 1, casterLod: 3), Kit("DeadTree_2", casts: true, lod: 1, casterLod: 3),
             },
-            treesFar: cheapTiers ?? new[]
+            treesFar: cheapDense ?? new[]
             {
                 // <b>The far band does not cast.</b> It begins past ninety-five metres and the haze begins
                 // at about seventy-seven, so its shadows fall on ground the fog has already taken — and it
@@ -639,7 +667,7 @@ internal sealed class SettlementArt : IDisposable
                 Kit("TwistedTree_1", casts: true, lod: 2, casterLod: 3, distantProxy: true), Kit("TwistedTree_2", casts: true, lod: 2, casterLod: 3, distantProxy: true),
                 Kit("DeadTree_1", casts: true, lod: 2, casterLod: 3, distantProxy: true), Kit("DeadTree_2", casts: true, lod: 2, casterLod: 3, distantProxy: true),
             },
-            treesDeep: cheapTiers ?? new[]
+            treesDeep: cheapDense ?? new[]
             {
                 // <b>The coarsest level, for trees buried deep enough in a wood to hide it.</b> §56 moved the
                 // far tier <em>up</em> off this level because it read too thin, and the reason that finding does
@@ -661,21 +689,21 @@ internal sealed class SettlementArt : IDisposable
                 Kit("TwistedTree_1", casts: true, lod: 3, distantProxy: true), Kit("TwistedTree_2", casts: true, lod: 3, distantProxy: true),
                 Kit("DeadTree_1", casts: true, lod: 3, distantProxy: true), Kit("DeadTree_2", casts: true, lod: 3, distantProxy: true),
             },
-            trees: cheapTiers ?? new[]
+            trees: cheapOpen ?? new[]
             {
                 // <b>Each level casts its own shadow.</b> The blob substitution that stood in for this is
                 // gone: a tier already costs what its own level of detail costs, so the sun's pass gets the
                 // decimated geometry for free and there is nothing left for a stand-in to save.
-                Kit("CommonTree_1", casts: true, casterLod: 2, distantProxy: true),
-                Kit("CommonTree_2", casts: true, casterLod: 2, distantProxy: true),
-                Kit("CommonTree_3", casts: true, casterLod: 2, distantProxy: true),
-                Kit("Pine_1", casts: true, casterLod: 2, distantProxy: true),
-                Kit("Pine_2", casts: true, casterLod: 2, distantProxy: true),
-                Kit("Pine_3", casts: true, casterLod: 2, distantProxy: true),
-                Kit("TwistedTree_1", casts: true, casterLod: 2, distantProxy: true),
-                Kit("TwistedTree_2", casts: true, casterLod: 2, distantProxy: true),
-                Kit("DeadTree_1", casts: true, casterLod: 2, distantProxy: true),
-                Kit("DeadTree_2", casts: true, casterLod: 2, distantProxy: true),
+                Kit("CommonTree_1", casts: true, casterLod: 2),
+                Kit("CommonTree_2", casts: true, casterLod: 2),
+                Kit("CommonTree_3", casts: true, casterLod: 2),
+                Kit("Pine_1", casts: true, casterLod: 2),
+                Kit("Pine_2", casts: true, casterLod: 2),
+                Kit("Pine_3", casts: true, casterLod: 2),
+                Kit("TwistedTree_1", casts: true, casterLod: 2),
+                Kit("TwistedTree_2", casts: true, casterLod: 2),
+                Kit("DeadTree_1", casts: true, casterLod: 2),
+                Kit("DeadTree_2", casts: true, casterLod: 2),
             },
             // A real stump, at last: Resource_Tree_Group_Cut was a cluster of cut trunks standing in for one.
             stumps: Nature("TreeStump", casts: false, surface: MaterialClass.Timber),
@@ -1017,6 +1045,15 @@ internal sealed class SettlementArt : IDisposable
     /// An octagonal bipyramid rather than a box: a box's corners stand outside the canopy and its shadow is
     /// visibly square where two of them fall along the light. The waist sits at 55% of the height, which is
     /// roughly where a crown is widest for every species in this kit.
+    /// </para>
+    /// <para>
+    /// <b>And the gate is density, not distance — which the first cut got backwards.</b> It was applied to all
+    /// four tiers, so an isolated tree drew a bipyramid into the coarse maps with nothing beside it, and read
+    /// from the chair as "the shadows are diamonds on smaller groups mid to far". The silhouette of a lone tree
+    /// is exactly what a shadow is doing there. §56 settled this for the meshes and the same argument holds
+    /// here: coarsening works where the neighbours put back the mass it loses, so it belongs to the crowded
+    /// tiers alone. The tiers are already chosen by crowding, so the gate needed no new machinery — only the
+    /// proxy withdrawn from the two tiers that mean "not crowded".
     /// </para>
     /// </remarks>
     private static MeshData ShadowProxy(Bounds3 bounds, string name)

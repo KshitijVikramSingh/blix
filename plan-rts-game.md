@@ -8633,3 +8633,55 @@ zsh function.
 **And it accidentally produced the best variance measurement of the arc**: twelve runs, one configuration, one
 session — frame p50 from 33.4 to 51.2 ms. Fifty-five per cent, in order, monotonically upward. Any absolute
 figure quoted from a hot machine is worth about as much as that spread.
+
+## 92. The proxy's gate is density, and it was on the tier that means "alone"
+
+From the chair, after looking: the proxy is serviceable except on smaller groups at mid to far range, where the
+shadows read as diamonds — and the gate should not be distance, it should be how surrounded a tree is.
+
+Both halves of that are right, and the second explains the first. `distantProxy: true` was set on **all four**
+tier arrays, including `trees` — the tier a tree lands in when it is *not* crowded. So an isolated tree cast an
+octagonal bipyramid into the coarse maps with no neighbour to absorb the substitution, which is precisely the
+case where the shadow is the only thing describing the tree. A diamond, seen as a diamond.
+
+§56 settled this for the meshes: coarsening works where the neighbours put back the mass it loses, so it
+belongs to crowding rather than to distance. The tiers are *already* chosen by crowding, so the gate needed no
+new machinery — only the proxy withdrawn from the two tiers that mean "not crowded". It now applies to
+`treesFar` and `treesDeep` alone, which is crowd at or above `TreeCrowdFar`.
+
+**The gate is nearly free.** At 118 m the ungated proxy took submitted casters from 16.73M to 4.02M; the gated
+one takes them to 4.25M. Isolated trees are a small minority of the casters in woodland, which is why the
+version that looks right costs a fifth of a million triangles more than the version that does not.
+
+### The two levers, composed
+
+They did not compose at first: with `--cheap-trees` all four tiers shared three models, and one shared model
+cannot express a per-tier gate. So the cheap path now builds two variants — open and dense, six models of about
+four hundred triangles, still cheaper than one of the kit's near species.
+
+```
+118 m                    scene      cast      coarse maps
+baseline                 8.12M     16.73M     6.56 / 6.81M
+gated proxy              8.12M      4.25M     0.44 / 0.45M
+cheap trees              4.06M     15.95M*    5.32 / 5.32M
+cheap + gated proxy      4.06M      2.77M     0.35 / 0.36M
+
+450 m
+baseline                10.84M     27.61M     9.20 / 9.20M
+gated proxy             10.84M     10.35M     0.57 / 0.57M
+cheap trees              5.51M     15.95M     5.32 / 5.32M
+cheap + gated proxy      5.51M      6.20M     0.44 / 0.44M
+```
+
+Together they take the wide view from 27.6M submitted caster triangles to 6.2M, and the scene from 10.8M to
+5.5M — and at 450 m with cheap trees the frame sits inside a single 16.7 ms interval with a **wait of about a
+tenth of a millisecond**. The GPU has stopped being the limiter at the widest standoff in the game.
+
+Which moves the frontier: at that point the frame is CPU, and the node phase is about eleven milliseconds of
+it. That is the next thing worth attacking, and it is the first time in this arc the answer has been on the
+CPU side.
+
+*A flag bug, found by the arms reporting identical numbers: `Legacy` ignored `distantShadowProxies`, so
+`--cheap-trees` proxied whether or not `--shadow-proxy` was given, and the two arms of that comparison were the
+same configuration. The third measurement failure of exactly this shape today — two arms, one behaviour — and
+all three were caught by an exact column rather than by a timing. Keep the exact columns.
