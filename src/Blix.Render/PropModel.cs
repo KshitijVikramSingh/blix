@@ -97,6 +97,29 @@ public sealed class PropModel : IDisposable
         }
     }
 
+    /// <summary>How many shadow passes this model's caster was built for, which is the cascade count.</summary>
+    private Part? CasterSource =>
+        casters.Length > 0 ? casters[0] : parts.FirstOrDefault(part => part.Casters.Length > 0);
+
+    /// <summary>How many passes the caster lists are kept per, so a caller can walk them by index.</summary>
+    public int CasterPassCount => CasterSource?.CasterInstances.Length ?? 0;
+
+    /// <summary>
+    /// How many copies are casting into ONE pass this frame.
+    /// </summary>
+    /// <remarks>
+    /// <b>The number <see cref="CasterInstanceCount"/> hides by summing.</b> Once each cascade keeps its own
+    /// instance list, the total says what the sun's passes cost together and nothing about whether the split
+    /// did anything: three cascades holding the same 2.9M triangles and three holding 0.8M/2.6M/2.9M sum to
+    /// figures a total cannot tell apart. A per-cascade partition can only be judged per cascade.
+    /// </remarks>
+    public int CasterInstanceCountIn(int pass)
+    {
+        var lists = CasterSource?.CasterInstances;
+        if (lists is null || pass < 0 || pass >= lists.Length) return 0;
+        return lists[pass].Count;
+    }
+
     // Build from a set of (mesh, tint) parts — one per material of the source asset.
     //
     // `bake` is applied to every part's geometry once, here, rather than to every

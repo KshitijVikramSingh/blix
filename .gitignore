@@ -20,3 +20,6 @@ third_party/**/*.dll
 # Assets/ = cooked (runtime); Assets-src/ = raw sources (setup's default split).
 src/Blix.Demos.SponzaModern/Assets/
 src/Blix.Demos.SponzaModern/Assets-src/
+
+# Perf matrix logs: the plan is the record, the logs are the working notes.
+perf/

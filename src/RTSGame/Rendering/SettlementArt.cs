@@ -152,6 +152,32 @@ internal sealed class SettlementArt : IDisposable
         return (instances, triangles, casters);
     }
 
+    /// <summary>
+    /// What the sun's passes were handed this frame, one entry per cascade.
+    /// </summary>
+    /// <remarks>
+    /// <b>Written into the caller's spans rather than returned, because this is read every frame of a
+    /// measured run</b> and a per-frame allocation inside the instrument is the instrument charging the
+    /// thing it is measuring. Entries past what the art was built for are left at zero.
+    /// </remarks>
+    public void StagedCasterLoad(Span<int> instancesPerCascade, Span<long> trianglesPerCascade)
+    {
+        instancesPerCascade.Clear();
+        trianglesPerCascade.Clear();
+        var passes = Math.Min(instancesPerCascade.Length, trianglesPerCascade.Length);
+        foreach (var model in owned)
+        {
+            var kept = Math.Min(passes, model.CasterPassCount);
+            for (var c = 0; c < kept; c++)
+            {
+                var count = model.CasterInstanceCountIn(c);
+                if (count <= 0) continue;
+                instancesPerCascade[c] += count;
+                trianglesPerCascade[c] += (long)count * model.CasterTriangleCount;
+            }
+        }
+    }
+
     public PropModel Granary { get; }
 
     public PropModel Depot { get; }

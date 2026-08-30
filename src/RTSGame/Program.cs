@@ -339,10 +339,17 @@ public static class Program
         // it ran. --perf-run is the sealed version: timings are on, the panel is not rendered, and the game
         // ignores live input until the requested frame count closes it.
         var performanceRun = args.Contains("--perf-run");
+        // <b>Fog off has to be sayable, because a village turns it on by itself.</b> --fog only ever added
+        // fog to a run that would not have had it, so on a village — the only map the perf matrix measures —
+        // the fog ablation the camera envelope needs was not reachable from the command line at all.
+        var fogDisabled = args.Contains("--nofog");
         var performanceCamera = Value(args, "--perf-camera") is { } cameraMotion
             ? Enum.Parse<PerformanceCameraMotion>(cameraMotion, ignoreCase: true)
             : PerformanceCameraMotion.Still;
         var performanceHour = Value(args, "--perf-hour") is { } hour ? float.Parse(hour) : -1f;
+        // The opt-in half of the vsync question: keep the display's cadence and measure pacing as a player
+        // feels it, rather than what the frame cost. See RtsGameLoop.performanceVsync.
+        var performanceVsync = args.Contains("--perf-vsync");
         if (performanceHour is < -1f or > 24f)
         {
             throw new ArgumentOutOfRangeException("--perf-hour", performanceHour, "Hour must be between 0 and 24.");
@@ -351,7 +358,8 @@ public static class Program
         {
             Console.WriteLine(
                 $"  performance fixture: camera {performanceCamera.ToString().ToLowerInvariant()}, " +
-                $"light {(performanceHour >= 0f ? $"{performanceHour:F1}:00" : "live")}");
+                $"light {(performanceHour >= 0f ? $"{performanceHour:F1}:00" : "live")}, " +
+                $"vsync {(performanceVsync ? "on" : "off")}");
         }
         // <b>Timings without the overlays.</b> --debug-all turns on the collider overlay too, which draws a
         // disc per body and per tree — 17 ms of it with five thousand trees in view — so a frame measured
@@ -390,9 +398,11 @@ public static class Program
             args.Contains("--treeprofile"),
             args.Contains("--fog"),
             args.Contains("--fogcells"),
+            fogDisabled,
             performanceRun,
             performanceCamera,
-            performanceHour);
+            performanceHour,
+            performanceVsync);
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
     }

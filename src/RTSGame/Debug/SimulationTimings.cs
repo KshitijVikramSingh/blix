@@ -35,6 +35,9 @@ internal sealed class SimulationTimings
 
     public void Reset() => Array.Clear(counters);
 
+    /// <summary>One phase's running average, for a report that wants a number rather than the line.</summary>
+    public double AverageOf(SimulationPhase phase) => counters[(int)phase].AverageMilliseconds;
+
     public string Format(int agentCount, long tickNumber)
     {
         var values = Enum.GetValues<SimulationPhase>()

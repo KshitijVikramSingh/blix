@@ -280,6 +280,55 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private bool performanceCameraInitialized;
     private Vector2 performanceCameraOrigin;
     private float performanceCameraYaw;
+    /// <summary>
+    /// Whether a sealed run keeps the display's cadence.
+    /// </summary>
+    /// <remarks>
+    /// <b>Off by default, and the reason is that the first matrix run measured the monitor.</b> The swapchain
+    /// takes FIFO unless told otherwise, so a frame time is then how many refresh intervals the frame waited
+    /// for — a 26 ms figure at a near view and a 33 ms figure at a wide one can both be "missed the train",
+    /// and neither is a cost. A sealed run therefore presents through Mailbox and reports what the frame
+    /// actually took, tearing included, because nobody is watching it.
+    /// <para>
+    /// Kept as a flag because the other question is real too: pacing as experienced <em>is</em> vsync-bound,
+    /// and the choppiness the player feels is which refresh intervals get missed. That is a different
+    /// measurement, and the two must never be quoted as one — hence <c>vsync=</c> in the report.
+    /// </para>
+    /// </remarks>
+    private readonly bool performanceVsync;
+
+    /// <summary>The recorder for a sealed run, absent otherwise. See PerformanceRun.</summary>
+    private readonly PerformanceRun? performance;
+
+    /// <summary>
+    /// This frame's delta, unsmoothed.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <c>frameMilliseconds</c>, which is an exponential average for the on-screen line. A
+    /// percentile taken over a smoothed series is a statement about the smoothing constant.
+    /// </remarks>
+    private double rawFrameMilliseconds;
+
+    /// <summary>
+    /// The two halves of the frame, and the fog inside the first of them.
+    /// </summary>
+    /// <remarks>
+    /// <b>Added because the first matrix closed to 8 ms of an accounted 45.</b> BUILD reports the render
+    /// build's own phases and nothing else, so everything in <c>OnUpdate</c> — the tick, the fog refresh, the
+    /// fog texture upload, the cover resolve — was outside every number on the line. That is how a wide view
+    /// came to look GPU-bound: the reported phases were small, so the rest was assumed to be the GPU, and one
+    /// of the largest terms in it was a per-frame texture upload nobody was timing.
+    /// <para>
+    /// With all three, the frame closes to a residual: whatever is left after update and render is the host's
+    /// own — acquiring an image, submitting, and waiting on the GPU. A residual is a real answer; an
+    /// unexplained majority is not.
+    /// </para>
+    /// </remarks>
+    private double updateMilliseconds, fogMilliseconds, renderMilliseconds;
+
+    /// <summary>What each cascade was handed this frame. Filled from the art; see StagedCasterLoad.</summary>
+    private readonly int[] stagedCasterInstances = new int[ShadowCascades.Count];
+    private readonly long[] stagedCasterTriangles = new long[ShadowCascades.Count];
     private bool debugStateInitialized;
 
     /// <summary>
@@ -1195,20 +1244,25 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         bool profileTreeWork = false,
         bool fogOfWar = false,
         bool showFogCells = false,
+        bool fogDisabled = false,
         bool performanceRun = false,
         PerformanceCameraMotion performanceCameraMotion = PerformanceCameraMotion.Still,
-        float performanceHour = -1f)
+        float performanceHour = -1f,
+        bool performanceVsync = false)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
         this.performanceHour = performanceHour;
+        this.performanceVsync = performanceVsync;
         this.rollEveryFrames = rollEveryFrames;
         // <b>Reachable from the command line because the panel cannot be clicked from a gate.</b> The fog's
         // masks are checked by reading the SCOUTED counts out of a run. A village is the playable game and
         // therefore starts with its information boundary in force; bare movement and map-lab runs stay clear
         // unless a fixture asks for fog explicitly. --fogcells adds the overlay and turns on the timings that
         // print the line, while the ordinary village default does not turn the diagnostic panel on.
-        fogSettings.Enabled = startVillage || fogOfWar || showFogCells;
+        // --nofog wins over the village default, because the ablation is asking what the fog costs and the
+        // answer cannot be obtained on the one map where it cannot be switched off.
+        fogSettings.Enabled = !fogDisabled && (startVillage || fogOfWar || showFogCells);
         fogSettings.ShowCells = showFogCells;
         if (fogOfWar || showFogCells) timingDebug = true;
         // The ablation starts at the cheapest level and works up, so nothing it measures was warmed by the
@@ -1294,6 +1348,22 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         mapTuning.Region = labRegion;
         mapTuning.ReliefMetres = this.reliefAmplitudeMetres;
         this.startingZoomMetres = startingZoomMetres;
+        if (performanceRun)
+        {
+            // <b>The label is the case.</b> Two runs whose numbers differ and whose labels do not are two
+            // numbers nobody can attribute, which is how the last wide-view figure ended up being quoted
+            // without anybody being sure which zoom it was taken at.
+            var standoff = startingZoomMetres > 0f ? startingZoomMetres : 46f;
+            var light = performanceHour >= 0f ? $"{performanceHour:F0}h" : "live";
+            var label =
+                $"{performanceCameraMotion.ToString().ToLowerInvariant()}-{light}-" +
+                $"{standoff:F0}m-fog{(fogSettings.Enabled ? "on" : "off")}";
+            // A quarter of the run, capped: long enough to cover first presentation, terrain meshing and the
+            // first cover resolve, short enough that a sixty-frame smoke still reports a steady window.
+            var warmUpFrames = exitAfterFrames > 0 ? Math.Clamp(exitAfterFrames / 4, 1, 120) : 120;
+            performance = new PerformanceRun(label, warmUpFrames, performanceVsync);
+        }
+
         movementTrace = traceMovement || debugAll ? new LiveMovementTrace() : null;
         if (debugAll)
         {
@@ -1633,6 +1703,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         this.host = host;
         this.graphicsDevice = graphicsDevice;
         vk = (VulkanGraphicsDevice)graphicsDevice;
+        if (performanceRun && !performanceVsync)
+        {
+            // Both halves: the window's own swap interval and the swapchain's present mode. Setting one and
+            // not the other leaves the frame capped by whichever was missed.
+            host.SetVSync(false);
+            vk.VsyncEnabled = false;
+            Console.WriteLine("  performance fixture: vsync OFF (Mailbox) — frame times are cost, not cadence");
+        }
 
         // <b>The same stride, with the texture coordinate declared.</b> The world shaders read position and
         // normal only, so the shared layout stopped at two attributes — and a pipeline whose shader declares
@@ -3485,6 +3563,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void OnUpdate(Time time)
     {
+        var updateStart = Stopwatch.GetTimestamp();
         FollowMapPanel();
 
         // Between frames rather than inside one, which is where a keypress lands too: a roll replaces the
@@ -3545,6 +3624,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var frame = (float)Math.Clamp(time.Delta, 0.0, 0.25);
         // Smoothed over about half a second, so the figure is readable rather than a flicker.
         frameMilliseconds += (time.Delta * 1000.0 - frameMilliseconds) * 0.08;
+        rawFrameMilliseconds = time.Delta * 1000.0;
         // Before anything that reads the light: the shadow box, the sky and the world shader all take their
         // sun from here and a disagreement between them is a scene lit from one place and shadowed from
         // another.
@@ -3561,8 +3641,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             look.Seasonality);
         AdvanceWear(frame);
         frameSeconds = frame;
+        var fogStart = Stopwatch.GetTimestamp();
         AdvanceFog();
         UploadFogTexture();
+        fogMilliseconds = (Stopwatch.GetTimestamp() - fogStart) * 1000.0 / Stopwatch.Frequency;
         ApplyWoodlandCover(frame);
         TurnAndZoom(frame);
         PanCamera(frame);
@@ -3570,6 +3652,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         UpdateCameraFocus(frame);
         UpdateCamera();
         UpdatePointerWorld();
+        updateMilliseconds = (Stopwatch.GetTimestamp() - updateStart) * 1000.0 / Stopwatch.Frequency;
     }
 
     private void UpdateCamera()
@@ -4060,6 +4143,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
+        var renderStart = Stopwatch.GetTimestamp();
         frameCount++;
         // Fitted every frame whether or not the cascades are rendered yet, because the gizmos are the point
         // of this stage: the boxes have to be watchable before three passes are wired to them.
@@ -4546,9 +4630,48 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
         buildPhases = (terrainMs, agentMs, scatterMs, overlayMs, stageMs, buildClock.Elapsed.TotalMilliseconds);
         stagedLoad = art?.StagedLoad() ?? (0, 0L, 0L);
+        if (art is not null)
+        {
+            art.StagedCasterLoad(stagedCasterInstances, stagedCasterTriangles);
+        }
+        else
+        {
+            Array.Clear(stagedCasterInstances);
+            Array.Clear(stagedCasterTriangles);
+        }
+
+        // Sampled here rather than in OnUpdate because this is the point at which both halves of the frame
+        // are known: what the build spent, and what it handed the passes. Past graph.Execute and the present
+        // pass, so the render figure covers recording as well as building.
+        renderMilliseconds = (Stopwatch.GetTimestamp() - renderStart) * 1000.0 / Stopwatch.Frequency;
+        performance?.Observe(new PerformanceRun.Sample(
+            rawFrameMilliseconds,
+            updateMilliseconds,
+            fogMilliseconds,
+            renderMilliseconds,
+            buildPhases.Terrain,
+            nodeMilliseconds,
+            buildPhases.Agents,
+            buildPhases.Scatter,
+            buildPhases.Overlay,
+            buildPhases.Stage,
+            buildPhases.Record,
+            stagedLoad.Instances,
+            stagedLoad.Triangles,
+            stagedLoad.Casters,
+            stagedCasterInstances[0],
+            stagedCasterInstances[1],
+            stagedCasterInstances[2],
+            stagedCasterTriangles[0],
+            stagedCasterTriangles[1],
+            stagedCasterTriangles[2],
+            treesDrawn,
+            drawnChunks.Count,
+            cameraDistance));
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames)
         {
+            ReportPerformanceRun();
             host.RequestClose();
         }
     }
@@ -8055,8 +8178,20 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (key == Key.E) turnRight = false;
     }
 
+    /// <summary>
+    /// Prints the sealed run's epilogue, once, wherever the run happens to end.
+    /// </summary>
+    /// <remarks>
+    /// Called both from the frame limit and from teardown on purpose: a run closed by Escape or by the window
+    /// going away is still a run somebody was measuring, and an instrument that only reports when the exit was
+    /// the expected one teaches you to distrust the exits.
+    /// </remarks>
+    private void ReportPerformanceRun() =>
+        performance?.Report(simulation.Timings.AverageOf(SimulationPhase.TotalTick), simulation.Agents.Count);
+
     public void Dispose()
     {
+        ReportPerformanceRun();
         hud?.Dispose();
         selectionUi?.Dispose();
         if (selectionPixel.Id >= 0) graphicsDevice?.DestroyTexture(selectionPixel);

@@ -7953,3 +7953,126 @@ onboarding flow and Providence should not inherit the movement test bench's alph
 This does not discard §76's direction. It protects it: the physical economic chain remains the spine, while the
 new order makes it fast enough to feel, organised enough to command, paced enough to read and finally composed
 as Providence rather than presented as a sandbox proof.
+
+## 83. The frame, measured properly: it is the GPU, and the fog upload was hiding it
+
+§82's stage 0 promised a per-cascade caster partition, then the still/pan/rotate/daylight matrix, then the
+supported camera envelope. The first two are done. **The envelope is deliberately not set here**, and the
+reason is the point of this section.
+
+### The partition, and what it was worth
+
+Prop, unit and canopy casters each own one instance list, one buffer and one batch per cascade instead of one
+list drawn three times, and the fitted-circle coverage test became a mask rather than a boolean so a caster
+overlapping two boxes still reaches both maps. On the wooded Village at the 118 m stress view, total submitted
+caster triangles fell from about 8.78M to 6.38M, and the near cascade from 2.93M to about 0.82M.
+
+The middle and far boxes legitimately overlap most of the visible woodland, and exclusivity was **not** forced
+there: a caster dropped from a box that can shade the ground under it is a missing shadow, which is a look
+regression paid for with a triangle count.
+
+### The instrument came first, and it was wrong twice before it was right
+
+The matrix is twenty sealed runs. The only instrument was a scrolling `FRAME/BUILD/LOAD` line, which is the
+right thing from the chair and the wrong thing for a comparison — every wrong number this stage has produced
+came from a figure recalled rather than recorded. So: `PerformanceRun` keeps raw per-frame samples and prints
+one block plus one machine-readable `PERFCASE key=value` line, `tools/perf-matrix.sh` runs the cases against
+one pinned map and generates the tables from those lines, and the plan's numbers can no longer disagree with
+the runs that produced them.
+
+Three corrections were needed before the tables meant anything, and each one had already produced a wrong
+belief:
+
+1. **Percentiles, not the smoothed average.** `FRAME` is an exponential average. A case at 45 ms p50 with a
+   102 ms p95 is choppy, and no average can say so.
+2. **Vsync off.** The swapchain takes FIFO unless told, so a frame time is otherwise how many refresh
+   intervals the frame waited for. Checked rather than assumed, and the answer was interesting: the near view
+   cost 25.7 ms uncapped against 26.4 ms capped, so vsync was never the floor — but it was adding jitter
+   (max 31 ms against 45 ms). A sealed run now presents through Mailbox and the report says `vsync=off — cost`
+   so a cadence figure can never be quoted as a cost.
+3. **The frame closed against its own halves.** This is the one that mattered. `BUILD` reports the render
+   build's phases and nothing else, so the whole of `OnUpdate` — the tick, the fog refresh, the fog texture
+   upload, the cover resolve — was outside every number printed. **The first accounted matrix closed to 8 ms
+   of an observed 45.** A frame that reports a small CPU and says nothing about the other 82% of itself is an
+   instrument that will support whatever theory is held about it, and it did: the wide view was called
+   GPU-bound on exactly that evidence, which was no evidence.
+
+Every sample now carries `update` (with `fog` broken out of it), `render`, and an `outside` residual — what
+neither half claimed, which is acquire, submit and waiting on the device.
+
+### The matrix
+
+Twenty cases, 600 frames each, 120 warm-up frames excluded and reported separately, one map
+(`--village --mapseed 1592842292 --relief-amplitude 32`, 25,141 nodes), Debug, vsync off. Frame figures are
+p50 ms.
+
+```
+case                       frame    p95   update    fog   render  outside   scene-tri  cast near/mid/far
+still-12h-24m-fogon         26.7   28.9     19.5   19.2      6.2      0.8       4314k  403k/1358k/2736k
+still-12h-60m-fogon         31.3   33.1     23.0   22.8      7.2      0.8       5985k  1411k/2813k/4885k
+still-12h-118m-fogon        44.6  101.8     33.6   33.2      8.9      0.7       8120k  3354k/6562k/6813k
+pan-12h-118m-fogon          47.2  113.8     34.7   34.2     11.0      0.8       8038k  3367k/6577k/6729k
+rotate-12h-118m-fogon       47.7  106.7     36.2   35.6      9.2      0.7       8118k  3059k/6620k/6810k
+still-19h-118m-fogon        56.8  104.4     42.0   41.0     11.4      1.1       8120k  3562k/6702k/6813k
+still-0h-118m-fogon         49.9   99.1     38.5   37.7      9.6      0.8       8120k  3562k/6703k/6813k
+still-12h-24m-fogoff        16.7   38.0      0.2    0.0      9.9      6.7       4398k  403k/1358k/2736k
+still-12h-60m-fogoff        20.1   47.0      0.2    0.0     10.0      7.9       6494k  1411k/2813k/4981k
+still-12h-118m-fogoff       35.2   87.8      0.4    0.0     18.3     19.3      10120k  3354k/6597k/8176k
+```
+
+Read the whole `fog` column against the whole `outside` column before drawing anything from either.
+
+### What it says
+
+**The frame is the GPU's, at every standoff, and the CPU is only ever waiting for it.** Fog on, the wait lands
+inside `UploadFogTexture` — 33 ms of "fog" at the wide view. Fog off, the identical wait reappears in
+`outside` at acquire, and the fog column is zero. The optimised build settles it: in Release the node phase
+falls from 6.8 ms to 2.3 ms and the tick from 0.19 ms to 0.06 ms, and **the frame does not move at all**
+(45.6 against 44.6 at 118 m). Managed work is not the frontier; nothing in C# will buy a millisecond here.
+
+> **`fog_p50` is a wait, not work.** The fog texture upload is a device synchronisation point and therefore
+> absorbs whatever the GPU still owes. Anybody reading 33 ms there and going to optimise the fog refresh
+> would be optimising the place the bill is presented rather than the thing being billed for.
+
+The rest, in the order the numbers support:
+
+- **Zoom sets the cost, and the present envelope has no comfortable end.** 26.7 ms at 24 m, 31.3 at 60 m,
+  44.6 at 118 m — 37, 32 and 22 fps. The near view is not a cheap frame; it is a 4.3M-triangle frame.
+- **Casters are at least as expensive as the scene at every zoom**: 4.5M against 4.3M at 24 m, 16.7M against
+  8.1M at 118 m. The partition gave each cascade its own list; it did not give the far cascades their own
+  *geometry*, so the mid and far boxes still take near-tier caster meshes. That is the unpaid follow-up, and
+  it is the largest single lever the tables point at.
+- **Light is real and dusk is the worst hour**, not midnight: 44.6 noon, 56.8 dusk, 49.9 night at 118 m; about
+  +6 ms at 60 m. Hearths, windows and smoke against a low sun.
+- **Camera motion is cheap.** Still 44.6, pan 47.2, rotate 47.7 at the wide view. §82 expected motion to be
+  the axis that rebuilds work; it costs 3 ms, and the fitted-box and cover caches are why.
+- **Release does not change the cost but it halves the choppiness**: p95 49.1 against 101.8 at 118 m. Feel
+  should be judged in Release, cost may be measured in either, and the two must be labelled.
+- **First presentation is about 0.75 s** in the steady cases, and the excluded warm-up window carries it
+  rather than contaminating a steady figure — which is what §75 was misled by once already.
+
+### Why the envelope is not set in this section
+
+Three reasons, all of them measurement rather than taste:
+
+1. **"GPU-bound" is still an inference.** It is the only reading consistent with a wait that moves between two
+   unrelated sync points and an optimised build that changes nothing — but no pass has been timed on the
+   device. The next slice proves it directly, by pass, or disproves it.
+2. **Variance is unmeasured.** One run per case, and the two matrices taken twenty minutes apart disagree by
+   about 5 ms on some cases (`zoom-12h-118m`, 38.5 then 45.6). A zoom cap is a design decision that will be
+   argued from a number; the number needs repeats and a spread first.
+3. **Fixing the largest lever moves the answer.** If per-cascade caster tiers take 16.7M submitted triangles
+   down near 8M at the wide view, the frame that the envelope is chosen against is not the frame in the table
+   above. Setting a cap now would be capping the renderer as it exists for one more slice.
+
+### The next slice
+
+1. **Attribute the GPU.** Timestamp queries per pass — three cascades, scene, smoke, present — so "it is the
+   GPU" becomes "it is these passes in this proportion". Cheap ablations beside it: one cascade instead of
+   three, casters skipped entirely, canopy skipped.
+2. **Per-cascade caster geometry.** The far box does not need the near tier's mesh; a shadow is a silhouette
+   resolved to that map's texels. This is the partition's actual payoff and the tables say it is worth about
+   half the submitted geometry at a wide view.
+3. **Then** repeats, the vsync-on pacing pass — which is a real and different question, because the choppiness
+   a player feels *is* which refresh intervals get missed — and only then the supported envelope, with 6-118 m
+   re-argued against a measured frame budget.
