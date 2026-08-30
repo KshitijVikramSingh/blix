@@ -8372,3 +8372,70 @@ Which is the same lesson as §83's heavy-map absolutes, arriving a second time: 
 a figure about one map at one standoff on one thermal state**, and the only claims that have survived are the
 ones about mechanism — a queue drain, a byte-identical instance list, a shape that both sweep directions agree
 on.
+
+## 88. The near end is free, and the middle-distance peak is fragments
+
+Two questions left open by §87: what the near end costs, and whether its 200-300 m peak is fill or geometry.
+Both needed a lever that did not exist, and one of the two levers turned out to be worthless — which is worth
+recording, because a dud lever reads exactly like a null result.
+
+### The near end
+
+Sealed, still, noon, fog on, pinned heavy seed:
+
+```
+ 6 m    16.7 ms (60 fps)   3,582 trees   3.31M scene   2.71M cast
+12 m    12.8 ms (78 fps)   4,042 trees   3.71M scene   3.19M cast
+24 m    16.7 ms (60 fps)   4,723 trees   4.31M scene   4.50M cast
+```
+
+Comfortable, and the cheapest standoff in the game is about 12 m. So the near limit has no frame-budget
+defence either — like the far limit (§86), it is a legibility and control question: too close and selection
+loses its context. Both ends of the envelope are now design calls with the frame out of the argument.
+
+### Fill against triangles, at the peak
+
+Two levers, chosen so that each moves one term and leaves the other alone:
+
+- `--width/--height` — the scene target is sized from the window, so a quarter-area window is a quarter of
+  the fragments and exactly the same geometry;
+- `--perf-tier-bias N` — every tree one or more detail levels coarser, which is fewer triangles over the same
+  pixels.
+
+Rotated ABCCBA, four runs per arm, at 200 m:
+
+```
+arm                    median    spread     scene tri   changed
+baseline               59.2 ms   50-80      9.87M       -
+quarter-area window    40.1 ms   33-48      9.87M       pixels / 4
+tier bias +1           77.1 ms   70-81      8.71M       triangles -12%
+```
+
+**The frame is fragment-bound at the peak.** A quarter of the pixels takes about 19 ms off the median, and the
+split says it more clearly than the total does: `outside` falls from 33-66 ms to 8-14 ms while the node phase
+rises to 18-20 ms. Take work off the GPU and the frame stops waiting and becomes CPU-bound — which is the
+signature, not an inference from one number.
+
+**The tier lever is a dud, and its 77 ms is not a result.** At 200 m most trees are already at the far and deep
+tiers by crowding, so one level coarser moved 12% of the triangles and none of the casters, and the arm's
+median sits inside the baseline's own spread. All it establishes is the negative: a 12% triangle cut buys
+nothing where a 75% pixel cut buys 30%. Reported because a lever that barely moves its own term will happily
+be mistaken for evidence that the term does not matter.
+
+### What that indicates, and what it does not
+
+MSAA is 4x on an R11G11B10F scene target at every standoff, and at 200-300 m what is being antialiased is a
+mush of subpixel trees — the case where the resolve costs most and buys least. Scaling MSAA or scene
+resolution with the standoff is what the measurement points at. It is a **look** decision, so it belongs to
+whoever is judging the look, not to whoever measured the fill.
+
+It does not indicate anything about the caster passes: 23M submitted caster triangles at 200 m survived both
+levers untouched, and §84's ablation already showed those are worth real milliseconds. Fragments dominating
+the peak and geometry mattering are not in competition.
+
+### The machine, again
+
+The baseline arm's own spread was 50 to 80 ms within one session, after hours of continuous load. Every
+absolute figure in §87 and §88 should be read as "this machine, this afternoon, in this order". What survives
+is the paired deltas and the CPU/GPU signature flip — which is the same conclusion §84 reached about
+thermals, reached again the hard way, and the reason this arc's trustworthy findings are all mechanisms.

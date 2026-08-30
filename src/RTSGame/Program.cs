@@ -366,6 +366,13 @@ public static class Program
         // the limits explicitly back in play. Give this a number to hold a measured envelope, including the
         // old one: --zoom-limit 118.
         var zoomLimit = Value(args, "--zoom-limit") is { } limit ? float.Parse(limit) : 0f;
+        // The geometry lever. See RtsGameLoop.performanceTierBias: coarser trees, same pixels.
+        var tierBias = Value(args, "--perf-tier-bias") is { } bias ? int.Parse(bias) : 0;
+        // <b>The fill lever, and it has to be the window because the scene target is sized from it.</b>
+        // Fragment cost scales with pixels and geometry does not, so a run at a quarter of the area is the
+        // one measurement that can tell the two apart. 1280x720 is what every figure in §83-87 was taken at.
+        var windowWidth = Value(args, "--width") is { } w ? int.Parse(w) : 1280;
+        var windowHeight = Value(args, "--height") is { } h ? int.Parse(h) : 720;
         if (performanceCascades > 3)
         {
             throw new ArgumentOutOfRangeException(
@@ -436,8 +443,10 @@ public static class Program
             performanceCascades,
             shadowProxies,
             performanceBlockingUpload,
-            zoomLimit);
-        using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
+            zoomLimit,
+            tierBias);
+        using var window = new Window(
+            game, new WindowOptions("RTSGame — Greybox Kingdom", windowWidth, windowHeight));
         window.Run();
     }
 

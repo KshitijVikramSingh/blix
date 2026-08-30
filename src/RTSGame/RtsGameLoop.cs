@@ -319,6 +319,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private readonly bool performanceBlockingUpload;
 
+    /// <summary>Shifts every tree this many detail levels coarser. A lever, not a look control.</summary>
+    /// <remarks>
+    /// <b>The control arm for the fill question.</b> §87 found the frame peaks at 200-300 m while submitted
+    /// geometry keeps rising, which points at fragment cost rather than triangles — but "points at" is not
+    /// evidence. Coarser geometry changes triangles and leaves pixels alone; a smaller window changes pixels
+    /// and leaves triangles alone. Whichever moves the frame is the one paying for it.
+    /// </remarks>
+    private readonly int performanceTierBias;
+
     /// <summary>The recorder for a sealed run, absent otherwise. See PerformanceRun.</summary>
     private readonly PerformanceRun? performance;
 
@@ -1294,7 +1303,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         int performanceCascades = -1,
         bool shadowProxies = false,
         bool performanceBlockingUpload = false,
-        float zoomLimitMetres = 0f)
+        float zoomLimitMetres = 0f,
+        int performanceTierBias = 0)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
@@ -1302,6 +1312,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         this.performanceVsync = performanceVsync;
         this.shadowProxies = shadowProxies;
         this.performanceBlockingUpload = performanceBlockingUpload;
+        this.performanceTierBias = Math.Clamp(performanceTierBias, 0, 3);
         if (performanceCascades >= 0)
         {
             performanceCascadeMask = (1 << Math.Min(performanceCascades, ShadowCascades.Count)) - 1;
@@ -1422,7 +1433,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 $"{standoff:F0}m-fog{(fogSettings.Enabled ? "on" : "off")}" +
                 (performanceCascades >= 0 ? $"-cast{performanceCascades}" : string.Empty) +
                 (shadowProxies ? "-proxy" : string.Empty) +
-                (performanceBlockingUpload ? "-blockingupload" : string.Empty);
+                (performanceBlockingUpload ? "-blockingupload" : string.Empty) +
+                (performanceTierBias > 0 ? $"-tier+{performanceTierBias}" : string.Empty);
             // A quarter of the run, capped: long enough to cover first presentation, terrain meshing and the
             // first cover resolve, short enough that a sixty-frame smoke still reports a steady window.
             var warmUpFrames = exitAfterFrames > 0 ? Math.Clamp(exitAfterFrames / 4, 1, 120) : 120;
@@ -6925,23 +6937,32 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     private int CanopyTierAt(Vector2 at)
     {
-        if (scouted.Cells == 0 || canopyCounts.Length == 0) return 0;
+        if (scouted.Cells == 0 || canopyCounts.Length == 0) return performanceTierBias;
         var crowd = canopyCounts[CanopyIndex(at)];
         // <b>A fourth tier at twice the crowding the third needs.</b> The rule is the same one all the way up:
         // a coarse level loses mass and the neighbours put it back, so the deeper into a wood a tree is the
         // less its own shape is doing. Twice, rather than a new dial, because that is the statement — "twice
         // as crowded as crowded" — and a number would invite tuning where a relationship does not.
-        if (crowd >= look.TreeCrowdFar * 2f) return 3;
-        if (crowd >= look.TreeCrowdFar) return 2;
-        return crowd >= look.TreeCrowdMid ? 1 : 0;
+        // The bias is a measurement lever, not a look control: it shifts every tree one or more levels
+        // coarser so the frame can be asked whether it is spending on TRIANGLES. Pixels are unaffected — a
+        // coarse tree covers the same ground — which is what makes it the control for the window-size lever
+        // rather than a duplicate of it. See §88.
+        var tier = crowd >= look.TreeCrowdFar * 2f ? 3
+            : crowd >= look.TreeCrowdFar ? 2
+            : crowd >= look.TreeCrowdMid ? 1
+            : 0;
+        return Math.Min(3, tier + performanceTierBias);
     }
 
     /// <summary>
     /// Where each level of tree detail gave way to the next before this was measured, in metres.
     /// </summary>
     /// <remarks>
-    /// <b>And the last of them is deliberately beyond what the camera can see.</b> The zoom caps at 118 m,
-    /// which sees about 165 m of ground, so a limit at 190 m is a limit nothing is ever drawn <em>across</em>
+    /// <b>And the last of them is deliberately beyond what the camera can see.</b> Written when the zoom
+    /// capped at 118 m, which sees about 165 m of ground — §86 unpinned that, so the claim below is now a
+    /// claim about a standoff the wheel can exceed; the tiers are chosen by crowding rather than by distance,
+    /// which is why unpinning the zoom did not break them. A limit at 190 m was a limit nothing is ever drawn
+    /// <em>across</em>
     /// — trees do not appear at the edge of view, they were always there. A cutoff inside the visible radius
     /// is the one thing an LOD scheme must not have, however cheap it makes the frame.
     /// <para>
