@@ -353,9 +353,12 @@ public static class Program
         // The caster ablation: how many cascades are allowed to receive casters at all. Default -1 leaves
         // every cascade alone. See RtsGameLoop.performanceCascadeMask for what it is bounding.
         var performanceCascades = Value(args, "--perf-cascades") is { } casc ? int.Parse(casc) : -1;
-        // The other arm of the A/B: the coarse cascades cast the real geometry again, as they did before
-        // §84. Both arms in one binary — see RtsGameLoop.performanceNoProxy.
-        var performanceNoProxy = args.Contains("--perf-noproxy");
+        // <b>Off by default: the eye rejected it.</b> §84 measured the coarse-cascade proxy as worth 7-10 ms
+        // and left its one unverified claim as "nobody has looked yet". Somebody looked, at 118 m, and the
+        // real geometry's tree shadows read plainly better — while the frame was comfortable either way. The
+        // machinery stays because it is measured and may be wanted on weaker hardware or a larger map, but it
+        // is a switch now and not a default. Both arms in one binary — see RtsGameLoop.shadowProxies.
+        var shadowProxies = args.Contains("--shadow-proxy");
         if (performanceCascades > 3)
         {
             throw new ArgumentOutOfRangeException(
@@ -376,7 +379,15 @@ public static class Program
         // <b>Timings without the overlays.</b> --debug-all turns on the collider overlay too, which draws a
         // disc per body and per tree — 17 ms of it with five thousand trees in view — so a frame measured
         // that way is measuring the instrument. This asks for the numbers and nothing else.
-        var timingsOnly = args.Contains("--timings") || performanceRun;
+        // <b>NOT implied by --perf-run any more, and that mistake cost §83 and §84 their absolute numbers.</b>
+        // --timings turns on timingDebug, and timingDebug keeps the whole diagnostics PRODUCER alive whether
+        // or not a panel is drawn — see the gate in RtsGameLoop.ReportDebug, whose own comment says
+        // ReportEconomy alone costs over four milliseconds in a wide Village frame, plus a stopwatch per
+        // thirty-second tree and one per undergrowth cluster. A sealed run had all of it, so the frame it
+        // reported was the frame plus the instrument, and the same view from the chair ran several times
+        // faster. The recorder needs none of it: build phases, node time and staged load are computed
+        // unconditionally.
+        var timingsOnly = args.Contains("--timings");
         var extent = Value(args, "--extent") is { } raw
             ? float.Parse(raw)
             : RtsGameLoop.DefaultWorldExtentMeters;
@@ -416,7 +427,7 @@ public static class Program
             performanceHour,
             performanceVsync,
             performanceCascades,
-            performanceNoProxy);
+            shadowProxies);
         using var window = new Window(game, new WindowOptions("RTSGame — Greybox Kingdom", 1280, 720));
         window.Run();
     }

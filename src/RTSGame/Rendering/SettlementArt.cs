@@ -268,7 +268,7 @@ internal sealed class SettlementArt : IDisposable
         ShaderProgramHandle casterShader,
         PipelineHandle casterPipeline,
         int casterPassCount = 1,
-        bool distantShadowProxies = true)
+        bool distantShadowProxies = false)
     {
         var directory = Path.Combine(AppContext.BaseDirectory, "Assets", "models");
         var measured = new List<(PropModel Model, Bounds3 Walls)>();

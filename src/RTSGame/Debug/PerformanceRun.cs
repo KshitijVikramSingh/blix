@@ -29,6 +29,7 @@ internal sealed class PerformanceRun
     /// <summary>One rendered frame, as the numbers the frame budget is argued in.</summary>
     internal readonly record struct Sample(
         double FrameMilliseconds,
+        double RenderDeltaMilliseconds,
         double Update,
         double Fog,
         double Render,
@@ -132,6 +133,13 @@ internal sealed class PerformanceRun
         // <b>The frame closed against its own halves.</b> Outside is what neither half claimed: acquiring a
         // swapchain image, submitting, and waiting on the GPU. It is the term that decides whether the next
         // slice belongs in C# or in a shader, and the first matrix had no name for it at all.
+        // The two clocks, side by side. Equal figures mean the host pairs update and render one to one and
+        // either may be quoted; a gap means the loop is doing something the frame budget has to know about.
+        Console.WriteLine(
+            $"  clocks p50: update-delta {Percentile(body, s => s.FrameMilliseconds, 0.50):F2} ms vs " +
+            $"render-delta {Percentile(body, s => s.RenderDeltaMilliseconds, 0.50):F2} ms " +
+            $"({1000.0 / Math.Max(0.001, Percentile(body, s => s.RenderDeltaMilliseconds, 0.50)):F0} fps by " +
+            $"the render clock)");
         Console.WriteLine(
             $"  split p50/p95 ms: update {Pair(body, s => s.Update)} (fog {Pair(body, s => s.Fog)}) · " +
             $"render {Pair(body, s => s.Render)} · " +
@@ -168,6 +176,7 @@ internal sealed class PerformanceRun
             $"PERFCASE case={Label} vsync={(vsync ? "on" : "off")} window={window.Replace(' ', '-')} " +
             $"frames={body.Count} warmup={warmUp.Count} " +
             $"frame_p50={Percentile(body, s => s.FrameMilliseconds, 0.50):F2} " +
+            $"render_delta_p50={Percentile(body, s => s.RenderDeltaMilliseconds, 0.50):F2} " +
             $"frame_p95={Percentile(body, s => s.FrameMilliseconds, 0.95):F2} " +
             $"frame_max={Percentile(body, s => s.FrameMilliseconds, 1.0):F2} " +
             $"startup_max={(warmUp.Count > 0 ? Percentile(warmUp, s => s.FrameMilliseconds, 1.0) : 0.0):F2} " +

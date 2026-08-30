@@ -298,17 +298,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private readonly bool performanceVsync;
 
     /// <summary>
-    /// Denies the coarse cascades their proxy geometry, for the A/B that justified giving it to them.
+    /// Gives the coarse cascades a sixteen-triangle stand-in instead of the model's own silhouette.
     /// </summary>
     /// <remarks>
-    /// <b>One binary holding both configurations, because the alternative measured the weather.</b> The first
-    /// attempt compared a matrix taken before the proxy against one taken after, and the second matrix came
-    /// out slower everywhere — including in the node phase, which is CPU work neither version touches. Twelve
-    /// minutes of uncapped GPU load on a laptop moves every figure by a quarter, so a before-and-after
-    /// separated by a rebuild is a comparison between two thermal states. Interleaved A/B/A/B inside one
-    /// session is the only version of this measurement that means anything.
+    /// <b>Off by default, on the eye's verdict.</b> §84 measured it at 7-10 ms and said its one unverified
+    /// claim was the look. The look lost: at 118 m the real geometry's tree shadows read plainly better, and
+    /// the frame is comfortable either way once the fixture stopped charging the frame for its own
+    /// diagnostics. Kept as a switch because the measurement stands and weaker hardware or a bigger map may
+    /// want it — and because it is the only way to keep both arms in one binary, which is the only kind of
+    /// comparison that survived §84: a before-and-after separated by a rebuild compares two thermal states,
+    /// not two configurations.
     /// </remarks>
-    private readonly bool performanceNoProxy;
+    private readonly bool shadowProxies;
 
     /// <summary>The recorder for a sealed run, absent otherwise. See PerformanceRun.</summary>
     private readonly PerformanceRun? performance;
@@ -1263,13 +1264,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         float performanceHour = -1f,
         bool performanceVsync = false,
         int performanceCascades = -1,
-        bool performanceNoProxy = false)
+        bool shadowProxies = false)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
         this.performanceHour = performanceHour;
         this.performanceVsync = performanceVsync;
-        this.performanceNoProxy = performanceNoProxy;
+        this.shadowProxies = shadowProxies;
         if (performanceCascades >= 0)
         {
             performanceCascadeMask = (1 << Math.Min(performanceCascades, ShadowCascades.Count)) - 1;
@@ -1379,7 +1380,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 $"{performanceCameraMotion.ToString().ToLowerInvariant()}-{light}-" +
                 $"{standoff:F0}m-fog{(fogSettings.Enabled ? "on" : "off")}" +
                 (performanceCascades >= 0 ? $"-cast{performanceCascades}" : string.Empty) +
-                (performanceNoProxy ? "-noproxy" : string.Empty);
+                (shadowProxies ? "-proxy" : string.Empty);
             // A quarter of the run, capped: long enough to cover first presentation, terrain meshing and the
             // first cover resolve, short enough that a sixty-frame smoke still reports a steady window.
             var warmUpFrames = exitAfterFrames > 0 ? Math.Clamp(exitAfterFrames / 4, 1, 120) : 120;
@@ -2042,7 +2043,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         smokeBatch = new InstancedBatch(canopyMesh, smokePipeline, smokeBuffer);
         art = SettlementArt.Load(
             vk, worldShader, worldPipeline, casterShader, casterPipeline, ShadowCascades.Count,
-            distantShadowProxies: !performanceNoProxy);
+            distantShadowProxies: shadowProxies);
         // <b>What the buildings measured, because two bugs came out of assuming it.</b> A fitted model's
         // bounding box is its roof and its height is whatever its proportions gave it — so anything hung on
         // a building (a lit window, a lantern, a chimney) has to be placed against numbers from the asset
@@ -4711,8 +4712,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // are known: what the build spent, and what it handed the passes. Past graph.Execute and the present
         // pass, so the render figure covers recording as well as building.
         renderMilliseconds = (Stopwatch.GetTimestamp() - renderStart) * 1000.0 / Stopwatch.Frequency;
+        // <b>Both deltas, because the chair and the fixture disagreed by six times and one of them was
+        // reading the wrong clock.</b> The recorder samples OnUpdate's delta; the engine's F1 perf HUD counts
+        // OnRender's. If the host ever runs the two callbacks at different cadences those are different
+        // numbers, and a frame budget argued from the wrong one is argued from nothing. Reported side by side
+        // so the question is answered by the log rather than by reading Silk's loop.
         performance?.Observe(new PerformanceRun.Sample(
             rawFrameMilliseconds,
+            time.Delta * 1000.0,
             updateMilliseconds,
             fogMilliseconds,
             renderMilliseconds,
