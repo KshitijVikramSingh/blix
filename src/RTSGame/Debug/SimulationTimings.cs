@@ -2,6 +2,16 @@ using System.Diagnostics;
 
 namespace RTSGame.Debug;
 
+/// <summary>
+/// The stages of a tick, plus two that are not stages at all.
+/// </summary>
+/// <remarks>
+/// <b><see cref="Pathfinding"/> and <see cref="AgentIndex"/> cut across the rest and must not be summed with
+/// them.</b> Both are accumulators — pathfinding adds up whatever routing happened wherever it happened, and
+/// most of it happens inside <see cref="Commands"/> — so a report that adds every counter it can see gets
+/// more than the tick it is describing. `--pathprofile` did exactly that and printed "named 4,259 of 2,662
+/// ms" without anybody noticing, which is a total that is its own refutation. See <see cref="IsCrossCutting"/>.
+/// </remarks>
 internal enum SimulationPhase
 {
     Congestion,
@@ -34,6 +44,10 @@ internal sealed class SimulationTimings
     }
 
     public void Reset() => Array.Clear(counters);
+
+    /// <summary>Whether a phase is an accumulator laid over the others rather than a stage of the tick.</summary>
+    public static bool IsCrossCutting(SimulationPhase phase) =>
+        phase is SimulationPhase.Pathfinding or SimulationPhase.AgentIndex or SimulationPhase.TotalTick;
 
     /// <summary>One phase's running average, for a report that wants a number rather than the line.</summary>
     public double AverageOf(SimulationPhase phase) => counters[(int)phase].AverageMilliseconds;

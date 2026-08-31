@@ -10046,3 +10046,65 @@ invented. The answerable question is "what is a sunrise for", and it is a design
 was ever going to settle.
 
 Gate 3/3 green.
+
+## 114. Two thirds of the worst event in the game was unattributed
+
+The perf debts were picked up again because they are noticeable now that the large ones are gone. §101 left
+the ledger reading: raster 100 ms, the click after a building 677 ms, of which the mesh sweep was 380 and
+therefore the thing to attack. §99 had already argued how — amortise the row sweep across ticks and let the
+old mesh serve until the new one lands.
+
+Measured first, before touching any of it. The click is **not 677 ms and the mesh is not most of it.**
+
+```
+raster     ~76 ms  — terrain 0.0 | clearance 0.5 over 1,208 cells | apply ~27
+order    ~1970 ms  — mesh 328 | tiles ~150 | field ~190 | 300,000 cells expanded
+                     climb 252,732 calls, 2,529,839 samples
+```
+
+Three runs, within 3% of each other. `--pathprofile` timed a whole `Tick` and then named three routing
+numbers that came to a third of it, so **two thirds of the worst event in the game had never been attributed**
+— and the arc was preparing to spend its next section optimising the largest of the three names it happened
+to print. The world has recorded a per-phase breakdown all along and nothing was asking it for one.
+
+### The instrument first, and it was wrong in a way that announced itself
+
+Asking produced `named 4,259.3 of 2,661.8 ms`, which is a total that refutes itself. `Pathfinding` and
+`AgentIndex` are accumulators laid over the tick rather than stages of it — pathfinding adds up whatever
+routing happened wherever it happened, and nearly all of it happens inside `Commands` — so summing every
+counter gets more than the tick it describes. Stages are now summed and accumulators reported apart, and
+`SimulationTimings.IsCrossCutting` says which is which at the definition instead of leaving each reader to
+work it out.
+
+```
+  stages: Commands 1941.7 — 1941.7 of 1942.1 ms accounted
+  of which, across all stages: pathfinding 1287.8 ms | agent index 0.0 ms
+```
+
+### What the attribution says, which reorders the debt
+
+All of it is in `Commands`, and two thirds of *that* is pathfinding. So the event is not a mesh rebuild with
+some overheads, it is **a mesh rebuild and the cascade it sets off**: the mesh dies, everything keyed to it
+dies with it, and the next order pays 300,000 cell expansions and two and a half million height samples to
+rebuild what it lost. Against a normal cold order — 132 ms, 237,100 samples — the placement order does
+**twelve times the climb work**.
+
+That changes both items on the list:
+
+- **§99's amortisation is worth more than it looked, and less than enough.** An old mesh that keeps serving
+  defers the whole cascade rather than just the 328 ms sweep. But deferring is not removing: when the new mesh
+  lands the caches die anyway and the *next* order pays. Amortisation moves the hitch; it does not answer it.
+- **The cascade has a cheaper answer, and it is §101's answer one layer up.** `CornerClimbCache` is keyed by
+  navigation revision, and its own comment gives the reason: *the corners come from the decomposition and the
+  climb comes from the heights, and a change to either bumps the revision*. True, and one revision too tight.
+  A climb between two fixed points is a fact about **terrain**, and a placement change cannot move terrain —
+  the same sentence that turned the raster's 774 ms into 100. The cache is thrown away because its keys are
+  mesh-relative corner indices, not because its values expired.
+
+The corners sit at half-cell positions — `crossing.MinimumX + 0.5f` and the like — so an exact
+mesh-independent key exists at twice the coordinates, and the cache could be keyed to the terrain revision it
+actually depends on. That is the next thing, and it needs a test that the same corner pair gets the same climb
+across a placement change, because a cache that survives when it should not is a quiet divergence and this arc
+has been bitten by one twice.
+
+Gate 3/3 green.

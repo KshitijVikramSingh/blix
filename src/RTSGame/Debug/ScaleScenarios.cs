@@ -656,16 +656,44 @@ internal static class ScaleScenarios
             $"apply {after0.ApplyMs - rasterBefore.ApplyMs:F1} ms");
 
         var coldBefore = world.RoutingCost;
+        var coldSearchBefore = world.PathSearch;
+        var coldClimbBefore = world.ClimbCost;
+        // <b>The whole tick, and every phase of it.</b> This line timed a Tick and then named three routing
+        // numbers, which came to a third of what it printed — so two thirds of the worst event in the game
+        // was unattributed and the arc went on optimising the largest of the three named terms. The world
+        // already records a per-phase breakdown and nothing here was asking for it.
+        world.Timings.Reset();
         var coldStart = Stopwatch.GetTimestamp();
         world.QueueMove(movers, new Vector2(half * 0.5f, half * 0.5f));
         world.Tick((float)SimulationWorld.FixedDeltaSeconds);
         var coldMs = Stopwatch.GetElapsedTime(coldStart).TotalMilliseconds;
         var cold = world.RoutingCost;
+        var coldSearch = world.PathSearch;
+        var coldClimb = world.ClimbCost;
         Console.WriteLine(
             $"  order  {coldMs,8:F1} ms | mesh {cold.MeshMs - coldBefore.MeshMs,7:F1} ms " +
             $"({cold.MeshBuilds - coldBefore.MeshBuilds} builds) | " +
             $"tiles {cold.TileMs - coldBefore.TileMs,7:F1} ms | " +
-            $"field {cold.FieldMs - coldBefore.FieldMs,7:F1} ms");
+            $"field {cold.FieldMs - coldBefore.FieldMs,7:F1} ms | " +
+            $"{coldSearch.Expansions - coldSearchBefore.Expansions:N0} cells expanded | " +
+            $"climb {coldClimb.Calls - coldClimbBefore.Calls:N0} calls, " +
+            $"{coldClimb.Samples - coldClimbBefore.Samples:N0} samples");
+
+        // Stages summed, accumulators reported apart. Adding the two together is how this line first
+        // claimed 4,259 ms of a 2,662 ms tick.
+        var stages = Enum.GetValues<SimulationPhase>()
+            .Where(phase => !SimulationTimings.IsCrossCutting(phase))
+            .Select(phase => (Phase: phase, Ms: world.Timings.AverageOf(phase)))
+            .Where(entry => entry.Ms > 0.5)
+            .OrderByDescending(entry => entry.Ms)
+            .ToArray();
+        Console.WriteLine(
+            $"    stages: {string.Join(" | ", stages.Select(e => $"{e.Phase} {e.Ms:F1}"))}" +
+            $" — {stages.Sum(e => e.Ms):F1} of {coldMs:F1} ms accounted");
+        Console.WriteLine(
+            $"    of which, across all stages: pathfinding " +
+            $"{world.Timings.AverageOf(SimulationPhase.Pathfinding):F1} ms | " +
+            $"agent index {world.Timings.AverageOf(SimulationPhase.AgentIndex):F1} ms");
 
         return 0;
     }
