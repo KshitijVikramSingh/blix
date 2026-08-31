@@ -36,14 +36,28 @@ internal static class Woodland
     /// </remarks>
     internal static float WoodPerTree = 90f;
 
-    /// <summary>Share of its year a cutter may spend walking its wood in.</summary>
+    /// <summary>Seconds a year one pair of hands may spend walking its load in.</summary>
     /// <remarks>
-    /// This is the dial the whole stage turns on, and it is a dial about <em>waste</em> rather than
-    /// about distance: a tenth of a year on the road is a tolerable overhead for one pair of hands, and
-    /// anything past that is a settlement that has outgrown its arrangement and should be told so. The
-    /// reach follows from it — see <see cref="ReachMetres"/> — instead of being a radius somebody liked.
-    /// </remarks>
-    internal static float CutterWalkShare = 0.10f;
+    /// This is the dial the whole stage turns on, and it is a dial about <em>waste</em> rather than about
+    /// distance: five hundred and forty seconds a year on the road is a tolerable overhead for one pair of
+    /// hands, and anything past that is a settlement that has outgrown its arrangement and should be told
+    /// so. The reach follows from it — see <see cref="ReachMetres"/> — instead of being a radius somebody
+    /// liked.
+    /// <para>
+    /// <b>Seconds, not a share of the year, and §112 is why.</b> It was a tenth of a year, which read well
+    /// and was on the wrong clock: walking is physical. A cutter makes a fixed number of round trips a year
+    /// — the annual tonnage divided by what it can carry — over a map whose distances do not care how long
+    /// a year is, so the seconds it spends walking are fixed and it is the <em>share</em> that moves when
+    /// the calendar does. Written as a share, tripling the year tripled the reach: 29 m to 87 m, quietly
+    /// putting every tree within reach of a store and deleting the receding wood line that lumber camps
+    /// exist to answer. Written as seconds, the reach does not move and the share falls to a thirtieth,
+    /// which is the true statement — the same walking is a smaller part of a longer year.
+    /// </para></remarks>
+    internal static float WalkSecondsPerYear = 540f;
+
+    /// <summary>What that walking budget comes to as a share of the year, for the rates that want one.</summary>
+    internal static float CutterWalkShare =>
+        MathF.Min(0.9f, WalkSecondsPerYear / WorldCalendar.YearSeconds);
 
     /// <summary>Units of wood one second of cutting frees from a tree.</summary>
     /// <remarks>
@@ -70,10 +84,10 @@ internal static class Woodland
     /// How far from its base a cutter will go for a tree, in metres.
     /// </summary>
     /// <remarks>
-    /// Derived from <see cref="CutterWalkShare"/> and nothing else: a year affords
-    /// <c>share × year</c> seconds of walking, a year is
-    /// <c>WoodPerHandPerYear / carry</c> round trips, so each round trip may be
-    /// <c>share × year / trips</c> seconds and half of that is the one-way distance at the body's pace.
+    /// Derived from <see cref="WalkSecondsPerYear"/> and nothing else: a year affords that many seconds of
+    /// walking, a year is <c>WoodPerHandPerYear / carry</c> round trips, so each round trip may be
+    /// <c>budget / trips</c> seconds and half of that is the one-way distance at the body's pace. It is
+    /// therefore a physical figure all the way down and does not move when the calendar does.
     /// Comes out near thirty metres for a villager, which is the band the design guessed at from the
     /// other end.
     /// <para>
@@ -90,8 +104,7 @@ internal static class Woodland
         {
             var body = UnitType.Villager;
             var tripsPerYear = EconomyRates.WoodPerHandPerYear / MathF.Max(1f, body.CarryCapacity);
-            var secondsPerTrip = CutterWalkShare * WorldCalendar.YearSeconds /
-                                 MathF.Max(0.01f, tripsPerYear);
+            var secondsPerTrip = WalkSecondsPerYear / MathF.Max(0.01f, tripsPerYear);
             return secondsPerTrip * 0.5f * body.MaximumSpeed;
         }
     }

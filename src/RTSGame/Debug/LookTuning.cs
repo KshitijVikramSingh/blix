@@ -70,17 +70,13 @@ internal sealed class LookSettings
     [Tune(0.0, 1.0, Label = "seasonality", Group = "sun")]
     public float Seasonality = 1f;
 
-    /// <summary>Seconds in one sun cycle: dawn, day, dusk, night.</summary>
+    /// <summary>How long a sun cycle takes, in simulated seconds. Read-only: it is the calendar's day.</summary>
     /// <remarks>
-    /// Its own period rather than the calendar's day, which is twenty seconds because a day is the unit a
-    /// ration is measured in. The dissonance is deliberate and named in <c>Atmosphere.DayLengthSeconds</c>.
+    /// Was settable, and should not have been. A day is one turn of the sun, so a dial here is a dial that
+    /// makes the sky disagree with the date — see <c>Atmosphere.DayLengthSeconds</c>. Shown because it is
+    /// worth being able to read what the calendar currently comes to.
     /// </remarks>
-    [Tune(60.0, 1800.0, Label = "sun cycle (s)", Group = "sun")]
-    public float DayLengthSeconds
-    {
-        get => Atmosphere.DayLengthSeconds;
-        set => Atmosphere.DayLengthSeconds = value;
-    }
+    public float DayLengthSeconds => Atmosphere.DayLengthSeconds;
 
     /// <summary>How far a plant leans at a metre above its own root, in metres.</summary>
     /// <remarks>

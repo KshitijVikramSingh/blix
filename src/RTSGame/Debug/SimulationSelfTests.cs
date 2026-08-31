@@ -129,6 +129,7 @@ internal static class SimulationSelfTests
         Check("a save this build cannot read is refused", ABadSaveIsRefused());
         Check("every order kind survives a save", EveryOrderKindSurvivesASave());
         Check("the year adds up and its rates are normalised", TheYearAddsUp());
+        Check("the calendar is a knob and nothing wrote its answers down", TheCalendarIsAKnob());
         Check("a settlement feeds itself without losing a grain", ASettlementFeedsItself());
         Check("a working settlement runs identically twice", TheEconomyRunsIdenticallyTwice());
         Check("dropped cargo stays in the world and is recovered", DroppedCargoStaysInTheWorld());
@@ -3316,6 +3317,8 @@ internal static class SimulationSelfTests
         }
 
         world.QueueAssign(hands, Assignment.Hold(post, dwellSeconds: 2f));
+        // Seconds, not economy-seconds: this is how long twelve bodies take to walk somewhere and stand
+        // still, which is a fact about legs and does not move when the calendar does.
         Tick(world, 30 * 60);
 
         var idle = 0;
@@ -3689,6 +3692,122 @@ internal static class SimulationSelfTests
     }
 
     /// <summary>
+    /// The calendar is a knob: turn the year and the day count, and every identity downstream still holds.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the guard the time work needed and did not have.</b> Every other test in this file runs at
+    /// one setting of the calendar, so a constant that had quietly captured a consequence of that setting
+    /// looked exactly like a constant that had not. §112 turned the year up by three and found out the hard
+    /// way: the foraging reaches tripled because a walking budget was written as a share of the year, the
+    /// ration collapsed because it was derived from the day count, the crop windows became errands because
+    /// they were the seconds a share came to, and nine tests failed for a tenth reason — durations chosen
+    /// against a year that had moved.
+    /// <para>
+    /// Not one of those was caught by a test. They were caught by reading, one at a time, which is the
+    /// method that works right up until the session somebody is in a hurry. So this turns the dials and
+    /// asserts what must not move, what must move exactly with them, and what must stay in proportion —
+    /// which is the whole factorisation, stated as arithmetic.
+    /// </para>
+    /// <para>
+    /// The three claims, and why each one is separate. <b>Physical things must not move at all</b>: a
+    /// cutter's reach is metres over a map, walked by a body at its own speed, and a longer year buys it
+    /// nothing. <b>Derived things must move exactly</b>: the day divides the year, the seasons are shares of
+    /// it. <b>Balanced things must stay in proportion</b>: a year's grain and a year's wood are what the
+    /// economy is tuned in, so they are the same numbers however long a year takes to happen.
+    /// </para></remarks>
+    private static bool TheCalendarIsAKnob()
+    {
+        var year = WorldCalendar.YearSeconds;
+        var days = WorldCalendar.DaysPerYear;
+        var report = new List<string>();
+        var held = true;
+        try
+        {
+            // Physical facts, measured before anything is turned. Nothing below may move them.
+            var cutterReach = Woodland.ReachMetres;
+            var quarrierReach = Quarrying.ReachMetres;
+            var ration = EconomyRates.GrainPerVillagerPerYear;
+
+            foreach (var (scale, count) in new[]
+                     { (1f, 270), (0.5f, 270), (3f, 270), (10f, 270), (1f, 365), (3f, 60) })
+            {
+                WorldCalendar.YearSeconds = year * scale;
+                WorldCalendar.DaysPerYear = count;
+                var now = WorldCalendar.YearSeconds;
+                var ok = true;
+
+                // Derived: the day divides the year by the count, and the seasons are shares that sum to it.
+                ok &= MathF.Abs(WorldCalendar.DaySeconds * count - now) < now * 1e-4f;
+                var seasons = 0f;
+                foreach (var season in Enum.GetValues<Season>()) seasons += WorldCalendar.LengthOf(season);
+                ok &= MathF.Abs(seasons - now) < now * 1e-4f;
+
+                // Derived: a season's boundaries land where its shares say, whatever the year is.
+                var elapsed = 0f;
+                foreach (var season in Enum.GetValues<Season>())
+                {
+                    ok &= WorldCalendar.At(elapsed + 1f).Season == season;
+                    elapsed += WorldCalendar.LengthOf(season);
+                    ok &= WorldCalendar.At(elapsed - 1f).Season == season;
+                }
+
+                // Balanced: a year still draws and still yields the annual figures it is tuned in. Sampled
+                // in proportion to the year rather than per second, so a ten-times year is not a ten-times
+                // integration.
+                foreach (var resource in new[] { Resource.Grain, Resource.Wood })
+                {
+                    var drawn = 0f;
+                    const int samples = 4000;
+                    var step = now / samples;
+                    for (var i = 0; i < samples; i++)
+                    {
+                        drawn += EconomyRates.DrawPerSecond(
+                            resource, WorldCalendar.At((i + 0.5f) * step).Season, appetite: 1f) * step;
+                    }
+                    var nominal = resource == Resource.Grain
+                        ? EconomyRates.GrainPerVillagerPerYear
+                        : EconomyRates.WoodPerVillagerPerYear;
+                    ok &= MathF.Abs(drawn - nominal) < nominal * 0.01f;
+                }
+
+                var cut = Woodland.CutPerSecond * now * (1f - Woodland.CutterWalkShare);
+                ok &= MathF.Abs(cut - EconomyRates.WoodPerHandPerYear) <
+                      EconomyRates.WoodPerHandPerYear * 0.002f;
+
+                // In proportion: a window is the share of its season it is meant to be, and a house is the
+                // count of springs it is meant to be. These are the two that became literals and drifted.
+                ok &= MathF.Abs(CropCycle.PrepareLabour / WorldCalendar.LengthOf(Season.Spring) - 0.75f) < 1e-4f;
+                ok &= MathF.Abs(CropCycle.ReapLabour / WorldCalendar.LengthOf(Season.Harvest) - 0.8f) < 1e-4f;
+                ok &= MathF.Abs(
+                    Construction.LabourFor(NodeKind.House) /
+                    WorldCalendar.LengthOf(Season.Spring) - 1f) < 1e-4f;
+
+                // Physical and balance anchors: untouched by anything the calendar does.
+                ok &= MathF.Abs(Woodland.ReachMetres - cutterReach) < 0.01f;
+                ok &= MathF.Abs(Quarrying.ReachMetres - quarrierReach) < 0.01f;
+                ok &= EconomyRates.GrainPerVillagerPerYear == ration;
+
+                held &= ok;
+                // <b>Simulated hours, said so.</b> Wall time is sim time over the compression, which this
+                // layer does not know and must not guess at — and a report about clocks that quietly hands
+                // you one unit while naming another is the exact fault this test exists to catch.
+                report.Add(
+                    $"{now / 3600f:F2} sim-h x{count} {(ok ? "ok" : "BROKE")} " +
+                    $"(day {WorldCalendar.DaySeconds:F1} s, reach {Woodland.ReachMetres:F0}/" +
+                    $"{Quarrying.ReachMetres:F0} m)");
+            }
+        }
+        finally
+        {
+            WorldCalendar.YearSeconds = year;
+            WorldCalendar.DaysPerYear = days;
+        }
+
+        Console.WriteLine($"    {string.Join(" | ", report)}");
+        return held;
+    }
+
+    /// <summary>
     /// The year adds up, and moving when a resource arrives cannot change how much of it arrives.
     /// </summary>
     /// <remarks>
@@ -3702,12 +3821,21 @@ internal static class SimulationSelfTests
     {
         var seasons = 0f;
         foreach (var season in Enum.GetValues<Season>()) seasons += WorldCalendar.LengthOf(season);
+        // <b>Each boundary from the lengths, not from the seconds they happened to fall at.</b> These were
+        // 1199 / 1201 / 3001 / 4001 — §3's year written out — and a test that hardcodes where spring ends is
+        // a test that fails the moment the calendar is retimed, which is exactly what it did in §112. What
+        // the check is for is that a second either side of a boundary lands in the right season, and that
+        // claim can be made without knowing where the boundary is.
         var boundaries = WorldCalendar.At(0f).Season == Season.Spring &&
-                         WorldCalendar.At(1199f).Season == Season.Spring &&
-                         WorldCalendar.At(1201f).Season == Season.Summer &&
-                         WorldCalendar.At(3001f).Season == Season.Harvest &&
-                         WorldCalendar.At(4001f).Season == Season.Winter &&
-                         WorldCalendar.At(WorldCalendar.YearSeconds + 1f) is { Year: 1, Season: Season.Spring };
+                         WorldCalendar.At(WorldCalendar.YearSeconds + 1f) is
+                             { Year: 1, Season: Season.Spring };
+        var elapsed = 0f;
+        foreach (var season in Enum.GetValues<Season>())
+        {
+            boundaries &= WorldCalendar.At(elapsed + 1f).Season == season;
+            elapsed += WorldCalendar.LengthOf(season);
+            boundaries &= WorldCalendar.At(elapsed - 1f).Season == season;
+        }
 
         // Integrate each shape over the year a second at a time and compare with the annual figure.
         var report = new List<string>();
@@ -3777,6 +3905,31 @@ internal static class SimulationSelfTests
             $"    year {seasons:F0} s over {WorldCalendar.DaysPerYear} days | {string.Join(" | ", report)}");
         return passed;
     }
+    /// <summary>The year the economy tests' durations were originally chosen against. See EconomySeconds.</summary>
+    /// <remarks>
+    /// §3's year, 5,400 sim seconds. Kept as a named constant rather than folded away because it is what
+    /// every literal duration below actually means: these tests were written as "long enough for a field to
+    /// be reaped", "enough of a harvest to see grain move", "a season and a bit", and each was then written
+    /// down as the seconds that came to at the time.
+    /// </remarks>
+    private const float TunedYearSeconds = 5400f;
+
+    /// <summary>
+    /// A duration chosen against §3's year, in this one.
+    /// </summary>
+    /// <remarks>
+    /// <b>Converted rather than restated, because the intent was always a share of the calendar.</b> §112
+    /// tripled the year, and a test that ticks a fixed number of seconds through an economy whose rates all
+    /// divide by the year is not measuring what it was written to measure — it is measuring a third of it.
+    /// Rewriting fourteen literals by hand would have been fourteen chances to pick a number that looked
+    /// right; one conversion is one decision, and it is the same decision the crop windows and construction
+    /// costs made when they became shares of their season.
+    /// </remarks>
+    private static float EconomySeconds(float atTunedYear) =>
+        atTunedYear * (WorldCalendar.YearSeconds / TunedYearSeconds);
+
+    /// <summary>Ticks for a duration chosen against §3's year.</summary>
+    private static int EconomyTicks(float atTunedYear) => (int)(30f * EconomySeconds(atTunedYear));
 
     /// <summary>
     /// A settlement produces, hauls, stores and consumes, and not one unit goes missing.
@@ -3792,7 +3945,7 @@ internal static class SimulationSelfTests
         var world = new SimulationWorld();
         // Start in the harvest, because spring brings in no grain at all by design and a test that
         // began there would be measuring how well the settlement waits.
-        world.StartAtSeconds(3100f);
+        world.StartAtSeconds(EconomySeconds(3100f));
         var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 400);
         world.SeedStock(granary, Resource.Grain, 40);
         // A house, because houses are the only things that eat. Inside the granary's catchment, so it
@@ -3828,7 +3981,7 @@ internal static class SimulationSelfTests
 
         var drift = default(ResourceTotals);
         var stalled = 0;
-        for (var tick = 0; tick < 30 * 240; tick++)
+        for (var tick = 0; tick < EconomyTicks(240f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
@@ -3953,7 +4106,7 @@ internal static class SimulationSelfTests
     private static bool DroppedCargoStaysInTheWorld()
     {
         var world = new SimulationWorld();
-        world.StartAtSeconds(3100f);
+        world.StartAtSeconds(EconomySeconds(3100f));
         var granary = world.AddNode(NodeKind.Granary, new Vector2(-9f, 0f), capacity: 400);
         var farm = new Vector2(9f, 0f);
         world.AddNode(NodeKind.Farm, farm, capacity: 200);
@@ -3974,7 +4127,7 @@ internal static class SimulationSelfTests
 
         // Let the board load the first cart and get it out on the road.
         var carried = 0;
-        for (var tick = 0; tick < 30 * 60 && carried == 0; tick++)
+        for (var tick = 0; tick < EconomyTicks(60f) && carried == 0; tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             if (world.Agents.Contains(doomed)) carried = world.Agents.Get(doomed).Jobs.CarriedUnits;
@@ -4004,7 +4157,7 @@ internal static class SimulationSelfTests
         // And the survivor fetches it. Two minutes is generous for twenty metres.
         var recovered = false;
         var worstDrift = 0L;
-        for (var tick = 0; tick < 30 * 150 && !recovered; tick++)
+        for (var tick = 0; tick < EconomyTicks(150f) && !recovered; tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
@@ -4130,7 +4283,7 @@ internal static class SimulationSelfTests
         var world = new SimulationWorld();
         // Start in the harvest, and hand-set what spring and summer did — which is the point: the
         // difference between these two fields was settled before this test starts.
-        world.StartAtSeconds(3100f);
+        world.StartAtSeconds(EconomySeconds(3100f));
         var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 4000);
         var prepared = world.AddNode(NodeKind.Farm, new Vector2(9f, 0f), capacity: 400);
         var unbroken = world.AddNode(NodeKind.Farm, new Vector2(-9f, 0f), capacity: 400);
@@ -4152,7 +4305,7 @@ internal static class SimulationSelfTests
         }
 
         var drift = default(ResourceTotals);
-        for (var tick = 0; tick < 30 * 300; tick++)
+        for (var tick = 0; tick < EconomyTicks(300f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
@@ -4207,7 +4360,7 @@ internal static class SimulationSelfTests
         // Long enough to fell the whole tree three loads over, plus the walking.
         var drift = default(ResourceTotals);
         var felled = false;
-        for (var tick = 0; tick < 30 * 1400; tick++)
+        for (var tick = 0; tick < EconomyTicks(1400f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
@@ -4313,7 +4466,7 @@ internal static class SimulationSelfTests
         }
 
         var drift = 0L;
-        for (var tick = 0; tick < 30 * 1600; tick++)
+        for (var tick = 0; tick < EconomyTicks(1600f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             var discrepancy = world.Economy.Discrepancy(world.Nodes, world.Agents);
@@ -4387,7 +4540,7 @@ internal static class SimulationSelfTests
         // The route runs, and keeps running: a standing commitment, not one round trip. A Haul would have
         // ended after the first delivery and gone back on the board.
         var legs = 0;
-        for (var tick = 0; tick < 30 * 240; tick++)
+        for (var tick = 0; tick < EconomyTicks(240f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             legs = Math.Max(legs, world.Agents.Get(villager).Jobs.LegsCompleted);
@@ -4446,7 +4599,7 @@ internal static class SimulationSelfTests
 
         var mostHands = 0;
         var drift = default(ResourceTotals);
-        for (var tick = 0; tick < 30 * 800; tick++)
+        for (var tick = 0; tick < EconomyTicks(800f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             if (world.Nodes.Contains(rock)) mostHands = Math.Max(mostHands, world.Nodes.Get(rock).Hands);
@@ -4487,7 +4640,7 @@ internal static class SimulationSelfTests
         var checkedSave = false;
         string? divergence = null;
         var drift = default(ResourceTotals);
-        for (var tick = 0; tick < 30 * 900; tick++)
+        for (var tick = 0; tick < EconomyTicks(900f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             ref readonly var body = ref world.Agents.Get(carter);
@@ -4618,7 +4771,7 @@ internal static class SimulationSelfTests
         var checkedSave = false;
         string? divergence = null;
         var drift = default(ResourceTotals);
-        for (var tick = 0; tick < 30 * 1_800; tick++)
+        for (var tick = 0; tick < EconomyTicks(1800f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
 
@@ -4702,7 +4855,7 @@ internal static class SimulationSelfTests
             Assignment.Hold(project.Position, EconomySystem.WorkShiftSeconds, project.FootprintRadius));
 
         var drift = default(ResourceTotals);
-        for (var tick = 0; tick < 30 * 1_500; tick++)
+        for (var tick = 0; tick < EconomyTicks(1500f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
@@ -4773,7 +4926,7 @@ internal static class SimulationSelfTests
         var deliveredAt = -1f;
         var raisedAt = -1f;
         var drift = 0L;
-        for (var tick = 1; tick <= 30 * 900; tick++)
+        for (var tick = 1; tick <= EconomyTicks(900f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             var discrepancy = world.Economy.Discrepancy(world.Nodes, world.Agents);
@@ -4833,7 +4986,7 @@ internal static class SimulationSelfTests
         var checkedSave = false;
         string? divergence = null;
         var drift = default(ResourceTotals);
-        for (var tick = 0; tick < 30 * 900; tick++)
+        for (var tick = 0; tick < EconomyTicks(900f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             foreach (var id in builders)
@@ -4909,7 +5062,7 @@ internal static class SimulationSelfTests
         var checkedSave = false;
         string? divergence = null;
         var drift = default(ResourceTotals);
-        for (var tick = 0; tick < 30 * 900; tick++)
+        for (var tick = 0; tick < EconomyTicks(900f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             foreach (var id in builders)
@@ -4976,7 +5129,7 @@ internal static class SimulationSelfTests
             Assignment.Hold(project.Position, EconomySystem.WorkShiftSeconds, project.FootprintRadius));
 
         var drift = default(ResourceTotals);
-        for (var tick = 0; tick < 30 * 900; tick++)
+        for (var tick = 0; tick < EconomyTicks(900f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
@@ -5021,7 +5174,7 @@ internal static class SimulationSelfTests
 
         var carriedBoth = false;
         var drift = default(ResourceTotals);
-        for (var tick = 0; tick < 30 * 1_200; tick++)
+        for (var tick = 0; tick < EconomyTicks(1200f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             var wood = false;
@@ -5048,7 +5201,7 @@ internal static class SimulationSelfTests
         var fetchedEquipment = false;
         var savedInProgress = false;
         string? divergence = null;
-        for (var tick = 0; tick < 30 * 300; tick++)
+        for (var tick = 0; tick < EconomyTicks(300f); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             foreach (var id in trainees)
@@ -5209,7 +5362,7 @@ internal static class SimulationSelfTests
         // Fill it, and the remaining households stop leaving.
         world.SeedStock(granary, Resource.Grain, 9000);
         world.SeedStock(granary, Resource.Wood, 9000);
-        Tick(world, 30 * 60);
+        Tick(world, EconomyTicks(60f));
         var recovered = world.Nodes.Get(house).Privation <= 0.001f;
         var afterFilling = world.Economy.Emigrated;
         Tick(world, (int)(30 * Population.PrivationSeconds * 1.1f));

@@ -101,10 +101,16 @@ internal static class Construction
     /// Labour-seconds of standing at a site that finishes it as material is supplied.
     /// </summary>
     /// <remarks>
-    /// Sized against the seasons, like the crop windows: a house is 1,200 against a 1,200-second spring, so
-    /// one pair of hands takes a season and four take a quarter of one. A granary is three times that
-    /// because it is three times the building. A depot is 600 — half a season for one person — because a
-    /// frontier holding that took a season to raise would always be raised too late.
+    /// Sized against the seasons, like the crop windows: a house is one spring, so one pair of hands takes a
+    /// season and four take a quarter of one. A granary is three times that because it is three times the
+    /// building. A depot is half a season for one person, because a frontier holding that took a season to
+    /// raise would always be raised too late.
+    /// <para>
+    /// <b>Written as those multiples rather than as the seconds they came to.</b> The literals were 1,200 /
+    /// 3,600 / 600 / 300 / 1,800 against a 1,200-second spring, and every one of them was documented as a
+    /// count of springs; §112 tripled the season and left the arithmetic behind. Same reason as
+    /// <c>CropCycle.PrepareLabour</c>: a number whose documentation is a ratio should be the ratio.
+    /// </para>
     /// <para>
     /// Accrued <em>per site from the hands standing at it</em> rather than per body, unlike a crop. A field
     /// accrues per body because the reaper carries the crop away in its own hands and the grain has to go
@@ -114,13 +120,16 @@ internal static class Construction
     /// </remarks>
     public static float LabourFor(NodeKind kind) => kind switch
     {
-        NodeKind.Granary => 3_600f,
-        NodeKind.House => 1_200f,
-        NodeKind.ForwardDepot => 600f,
-        NodeKind.PalisadeWall => 300f,
-        NodeKind.Barracks => 1_800f,
+        NodeKind.Granary => Springs(3f),
+        NodeKind.House => Springs(1f),
+        NodeKind.ForwardDepot => Springs(0.5f),
+        NodeKind.PalisadeWall => Springs(0.25f),
+        NodeKind.Barracks => Springs(1.5f),
         _ => 0f,
     };
+
+    /// <summary>Labour-seconds that many springs of one pair of hands come to.</summary>
+    private static float Springs(float count) => WorldCalendar.LengthOf(Season.Spring) * count;
 
     /// <summary>Whether this kind of node has to be built at all.</summary>
     public static bool NeedsBuilding(NodeKind kind) => LabourFor(kind) > 0f || CostFor(kind).Total > 0;

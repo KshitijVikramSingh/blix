@@ -57,8 +57,22 @@ internal static class EconomyRates
     /// </remarks>
     internal static float StonePerHandPerYear = 240f;
 
-    /// <summary>Grain one villager eats a year. One unit a day unit, so the day is the ration.</summary>
-    internal static float GrainPerVillagerPerYear = WorldCalendar.DaysPerYear;
+    /// <summary>
+    /// Grain one villager eats a year. An economic anchor, and its own knob.
+    /// </summary>
+    /// <remarks>
+    /// It read <c>WorldCalendar.DaysPerYear</c>, on the strength of "one unit a day unit, so the day is the
+    /// ration" — which is true today and true by coincidence. Two hundred and seventy is two different
+    /// decisions that happen to share a number: how many days read as a year, which is legibility, and how
+    /// much a person eats against a farm's seven hundred, which is the balance the whole economy sits on.
+    /// <para>
+    /// Welding them means the calendar cannot be made more legible without silently rebalancing the
+    /// settlement — turn the day count to 365 and a farm quietly stops feeding 2.6 people. §112 found that
+    /// by turning the dial the other way and watching one field come to feed four and a half times its
+    /// share. So the ration is written down as the anchor it is, and the day being a ration stays true
+    /// while both are 270 rather than being enforced by a derivation that hides which one is load-bearing.
+    /// </para></remarks>
+    internal static float GrainPerVillagerPerYear = 270f;
 
     /// <summary>Wood one household burns a year, before the winter swing.</summary>
     internal static float WoodPerVillagerPerYear = 120f;

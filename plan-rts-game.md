@@ -9861,3 +9861,131 @@ Gate 3/3 green.
 The fourth is not built and should not be. §82 said formation geometry, facing and combat ranks are a later
 consumer rather than a prerequisite, and the combat arc is where the questions it would answer actually get
 asked. What this section buys is that when that arc opens, the thing it extends is one class with one job.
+
+## 112. The calendar is a knob, and a day I invented the length of
+
+This section is the one that did not land what it set out to. It set out to retime the calendar so a day is
+something a player can inhabit; it retimed it, measured the retiming, put it back, and kept the structure it
+had built on the way. What it actually produced is the ability to ask the question, which is what it turned
+out to be missing.
+
+### The complaint, and the number I made up
+
+`WorldCalendar.DaySeconds` was twenty simulated seconds — thirteen wall seconds — so a whole solar day passed
+while the player was carrying out one ordinary command. §82.2's brief: give each lighting state enough wall
+time to be experienced, and stop cycling noon-to-night inside one command.
+
+From that prose I asserted that an inhabitable day is **about three wall minutes**, and then built a menu of
+options on it. The menu was chosen from. **Nothing measured that figure.** It was the load-bearing constant of
+the whole design pass and I invented it — in an arc about clocks, having written §105's caution that a
+measurement which cannot tell walking round a wood from walking on the spot will happily report either.
+
+Measured afterwards, using the renderer's own spherical trigonometry (which reproduces the 7.9 / 16.1 midwinter
+and midsummer daylight hours the file already documents, so it is the model the game actually runs):
+
+```
+share of a cycle       midwinter   equinox   midsummer
+night                      55.2%     39.5%       16.5%
+twilight                    9.9%      8.8%       14.0%
+the horizon                 9.3%      6.9%        8.5%
+sunlit                     25.6%     44.8%       61.0%
+
+wall seconds per state       winter night   twilight   horizon
+  13 s day  (today)                    7s         1s        1s
+  45 s day                            25s         4s        3s
+  90 s day                            50s         8s        6s
+ 180 s day  (my invention)            99s        16s       12s
+```
+
+**The defect is not that a day is thirteen seconds. It is that dawn is one second long.** And an ordinary
+command, from the villager's 1.79 m/s at 1.5x compression, is 11 wall seconds for a 30 m walk and 45 for
+120 m — so the brief wants a day north of about 45 s, not 180.
+
+Which demolishes the conclusion the menu rested on. At 270 days a 45 s day is a 3.4 hour year and a 90 s day
+is 6.75; the 13.5 hour figure that made "a believable day count" look impossible came entirely from my number.
+The chair's own argument — that sixty days does not read as a year, so a day whose count means nothing should
+perhaps not exist — was reasoning correctly from a premise I had fabricated.
+
+### What the retiming found on the way, which was worth the trip
+
+Tripling the year and running the suite turned up four separate constants that had captured a consequence of
+the calendar rather than a decision:
+
+- **The foraging reaches tripled.** `CutterWalkShare` was a tenth *of the year*, and both reaches derive from
+  it, so a cutter's arm went 29 m to 87 m and a quarrier's 60 m to 180 m. That silently deletes §70's receding
+  wood line and the stone mechanic whose own comment says *the nearest rock is 52-86 m depending on the map,
+  so some maps have stone in reach of the granary and some do not*. **No test failed.** Walking is physical —
+  a fixed number of trips over a map that did not change — so the budget is now `WalkSecondsPerYear` and it is
+  the share that moves when the calendar does.
+- **The ration collapsed.** `GrainPerVillagerPerYear = DaysPerYear` reads as the identity "a day is a ration"
+  and is a coincidence: two hundred and seventy is both how many days read as a year and how much a person
+  eats against a farm's seven hundred. Welded, the calendar cannot be made more legible without rebalancing
+  the settlement.
+- **The crop windows and construction costs became errands.** Both were *documented* as shares of their season
+  and *written* as the seconds those came to. Now written as the shares — and the share is the field with the
+  seconds derived, because "three quarters of a spring" is the design statement and "900 seconds" is that
+  statement evaluated at one setting.
+- **Nine tests failed on hardcoded durations**, which are the same fault one layer out.
+
+### The factorisation, which is the actual deliverable
+
+Decided from the chair, and it corrected two of my instincts. The goal is not maximum independence — it is
+welding what is genuinely one thing, so the few real knobs become visible instead of being spread across
+places where they can be papered over. And everything is a knob; they differ in who turns them.
+
+```
+design knobs      days per year, season shares, latitude, body speed,
+(set in code)     the walking budget, the per-year economic anchors
+
+session knobs     YearSeconds, compression, map extent
+(surfaced)
+
+derived           day length, season lengths, the solar cycle, every per-second
+(never authored)  rate, crop windows, construction costs, foraging reaches,
+                  how long a sunrise lasts
+```
+
+Two welds, both of which I had wanted to break and should not have:
+
+- **The solar cycle is the calendar day.** A day is one sunrise to the next. `Atmosphere.DayLengthSeconds` was
+  a settable slider whose own comment offered *a longer, cosier day at the cost of the calendar agreeing with
+  the sky* — an invitation to fix the symptom by lying, and the reason the trade never had to be faced. It is
+  a property now.
+- **Days per year is structure.** The derivation ran `DaysPerYear = Year / Day`, so the day was primary and
+  the count fell out — which is how it drifted to sixty with nothing objecting. It runs the other way now.
+
+What the welds force into the open: with the count fixed, **how long a sunrise lasts and how long a year lasts
+are one decision.** There is no dial left that relieves it, which is the point.
+
+### The guard
+
+`the calendar is a knob and nothing wrote its answers down` turns the year to 0.5x, 3x and 10x, and the day
+count to 270, 365 and 60, and asserts three different kinds of thing at every setting:
+
+```
+1.50 sim-h x270 ok (day 20.0 s, reach 29/60 m) | 0.75 sim-h x270 ok (day 10.0 s, reach 29/60 m)
+4.50 sim-h x270 ok (day 60.0 s, reach 29/60 m) | 15.00 sim-h x270 ok (day 200.0 s, reach 29/60 m)
+1.50 sim-h x365 ok (day 14.8 s, reach 29/60 m) | 4.50 sim-h x60 ok (day 270.0 s, reach 29/60 m)
+```
+
+- **Physical things must not move at all** — the reaches hold at 29 and 60 m across a twenty-fold range of
+  year lengths, which is the exact invariant that broke silently.
+- **Derived things must move exactly** — the day divides the year, the seasons are shares of it, the
+  boundaries land where the shares say.
+- **Balanced things must stay in proportion** — a year still draws 270 grain and 120 wood and still yields a
+  cutter 500, whatever it costs in seconds.
+
+Every fault above lives in one of those three rows. Not one of them was caught by a test; they were caught by
+reading, one at a time, which is a method that works right up until the session somebody is in a hurry.
+
+Writing the guard immediately caught a fifth: the crop constants were *fields* initialised from the season, so
+they snapshot the calendar at class-init and would never have followed it. The normalisation would have read
+correctly in the source and been wrong at runtime.
+
+### Where this leaves the numbers
+
+Unchanged. §3's year, §3's seasons, 270 days, a thirteen-second day and a one-second dawn. The complaint that
+opened the section is still true and is now a decision that can be made rather than guessed at: pick a year,
+and the day, the seasons, the rates and the length of a sunrise follow, in proportions a test defends.
+
+Gate 3/3 green.

@@ -41,30 +41,52 @@ internal enum CropPhase
 /// </remarks>
 internal static class CropCycle
 {
-    /// <summary>Labour-seconds of breaking ground that a full ceiling costs.</summary>
+    /// <summary>Share of spring that breaking ground for a full ceiling costs one pair of hands.</summary>
     /// <remarks>
-    /// Sized against its window rather than chosen: 900 in a 1,200 s spring is 75% of the season for one
-    /// pair of hands, so a field is a real commitment and a farmer pulled away in spring is a ceiling
-    /// lowered. That is <em>commit</em>.
-    /// </remarks>
-    internal static float PrepareLabour = 900f;
+    /// Sized against its window rather than chosen: three quarters of spring for one pair of hands, so a
+    /// field is a real commitment and a farmer pulled away in spring is a ceiling lowered. That is
+    /// <em>commit</em>.
+    /// <para>
+    /// <b>The share is the field and the seconds are derived, in that order deliberately.</b> It stood at a
+    /// literal 900 against a 1,200-second spring, with the comment doing the arithmetic; move the season and
+    /// the literal quietly becomes a quarter of its window, turning the most expensive thing a farmhand does
+    /// all year into an errand. A number whose documentation is a ratio should <em>be</em> the ratio — and
+    /// the ratio is also the thing worth tuning, since "three quarters of a season" is a design statement
+    /// and "900 seconds" is that statement evaluated at one setting of the calendar.
+    /// </para></remarks>
+    internal static float PrepareShare = 0.75f;
 
-    /// <summary>Labour-seconds of tending that keeps the whole ceiling.</summary>
-    /// <remarks>
-    /// 300 in an 1,800 s summer — 17% of the season, so the other 83% is free for wood and building. That
-    /// is <em>exploit</em>, and it is why summer is where a settlement grows rather than where it eats.
-    /// </remarks>
-    internal static float MaintainLabour = 300f;
+    /// <summary>What that share of spring comes to in labour-seconds. Derived, and live.</summary>
+    internal static float PrepareLabour => WorldCalendar.LengthOf(Season.Spring) * PrepareShare;
 
-    /// <summary>Labour-seconds of reaping that brings in a full crop.</summary>
+    /// <summary>Share of summer that tending the whole ceiling costs.</summary>
     /// <remarks>
-    /// 800 in a 1,000 s harvest, and <b>it does not fit</b>. One pair of hands spends 80% of the window
-    /// reaping and another 26% walking the grain in, which is 106% of a window that does not stretch — so
-    /// a single farmer cannot quite bring in a whole field and something has to come and help. That is
-    /// <em>scramble</em>, and it is the seasonal reallocation the design is about rather than a number that
-    /// happens to be tight.
+    /// A sixth of summer, so the other five sixths are free for wood and building. That is <em>exploit</em>,
+    /// and it is why summer is where a settlement grows rather than where it eats. A share for the same
+    /// reason as <see cref="PrepareLabour"/>.
     /// </remarks>
-    internal static float ReapLabour = 800f;
+    internal static float MaintainShare = 1f / 6f;
+
+    /// <summary>What that share of summer comes to in labour-seconds. Derived, and live.</summary>
+    internal static float MaintainLabour => WorldCalendar.LengthOf(Season.Summer) * MaintainShare;
+
+    /// <summary>Share of harvest that reaping a full crop costs.</summary>
+    /// <remarks>
+    /// Four fifths of harvest, and it is meant not to fit: one pair of hands spends 80% of the window
+    /// reaping and the rest of it walking the grain in, so a single farmer cannot quite bring in a whole
+    /// field and something has to come and help. That is <em>scramble</em>, and it is the seasonal
+    /// reallocation the design is about rather than a number that happens to be tight.
+    /// <para>
+    /// <b>The hauling half of that sum does not scale with the year and §112 is where that shows.</b> The
+    /// reaping share is written here and follows the season; the walking is physical — a fixed number of
+    /// trips at a fixed speed over a map that did not change — so tripling the year leaves the same walking
+    /// seconds inside a window three times as long. The 26% that made the sum 106% is nearer 9% now, and the
+    /// scramble is softer for it. Measured rather than predicted: see §112.
+    /// </para></remarks>
+    internal static float ReapShare = 0.8f;
+
+    /// <summary>What that share of harvest comes to in labour-seconds. Derived, and live.</summary>
+    internal static float ReapLabour => WorldCalendar.LengthOf(Season.Harvest) * ReapShare;
 
     /// <summary>Share of the ceiling a field keeps when nobody tends it at all.</summary>
     internal static float NeglectedRetention = 0.76f;

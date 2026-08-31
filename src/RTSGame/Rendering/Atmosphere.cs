@@ -99,26 +99,22 @@ internal readonly record struct Atmosphere(
     internal static float MiddayGreenDrop = 0.22f;
 
     /// <summary>
-    /// How long a sun cycle takes, in simulated seconds. The calendar's own day, by default.
+    /// How long a sun cycle takes, in simulated seconds. The calendar's day, and not separately settable.
     /// </summary>
     /// <remarks>
-    /// <b>Synced to the calendar, and the argument I made for not doing so was wrong.</b> I had it at seven
-    /// simulated minutes on the grounds that <c>WorldCalendar.DaySeconds</c> is twenty seconds and a sun
-    /// going round every twenty seconds is a strobe. What that produced was thirteen sun cycles in a year of
-    /// ninety — a daily rhythm and an annual one on comparable timescales — and reported exactly as it
-    /// should have been: <em>hard to tell annual rotation from daily.</em> Two slow signals of similar
-    /// period are far harder to read than one fast and one slow.
+    /// <b>Welded, and the slider that used to be here was the problem rather than the escape from it.</b>
+    /// A day is one sunrise to the next; a sun on its own period makes the sky disagree with the date, and
+    /// that was tried — at seven simulated minutes there were thirteen sun cycles in a year of ninety, a
+    /// daily rhythm and an annual one at comparable timescales, and it was reported from the chair as
+    /// impossible to tell apart. Syncing them fixed that and left a slider offering "a longer, cosier day at
+    /// the cost of the calendar agreeing with the sky", which is an invitation to fix the symptom by
+    /// lying.
     /// <para>
-    /// At the calendar's day there are two hundred and seventy cycles in a year, so the daily one is
-    /// unmistakably rapid and the seasonal drift unmistakably gradual, and the two stop being confusable.
-    /// The panel's day number now means what it says, which removes the one dissonance this file had.
-    /// </para>
-    /// <para>
-    /// Still a slider, because twenty seconds is brisk and somebody may want a longer, cosier day at the
-    /// cost of the calendar agreeing with the sky.
-    /// </para>
-    /// </remarks>
-    internal static float DayLengthSeconds = WorldCalendar.DaySeconds;
+    /// So there is no dial here. How long a sunrise lasts is set where it is actually decided — by the
+    /// length of the year, divided by a day count that is structure. That trade is real and
+    /// <c>--clocks</c> reports it rather than offering a way around it.
+    /// </para></remarks>
+    internal static float DayLengthSeconds => WorldCalendar.DaySeconds;
 
     /// <summary>How far through the year, 0 at the start of spring and 1 at the end of winter.</summary>
     /// <remarks>
@@ -367,8 +363,9 @@ internal readonly record struct Atmosphere(
         var look = Blend(year, Math.Clamp(seasonality, 0f, 1f));
 
         // <b>The day of the year from the calendar, not from a fraction of it.</b> The date already knows
-        // which day it is, and 270 game days map onto 365 real ones for the declination formula's sake —
-        // which is a scaling, not an approximation, since the formula only cares where in the cycle it is.
+        // which day it is, and the calendar's days map onto 365 real ones for the declination formula's sake
+        // — which is a scaling, not an approximation, since the formula only cares where in the cycle it is,
+        // and it is therefore indifferent to §112 having changed how many days a year holds.
         //
         // <b>Plus an offset, because the two years did not start in the same place.</b> Found by printing
         // the profile rather than by looking at it: the calendar's year begins at spring and the

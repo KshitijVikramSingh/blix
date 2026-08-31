@@ -61,6 +61,9 @@ internal static class Quarrying
     /// </remarks>
     internal static float QuarrierWalkShare => Woodland.CutterWalkShare;
 
+    /// <summary>The same physical walking budget a cutter gets. See Woodland.WalkSecondsPerYear.</summary>
+    internal static float WalkSecondsPerYear => Woodland.WalkSecondsPerYear;
+
     /// <summary>Units of stone one second of quarrying frees from an outcrop.</summary>
     /// <remarks>
     /// Same derivation as <see cref="Woodland.CutPerSecond"/>: a quarrier has <c>year × (1 − walkShare)</c>
@@ -76,9 +79,13 @@ internal static class Quarrying
 
     /// <summary>How far from its store a quarrier will go for stone, in metres.</summary>
     /// <remarks>
-    /// Derived exactly as <see cref="Woodland.ReachMetres"/> is, from the walk share and nothing else: a year
-    /// affords <c>share × year</c> seconds of walking, a year is <c>StonePerHandPerYear / carry</c> round
-    /// trips, and half of one trip's seconds is the one-way distance at the body's pace.
+    /// Derived exactly as <see cref="Woodland.ReachMetres"/> is, from the walking budget and nothing else: a
+    /// year affords <see cref="WalkSecondsPerYear"/> seconds of walking, a year is
+    /// <c>StonePerHandPerYear / carry</c> round trips, and half of one trip's seconds is the one-way distance
+    /// at the body's pace. Seconds rather than a share of the year for the reason given on the cutter's
+    /// budget, and it matters more here: the reach sits inside the 52-86 m band the nearest rock falls in, so
+    /// a reach that moved with the calendar would have put every map's stone in reach of the granary and
+    /// taken the map variety with it.
     /// <para>
     /// Measured from the store the quarrier delivers to, so the same thing follows here as follows for wood:
     /// when no store is within reach of any rock, the answer is a depot at the quarry, and the stone piling up
@@ -91,8 +98,7 @@ internal static class Quarrying
         {
             var body = UnitType.Villager;
             var tripsPerYear = EconomyRates.StonePerHandPerYear / MathF.Max(1f, body.CarryCapacity);
-            var secondsPerTrip = QuarrierWalkShare * WorldCalendar.YearSeconds /
-                                 MathF.Max(0.01f, tripsPerYear);
+            var secondsPerTrip = WalkSecondsPerYear / MathF.Max(0.01f, tripsPerYear);
             return secondsPerTrip * 0.5f * body.MaximumSpeed;
         }
     }
