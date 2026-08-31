@@ -256,6 +256,11 @@ internal static class JobSystem
             return JobRequest.None;
         }
 
+        // An order holds until something overrides it. A body that has been sent somewhere reaches it and
+        // stays posted; it does not drift back to work two seconds later because it happened to stand still.
+        // The assignment is kept, not cancelled — a new assignment, or being taken off work, resumes it.
+        if (jobs.Interrupt == InterruptKind.Order) return JobRequest.None;
+
         jobs.InterruptGrace -= deltaSeconds;
         if (jobs.InterruptGrace > 0f) return JobRequest.None;
 

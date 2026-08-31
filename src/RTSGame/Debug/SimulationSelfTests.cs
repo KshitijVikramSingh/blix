@@ -115,8 +115,8 @@ internal static class SimulationSelfTests
         Check("a divergence is reported on the tick it happens", DivergenceIsCaughtWhenItAppears());
         Check("the checkpoint fingerprint reads the ground, not only the bodies", FullScopeReadsTheMap());
         Check("a standing assignment works with nobody watching", StandingAssignmentWorksUnwatched());
-        Check("a standing assignment survives an interrupt and resumes it", AssignmentSurvivesAnInterrupt());
-        Check("an order never becomes a mode", AnOrderNeverBecomesAMode());
+        Check("a standing assignment is parked by an order and given back on request", AssignmentSurvivesAnInterrupt());
+        Check("an order holds until overridden and is never a trap", AnOrderNeverBecomesAMode());
         Check("a job's reach is written in bodies", JobReachIsWrittenInBodies());
         Check("an unreachable job fails politely", AnUnreachableJobFailsPolitely());
         Check("a workplace holds more hands than fit on it", AWorkplaceHoldsMoreHandsThanFitOnIt());
@@ -2689,11 +2689,12 @@ internal static class SimulationSelfTests
     /// it.
     /// </summary>
     /// <remarks>
-    /// Three things have to hold, and the third is the one that makes the design's claim real.
-    /// The unit obeys the order, so taking control works. Its assignment and its count of legs
-    /// finished are exactly what they were, so the order cost it nothing. And it goes back to
-    /// work by itself, so nobody has to remember to release it — there is no manual mode,
-    /// because a mode is a thing somebody has to switch off.
+    /// The unit obeys the order, so taking control works. Its assignment and its count of legs finished are
+    /// exactly what they were, so the order cost it nothing. It then STAYS where it was sent — this test
+    /// asserted the opposite until §106, when the automatic return was removed: a body that reached the place
+    /// it was ordered to and then wandered back to work on a two-second timer is a body that did not obey the
+    /// order, and it was measured disintegrating cohorts within seconds of arrival. And the work resumes when
+    /// it is handed back, which is what keeps the assignment a parked thing rather than a lost one.
     /// </remarks>
     private static bool AssignmentSurvivesAnInterrupt()
     {
@@ -2730,18 +2731,29 @@ internal static class SimulationSelfTests
         var arrived = world.Agents.Get(id);
         var obeyed = Vector2.Distance(arrived.Position, elsewhere) < 1.0f;
 
-        // Long enough for the grace to expire and for a leg to be finished after it.
+        // Long enough that the old two-second grace would have expired many times over. It must NOT resume:
+        // an order holds until something overrides it, so the body stays where it was sent.
+        Tick(world, 30 * 30);
+        var waiting = world.Agents.Get(id).Jobs;
+        var stayedPut = waiting.IsInterrupted &&
+                        waiting.Assignment == assignment &&
+                        waiting.LegsCompleted == legsBefore &&
+                        Vector2.Distance(world.Agents.Get(id).Position, elsewhere) < 1.5f;
+
+        // Given the work back explicitly, which is the override. The assignment was parked, not lost, so it
+        // picks up where it left off.
+        world.QueueAssign(new[] { id }, assignment);
         Tick(world, 30 * 30);
         var resumed = world.Agents.Get(id).Jobs;
         var backAtWork = !resumed.IsInterrupted &&
                          resumed.LegsCompleted > legsBefore &&
                          resumed.Assignment == assignment;
 
-        var passed = obeyed && suspended && backAtWork;
+        var passed = obeyed && suspended && stayedPut && backAtWork;
         Console.WriteLine(
-            $"    interrupt obeyed={obeyed} suspended={suspended} " +
-            $"legs {legsBefore} -> {dragged.LegsCompleted} while dragged -> " +
-            $"{resumed.LegsCompleted} once released");
+            $"    obeyed={obeyed} suspended={suspended} stayedPut={stayedPut} " +
+            $"legs {legsBefore} -> {dragged.LegsCompleted} while walking -> " +
+            $"{waiting.LegsCompleted} while posted -> {resumed.LegsCompleted} once given back");
         return passed;
     }
 
@@ -2750,10 +2762,13 @@ internal static class SimulationSelfTests
     /// the same assignment, and clearing the assignment is the only thing that stops the work.
     /// </summary>
     /// <remarks>
-    /// The failure this rules out is the classic one — a unit left in manual mode, standing
-    /// where you last dropped it, doing nothing, until you notice. There is nothing to leave
-    /// it in: the interrupt is a countdown, so the only way to make a unit stop working is to
-    /// say so, which is a different command.
+    /// <b>What "not a mode" means changed in §106, and the invariant worth keeping did not.</b> A unit does
+    /// now stay where it was last sent — the automatic return on a two-second timer is gone, because it made a
+    /// cohort disintegrate within seconds of arriving and it meant an order was not really obeyed. What must
+    /// remain true is that an order is never a trap: the assignment is parked rather than lost, a run of
+    /// orders leaves one interrupt rather than a pile of state, being handed work back always takes, and
+    /// clearing the assignment stops the work for good. A mode you cannot get out of is the failure; a unit
+    /// that waits where you put it is not.
     /// </remarks>
     private static bool AnOrderNeverBecomesAMode()
     {
@@ -2776,6 +2791,15 @@ internal static class SimulationSelfTests
                                 ordered.Assignment.Kind == AssignmentKind.Hold;
         Tick(world, 30 * 25);
 
+        // It stays at the last place it was sent rather than drifting back to its post.
+        var posted = world.Agents.Get(id);
+        var heldPosition = posted.Jobs.IsInterrupted &&
+                           posted.Jobs.LegsCompleted == held &&
+                           Vector2.Distance(posted.Position, new Vector2(4f, 4f)) < 2f;
+
+        // Handed the work back: the override always takes, which is what stops an order being a trap.
+        world.QueueAssign(new[] { id }, Assignment.Hold(post, dwellSeconds: 0.5f));
+        Tick(world, 30 * 25);
         var returned = world.Agents.Get(id);
         var wentBack = !returned.Jobs.IsInterrupted &&
                        returned.Jobs.LegsCompleted > held &&
@@ -2792,10 +2816,10 @@ internal static class SimulationSelfTests
                              idle.LegsCompleted == releasedAt &&
                              idle.Activity == ActivityKind.None;
 
-        var passed = stillOneInterrupt && wentBack && stoppedForGood;
+        var passed = stillOneInterrupt && heldPosition && wentBack && stoppedForGood;
         Console.WriteLine(
-            $"    orders left interrupt={ordered.Interrupt} returned={wentBack} " +
-            $"legs {held}->{returned.Jobs.LegsCompleted} then cleared={stoppedForGood}");
+            $"    orders left interrupt={ordered.Interrupt} heldPosition={heldPosition} " +
+            $"returned={wentBack} legs {held}->{returned.Jobs.LegsCompleted} then cleared={stoppedForGood}");
         return passed;
     }
 

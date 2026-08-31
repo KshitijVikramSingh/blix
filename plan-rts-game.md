@@ -9456,3 +9456,38 @@ Worth sitting with: the bound was added to fix a freeze, it was measured as fixi
 green, and it silently broke movement everywhere else for the rest of the run. Nothing in this arc's
 instrumentation caught it — not the frame timings, not the routing counters, not the self-tests. What caught it
 was counting *per body* what an order did, which is the one thing none of the previous instruments did.
+
+## 106. An order holds until overridden
+
+Decided from the chair: no automatic return to work. Reach the target, then idle — posted — unless something
+overrides it.
+
+`ServeInterrupt` no longer counts an order's grace down. The assignment is parked, not cancelled; being handed
+work again resumes it, and clearing the assignment stops it for good.
+
+Measured on the probe, 240 seconds an order:
+
+```
+                    before                                   after
+halfway back   7 arrived, 13 gave up and left      20 arrived, 0 gave up
+far again      8 arrived, 12 travelling            20 arrived, 0 gave up
+```
+
+Every body now arrives and stays. The stragglers were never a routing fault: they were villagers whose
+two-second grace expired the moment they stood still, walking back to work through `BeginSoloMove` and
+detaching from the group on the way out.
+
+### The two tests that encoded the old rule
+
+Both asserted the automatic return, so both had their intent rewritten rather than their expectations relaxed —
+the same move as §103's impassable slope.
+
+- *"a standing assignment survives an interrupt and resumes it"* is now **parked by an order and given back on
+  request**: obey, keep the assignment and the leg count, then stay at the ordered spot through thirty seconds
+  where the old grace would have expired fifteen times, and resume only when the work is handed back.
+- *"an order never becomes a mode"* is now **holds until overridden and is never a trap**. What "not a mode"
+  means changed; the invariant did not. A unit that waits where you put it is not a mode. A unit you cannot get
+  out of would be — so the test still requires that a run of orders leaves one interrupt rather than a pile of
+  state, that handing work back always takes, and that clearing the assignment stops the work for good.
+
+Gate 3/3 green.
