@@ -118,6 +118,7 @@ internal static class SimulationSelfTests
         Check("a standing assignment is parked by an order and given back on request", AssignmentSurvivesAnInterrupt());
         Check("an order holds until overridden and is never a trap", AnOrderNeverBecomesAMode());
         Check("a cohort owns its roster, and every departure names a reason", ACohortOwnsItsRoster());
+        Check("a crew survives the orders given to it and forgets its dead", ACrewSurvivesWhatIsDoneToIt());
         Check("a job's reach is written in bodies", JobReachIsWrittenInBodies());
         Check("an unreachable job fails politely", AnUnreachableJobFailsPolitely());
         Check("a workplace holds more hands than fit on it", AWorkplaceHoldsMoreHandsThanFitOnIt());
@@ -2715,6 +2716,73 @@ internal static class SimulationSelfTests
     /// anything the player asked for, because that is the only exit nobody asked for and the only one worth
     /// watching.
     /// </para></remarks>
+    /// <summary>
+    /// A crew is a set the player named: it survives the orders given to it, it forgets its dead, and it is
+    /// not the cohort that carrying out an order produces.
+    /// </summary>
+    /// <remarks>
+    /// <b>§82's third representation, asserted as the thing that distinguishes it.</b> A transient selection
+    /// is rebuilt by every marquee and a cohort is dissolved by the end of its move; a crew is worth having
+    /// only because neither of those happens to it. So the test does to a crew the three things that end the
+    /// other two — an order, a second order, and losing members — and requires the set to still be there.
+    /// <para>
+    /// It also asserts the separation directly: while the crew is carrying out an order there is a cohort
+    /// with the same members and a different identity, and when the cohort is gone the crew is not. Collapsing
+    /// them is the failure §82 named, and it would pass every other test in this file.
+    /// </para></remarks>
+    private static bool ACrewSurvivesWhatIsDoneToIt()
+    {
+        var world = new SimulationWorld(60f);
+        var crews = new ControlGroups();
+        var everyone = new List<AgentId>();
+        for (var i = 0; i < 12; i++)
+        {
+            everyone.Add(world.SpawnAgent(new Vector2(-20f + i % 4 * 1.2f, -12f + i / 4 * 1.2f)));
+        }
+
+        var chosen = everyone.Take(6).ToArray();
+        crews.Assign(1, chosen);
+        var named = crews.Members(1, world.Agents).Count;
+
+        // An order, which is what ends a selection's usefulness and creates a cohort.
+        world.QueueMove(crews.Members(1, world.Agents), new Vector2(14f, 9f));
+        Tick(world, 30 * 4);
+        var cohorts = world.MoveGroups.Values.Count(group => group.Members.Count > 0);
+        var throughAnOrder = crews.Members(1, world.Agents).Count;
+        // Same people, different identity: the cohort knows them by a roster it owns, the crew by a list the
+        // simulation has never heard of.
+        var separate = world.MoveGroups.Values.Any(group =>
+            group.Members.Count == 6 && group.Members.All(chosen.Contains));
+
+        // A second order, then an override, then long enough for the cohort to be gone entirely.
+        world.QueueMove(crews.Members(1, world.Agents), new Vector2(-14f, 9f));
+        Tick(world, 30 * 2);
+        world.QueueStop(crews.Members(1, world.Agents));
+        Tick(world, 30 * 2);
+        var cohortsLeft = world.MoveGroups.Values.Count(group => group.Members.Count > 0);
+        var throughTheLot = crews.Members(1, world.Agents).Count;
+
+        // Losing members. Two of the six die, and the crew reports what it actually has without anybody
+        // having told it — which is the property that makes a list of ids safe outside the simulation.
+        world.DespawnAgents(chosen.Take(2));
+        var afterLosses = crews.Members(1, world.Agents).Count;
+
+        // And membership edits, which are the affordance rather than an accident.
+        crews.Add(1, everyone.Skip(6).Take(3));
+        var extended = crews.Members(1, world.Agents).Count;
+        crews.Assign(1, everyone.Skip(9));
+        var replaced = crews.Members(1, world.Agents).Count;
+
+        var passed = named == 6 && cohorts == 1 && separate && throughAnOrder == 6 &&
+                     cohortsLeft == 0 && throughTheLot == 6 && afterLosses == 4 &&
+                     extended == 7 && replaced == 3;
+        Console.WriteLine(
+            $"    crew of {named}: {throughAnOrder} through an order (cohorts={cohorts}, " +
+            $"same members in one={separate}), {throughTheLot} through two more and a stop " +
+            $"(cohorts={cohortsLeft}), {afterLosses} after two died, {extended} extended, {replaced} replaced");
+        return passed;
+    }
+
     private static bool ACohortOwnsItsRoster()
     {
         // A wider world than the tuned one, for the single reason that the straggler has to still be

@@ -601,6 +601,20 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         SilkKey.ControlRight => BlixKey.RightControl,
         SilkKey.SuperLeft => BlixKey.LeftSuper,
         SilkKey.SuperRight => BlixKey.RightSuper,
+        SilkKey.ShiftLeft => BlixKey.LeftShift,
+        SilkKey.ShiftRight => BlixKey.RightShift,
+        // Both rows to the same value. Which physical key produced a digit is a fact about the keyboard,
+        // and no caller has ever wanted it: a control group is bound to "4", not to "the 4 above the R".
+        SilkKey.Number0 or SilkKey.Keypad0 => BlixKey.Number0,
+        SilkKey.Number1 or SilkKey.Keypad1 => BlixKey.Number1,
+        SilkKey.Number2 or SilkKey.Keypad2 => BlixKey.Number2,
+        SilkKey.Number3 or SilkKey.Keypad3 => BlixKey.Number3,
+        SilkKey.Number4 or SilkKey.Keypad4 => BlixKey.Number4,
+        SilkKey.Number5 or SilkKey.Keypad5 => BlixKey.Number5,
+        SilkKey.Number6 or SilkKey.Keypad6 => BlixKey.Number6,
+        SilkKey.Number7 or SilkKey.Keypad7 => BlixKey.Number7,
+        SilkKey.Number8 or SilkKey.Keypad8 => BlixKey.Number8,
+        SilkKey.Number9 or SilkKey.Keypad9 => BlixKey.Number9,
         _ => BlixKey.Unknown,
     };
 

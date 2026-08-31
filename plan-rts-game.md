@@ -9588,3 +9588,71 @@ Also left standing, deliberately: a cohort still cannot take a new member. `Remo
 member, because slots are laid out once against the ground and the approach for the bodies that were there at
 the time, and handing a departed member's slot to somebody else is a question for the pass that lets a cohort
 grow.
+
+## 108. Crews, on the digits the key enum did not have
+
+§82's second complaint about groups is affordance: *the player needs to create, recall, inspect and command a
+set without repeatedly reconstructing it by marquee selection*. This is that, and it is deliberately the whole
+of it — the third representation, built as its own thing rather than as a use of either of the other two.
+
+### It stays out of the simulation
+
+Decided in §107 and acted on here. `ControlGroups` lives in `Control/`, holds ten lists of ids, and the world
+has never heard of it: nothing is ticked, fingerprinted or saved. What makes that safe is a property
+`AgentStore` already had on purpose — it tombstones rather than compacts and **never reuses an id**, so a
+stale reference resolves to a dead body and is refused rather than resolving to somebody else. A list of ids
+held outside the simulation needs exactly that and nothing more.
+
+The two costs are real and are named rather than discovered later: **a crew does not survive a save**, and
+nothing computed at group resolution can be shared through one. Both become live questions the moment
+something wants either, and neither is a reason to put it in the world today.
+
+### The keys did not exist
+
+`Blix.Core.Key` had letters, arrows, Escape, Space, Tab, Backspace, Control and Super — and no digits at all,
+so "bind this to 4" was not expressible anywhere in the engine. Added to the enum and to the Silk mapping,
+appended rather than slotted in beside the letters so nothing renumbers. Number row and keypad map to the same
+value, because which physical key produced a digit is a fact about the keyboard that no caller has ever
+wanted. Shift went in at the same time; the note in `OnKeyDown` that "Shift is not in the `Key` enum at all"
+is now stale, and has been corrected where it stands.
+
+Three verbs on one key, matching thirty years of every other RTS exactly, because the affordance being tested
+is muscle memory rather than novelty:
+
+```
+  Ctrl + digit    set the crew to the selection
+  Shift + digit   add the selection to it
+  digit           recall it
+  digit again     jump the camera to it
+```
+
+The last line is arrived at without a double-tap timer. "The selection already equals this crew" is precisely
+the state a second press produces, so it is asked directly rather than timed — one less piece of state, and it
+also does the right thing when the set was reached some other way.
+
+### The separation, asserted rather than assumed
+
+New assertion, *a crew survives the orders given to it and forgets its dead*. It does to a crew the three
+things that end the other two representations — an order, more orders, and losing members:
+
+```
+crew of 6: 6 through an order (cohorts=1, same members in one=True), 6 through two more and a stop
+(cohorts=0), 4 after two died, 7 extended, 3 replaced
+```
+
+The middle clause is the one that matters. While the crew is carrying out its order there is a cohort holding
+the same six bodies under a different identity; two orders and a stop later the cohort is gone and the crew is
+not. **Collapsing the two would pass every other test in this file**, which is why the separation gets an
+assertion of its own rather than a comment.
+
+Gate 3/3 green.
+
+### What one press from the chair still has to confirm
+
+Whether digit and Shift presses actually arrive is not answerable by reading — the enum can be right, the
+mapping right, the dispatch unfiltered, and the combination still swallowed by the window library or the OS.
+That was true of Ctrl, and it is the reason the map-roll key was put on bare Space rather than on a
+combination: an action somebody presses fifty times in a row should not rest on delivery nobody has tested. `--debug-all` prints one line per press, so a bare `1` reading `key Number1` settles the digits and
+`key Unknown` would settle them the other way. Shift+digit is the one binding here that would be worth
+retiring for a different chord if it does not survive that test; Ctrl+digit and the bare digit are the two
+that carry the affordance.

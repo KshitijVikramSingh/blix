@@ -1231,6 +1231,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private Vector2 pointerWorld;
     private bool pointerOnTerrain;
     private bool additiveSelection;
+    /// <summary>Whether Shift is down. Only crews read it; Ctrl already means "the other thing" everywhere.</summary>
+    private bool shiftHeld;
+    /// <summary>The sets the player has named. View-layer only, by ruling — see ControlGroups.</summary>
+    private readonly ControlGroups crews = new();
     private bool obstacleEditMode;
     private int navigationDebugMode;
     /// <summary>
@@ -1570,6 +1574,74 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             selection.Selected.Count == 0
                 ? "  nobody spare — everybody has a job"
                 : $"  {selection.Selected.Count} unit(s) selected");
+    }
+
+    /// <summary>
+    /// Sets, extends or recalls the crew on a digit.
+    /// </summary>
+    /// <remarks>
+    /// <b>Three verbs on one key, and the third one is the point.</b> Ctrl sets, Shift adds, the bare digit
+    /// recalls — the arrangement every RTS has used for thirty years, and worth matching exactly because the
+    /// affordance being tested here is muscle memory rather than novelty. §82's complaint was that a player
+    /// had to reconstruct a set by marquee every time they wanted it; a crew is the answer to that and to
+    /// nothing else.
+    /// <para>
+    /// Recalling the crew you are already holding jumps the camera to it. Standard behaviour, arrived at
+    /// here without a double-tap timer: "the selection already equals this crew" is exactly the state a
+    /// second press produces, so it can be asked directly instead of timed. One less piece of state, and it
+    /// also does the right thing when the set was reached some other way.
+    /// </para>
+    /// <para>
+    /// A crew is not a cohort. Recalling one and then ordering it produces a cohort, the same as any other
+    /// selection would; the crew keeps its membership through that order and through the next one, which is
+    /// the whole difference between the two representations.
+    /// </para></remarks>
+    private void Crew(int slot)
+    {
+        if (additiveSelection)
+        {
+            // Snapshot rather than the live set. Every other place that hands a set of ids anywhere in this
+            // game sorts by id first, and a crew that stored them in hash order would be the one exception
+            // for no reason — the order is invisible today, and something that reads it later should find
+            // the same order this codebase means everywhere else.
+            crews.Assign(slot, selection.Snapshot());
+            var size = crews.Members(slot, simulation.Agents).Count;
+            Console.WriteLine(
+                size == 0
+                    ? $"  crew {slot} cleared"
+                    : $"  crew {slot} is now {size} unit(s)");
+            return;
+        }
+
+        if (shiftHeld)
+        {
+            var before = crews.Members(slot, simulation.Agents).Count;
+            crews.Add(slot, selection.Snapshot());
+            var after = crews.Members(slot, simulation.Agents).Count;
+            Console.WriteLine($"  crew {slot}: {before} -> {after} unit(s)");
+            return;
+        }
+
+        // Asked before the recall, because recalling is what makes it true.
+        var alreadyHeld = crews.Holds(slot, selection.Selected, simulation.Agents);
+        var members = crews.Members(slot, simulation.Agents);
+        if (members.Count == 0)
+        {
+            Console.WriteLine($"  crew {slot} is empty — Ctrl+{slot} sets it to the selection");
+            return;
+        }
+
+        selection.ReplaceWith(members);
+        if (!alreadyHeld)
+        {
+            Console.WriteLine($"  crew {slot}: {members.Count} unit(s) selected");
+            return;
+        }
+
+        var centroid = Vector2.Zero;
+        foreach (var id in members) centroid += simulation.Agents.Get(id).Position;
+        cameraFocus = centroid / members.Count;
+        Console.WriteLine($"  crew {slot}: {members.Count} unit(s) — camera moved to them");
     }
 
     private void SpawnScenarioAgents(int count)
@@ -2313,6 +2385,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             (cameraFurthest > CameraFurthestDistance
                 ? $" (past the old {CameraFurthestDistance:F0} m cap — --zoom-limit pins it)"
                 : string.Empty));
+        Console.WriteLine("  0-9: recall a crew   Ctrl+digit: set it to the selection   Shift+digit: add to it");
+        Console.WriteLine("     recalling the crew you already have jumps the camera to it; crews are not saved");
         Console.WriteLine("  Z: camera follows the selection (off by default)   Esc: quit");
         Console.WriteLine($"  {simulation.Agents.Count} agents   simulation: 30 Hz fixed step");
         Console.WriteLine("  placement grid: 1.5 m   navigation grid: 0.5 m   collider hash: 2.0 m");
@@ -4800,6 +4874,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                         : null,
                     colliderOverlay > 0 ? GeometryLine() : null,
                     mapLab ? LabStatus() : MapStatus(),
+                    crews.Summary(simulation.Agents),
                     hoveredNode,
                     selectedNode,
                     frame.Width,
@@ -8247,9 +8322,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             //
             // That leaves one action, and it gets the one free single key. Ctrl+letter is mapped and forwarded
             // and ought to work, but "ought to" is doing a lot of work in that sentence: modifier delivery
-            // depends on the window library and on what the OS keeps for itself, and Shift is not in the
-            // <c>Key</c> enum at all. Rolling a map is the thing somebody presses fifty times in a row, and it
-            // should not rest on a combination I cannot verify by reading the source.
+            // depends on the window library and on what the OS keeps for itself. (Shift was not in the
+            // <c>Key</c> enum at all when this was written; §108 added it, along with the digits, and the
+            // same caution applies to it.) Rolling a map is the thing somebody presses fifty times in a row,
+            // and it should not rest on a combination I cannot verify by reading the source.
             case Key.Space when !mapLab:
                 RollLab(0, reseed: true);
                 break;
@@ -8378,6 +8454,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             case Key.RightControl:
                 additiveSelection = true;
                 break;
+            case Key.LeftShift:
+            case Key.RightShift:
+                shiftHeld = true;
+                break;
+            // <b>The digits, which the Key enum did not have.</b> Not an oversight worth working around: a
+            // control group is bound to a number in every game that has ever had one, and there was no way
+            // to say "4" at all. Added to the enum and to the Silk mapping, number row and keypad alike.
+            case >= Key.Number0 and <= Key.Number9:
+                Crew(key - Key.Number0);
+                break;
             // Rotation is Q and E; the arrows pan. They used to do both, which meant there was no way to
             // move the camera sideways at all and pressing Left to look left spun the world instead.
             case Key.Q:
@@ -8405,6 +8491,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     {
         if (performanceRun) return;
         if (key is Key.LeftControl or Key.RightControl) additiveSelection = false;
+        if (key is Key.LeftShift or Key.RightShift) shiftHeld = false;
         // Held rather than edge-triggered: key events fire once, and a pan has to keep going for as long
         // as the key is down, so the state lives here and PanCamera reads it every frame.
         if (key == Key.Left) panLeft = false;

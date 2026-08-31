@@ -94,6 +94,7 @@ internal sealed class SettlementHud : IDisposable
         string? light,
         string? geometry,
         string? lab,
+        string? crews,
         NodeId pointed,
         NodeId picked,
         int width,
@@ -173,6 +174,9 @@ internal sealed class SettlementHud : IDisposable
         // fog starts — and "geometries that should tie together don't" cannot be checked without seeing
         // them next to each other.
         if (geometry is not null) lines.Add((geometry.ToUpperInvariant(), Body));
+        // The crews, if there are any. Slot and size only: the panel's job is to say a set exists and is
+        // still that size after a raid, not to list it — that is what recalling it is for.
+        if (crews is not null) lines.Add(($"CREWS · {crews}", Body));
         // <b>The map lab's whole state, on screen, because a lab you have to read a terminal for is not a
         // lab.</b> Every one of its controls worked and none of them appeared to: the region, the archetype
         // and the pick were printed to stdout, which on a windowed run is a file nobody is watching. Reported
