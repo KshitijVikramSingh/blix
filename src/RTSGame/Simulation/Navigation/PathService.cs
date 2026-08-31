@@ -685,13 +685,81 @@ internal sealed partial class PathService
         return cost <= direct * SlotDetourTolerance + SlotDetourSlack;
     }
 
+    /// <summary>
+    /// A route for one body, and a record of what asking cost.
+    /// </summary>
+    /// <remarks>
+    /// <b>The reason is required because the count was not enough.</b> §115 established that the click after
+    /// a placement change is two route queries and some 60% of the event, and could not say which two: a
+    /// counter cannot distinguish a cohort member the shared field refused from a villager whose stored route
+    /// died with the navigation revision, and those want opposite fixes. Every request now names itself and is
+    /// charged its own expansions, its own milliseconds and its own ending. See <see cref="RouteAttribution"/>.
+    /// <para>
+    /// The wrapper exists so the attribution cannot be forgotten at one of the seven places the search can
+    /// return from. It reads the counters the core keeps and turns their deltas into an outcome.
+    /// </para></remarks>
     public PathResult? FindPath(
         Vector2 start,
         Vector2 requestedGoal,
         float agentRadius,
+        RouteReason reason,
         Vector2? congestionAvoidanceCenter = null,
         float[]? additionalNavigationCosts = null,
         float agentSpeed = 0f)
+    {
+        var startTimestamp = Stopwatch.GetTimestamp();
+        var expansionsAtEntry = PathExpansions;
+        var refusalsAtEntry = SearchesDeniedByOrderBudget;
+        var stopsAtEntry = PathBudgetStops;
+        var truncationsAtEntry = PathTruncatedToStart;
+        var failuresAtEntry = PathFailures;
+        var result = FindPathCore(
+            start,
+            requestedGoal,
+            agentRadius,
+            congestionAvoidanceCenter,
+            additionalNavigationCosts,
+            agentSpeed);
+        var spent = PathExpansions - expansionsAtEntry;
+        // <b>Ordered narrowest cause first, and nullness is not one of the causes.</b> A truncation is also a
+        // budget stop and a refusal ran no search at all, so the tests have to run inwards. Nullness was in
+        // this chain once, ahead of the budget, and it filed a budget-stopped search whose partial route the
+        // smoothing then rejected as "unresolvable" — a label that points at goal resolution and would have
+        // cost the next session a wrong afternoon. What the body received is a separate axis.
+        var outcome =
+            SearchesDeniedByOrderBudget > refusalsAtEntry ? RouteOutcome.Refused
+            : PathTruncatedToStart > truncationsAtEntry ? RouteOutcome.Truncated
+            : PathFailures > failuresAtEntry ? RouteOutcome.Exhausted
+            : PathBudgetStops > stopsAtEntry ? RouteOutcome.Partial
+            : spent > 0 ? RouteOutcome.Reached
+            : result is not null ? RouteOutcome.Direct
+            : RouteOutcome.Unresolvable;
+        Routes.Record(
+            reason,
+            outcome,
+            result is not null,
+            spent,
+            Stopwatch.GetTimestamp() - startTimestamp,
+            CellSpan(start, requestedGoal));
+        return result;
+    }
+
+    /// <summary>Chebyshev cells between the two ends of a request, so its size can be read off the log.</summary>
+    private int CellSpan(Vector2 start, Vector2 goal) =>
+        grid.TryWorldToCell(start, out var from) && grid.TryWorldToCell(goal, out var to)
+            ? Math.Max(Math.Abs(from.X - to.X), Math.Abs(from.Z - to.Z))
+            : -1;
+
+    /// <summary>What routing was asked for and how it ended, per reason. Diagnostics; never read back.</summary>
+    internal readonly RouteAttribution Routes = new();
+
+    private PathResult? FindPathCore(
+        Vector2 start,
+        Vector2 requestedGoal,
+        float agentRadius,
+        Vector2? congestionAvoidanceCenter,
+        float[]? additionalNavigationCosts,
+        float agentSpeed)
     {
         PathQueries++;
         if (!OrderBudgetRemains)
@@ -1232,17 +1300,47 @@ internal sealed partial class PathService
         if (!grid.TryWorldToCell(position, out var current) ||
             !grid.TryWorldToCell(requestedGoal, out var requestedGoalCell))
         {
+            GradientRefusedOffGrid++;
             return Vector2.Zero;
         }
         var goal = grid.IsWalkable(requestedGoalCell, agentRadius)
             ? requestedGoalCell
             : FindNearestWalkable(requestedGoalCell, agentRadius);
-        if (goal is not { } resolvedGoal) return Vector2.Zero;
+        if (goal is not { } resolvedGoal)
+        {
+            GradientRefusedNoGoal++;
+            return Vector2.Zero;
+        }
 
         var costs = GetFlowField(
             resolvedGoal, agentRadius, congestionRevision, agentSpeed: agentSpeed);
         var centerCost = costs.CostAt(current);
-        if (!float.IsFinite(centerCost)) return Vector2.Zero;
+        if (!float.IsFinite(centerCost))
+        {
+            // <b>Split, because the tile was filled and the cell still came back infinite.</b> CostAt fills a
+            // region's tile on demand, so this is never "nobody has asked yet" — it is a cell the region
+            // search could not reach from its seeded perimeter. Two things do that and they are different
+            // bugs: a body standing where it does not fit (its own cell is unwalkable at its radius, so no
+            // rectangle contains it and nothing can price it), and a body that fits but sits in a pocket the
+            // corner graph does not reach into. The first is a placement or depenetration problem; only the
+            // second is what FindFieldEntry was built for.
+            if (grid.IsWalkable(current, agentRadius))
+            {
+                GradientRefusedUnpriced++;
+            }
+            else
+            {
+                // <b>By how much, because "does not fit" is a claim about a margin.</b> The routing radius is
+                // the body's own radius here — RoutingRadius aliases Radius deliberately — so this is not a
+                // conservative predicate refusing a body that is really fine. A shortfall of centimetres and
+                // a shortfall of a metre are still different situations: the first is a body resting on the
+                // clearance boundary and the second is a body inside something.
+                GradientRefusedNoFooting++;
+                GradientNoFootingWorstShortfall = MathF.Max(
+                    GradientNoFootingWorstShortfall, agentRadius - grid.Clearance(current));
+            }
+            return Vector2.Zero;
+        }
 
         var blockedCost = centerCost + BlockedFlowSeconds;
         var probe = grid.Transform.CellSize;
@@ -1866,6 +1964,30 @@ internal sealed partial class PathService
     /// service is already argued as derived, so diagnostics that nothing reads back belong here. Public fields
     /// rather than properties because the world increments them.
     /// </remarks>
+    /// <summary>
+    /// Why the shared field had no direction for a body, by cause.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because a body the field refuses is handed a cross-map search, and this is where that decision is
+    /// taken.</b> The three causes are not alike and only one of them is about the field: a position or goal
+    /// off the grid is a control problem, an unresolvable goal is a resolution problem, and a body standing on
+    /// ground the field never priced is the case §96 built <see cref="FindFieldEntry"/> for. Attributing the
+    /// placement click found two <see cref="RouteReason.OrderSlot"/> searches costing 1,232 ms between them
+    /// and neither reaching its goal, and the whole of that spend hangs off which of these three it was.
+    /// </remarks>
+    public long GradientRefusedOffGrid;
+
+    public long GradientRefusedNoGoal;
+
+    /// <summary>Walkable ground the field could not price: a pocket the corner graph does not reach.</summary>
+    public long GradientRefusedUnpriced;
+
+    /// <summary>The body's own cell does not admit a body of its radius, so nothing can price it.</summary>
+    public long GradientRefusedNoFooting;
+
+    /// <summary>Metres by which the worst such body overhung the clearance of the cell it stood in.</summary>
+    public float GradientNoFootingWorstShortfall;
+
     public long FlowTransitDropsRejected;
 
     public long FlowTransitDropsNoGradient;

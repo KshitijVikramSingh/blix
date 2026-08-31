@@ -314,6 +314,22 @@ internal sealed class SimulationWorld
     public (long Rejected, long NoGradient) FlowTransitDrops =>
         (pathService.FlowTransitDropsRejected, pathService.FlowTransitDropsNoGradient);
 
+    /// <summary>Why the shared field had no direction to give, by cause. See PathService.GradientRefusedOffGrid.</summary>
+    public (long OffGrid, long NoGoal, long Unpriced, long NoFooting, float WorstShortfall) GradientRefusals =>
+        (pathService.GradientRefusedOffGrid, pathService.GradientRefusedNoGoal,
+         pathService.GradientRefusedUnpriced, pathService.GradientRefusedNoFooting,
+         pathService.GradientNoFootingWorstShortfall);
+
+    /// <summary>
+    /// Who asked for routing, what it cost them, and how it ended. See <see cref="RouteAttribution"/>.
+    /// </summary>
+    /// <remarks>
+    /// Forwarded rather than held, for the reason given above FlowTransitDrops: a field on the world must be
+    /// fingerprinted or argued away, and this one holds wall clock. Read as a difference across a window —
+    /// <c>Snapshot()</c> before, <c>Since(snapshot)</c> after — because every total in it is cumulative.
+    /// </remarks>
+    internal RouteAttribution Routes => pathService.Routes;
+
     /// <summary>What the cell search actually explored. See PathService.PathExpansions.</summary>
     public (long Expansions, long Worst, long Failures, int GridCells) PathSearch =>
         (pathService.PathExpansions, pathService.PathExpansionsWorst,
@@ -2339,7 +2355,7 @@ internal sealed class SimulationWorld
                 // the reported symptom — an order given across the map and nobody moves — and it is invisible
                 // from inside the tick: the order was accepted, the group was formed, the slot was assigned,
                 // and the route came back empty.
-                if (AssignPath(ref agent, agent.GroupSlot))
+                if (AssignPath(ref agent, agent.GroupSlot, RouteReason.OrderSlot))
                 {
                     pathService.OrdersOnSlotPath++;
                 }
@@ -3439,7 +3455,7 @@ internal sealed class SimulationWorld
         agent.ApproachingSlot = true;
         agent.UsesFlowTransit = false;
         agent.RequestedDestination = target;
-        AssignPath(ref agent, target);
+        AssignPath(ref agent, target, RouteReason.SoloMove);
     }
 
     /// <summary>
@@ -3576,7 +3592,7 @@ internal sealed class SimulationWorld
                 agent.RequestedDestination = agent.GroupSlot;
                 agent.CrowdedArrivalAttempts = 0;
                 agent.CrowdedArrivalContactFrames = 0;
-                if (!AssignPath(ref agent, agent.GroupSlot, preserveCurrentPathOnFailure: true))
+                if (!AssignPath(ref agent, agent.GroupSlot, RouteReason.FormationSlot, preserveCurrentPathOnFailure: true))
                 {
                     // An unreachable slot is not worth stalling for; settle where
                     // the body already stands and let contact resolution pack it.
@@ -3781,7 +3797,7 @@ internal sealed class SimulationWorld
             agent.PatrolEnd = patrol.End;
             agent.PatrolTowardEnd = true;
             agent.RequestedDestination = patrol.End;
-            AssignPath(ref agent, patrol.End);
+            AssignPath(ref agent, patrol.End, RouteReason.Patrol);
         }
     }
 
@@ -3827,7 +3843,7 @@ internal sealed class SimulationWorld
                 case AgentLocomotionState.Patrol when !agent.HasDestination:
                     var patrolTarget = agent.PatrolTowardEnd ? agent.PatrolEnd : agent.PatrolStart;
                     agent.RequestedDestination = patrolTarget;
-                    AssignPath(ref agent, patrolTarget);
+                    AssignPath(ref agent, patrolTarget, RouteReason.Behavior);
                     agent.BehaviorUpdateCooldown = 0.25f;
                     break;
                 case AgentLocomotionState.Idle when !agent.HasDestination:
@@ -3883,7 +3899,7 @@ internal sealed class SimulationWorld
         }
 
         agent.RequestedDestination = agent.HoldPosition;
-        AssignPath(ref agent, agent.HoldPosition);
+        AssignPath(ref agent, agent.HoldPosition, RouteReason.ReturnToHold);
         agent.ReturningToHold = agent.HasDestination;
         if (!agent.ReturningToHold) agent.HoldReturnCooldown = 0.25f;
     }
@@ -3929,7 +3945,7 @@ internal sealed class SimulationWorld
             return;
         }
         agent.RequestedDestination = requested;
-        AssignPath(ref agent, requested, preserveCurrentPathOnFailure: true);
+        AssignPath(ref agent, requested, RouteReason.ChaseTarget, preserveCurrentPathOnFailure: true);
     }
 
     private static Vector2 StableAgentDirection(AgentId id)
@@ -4010,7 +4026,7 @@ internal sealed class SimulationWorld
         agent.AdoptedCongestionRevision = pathService.CongestionRevision;
         agent.RouteCommitSeconds = RouteCommitmentSeconds;
         routePlansThisTick++;
-        if (AssignPath(ref agent, agent.RequestedDestination, preserveCurrentPathOnFailure: true))
+        if (AssignPath(ref agent, agent.RequestedDestination, RouteReason.CongestionReroute, preserveCurrentPathOnFailure: true))
         {
             CongestionRerouteCount++;
         }
@@ -4033,13 +4049,14 @@ internal sealed class SimulationWorld
                 agent.NavigationRevision = Navigation.Revision;
                 continue;
             }
-            AssignPath(ref agent, agent.RequestedDestination);
+            AssignPath(ref agent, agent.RequestedDestination, RouteReason.NavigationChanged);
         }
     }
 
     private bool AssignPath(
         ref AgentState agent,
         Vector2 requestedDestination,
+        RouteReason reason,
         bool preserveCurrentPathOnFailure = false,
         Vector2? congestionAvoidanceCenter = null,
         float[]? additionalNavigationCosts = null,
@@ -4056,6 +4073,7 @@ internal sealed class SimulationWorld
             agent.Position,
             requestedDestination,
             agent.NavigationRadius,
+            reason,
             congestionAvoidanceCenter,
             additionalNavigationCosts,
             agent.MaximumSpeed);
@@ -4110,52 +4128,6 @@ internal sealed class SimulationWorld
         return true;
     }
 
-    private bool AssignPathVia(
-        ref AgentState agent,
-        Vector2 joinPoint,
-        Vector2 requestedDestination,
-        Vector2 congestionAvoidanceCenter)
-    {
-        var pathfindingStart = Stopwatch.GetTimestamp();
-        var first = pathService.FindPath(
-            agent.Position,
-            joinPoint,
-            agent.NavigationRadius,
-            congestionAvoidanceCenter,
-            agentSpeed: agent.MaximumSpeed);
-        var second = first is null
-            ? null
-            : pathService.FindPath(
-                joinPoint,
-                requestedDestination,
-                agent.NavigationRadius,
-                agentSpeed: agent.MaximumSpeed);
-        pathfindingTicksThisTick += Stopwatch.GetTimestamp() - pathfindingStart;
-        if (first is not { } approach || second is not { } continuation)
-        {
-            return false;
-        }
-
-        var combined = new Vector2[approach.Waypoints.Length + continuation.Waypoints.Length];
-        approach.Waypoints.CopyTo(combined, 0);
-        continuation.Waypoints.CopyTo(combined, approach.Waypoints.Length);
-        paths.Release(agent.Path);
-        agent.Path = paths.Add(combined);
-        agent.WaypointIndex = 0;
-        agent.NavigationRevision = Navigation.Revision;
-        agent.StuckSeconds = 0f;
-        agent.CongestionYieldSeconds = 0f;
-        agent.RepathRequested = false;
-        agent.HasRepathAvoidance = false;
-        agent.Destination = continuation.Destination;
-        agent.LastDestinationDistance = Vector2.Distance(agent.Position, agent.Destination);
-        agent.HasDestination = true;
-        agent.ProgressSampleSeconds = 0f;
-        agent.ProgressSampleWaypointIndex = 0;
-        agent.ProgressSampleDistance = Vector2.Distance(agent.Position, combined[0]);
-        return true;
-    }
-
     private void PreparePreferredVelocities()
     {
         var agents = Agents.MutableSpan();
@@ -4193,7 +4165,7 @@ internal sealed class SimulationWorld
                 if (agent.RepathCooldown <= 0f)
                 {
                     agent.RepathCooldown = RoutelessRepathInterval;
-                    AssignPath(ref agent, agent.RequestedDestination, preserveCurrentPathOnFailure: true);
+                    AssignPath(ref agent, agent.RequestedDestination, RouteReason.NoVelocity, preserveCurrentPathOnFailure: true);
                 }
                 continue;
             }
@@ -4357,7 +4329,7 @@ internal sealed class SimulationWorld
             pathService.FlowTransitDropsRejected++;
             agent.UsesFlowTransit = false;
             agent.FlowStepRejections = 0;
-            AssignPath(ref agent, agent.RequestedDestination, preserveCurrentPathOnFailure: true);
+            AssignPath(ref agent, agent.RequestedDestination, RouteReason.TransitRejected, preserveCurrentPathOnFailure: true);
             return Vector2.Zero;
         }
 
@@ -4402,6 +4374,7 @@ internal sealed class SimulationWorld
             AssignPath(
                 ref agent,
                 entry ?? agent.RequestedDestination,
+                entry is null ? RouteReason.TransitStranded : RouteReason.FieldEntry,
                 preserveCurrentPathOnFailure: true);
             // Set after the assignment, because AssignPath clears it: an ordinary route means the body is no
             // longer looking for the field.
@@ -4751,6 +4724,7 @@ internal sealed class SimulationWorld
                     var repaired = AssignPath(
                         ref agent,
                         agent.RequestedDestination,
+                        RouteReason.RouteRepair,
                         preserveCurrentPathOnFailure: true);
                     if (repaired)
                     {
@@ -4796,7 +4770,7 @@ internal sealed class SimulationWorld
                     agent.RepathCooldown = 0f;
                     agent.UsesFlowTransit = false;
                     agent.FlowStepRejections = 0;
-                    AssignPath(ref agent, agent.RequestedDestination, preserveCurrentPathOnFailure: true);
+                    AssignPath(ref agent, agent.RequestedDestination, RouteReason.NoIntentRetry, preserveCurrentPathOnFailure: true);
                 }
             }
             else
@@ -4967,6 +4941,7 @@ internal sealed class SimulationWorld
             AssignPath(
                 ref agent,
                 agent.RequestedDestination,
+                RouteReason.CongestionRecovery,
                 preserveCurrentPathOnFailure: true,
                 congestionAvoidanceCenter: avoidanceCenter,
                 additionalNavigationCosts: dynamicNavigationCosts);

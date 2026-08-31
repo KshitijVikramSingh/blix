@@ -575,6 +575,8 @@ internal static class ScaleScenarios
             var dropsBefore = world.FlowTransitDrops;
             var failuresBefore = world.PathSearch.Failures;
             var searchesQuietBefore = world.RegionSearches;
+            var quietRoutesBefore = world.Routes.Snapshot();
+            var quietLogFrom = world.Routes.Recorded;
             for (var tick = 0; tick < 20; tick++) world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             var quietAfter = world.RoutingCost;
             Console.WriteLine(
@@ -620,6 +622,8 @@ internal static class ScaleScenarios
                     $"found, {world.FieldRejoins} rejoins, " +
                     $"worst drop pressure {world.WorstDropPressure:F3}");
             }
+
+            ReportRoutes(world, quietRoutesBefore, quietLogFrom, "           | ");
         }
 
         // <b>What a finished building costs.</b> Construction changes the placement grid, which re-rasterises
@@ -659,6 +663,9 @@ internal static class ScaleScenarios
         var coldSearchBefore = world.PathSearch;
         var coldClimbBefore = world.ClimbCost;
         var coldQueriesBefore = world.PathQueries;
+        var coldRoutesBefore = world.Routes.Snapshot();
+        var coldRefusalsBefore = world.GradientRefusals;
+        var coldLogFrom = world.Routes.Recorded;
         var coldAgents = world.Agents.LiveCount;
         // <b>The whole tick, and every phase of it.</b> This line timed a Tick and then named three routing
         // numbers, which came to a third of what it printed — so two thirds of the worst event in the game
@@ -687,6 +694,25 @@ internal static class ScaleScenarios
         Console.WriteLine(
             $"    {world.PathQueries - coldQueriesBefore:N0} route queries for {coldAgents:N0} bodies " +
             $"({(world.PathQueries - coldQueriesBefore) / (float)Math.Max(1, coldAgents):F1} each)");
+        // <b>And which queries, because the ratio was as far as §115 could see.</b> Two searches out of twenty
+        // bodies is 60% of this event, and "two" does not say whether they are cohort members the field
+        // refused, villagers whose stored routes died with the revision, or bodies asking again after being
+        // stopped by the budget. Each of those has a different fix and only one of them is about the search.
+        ReportRoutes(world, coldRoutesBefore, coldLogFrom, "    ");
+        // <b>And why the field refused the bodies that had to search.</b> Every OrderSlot query above is a
+        // body BeginFlowTransit could not put on the shared field, and there are three reasons that can
+        // happen. Only the third — standing on ground the field never priced — is the one §96 already built
+        // an answer for, and that answer is wired into the transit-drop path and not into this one.
+        var refusals = world.GradientRefusals;
+        Console.WriteLine(
+            $"    the field refused: {refusals.OffGrid - coldRefusalsBefore.OffGrid} off grid, " +
+            $"{refusals.NoGoal - coldRefusalsBefore.NoGoal} no reachable goal, " +
+            $"{refusals.Unpriced - coldRefusalsBefore.Unpriced} on walkable ground it could not price, " +
+            $"{refusals.NoFooting - coldRefusalsBefore.NoFooting} standing where the body does not fit" +
+            (refusals.NoFooting > coldRefusalsBefore.NoFooting
+                ? $" (overhanging the cell's clearance by up to {refusals.WorstShortfall * 100f:F0} cm " +
+                  $"of a {AgentDefaults.RoutingRadius * 100f:F0} cm body)"
+                : string.Empty));
 
         // Stages summed, accumulators reported apart. Adding the two together is how this line first
         // claimed 4,259 ms of a 2,662 ms tick.
@@ -705,6 +731,57 @@ internal static class ScaleScenarios
             $"agent index {world.Timings.AverageOf(SimulationPhase.AgentIndex):F1} ms");
 
         return 0;
+    }
+
+    /// <summary>
+    /// Who asked routing for what, over one window, and how each request ended.
+    /// </summary>
+    /// <remarks>
+    /// <b>Two shapes, because the events are two sizes.</b> The per-reason table is for a window with
+    /// hundreds of requests in it, where the question is which caller owns the time. The verbatim list is for
+    /// a window with two, where the aggregate is the thing that hid them: §115 could say "2 route queries for
+    /// 20 bodies" and not which two, and the whole remaining cost of the worst event in the game was inside
+    /// that gap. Printed whenever the window is small enough to name each request individually.
+    /// </remarks>
+    private static void ReportRoutes(
+        SimulationWorld world,
+        Simulation.Navigation.RouteAttribution before,
+        long logFrom,
+        string indent,
+        int verbatimLimit = 12)
+    {
+        var rows = world.Routes.Since(before);
+        if (rows.Count == 0)
+        {
+            Console.WriteLine($"{indent}routing: nothing asked for a route in this window");
+            return;
+        }
+
+        var total = rows.Sum(row => row.Queries);
+        Console.WriteLine($"{indent}routing, by who asked ({total:N0} queries)");
+        foreach (var row in rows)
+        {
+            var endings = string.Join(", ", Simulation.Navigation.RouteAttribution.Outcomes
+                .Where(outcome => row.Outcomes[(int)outcome] > 0)
+                .Select(outcome => $"{row.Outcomes[(int)outcome]} {outcome.ToString().ToLowerInvariant()}"));
+            Console.WriteLine(
+                $"{indent}  {row.Reason,-18} {row.Queries,5:N0} queries {row.Milliseconds,9:F1} ms " +
+                $"{row.Expansions,9:N0} cells — {row.Answered} answered, {endings}");
+        }
+
+        var (entries, lost) = world.Routes.LogSince(logFrom);
+        if (entries.Count == 0 || entries.Count > verbatimLimit) return;
+        Console.WriteLine(
+            $"{indent}  each request, in order" +
+            (lost > 0 ? $" ({lost} older ones fell out of the ring)" : string.Empty));
+        foreach (var entry in entries)
+        {
+            Console.WriteLine(
+                $"{indent}    #{entry.Sequence,-6} {entry.Reason,-18} {entry.Outcome,-12} " +
+                $"{(entry.Answered ? "routed  " : "NOTHING ")} " +
+                $"{entry.Expansions,9:N0} cells {entry.Milliseconds,8:F1} ms " +
+                $"over {entry.CellSpan:N0} cells of map");
+        }
     }
 
     public static int RunOrderDistance(float extentMeters, int agentCount, bool sculpted = false)

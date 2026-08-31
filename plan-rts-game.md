@@ -10173,3 +10173,98 @@ moves the hitch rather than removing it.
 Counting it cost one line and saved a section spent budgeting repaths that were never happening.
 
 Gate 3/3 green.
+
+## 116. The click's two searches, attributed: a body twelve centimetres over a clearance line
+
+§115 ended with the click after a placement change at ~1,762 ms, two thirds of it two A* searches, and a
+sentence about what they were: *two bodies fell off the shared field, took their own route, and paid full
+price for a hierarchy that had just gone cold*. That reading was available from a count of queries, and it
+was wrong in every part that decides what to fix.
+
+Every route request now names why it was asked for. `RouteReason` is required at the call site, on the same
+reasoning as `CohortDeparture` — a request nobody knew was being issued is the failure mode — and each one is
+charged its own expansions, its own milliseconds and its own ending. Threading it found **fifteen distinct
+call sites**, which is itself the first result: routing is asked for in fifteen situations and until now they
+all arrived at one counter. It also found a sixteenth that was dead (`AssignPathVia`, unreferenced), deleted
+rather than given a reason it could never report.
+
+```
+  order    1793.6 ms | mesh 331.1 | tiles 157.8 | field 47.8 | 300,000 cells expanded
+    2 route queries for 20 bodies
+    routing, by who asked (2 queries)
+      OrderSlot     2 queries  1254.2 ms  300,000 cells — 1 answered, 2 partial
+      each request, in order
+        #7  OrderSlot  Partial  routed     250,000 cells  1066.6 ms  over 503 cells of map
+        #8  OrderSlot  Partial  NOTHING     50,000 cells   187.6 ms  over 513 cells of map
+    the field refused: 0 off grid, 0 no reachable goal, 0 on walkable ground it could not price,
+                       2 standing where the body does not fit (overhanging the cell's clearance
+                       by up to 12 cm of a 37 cm body)
+```
+
+### It is not the revision bump, and that was the entire hypothesis
+
+`NavigationChanged` — a body holding a stored polyline when the placement change invalidates it — scored
+**zero**. Not one route in the settlement was invalidated by the raster. §114 had read the click as *the mesh
+dies and everything keyed to it dies with it*, and for routes that is not what happens: the bodies under
+orders are on the shared field, which is rebuilt rather than searched, and nobody else was holding a route at
+all. The cascade §114 named is real and it is the climb cache and the tiles. It is not repaths. Two sections
+had a mechanism for this event that the first attribution deleted.
+
+### Neither search reached its goal, and one bought nothing at all
+
+Both requests are `OrderSlot`: `ApplyMove`'s second choice, taken when `BeginFlowTransit` cannot put a body
+on the shared field, which sends it to A* to its formation slot instead. Both were stopped by a budget — #7
+by the per-search 250,000, #8 by the 50,000 left of the pooled 300,000 — so **the 300,000 cells §114 and §115
+both reported is not what the routes needed, it is the ceiling.** The searches ran until something stopped
+them.
+
+And #8's partial route was rejected by the smoothing, so its 187 ms bought a body standing still. The honest
+statement of the click's largest term is therefore not "two expensive searches" but: **1,254 ms, 70% of the
+event, for one truncated route and one refusal.**
+
+### Why the field refused them, which is the actual bug
+
+Not a pocket the corner graph could not reach — that was the next guess and the split says no. Both bodies
+stood on a cell whose **clearance is below their own radius, by up to 12 cm of 37**. A body resting a hand's
+width over a clearance line, beside a wall or a tree, which from the chair is a body standing still on open
+ground.
+
+`RoutingRadius` aliases `Radius` deliberately, so this is not a conservative predicate refusing a body that
+is really fine: the navigation grid genuinely says the cell does not admit it. What makes it a bug is the
+**asymmetry between the two things that are asked**:
+
+- `FindPath` handles this case. A start cell that does not admit the body is resolved outward by
+  `FindRecoveryStart` within 2.25 cells, and the search proceeds from there.
+- `SampleFlowGradient` does not. It reads `CostAt` at the body's own cell, gets infinity, and returns zero.
+
+So the same body at the same position is routable to the A* and unroutable to the field, and the giving-up is
+what buys the expensive path. The field refuses, the order falls back, and a 12 cm overhang costs a second and
+a quarter of the worst event in the game.
+
+### The instrument was wrong once, in this arc's usual way
+
+The first classification tested nullness before the budget and filed #8 — budget-stopped, partial route
+rejected by smoothing — as `Unresolvable`. That label points at goal resolution, and the next session would
+have gone to look there. What a search did and what the body received are two axes and are now recorded as
+two: every row carries `answered`, and *time bought and thrown away* is a column rather than an inference.
+
+### And the figure is contingent, which explains why it keeps moving
+
+At `--orders 2` the same placement change costs **500 ms and issues zero route queries**: no body happens to
+be resting over a clearance line when the order lands, so the fallback never fires. This event has been
+reported at 677 ms (§101), 1,970 (§114), 1,762 (§115) and 1,794 here. That spread is not drift and not
+thermal — it is whether two bodies out of twenty are standing 12 cm over a line. **Any figure for this event
+has to say how many orders preceded it**, and none of the four did.
+
+### What this leaves
+
+The next thing is not a cheaper cell search. It is to make the two questions agree: sample the field from
+ground that admits the body — the resolution `FindPath` already does, or §96's `FindFieldEntry`, which costs
+2 cells and 0.5 ms in the same profile — before falling back to a cross-map A*. The measurement predicts the
+size: 1,254 ms of a 1,794 ms click, about 70%, against §99's mesh amortisation at 18%.
+
+The A* itself keeps exactly one debt out of this, and it is smaller than it looked: 250,000 expansions that
+fail to find a goal 503 cells away is the weak-heuristic finding §95 already recorded, and it is a ceiling on
+a case that should now stop arising rather than the click's problem.
+
+Gate 3/3 green.
