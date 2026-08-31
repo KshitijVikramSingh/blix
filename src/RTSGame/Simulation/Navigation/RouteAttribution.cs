@@ -166,6 +166,49 @@ internal sealed class RouteAttribution
     }
 
     /// <summary>
+    /// This window's routing as lines, ready to print. One formatter, for one reason.
+    /// </summary>
+    /// <remarks>
+    /// <b>Shared between the fixture and the chair on purpose.</b> §119: the stall a player felt was
+    /// click-caused and the fixture that ranked the debt could not produce it, so the two have to be able to
+    /// print the same thing — a live report that formats routing its own way is a second opinion nobody will
+    /// reconcile. Returns nothing at all when nothing asked, because this is printed once a second in the
+    /// live loop and a quiet second should be silent.
+    /// </remarks>
+    public List<string> Describe(RouteAttribution before, long logFrom, int verbatimLimit = 12)
+    {
+        var lines = new List<string>();
+        var rows = Since(before);
+        if (rows.Count == 0) return lines;
+
+        lines.Add($"routing, by who asked ({rows.Sum(row => row.Queries):N0} queries)");
+        foreach (var row in rows)
+        {
+            var endings = string.Join(", ", Outcomes
+                .Where(outcome => row.Outcomes[(int)outcome] > 0)
+                .Select(outcome => $"{row.Outcomes[(int)outcome]} {outcome.ToString().ToLowerInvariant()}"));
+            lines.Add(
+                $"  {row.Reason,-18} {row.Queries,5:N0} queries {row.Milliseconds,9:F1} ms " +
+                $"{row.Expansions,9:N0} cells — {row.Answered} answered, {endings}");
+        }
+
+        var (entries, lost) = LogSince(logFrom);
+        if (entries.Count == 0 || entries.Count > verbatimLimit) return lines;
+        lines.Add("  each request, in order" +
+                  (lost > 0 ? $" ({lost} older ones fell out of the ring)" : string.Empty));
+        foreach (var entry in entries)
+        {
+            lines.Add(
+                $"    #{entry.Sequence,-6} {entry.Reason,-18} {entry.Outcome,-12} " +
+                $"{(entry.Answered ? "routed  " : "NOTHING ")} " +
+                $"{entry.Expansions,9:N0} cells {entry.Milliseconds,8:F1} ms " +
+                $"over {entry.CellSpan:N0} cells of map");
+        }
+
+        return lines;
+    }
+
+    /// <summary>
     /// Requests recorded at or after <paramref name="sequence"/>, oldest first, and how many were lost.
     /// </summary>
     /// <remarks>

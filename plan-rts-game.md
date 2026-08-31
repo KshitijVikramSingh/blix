@@ -10412,3 +10412,82 @@ One more thing worth keeping in view: **the ordinary click is already fine.** 7.
 0.3 ms for one that needs nothing. The event under discussion is the first order after a building completes,
 which is rare and not player-initiated. That is a real argument about priority, not a reason the work is
 wrong — but it belongs next to the 46%.
+
+## 119. The stall was a click after all, and the stage it landed in was not the one that caused it
+
+Run from the chair on the Village, `--timings`, and reported: *it did happen when I clicked.* The log agreed
+and my reading of it had not.
+
+```
+tick 1130  jobs 154.586  paths 154.584  commands 0.065  nav 0.001  TOTAL 154.829
+tick 1153  jobs 101.563  paths 101.561  commands 0.020  nav 0.001
+tick 1176  jobs  86.852  paths  86.850   ... 38, 38, 25, 26, decaying to 0.24 by tick 1440
+```
+
+Sixty frames took **10.34 s** across that window (172 ms a frame), then 2.08 s for the next sixty. Not four
+bad frames — some twelve seconds of degraded play in Debug.
+
+### What I got wrong, and it is §114's mistake in a new costume
+
+I read `commands 0.065 ms` as *no player order was involved* and went looking for a jobs-layer cause. But the
+Commands stage only **applies** a command; when the routing is paid by the jobs layer acting on it over the
+following ticks, the cost lands in the Jobs stage and `commands` stays near zero. **A cheap `commands` figure
+does not mean a cheap click.** §114's lesson was that a report which only covers some of the tick will support
+any theory held about it; this is the same error one level along — I attributed by *which stage holds the
+time* and concluded *what caused it*. Stage is not cause.
+
+The diagnostics say so plainly, and they were in the same log:
+
+```
+f1200   moving  6   jobs/assigned  8   working 8   interrupted 0
+f1260   moving 13   jobs/assigned 13   working 8   interrupted 0
+```
+
+Thirteen bodies start moving and five assignments appear, inside the stalled window.
+
+### Two facts that make the shape of it clear
+
+- **`BeginOrderBudget`/`EndOrderBudget` wrap only the command batch.** Routing the jobs layer does afterwards
+  runs with the budget inactive, so §102's pooled 300,000-expansion ceiling — the thing that bounds a click —
+  **does not apply to it.** Only the per-search 250,000 does.
+- **`MaxRoutePlansPerTick = 2` is checked in exactly one place**, inside `ReconsiderCongestedRoute`. It bounds
+  congestion replans and nothing else.
+
+So nothing bounds job routing in aggregate. The arithmetic fits: 10.34 s over the fourteen A\* searches in
+that window is ~740 ms each, against the 1,058 ms / 250,000-expansion cold cross-map search §116 measured in
+the same config. And the printed phase figures are a twenty-tick EMA, not single ticks, so the worst ticks
+were worse than 154 ms.
+
+### Why the fixture could not have found this
+
+`--pathprofile` issues `QueueMove` and nothing else, so §114–118 ranked the debt on the one event the fixture
+produces. `--jobs` — which does order a cohort and watch it — reproduces none of it either: `jobs ms` stays
+under 0.2 there, because its bodies are on synthetic terrain beside their work, not in a founded village.
+**Three sections ranked a 291 ms event while a multi-second one sat outside the fixture's reach**, and the
+only thing that found it was somebody clicking.
+
+So the instrument moves to where the event is. `RouteAttribution.Describe` is now shared by the fixture and
+the live loop — `--timings` prints `ROUTES` lines once a second, silent when nothing asked — because a live
+report that formats routing its own way is a second opinion nobody reconciles.
+
+### Two things found on the way, both instruments that were lying
+
+- **The launcher published Debug.** `tools/run-rts-game.sh` — the only way anybody plays this — built and ran
+  `-c Debug` and said nothing about it, so every judgement from the chair since the launcher existed was made
+  at roughly twice the shipped cost (§118: the click is 520 ms Debug against 291 Release). It now takes
+  `--release`, keeps Debug as the default so earlier figures stay comparable, and prints which one it ran.
+- **`--jobs` had been reporting a false FAULT since §106.** Its criterion was "nobody left holding an
+  interrupt after being let go", and §106 decided from the chair that **an order holds until overridden** —
+  reach the target, then idle. So sixteen correctly-parked villagers were a fault on every run, and two of its
+  three per-unit moments ("interrupt expired", "first leg finished") measured behaviour that no longer exists
+  and printed `NaN`. A trace that cries wolf is read as noise and then not read at all, which is worse than no
+  trace. The criterion is now unreachable-only; the parked count is reported as the expectation it is, with a
+  note if it differs from the ordered count because that means somebody left the cohort.
+
+### What is next, and it is a measurement rather than a fix
+
+Re-run it from the chair and click the same way. The `ROUTES` line will name the callers of those fourteen
+searches, and the candidates want different answers: `SoloMove`/`OrderSlot` is the order path and §117's
+question again; `Behavior` is the jobs layer walking people to work, which has no cohort and therefore no
+shared field to fall back on, and would be the same "the field exists and this path does not use it" shape one
+layer over. Not asserted — that is what the line is for.

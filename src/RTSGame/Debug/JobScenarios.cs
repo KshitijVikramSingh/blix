@@ -78,43 +78,31 @@ internal static class JobScenarios
 
         var previous = (Local: 0, Long: 0, Posted: 0, Tick: 0);
         var orderTick = -1;
-        var legsAtOrder = 0;
         // Per unit, because the cohort never does anything simultaneously: they are ordered
         // together and they arrive, are released and go back to work one at a time. Averaging a
         // cohort-wide "all of them are free" moment gives a number that never arrives.
         var freeAt = new int[local.Length];
-        var releasedAt = new int[local.Length];
-        var resumedAt = new int[local.Length];
         Array.Fill(freeAt, -1);
-        Array.Fill(releasedAt, -1);
-        Array.Fill(resumedAt, -1);
-        var legsBefore = new int[local.Length];
         for (var tick = 1; tick <= totalTicks; tick++)
         {
             if (tick == interruptAt)
             {
                 world.QueueMove(local, rally);
                 orderTick = tick;
-                legsAtOrder = Legs(world, local);
-                for (var i = 0; i < local.Length; i++)
-                {
-                    legsBefore[i] = world.Agents.Get(local[i]).Jobs.LegsCompleted;
-                }
             }
 
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
 
             if (orderTick > 0)
             {
-                // Three moments per unit, and conflating them is what made the first version of
-                // this trace unreadable. The order is carried out; the interrupt then expires on
-                // its own; work resumes a walk after that.
+                // <b>One moment per unit now, and it used to be three.</b> The other two — the interrupt
+                // expiring on its own, and the first leg finished after it — measured behaviour §106 removed
+                // on purpose, so they read NaN on every run. Arrival is still per unit rather than
+                // cohort-wide, because the cohort never does anything simultaneously: they are ordered
+                // together and they arrive one at a time, and a "they are all there" moment never comes.
                 for (var i = 0; i < local.Length; i++)
                 {
-                    var jobs = world.Agents.Get(local[i]);
-                    if (freeAt[i] < 0 && !jobs.HasDestination) freeAt[i] = tick;
-                    if (freeAt[i] > 0 && releasedAt[i] < 0 && !jobs.Jobs.IsInterrupted) releasedAt[i] = tick;
-                    if (resumedAt[i] < 0 && jobs.Jobs.LegsCompleted > legsBefore[i]) resumedAt[i] = tick;
+                    if (freeAt[i] < 0 && !world.Agents.Get(local[i]).HasDestination) freeAt[i] = tick;
                 }
             }
 
@@ -136,26 +124,40 @@ internal static class JobScenarios
 
         var final = Census(world);
         Console.WriteLine("  legs per minute above, by lane. Sixteen units on each.");
+        // <b>The grace and the resumed walk are gone, because §106 deleted the thing they measured.</b> This
+        // trace was written when an order's interrupt counted itself down and the body walked back to work on
+        // its own; §106 decided from the chair that an order holds until overridden — reach the target, then
+        // idle. So "interrupt expired N s later" was reporting a NaN and "first leg finished" another, and
+        // the FAULT line below called sixteen correctly-parked villagers a fault on every run since.
+        //
+        // A trace that cries wolf gets read as noise and then not read at all, which is worse than no trace:
+        // this one was reporting a fault for months and the only thing that noticed was a session that ran it
+        // for an unrelated reason.
         Console.WriteLine(orderTick > 0
             ? $"  order at 180 s, {local.Length} units: standing free after " +
-              $"{Mean(freeAt, orderTick):F1} s (a distance), interrupt expired " +
-              $"{Mean(releasedAt, freeAt):F1} s later (the grace), first leg finished " +
-              $"{Mean(resumedAt, freeAt):F1} s after that (a walk)"
-            : $"  no order issued: {minutes} minutes leaves no room to watch one be recovered from");
+              $"{Mean(freeAt, orderTick):F1} s (a distance), and parked there — §106, an order holds"
+            : $"  no order issued: {minutes} minutes leaves no room to watch one be carried out");
         Console.WriteLine(
-            $"  ending: {final.Working} working, {final.Interrupted} interrupted, " +
+            $"  ending: {final.Working} working, {final.Interrupted} parked under orders, " +
             $"{final.Unreachable} unable to reach their place");
 
         ReportSave(world);
 
-        // The two things this trace exists to catch: nobody permanently unable to get to work,
-        // and nobody left holding an interrupt after being let go. Everything else is a number.
-        var faults = final.Unreachable + final.Interrupted;
+        // <b>One fault, and being parked is not it.</b> A body that cannot reach its place is broken; a body
+        // holding an interrupt after an order is doing what §106 asks. The ordered cohort is expected to be
+        // exactly that count, so a mismatch there is worth saying out loud without being a failure — it means
+        // somebody left the cohort, and CohortDeparture says why.
+        var faults = final.Unreachable;
         if (faults > 0)
         {
+            Console.WriteLine($"  FAULT: {final.Unreachable} cannot reach their place");
+        }
+
+        if (orderTick > 0 && final.Interrupted != local.Length)
+        {
             Console.WriteLine(
-                $"  FAULT: {final.Unreachable} cannot reach their place, " +
-                $"{final.Interrupted} still interrupted with nobody ordering them about");
+                $"  note: {final.Interrupted} parked against {local.Length} ordered — the difference left the " +
+                "cohort, and cohortDepartures says by which reason");
         }
 
         return faults > 0 ? 1 : 0;

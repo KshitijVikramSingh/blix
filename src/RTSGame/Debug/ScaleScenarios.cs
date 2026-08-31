@@ -740,12 +740,15 @@ internal static class ScaleScenarios
     /// Who asked routing for what, over one window, and how each request ended.
     /// </summary>
     /// <remarks>
-    /// <b>Two shapes, because the events are two sizes.</b> The per-reason table is for a window with
-    /// hundreds of requests in it, where the question is which caller owns the time. The verbatim list is for
-    /// a window with two, where the aggregate is the thing that hid them: §115 could say "2 route queries for
+    /// <b>Two shapes, because the events are two sizes</b> — a window with hundreds of requests wants to know
+    /// which caller owns the time, and a window with two wants them named. §115 could say "2 route queries for
     /// 20 bodies" and not which two, and the whole remaining cost of the worst event in the game was inside
-    /// that gap. Printed whenever the window is small enough to name each request individually.
-    /// </remarks>
+    /// that gap.
+    /// <para>
+    /// The formatting itself lives on <see cref="Simulation.Navigation.RouteAttribution"/> so that this and the
+    /// live overlay cannot drift into two opinions — see §119, where the fixture and the chair disagreed about
+    /// what the expensive event even was.
+    /// </para></remarks>
     private static void ReportRoutes(
         SimulationWorld world,
         Simulation.Navigation.RouteAttribution before,
@@ -753,38 +756,14 @@ internal static class ScaleScenarios
         string indent,
         int verbatimLimit = 12)
     {
-        var rows = world.Routes.Since(before);
-        if (rows.Count == 0)
+        var lines = world.Routes.Describe(before, logFrom, verbatimLimit);
+        if (lines.Count == 0)
         {
             Console.WriteLine($"{indent}routing: nothing asked for a route in this window");
             return;
         }
 
-        var total = rows.Sum(row => row.Queries);
-        Console.WriteLine($"{indent}routing, by who asked ({total:N0} queries)");
-        foreach (var row in rows)
-        {
-            var endings = string.Join(", ", Simulation.Navigation.RouteAttribution.Outcomes
-                .Where(outcome => row.Outcomes[(int)outcome] > 0)
-                .Select(outcome => $"{row.Outcomes[(int)outcome]} {outcome.ToString().ToLowerInvariant()}"));
-            Console.WriteLine(
-                $"{indent}  {row.Reason,-18} {row.Queries,5:N0} queries {row.Milliseconds,9:F1} ms " +
-                $"{row.Expansions,9:N0} cells — {row.Answered} answered, {endings}");
-        }
-
-        var (entries, lost) = world.Routes.LogSince(logFrom);
-        if (entries.Count == 0 || entries.Count > verbatimLimit) return;
-        Console.WriteLine(
-            $"{indent}  each request, in order" +
-            (lost > 0 ? $" ({lost} older ones fell out of the ring)" : string.Empty));
-        foreach (var entry in entries)
-        {
-            Console.WriteLine(
-                $"{indent}    #{entry.Sequence,-6} {entry.Reason,-18} {entry.Outcome,-12} " +
-                $"{(entry.Answered ? "routed  " : "NOTHING ")} " +
-                $"{entry.Expansions,9:N0} cells {entry.Milliseconds,8:F1} ms " +
-                $"over {entry.CellSpan:N0} cells of map");
-        }
+        foreach (var line in lines) Console.WriteLine($"{indent}{line}");
     }
 
     public static int RunOrderDistance(float extentMeters, int agentCount, bool sculpted = false)

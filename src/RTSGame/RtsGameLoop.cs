@@ -13,6 +13,7 @@ using RTSGame.Control;
 using RTSGame.Debug;
 using RTSGame.Rendering;
 using RTSGame.Simulation;
+using RTSGame.Simulation.Navigation;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Collision;
 using RTSGame.Simulation.Economy;
@@ -1294,6 +1295,11 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private int outcropsDrawn;
     private int rolls;
     private double nextTimingReport;
+
+    /// <summary>Routing as it stood at the last report, so each second is a window rather than a total.</summary>
+    private RouteAttribution routesAtLastReport = new();
+
+    private long routeLogAtLastReport;
 
     private sealed record TerrainSurfaceLayer(
         Mesh Mesh,
@@ -3861,6 +3867,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (timingDebug && time.Total >= nextTimingReport)
         {
             Console.WriteLine($"  {simulation.Timings.Format(simulation.Agents.Count, simulation.TickNumber)}");
+            // <b>Who asked for routing this second, because §119's stall was invisible without it.</b> A
+            // player clicked, the settlement stalled for ten seconds, and the timings line could say only
+            // that the time was in the Jobs stage — which is where the cost lands, not what caused it. The
+            // phase columns above are stages; this is callers, and the two answer different questions.
+            //
+            // Silent when nothing asked, which is nearly every second: this prints beside a line that is
+            // already dense, and a "routing: nothing" every second would train the eye to skip both.
+            foreach (var line in simulation.Routes.Describe(routesAtLastReport, routeLogAtLastReport))
+            {
+                Console.WriteLine($"  ROUTES {line}");
+            }
+            routesAtLastReport = simulation.Routes.Snapshot();
+            routeLogAtLastReport = simulation.Routes.Recorded;
             Console.WriteLine($"  DRESSING {GeometryLine()}");
             nextTimingReport = time.Total + 1.0;
         }
