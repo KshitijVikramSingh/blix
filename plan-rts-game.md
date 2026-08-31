@@ -10338,3 +10338,77 @@ raster's ~70 ms sits beside it, of which ~25 is a whole-map apply that could be 
 (§95) keeps no debt here at all: it is a ceiling on a case the order path no longer creates.
 
 Gate 3/3 green, including the two pen-distribution tests that guard the crowd gate.
+
+## 118. The config was worth more than anything left in the click, and the split moved under it
+
+Every figure in §114–117 is Debug, which §83 already warned about — *judge feel in Release and label every
+figure with its config* — and the click is the one event where that warning had not been applied. Measured
+ABBA-interleaved, three samples each, on the same fixture:
+
+```
+                 Debug        Release
+the click       ~520 ms       ~291 ms      1.8x
+  mesh (1)       ~322          ~134        2.4x
+  tiles (11)     ~143           ~78        1.8x
+  field (2)       ~48           ~76        0.6x  <-- the wrong way
+  A*               3.3           0.6
+the raster        ~70 ms        ~14 ms      5.1x
+```
+
+Two things follow immediately.
+
+**The raster stops being a debt.** §101's remaining item there was a ~25 ms whole-map apply that could be
+windowed; in Release the whole raster is 13.8 ms and the apply is 8.6. There is nothing to win. That item is
+struck from the list rather than carried, and the lesson is the general one: an optimisation ranked in Debug
+can be ranked against a cost that does not exist.
+
+**One term went the wrong way, and that is now the open instrument question.** The field solve is consistently
+1.6× *slower* in Release — 75–77 ms against 45–51 — at identical work: two fields built, 27,624 climb calls,
+byte-identical counts. The terms are additive in both configs (they close to within 0.3 ms of the total), so
+this is not a boundary absorbing tile time. A term that gets slower under optimisation is either a real
+deoptimisation or a mis-attributed region, those want opposite work, and **the honest position is that I do not
+know which.** One measurement — per-phase timestamps inside the field construction, both configs — before
+anybody optimises the field.
+
+### Where the click can actually go
+
+Reference points from the same Release run, which is what makes the projection more than arithmetic:
+
+```
+a normal cold order (mesh already warm)   ~140 ms   tiles 48-65 (7-9 fills) + field 74-88
+a second order to nearby ground             7.7 ms  1 tile fill
+an order needing nothing new                0.3 ms
+```
+
+- **Mesh amortisation (§99) takes the click to ~157 ms and no further.** That is not a coincidence, it is the
+  definition: an old mesh that keeps serving turns the click into a normal cold order, and a normal cold order
+  is ~140 ms. **The floor of that fix is the cost of an ordinary order**, which is itself eight frames.
+- **Tiles: 78 ms over 11 fills, ~7 ms each.** The interesting half is that a normal order needs 7–9 and a
+  follow-up needs 1 — so most of the click's eleven are re-derivations of what was already known, and the
+  prize is reuse across a placement change rather than a faster fill. That is §115's move one layer up and it
+  is a much harder claim: tiles are keyed to mesh regions, so a rebuilt mesh invalidates them structurally,
+  and whether their *contents* are still valid is a real question about a changed decomposition rather than a
+  formality. Faster fills are worth maybe 2× on their own (~240 ns a neighbour visit in Release, after §98
+  already took 45% out of the corner tests).
+- **Field: 76 ms for two builds** — and see above; this term is not ready to be optimised, and "why two" is
+  the first thing to ask of it.
+
+### The target, stated as the thing that actually matters
+
+At 60 fps the budget is 16.7 ms a frame and §83 measured the gameplay frame at 16–45 ms, so the headroom for
+extra work in any one tick is about **5 ms**. That reframes the whole remaining exercise:
+
+> **No amount of reduction gets this event to smooth.** A perfect 3× on every term left in the click still
+> leaves ~97 ms, which is six dropped frames. Smoothness is only reachable by *spreading* the work across
+> ticks — 291 ms at a 5 ms ceiling is about sixty ticks, one second — and reduction's only job is to lower how
+> much has to be spread.
+
+So the target is not a click figure at all, it is a per-tick ceiling: **no tick more than ~5 ms above its
+neighbours**, with the placement rebuild spread behind an old mesh that keeps serving until the new one lands.
+Which is exactly what §99 proposed, and the reason to do it is not its 46% — it is that it is the only shape of
+fix that can reach the goal.
+
+One more thing worth keeping in view: **the ordinary click is already fine.** 7.7 ms for a second order,
+0.3 ms for one that needs nothing. The event under discussion is the first order after a building completes,
+which is rare and not player-initiated. That is a real argument about priority, not a reason the work is
+wrong — but it belongs next to the 46%.

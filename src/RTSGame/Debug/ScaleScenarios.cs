@@ -683,7 +683,8 @@ internal static class ScaleScenarios
         Console.WriteLine(
             $"  order  {coldMs,8:F1} ms | mesh {cold.MeshMs - coldBefore.MeshMs,7:F1} ms " +
             $"({cold.MeshBuilds - coldBefore.MeshBuilds} builds) | " +
-            $"tiles {cold.TileMs - coldBefore.TileMs,7:F1} ms | " +
+            $"tiles {cold.TileMs - coldBefore.TileMs,7:F1} ms " +
+            $"({cold.TileFills - coldBefore.TileFills} fills) | " +
             $"field {cold.FieldMs - coldBefore.FieldMs,7:F1} ms | " +
             $"{coldSearch.Expansions - coldSearchBefore.Expansions:N0} cells expanded | " +
             $"climb {coldClimb.Calls - coldClimbBefore.Calls:N0} calls, " +
