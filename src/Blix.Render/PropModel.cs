@@ -66,14 +66,29 @@ public sealed class PropModel : IDisposable
     private readonly CasterPass[] casterPasses;
 
     private PropModel(
-        string name, Part[] parts, CasterPass[] casterPasses, Bounds3 bounds, int triangles)
+        string name,
+        Part[] parts,
+        CasterPass[] casterPasses,
+        Bounds3 bounds,
+        int triangles,
+        VulkanGraphicsDevice sceneDevice,
+        ShaderProgramHandle sceneShader,
+        PipelineHandle scenePipeline)
     {
         Name = name;
         this.parts = parts;
         this.casterPasses = casterPasses;
         Bounds = bounds;
         TriangleCount = triangles;
+        // Kept so a part can grow another buffer's worth of copies mid-frame. See StageScene.
+        this.sceneDevice = sceneDevice;
+        this.sceneShader = sceneShader;
+        this.scenePipeline = scenePipeline;
     }
+
+    private readonly VulkanGraphicsDevice sceneDevice;
+    private readonly ShaderProgramHandle sceneShader;
+    private readonly PipelineHandle scenePipeline;
 
     public string Name { get; }
 
@@ -222,6 +237,7 @@ public sealed class PropModel : IDisposable
                 Tint = tint,
                 SceneBuffer = sceneBuffer,
                 Scene = new InstancedBatch(uploaded, scenePipeline, sceneBuffer),
+                SceneMesh = uploaded,
             };
             built.Add(part);
             index++;
@@ -299,7 +315,10 @@ public sealed class PropModel : IDisposable
             built.ToArray(),
             passes.ToArray(),
             meshes.CombinedBounds(),
-            triangles);
+            triangles,
+            device,
+            sceneShader,
+            scenePipeline);
     }
 
     // Drop every copy staged last frame. Call once, before the frame's Adds.
@@ -376,13 +395,45 @@ public sealed class PropModel : IDisposable
     // brackets a single pass.
     public void Stage(ReadOnlySpan<byte> scenePush, ReadOnlySpan<byte> shadowPush)
     {
-        foreach (var part in parts)
+        foreach (var part in parts) StageScene(part, scenePush);
+        if (casterPasses.Length > 0) casterPasses[0].Stage(shadowPush);
+    }
+
+    /// <summary>
+    /// Hands one part's copies to its batches, in as many buffers' worth as it takes.
+    /// </summary>
+    /// <remarks>
+    /// The scene half of the same problem the caster half hit: a buffer holds
+    /// <see cref="InstanceBuffer.MaxInstances"/> copies, and a model that stands in for four levels of detail
+    /// can be asked to draw more than that in one frame. The first chunk uses the part's original batch so the
+    /// ordinary case is unchanged; the rest are added on demand and kept.
+    /// </remarks>
+    private void StageScene(Part part, ReadOnlySpan<byte> scenePush)
+    {
+        var instances = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances);
+        var capacity = InstanceBuffer.MaxInstances;
+        var first = Math.Min(capacity, instances.Length);
+        part.Scene!.Begin(scenePush);
+        part.Scene.SetInstances(instances[..first]);
+
+        var remaining = instances.Length - first;
+        var extras = remaining <= 0 ? 0 : (remaining + capacity - 1) / capacity;
+        while (part.ExtraBuffers.Count < extras)
         {
-            part.Scene!.Begin(scenePush);
-            part.Scene.SetInstances(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances));
+            var buffer = new InstanceBuffer(
+                sceneDevice, sceneShader, $"{Name}.scene.extra{part.ExtraBuffers.Count}");
+            part.ExtraBuffers.Add(buffer);
+            part.ExtraBatches.Add(new InstancedBatch(part.SceneMesh, scenePipeline, buffer));
         }
 
-        if (casterPasses.Length > 0) casterPasses[0].Stage(shadowPush);
+        part.ExtraInUse = extras;
+        for (var c = 0; c < extras; c++)
+        {
+            var offset = first + c * capacity;
+            var length = Math.Min(capacity, instances.Length - offset);
+            part.ExtraBatches[c].Begin(scenePush);
+            part.ExtraBatches[c].SetInstances(instances.Slice(offset, length));
+        }
     }
 
     /// <summary>Stages distinct caster storage for every shadow pass.</summary>
@@ -396,18 +447,17 @@ public sealed class PropModel : IDisposable
                 nameof(shadowPushes));
         }
 
-        foreach (var part in parts)
-        {
-            part.Scene!.Begin(scenePush);
-            part.Scene.SetInstances(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(part.Instances));
-        }
-
+        foreach (var part in parts) StageScene(part, scenePush);
         for (var c = 0; c < casterPasses.Length; c++) casterPasses[c].Stage(shadowPushes[c]);
     }
 
     public void DrawScene(RenderPassBuilder pass, IReadOnlyList<ShaderTextureBinding>? textures = null)
     {
-        foreach (var part in parts) part.Scene!.End(pass, textures);
+        foreach (var part in parts)
+        {
+            part.Scene!.End(pass, textures);
+            for (var c = 0; c < part.ExtraInUse; c++) part.ExtraBatches[c].End(pass, textures);
+        }
     }
 
     public void DrawShadow(RenderPassBuilder pass)
@@ -444,10 +494,14 @@ public sealed class PropModel : IDisposable
 
     public void Dispose()
     {
-        foreach (var part in parts) part.SceneBuffer?.Dispose();
+        foreach (var part in parts)
+        {
+            part.SceneBuffer?.Dispose();
+            foreach (var buffer in part.ExtraBuffers) buffer.Dispose();
+        }
         foreach (var pass in casterPasses)
         {
-            foreach (var buffer in pass.Buffers) buffer.Dispose();
+            foreach (var buffer in pass.AllBuffers) buffer.Dispose();
         }
     }
 
@@ -493,7 +547,18 @@ public sealed class PropModel : IDisposable
         public Vector4 Tint;
         public InstanceBuffer? SceneBuffer;
         public InstancedBatch? Scene;
+
+        /// <summary>The uploaded geometry, kept so extra chunks can be built against the same mesh.</summary>
+        public Mesh SceneMesh = null!;
+
         public readonly List<InstanceData> Instances = new();
+
+        /// <summary>Extra buffers and batches for the copies past the first buffer's worth. See CasterPass.</summary>
+        public readonly List<InstanceBuffer> ExtraBuffers = new();
+
+        public readonly List<InstancedBatch> ExtraBatches = new();
+
+        public int ExtraInUse;
 
         public void Clear() => Instances.Clear();
     }
@@ -507,47 +572,115 @@ public sealed class PropModel : IDisposable
     /// </remarks>
     private sealed class CasterPass
     {
-        public InstanceBuffer[] Buffers = Array.Empty<InstanceBuffer>();
-        public InstancedBatch[] Batches = Array.Empty<InstancedBatch>();
+        /// <summary>
+        /// One mesh's buffers and batches, one pair per chunk of instances it has needed so far.
+        /// </summary>
+        /// <remarks>
+        /// <b>Chunked because a caller can legitimately have more copies than a buffer holds.</b> An instance
+        /// buffer tops out at InstanceBuffer.MaxInstances, which was never a problem while a species had four
+        /// levels of detail and the copies spread across forty models — and became one the moment RTSGame's
+        /// cheap-tree swap collapsed those forty into six and the zoom was unpinned far enough to show 24,000
+        /// trees at once. It threw: "given 16714 instances; max is 16384", at a 450 m standoff.
+        /// <para>
+        /// Raising the constant was the wrong answer — the buffer's storage block is sized from it, so every
+        /// one of the dozens of buffers in a frame would grow, hundreds of megabytes to serve one model. A
+        /// primitive asked to draw N copies of a mesh should draw them in as many submissions as its buffers
+        /// require, and nothing above it should have to know the number.
+        /// </para>
+        /// <para>
+        /// Buffers are added on demand and kept: a frame that needed six chunks once will very likely need
+        /// them again, and allocating on the way up beats allocating every frame.
+        /// </para>
+        /// </remarks>
+        private sealed class MeshChunks
+        {
+            public Mesh Geometry = null!;
+            public readonly List<InstanceBuffer> Buffers = new();
+            public readonly List<InstancedBatch> Batches = new();
+            public int InUse;
+        }
+
+        private MeshChunks[] meshes = Array.Empty<MeshChunks>();
+        private VulkanGraphicsDevice device = null!;
+        private ShaderProgramHandle shader;
+        private PipelineHandle pipeline;
+        private string name = string.Empty;
 
         /// <summary>Triangles one copy costs THIS pass.</summary>
         public int TriangleCount;
 
         public readonly List<InstanceData> Instances = new();
 
-        public void Create(
-            VulkanGraphicsDevice device,
-            IReadOnlyList<Mesh> meshes,
-            ShaderProgramHandle shader,
-            PipelineHandle pipeline,
-            string name)
+        public IEnumerable<InstanceBuffer> AllBuffers
         {
-            Buffers = new InstanceBuffer[meshes.Count];
-            Batches = new InstancedBatch[meshes.Count];
-            for (var i = 0; i < meshes.Count; i++)
+            get
             {
-                // <b>A buffer per mesh, not per pass.</b> InstanceBuffer writes one current-frame slot, so
-                // two batches sharing one buffer would both draw whatever was uploaded last — which is the
-                // same failure the per-cascade split was made to avoid, one level down.
-                var buffer = new InstanceBuffer(device, shader, $"{name}.{i}");
-                Buffers[i] = buffer;
-                Batches[i] = new InstancedBatch(meshes[i], pipeline, buffer);
+                foreach (var mesh in meshes)
+                foreach (var buffer in mesh.Buffers)
+                {
+                    yield return buffer;
+                }
             }
+        }
+
+        public void Create(
+            VulkanGraphicsDevice graphicsDevice,
+            IReadOnlyList<Mesh> geometry,
+            ShaderProgramHandle casterShader,
+            PipelineHandle casterPipeline,
+            string label)
+        {
+            device = graphicsDevice;
+            shader = casterShader;
+            pipeline = casterPipeline;
+            name = label;
+            meshes = new MeshChunks[geometry.Count];
+            for (var i = 0; i < geometry.Count; i++)
+            {
+                meshes[i] = new MeshChunks { Geometry = geometry[i] };
+                // The first chunk eagerly, so the common case allocates exactly what it used to.
+                AddChunk(meshes[i], i);
+            }
+        }
+
+        private void AddChunk(MeshChunks mesh, int meshIndex)
+        {
+            // <b>A buffer per chunk, not per mesh.</b> InstanceBuffer writes one current-frame slot, so two
+            // batches sharing one buffer would both draw whatever was uploaded last — the same failure the
+            // per-cascade split was made to avoid, one level further down.
+            var buffer = new InstanceBuffer(device, shader, $"{name}.{meshIndex}.{mesh.Buffers.Count}");
+            mesh.Buffers.Add(buffer);
+            mesh.Batches.Add(new InstancedBatch(mesh.Geometry, pipeline, buffer));
         }
 
         public void Stage(ReadOnlySpan<byte> push)
         {
             var instances = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(Instances);
-            foreach (var batch in Batches)
+            var capacity = InstanceBuffer.MaxInstances;
+            // At least one chunk even when empty, so Draw ends exactly what Stage began and a pass with no
+            // instances still records its (empty) draw as it always did.
+            var chunks = Math.Max(1, (instances.Length + capacity - 1) / capacity);
+            for (var m = 0; m < meshes.Length; m++)
             {
-                batch.Begin(push);
-                batch.SetInstances(instances);
+                var mesh = meshes[m];
+                while (mesh.Buffers.Count < chunks) AddChunk(mesh, m);
+                mesh.InUse = chunks;
+                for (var c = 0; c < chunks; c++)
+                {
+                    var offset = c * capacity;
+                    var length = Math.Min(capacity, Math.Max(0, instances.Length - offset));
+                    mesh.Batches[c].Begin(push);
+                    mesh.Batches[c].SetInstances(instances.Slice(offset, length));
+                }
             }
         }
 
         public void Draw(RenderPassBuilder pass)
         {
-            foreach (var batch in Batches) batch.End(pass);
+            foreach (var mesh in meshes)
+            {
+                for (var c = 0; c < mesh.InUse; c++) mesh.Batches[c].End(pass);
+            }
         }
     }
 }

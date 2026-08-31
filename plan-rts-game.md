@@ -9337,3 +9337,51 @@ The halfway order still moves twenty bodies fifty-one metres and closes two (§1
 the order resolves as asked, everyone gets the field, everyone walks, and the cohort does not approach. That is
 a steering or a formation question rather than a routing one, and it is the first item of the groups arc rather
 than the last of this one.
+
+## 104. The crash two of my own changes made between them
+
+Reported by the run aborting: exit 134, `InstancedBatch.SetInstances given 16714 instances; max is 16384`, in
+`PropModel.StageCascades`, at a 450 m standoff with cheap trees and fog off — 28,069 trees on screen.
+
+Two changes from this session, each sound alone:
+
+- **§91's cheap-tree swap** collapsed forty models (ten species at four levels of detail) into six, so every
+  copy of a species now funnels into one instance list instead of four.
+- **§86's zoom unpinning** made 450 m reachable, where a wooded village offers thirty thousand trees at once.
+
+Neither is wrong and the combination overflows a buffer. Worth recording as the shape rather than the
+incident: a change that concentrates work and a change that increases it are not independent, and the
+arithmetic that makes each fine separately is not the arithmetic that matters.
+
+### Why not raise the limit
+
+`InstanceBuffer.MaxInstances` sizes the storage block — `16384 x 80` bytes — and a frame holds dozens of
+buffers, several per model per cascade. Doubling the constant to serve one model would cost hundreds of
+megabytes across all of them. The limit is not the problem; a primitive that cannot draw what it was handed is.
+
+So `PropModel` chunks. Each mesh keeps a list of buffer-and-batch pairs, one per buffer's worth of copies,
+added on demand and kept — a frame that needed six chunks once will need them again, and growing on the way up
+beats allocating every frame. `Stage` slices the instance list across the chunks it needs and `Draw` ends
+exactly the chunks `Stage` began. A buffer per chunk rather than per mesh, for the same reason the per-cascade
+split needed a buffer per cascade: an instance buffer writes one current-frame slot, so two batches sharing one
+would both draw whatever was uploaded last.
+
+Both halves are chunked, scene and caster. The crash came from the caster path, and the scene path concentrates
+identically — 31,172 instances staged in the reproduction — so fixing one and waiting for the other to abort
+would have been a choice.
+
+```
+                          before          after
+450 m, cheap trees, fog off   abort 134    22.2 ms, 30,298 trees, 31,172 instances
+450 m, cheap trees, fog on    (untested)   16.7 ms, 60 fps
+```
+
+Gate 3/3 green, 389/389 graphics tests. Reproduction, for whenever this needs checking again:
+
+```
+RTSGame --village --cheap-trees --shadow-proxy --nofog --perf-run --frames 250 \
+        --zoom 450 --zoom-limit 450 --perf-camera still --perf-hour 12
+```
+
+That run stages more copies than the one that aborted, which is the property worth keeping: the case is now
+covered by something that runs in twenty seconds without a window.
