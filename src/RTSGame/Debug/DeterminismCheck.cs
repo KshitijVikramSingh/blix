@@ -111,6 +111,7 @@ internal static class DeterminismCheck
             "simulation does, so it cannot carry a difference into a decision — and it is derived from the " +
             "target and the navigation mesh, both of which are fingerprinted.",
         ["SimulationWorld.LastOrderFoundNothing"] = "as LastOrderWasBestEffort: a report, not an input.",
+        ["SimulationWorld.LastOrderAnchorUnplaced"] = "as LastOrderWasBestEffort: a report, not an input.",
         ["SimulationWorld.LastOrderShortfall"] =
             "metres between the target asked for and the one used, for the same report. Nothing reads it back.",
         ["SimulationWorld.placementHits"] = "query result buffer, refilled before each read.",

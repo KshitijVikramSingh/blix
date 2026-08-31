@@ -253,7 +253,8 @@ public static class Program
             var probeRelief = Value(args, "--relief-amplitude") is { } probeAmplitude
                 ? float.Parse(probeAmplitude)
                 : 32f;
-            Environment.Exit(ScaleScenarios.RunOrderProbe(probeExtent, probeRelief));
+            var probeSeconds = Value(args, "--seconds") is { } span ? float.Parse(span) : 40f;
+            Environment.Exit(ScaleScenarios.RunOrderProbe(probeExtent, probeRelief, probeSeconds));
         }
 
         if (args.Contains("--pathprofile"))

@@ -231,7 +231,7 @@ internal static class ScaleScenarios
     /// woodland the router finds awkward, and that correlation is the whole of the connection.
     /// </para>
     /// </remarks>
-    public static int RunOrderProbe(float extentMeters, float reliefAmplitudeMetres)
+    public static int RunOrderProbe(float extentMeters, float reliefAmplitudeMetres, float seconds = 40f)
     {
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         var world = SettlementScenarios.BuildVillage(
@@ -263,13 +263,14 @@ internal static class ScaleScenarios
         // Forty simulated seconds an order, not three. The first version ran ninety ticks and reported that
         // the bodies had moved three metres, which at a villager's pace is exactly right for three seconds and
         // says nothing at all about whether they were walking or wedged.
-        Order(world, movers, far, "far, across the map", 1200);
-        Order(world, movers, midway, "halfway back", 1200);
-        Order(world, movers, far, "far again", 1200);
+        var horizon = Math.Max(60, (int)(seconds * 30f));
+        Order(world, movers, far, "far, across the map", horizon);
+        Order(world, movers, midway, "halfway back", horizon);
+        Order(world, movers, far, "far again", horizon);
 
         foreach (var (label, target) in awkward)
         {
-            Order(world, movers, target, label, 600);
+            Order(world, movers, target, label, Math.Max(60, horizon / 2));
         }
 
         return 0;
@@ -355,6 +356,7 @@ internal static class ScaleScenarios
         var routingBefore = world.RoutingCost;
         var searchBefore = world.PathSearch;
         var dropsBefore = world.FlowTransitDrops;
+        var deniedBefore = world.SearchesDeniedByOrderBudget;
 
         var orderStart = Stopwatch.GetTimestamp();
         world.QueueMove(movers, target);
@@ -364,7 +366,7 @@ internal static class ScaleScenarios
         var worstTick = 0.0;
         var worstTickAt = 0;
         var runStart = Stopwatch.GetTimestamp();
-        var trace = new List<(int Tick, float Remaining, int Moving, float WorstStuck)>();
+        var trace = new List<(int Tick, float Remaining, int Moving, float WorstStuck, float? Cost)>();
         for (var tick = 0; tick < ticks; tick++)
         {
             var tickStart = Stopwatch.GetTimestamp();
@@ -388,7 +390,17 @@ internal static class ScaleScenarios
                 worstStuck = MathF.Max(worstStuck, body.StuckSeconds);
             }
 
-            trace.Add((tick + 1, Vector2.Distance(Centroid(world, movers), target), moving, worstStuck));
+            // <b>Route cost beside straight-line distance.</b> A cohort walking round a wood closes no
+            // straight-line distance while the detour lasts and looks stalled; cost-to-goal falls the whole
+            // time. Reporting only the first is how §102 recorded "moves fifty-one metres, closes two".
+            var anchor = world.Agents.Get(movers[0]);
+            var cost = world.CostToGoal(anchor.Position, target, anchor.NavigationRadius);
+            trace.Add((
+                tick + 1,
+                Vector2.Distance(Centroid(world, movers), target),
+                moving,
+                worstStuck,
+                cost));
         }
 
         var runMs = Stopwatch.GetElapsedTime(runStart).TotalMilliseconds;
@@ -436,15 +448,57 @@ internal static class ScaleScenarios
             $"    search: {search.Expansions - searchBefore.Expansions:N0} cells expanded, " +
             $"worst single {search.Worst:N0} | transit drops " +
             $"{drops.Rejected - dropsBefore.Rejected} rejected, " +
-            $"{drops.NoGradient - dropsBefore.NoGradient} no gradient");
+            $"{drops.NoGradient - dropsBefore.NoGradient} no gradient | " +
+            $"{world.SearchesDeniedByOrderBudget - deniedBefore} searches DENIED by the order budget");
+        // <b>Per body, because an aggregate cannot see a straggler.</b> Reported from the chair: "individuals
+        // path away correctly while some of the group just stalls midway never catching the lead" — and a
+        // centroid with a mean speed says nothing about that. What matters is the spread: how many are at the
+        // target, how many stopped somewhere else, and whether the ones that stopped still believe they have
+        // somewhere to be.
+        var arrived = 0;
+        var stoppedShort = 0;
+        var stillGoing = 0;
+        var worstShortfall = 0f;
+        var gaveUp = 0;
+        var wedged = 0;
+        var orphaned = 0;
+        var working = 0;
+        foreach (var id in movers)
+        {
+            ref readonly var body = ref world.Agents.Get(id);
+            var away = Vector2.Distance(body.Position, target);
+            if (away <= 6f) { arrived++; continue; }
+            if (body.HasDestination && body.Velocity.LengthSquared() > 0.04f) { stillGoing++; continue; }
+            stoppedShort++;
+            worstShortfall = MathF.Max(worstShortfall, away);
+            // <b>Two different failures wear one symptom.</b> A body with no destination has DECIDED it is
+            // finished — that is behaviour, and it is a design question. A body that still holds a destination
+            // and is not moving is wedged — that is physics, and it is a bug. Counting them together would
+            // send the fix to the wrong layer.
+            if (!body.HasDestination) gaveUp++;
+            else wedged++;
+            if (body.MoveGroupId == 0) orphaned++;
+            // <b>And whether it went back to work, which is not a failure at all.</b> A villager holds a
+            // standing assignment; an order interrupts it, and two seconds after the body is standing free the
+            // job reclaims it and walks it to its workplace. From outside that is indistinguishable from
+            // abandoning the order, and it is the documented behaviour of the jobs layer rather than a bug.
+            if (body.Jobs.Assignment.Kind != Simulation.Jobs.AssignmentKind.None) working++;
+        }
+
+        Console.WriteLine(
+            $"    bodies: {arrived} within 6 m of the target, {stillGoing} still travelling, " +
+            $"{stoppedShort} STOPPED SHORT (worst {worstShortfall:F0} m out) — " +
+            $"of those {gaveUp} gave up the destination, {wedged} still hold one and are not moving, " +
+            $"{orphaned} no longer in the group, {working} hold a standing job");
         Console.WriteLine(
             $"    motion: moved {travelled,6:F1} m over {ticks / 30f:F0} s, still {remaining,6:F1} m out" +
             (travelled < 2f ? "  <-- STOOD STILL" : string.Empty));
-        foreach (var (tick, left, moving, stuck) in trace)
+        foreach (var (tick, left, moving, stuck, cost) in trace)
         {
             Console.WriteLine(
-                $"      t+{tick / 30f,4:F0}s | {left,6:F1} m to go | {moving,2} of {movers.Count} moving | " +
-                $"worst stall {stuck,5:F1} s");
+                $"      t+{tick / 30f,4:F0}s | {left,6:F1} m straight | " +
+                $"{(cost is { } seconds ? $"{seconds,6:F1} s by route" : "  no route")} | " +
+                $"{moving,2} of {movers.Count} moving | worst stall {stuck,5:F1} s");
         }
         Console.WriteLine();
     }

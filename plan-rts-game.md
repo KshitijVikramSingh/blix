@@ -9385,3 +9385,74 @@ RTSGame --village --cheap-trees --shadow-proxy --nofog --perf-run --frames 250 \
 
 That run stages more copies than the one that aborted, which is the property worth keeping: the case is now
 covered by something that runs in twenty seconds without a window.
+
+## 105. The straggler is a villager going back to work, and one of my bounds was eating the game
+
+§102's second failure — "the halfway order moves twenty bodies fifty-one metres and closes two" — was the first
+item of the groups arc. It turned out to be three separate things, one of which was not a failure and one of
+which was mine.
+
+### The metric was wrong
+
+Straight-line distance cannot see a detour. `--orderprobe` now reports the field's own cost-to-goal beside it,
+and on the same order:
+
+```
+t+10s |  91.5 m straight | 176.1 s by route
+t+20s |  91.4 m straight | 166.9 s by route
+t+30s |  91.7 m straight | 154.5 s by route
+t+40s |  89.6 m straight | 142.9 s by route
+```
+
+They were approaching the whole time, around something, on a route two and a half times the straight line. Run
+for four minutes instead of forty seconds and they arrive: 3.1 seconds of route left. **There was no
+motion-without-progress bug; there was a measurement that could not tell walking around a wood from walking on
+the spot.** Recorded as a caution rather than a fix: every progress figure in this arc that used straight-line
+distance was capable of saying that.
+
+### The straggler is real, and it is the jobs layer
+
+Reported from the chair: *"sometimes individuals path away correctly while some of the group just stalls midway
+never catching the lead."* Quantified per body rather than per centroid, and split by cause, because "stopped
+short" is two different faults — a body that has given up its destination has decided, and a body still holding
+one is wedged:
+
+```
+order            arrived  travelling  stopped short   gave up   wedged   left group   hold a job
+far                    1          19              0         0        0            0            0
+halfway back           7           0             13        13        0           13           13
+far again              8          12              0         0        0            0            0
+deep in a wood         0          13              7         7        0            4            7
+```
+
+**Every stopped body gave up its destination; none is wedged; every one holds a standing job.** The mechanism is
+documented behaviour: `JobSystem.Interrupt` parks an assignment when an order arrives, and `ServeInterrupt`
+counts down `OrderGraceSeconds` — two seconds — from the moment the body is standing free, then walks it back to
+its workplace through `BeginSoloMove`, which detaches it from the move group on the way out.
+
+So near the settlement, where the workplaces are, a cohort disintegrates within seconds of arriving: the first
+bodies to reach their slots are reclaimed while the rest are still walking, and from the chair that is
+indistinguishable from half the group abandoning the order. At the far targets it never happens, because nobody
+stands free long enough for the grace to expire.
+
+**This is behaviour working as specified, and the specification is the thing to argue with.** Two seconds is
+very short for "I told you to go there". The knob is `JobDefaults.OrderGraceSeconds`, and the constraint on any
+change is a self-test that already exists and should keep existing: *an order never becomes a mode*. So the
+options are about how long an order outranks a standing job, not about whether it does forever.
+
+### And a bound of mine was eating every search in the game
+
+§103 opened the per-order allowance per command and never closed it. Once one order spent the pool, **every
+later search was refused** — job walks, congestion repaths, stuck recovery, all of it. The probe found **461
+denied searches in an order that issues twenty**, and the denials produced exactly the symptom being
+investigated: bodies losing their destinations, the jobs layer reclaiming them two seconds later, and
+stragglers hundreds of metres from where they were sent.
+
+It is now opened per command and closed when command processing ends, so nothing outside an order is charged.
+The freeze it exists to prevent was twenty searches in one tick, which is what it still bounds. Denials: 461 to
+zero.
+
+Worth sitting with: the bound was added to fix a freeze, it was measured as fixing that freeze, the gate stayed
+green, and it silently broke movement everywhere else for the rest of the run. Nothing in this arc's
+instrumentation caught it — not the frame timings, not the routing counters, not the self-tests. What caught it
+was counting *per body* what an order did, which is the one thing none of the previous instruments did.

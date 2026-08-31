@@ -230,11 +230,18 @@ internal sealed class SimulationWorld
 
     public bool LastOrderFoundNothing { get; private set; }
 
+    /// <summary>The resolution was abandoned because the cohort's anchor was off the decomposition.</summary>
+    public bool LastOrderAnchorUnplaced { get; private set; }
+
     /// <summary>How far the effective target ended up from the one asked for, in metres.</summary>
     public float LastOrderShortfall { get; private set; }
 
     /// <summary>Searches refused because their order's pooled allowance was spent.</summary>
     public long SearchesDeniedByOrderBudget => pathService.SearchesDeniedByOrderBudget;
+
+    /// <summary>Seconds of travel to a goal by the field's reckoning, for progress that a detour cannot fake.</summary>
+    public float? CostToGoal(Vector2 position, Vector2 goal, float agentRadius) =>
+        pathService.CostToGoal(position, goal, agentRadius);
 
     /// <summary>How order goals resolved across the run. See PathService.ResolveReachableGoal.</summary>
     public (long AsAsked, long Moved, long Unreachable) GoalResolutions =>
@@ -2016,8 +2023,8 @@ internal sealed class SimulationWorld
         var placementChanged = false;
         while (commands.TryDequeue(out var command))
         {
-            // One allowance per command, so two clicks in a tick get one each rather than sharing — the thing
-            // being bounded is a player's order, not the frame it happens to land in.
+            // One allowance per command, opened here and closed below, so two clicks in a tick get one each
+            // and nothing outside an order is charged at all.
             pathService.BeginOrderBudget();
             switch (command)
             {
@@ -2057,6 +2064,11 @@ internal sealed class SimulationWorld
                 if (Agents.Contains(id)) JobSystem.Interrupt(ref Agents.Get(id));
             }
         }
+
+        // Closed after the loop rather than inside it, because the loop has a continue in it and a bound that
+        // depends on which branch an iteration took is not a bound. Outside command processing nothing is
+        // charged: ordinary repaths are one body at a time behind cooldowns and were never the freeze.
+        pathService.EndOrderBudget();
         if (placementChanged) RefreshNavigationAfterPlacement();
     }
 
@@ -2185,7 +2197,9 @@ internal sealed class SimulationWorld
         var from = Agents.Get(anchor).Position;
 
         var target = requested;
+        var anchorFailuresBefore = pathService.GoalsAnchorUnplaced;
         LastOrderShortfall = 0f;
+        LastOrderAnchorUnplaced = false;
         LastOrderWasBestEffort = false;
         LastOrderFoundNothing = false;
         if (pathService.ResolveReachableGoal(from, requested, navigationRadius) is { } resolved)
@@ -2196,10 +2210,12 @@ internal sealed class SimulationWorld
         }
         else
         {
-            // Nothing the cohort can stand on anywhere near it. Going as far as the clamp is still better than
-            // standing — they walk toward it and stop where the ground stops, which is what a person does when
-            // told to go somewhere that turns out not to exist.
+            // Nothing the cohort can stand on anywhere near it, OR the anchor itself was not on the
+            // decomposition — two different facts, and reporting the second as the first put "nothing
+            // reachable" against a target the cohort had already walked to twice. The service counts them
+            // apart; so does this.
             LastOrderFoundNothing = true;
+            LastOrderAnchorUnplaced = pathService.GoalsAnchorUnplaced != anchorFailuresBefore;
         }
 
         var group = members.Length > 1

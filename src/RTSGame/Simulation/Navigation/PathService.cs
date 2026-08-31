@@ -1724,6 +1724,32 @@ internal sealed partial class PathService
     /// <summary>Resolutions abandoned because the cohort's anchor was not on the decomposition.</summary>
     public long GoalsAnchorUnplaced { get; private set; }
 
+    /// <summary>
+    /// Seconds of travel from a position to a goal, by the field's own reckoning.
+    /// </summary>
+    /// <remarks>
+    /// <b>The honest measure of progress, and straight-line distance is not it.</b> A cohort walking round a
+    /// river or a wood closes no straight-line distance for as long as the detour lasts, which looks exactly
+    /// like a cohort that has stopped approaching — and §102 recorded the halfway order as "moves fifty-one
+    /// metres, closes two" on precisely that measure. Cost-to-goal falls whenever the bodies are getting
+    /// closer along the route they are actually walking, so the two figures together say which it is.
+    /// </remarks>
+    public float? CostToGoal(Vector2 position, Vector2 requestedGoal, float agentRadius)
+    {
+        if (!grid.TryWorldToCell(position, out var cell) ||
+            !grid.TryWorldToCell(requestedGoal, out var requestedGoalCell))
+        {
+            return null;
+        }
+
+        var goal = grid.IsWalkable(requestedGoalCell, agentRadius)
+            ? requestedGoalCell
+            : FindNearestWalkable(requestedGoalCell, agentRadius);
+        if (goal is not { } resolved) return null;
+        var cost = GetFlowField(resolved, agentRadius, CongestionRevision).CostAt(cell);
+        return float.IsFinite(cost) ? cost : null;
+    }
+
     public Vector2? FindFieldEntry(
         Vector2 position,
         Vector2 requestedGoal,
@@ -2361,11 +2387,34 @@ internal sealed partial class PathService
 
     private long orderExpansionsSpent;
 
-    /// <summary>Opens a fresh allowance for one batch of commands. See OrderExpansionBudget.</summary>
-    public void BeginOrderBudget() => orderExpansionsSpent = 0;
+    /// <summary>
+    /// Opens an allowance for one order, and closes it again when the order has been applied.
+    /// </summary>
+    /// <remarks>
+    /// <b>Scoped to the order, and the first version was not.</b> It opened per command and never closed, so
+    /// once one order spent the pool every later search in the game was refused — job walks, congestion
+    /// repaths, stuck recovery, all of it. Bodies lost their destinations, the jobs layer reclaimed them two
+    /// seconds later, and they walked back to work hundreds of metres from where they had been sent. Reported
+    /// from the chair as "some of the group just stalls midway never catching the lead", and the probe found
+    /// four hundred and sixty-one denied searches in an order that issues twenty.
+    /// <para>
+    /// What the freeze actually was is twenty searches in ONE tick, so that is what the bound covers. Ordinary
+    /// movement repaths are one body at a time behind cooldowns and were never the problem; they are charged
+    /// nothing.
+    /// </para>
+    /// </remarks>
+    public void BeginOrderBudget()
+    {
+        orderExpansionsSpent = 0;
+        orderBudgetActive = true;
+    }
 
-    /// <summary>Whether this order still has search left to spend.</summary>
-    private bool OrderBudgetRemains => orderExpansionsSpent < OrderExpansionBudget;
+    public void EndOrderBudget() => orderBudgetActive = false;
+
+    private bool orderBudgetActive;
+
+    /// <summary>Whether this order still has search left to spend. Unbounded outside an order.</summary>
+    private bool OrderBudgetRemains => !orderBudgetActive || orderExpansionsSpent < OrderExpansionBudget;
 
     /// <summary>Searches refused outright because the order's pooled allowance was gone.</summary>
     public long SearchesDeniedByOrderBudget { get; private set; }
