@@ -158,7 +158,7 @@ internal static class NavigationRasterizer
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
-            RebuildCore(placement, navigation, terrain);
+            RebuildCore(placement, navigation, terrain, dirty: null);
         }
         finally
         {
@@ -167,18 +167,112 @@ internal static class NavigationRasterizer
         }
     }
 
-    private static void RebuildCore(PlacementGrid placement, NavigationGrid navigation, TerrainMap terrain)
+    /// <summary>
+    /// Re-rasterises only the ground a placement change can have altered.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because a building cannot move the terrain.</b> Measured on the village, a full rebuild is 774 ms —
+    /// 288 of it sampling surface and height for 1.44M cells that are already correct, and 459 recomputing a
+    /// distance-to-nearest-obstacle for cells nowhere near what changed. A placement changes a few metres of
+    /// ground, and only cells within <see cref="ObstacleIndex.Reach"/> of it can have a different clearance.
+    /// <para>
+    /// The window is the dirty rectangle for the terrain-derived values, and the dirty rectangle widened by
+    /// the obstacle reach for clearance. Everything outside is read back from the grid unchanged, which is
+    /// what makes this identical to a full rebuild rather than an approximation of one — and there is a
+    /// self-test that asserts exactly that, cell by cell, because "should be identical" is the kind of claim
+    /// that stops being true quietly.
+    /// </para>
+    /// </remarks>
+    public static void RebuildWithin(
+        PlacementGrid placement,
+        NavigationGrid navigation,
+        TerrainMap terrain,
+        Vector2 dirtyMinimum,
+        Vector2 dirtyMaximum)
     {
-        var blocked = new bool[navigation.Width * navigation.Height];
-        var clearance = new float[blocked.Length];
-        var heights = new float[blocked.Length];
-        var traversalCosts = new float[blocked.Length];
-        var speedMultipliers = new float[blocked.Length];
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        try
+        {
+            RebuildCore(placement, navigation, terrain, (dirtyMinimum, dirtyMaximum));
+        }
+        finally
+        {
+            RebuildTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+            Rebuilds++;
+            LocalRebuilds++;
+        }
+    }
+
+    internal static int LocalRebuilds;
+
+    /// <summary>Cells whose clearance was computed, and boxes the index was built over.</summary>
+    internal static long ClearanceCells;
+
+    internal static int ObstacleBoxes;
+
+    internal static long TerrainCells;
+
+    internal static long ClearanceWindowCells;
+
+    private static void RebuildCore(
+        PlacementGrid placement,
+        NavigationGrid navigation,
+        TerrainMap terrain,
+        (Vector2 Minimum, Vector2 Maximum)? dirty)
+    {
+        bool[] blocked;
+        float[] clearance;
+        float[] heights;
+        float[] traversalCosts;
+        float[] speedMultipliers;
+        int terrainLowX, terrainLowZ, terrainHighX, terrainHighZ;
+        int clearanceLowX, clearanceLowZ, clearanceHighX, clearanceHighZ;
+        int gatherLowX, gatherLowZ, gatherHighX, gatherHighZ;
+        if (dirty is { } window)
+        {
+            // Everything outside the window comes back from the grid exactly as it went in.
+            navigation.ReadRaster(
+                out blocked, out clearance, out heights, out traversalCosts, out speedMultipliers);
+            CellWindow(
+                navigation, window.Minimum, window.Maximum, 0f,
+                out terrainLowX, out terrainLowZ, out terrainHighX, out terrainHighZ);
+            // Clearance reaches further than the change does: a cell's distance-to-nearest-obstacle can only
+            // have moved if the change is within the reach it clamps at.
+            CellWindow(
+                navigation, window.Minimum, window.Maximum, ObstacleIndex.Reach,
+                out clearanceLowX, out clearanceLowZ, out clearanceHighX, out clearanceHighZ);
+            // Wider again for GATHERING boxes than for computing clearance. A cell at the edge of the
+            // clearance window is itself within reach of ground outside it, so a box out there can be its
+            // nearest one — and an obstacle set missing that box would give a wrong answer rather than a
+            // stale one. Two reaches out, and still about two thousand cells against 1.44M.
+            CellWindow(
+                navigation, window.Minimum, window.Maximum, ObstacleIndex.Reach * 2f,
+                out gatherLowX, out gatherLowZ, out gatherHighX, out gatherHighZ);
+        }
+        else
+        {
+            blocked = new bool[navigation.Width * navigation.Height];
+            clearance = new float[blocked.Length];
+            heights = new float[blocked.Length];
+            traversalCosts = new float[blocked.Length];
+            speedMultipliers = new float[blocked.Length];
+            terrainLowX = clearanceLowX = 0;
+            terrainLowZ = clearanceLowZ = 0;
+            terrainHighX = clearanceHighX = gatherHighX = navigation.Width - 1;
+            terrainHighZ = clearanceHighZ = gatherHighZ = navigation.Height - 1;
+            gatherLowX = gatherLowZ = 0;
+        }
+
         var obstacleBounds = GatherObstacleBounds(placement);
+        // Per call, so the figure describes this pass and not the sum of every rebuild since startup — which
+        // is what it did first, and reported four million cells for a four-cell wall.
+        ClearanceCells = 0;
+        TerrainCells = (long)(terrainHighX - terrainLowX + 1) * (terrainHighZ - terrainLowZ + 1);
+        ClearanceWindowCells = (long)(clearanceHighX - clearanceLowX + 1) * (clearanceHighZ - clearanceLowZ + 1);
 
         var terrainStart = System.Diagnostics.Stopwatch.GetTimestamp();
-        for (var z = 0; z < navigation.Height; z++)
-        for (var x = 0; x < navigation.Width; x++)
+        for (var z = terrainLowZ; z <= terrainHighZ; z++)
+        for (var x = terrainLowX; x <= terrainHighX; x++)
         {
             var cell = new GridCell(x, z);
             var index = navigation.Transform.Index(cell);
@@ -187,6 +281,9 @@ internal static class NavigationRasterizer
             heights[index] = terrain.SampleHeight(center);
             traversalCosts[index] = TerrainSurfaceRules.PathCost(surface);
             speedMultipliers[index] = TerrainSurfaceRules.SpeedMultiplier(surface);
+            // Cleared first: on a local pass this array came back from the grid, so a cell that used to be
+            // blocked by an obstacle now gone would keep saying so.
+            blocked[index] = false;
             if (!TerrainSurfaceRules.IsPassable(surface))
             {
                 blocked[index] = true;
@@ -197,6 +294,23 @@ internal static class NavigationRasterizer
 
         TerrainPassTicks += System.Diagnostics.Stopwatch.GetTimestamp() - terrainStart;
         var restStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (dirty is not null)
+        {
+            // The full pass adds impassable terrain to the obstacle list as it samples it. A local pass never
+            // sampled the ground outside its window, so it has to take those bounds from what the grid already
+            // knows — otherwise a cell beside a cliff would compute its clearance as if the cliff were gone.
+            // Placement cells are in the list twice as a result, which costs a comparison and cannot change a
+            // minimum distance.
+            for (var z = gatherLowZ; z <= gatherHighZ; z++)
+            for (var x = gatherLowX; x <= gatherHighX; x++)
+            {
+                if (x >= terrainLowX && x <= terrainHighX && z >= terrainLowZ && z <= terrainHighZ) continue;
+                var cell = new GridCell(x, z);
+                if (!blocked[navigation.Transform.Index(cell)]) continue;
+                navigation.Transform.CellBounds(cell, out var minimum, out var maximum);
+                obstacleBounds.Add((minimum, maximum));
+            }
+        }
 
         // <b>Slope's cost is not here, and putting it here was a mistake worth recording.</b> A slope band
         // per cell was added to this pass, folded into the traversal cost, on the reasoning that the router
@@ -217,8 +331,11 @@ internal static class NavigationRasterizer
         // may have passable surface paint. Include those edges in clearance so
         // A* keeps the agent's body—not merely its center—away from ramp corners.
         var halfCell = navigation.Transform.CellSize * 0.5f;
-        for (var z = 0; z < navigation.Height; z++)
-        for (var x = 0; x < navigation.Width; x++)
+        // Bounded to the gather window on a local pass. This was the last whole-map loop left in it, and it
+        // was 108 ms of a 196 ms rebuild — walking 1.44M cells to add cliff edges the filter below then threw
+        // away, because nothing outside the window can be near anything inside it.
+        for (var z = gatherLowZ; z <= gatherHighZ; z++)
+        for (var x = gatherLowX; x <= gatherHighX; x++)
         {
             var cell = new GridCell(x, z);
             var index = navigation.Transform.Index(cell);
@@ -251,6 +368,23 @@ internal static class NavigationRasterizer
             }
         }
 
+        if (dirty is not null)
+        {
+            // <b>And only the obstacles the window can see.</b> Merging and indexing every box on the map is
+            // a fixed cost that does not care how small the change was — on a village that is twenty-five
+            // thousand trees, and it was 125 ms of a 225 ms local pass. Nothing outside the window plus the
+            // reach can be the nearest box to a cell inside it, so nothing outside needs to be in the index.
+            var lowCorner = navigation.CellCenter(new GridCell(gatherLowX, gatherLowZ));
+            var highCorner = navigation.CellCenter(new GridCell(gatherHighX, gatherHighZ));
+            var slack = new Vector2(ObstacleIndex.Reach + navigation.Transform.CellSize);
+            var windowMinimum = lowCorner - slack;
+            var windowMaximum = highCorner + slack;
+            obstacleBounds.RemoveAll(bounds =>
+                bounds.Maximum.X < windowMinimum.X || bounds.Minimum.X > windowMaximum.X ||
+                bounds.Maximum.Y < windowMinimum.Y || bounds.Minimum.Y > windowMaximum.Y);
+        }
+
+        ObstacleBoxes = obstacleBounds.Count;
         var obstacles = new ObstacleIndex(
             MergeColinear(obstacleBounds),
             terrain.Minimum,
@@ -261,11 +395,11 @@ internal static class NavigationRasterizer
         // country that gather is empty and all sixteen take the clamp having looked at nothing.
         const int tile = 4;
         var candidates = new List<(Vector2 Minimum, Vector2 Maximum)>();
-        for (var tileZ = 0; tileZ < navigation.Height; tileZ += tile)
-        for (var tileX = 0; tileX < navigation.Width; tileX += tile)
+        for (var tileZ = clearanceLowZ; tileZ <= clearanceHighZ; tileZ += tile)
+        for (var tileX = clearanceLowX; tileX <= clearanceHighX; tileX += tile)
         {
-            var highZ = Math.Min(tileZ + tile - 1, navigation.Height - 1);
-            var highX = Math.Min(tileX + tile - 1, navigation.Width - 1);
+            var highZ = Math.Min(tileZ + tile - 1, clearanceHighZ);
+            var highX = Math.Min(tileX + tile - 1, clearanceHighX);
             navigation.Transform.CellBounds(new GridCell(tileX, tileZ), out var tileMinimum, out _);
             navigation.Transform.CellBounds(new GridCell(highX, highZ), out _, out var tileMaximum);
 
@@ -320,6 +454,7 @@ internal static class NavigationRasterizer
                         break;
                     }
 
+                    ClearanceCells++;
                     if (solid) blocked[cellIndex] = true;
                     clearance[cellIndex] = MathF.Min(nearest, ObstacleIndex.Reach);
                 }
@@ -339,6 +474,28 @@ internal static class NavigationRasterizer
         var delta = MathF.Abs(second - first);
         return delta > TerrainMap.MaximumStepHeight ||
                delta / MathF.Max(distance, 0.0001f) > TerrainMap.MaximumTraversableGrade;
+    }
+
+    /// <summary>The cell range covering a world-space rectangle, widened by a margin and clamped to the grid.</summary>
+    private static void CellWindow(
+        NavigationGrid navigation,
+        Vector2 minimum,
+        Vector2 maximum,
+        float margin,
+        out int lowX,
+        out int lowZ,
+        out int highX,
+        out int highZ)
+    {
+        var size = navigation.Transform.CellSize;
+        var origin = navigation.Transform.Origin;
+        // One extra cell each way past the margin, because a cell's clearance is measured from its centre and
+        // a box that reaches its edge is nearer than the margin suggests.
+        var pad = margin + size;
+        lowX = Math.Max(0, (int)MathF.Floor((minimum.X - pad - origin.X) / size));
+        lowZ = Math.Max(0, (int)MathF.Floor((minimum.Y - pad - origin.Y) / size));
+        highX = Math.Min(navigation.Width - 1, (int)MathF.Ceiling((maximum.X + pad - origin.X) / size));
+        highZ = Math.Min(navigation.Height - 1, (int)MathF.Ceiling((maximum.Y + pad - origin.Y) / size));
     }
 
     private static List<(Vector2 Minimum, Vector2 Maximum)> GatherObstacleBounds(PlacementGrid placement)

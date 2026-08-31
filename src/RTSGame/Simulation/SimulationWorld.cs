@@ -1042,7 +1042,7 @@ internal sealed class SimulationWorld
                 transform.CellCenter(cell));
         }
 
-        if (changed) RebuildTerrainNavigation();
+        if (changed) RefreshNavigationAfterPlacement();
     }
 
     /// <summary>People with no house to live in, which §6 wants named as a blocked sink.</summary>
@@ -1680,7 +1680,40 @@ internal sealed class SimulationWorld
     public void RebuildTerrainNavigation()
     {
         NavigationRasterizer.Rebuild(Placement, Navigation, Terrain);
+        Placement.ConsumeDirtyBounds(out _, out _);
         rasterizedTerrainRevision = Terrain.Revision;
+    }
+
+    /// <summary>
+    /// Re-rasterises what a placement change touched, or everything if the terrain moved too.
+    /// </summary>
+    /// <remarks>
+    /// <b>The whole reason a finished building used to cost three quarters of a second.</b> Placing or clearing
+    /// a cell bumps the placement grid, which re-rasterises navigation, which used to mean sampling terrain
+    /// for 1.44M cells that had not changed and recomputing clearance for cells nowhere near the change. The
+    /// placement grid now says WHERE it moved, so the pass can be local — and a local pass produces the same
+    /// grid as a full one, which is asserted cell by cell in the self-tests rather than assumed here.
+    /// <para>
+    /// Falls back to the full rebuild whenever the terrain revision has moved as well, because then the
+    /// terrain-derived half of every cell really is stale.
+    /// </para>
+    /// </remarks>
+    /// <summary>The local refresh, reachable from the self-tests that hold it to the full rebuild's answer.</summary>
+    internal void RefreshNavigationForTest() => RefreshNavigationAfterPlacement();
+
+    /// <summary>The terrain revision the raster was last built against, for the identity test's diagnosis.</summary>
+    internal int RasterisedTerrainRevisionForTest => rasterizedTerrainRevision;
+
+    private void RefreshNavigationAfterPlacement()
+    {
+        if (Terrain.Revision != rasterizedTerrainRevision)
+        {
+            RebuildTerrainNavigation();
+            return;
+        }
+
+        if (!Placement.ConsumeDirtyBounds(out var minimum, out var maximum)) return;
+        NavigationRasterizer.RebuildWithin(Placement, Navigation, Terrain, minimum, maximum);
     }
 
     /// <summary>
@@ -1979,7 +2012,7 @@ internal sealed class SimulationWorld
                 if (Agents.Contains(id)) JobSystem.Interrupt(ref Agents.Get(id));
             }
         }
-        if (placementChanged) RebuildTerrainNavigation();
+        if (placementChanged) RefreshNavigationAfterPlacement();
     }
 
     /// <summary>Who an order was addressed to, whatever kind of order it is.</summary>

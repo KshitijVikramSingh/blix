@@ -321,15 +321,30 @@ internal static class ScaleScenarios
         Console.WriteLine();
         Console.WriteLine("  what a placement change costs the next click");
         var rasterBefore = world.NavRasterCost;
+        // <b>A placement change, then the refresh the game actually runs.</b> The first version of this called
+        // RebuildTerrainNavigation directly, which measures the full path whatever the placement path does —
+        // so it went on reporting 780 ms after the local pass had been written.
+        if (world.Placement.Transform.TryWorldToCell(new Vector2(6f, 6f), out var wall))
+        {
+            for (var dx = 0; dx < 4; dx++)
+            {
+                world.Placement.SetOccupied(new Simulation.Spatial.GridCell(wall.X + dx, wall.Z), true);
+            }
+        }
+
         var rasterStart = Stopwatch.GetTimestamp();
-        world.RebuildTerrainNavigation();
+        world.RefreshNavigationForTest();
         var rasterMs = Stopwatch.GetElapsedTime(rasterStart).TotalMilliseconds;
         var after0 = world.NavRasterCost;
         Console.WriteLine(
             $"  raster {rasterMs,8:F1} ms ({after0.Rebuilds - rasterBefore.Rebuilds} rebuild, " +
             $"{world.Navigation.Width * world.Navigation.Height:N0} cells) — " +
             $"terrain pass {after0.TerrainMs - rasterBefore.TerrainMs:F1} ms, " +
-            $"clearance {after0.RestMs - rasterBefore.RestMs:F1} ms, " +
+            $"clearance {after0.RestMs - rasterBefore.RestMs:F1} ms over " +
+            $"{Simulation.Navigation.NavigationRasterizer.ClearanceCells:N0} cells " +
+            $"(window {Simulation.Navigation.NavigationRasterizer.ClearanceWindowCells:N0}, " +
+            $"terrain window {Simulation.Navigation.NavigationRasterizer.TerrainCells:N0}) with " +
+            $"{Simulation.Navigation.NavigationRasterizer.ObstacleBoxes:N0} boxes, " +
             $"apply {after0.ApplyMs - rasterBefore.ApplyMs:F1} ms");
 
         var coldBefore = world.RoutingCost;

@@ -228,6 +228,53 @@ internal sealed class NavigationGrid
     /// </remarks>
     internal void RestoreRevision(int revision) => Revision = revision;
 
+    /// <summary>
+    /// Flattens the chunked raster back into the five arrays it was built from.
+    /// </summary>
+    /// <remarks>
+    /// So a local re-rasterisation can keep everything it is not changing without a second copy of the raster
+    /// living in memory to keep it in. The chunked form is the memory saving — most regions are one uniform
+    /// ground — and this pays it back out at about a cell a nanosecond, which against the 774 ms a full
+    /// rebuild costs is not a cost worth structuring around.
+    /// </remarks>
+    /// <summary>The read-back, for the test that compares a local re-rasterisation against a full one.</summary>
+    internal void ReadRasterForTest(
+        out bool[] existingBlocked,
+        out float[] existingClearance,
+        out float[] existingHeights,
+        out float[] existingTraversalCosts,
+        out float[] existingSpeedMultipliers) =>
+        ReadRaster(
+            out existingBlocked, out existingClearance, out existingHeights,
+            out existingTraversalCosts, out existingSpeedMultipliers);
+
+    internal void ReadRaster(
+        out bool[] existingBlocked,
+        out float[] existingClearance,
+        out float[] existingHeights,
+        out float[] existingTraversalCosts,
+        out float[] existingSpeedMultipliers)
+    {
+        var cells = Width * Height;
+        existingBlocked = new bool[cells];
+        existingClearance = new float[cells];
+        existingHeights = new float[cells];
+        existingTraversalCosts = new float[cells];
+        existingSpeedMultipliers = new float[cells];
+        for (var z = 0; z < Height; z++)
+        for (var x = 0; x < Width; x++)
+        {
+            var cell = new GridCell(x, z);
+            var index = Transform.Index(cell);
+            var ground = GroundAt(cell);
+            existingBlocked[index] = ground.Blocked;
+            existingClearance[index] = ground.Clearance;
+            existingHeights[index] = ground.Height;
+            existingTraversalCosts[index] = ground.TraversalCost;
+            existingSpeedMultipliers[index] = ground.SpeedMultiplier;
+        }
+    }
+
     internal void ReplaceRaster(
         bool[] newBlocked,
         float[] newClearance,

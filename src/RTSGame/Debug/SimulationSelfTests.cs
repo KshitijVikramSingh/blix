@@ -108,6 +108,9 @@ internal static class SimulationSelfTests
         Check("a latecomer arrives at ground a settled crowd is standing on", LatecomerArrivesAtOccupiedGround());
         Check("a queue is worth more to a body that is wide", CongestionIsPricedByWidth());
         Check("the fingerprint reads every value a body carries", FingerprintReadsEveryBodyValue());
+        Check(
+            "a local re-rasterisation leaves the same grid as a full one",
+            LocalRasterMatchesFullRebuild());
         Check("every field of the world is fingerprinted or argued away", WorldStateIsFullyAccountedFor());
         Check("a divergence is reported on the tick it happens", DivergenceIsCaughtWhenItAppears());
         Check("the checkpoint fingerprint reads the ground, not only the bodies", FullScopeReadsTheMap());
@@ -610,6 +613,90 @@ internal static class SimulationSelfTests
     /// that is none of those is a hole in the determinism check, and holes in a passing test
     /// do not announce themselves.
     /// </summary>
+    /// <summary>
+    /// A placement change re-rasterised locally must leave exactly the grid a full rebuild would.
+    /// </summary>
+    /// <remarks>
+    /// <b>The guard on the only interesting claim §101 makes.</b> Skipping 1.44M terrain samples and most of a
+    /// clearance pass is only sound if the answer is unchanged, and "should be identical" is precisely the kind
+    /// of statement that stops being true without anybody noticing — a widened window off by a cell, a stale
+    /// blocked flag, an obstacle bound gathered on the full path and forgotten on the local one. So the test
+    /// builds a world with relief, blocks some ground, refreshes it locally, and then compares every cell
+    /// against the same world rebuilt from scratch: blocked, clearance, height, traversal cost and speed.
+    /// <para>
+    /// Sculpted on purpose. On flat ground the terrain half of the raster is uniform and a bug in it cannot
+    /// show, which is how a test like this passes while the feature is broken on every map anybody plays.
+    /// </para>
+    /// </remarks>
+    private static bool LocalRasterMatchesFullRebuild()
+    {
+        var world = new SimulationWorld(200f);
+        world.Terrain.SetRegion(Simulation.Terrain.Region.Downland);
+        var layout = Simulation.Terrain.MapLayout.Composed(
+            Simulation.Terrain.Archetype.SplitValley, 200f, 0x5EED1234u, 24f);
+        Simulation.Terrain.ReliefPlan.FromLayout(layout, 200f, 0x5EED1234u).Apply(world.Terrain);
+        world.RebuildTerrainNavigation();
+
+        // A short wall, away from the edges, so the widened clearance window is interior on every side.
+        // <b>The placement grid's own transform, not navigation's.</b> They have different cell sizes — 1.5 m
+        // against 0.5 — so a navigation cell index handed to the placement grid is a different place, and
+        // usually off its edge, which is how the first version of this test blocked nothing and said so.
+        if (!world.Placement.Transform.TryWorldToCell(new Vector2(10f, -6f), out var centre))
+        {
+            Console.WriteLine("    the test's wall position is off the grid");
+            return false;
+        }
+
+        for (var dx = 0; dx < 6; dx++)
+        {
+            world.Placement.SetOccupied(new GridCell(centre.X + dx, centre.Z), true);
+        }
+
+        // The path under test: local refresh, driven by the dirty rectangle the placement grid accumulated.
+        var localBefore = NavigationRasterizer.LocalRebuilds;
+        var occupied = world.Placement.OccupiedCells.Count;
+        world.RefreshNavigationForTest();
+        if (NavigationRasterizer.LocalRebuilds == localBefore)
+        {
+            Console.WriteLine(
+                $"    the refresh did not take the local path: {occupied} cells occupied, " +
+                $"terrain revision {world.Terrain.Revision} against rasterised " +
+                $"{world.RasterisedTerrainRevisionForTest}");
+            return false;
+        }
+
+        world.Navigation.ReadRasterForTest(
+            out var localBlocked, out var localClearance, out var localHeights,
+            out var localCosts, out var localSpeeds);
+        NavigationRasterizer.Rebuild(world.Placement, world.Navigation, world.Terrain);
+        world.Navigation.ReadRasterForTest(
+            out var fullBlocked, out var fullClearance, out var fullHeights,
+            out var fullCosts, out var fullSpeeds);
+
+        for (var index = 0; index < fullBlocked.Length; index++)
+        {
+            if (localBlocked[index] == fullBlocked[index] &&
+                localClearance[index] == fullClearance[index] &&
+                localHeights[index] == fullHeights[index] &&
+                localCosts[index] == fullCosts[index] &&
+                localSpeeds[index] == fullSpeeds[index])
+            {
+                continue;
+            }
+
+            var cell = new GridCell(index % world.Navigation.Width, index / world.Navigation.Width);
+            Console.WriteLine(
+                $"    cell {cell.X},{cell.Z} differs: blocked {localBlocked[index]}/{fullBlocked[index]}, " +
+                $"clearance {localClearance[index]:F4}/{fullClearance[index]:F4}, " +
+                $"height {localHeights[index]:F4}/{fullHeights[index]:F4}, " +
+                $"cost {localCosts[index]:F4}/{fullCosts[index]:F4}, " +
+                $"speed {localSpeeds[index]:F4}/{fullSpeeds[index]:F4}");
+            return false;
+        }
+
+        return true;
+    }
+
     private static bool WorldStateIsFullyAccountedFor()
     {
         var fault = DeterminismCheck.CensusFault();

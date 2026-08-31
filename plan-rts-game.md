@@ -9144,3 +9144,69 @@ moved for unrelated reasons; the parts that were changed are the parts that impr
 
 Still open, from §99: the raster's 774 ms on a placement change — two thirds of it provably unnecessary — and
 the mesh's 380 ms, which wants amortisation rather than incrementalisation.
+
+## 101. A building no longer re-rasterises the map it did not touch
+
+§99 measured a finished building at 774 ms of re-rasterisation in the tick it completes, and named two thirds
+of it as provably unnecessary: a placement change cannot move terrain, and only cells within
+`ObstacleIndex.Reach` of the change can have a different clearance. What was missing was that the placement
+grid said *something* had changed and never *what*.
+
+It says what now. `SetOccupied` accumulates one dirty rectangle — one rather than a list, because two buildings
+finishing in the same tick want a single slightly larger window rather than two passes, and a rectangle can
+only be too large, never wrong — and `ConsumeDirtyBounds` hands it over exactly once.
+
+`NavigationRasterizer.RebuildWithin` then works in three nested windows, which is the part that took three
+attempts to get right:
+
+- **the dirty rectangle** — the only cells whose terrain-derived values are recomputed, and on a placement
+  change that recomputation is redundant anyway;
+- **plus one reach** — the cells whose clearance can have changed;
+- **plus another reach** — the cells whose *obstacles* must be gathered, because a cell at the edge of the
+  clearance window is itself within reach of ground outside it, and an obstacle set missing that box gives a
+  wrong answer rather than a stale one.
+
+```
+                                  full      local
+raster                           774 ms    100.6 ms
+  terrain pass                   288 ms      0.0 ms   (skipped: terrain did not move)
+  clearance and gathering        459 ms      0.7 ms   (1,208 cells, 4 boxes)
+  apply                           26 ms     35.8 ms
+```
+
+The remaining ~64 ms is reading the chunked raster back into flat arrays so the untouched cells can be handed
+through unchanged, and the apply that writes all of it back. Both are whole-map array work on a change that
+touched ninety cells, and both would go with a windowed apply — but the mesh rebuild on the same event is
+still 380 ms, so sharpening this further would be optimising the smaller half again.
+
+### The test that makes it a saving rather than a gamble
+
+Skipping 1.44M terrain samples is only sound if the answer is unchanged, and "should be identical" is exactly
+the claim that stops being true quietly. So there is a self-test: build a sculpted world, block some ground,
+refresh locally, then rebuild fully and compare **every cell** on blocked, clearance, height, traversal cost
+and speed. It is sculpted deliberately — on flat ground the terrain half of the raster is uniform and a bug in
+it cannot show, which is how a test like this passes while the feature is broken on every map anybody plays.
+
+It earned itself immediately. Three separate faults surfaced through it or the profile beside it:
+
+1. **A navigation cell index handed to the placement grid.** They have different cell sizes — 1.5 m against
+   0.5 — so the test blocked nothing and said "the refresh did not take the local path", which is the failure
+   message doing its job.
+2. **The profile was measuring the wrong path.** It called `RebuildTerrainNavigation` directly, so it went on
+   reporting 780 ms after the local pass existed. A harness that names the thing it calls would have said so.
+3. **A whole-map loop left inside the local pass** — the cliff-edge gather, 108 ms of the first 196, walking
+   1.44M cells to add boxes the window filter then discarded. Found by counting the cells the pass actually
+   touched, which came out at four million for a four-cell wall because the counter was cumulative and not
+   per-call. Two instrument bugs to find one real one.
+
+### Where the event stands
+
+```
+                      raster (in the tick)   next click
+before                       774 ms            677 ms
+after                        100 ms            677 ms
+```
+
+The tick a building completes is no longer a freeze. The click after it still is, and it is the mesh — 380 ms
+of global row sweep, which §99 argued wants amortisation across ticks rather than incrementalisation, and
+which is now unambiguously the next thing in this arc if it is worth continuing before groups.
