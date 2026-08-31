@@ -695,8 +695,15 @@ internal sealed partial class PathService
     {
         PathQueries++;
         requestedGoal = terrain.ClampPosition(requestedGoal, agentRadius + BodyFootprint.NavigationMargin);
-        if (!grid.TryWorldToCell(start, out var startCell) || !grid.TryWorldToCell(requestedGoal, out var requestedCell))
+        if (!grid.TryWorldToCell(start, out var startCell))
         {
+            PathNoStartCell++;
+            return null;
+        }
+
+        if (!grid.TryWorldToCell(requestedGoal, out var requestedCell))
+        {
+            PathNoGoalCell++;
             return null;
         }
         var startCellCenter = grid.CellCenter(startCell);
@@ -710,7 +717,11 @@ internal sealed partial class PathService
                 start,
                 requestedGoal,
                 grid.Transform.CellSize * 2.25f);
-        if (pathStartCell is not { } resolvedStartCell) return null;
+        if (pathStartCell is not { } resolvedStartCell)
+        {
+            PathStartUnresolvable++;
+            return null;
+        }
         var startWasAdjusted = resolvedStartCell != startCell;
 
         if (additionalNavigationCosts is null &&
@@ -729,7 +740,11 @@ internal sealed partial class PathService
         var goalCell = grid.IsWalkable(requestedCell, agentRadius)
             ? requestedCell
             : FindNearestWalkable(requestedCell, agentRadius);
-        if (goalCell is not { } goal) return null;
+        if (goalCell is not { } goal)
+        {
+            PathGoalUnresolvable++;
+            return null;
+        }
         var cells = FindCellPath(
             resolvedStartCell,
             goal,
@@ -737,7 +752,11 @@ internal sealed partial class PathService
             congestionAvoidanceCenter,
             additionalNavigationCosts,
             CongestionSpeedScale(agentSpeed));
-        if (cells is null) return null;
+        if (cells is null)
+        {
+            PathSearchFoundNothing++;
+            return null;
+        }
 
         var destination = goal == requestedCell ? requestedGoal : grid.CellCenter(goal);
         var waypoints = SmoothPath(
@@ -1666,6 +1685,29 @@ internal sealed partial class PathService
     public long FieldEntriesMissed { get; private set; }
 
     /// <summary>
+    /// Why a path request came back with nothing, by cause.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because "they stood in place" is four different bugs.</b> A body given an order and not moving has
+    /// been refused a route, and the refusals are not alike: a target off the grid is a control problem, a
+    /// target inside solid ground is a resolution problem, a search that exhausted the reachable set is a
+    /// connectivity problem, and a search truncated back to where it started is a budget problem. They want
+    /// different answers — clamp the click, resolve the goal outward, accept a nearer goal, raise or slice the
+    /// budget — and one counter for all of them would tell us which quarter of the time we are wrong.
+    /// </remarks>
+    public long PathNoStartCell { get; private set; }
+
+    public long PathNoGoalCell { get; private set; }
+
+    public long PathStartUnresolvable { get; private set; }
+
+    public long PathGoalUnresolvable { get; private set; }
+
+    public long PathSearchFoundNothing { get; private set; }
+
+    public long PathTruncatedToStart { get; private set; }
+
+    /// <summary>
     /// Transit-drop and rejoin counters, kept here rather than on the world.
     /// </summary>
     /// <remarks>
@@ -1678,6 +1720,13 @@ internal sealed partial class PathService
     public long FlowTransitDropsNoGradient;
 
     public long FieldRejoins;
+
+    /// <summary>How orders ended for the bodies given them. See SimulationWorld.OrderOutcomes.</summary>
+    public long OrdersOnTransit;
+
+    public long OrdersOnSlotPath;
+
+    public long OrdersRefused;
 
     /// <summary>The highest local pressure seen at a transit drop, for choosing the ceiling by measurement.</summary>
     public float WorstDropPressure;
@@ -1840,7 +1889,16 @@ internal sealed partial class PathService
                 // there, which is also what it would do if the world had changed under it.
                 PathBudgetStops++;
                 PathExpansionsWorst = Math.Max(PathExpansionsWorst, PathExpansions - expansionsAtEntry);
-                return bestIndex == startIndex ? null : Reconstruct(cameFrom, startIndex, bestIndex);
+                if (bestIndex == startIndex)
+                {
+                    // The budget ran out before anything closer to the goal than the start was found, so the
+                    // only honest answer is none — and a body that gets none stands still, which is the
+                    // symptom this counter exists to attribute.
+                    PathTruncatedToStart++;
+                    return null;
+                }
+
+                return Reconstruct(cameFrom, startIndex, bestIndex);
             }
 
             for (var directionIndex = 0; directionIndex < NeighborOffsets.Length; directionIndex++)

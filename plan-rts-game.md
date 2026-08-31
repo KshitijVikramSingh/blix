@@ -9210,3 +9210,64 @@ after                        100 ms            677 ms
 The tick a building completes is no longer a freeze. The click after it still is, and it is the mesh — 380 ms
 of global row sweep, which §99 argued wants amortisation across ticks rather than incrementalisation, and
 which is now unambiguously the next thing in this arc if it is worth continuing before groups.
+
+## 102. The catalogue of ways an order fails, and the freeze at the end of it
+
+From the chair: *"I gave my first command, they stood in place (it was across the map, in the fog), then I
+clicked another spot in the fog relatively closer halfway across the map, they walked and reached, then I
+clicked somewhere around the initial spot again, and the game froze."* And the ask with it: before fixing
+anything, find out what kinds of failure an order to a random spot can meet, because this is behaviour
+territory now and best-effort may read better than accurate.
+
+`--orderprobe` replays that sequence on the real village and then walks a set of deliberately awkward targets.
+It reports, per order: how many bodies went onto the shared field, how many onto their own route, how many were
+**refused** one — and when refused, which of six refusals it was — then samples progress every few seconds,
+because "accepted an order" and "went somewhere" are different claims.
+
+### What it found
+
+```
+target                          outcomes                        order tick   expansions   motion
+far, across the map             20 field, 0 route, 0 refused        164 ms            0   closes steadily
+halfway back                    20 field, 0 route, 0 refused        129 ms            8   MOVES, DOES NOT CLOSE
+far again                       20 field, 0 route, 0 refused        106 ms           20   closes steadily
+deep inside a wood               0 field, 0 route, 20 REFUSED    18,137 ms    5,543,377   stands still
+where they already stand        20 field, 0 route, 0 refused        119 ms       17,723   drifts
+off the map entirely            20 field, 0 route, 0 refused        125 ms            1   walks at the clamp
+```
+
+**The freeze and the stand-still are the same fault.** An order to unreachable ground — and "somewhere in the
+fog" is usually unreachable, because unexplored correlates with dense woodland — goes: transit cannot price the
+goal, the field-entry search finds nothing priced, each body falls back to a full-map A\*, each exhausts the
+250,000-expansion budget, each is truncated back to its own start and refused. Twenty bodies, five and a half
+million cells, **eighteen seconds in one tick**, and every body stands still at the end of it.
+
+So §95's budget is doing exactly what it was written to do and is useless here: it caps a *search*, and an
+order issues twenty of them. A cap per search cannot bound a cost per order.
+
+### The second failure, unrelated and real
+
+The halfway order moves every body — twenty of twenty in motion, fifty-one metres travelled — and closes two
+metres in forty seconds: 91.5, 91.4, 91.7, 89.6 m to go. Motion without progress. Not a stall (the stall clock
+reads under a second), not a refusal, not a cost problem. Something is steering them across the gradient rather
+than down it, and it is invisible to every counter this arc has added because every one of them says the order
+succeeded.
+
+### What the numbers argue for, as design rather than as patch
+
+1. **Resolve the goal once per order, not once per body.** Twenty bodies asking the same unanswerable question
+   twenty times is the whole of the eighteen seconds. The cohort already shares a field; a refusal should be
+   answered once, for the group, and the answer shared.
+2. **Best effort beats refusal, and the chair predicted this.** A body told to walk somewhere it cannot reach
+   should walk as near as it can get. That is what a person would do, it is what the fog makes ordinary — you
+   cannot know the wood is impenetrable until you have been there — and it turns the worst case from "nothing
+   happens for eighteen seconds" into "they set off". The nearest reachable point is available cheaply: the
+   field already knows which cells it can price.
+3. **A budget per order, not per search.** Whatever bound exists must be spent across the cohort, so twenty
+   refusals cost what one does.
+4. **And say so.** A cohort that stops short because the target was unreachable is doing the right thing and
+   looks like a bug. Whatever the interface eventually is, the simulation should be able to report "as close as
+   we could get" rather than leaving the player to infer it.
+
+None of that is implemented here. The instrument is, and it now names all six refusals and samples progress —
+which is what the next design conversation should be argued from.

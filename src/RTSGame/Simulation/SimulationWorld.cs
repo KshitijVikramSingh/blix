@@ -198,6 +198,24 @@ internal sealed class SimulationWorld
     }
     public long PathQueries => pathService.PathQueries;
 
+    /// <summary>
+    /// What became of the bodies in the last orders: on the shared field, on their own route, or refused one.
+    /// </summary>
+    /// <remarks>
+    /// The three outcomes an order can have for a body, which is the vocabulary any behaviour decision here
+    /// needs. Refused is the one that reads as a bug from the chair — the body has an order and does nothing —
+    /// and PathService's failure counters say which of the four refusals it was.
+    /// </remarks>
+    public (long Transit, long SlotPath, long Refused) OrderOutcomes =>
+        (pathService.OrdersOnTransit, pathService.OrdersOnSlotPath, pathService.OrdersRefused);
+
+    /// <summary>Why route requests came back empty, by cause. See PathService.PathNoStartCell.</summary>
+    public (long NoStartCell, long NoGoalCell, long StartUnresolvable, long GoalUnresolvable,
+            long SearchFoundNothing, long TruncatedToStart) RouteRefusals =>
+        (pathService.PathNoStartCell, pathService.PathNoGoalCell, pathService.PathStartUnresolvable,
+         pathService.PathGoalUnresolvable, pathService.PathSearchFoundNothing,
+         pathService.PathTruncatedToStart);
+
     /// <summary>Whether a dropped body found priced ground again. See PathService.FindFieldEntry.</summary>
     /// <summary>What re-rasterising navigation has cost. See NavigationRasterizer.RebuildTicks.</summary>
     public (double Milliseconds, int Rebuilds, double TerrainMs, double RestMs, double ApplyMs) NavRasterCost =>
@@ -2146,11 +2164,26 @@ internal sealed class SimulationWorld
             // crowd split across whatever exits are actually cheapest. Slots are
             // claimed on arrival, not before.
             agent.RequestedDestination = target;
-            if (!BeginFlowTransit(ref agent, target))
+            if (BeginFlowTransit(ref agent, target))
+            {
+                pathService.OrdersOnTransit++;
+            }
+            else
             {
                 agent.ApproachingSlot = true;
                 agent.RequestedDestination = agent.GroupSlot;
-                AssignPath(ref agent, agent.GroupSlot);
+                // <b>Counted, because a body that is refused here stands still and says nothing.</b> That is
+                // the reported symptom — an order given across the map and nobody moves — and it is invisible
+                // from inside the tick: the order was accepted, the group was formed, the slot was assigned,
+                // and the route came back empty.
+                if (AssignPath(ref agent, agent.GroupSlot))
+                {
+                    pathService.OrdersOnSlotPath++;
+                }
+                else
+                {
+                    pathService.OrdersRefused++;
+                }
             }
         }
     }

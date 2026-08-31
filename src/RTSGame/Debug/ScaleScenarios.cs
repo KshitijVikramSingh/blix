@@ -211,6 +211,237 @@ internal static class ScaleScenarios
     /// corner Dijkstra scale with rectangle count. The report from the chair was an order across the whole map
     /// on the standard 600 m village, so that is what this measures.
     /// </remarks>
+    /// <summary>
+    /// Replays the reported sequence — far, then halfway, then far again — and names what each order did.
+    /// </summary>
+    /// <remarks>
+    /// <b>From the chair:</b> "I gave my first command, they stood in place (it was across the map, in the
+    /// fog), then I clicked another spot in the fog relatively closer halfway across the map, they walked and
+    /// reached, then I clicked somewhere around the initial spot again, and the game froze."
+    /// <para>
+    /// Three orders, three different outcomes, and the third one is not the same failure as the first. So this
+    /// runs exactly that and reports, per order: how many bodies went onto the shared field, how many got their
+    /// own route, how many were refused one and stand there — and, when a route is refused, which of the four
+    /// refusals it was. Then it lets the bodies run and reports how far they actually got, because "accepted an
+    /// order" and "went somewhere" are different claims.
+    /// </para>
+    /// <para>
+    /// Fog is not in this: the order path does not consult it, so a target in unexplored ground is only
+    /// incidentally special — it is unexplored because nobody has been there, which correlates with it being
+    /// woodland the router finds awkward, and that correlation is the whole of the connection.
+    /// </para>
+    /// </remarks>
+    public static int RunOrderProbe(float extentMeters, float reliefAmplitudeMetres)
+    {
+        CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
+        var world = SettlementScenarios.BuildVillage(
+            extentMeters, out _, reliefAmplitudeMetres <= 0f ? 32f : reliefAmplitudeMetres);
+        for (var warm = 0; warm < 30; warm++) world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+
+        var movers = new List<AgentId>();
+        foreach (ref readonly var agent in world.Agents.All)
+        {
+            if (agent.IsAlive) movers.Add(agent.Id);
+        }
+
+        var half = extentMeters * 0.5f - 12f;
+        var origin = Centroid(world, movers);
+        Console.WriteLine(
+            $"RTSGame order probe — {world.ExtentMeters:F0} m village, {world.Nodes.LiveCount:N0} nodes, " +
+            $"{movers.Count} people at ({origin.X:F0}, {origin.Y:F0})");
+        Console.WriteLine();
+
+        // Far, halfway, then far again — the reported sequence, in the reported order.
+        var far = new Vector2(-origin.X * 0.9f, -origin.Y * 0.9f);
+        var midway = origin + (far - origin) * 0.5f;
+        // <b>The catalogue, not just the reported sequence.</b> An order to a random spot can fail in more ways
+        // than one, and the point of this probe is to name them all before anything is designed around them. So
+        // after the reported far-mid-far it walks a set of deliberately awkward targets: ground nothing can
+        // stand on, ground across water, ground the body is already on, and ground off the map.
+        var awkward = FindAwkwardTargets(world, movers, extentMeters);
+
+        // Forty simulated seconds an order, not three. The first version ran ninety ticks and reported that
+        // the bodies had moved three metres, which at a villager's pace is exactly right for three seconds and
+        // says nothing at all about whether they were walking or wedged.
+        Order(world, movers, far, "far, across the map", 1200);
+        Order(world, movers, midway, "halfway back", 1200);
+        Order(world, movers, far, "far again", 1200);
+
+        foreach (var (label, target) in awkward)
+        {
+            Order(world, movers, target, label, 600);
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Targets chosen to break an order in a different way each time.
+    /// </summary>
+    /// <remarks>
+    /// Found by looking at the map rather than by hard-coded coordinates, because the interesting ones are
+    /// properties of the ground — the middle of a lake, the middle of a wood — and a coordinate that is a lake
+    /// on one seed is a meadow on the next.
+    /// </remarks>
+    private static List<(string Label, Vector2 Target)> FindAwkwardTargets(
+        SimulationWorld world,
+        List<AgentId> movers,
+        float extentMeters)
+    {
+        var found = new List<(string, Vector2)>();
+        Vector2? deepWater = null;
+        Vector2? deepWood = null;
+        var transform = world.Navigation.Transform;
+        for (var z = 4; z < world.Navigation.Height - 4 && (deepWater is null || deepWood is null); z += 3)
+        for (var x = 4; x < world.Navigation.Width - 4; x += 3)
+        {
+            var cell = new Simulation.Spatial.GridCell(x, z);
+            var surface = world.Terrain.Surface(cell);
+            // Wanted well inside, not on the shore or the treeline: a target one cell into an obstacle is
+            // resolved outward to walkable ground immediately and tests nothing.
+            if (deepWater is null && surface == Simulation.Terrain.TerrainSurface.Impassable &&
+                Surrounded(world, cell, Simulation.Terrain.TerrainSurface.Impassable, 6))
+            {
+                deepWater = transform.CellCenter(cell);
+            }
+
+            if (deepWood is null && surface == Simulation.Terrain.TerrainSurface.Forest &&
+                Surrounded(world, cell, Simulation.Terrain.TerrainSurface.Forest, 6))
+            {
+                deepWood = transform.CellCenter(cell);
+            }
+        }
+
+        if (deepWater is { } water) found.Add(("deep inside impassable ground", water));
+        if (deepWood is { } wood) found.Add(("deep inside a wood", wood));
+        found.Add(("where they already stand", Centroid(world, movers)));
+        found.Add(("off the map entirely", new Vector2(extentMeters, extentMeters)));
+        return found;
+    }
+
+    private static bool Surrounded(
+        SimulationWorld world,
+        Simulation.Spatial.GridCell centre,
+        Simulation.Terrain.TerrainSurface surface,
+        int radius)
+    {
+        for (var dz = -radius; dz <= radius; dz += radius)
+        for (var dx = -radius; dx <= radius; dx += radius)
+        {
+            var cell = new Simulation.Spatial.GridCell(centre.X + dx, centre.Z + dz);
+            if (world.Terrain.Surface(cell) != surface) return false;
+        }
+
+        return true;
+    }
+
+    private static Vector2 Centroid(SimulationWorld world, List<AgentId> movers)
+    {
+        var centre = Vector2.Zero;
+        foreach (var id in movers) centre += world.Agents.Get(id).Position;
+        return movers.Count == 0 ? Vector2.Zero : centre / movers.Count;
+    }
+
+    private static void Order(
+        SimulationWorld world,
+        List<AgentId> movers,
+        Vector2 target,
+        string label,
+        int ticks)
+    {
+        var before = Centroid(world, movers);
+        var outcomesBefore = world.OrderOutcomes;
+        var refusalsBefore = world.RouteRefusals;
+        var routingBefore = world.RoutingCost;
+        var searchBefore = world.PathSearch;
+        var dropsBefore = world.FlowTransitDrops;
+
+        var orderStart = Stopwatch.GetTimestamp();
+        world.QueueMove(movers, target);
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        var orderMs = Stopwatch.GetElapsedTime(orderStart).TotalMilliseconds;
+
+        var worstTick = 0.0;
+        var worstTickAt = 0;
+        var runStart = Stopwatch.GetTimestamp();
+        var trace = new List<(int Tick, float Remaining, int Moving, float WorstStuck)>();
+        for (var tick = 0; tick < ticks; tick++)
+        {
+            var tickStart = Stopwatch.GetTimestamp();
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            var tickMs = Stopwatch.GetElapsedTime(tickStart).TotalMilliseconds;
+            if (tickMs > worstTick)
+            {
+                worstTick = tickMs;
+                worstTickAt = tick;
+            }
+
+            // Sampled rather than summarised: an order that closes half the distance and then stops looks
+            // identical at the end to one that never started, and the difference is the whole question.
+            if ((tick + 1) % (ticks / 4) != 0) continue;
+            var moving = 0;
+            var worstStuck = 0f;
+            foreach (var id in movers)
+            {
+                ref readonly var body = ref world.Agents.Get(id);
+                if (body.Velocity.LengthSquared() > 0.04f) moving++;
+                worstStuck = MathF.Max(worstStuck, body.StuckSeconds);
+            }
+
+            trace.Add((tick + 1, Vector2.Distance(Centroid(world, movers), target), moving, worstStuck));
+        }
+
+        var runMs = Stopwatch.GetElapsedTime(runStart).TotalMilliseconds;
+        var outcomes = world.OrderOutcomes;
+        var refusals = world.RouteRefusals;
+        var routing = world.RoutingCost;
+        var search = world.PathSearch;
+        var drops = world.FlowTransitDrops;
+        var after = Centroid(world, movers);
+        var travelled = Vector2.Distance(before, after);
+        var remaining = Vector2.Distance(after, target);
+
+        Console.WriteLine($"  {label} — target ({target.X:F0}, {target.Y:F0})");
+        Console.WriteLine(
+            $"    outcomes: {outcomes.Transit - outcomesBefore.Transit} on the shared field, " +
+            $"{outcomes.SlotPath - outcomesBefore.SlotPath} on own route, " +
+            $"{outcomes.Refused - outcomesBefore.Refused} REFUSED a route");
+        var noStart = refusals.NoStartCell - refusalsBefore.NoStartCell;
+        var noGoal = refusals.NoGoalCell - refusalsBefore.NoGoalCell;
+        var badStart = refusals.StartUnresolvable - refusalsBefore.StartUnresolvable;
+        var badGoal = refusals.GoalUnresolvable - refusalsBefore.GoalUnresolvable;
+        var nothing = refusals.SearchFoundNothing - refusalsBefore.SearchFoundNothing;
+        var truncated = refusals.TruncatedToStart - refusalsBefore.TruncatedToStart;
+        if (noStart + noGoal + badStart + badGoal + nothing + truncated > 0)
+        {
+            Console.WriteLine(
+                $"    refusals: goal off grid {noGoal}, start off grid {noStart}, " +
+                $"goal unresolvable {badGoal}, start unresolvable {badStart}, " +
+                $"search found nothing {nothing}, truncated to start {truncated}");
+        }
+
+        Console.WriteLine(
+            $"    cost: order tick {orderMs,7:F1} ms | {ticks} ticks {runMs / ticks,6:F2} ms each, " +
+            $"worst {worstTick,7:F1} ms | mesh {routing.MeshMs - routingBefore.MeshMs,6:F1} " +
+            $"tiles {routing.TileMs - routingBefore.TileMs,6:F1} " +
+            $"field {routing.FieldMs - routingBefore.FieldMs,6:F1} ms");
+        Console.WriteLine(
+            $"    search: {search.Expansions - searchBefore.Expansions:N0} cells expanded, " +
+            $"worst single {search.Worst:N0} | transit drops " +
+            $"{drops.Rejected - dropsBefore.Rejected} rejected, " +
+            $"{drops.NoGradient - dropsBefore.NoGradient} no gradient");
+        Console.WriteLine(
+            $"    motion: moved {travelled,6:F1} m over {ticks / 30f:F0} s, still {remaining,6:F1} m out" +
+            (travelled < 2f ? "  <-- STOOD STILL" : string.Empty));
+        foreach (var (tick, left, moving, stuck) in trace)
+        {
+            Console.WriteLine(
+                $"      t+{tick / 30f,4:F0}s | {left,6:F1} m to go | {moving,2} of {movers.Count} moving | " +
+                $"worst stall {stuck,5:F1} s");
+        }
+        Console.WriteLine();
+    }
+
     public static int RunPathProfile(float extentMeters, float reliefAmplitudeMetres, int orders)
     {
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;

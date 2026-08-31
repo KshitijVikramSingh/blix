@@ -247,6 +247,15 @@ public static class Program
             Environment.Exit(0);
         }
 
+        if (args.Contains("--orderprobe"))
+        {
+            var probeExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var probeRelief = Value(args, "--relief-amplitude") is { } probeAmplitude
+                ? float.Parse(probeAmplitude)
+                : 32f;
+            Environment.Exit(ScaleScenarios.RunOrderProbe(probeExtent, probeRelief));
+        }
+
         if (args.Contains("--pathprofile"))
         {
             var profileExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
