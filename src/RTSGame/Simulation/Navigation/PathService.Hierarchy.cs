@@ -70,6 +70,30 @@ internal sealed partial class PathService
     /// terrain revision exactly as the portal graph was. Radius is part of the key because
     /// walkability is: a wider body has fewer rectangles and different crossings.
     /// </remarks>
+    /// <summary>
+    /// Corner-pair climb charges for one mesh, kept as long as the mesh is.
+    /// </summary>
+    /// <remarks>
+    /// Keyed exactly as the mesh is — navigation revision and radius bucket — because that is precisely how
+    /// long the answers stay true: the corners come from the decomposition and the climb comes from the
+    /// heights, and a change to either bumps the revision. Evicted with the meshes, for the same reason.
+    /// </remarks>
+    private readonly Dictionary<(int Nav, int Radius), Dictionary<(int From, int To), float>> cornerClimbs = new();
+
+    internal Dictionary<(int From, int To), float> CornerClimbCache(float agentRadius)
+    {
+        var key = (grid.Revision, RadiusKey(agentRadius));
+        if (cornerClimbs.TryGetValue(key, out var existing)) return existing;
+        foreach (var stale in cornerClimbs.Keys.Where(k => k.Nav != grid.Revision).ToArray())
+        {
+            cornerClimbs.Remove(stale);
+        }
+
+        var created = new Dictionary<(int From, int To), float>();
+        cornerClimbs[key] = created;
+        return created;
+    }
+
     internal (WalkableRectangles Mesh, RectangleIndex Index) Mesh(float agentRadius)
     {
         var key = (grid.Revision, RadiusKey(agentRadius));
@@ -308,7 +332,8 @@ internal sealed partial class PathService
             this,
             agentRadius,
             1f,
-            chargeTurns: true);
+            chargeTurns: true,
+            CornerClimbCache(agentRadius));
 
         var reachable = 0;
         var lost = 0;

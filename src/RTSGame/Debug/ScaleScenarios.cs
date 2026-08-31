@@ -237,6 +237,7 @@ internal static class ScaleScenarios
             var sign = order % 2 == 0 ? 1f : -1f;
             var target = new Vector2(sign * half * 0.9f, -sign * half * 0.9f);
             var before = world.RoutingCost;
+            var climbBefore = world.ClimbCost;
             var start = Stopwatch.GetTimestamp();
             world.QueueMove(movers, target);
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
@@ -247,7 +248,9 @@ internal static class ScaleScenarios
                 $"mesh {after.MeshMs - before.MeshMs,7:F1} ms " +
                 $"({after.MeshBuilds - before.MeshBuilds} builds, {after.MeshRectangles:N0} rects) | " +
                 $"tiles {after.TileMs - before.TileMs,7:F1} ms ({after.TileFills - before.TileFills} fills) | " +
-                $"field {after.FieldMs - before.FieldMs,8:F1} ms ({after.Fields - before.Fields} built)");
+                $"field {after.FieldMs - before.FieldMs,8:F1} ms ({after.Fields - before.Fields} built) | " +
+                $"climb {world.ClimbCost.Calls - climbBefore.Calls:N0} calls, " +
+                $"{world.ClimbCost.Samples - climbBefore.Samples:N0} samples");
             // Twenty quiet ticks after the order, which is where a stall would show up as the bodies
             // actually start moving and ask for what the order did not build.
             var quiet = Stopwatch.GetTimestamp();

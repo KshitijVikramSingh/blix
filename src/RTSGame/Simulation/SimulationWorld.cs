@@ -199,6 +199,9 @@ internal sealed class SimulationWorld
     public long PathQueries => pathService.PathQueries;
 
     /// <summary>Whether a dropped body found priced ground again. See PathService.FindFieldEntry.</summary>
+    /// <summary>What the abstract layer's climb term costs, in calls and height samples. See §97.</summary>
+    public (long Calls, long Samples) ClimbCost => (pathService.ClimbCalls, pathService.ClimbSamples);
+
     /// <summary>Highest local pressure at a transit drop. See FieldEntryPressureCeiling.</summary>
     public float WorstDropPressure => pathService.WorstDropPressure;
 

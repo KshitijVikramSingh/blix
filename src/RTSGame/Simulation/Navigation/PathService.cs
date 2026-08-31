@@ -250,6 +250,7 @@ internal sealed partial class PathService
     /// </remarks>
     internal float ClimbSecondsAlong(float fromX, float fromZ, float toX, float toZ)
     {
+        ClimbCalls++;
         if (!grid.HasRelief) return 0f;
         var dx = toX - fromX;
         var dz = toZ - fromZ;
@@ -258,6 +259,7 @@ internal sealed partial class PathService
         // One sample every four cells — two metres at the half-metre grid — which resolves a landform
         // hundreds of metres across many times over, and capped so a leg the width of the map is bounded.
         var samples = Math.Clamp((int)MathF.Ceiling(cells / 4f), 1, 48);
+        ClimbSamples += samples;
         var climbed = 0f;
         var last = HeightAtPoint(fromX, fromZ);
         for (var i = 1; i <= samples; i++)
@@ -1349,7 +1351,8 @@ internal sealed partial class PathService
             this,
             agentRadius,
             speedScale,
-            chargeTurns);
+            chargeTurns,
+            CornerClimbCache(agentRadius));
         FieldSetupTicks += Stopwatch.GetTimestamp() - fieldStart;
         FlowFieldBuilds++;
         flowFields[key] = costs;
@@ -1676,6 +1679,11 @@ internal sealed partial class PathService
 
     /// <summary>The highest local pressure seen at a transit drop, for choosing the ceiling by measurement.</summary>
     public float WorstDropPressure;
+
+    /// <summary>Climb queries and the height samples they cost. See §97.</summary>
+    public long ClimbCalls;
+
+    public long ClimbSamples;
 
     private GridCell? FindNearestWalkable(
         GridCell origin,

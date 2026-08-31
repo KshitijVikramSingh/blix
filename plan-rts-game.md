@@ -8920,3 +8920,67 @@ game's response to a click — and §95's `LegBetween` question is still the way
 
 The expansion budget stays at 250,000. It never fires on this map any more, which is what a ceiling should
 look like.
+
+## 97. The abstract layer was recomputing the terrain half a million times a click
+
+§96 left the order tick as the largest cost in a click's response: about 430 ms on the village, of which ~290
+was two flow fields. §95 guessed `LegBetween`. It was, and the guess was right for the wrong reason.
+
+### What it was
+
+`LegBetween` charges a corner-to-corner leg the same climb the fine field charges, through
+`ClimbSecondsAlong`, which samples heights along the segment — up to forty-eight of them. The corner Dijkstra
+calls it for every edge relaxation. Measured per order:
+
+```
+climb 496,040 calls, 4,617,012 height samples
+```
+
+Half a million calls and four and a half million samples, **for every click**, recomputing a quantity that
+cannot change: between two fixed corners the climb is a fact about the terrain, and both the corners and the
+terrain are fixed for as long as the mesh is — all three are keyed by the navigation revision. So it is cached
+on the mesh, and every field built on that decomposition inherits what the first one learned.
+
+```
+                field      order tick   climb calls
+before          290 ms      430 ms       496,040
+after            38 ms      158 ms        14,952
+```
+
+**Seven and a half times off the field build**, and the order tick's largest term is now the region tile fills
+at 112-152 ms.
+
+### Two ways it was wrong first, both instructive
+
+**Symmetric keys cost eight times what they saved.** A climb charge is a sum of absolute height differences,
+so reversing a leg changes nothing in exact arithmetic — but it is *sampled*, from one end, so the two
+directions disagree by a sampling artefact. Sharing one entry between them made a leg cheaper one way than the
+other, which is exactly the invariant `Expand` is written around, and the Dijkstra answered by settling
+corners over and over: 290 ms became 2,353 while the calls it was meant to save fell by a factor of
+thirty-three. The tell was that pairing: fewer computations, far more time.
+
+**Then a packed key collided catastrophically.** `(from << 32) | to` is the obvious encoding, and .NET hashes
+a `long` by folding its halves with XOR — for two corner indices under 2^16 that is `from ^ to`, so thousands
+of distinct pairs share a bucket. Half a million entries turned every lookup into a chain walk: 4,487 ms, worse
+than no cache at all, with the relaxation count unchanged. A `ValueTuple` key hashes through
+`HashCode.Combine`, which mixes, and the same code then ran in 38 ms.
+
+Both failures looked like "the cache is slower than the computation", which is nearly always false and was
+worth disbelieving twice. The instrument that caught them both was the pairing of *calls* against *time*:
+when the work goes down and the clock goes up, the answer is never the work.
+
+### Where the click stands
+
+```
+order 1 | 158 ms | tiles 112 ms (7 fills) | field 38 ms (2 built)
+order 2 | 192 ms | tiles 152 ms (9 fills) | field 39 ms (2 built)
+order 3 |  18 ms | tiles  18 ms (1 fill)  | field  0 ms (cached)
+order 4 |   0 ms | nothing to build       | field  0 ms (cached)
+```
+
+From 430 ms to 158, and from a six-second freeze two sections ago to nothing measurable. What is left:
+
+1. **Region tile fills, 112-152 ms** — now the largest term. Seven to nine fills at ~16 ms each, and the same
+   question applies: how much of a tile fill is recomputing something the mesh already knows.
+2. **The 233 ms mesh rebuild on any nav change** (§93 item 4), untouched, and the one an actively building
+   village trips over.
