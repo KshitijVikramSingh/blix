@@ -216,6 +216,30 @@ internal sealed class SimulationWorld
          pathService.PathGoalUnresolvable, pathService.PathSearchFoundNothing,
          pathService.PathTruncatedToStart);
 
+    /// <summary>
+    /// How the last move order's target was resolved, so the game can say "as close as we could get".
+    /// </summary>
+    /// <remarks>
+    /// <b>Explicit, because stopping short for a good reason looks exactly like a bug.</b> A cohort sent into a
+    /// wood it cannot enter, walking to the treeline and halting, is behaving correctly and reads as broken
+    /// unless something says otherwise. The simulation knows which of the three happened — taken as asked,
+    /// moved to the nearest reachable ground, or nowhere near any — and now says so instead of leaving the
+    /// player to infer it from twenty bodies standing in a field.
+    /// </remarks>
+    public bool LastOrderWasBestEffort { get; private set; }
+
+    public bool LastOrderFoundNothing { get; private set; }
+
+    /// <summary>How far the effective target ended up from the one asked for, in metres.</summary>
+    public float LastOrderShortfall { get; private set; }
+
+    /// <summary>Searches refused because their order's pooled allowance was spent.</summary>
+    public long SearchesDeniedByOrderBudget => pathService.SearchesDeniedByOrderBudget;
+
+    /// <summary>How order goals resolved across the run. See PathService.ResolveReachableGoal.</summary>
+    public (long AsAsked, long Moved, long Unreachable) GoalResolutions =>
+        (pathService.GoalsTakenAsAsked, pathService.GoalsMovedToReachable, pathService.GoalsUnreachable);
+
     /// <summary>Whether a dropped body found priced ground again. See PathService.FindFieldEntry.</summary>
     /// <summary>What re-rasterising navigation has cost. See NavigationRasterizer.RebuildTicks.</summary>
     public (double Milliseconds, int Rebuilds, double TerrainMs, double RestMs, double ApplyMs) NavRasterCost =>
@@ -1992,6 +2016,9 @@ internal sealed class SimulationWorld
         var placementChanged = false;
         while (commands.TryDequeue(out var command))
         {
+            // One allowance per command, so two clicks in a tick get one each rather than sharing — the thing
+            // being bounded is a player's order, not the frame it happens to land in.
+            pathService.BeginOrderBudget();
             switch (command)
             {
                 case MoveGroupCommand move:
@@ -2129,7 +2156,52 @@ internal sealed class SimulationWorld
             .ToArray();
         if (members.Length == 0) return;
 
-        var target = Terrain.ClampPosition(move.Target);
+        var requested = Terrain.ClampPosition(move.Target);
+        // <b>Once for the order, not once per body.</b> §102: twenty bodies each discovering that a clearing
+        // inside a wood cannot be entered cost eighteen seconds and left every one of them standing. Whether
+        // the target can be reached at all is a fact about the order, so it is settled here, once, before a
+        // single route is asked for — and settled as best effort, so an unreachable target becomes the nearest
+        // reachable ground rather than a refusal.
+        // <b>A member's own position, not the cohort's centroid.</b> The centroid of twenty scattered bodies is
+        // an average, and an average lands wherever it lands — inside a tree, in a river, in the wall of a
+        // barn — where the decomposition has no rectangle and the reachability question cannot be asked at all.
+        // Measured: the third order of the probe's sequence reported its target unreachable when the same
+        // target had been taken as asked twice, purely because the group had spread out around a wood. A body
+        // is standing where it stands, so its ground is walkable by construction; the one nearest the target is
+        // also the one whose island the answer is about.
+        var anchor = members[0];
+        var anchorDistance = float.PositiveInfinity;
+        var navigationRadius = 0f;
+        foreach (var id in members)
+        {
+            ref readonly var member = ref Agents.Get(id);
+            navigationRadius = MathF.Max(navigationRadius, member.NavigationRadius);
+            var distance = Vector2.DistanceSquared(member.Position, requested);
+            if (distance >= anchorDistance) continue;
+            anchorDistance = distance;
+            anchor = id;
+        }
+
+        var from = Agents.Get(anchor).Position;
+
+        var target = requested;
+        LastOrderShortfall = 0f;
+        LastOrderWasBestEffort = false;
+        LastOrderFoundNothing = false;
+        if (pathService.ResolveReachableGoal(from, requested, navigationRadius) is { } resolved)
+        {
+            target = resolved.Target;
+            LastOrderWasBestEffort = resolved.WasMoved;
+            LastOrderShortfall = resolved.Shortfall;
+        }
+        else
+        {
+            // Nothing the cohort can stand on anywhere near it. Going as far as the clamp is still better than
+            // standing — they walk toward it and stop where the ground stops, which is what a person does when
+            // told to go somewhere that turns out not to exist.
+            LastOrderFoundNothing = true;
+        }
+
         var group = members.Length > 1
             ? MoveGroup.Create(++nextMoveGroupId, target, members, Agents, pathService)
             : null;

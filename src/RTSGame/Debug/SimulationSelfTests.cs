@@ -67,7 +67,7 @@ internal static class SimulationSelfTests
         Check("height field samples elevation and slope", HeightFieldSamplesElevation());
         Check("surface costs prefer a road over mud", SurfaceCostsPreferRoad());
         Check("routes detour around an over-steep hill", RoutesAroundSteepHill());
-        Check("impassable slopes reject a route", ImpassableSlopeRejectsRoute());
+        Check("impassable slopes are walked up to and never crossed", ImpassableSlopeIsNotCrossed());
         Check("placement rejects unsuitable terrain", PlacementRejectsUnsuitableTerrain());
         Check("crowd crosses a traversable terrain ramp", CrowdCrossesTerrainRamp());
         Check("crowd rounds a ramp-cliff corner without sticking", CrowdRoundsTerrainCorner());
@@ -914,7 +914,23 @@ internal static class SimulationSelfTests
         return passed;
     }
 
-    private static bool ImpassableSlopeRejectsRoute()
+    /// <summary>
+    /// A body ordered past an impassable step walks up to it and stops on its own side.
+    /// </summary>
+    /// <remarks>
+    /// <b>This test used to assert the body did not move at all, and that expectation was retired
+    /// deliberately.</b> §103 chose best effort over refusal: an order to somewhere unreachable resolves to the
+    /// nearest ground the body can actually stand on, so a unit told to cross a cliff walks to the foot of it
+    /// rather than standing still with an order it has silently declined. Standing still was measured as the
+    /// worse behaviour — it is what a player reads as a bug, and it was what an eighteen-second freeze looked
+    /// like from the chair.
+    /// <para>
+    /// So the assertion is now the pair that actually matters, and it is stronger than the one it replaces:
+    /// the body must SET OFF, and it must never end up on the far side of the step. The old test could have
+    /// passed with a pathfinder that refused every route in the game.
+    /// </para>
+    /// </remarks>
+    private static bool ImpassableSlopeIsNotCrossed()
     {
         var world = new SimulationWorld();
         var terrain = world.Terrain;
@@ -924,10 +940,28 @@ internal static class SimulationSelfTests
         world.RebuildTerrainNavigation();
 
         var id = world.SpawnAgent(new Vector2(-6f, 0f));
+        var start = world.Agents.Get(id).Position;
         world.QueueMove(new[] { id }, new Vector2(6f, 0f));
-        Tick(world, 60);
-        ref var agent = ref world.Agents.Get(id);
-        return !agent.HasDestination && agent.Position.X < -5.9f;
+        var bestEffort = world.LastOrderWasBestEffort;
+        Tick(world, 240);
+        ref readonly var agent = ref world.Agents.Get(id);
+        var crossed = agent.Position.X > 0.5f;
+        var setOff = agent.Position.X > start.X + 0.5f;
+        if (crossed)
+        {
+            Console.WriteLine($"    the body crossed the step: it is at x {agent.Position.X:F2}");
+            return false;
+        }
+
+        if (!setOff)
+        {
+            Console.WriteLine(
+                $"    the body never set off: x {start.X:F2} to {agent.Position.X:F2}, " +
+                $"order reported best effort: {bestEffort}");
+            return false;
+        }
+
+        return true;
     }
 
     private static bool RoutesAroundSteepHill()

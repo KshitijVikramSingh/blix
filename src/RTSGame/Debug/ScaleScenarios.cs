@@ -403,6 +403,13 @@ internal static class ScaleScenarios
 
         Console.WriteLine($"  {label} — target ({target.X:F0}, {target.Y:F0})");
         Console.WriteLine(
+            "    resolution: " +
+            (world.LastOrderFoundNothing
+                ? "NOTHING REACHABLE anywhere near it — walking at the clamp"
+                : world.LastOrderWasBestEffort
+                    ? $"best effort — nearest reachable ground, {world.LastOrderShortfall:F1} m short of the ask"
+                    : "taken as asked"));
+        Console.WriteLine(
             $"    outcomes: {outcomes.Transit - outcomesBefore.Transit} on the shared field, " +
             $"{outcomes.SlotPath - outcomesBefore.SlotPath} on own route, " +
             $"{outcomes.Refused - outcomesBefore.Refused} REFUSED a route");

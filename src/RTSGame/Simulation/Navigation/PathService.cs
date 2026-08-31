@@ -694,6 +694,14 @@ internal sealed partial class PathService
         float agentSpeed = 0f)
     {
         PathQueries++;
+        if (!OrderBudgetRemains)
+        {
+            // The order's pooled allowance is gone. Refusing here is what makes the bound a bound: the
+            // twentieth body cannot spend what the first nineteen already have.
+            SearchesDeniedByOrderBudget++;
+            return null;
+        }
+
         requestedGoal = terrain.ClampPosition(requestedGoal, agentRadius + BodyFootprint.NavigationMargin);
         if (!grid.TryWorldToCell(start, out var startCell))
         {
@@ -1599,6 +1607,123 @@ internal sealed partial class PathService
     /// should do whatever it did before. Half a per cent of the grid, not a fraction of the answer.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// The nearest point to a requested target that the cohort can actually reach, and whether it moved.
+    /// </summary>
+    /// <remarks>
+    /// <b>Resolved once for an order rather than once per body, which is the whole of §102's eighteen
+    /// seconds.</b> Twenty bodies each discovering that a clearing inside a wood cannot be entered is twenty
+    /// full-map searches for one answer; the answer is a property of the order, not of the body.
+    /// <para>
+    /// Reachability comes from the mesh's connected components, so the test is two array reads rather than a
+    /// search: a target in the cohort's own component is taken as asked, and one outside it walks outward from
+    /// the target until it meets ground in that component. That walk is bounded — past the bound the honest
+    /// answer is "nowhere near it", and the caller decides what to do with that.
+    /// </para>
+    /// <para>
+    /// <b>Best effort by construction.</b> This never refuses: it returns the requested point, a nearer one, or
+    /// nothing at all, and the caller can tell which. A body told to walk somewhere it cannot reach should walk
+    /// as near as it can get — that is what a person does, and with fog it is the ordinary case rather than the
+    /// exception, because a wood is not known to be impassable until somebody has stood at its edge.
+    /// </para>
+    /// </remarks>
+    public (Vector2 Target, bool WasMoved, float Shortfall)? ResolveReachableGoal(
+        Vector2 from,
+        Vector2 requestedGoal,
+        float agentRadius)
+    {
+        var clamped = terrain.ClampPosition(requestedGoal, agentRadius + BodyFootprint.NavigationMargin);
+        if (!grid.TryWorldToCell(from, out var fromCell) ||
+            !grid.TryWorldToCell(clamped, out var goalCell))
+        {
+            return null;
+        }
+
+        var (mesh, meshIndex) = Mesh(agentRadius);
+        var fromRectangle = meshIndex.RectangleAt(fromCell);
+        if (fromRectangle < 0)
+        {
+            // The anchor is somewhere the decomposition does not cover — a pocket too tight for this radius.
+            // Counted apart from an unreachable target because they are different facts: one is about where
+            // the cohort is standing and one is about where it was sent, and reporting the first as the second
+            // is how "nothing reachable" ended up printed for a target that had been reached twice.
+            GoalsAnchorUnplaced++;
+            return null;
+        }
+
+        var component = mesh.ComponentOf(fromRectangle);
+        var goalRectangle = meshIndex.RectangleAt(goalCell);
+        if (goalRectangle >= 0 && mesh.ComponentOf(goalRectangle) == component)
+        {
+            GoalsTakenAsAsked++;
+            return (clamped, false, 0f);
+        }
+
+        // Outward from the target, nearest first, for ground in the cohort's own island.
+        goalWalkStamp ??= new int[grid.Width * grid.Height];
+        if (goalWalkStamp.Length != grid.Width * grid.Height)
+        {
+            goalWalkStamp = new int[grid.Width * grid.Height];
+        }
+
+        goalWalkGeneration++;
+        var queue = goalWalkQueue;
+        queue.Clear();
+        queue.Enqueue(goalCell);
+        goalWalkStamp[grid.Transform.Index(goalCell)] = goalWalkGeneration;
+        var examined = 0;
+        while (queue.TryDequeue(out var current))
+        {
+            if (++examined > ReachableGoalBudget) break;
+            var rectangle = meshIndex.RectangleAt(current);
+            if (rectangle >= 0 && mesh.ComponentOf(rectangle) == component)
+            {
+                var landing = grid.CellCenter(current);
+                GoalsMovedToReachable++;
+                return (landing, true, Vector2.Distance(landing, clamped));
+            }
+
+            for (var i = 0; i < 4; i++)
+            {
+                var offset = NeighborOffsets[i];
+                var next = new GridCell(current.X + offset.X, current.Z + offset.Z);
+                if (!grid.Contains(next)) continue;
+                var index = grid.Transform.Index(next);
+                if (goalWalkStamp[index] == goalWalkGeneration) continue;
+                goalWalkStamp[index] = goalWalkGeneration;
+                queue.Enqueue(next);
+            }
+        }
+
+        GoalsUnreachable++;
+        return null;
+    }
+
+    /// <summary>
+    /// Cells the outward walk from an unreachable target may examine.
+    /// </summary>
+    /// <remarks>
+    /// Generous, because this runs once per order rather than once per body: forty thousand cells is a hundred
+    /// metres of radius on a half-metre grid and a few milliseconds, against the eighteen seconds the twenty
+    /// per-body searches it replaces were costing. Past it, the target is not near anything the cohort can
+    /// stand on and the caller should say so rather than walk them somewhere arbitrary.
+    /// </remarks>
+    private const int ReachableGoalBudget = 40_000;
+
+    private int[]? goalWalkStamp;
+    private int goalWalkGeneration;
+    private readonly Queue<GridCell> goalWalkQueue = new();
+
+    /// <summary>How order goals resolved: as asked, moved to reachable ground, or nowhere near any.</summary>
+    public long GoalsTakenAsAsked { get; private set; }
+
+    public long GoalsMovedToReachable { get; private set; }
+
+    public long GoalsUnreachable { get; private set; }
+
+    /// <summary>Resolutions abandoned because the cohort's anchor was not on the decomposition.</summary>
+    public long GoalsAnchorUnplaced { get; private set; }
+
     public Vector2? FindFieldEntry(
         Vector2 position,
         Vector2 requestedGoal,
@@ -1865,6 +1990,7 @@ internal sealed partial class PathService
             // closes most of the map either could not reach its goal or was steered by a heuristic that had
             // stopped steering.
             PathExpansions++;
+            orderExpansionsSpent++;
             if (currentIndex == goalIndex)
             {
                 PathExpansionsWorst = Math.Max(PathExpansionsWorst, PathExpansions - expansionsAtEntry);
@@ -1881,7 +2007,7 @@ internal sealed partial class PathService
                 bestIndex = currentIndex;
             }
 
-            if (PathExpansions - expansionsAtEntry >= ExpansionBudget)
+            if (PathExpansions - expansionsAtEntry >= ExpansionBudget || !OrderBudgetRemains)
             {
                 // Out of budget with the goal unreached. Handing back the partial route beats both
                 // alternatives: a null makes a reachable destination look unreachable and the body gives up,
@@ -2219,8 +2345,32 @@ internal sealed partial class PathService
     private const float HeuristicWeight = 1f;
 
     /// <summary>
-    /// Cells one search may close before it gives up and hands back what it has.
+    /// Cells every search issued for ONE order may close between them.
     /// </summary>
+    /// <remarks>
+    /// <b>Per order, because a budget per search cannot bound the cost of an order that issues twenty.</b>
+    /// §102: each body's search stopped politely at its own 250,000 and the tick still took eighteen seconds,
+    /// because twenty of them ran. This is the pooled allowance — once it is spent, the remaining bodies get no
+    /// search at all and fall back to the cohort's field or to standing where they are, which is the same
+    /// best-effort answer the goal resolution gives and costs nothing.
+    /// <para>
+    /// Reset when a command batch begins, not per tick: the thing being bounded is a player's click.
+    /// </para>
+    /// </remarks>
+    private const int OrderExpansionBudget = 300_000;
+
+    private long orderExpansionsSpent;
+
+    /// <summary>Opens a fresh allowance for one batch of commands. See OrderExpansionBudget.</summary>
+    public void BeginOrderBudget() => orderExpansionsSpent = 0;
+
+    /// <summary>Whether this order still has search left to spend.</summary>
+    private bool OrderBudgetRemains => orderExpansionsSpent < OrderExpansionBudget;
+
+    /// <summary>Searches refused outright because the order's pooled allowance was gone.</summary>
+    public long SearchesDeniedByOrderBudget { get; private set; }
+
+    /// <summary>Cells one search may close before it gives up and hands back what it has.</summary>
     /// <remarks>
     /// <b>A ceiling on the worst case, and NOT a cure for the freeze — those turned out to be different
     /// numbers.</b> An expansion costs about 2.6 microseconds here, so this is roughly 650 ms: half of what

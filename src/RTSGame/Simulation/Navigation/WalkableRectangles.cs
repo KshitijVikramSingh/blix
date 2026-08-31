@@ -87,6 +87,58 @@ internal sealed class WalkableRectangles
     public IReadOnlyList<Crossing> Crossings => crossings;
 
     /// <summary>Crossings on the border of one rectangle, in ascending crossing order.</summary>
+    /// <summary>
+    /// Which connected region of walkable ground each rectangle belongs to.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reachability, which this decomposition already knew and never said.</b> Two rectangles joined by a
+    /// crossing are walkable one to the other, so the connected components of the crossing graph are exactly
+    /// the islands of ground a body can move within — and asking "can I get there from here" becomes two array
+    /// reads instead of a search. §102 measured what not having this costs: an order to a clearing inside a
+    /// wood sent twenty bodies to exhaust a quarter of a million cells each, eighteen seconds, to discover
+    /// something a component label answers immediately.
+    /// <para>
+    /// Union-find with path halving, built once with the mesh and shared by every field on it. About seventeen
+    /// thousand crossings on a village, which is a millisecond of work to save eighteen seconds of searching.
+    /// </para>
+    /// </remarks>
+    public int ComponentOf(int rectangle)
+    {
+        components ??= BuildComponents();
+        return rectangle >= 0 && rectangle < components.Length ? components[rectangle] : -1;
+    }
+
+    private int[]? components;
+
+    private int[] BuildComponents()
+    {
+        var parent = new int[rectangles.Count];
+        for (var i = 0; i < parent.Length; i++) parent[i] = i;
+
+        int Find(int node)
+        {
+            while (parent[node] != node)
+            {
+                parent[node] = parent[parent[node]];
+                node = parent[node];
+            }
+
+            return node;
+        }
+
+        foreach (var crossing in crossings)
+        {
+            var a = Find(crossing.RectangleA);
+            var b = Find(crossing.RectangleB);
+            if (a != b) parent[a] = b;
+        }
+
+        // Flattened to representatives so a caller comparing two labels is comparing numbers.
+        var labels = new int[parent.Length];
+        for (var i = 0; i < labels.Length; i++) labels[i] = Find(i);
+        return labels;
+    }
+
     public ReadOnlySpan<int> CrossingsOf(int rectangle) => rectangleCrossings.AsSpan(
         crossingStart[rectangle],
         crossingStart[rectangle + 1] - crossingStart[rectangle]);

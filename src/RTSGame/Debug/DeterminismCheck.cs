@@ -105,6 +105,14 @@ internal static class DeterminismCheck
             "already diverged in a decision.",
         ["SimulationWorld.collisionSystem"] = "per-tick scratch; contact results land on bodies within the tick.",
         ["SimulationWorld.agentIndex"] = "rebuilt from body positions every tick, and those are fingerprinted.",
+        ["SimulationWorld.LastOrderWasBestEffort"] =
+            "what the last order's goal resolution decided, kept so the game can say 'as close as we could " +
+            "get'. Written by every move order before any route is asked for and read by nothing the " +
+            "simulation does, so it cannot carry a difference into a decision — and it is derived from the " +
+            "target and the navigation mesh, both of which are fingerprinted.",
+        ["SimulationWorld.LastOrderFoundNothing"] = "as LastOrderWasBestEffort: a report, not an input.",
+        ["SimulationWorld.LastOrderShortfall"] =
+            "metres between the target asked for and the one used, for the same report. Nothing reads it back.",
         ["SimulationWorld.placementHits"] = "query result buffer, refilled before each read.",
         ["SimulationWorld.holdPositionHits"] = "query result buffer, refilled before each read.",
         ["EconomySystem.tasks"] =

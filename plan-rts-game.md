@@ -9271,3 +9271,69 @@ succeeded.
 
 None of that is implemented here. The instrument is, and it now names all six refusals and samples progress —
 which is what the next design conversation should be argued from.
+
+## 103. Best effort, resolved once, budgeted per order, and said out loud
+
+§102 catalogued how an order fails and argued for four changes. All four are in, in the order they were asked
+for, and they turn out to be one change wearing four hats — which is the first evidence that "group" belongs
+here rather than after.
+
+### The four
+
+**1. Best effort instead of refusal.** A target the cohort cannot reach resolves to the nearest ground it can,
+and the bodies set off. This is not only cheaper, it is more truthful: with fog, a wood is not known to be
+impassable until somebody has stood at its edge, so walking to the treeline and stopping is what actually
+happened rather than a failure to obey.
+
+**2. Resolved once per order, not once per body.** The mesh already knew reachability and never said so — two
+rectangles joined by a crossing are walkable one to the other, so the connected components of the crossing
+graph are the islands of ground a body can move within. `WalkableRectangles.ComponentOf` is a union-find built
+with the mesh and shared by every field on it: about a millisecond, to replace a question twenty bodies were
+each answering with a quarter of a million cell expansions.
+
+**3. A budget per order rather than per search.** §95's cap stopped each search politely at 250,000 and the
+tick still took eighteen seconds, because twenty ran. There is now a pooled allowance opened per command; when
+it is gone, the remaining bodies get the cohort's field or stay where they are, which is the same best-effort
+answer and costs nothing.
+
+**4. Said out loud.** `LastOrderWasBestEffort`, `LastOrderShortfall` and `LastOrderFoundNothing` — because a
+cohort that stops short for a good reason is behaving correctly and reads as broken. The simulation knows which
+of the three happened and now reports it instead of leaving the player to infer it from bodies standing in a
+field.
+
+### Measured, on the case that froze
+
+```
+                            before                          after
+order tick               18,137 ms                        99.5 ms
+cells expanded            5,543,377                            23
+outcomes           0 field, 20 REFUSED         20 field, 0 refused
+resolution                        —    best effort, 8.7 m short
+motion                   stood still     19.3 m in 20 s, closing
+```
+
+And the whole catalogue now resolves honestly: far targets taken as asked, unreachable ones moved 6.2 and 8.7
+metres to reachable ground, off-map clamped, and nobody refused anywhere.
+
+### Two things this got wrong first
+
+**The cohort's centroid is not a place.** Reachability was first asked from the average of twenty positions,
+and an average lands wherever it lands — inside a tree, in a river, in the wall of a barn — where the
+decomposition has no rectangle and the question cannot be asked at all. The probe caught it immediately by
+reporting a target unreachable that had been reached twice in the same run. It asks from the member nearest the
+target now: a body is standing where it stands, so its ground is walkable by construction, and the one nearest
+the target is the one whose island the answer is about. "Where the group is" turns out to need a definition,
+which is a groups question arriving early.
+
+**A test encoded the behaviour being replaced.** "Impassable slopes reject a route" asserted that a body
+ordered across a cliff does not move. That was the old intent, and best effort contradicts it deliberately. The
+invariant worth keeping is not "an impossible order produces no movement" but "a body never ends up on the far
+side", so the test now asserts both halves — it must set off, and it must not cross. That is stronger than what
+it replaced, which could have passed with a pathfinder that refused every route in the game.
+
+### What is still open, and where groups start
+
+The halfway order still moves twenty bodies fifty-one metres and closes two (§102). Nothing here touched it:
+the order resolves as asked, everyone gets the field, everyone walks, and the cohort does not approach. That is
+a steering or a formation question rather than a routing one, and it is the first item of the groups arc rather
+than the last of this one.
