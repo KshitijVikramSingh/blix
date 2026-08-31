@@ -424,6 +424,7 @@ internal static class ScaleScenarios
                     : "taken as asked"));
         Console.WriteLine(
             $"    outcomes: {outcomes.Transit - outcomesBefore.Transit} on the shared field, " +
+            $"{outcomes.FieldEntry - outcomesBefore.FieldEntry} joining it at an entry, " +
             $"{outcomes.SlotPath - outcomesBefore.SlotPath} on own route, " +
             $"{outcomes.Refused - outcomesBefore.Refused} REFUSED a route");
         var noStart = refusals.NoStartCell - refusalsBefore.NoStartCell;
@@ -710,8 +711,9 @@ internal static class ScaleScenarios
             $"{refusals.Unpriced - coldRefusalsBefore.Unpriced} on walkable ground it could not price, " +
             $"{refusals.NoFooting - coldRefusalsBefore.NoFooting} standing where the body does not fit" +
             (refusals.NoFooting > coldRefusalsBefore.NoFooting
-                ? $" (overhanging the cell's clearance by up to {refusals.WorstShortfall * 100f:F0} cm " +
-                  $"of a {AgentDefaults.RoutingRadius * 100f:F0} cm body)"
+                ? $" (worst cell offers {refusals.WorstClearance * 100f:F0} cm of clearance to a body " +
+                  $"needing {(AgentDefaults.RoutingRadius + BodyFootprint.NavigationMargin) * 100f:F0}, " +
+                  $"so it fails by {refusals.WorstShortfall * 100f:F0} cm)"
                 : string.Empty));
 
         // Stages summed, accumulators reported apart. Adding the two together is how this line first

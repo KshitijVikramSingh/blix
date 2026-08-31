@@ -75,6 +75,9 @@ internal static class SimulationSelfTests
         Check("a cached climb outlives a building and not a hill", ACachedClimbOutlivesABuildingAndNotAHill());
         Check("terrain-aware simulations stay deterministic", TerrainSimulationsMatch());
         Check("repath recovers from a nearby invalid start cell", RepathRecoversFromInvalidStart());
+        Check(
+            "an order from ground the body does not fit on joins the field",
+            AnOrderFromMarginalGroundJoinsTheField());
         Check("placement uses purpose-specific colliders", PlacementUsesColliderQuery());
         Check("collider queries separate self, ally and enemy", ColliderRelationsAreFiltered());
         Check("head-on allies steer past without overlap", HeadOnAgentsPass());
@@ -1308,6 +1311,90 @@ internal static class SimulationSelfTests
         var fault = DeterminismCheck.Diverges(first, second, 600);
         if (fault is not null) Console.WriteLine($"    {fault}");
         return fault is null;
+    }
+
+    /// <summary>
+    /// A body ordered from ground its own cell will not admit joins the shared field rather than
+    /// searching the map for its slot.
+    /// </summary>
+    /// <remarks>
+    /// <b>§116, and the number it guards is 1,254 ms.</b> The click after a placement change spent 70% of
+    /// itself on two cross-map searches, and the cause was two bodies resting a hand's width over a clearance
+    /// line beside a wall: <c>SampleFlowGradient</c> reads the cost at the body's own cell, gets infinity and
+    /// refuses, where <c>FindPath</c> would have resolved that start outward and routed. So the order path
+    /// answered a fifteen-centimetre overhang with a quarter of a million cell expansions, and one of the two
+    /// bodies got nothing for it.
+    /// <para>
+    /// <b>The precondition is asserted, not assumed.</b> This test is only meaningful while the body it places
+    /// really is standing somewhere the grid refuses it and really is physically clear of the block — a setup
+    /// that quietly stops reproducing the condition would go on passing and guard nothing. Both are checked
+    /// and both fail loudly.
+    /// </para>
+    /// <para>
+    /// What it asserts is the reason, not the cost: exactly one <see cref="RouteReason.OrderFieldEntry"/> and
+    /// no <see cref="RouteReason.OrderSlot"/>. A cost threshold would pass on a small map for the wrong
+    /// reason, and the whole finding was that a count of queries cannot tell two situations apart.
+    /// </para></remarks>
+    private static bool AnOrderFromMarginalGroundJoinsTheField()
+    {
+        var world = new SimulationWorld();
+        world.QueueToggleObstacle(Vector2.Zero);
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        if (!world.TryGetPlacementCell(Vector2.Zero, out var blockCell)) return false;
+
+        const float radius = AgentDefaults.Radius;
+        var center = world.Placement.Transform.CellCenter(blockCell);
+        var half = world.Placement.Transform.CellSize * 0.5f;
+        // <b>Inside the cell beside the block, at the far edge of it.</b> That cell's centre is half a cell
+        // from the block, so it offers a quarter-metre of clearance and refuses a 37 cm body — while a body
+        // standing at its far edge is 45 cm from the block and physically fine. That gap between "where the
+        // body is" and "what its cell says" is the whole of §116.
+        //
+        // allowEmbedded because the spawn nudge exists precisely to prevent this: it walks a body out to
+        // ground its radius fits on, which is the right default and would erase the case under test.
+        var navigationCell = world.Navigation.Transform.CellSize;
+        var beside = center - new Vector2(half + navigationCell * 0.9f, 0f);
+        var marginal = world.SpawnAgent(beside, radius: radius, allowEmbedded: true);
+        var companion = world.SpawnAgent(beside - new Vector2(3f, 0f), radius: radius);
+
+        // <b>The cell the body is actually in, not the one it was aimed at.</b> Spawning can adjust a
+        // position, and a precondition asserted about somewhere the body is not would pass while guarding
+        // nothing — which is exactly the failure this test is written to prevent one level up.
+        var standing = world.Agents.Get(marginal).Position;
+        if (!world.Navigation.TryWorldToCell(standing, out var cell)) return false;
+        var cellAdmitsBody = world.Navigation.IsWalkable(cell, radius);
+        var bodyIsClear = world.IsAgentGeometryValid(marginal);
+        if (cellAdmitsBody || !bodyIsClear)
+        {
+            Console.WriteLine(
+                $"    marginal-ground PRECONDITION lost: cell admits body={cellAdmitsBody} " +
+                $"(clearance {world.Navigation.Clearance(cell):F3} m, needs " +
+                $"{radius + BodyFootprint.NavigationMargin:F3}), body clear of block={bodyIsClear}");
+            return false;
+        }
+
+        var target = new Vector2(11f, 11f);
+        var routesBefore = world.Routes.Snapshot();
+        world.QueueMove(new[] { marginal, companion }, target);
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        var rows = world.Routes.Since(routesBefore);
+        var entries = rows.Where(row => row.Reason == RouteReason.OrderFieldEntry).Sum(row => row.Queries);
+        var slotPaths = rows.Where(row => row.Reason == RouteReason.OrderSlot).Sum(row => row.Queries);
+
+        // And it has to actually get there: an entry hop that is a dead end would satisfy everything above.
+        Tick(world, 400 * WalkingPace);
+        ref var agent = ref world.Agents.Get(marginal);
+        var arrived = Vector2.Distance(agent.Position, target) < 3f;
+        var passed = entries == 1 && slotPaths == 0 && arrived;
+        if (!passed) Console.WriteLine(
+            $"    marginal-ground entries={entries} slotPaths={slotPaths} arrived={arrived} " +
+            $"residual={Vector2.Distance(agent.Position, target):F2} m " +
+            $"expansions={rows.Sum(row => row.Expansions)} " +
+            $"reasons=[{string.Join(", ", rows.Select(row => $"{row.Reason}x{row.Queries}"))}] " +
+            $"refusals={world.GradientRefusals} outcomes={world.OrderOutcomes} " +
+            $"stoodAt=({standing.X:F3},{standing.Y:F3}) cell=({cell.X},{cell.Z}) " +
+            $"clearance={world.Navigation.Clearance(cell):F3}");
+        return passed;
     }
 
     private static bool RepathRecoversFromInvalidStart()

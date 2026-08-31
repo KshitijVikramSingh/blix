@@ -10268,3 +10268,73 @@ fail to find a goal 503 cells away is the weak-heuristic finding §95 already re
 a case that should now stop arising rather than the click's problem.
 
 Gate 3/3 green.
+
+## 117. The order path gets the answer the drop path has had since §96
+
+§116 attributed the click after a placement change and found the 1,254 ms was two bodies resting a hand's
+width over a clearance line: unroutable to `SampleFlowGradient`, which reads the cost at the body's own cell
+and gets infinity, and perfectly routable to `FindPath`, which resolves such a start outward before searching.
+The order path answered that with a cross-map A*.
+
+The fix is `TryEnterFieldOnOrder`, and it is not new code so much as a wire that was missing. §96 built
+`FindFieldEntry` for a body dropped mid-journey — *where is the nearest cell this field can serve* — and it has
+been costing two cells and half a millisecond in the same profile ever since. `ApplyMove` now asks it before
+falling back to a search, sets `SeekingFieldEntry`, and `RejoinFieldTransit` puts the body on the shared field
+when it arrives. **The crowd gate is kept**: above `FieldEntryPressureCeiling` a body still solves its own
+route, because a body that solves its own route can pick a different exit and in a pen that diversity is the
+behaviour both pen-distribution self-tests assert.
+
+### Measured, three runs each
+
+```
+                         before        after
+the click             ~1793.6 ms     ~524.9 ms     3.4x faster
+of which pathfinding  ~1254.2 ms       ~3.3 ms      380x less
+cells expanded           300,000             6
+bodies answered            1 of 2        2 of 2
+```
+
+Three runs at 523.7 / 528.3 / 522.7 ms, inside 1%. **The pathological term is gone rather than reduced**, and
+there is a second reading that says so: §116 measured this same click at 500 ms under `--orders 2`, where no
+body happened to be standing over a clearance line and the fallback never fired. The click now costs what it
+costs when nothing goes wrong.
+
+### The test, and the precondition it asserts rather than assumes
+
+*an order from ground the body does not fit on joins the field* puts a body at the far edge of the cell beside
+a block — that cell's centre offers 25 cm of clearance to a body needing 40.5, while a body at its far edge is
+45 cm from the block and physically fine — orders it across the map with a companion, and asserts **the
+reason**: exactly one `OrderFieldEntry` and no `OrderSlot`. Then it walks the body to the target, because an
+entry hop that is a dead end would satisfy everything above.
+
+Two things it does deliberately:
+
+- **It checks where the body actually is, not where it was aimed.** The first version asserted the precondition
+  about the intended position and passed while guarding nothing — the spawn nudge had walked the body out to
+  ground its radius fits on, which is the right default and erases the case. `allowEmbedded` keeps it.
+- **It asserts the reason and not a cost.** A threshold on expansions passes on a small map for the wrong
+  reason, and the whole of §116 was that a count cannot tell two situations apart.
+
+Verified against its own absence: with the fallback stubbed out it reports
+`slotPaths=1, reasons=[OrderSlotx1], refusals=(0,0,0,1, 0.155, 0.25)` and fails.
+
+### A figure corrected
+
+§116 said the bodies overhung by "up to 12 cm of a 37 cm body". That is the overhang against the radius; the
+predicate that actually refuses them is `IsWalkable`, which wants radius **plus `NavigationMargin`** — so the
+shortfall is 15.5 cm, against a cell offering 25 cm where 40.5 is needed. The profile now prints the clearance
+and the requirement rather than a difference, because a difference against the wrong side of a margin is a
+number no predicate in the codebase uses.
+
+### What the click is now
+
+```
+the click  ~525 ms   mesh 326 (62%) | tiles 142 (27%) | field 51 (10%) | A* 3.3 (0.6%)
+```
+
+So §99's mesh amortisation is now the largest term — which is what §99 and §101 both nominated, and it is
+finally the right answer for the right reason rather than the largest number that happened to be printed. The
+raster's ~70 ms sits beside it, of which ~25 is a whole-map apply that could be windowed. The weak heuristic
+(§95) keeps no debt here at all: it is a ceiling on a case the order path no longer creates.
+
+Gate 3/3 green, including the two pen-distribution tests that guard the crowd gate.

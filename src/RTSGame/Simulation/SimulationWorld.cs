@@ -218,8 +218,9 @@ internal sealed class SimulationWorld
     /// needs. Refused is the one that reads as a bug from the chair — the body has an order and does nothing —
     /// and PathService's failure counters say which of the four refusals it was.
     /// </remarks>
-    public (long Transit, long SlotPath, long Refused) OrderOutcomes =>
-        (pathService.OrdersOnTransit, pathService.OrdersOnSlotPath, pathService.OrdersRefused);
+    public (long Transit, long FieldEntry, long SlotPath, long Refused) OrderOutcomes =>
+        (pathService.OrdersOnTransit, pathService.OrdersOnFieldEntry,
+         pathService.OrdersOnSlotPath, pathService.OrdersRefused);
 
     /// <summary>
     /// How bodies have left cohorts, by reason. See <see cref="CohortDeparture"/>.
@@ -315,10 +316,11 @@ internal sealed class SimulationWorld
         (pathService.FlowTransitDropsRejected, pathService.FlowTransitDropsNoGradient);
 
     /// <summary>Why the shared field had no direction to give, by cause. See PathService.GradientRefusedOffGrid.</summary>
-    public (long OffGrid, long NoGoal, long Unpriced, long NoFooting, float WorstShortfall) GradientRefusals =>
+    public (long OffGrid, long NoGoal, long Unpriced, long NoFooting,
+            float WorstShortfall, float WorstClearance) GradientRefusals =>
         (pathService.GradientRefusedOffGrid, pathService.GradientRefusedNoGoal,
          pathService.GradientRefusedUnpriced, pathService.GradientRefusedNoFooting,
-         pathService.GradientNoFootingWorstShortfall);
+         pathService.GradientNoFootingWorstShortfall, pathService.GradientNoFootingWorstClearance);
 
     /// <summary>
     /// Who asked for routing, what it cost them, and how it ended. See <see cref="RouteAttribution"/>.
@@ -2347,6 +2349,10 @@ internal sealed class SimulationWorld
             {
                 pathService.OrdersOnTransit++;
             }
+            else if (TryEnterFieldOnOrder(ref agent, target))
+            {
+                pathService.OrdersOnFieldEntry++;
+            }
             else
             {
                 agent.ApproachingSlot = true;
@@ -3622,6 +3628,48 @@ internal sealed class SimulationWorld
         }
 
         foreach (var id in retired) moveGroups.Remove(id);
+    }
+
+    /// <summary>
+    /// Walks a body the field refused to the nearest cell the field can serve, so it can join there.
+    /// </summary>
+    /// <remarks>
+    /// <b>§116: the same question, asked twice, answered differently.</b> A body whose own cell does not admit
+    /// its radius — resting twelve centimetres over a clearance line, beside a wall or a tree, which from the
+    /// chair is a body standing on open ground — is unroutable to <c>SampleFlowGradient</c>, which reads the
+    /// cost at that cell and gets infinity, and perfectly routable to <c>FindPath</c>, which resolves such a
+    /// start outward before searching. So the order path used to answer a twelve-centimetre overhang with a
+    /// cross-map A*: measured at 1,254 ms of a 1,794 ms click, for one truncated route and one body that got
+    /// nothing at all.
+    /// <para>
+    /// The answer is not new. §96 built <see cref="PathService.FindFieldEntry"/> for a body dropped
+    /// mid-journey — <em>where is the nearest cell this field can serve</em> — and in the same profile that
+    /// costs two cells and half a millisecond. This wires it into the order path, where it always belonged.
+    /// </para>
+    /// <para>
+    /// <b>The crowd gate is kept, deliberately.</b> Under pressure a dropped body solves its own route,
+    /// because a body that solves its own route can pick a different exit and in a pen that diversity is the
+    /// whole behaviour — both pen-distribution self-tests assert it and both failed when every dropped body
+    /// was put on one shared gradient. An order given inside a pen is the same situation, so it gets the same
+    /// rule rather than a second one.
+    /// </para></remarks>
+    private bool TryEnterFieldOnOrder(ref AgentState agent, Vector2 target)
+    {
+        var pressure = Navigation.TryWorldToCell(agent.Position, out var cell)
+            ? Congestion.At(cell)
+            : 0f;
+        if (pressure >= FieldEntryPressureCeiling) return false;
+        var entry = pathService.FindFieldEntry(
+            agent.Position,
+            target,
+            agent.NavigationRadius,
+            agentSpeed: agent.MaximumSpeed);
+        if (entry is not { } joinPoint) return false;
+        if (!AssignPath(ref agent, joinPoint, RouteReason.OrderFieldEntry)) return false;
+        // After the assignment, because AssignPath clears it — and RequestedDestination is left as the real
+        // target, which is the difference RejoinFieldTransit reads to know this body is on an escape hop.
+        agent.SeekingFieldEntry = true;
+        return true;
     }
 
     /// <summary>

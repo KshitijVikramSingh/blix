@@ -1330,14 +1330,18 @@ internal sealed partial class PathService
             }
             else
             {
-                // <b>By how much, because "does not fit" is a claim about a margin.</b> The routing radius is
-                // the body's own radius here — RoutingRadius aliases Radius deliberately — so this is not a
-                // conservative predicate refusing a body that is really fine. A shortfall of centimetres and
-                // a shortfall of a metre are still different situations: the first is a body resting on the
-                // clearance boundary and the second is a body inside something.
+                // <b>By how much, measured against the predicate that actually refused it.</b> A shortfall of
+                // centimetres and a shortfall of a metre are different situations — a body resting on the
+                // clearance boundary, and a body inside something — and only the first is what this turned out
+                // to be. The margin is part of the test (IsWalkable wants radius + NavigationMargin), so it is
+                // part of the figure: leaving it out understates the overhang by 3.5 cm and quotes a number no
+                // predicate in the codebase uses.
                 GradientRefusedNoFooting++;
                 GradientNoFootingWorstShortfall = MathF.Max(
-                    GradientNoFootingWorstShortfall, agentRadius - grid.Clearance(current));
+                    GradientNoFootingWorstShortfall,
+                    agentRadius + BodyFootprint.NavigationMargin - grid.Clearance(current));
+                GradientNoFootingWorstClearance = MathF.Min(
+                    GradientNoFootingWorstClearance, grid.Clearance(current));
             }
             return Vector2.Zero;
         }
@@ -1985,8 +1989,11 @@ internal sealed partial class PathService
     /// <summary>The body's own cell does not admit a body of its radius, so nothing can price it.</summary>
     public long GradientRefusedNoFooting;
 
-    /// <summary>Metres by which the worst such body overhung the clearance of the cell it stood in.</summary>
+    /// <summary>Metres by which the worst such body failed its cell's clearance test.</summary>
     public float GradientNoFootingWorstShortfall;
+
+    /// <summary>The least clearance any refused body was standing in, for the same figure read the other way.</summary>
+    public float GradientNoFootingWorstClearance = float.PositiveInfinity;
 
     public long FlowTransitDropsRejected;
 
@@ -1996,6 +2003,8 @@ internal sealed partial class PathService
 
     /// <summary>How orders ended for the bodies given them. See SimulationWorld.OrderOutcomes.</summary>
     public long OrdersOnTransit;
+
+    public long OrdersOnFieldEntry;
 
     public long OrdersOnSlotPath;
 

@@ -25,7 +25,26 @@ namespace RTSGame.Simulation.Navigation;
 /// </para></remarks>
 internal enum RouteReason
 {
-    /// <summary>A move order whose body the shared field refused, walking to its formation slot instead.</summary>
+    /// <summary>
+    /// A move order whose body the shared field refused, hopping onto the field at the nearest cell it can
+    /// serve.
+    /// </summary>
+    /// <remarks>
+    /// <b>§116's answer to the click.</b> The field refuses a body whose own cell does not admit its radius —
+    /// a body resting twelve centimetres over a clearance line beside a wall — and the order path used to
+    /// answer that with a cross-map search, 1,254 ms of a 1,794 ms click for one truncated route and one
+    /// refusal. <see cref="FieldEntry"/> had solved the identical problem for a body dropped mid-journey since
+    /// §96 and was never wired in here. Short by construction, and it should read short.
+    /// </remarks>
+    OrderFieldEntry,
+    /// <summary>
+    /// A move order whose body the shared field refused and for which no field entry could be found either.
+    /// </summary>
+    /// <remarks>
+    /// The last resort, and the expensive one: a full search to the body's formation slot. Under crowd
+    /// pressure it is also the deliberate one — see <see cref="TransitStranded"/> for why a body in a crowd is
+    /// left to solve its own route.
+    /// </remarks>
     OrderSlot,
     /// <summary>A move order given to a body with no cohort to share a field with.</summary>
     SoloMove,
