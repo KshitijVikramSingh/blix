@@ -697,15 +697,47 @@ internal static class SettlementScenarios
     /// not against a synthetic one. The difference is the whole finding: a sculpted test world decomposes into
     /// 562 rectangles and a real village into far more, and the flow field's cost follows the rectangles.
     /// </remarks>
+    /// <summary>
+    /// How many of each trade a village is founded with, and what time of day it starts.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because "shared, deliberately" was true of the method and false of its arguments.</b>
+    /// <see cref="Populate"/> carries a comment saying the headless gate and the live game use one settlement
+    /// definition so the two cannot drift — and they had drifted anyway, in the call: the gate founded twelve
+    /// farms, seven cutters and seven carts at dawn, and the game founded eight, four and five at
+    /// <c>StartAtSeconds(3100)</c>. Nineteen people against thirteen, at different hours.
+    /// <para>
+    /// That is not a cosmetic difference. §120 went looking for a stall a player had reported on a click into
+    /// the fog and could not reproduce it, because the fixture was ordering a different village about at a
+    /// different time of day. A shared method with unshared arguments is two definitions wearing one name.
+    /// </para></remarks>
+    internal readonly record struct VillageRecipe(
+        int Farms,
+        int Woodcutters,
+        int Quarriers,
+        int Carts,
+        int Wagons,
+        float StartSeconds)
+    {
+        /// <summary>What the year-long gate legs assert about.</summary>
+        public static VillageRecipe Gate { get; } = new(12, 7, 1, 7, 0, 0f);
+
+        /// <summary>What `--village` actually founds, which is what anybody judging from the chair sees.</summary>
+        public static VillageRecipe AsPlayed { get; } = new(8, 4, 1, 5, 0, 3100f);
+    }
+
     internal static SimulationWorld BuildVillage(
         float extentMeters,
         out NodeId granary,
         float reliefAmplitudeMetres = 0f,
         Region region = Region.Downland,
         Archetype archetype = Archetype.SplitValley,
-        uint mapSeed = 0x5EED1234u)
+        uint mapSeed = 0x5EED1234u,
+        VillageRecipe? recipe = null)
     {
+        var built = recipe ?? VillageRecipe.Gate;
         var world = new SimulationWorld(extentMeters);
+        if (built.StartSeconds > 0f) world.StartAtSeconds(built.StartSeconds);
         if (reliefAmplitudeMetres > 0f)
         {
             world.Terrain.SetRegion(region);
@@ -720,11 +752,11 @@ internal static class SettlementScenarios
 
         granary = Populate(
             world,
-            Farms,
-            Woodcutters,
-            Quarriers,
-            Carts,
-            Wagons,
+            built.Farms,
+            built.Woodcutters,
+            built.Quarriers,
+            built.Carts,
+            built.Wagons,
             centre: ChooseSite(world, extentMeters));
         return world;
     }

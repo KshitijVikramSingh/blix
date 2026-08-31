@@ -238,10 +238,12 @@ internal sealed class SimulationWorld
 
     /// <summary>Why route requests came back empty, by cause. See PathService.PathNoStartCell.</summary>
     public (long NoStartCell, long NoGoalCell, long StartUnresolvable, long GoalUnresolvable,
-            long SearchFoundNothing, long TruncatedToStart) RouteRefusals =>
+            long SearchFoundNothing, long TruncatedToStart,
+            long SmoothedToNothing, long FirstStepBlocked) RouteRefusals =>
         (pathService.PathNoStartCell, pathService.PathNoGoalCell, pathService.PathStartUnresolvable,
          pathService.PathGoalUnresolvable, pathService.PathSearchFoundNothing,
-         pathService.PathTruncatedToStart);
+         pathService.PathTruncatedToStart,
+         pathService.PathSmoothedToNothing, pathService.PathFirstStepBlocked);
 
     /// <summary>
     /// How the last move order's target was resolved, so the game can say "as close as we could get".

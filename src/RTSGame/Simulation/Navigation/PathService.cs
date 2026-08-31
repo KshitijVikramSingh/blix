@@ -843,10 +843,25 @@ internal sealed partial class PathService
             congestionAvoidanceCenter,
             additionalNavigationCosts,
             includeFirstCell: startWasAdjusted || terrain.Revision > 0);
-        return waypoints.Length == 0 ||
-               !IsInitialBodyStepClear(start, waypoints[0], agentRadius)
-            ? null
-            : new PathResult(waypoints, destination, cells.ToArray());
+        // <b>Counted, because this is where a quarter of a million cells of work goes in the bin.</b> §120: a
+        // player clicked a far corner and twelve searches came back "Partial, NOTHING" — the search had found
+        // a route to the furthest cell it reached, the smoothing threw it away, and the body was left with no
+        // destination and asked again next tick. Which of the two rejections fired was not recorded anywhere,
+        // and they want different fixes: an empty smoothing result is a smoothing bug, and a blocked first
+        // step is the §116 footing problem again.
+        if (waypoints.Length == 0)
+        {
+            PathSmoothedToNothing++;
+            return null;
+        }
+
+        if (!IsInitialBodyStepClear(start, waypoints[0], agentRadius))
+        {
+            PathFirstStepBlocked++;
+            return null;
+        }
+
+        return new PathResult(waypoints, destination, cells.ToArray());
     }
 
     public void ReserveGroupRoute(
@@ -1960,6 +1975,15 @@ internal sealed partial class PathService
 
     public long PathTruncatedToStart { get; private set; }
 
+    /// <summary>Routes the search found and the smoothing then discarded, by which rejection fired.</summary>
+    /// <remarks>
+    /// Both of these are work performed and thrown away, which is the most expensive kind of refusal there
+    /// is: the caller cannot tell it from "there is no route", so it asks again.
+    /// </remarks>
+    public long PathSmoothedToNothing { get; private set; }
+
+    public long PathFirstStepBlocked { get; private set; }
+
     /// <summary>
     /// Transit-drop and rejoin counters, kept here rather than on the world.
     /// </summary>
@@ -2328,7 +2352,21 @@ internal sealed partial class PathService
                     // reach from the current anchor. The caller may retry from
                     // another recovery cell, but an invalid first segment causes a
                     // permanent steer/replan loop at terrain corners.
-                    return Array.Empty<Vector2>();
+                    //
+                    // <b>But everything already accepted IS reachable, and throwing it away was the §120
+                    // bug.</b> Asked for from the chair: *if I click a random spot in the fog I want a
+                    // villager to walk up to at least the last reachable point — I won't expect them to
+                    // magically know they can't reach something nobody can see.* That answer was being
+                    // computed and binned. A truncated search hands back a route to the furthest cell it
+                    // reached and then this line discarded the whole thing on one bad step, so the body was
+                    // left with no destination, no progress, and asked again next tick: thirty routes found
+                    // and dropped in one measured order, 2.7 seconds of searching for nothing, and from the
+                    // chair a settlement that hitched and did not move.
+                    //
+                    // The reasoning above survives intact, because it is about the FIRST segment: with
+                    // nothing accepted there is no valid prefix and no route, and that is still the honest
+                    // answer. A prefix is not manufactured, it is the part that passed.
+                    return result.Count > 0 ? result.ToArray() : Array.Empty<Vector2>();
                 }
                 farthest = cursor;
             }
@@ -2573,7 +2611,22 @@ internal sealed partial class PathService
     /// non-swinging answer for that goal — rather than be given a polyline that stops halfway. That is the
     /// next slice, and until it lands this constant is a ceiling and not a solution.
     /// </remarks>
-    private const int ExpansionBudget = 250_000;
+    private const int DefaultExpansionBudget = 250_000;
+
+    /// <summary>
+    /// Cells one search may close, overridable so that a truncated search can be provoked cheaply.
+    /// </summary>
+    /// <remarks>
+    /// <b>A const until §120, and that is why the partial-route path had never been exercised.</b> Reaching it
+    /// on the default value needs a body eight hundred cells from its goal on a real map — which is exactly
+    /// the situation a player found and no fixture could produce. A settable ceiling makes the same code path
+    /// reachable in a thirty-metre world.
+    /// <para>
+    /// Not a tuning knob: nothing in the game sets it, and the fixture that does says so in its output.
+    /// </para></remarks>
+    internal static int ExpansionBudgetOverride = DefaultExpansionBudget;
+
+    private static int ExpansionBudget => ExpansionBudgetOverride;
 
     private static float Heuristic(GridCell from, GridCell to)
     {

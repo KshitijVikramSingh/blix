@@ -1787,8 +1787,12 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private void LoadSettlementScenario()
     {
+        // <b>One recipe, named, shared with the fixtures.</b> These numbers used to be written here and the
+        // headless legs had their own: nineteen people at dawn against thirteen at mid-morning, which is why
+        // §120's fixture could not reproduce a stall from the chair. See SettlementScenarios.VillageRecipe.
+        var recipe = SettlementScenarios.VillageRecipe.AsPlayed;
         simulation = new SimulationWorld(worldExtentMeters);
-        simulation.StartAtSeconds(3100f);
+        simulation.StartAtSeconds(recipe.StartSeconds);
         selection.Clear();
         // <b>Relief before the settlement, because the settlement is laid out against the ground.</b> Trees
         // are refused on ground nobody can stand on and the site is chosen from the map, so generating the
@@ -1833,7 +1837,13 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // same corner it always was, to the metre.
         var founded = SettlementScenarios.ChooseSite(simulation, worldExtentMeters);
         SettlementScenarios.Populate(
-            simulation, farms: 8, woodcutters: 4, quarriers: 1, carts: 5, wagons: 0, centre: founded);
+            simulation,
+            recipe.Farms,
+            recipe.Woodcutters,
+            recipe.Quarriers,
+            recipe.Carts,
+            recipe.Wagons,
+            centre: founded);
         cameraFocus = founded;
         cameraDistance = cameraDistanceTarget = startingZoomMetres > 0f ? startingZoomMetres : 78f;
         Console.WriteLine(

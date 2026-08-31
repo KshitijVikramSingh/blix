@@ -10491,3 +10491,110 @@ searches, and the candidates want different answers: `SoloMove`/`OrderSlot` is t
 question again; `Behavior` is the jobs layer walking people to work, which has no cohort and therefore no
 shared field to fall back on, and would be the same "the field exists and this path does not use it" shape one
 layer over. Not asserted — that is what the line is for.
+
+## 120. Thirty routes found and binned, and the two drifts that hid them
+
+§119 wired route attribution into the live loop and asked for one more run from the chair. It came back with a
+sentence that settled the diagnosis and a rule that settled the fix:
+
+> *I clicked the first time, the game hitched for a second but the guys didn't move, then I clicked on a second
+> location and they started moving — both locations were random corners on the fog hidden map.*
+
+And, asked what a villager should do when it cannot reach where it was sent:
+
+> *Ideally I'd want a villager to walk up to at least the "last reachable/navigable" point if I click a random
+> spot in the fog. I won't expect them to magically know they won't be able to reach something nobody can see.*
+
+The live `ROUTES` lines, Release:
+
+```
+tick 1033  commands 0.046 ms   SoloMove 10 queries  845 ms  2,500,000 cells — 0 answered, 10 partial
+tick 1189                      SoloMove 11 queries  907 ms  2,750,000 cells — 0 answered, 11 partial
+tick 1344                      SoloMove 11 queries  926 ms  2,750,000 cells — 0 answered, 11 partial
+   #7  SoloMove  Partial  NOTHING  250,000 cells  117.5 ms  over 797 cells of map
+```
+
+Every request exactly 250,000 cells — the per-search ceiling — and **nothing answered**, recurring on a
+~155-tick cycle for the rest of the run. The caller is `UpdateJobs` → `JobStep.WalkTo` → `BeginSoloMove`, which
+is why §119 found the time in the Jobs stage. Roughly 900 ms of searching per wall-clock second: the bodies had
+no route *and* the fixed-step loop was starved, so "it hitched and nobody moved" is two symptoms of one cause.
+
+### Two drifts stood between the fixture and the event
+
+The first attempt to reproduce it headlessly passed on all four corners, twice, for two different reasons.
+
+- **The village the gate builds is not the village the game founds.** `Populate` carries a comment saying it
+  is *shared by the headless gate and the live game, deliberately: two settlement definitions would drift* —
+  and they had drifted in the call. The gate founded twelve farms, seven cutters and seven carts at dawn; the
+  game founded eight, four and five at `StartAtSeconds(3100)`. Nineteen people against thirteen, at different
+  hours, doing different work. **A shared method with unshared arguments is two definitions wearing one name.**
+  Both now take `SettlementScenarios.VillageRecipe` — `Gate` and `AsPlayed` — from one place.
+- **The event needs the bodies to have walked away first.** Ordered to a corner, the cohort takes the shared
+  field and issues no cell search at all; the expensive routing starts a couple of hundred metres later, when
+  something wants a body back and the distance has become cross-map. A ten-second watch sees none of it. At
+  three hundred seconds it appears.
+
+With both fixed, `--fogclick` reproduces it — and names it more precisely than the live log could:
+
+```
+south-west (-290,-290)   worst tick 188.3 ms
+  NoVelocity        18 queries  1671.3 ms  4,500,000 cells — 0 answered, 18 partial
+  NoIntentRetry      9 queries   750.9 ms  2,250,000 cells — 0 answered,  9 partial
+  TransitStranded    3 queries   327.3 ms    750,000 cells — 0 answered,  3 partial
+  DISCARDED 30 routes the search had already found: 30 smoothed to nothing, 0 first step blocked
+```
+
+### The bug, and it is the requested behaviour being computed and thrown away
+
+A budget-stopped search does not fail. `FindCellPath` returns `Reconstruct(cameFrom, startIndex, bestIndex)` —
+a route to the furthest cell it reached toward the goal, which **is** the last reachable point the chair asked
+for. Then `SmoothPath` discards it. Two lines do the damage:
+
+- The goal is appended as the final candidate whether or not the search reached it, so a truncated route always
+  ends in a jump to ground nobody proved is connected.
+- When one candidate step fails `SegmentIsBodySafe`, the method returns `Array.Empty` — **throwing away every
+  waypoint it had already accepted.** The comment above it says the cost and congestion filters *must not be
+  able to destroy the route*; the body-safety check still could.
+
+That reasoning was sound and it is about the *first* segment: with nothing accepted there is no valid prefix
+and no route, and empty is the honest answer. With a prefix, the prefix passed every test the smoothing has —
+it is not manufactured, it is the part that worked. So the fix is `result.Count > 0 ? result.ToArray() :
+Array.Empty<Vector2>()`, and the original invariant survives intact.
+
+### Measured, same fixture, same corner
+
+```
+                          before        after
+routes discarded              30             0
+queries answered         18 of 48       24 of 24
+routing                  ~2757 ms       ~481 ms      5.7x
+cells expanded              7.5M           1.0M
+NoVelocity + NoIntentRetry    27              0
+distance walked            173.9 m       203.4 m
+```
+
+**The retry classes vanish, and the bodies walk further.** Both follow from the same thing: a body handed a
+partial route makes progress, so nothing asks again from the same place. `NoVelocity` and `NoIntentRetry` were
+not causes, they were the loop.
+
+### What is not fixed, said out loud
+
+The worst tick is **219 ms**, against 188 before — the discards are gone but the searches that produce the
+partials still run to their 250,000-cell ceiling at 80–130 ms each. `--fogclick` now faults on that, against a
+stated 50 ms ceiling (three frames; §118 argues the real headroom is nearer five, and this is deliberately the
+looser number — the line below which nobody would have complained). It also faults on any discarded route,
+which is the regression guard for this section.
+
+That remaining cost is §117's question one layer over: a cross-map cell search where a hierarchy exists. It is
+now a hitch rather than a livelock, which is a different severity, and it is the next thing.
+
+### Instruments added
+
+- `PathSmoothedToNothing` and `PathFirstStepBlocked` — a route found and discarded is the most expensive
+  refusal there is, because the caller cannot tell it from "no route exists" and therefore asks again. Neither
+  was counted; the two want different fixes and only one of them fired.
+- `ExpansionBudgetOverride` — the per-search ceiling was a `const`, so the truncated-route path was only
+  reachable with a body eight hundred cells from its goal on a real map. That is why it had never been
+  exercised. A fixture can now provoke it in a thirty-metre world, and says so in its output when it does.
+- `--fogclick` — the click a player made, headless, on the same map, ordered to every corner rather than the
+  one that failed. A fixture that tests the direction somebody happened to complain about is how §119 happened.

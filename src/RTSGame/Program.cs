@@ -271,6 +271,37 @@ public static class Program
             Environment.Exit(ScaleScenarios.RunOrderProbe(probeExtent, probeRelief, probeSeconds));
         }
 
+        if (args.Contains("--fogclick"))
+        {
+            var clickExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var clickRelief = Value(args, "--relief-amplitude") is { } amplitude
+                ? float.Parse(amplitude)
+                : 32f;
+            var clickWarmup = Value(args, "--warmup") is { } warm ? int.Parse(warm) : 20;
+            var clickWatch = Value(args, "--watch") is { } watch ? int.Parse(watch) : 10;
+            var clickRegion = Value(args, "--region") is { } clickRegionName
+                ? Enum.Parse<Simulation.Terrain.Region>(clickRegionName, ignoreCase: true)
+                : Simulation.Terrain.Region.Downland;
+            var clickArchetype = Value(args, "--archetype") is { } clickArchetypeName
+                ? Enum.Parse<Simulation.Terrain.Archetype>(clickArchetypeName, ignoreCase: true)
+                : Simulation.Terrain.Archetype.YValley;
+            var clickSeed = Value(args, "--mapseed") is { } clickSeedText
+                ? uint.Parse(clickSeedText)
+                : 1592594996u;
+            var clickBudget = Value(args, "--path-budget") is { } budgetText
+                ? int.Parse(budgetText)
+                : 0;
+            Environment.Exit(FogClickScenarios.Run(
+                clickExtent,
+                clickRelief,
+                clickWarmup,
+                clickWatch,
+                clickRegion,
+                clickArchetype,
+                clickSeed,
+                clickBudget));
+        }
+
         if (args.Contains("--pathprofile"))
         {
             var profileExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
