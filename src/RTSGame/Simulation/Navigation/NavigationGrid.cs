@@ -134,6 +134,55 @@ internal sealed class NavigationGrid
     }
 
     /// <summary>
+    /// Whether a diagonal step is walkable without cutting either corner.
+    /// </summary>
+    /// <remarks>
+    /// <b>The same five pair tests the callers used to make separately, over four ground reads instead of
+    /// ten.</b> A diagonal edge involves exactly four cells — the two ends and the two corners — and asking
+    /// <see cref="CanTraverse"/> five times reads each of them two or three times over. Measured on a region
+    /// tile fill: the corner tests were 45% of the whole search, 100.6 ms against 55.0 with them removed, and
+    /// GroundAt is what they were spending it on.
+    /// <para>
+    /// The result is identical, not approximate. The old answer was the AND of five predicates with no side
+    /// effects, so evaluating them in any order over the same ground values gives the same boolean; only the
+    /// number of reads changes.
+    /// </para>
+    /// </remarks>
+    public bool CanTraverseDiagonal(GridCell from, GridCell to, float agentRadius)
+    {
+        var firstCorner = new GridCell(to.X, from.Z);
+        var secondCorner = new GridCell(from.X, to.Z);
+        if (!Contains(from) || !Contains(to) || !Contains(firstCorner) || !Contains(secondCorner)) return false;
+
+        var fromGround = GroundAt(from);
+        var toGround = GroundAt(to);
+        var firstGround = GroundAt(firstCorner);
+        var secondGround = GroundAt(secondCorner);
+        var clearanceNeeded = agentRadius + BodyFootprint.NavigationMargin;
+        if (fromGround.Blocked || fromGround.Clearance < clearanceNeeded) return false;
+        if (toGround.Blocked || toGround.Clearance < clearanceNeeded) return false;
+        if (firstGround.Blocked || firstGround.Clearance < clearanceNeeded) return false;
+        if (secondGround.Blocked || secondGround.Clearance < clearanceNeeded) return false;
+
+        return StepAllowed(from, fromGround, to, toGround) &&
+               StepAllowed(from, fromGround, firstCorner, firstGround) &&
+               StepAllowed(from, fromGround, secondCorner, secondGround) &&
+               StepAllowed(firstCorner, firstGround, to, toGround) &&
+               StepAllowed(secondCorner, secondGround, to, toGround);
+    }
+
+    /// <summary>The height half of <see cref="CanTraverse"/>, over ground already read.</summary>
+    private bool StepAllowed(GridCell from, RegionGround fromGround, GridCell to, RegionGround toGround)
+    {
+        var heightDelta = MathF.Abs(toGround.Height - fromGround.Height);
+        if (heightDelta > Terrain.TerrainMap.MaximumStepHeight) return false;
+        if (heightDelta <= 0f) return true;
+        var horizontalDistance = Vector2.Distance(CellCenter(from), CellCenter(to));
+        return heightDelta / MathF.Max(horizontalDistance, 0.0001f) <=
+               Terrain.TerrainMap.MaximumTraversableGrade;
+    }
+
+    /// <summary>
     /// Takes a freshly rasterised map and keeps, per region, either every cell of it or the
     /// five numbers that describe all of them.
     /// </summary>

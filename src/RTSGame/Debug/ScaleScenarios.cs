@@ -251,6 +251,13 @@ internal static class ScaleScenarios
                 $"field {after.FieldMs - before.FieldMs,8:F1} ms ({after.Fields - before.Fields} built) | " +
                 $"climb {world.ClimbCost.Calls - climbBefore.Calls:N0} calls, " +
                 $"{world.ClimbCost.Samples - climbBefore.Samples:N0} samples");
+            Console.WriteLine(
+                $"           | tile split: seed {after.TileSeedMs - before.TileSeedMs,7:F1} ms " +
+                $"({after.TileSeedCells - before.TileSeedCells:N0} perimeter cells priced) | " +
+                $"search {after.TileSearchMs - before.TileSearchMs,7:F1} ms " +
+                $"({after.RegionRelaxations - before.RegionRelaxations:N0} visits, " +
+                $"{after.RegionSteps - before.RegionSteps:N0} priced, " +
+                $"{(after.RegionRelaxations > before.RegionRelaxations ? (after.TileSearchMs - before.TileSearchMs) * 1e6 / (after.RegionRelaxations - before.RegionRelaxations) : 0.0):F0} ns each)");
             // Twenty quiet ticks after the order, which is where a stall would show up as the bodies
             // actually start moving and ask for what the order did not build.
             var quiet = Stopwatch.GetTimestamp();

@@ -227,7 +227,9 @@ internal sealed class SimulationWorld
 
     /// <summary>Where routing's time went, split three ways. See PathService.RoutingCost.</summary>
     public (double MeshMs, int MeshBuilds, int MeshCacheHits, int MeshRectangles,
-            double TileMs, long TileFills, double FieldMs, int Fields) RoutingCost =>
+            double TileMs, long TileFills, double FieldMs, int Fields,
+            double TileSeedMs, double TileSearchMs, int TileSeedCells,
+            long RegionRelaxations, long RegionSteps) RoutingCost =>
         pathService.RoutingCost;
     public long AvoidanceSolves => steeringSystem.Solver.Solves;
     public long AvoidanceInfeasible => steeringSystem.Solver.InfeasibleSolves;

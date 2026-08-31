@@ -156,6 +156,7 @@ internal sealed partial class PathService
 
     private float[] FillRectangleTileCore(RectangleFlowField field, int region)
     {
+        var seedStart = Stopwatch.GetTimestamp();
         partition.Bounds(region, out var minimumX, out var minimumZ, out var maximumX, out var maximumZ);
         var seeds = new List<(GridCell Cell, float Cost)>();
         if (partition.RegionOf(field.Goal) == region) seeds.Add((field.Goal, 0f));
@@ -165,20 +166,44 @@ internal sealed partial class PathService
         {
             if (x != minimumX && x != maximumX && z != minimumZ && z != maximumZ) continue;
             var cell = new GridCell(x, z);
+            TileSeedCells++;
             var cost = field.AnalyticCostAt(cell);
             if (!float.IsFinite(cost)) continue;
             seeds.Add((cell, cost));
         }
 
         TileRefinements++;
-        return SearchRegion(
+        // Split, because a tile fill is two different jobs: pricing the perimeter through the corner graph,
+        // and searching inward from it. §98.
+        TileSeedTicks += Stopwatch.GetTimestamp() - seedStart;
+        var searchStart = Stopwatch.GetTimestamp();
+        try
+        {
+            return SearchRegion(
             region,
             field.AgentRadius,
             field.ChargeTurns,
             field.CongestionSpeedScale,
-            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(seeds),
-            retained: true);
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(seeds),
+                retained: true);
+        }
+        finally
+        {
+            TileSearchTicks += Stopwatch.GetTimestamp() - searchStart;
+        }
     }
+
+    /// <summary>A tile fill's two halves: seeding the perimeter, and searching in from it.</summary>
+    internal long TileSeedTicks;
+
+    internal long TileSearchTicks;
+
+    internal int TileSeedCells;
+
+    /// <summary>Neighbour visits attempted, and those that survived the traversal test, in region searches.</summary>
+    internal long RegionRelaxations;
+
+    internal long RegionSteps;
 
     /// <summary>Seconds a body loses to the single bend an octile leg contains.</summary>
     internal float BendSeconds(GridCell near, float agentRadius, bool chargeTurns) =>
@@ -272,7 +297,9 @@ internal sealed partial class PathService
                 }
 
                 var previous = new GridCell(previousX, previousZ);
+                RegionRelaxations++;
                 if (!CanTraverseFlow(previous, current, agentRadius)) continue;
+                RegionSteps++;
                 var previousIndex = partition.TileIndex(previous);
                 if (closed[previousIndex]) continue;
                 var nextCost = FlowStepCost(

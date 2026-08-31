@@ -8984,3 +8984,61 @@ From 430 ms to 158, and from a six-second freeze two sections ago to nothing mea
    question applies: how much of a tile fill is recomputing something the mesh already knows.
 2. **The 233 ms mesh rebuild on any nav change** (§93 item 4), untouched, and the one an actively building
    village trips over.
+
+## 98. The tile fill, and the corner tests that were reading the same four cells ten times
+
+§97 left region tile fills as the largest term in a click: 112-152 ms for seven to nine fills. Split into its
+two halves — pricing the perimeter through the corner graph, and searching inward from it — the answer is not
+where the seeding is:
+
+```
+seed 12.8 ms (1,764 perimeter cells priced) | search 100.4 ms (205,133 visits, 483 ns each)
+```
+
+A region is 64 x 64 cells and a tile runs to exhaustion, so a fill is about 32,000 neighbour visits. **483
+nanoseconds a visit** is ten to twenty times what a grid Dijkstra step should cost, so the question was which
+term owned it. Ablated, on the same fill:
+
+```
+baseline               100.6 ms   491 ns a visit
+no turn charge          97.1 ms   473 ns      -- 3.5 ms, noise
+no diagonal corners     55.0 ms   268 ns      -- 45% of the search
+neither                 53.2 ms   260 ns
+```
+
+**The corner tests are nearly half the fill.** A diagonal step must not cut either corner, which
+`CanTraverseFlow` asked by calling `CanTraverse` five times — (from,to), then both corners from each end. Those
+five calls span exactly four distinct cells, so six of their ten `GroundAt` reads were re-reads, along with
+six redundant bounds checks.
+
+`NavigationGrid.CanTraverseDiagonal` now reads the four grounds once and applies the same five predicates. The
+result is identical rather than approximate: the old answer was the AND of five side-effect-free predicates, so
+evaluating them in any order over the same ground values gives the same boolean, and only the number of reads
+changes. Measured: **491 to 393 ns a visit, the tile search 100.6 to 80.7 ms**, and the order tick from 158 to
+138.
+
+### What is left in a tile, and why it was left
+
+The ablation says another ~125 ns a visit is still corner work, and it is the grade test's
+`Vector2.Distance(CellCenter(from), CellCenter(to))` — two cell-centre reconstructions and a square root, five
+times per diagonal edge, to recover a distance that is always one cell or one diagonal. Replacing it with a
+constant is the obvious next step and is **deliberately not taken**: this file's own comment explains that a
+different number in the last bit is a different route out of a Dijkstra, and the routing-fidelity suite exists
+to catch exactly that. A cheap arithmetic identity that changes a float in the last place is not cheap.
+
+If it is worth taking later, it wants the fidelity comparison run before and after rather than the gate alone —
+green tests prove no invariant broke, not that the routes are the same routes.
+
+### Where a click stands, end to end
+
+```
+                        order tick    field      tiles     freeze after
+§94 (as reported)          430 ms     290 ms     112 ms     300 ms/tick
+§96 (field fallback)       430 ms     290 ms     112 ms       1.2 ms/tick
+§97 (climb cached)         158 ms      38 ms     113 ms       1.2 ms/tick
+§98 (diagonal reads)       138 ms      38 ms      93 ms       1.2 ms/tick
+```
+
+A six-second freeze became a 138 ms click, and the remaining 138 is two thirds tile fills. Still open, in
+order: the ~125 ns of distance arithmetic above (with fidelity checked, not assumed), and §93's 233 ms mesh
+rebuild on any navigation change, which is the one an actively building village trips over.

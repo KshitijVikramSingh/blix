@@ -458,10 +458,14 @@ internal sealed partial class PathService
     /// 340 ms over forty tile fills are different problems wearing one number.
     /// </remarks>
     public (double MeshMs, int MeshBuilds, int MeshCacheHits, int MeshRectangles,
-            double TileMs, long TileFills, double FieldMs, int Fields) RoutingCost =>
+            double TileMs, long TileFills, double FieldMs, int Fields,
+            double TileSeedMs, double TileSearchMs, int TileSeedCells,
+            long RegionRelaxations, long RegionSteps) RoutingCost =>
         (MeshBuildTicks * 1000.0 / Stopwatch.Frequency, MeshBuilds, MeshCacheHits, MeshRectangles,
          TileFillTicks * 1000.0 / Stopwatch.Frequency, TileRefinements,
-         FieldSetupTicks * 1000.0 / Stopwatch.Frequency, FlowFieldBuilds);
+         FieldSetupTicks * 1000.0 / Stopwatch.Frequency, FlowFieldBuilds,
+         TileSeedTicks * 1000.0 / Stopwatch.Frequency, TileSearchTicks * 1000.0 / Stopwatch.Frequency,
+         TileSeedCells, RegionRelaxations, RegionSteps);
     /// <summary>Tiles adopted whole from the previous field for the same goal.</summary>
     public long InheritedTiles { get; private set; }
     /// <summary>A* queries served, for attributing pathfinding cost.</summary>
@@ -1459,15 +1463,13 @@ internal sealed partial class PathService
 
     private bool CanTraverseFlow(GridCell from, GridCell to, float agentRadius)
     {
-        if (!grid.CanTraverse(from, to, agentRadius)) return false;
         var diagonal = from.X != to.X && from.Z != to.Z;
-        if (!diagonal) return true;
-        var firstCorner = new GridCell(to.X, from.Z);
-        var secondCorner = new GridCell(from.X, to.Z);
-        return grid.CanTraverse(from, firstCorner, agentRadius) &&
-               grid.CanTraverse(from, secondCorner, agentRadius) &&
-               grid.CanTraverse(firstCorner, to, agentRadius) &&
-               grid.CanTraverse(secondCorner, to, agentRadius);
+        // One call, four ground reads, the same five predicates — see NavigationGrid.CanTraverseDiagonal. The
+        // corner tests were 45% of a region tile's search, spent almost entirely on reading the same four
+        // cells over and over.
+        return diagonal
+            ? grid.CanTraverseDiagonal(from, to, agentRadius)
+            : grid.CanTraverse(from, to, agentRadius);
     }
 
     /// <summary>
