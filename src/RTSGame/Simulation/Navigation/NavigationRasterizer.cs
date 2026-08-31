@@ -270,6 +270,10 @@ internal static class NavigationRasterizer
         TerrainCells = (long)(terrainHighX - terrainLowX + 1) * (terrainHighZ - terrainLowZ + 1);
         ClearanceWindowCells = (long)(clearanceHighX - clearanceLowX + 1) * (clearanceHighZ - clearanceLowZ + 1);
 
+        // Which ground these heights came from, recorded whether the pass ran over the whole map or a
+        // window: either way the raster now describes this terrain and nothing older.
+        navigation.MarkTerrain(terrain.Revision);
+
         var terrainStart = System.Diagnostics.Stopwatch.GetTimestamp();
         for (var z = terrainLowZ; z <= terrainHighZ; z++)
         for (var x = terrainLowX; x <= terrainHighX; x++)

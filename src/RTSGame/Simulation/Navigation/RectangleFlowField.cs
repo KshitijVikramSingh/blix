@@ -60,7 +60,7 @@ internal sealed class RectangleFlowField
     private readonly float[] cornerCost;
 
     /// <summary>Corner-pair climb charges, owned by the mesh and shared by every field built on it.</summary>
-    private readonly Dictionary<(int From, int To), float> cornerClimb;
+    private readonly Dictionary<(int, int, int, int), float> cornerClimb;
     private readonly GridCell goal;
 
     /// <summary>The cell this field routes to.</summary>
@@ -82,7 +82,7 @@ internal sealed class RectangleFlowField
         float agentRadius,
         float congestionSpeedScale,
         bool chargeTurns,
-        Dictionary<(int From, int To), float> cornerClimb)
+        Dictionary<(int, int, int, int), float> cornerClimb)
     {
         this.cornerClimb = cornerClimb;
         this.owner = owner;
@@ -390,11 +390,29 @@ internal sealed class RectangleFlowField
         // indices under 2^16 is from ^ to, so thousands of distinct pairs share a bucket. With half a million
         // entries the lookups degrade to chain walks and the field went from 290 ms to 4,487. A ValueTuple
         // hashes through HashCode.Combine, which mixes.
-        if (cornerClimb.TryGetValue((fromCorner, toCorner), out var cached)) return cached;
+        //
+        // <b>And the coordinates rather than the corner indices, so the answer outlives the mesh.</b> A
+        // corner index is a position in one decomposition; the climb is a property of the two points. Every
+        // corner sits at a half-cell — see the constructor, which places them at MinimumX + 0.5f and the
+        // like — so twice the coordinate is an exact integer and the pair is an exact key. §114 measured
+        // what the old key cost: a placement change rebuilt the mesh, renumbered every corner, and made the
+        // next click re-sample two and a half million heights that had not moved.
+        var key = (Round2(fromX), Round2(fromZ), Round2(toX), Round2(toZ));
+        if (cornerClimb.TryGetValue(key, out var cached)) return cached;
         var climbed = owner.ClimbSecondsAlong(fromX, fromZ, toX, toZ);
-        cornerClimb[(fromCorner, toCorner)] = climbed;
+        cornerClimb[key] = climbed;
         return climbed;
     }
+
+    /// <summary>
+    /// Twice a half-cell coordinate, which is exactly an integer.
+    /// </summary>
+    /// <remarks>
+    /// Rounded rather than truncated because the value is exact and truncation of an exact 3.0 that arrived
+    /// as 2.9999998 is off by one — and off by one here is two different points sharing a cached climb,
+    /// which is the one way this cache could be wrong rather than merely cold.
+    /// </remarks>
+    private static int Round2(float coordinate) => (int)MathF.Round(coordinate * 2f);
 
     /// <summary>Cells between samples along a leg, and the ceiling on how many.</summary>
     private const float CellsPerSample = 4f;

@@ -10108,3 +10108,68 @@ across a placement change, because a cache that survives when it should not is a
 has been bitten by one twice.
 
 Gate 3/3 green.
+
+## 115. A climb outlives a building, and the repath storm that was not there
+
+§114's attribution said the cascade rather than the sweep was the click, and named the cheapest piece of it:
+`CornerClimbCache` was keyed by the navigation revision, one revision tighter than the thing it depends on.
+
+Two things had to move for the cache to survive a placement change:
+
+- **The key was a pair of corner indices**, which are positions in one decomposition and mean nothing once
+  the mesh is rebuilt. Corners sit at half-cell coordinates — `crossing.MinimumX + 0.5f` and the like — so
+  twice the coordinate is an exact integer and the pair is an exact, mesh-independent key.
+- **The radius bucket is gone.** It was in the key because *which corners exist* depends on radius; the climb
+  between two points is not a property of who walks it. The coordinates carry that themselves, and a
+  mixed-radius world now shares one cache as a side effect.
+
+`NavigationGrid.TerrainRevision` is the new key: set from `TerrainMap.Revision` by the rasteriser, which is
+the one place that knows, so it cannot become a second opinion about when the ground changed. A load rebuilds
+the raster from restored terrain and gets the right number without anything having to restore it.
+
+### Measured, three runs each
+
+```
+                 before        after
+climb calls      252,732       27,624      9.1x fewer
+climb samples  2,529,839      477,697      5.3x fewer
+field             ~190 ms       ~51 ms     3.7x faster
+the click        ~1970 ms     ~1762 ms     11% off
+```
+
+Worth stating plainly: **that is 210 ms of a 1,762 ms click.** The field collapsed and the event did not,
+which is what attribution is for — the same fix presented without §114's breakdown would have read as a
+success rather than as a tenth of one.
+
+### The test, because a cache that survives when it should not is a divergence
+
+*a cached climb outlives a building and not a hill* warms a cache on sculpted ground, puts a building up, and
+compares every probe against a second world born with the building already in it and a cold cache. If any
+surviving entry were stale the two could not agree.
+
+```
+across a building: terrain revision 231 -> 231 (navigation 2 -> 3), 24/24 probes priced identically
+                   to a cold world, 0 differed | across a hill: terrain revision -> 276 (evicted)
+```
+
+Sculpted deliberately: on flat ground every climb is zero and a cache returning nonsense returns the right
+nonsense. It failed on its first run and the code was right — raising a ridge moves the terrain revision once
+per vertex, but the grid records which terrain it sampled only when the rasteriser next runs, so a revision
+read before any rebuild is the number from before the ridge and the building then appears to have moved it.
+The test now lets the raster catch up first, which is a fact about the two clocks worth having written down.
+
+### And a repath storm that was not there
+
+The obvious next hypothesis was that a placement change invalidates every villager's route and the settlement
+repaths at once. The profile now counts it: **2 route queries for 20 bodies.** Twenty took the shared field
+exactly as §96 intended; two did not.
+
+So the remaining 1,232 ms of pathfinding is **two A\* searches**, each expanding about 150,000 cells — a tenth
+of the map — at some 600 ms apiece. Not breadth, depth: two bodies fell off the shared field, took their own
+route, and paid full price for a hierarchy that had just gone cold. That is roughly 60% of the whole click and
+it is the next thing, against a mesh amortisation that §99 and §101 both nominated and that is worth 18% and
+moves the hitch rather than removing it.
+
+Counting it cost one line and saved a section spent budgeting repaths that were never happening.
+
+Gate 3/3 green.

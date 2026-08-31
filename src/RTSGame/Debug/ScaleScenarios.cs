@@ -658,6 +658,8 @@ internal static class ScaleScenarios
         var coldBefore = world.RoutingCost;
         var coldSearchBefore = world.PathSearch;
         var coldClimbBefore = world.ClimbCost;
+        var coldQueriesBefore = world.PathQueries;
+        var coldAgents = world.Agents.LiveCount;
         // <b>The whole tick, and every phase of it.</b> This line timed a Tick and then named three routing
         // numbers, which came to a third of what it printed — so two thirds of the worst event in the game
         // was unattributed and the arc went on optimising the largest of the three named terms. The world
@@ -678,6 +680,13 @@ internal static class ScaleScenarios
             $"{coldSearch.Expansions - coldSearchBefore.Expansions:N0} cells expanded | " +
             $"climb {coldClimb.Calls - coldClimbBefore.Calls:N0} calls, " +
             $"{coldClimb.Samples - coldClimbBefore.Samples:N0} samples");
+        // <b>Routes asked for, against bodies alive.</b> A placement change bumps the navigation revision and
+        // every body holding a route has to ask for another one, so the click is not only the cohort that was
+        // ordered — it is the whole settlement repathing at once. Reported as a ratio because the interesting
+        // number is not how many searches happened but how many bodies there were to cause them.
+        Console.WriteLine(
+            $"    {world.PathQueries - coldQueriesBefore:N0} route queries for {coldAgents:N0} bodies " +
+            $"({(world.PathQueries - coldQueriesBefore) / (float)Math.Max(1, coldAgents):F1} each)");
 
         // Stages summed, accumulators reported apart. Adding the two together is how this line first
         // claimed 4,259 ms of a 2,662 ms tick.

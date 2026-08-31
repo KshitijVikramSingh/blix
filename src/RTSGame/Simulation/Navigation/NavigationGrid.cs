@@ -34,6 +34,25 @@ internal sealed class NavigationGrid
     public int Revision { get; private set; }
 
     /// <summary>
+    /// The terrain revision this raster's heights were sampled from.
+    /// </summary>
+    /// <remarks>
+    /// <b>A second, slower clock on the same data, and the point is what it does <em>not</em> tick for.</b>
+    /// <see cref="Revision"/> bumps on any rebuild, which includes a building going up — correctly, because
+    /// clearance and walkability changed. The heights did not. Anything derived from the ground alone can be
+    /// keyed here and survive a placement change, which is the difference between a click paying two and a
+    /// half million height samples and paying none.
+    /// <para>
+    /// Set from <c>TerrainMap.Revision</c> by the rasteriser rather than counted here, so it cannot become a
+    /// second opinion about when the ground changed. A load rebuilds the raster from restored terrain and
+    /// therefore gets the right number without anything having to restore it.
+    /// </para></remarks>
+    public int TerrainRevision { get; private set; }
+
+    /// <summary>Records which terrain the heights came from. Called by the rasteriser, which knows.</summary>
+    internal void MarkTerrain(int terrainRevision) => TerrainRevision = terrainRevision;
+
+    /// <summary>
     /// Whether any two cells on this map differ in height.
     /// </summary>
     /// <remarks>

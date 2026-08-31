@@ -72,6 +72,7 @@ internal static class SimulationSelfTests
         Check("crowd crosses a traversable terrain ramp", CrowdCrossesTerrainRamp());
         Check("crowd rounds a ramp-cliff corner without sticking", CrowdRoundsTerrainCorner());
         Check("terrain edits invalidate active routes", TerrainEditInvalidatesRoute());
+        Check("a cached climb outlives a building and not a hill", ACachedClimbOutlivesABuildingAndNotAHill());
         Check("terrain-aware simulations stay deterministic", TerrainSimulationsMatch());
         Check("repath recovers from a nearby invalid start cell", RepathRecoversFromInvalidStart());
         Check("placement uses purpose-specific colliders", PlacementUsesColliderQuery());
@@ -916,6 +917,106 @@ internal static class SimulationSelfTests
             $"    road route waypoints={route.Length} surfaces=[" +
             string.Join(',', route.Take(24).Select(point =>
                 $"{point.X:F1}/{point.Y:F1}:{terrain.SampleSurface(point)}")) + "]");
+        return passed;
+    }
+
+    /// <summary>
+    /// A cached climb outlives a building and not a hill: same routes across a placement change, and the
+    /// cache dropped the moment the ground itself moves.
+    /// </summary>
+    /// <remarks>
+    /// <b>The claim §114 rests on, and the way it could be wrong.</b> The corner-climb cache is now keyed by
+    /// the terrain revision rather than the navigation one, so it survives a building going up — worth nine
+    /// times fewer height samples on the click after a placement. The whole saving depends on a single
+    /// sentence being true: a placement change cannot move the ground. If it ever stops being true, or if
+    /// the key stops distinguishing two points that differ, the cache serves an answer for terrain that is
+    /// no longer there and routes bend around hills that are not in front of them. That is a quiet
+    /// divergence, and this arc has shipped two.
+    /// <para>
+    /// So the test is a comparison rather than an assertion about the cache: one world warms the cache, then
+    /// takes the placement change; another is born with the change already in it and a cold cache. If the
+    /// surviving entries are honest the two must price the same ground identically, and if any of them is
+    /// stale they cannot. Sculpted relief deliberately — on flat ground every climb is zero and a cache
+    /// returning nonsense returns the right nonsense.
+    /// </para></remarks>
+    private static bool ACachedClimbOutlivesABuildingAndNotAHill()
+    {
+        static SimulationWorld Sculpted()
+        {
+            var world = new SimulationWorld();
+            // A ridge, so climbs along the sampled legs are not all zero.
+            for (var z = 12; z <= 44; z++)
+            for (var x = 24; x <= 30; x++)
+            {
+                world.Terrain.SetVertexHeight(x, z, 3.5f);
+            }
+
+            return world;
+        }
+
+        static void Build(SimulationWorld world)
+        {
+            if (!world.Placement.Transform.TryWorldToCell(new Vector2(2f, 2f), out var cell)) return;
+            for (var dx = 0; dx < 4; dx++)
+            {
+                world.Placement.SetOccupied(new GridCell(cell.X + dx, cell.Z), true);
+            }
+
+            world.RefreshNavigationForTest();
+        }
+
+        var goal = new Vector2(11f, 11f);
+        var probes = new List<Vector2>();
+        for (var i = 0; i < 24; i++) probes.Add(new Vector2(-12f + i * 1.0f, -11f + i * 0.9f));
+
+        // Warmed, then built on: the cache is carrying answers from before the mesh was replaced.
+        var warmed = Sculpted();
+        // <b>Let the raster catch up with the sculpting before reading the revision it is supposed to hold
+        // still.</b> Raising a ridge moves the terrain revision once per vertex, and the grid only records
+        // which terrain it sampled when the rasteriser next runs — so a revision read here, before any
+        // rebuild, is the number from before the ridge existed, and the placement change below then appears
+        // to have moved it. The first run of this test failed exactly that way and the code was right.
+        warmed.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        var terrainBefore = warmed.Navigation.TerrainRevision;
+        var navBefore = warmed.Navigation.Revision;
+        foreach (var probe in probes) warmed.CostToGoal(probe, goal, AgentDefaults.Radius);
+        Build(warmed);
+        var terrainAfterBuild = warmed.Navigation.TerrainRevision;
+        var navAfterBuild = warmed.Navigation.Revision;
+
+        // Cold, and born with the building already there.
+        var fresh = Sculpted();
+        Build(fresh);
+
+        var matched = 0;
+        var mismatched = 0;
+        foreach (var probe in probes)
+        {
+            var a = warmed.CostToGoal(probe, goal, AgentDefaults.Radius);
+            var b = fresh.CostToGoal(probe, goal, AgentDefaults.Radius);
+            if (a is null != (b is null)) { mismatched++; continue; }
+            if (a is { } x && b is { } y && MathF.Abs(x - y) > 0.001f) { mismatched++; continue; }
+            matched++;
+        }
+
+        // And the ground moving does evict it, which is the only thing it may not survive.
+        for (var z = 12; z <= 20; z++)
+        for (var x = 34; x <= 38; x++)
+        {
+            warmed.Terrain.SetVertexHeight(x, z, 6f);
+        }
+
+        warmed.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        var terrainAfterHill = warmed.Navigation.TerrainRevision;
+
+        var survivedTheBuilding = terrainAfterBuild == terrainBefore && navAfterBuild > navBefore;
+        var droppedForTheHill = terrainAfterHill > terrainAfterBuild;
+        var passed = survivedTheBuilding && droppedForTheHill && mismatched == 0 && matched == probes.Count;
+        Console.WriteLine(
+            $"    across a building: terrain revision {terrainBefore} -> {terrainAfterBuild} " +
+            $"(navigation {navBefore} -> {navAfterBuild}), {matched}/{probes.Count} probes priced " +
+            $"identically to a cold world, {mismatched} differed | across a hill: terrain revision " +
+            $"-> {terrainAfterHill} ({(droppedForTheHill ? "evicted" : "NOT EVICTED")})");
         return passed;
     }
 

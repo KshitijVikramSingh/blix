@@ -71,25 +71,43 @@ internal sealed partial class PathService
     /// walkability is: a wider body has fewer rectangles and different crossings.
     /// </remarks>
     /// <summary>
-    /// Corner-pair climb charges for one mesh, kept as long as the mesh is.
+    /// Climb charges between points, kept as long as the ground under them is.
     /// </summary>
     /// <remarks>
-    /// Keyed exactly as the mesh is — navigation revision and radius bucket — because that is precisely how
-    /// long the answers stay true: the corners come from the decomposition and the climb comes from the
-    /// heights, and a change to either bumps the revision. Evicted with the meshes, for the same reason.
-    /// </remarks>
-    private readonly Dictionary<(int Nav, int Radius), Dictionary<(int From, int To), float>> cornerClimbs = new();
+    /// <b>Keyed by the terrain revision, and it used to be keyed by the navigation revision.</b> The old
+    /// comment gave the reason and it was sound and one revision too tight: <em>the corners come from the
+    /// decomposition and the climb comes from the heights, and a change to either bumps the revision</em>.
+    /// True — but a change to the decomposition alone should not cost anything here, and a building going up
+    /// is exactly that. Measured in §114: the click after a placement paid 2.5 million height samples,
+    /// twelve times a normal cold order, rebuilding answers that could not have changed.
+    /// <para>
+    /// Two things had to move for it to survive. The key was a pair of <em>corner indices</em>, which are
+    /// positions in a mesh and mean nothing once the mesh is rebuilt; corners sit at half-cell coordinates,
+    /// so twice the coordinates is an exact integer key that outlives any decomposition. And the radius
+    /// bucket is gone, because the climb between two points is not a property of who is walking it — that
+    /// was in the key because <em>which corners exist</em> depends on radius, which the coordinates now
+    /// carry for themselves. A mixed-radius world shares one cache as a side effect.
+    /// </para>
+    /// <para>
+    /// The eviction is what keeps it honest: the moment the ground itself changes, every answer in here is
+    /// suspect and the whole table goes. That is the only thing this cache is allowed to survive.
+    /// </para></remarks>
+    private readonly Dictionary<int, Dictionary<(int, int, int, int), float>> cornerClimbs = new();
 
-    internal Dictionary<(int From, int To), float> CornerClimbCache(float agentRadius)
+    /// <summary>Entries currently held, for a profile that would rather report growth than assume it.</summary>
+    internal int CornerClimbEntries =>
+        cornerClimbs.TryGetValue(grid.TerrainRevision, out var live) ? live.Count : 0;
+
+    internal Dictionary<(int, int, int, int), float> CornerClimbCache()
     {
-        var key = (grid.Revision, RadiusKey(agentRadius));
+        var key = grid.TerrainRevision;
         if (cornerClimbs.TryGetValue(key, out var existing)) return existing;
-        foreach (var stale in cornerClimbs.Keys.Where(k => k.Nav != grid.Revision).ToArray())
+        foreach (var stale in cornerClimbs.Keys.Where(k => k != key).ToArray())
         {
             cornerClimbs.Remove(stale);
         }
 
-        var created = new Dictionary<(int From, int To), float>();
+        var created = new Dictionary<(int, int, int, int), float>();
         cornerClimbs[key] = created;
         return created;
     }
@@ -360,7 +378,7 @@ internal sealed partial class PathService
             agentRadius,
             1f,
             chargeTurns: true,
-            CornerClimbCache(agentRadius));
+            CornerClimbCache());
 
         var reachable = 0;
         var lost = 0;

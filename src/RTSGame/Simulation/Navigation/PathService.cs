@@ -1383,7 +1383,7 @@ internal sealed partial class PathService
             agentRadius,
             speedScale,
             chargeTurns,
-            CornerClimbCache(agentRadius));
+            CornerClimbCache());
         FieldSetupTicks += Stopwatch.GetTimestamp() - fieldStart;
         FlowFieldBuilds++;
         flowFields[key] = costs;
