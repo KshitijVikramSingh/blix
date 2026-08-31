@@ -9656,3 +9656,86 @@ combination: an action somebody presses fifty times in a row should not rest on 
 `key Unknown` would settle them the other way. Shift+digit is the one binding here that would be worth
 retiring for a different chord if it does not survive that test; Ctrl+digit and the bare digit are the two
 that carry the affordance.
+
+## 109. A cohort outlives its move
+
+Three rulings from the chair, and they compose into one design rather than three:
+
+- **Adopt.** An order given to a set that is already a cohort takes that cohort, rather than building a new one.
+- **Internal bookkeeping only.** A cohort is never a thing the player selects, sees outlined, or commands as
+  an object. It shows up as movement being better and in no other way.
+- **The player holds one cohort at a time.** Any ordered set resolves to exactly one cohort — old or new,
+  never two.
+
+### The seam §107 named, cut
+
+Retiring on "everybody has settled for thirty ticks" was a **locomotion** lifetime wearing the cohort's
+clothes. It is also precisely why adoption was not expressible: the set died the moment the walk did, so by
+the time the next order arrived there was no group left to give it to.
+
+So the arrival branch no longer releases anybody. The cohort sets `AtRest`, does its arrival bookkeeping once
+on the way into that state, and keeps its people. Retirement moved to the only condition that actually ends a
+set — **an empty roster** — asked immediately after the dead sweep so that it is asked of a resting cohort
+too. A set whose last member the jobs layer took back is over whether or not it was walking at the time.
+
+A resting cohort then costs one branch a tick: no transit average to take, no slot to peel off to, nothing to
+rediscover by walking its members. The dead sweep still runs, because the roster has to stay honest whether or
+not anybody is moving.
+
+### Adoption is exact, and that is where the third ruling lives
+
+An order adopts a cohort **iff the ordered set is exactly that cohort's roster**. Both sides are in id order —
+the roster because it is built that way and removal preserves it, the command because every path sorts before
+it queues — so the test is a walk.
+
+Exactly, not overlapping, and the reason is that ordering six of a cohort's ten is a genuinely different
+intention. There is no reading under which the four left behind should be dragged along, or under which the
+six should inherit a formation laid out for ten. So a partial order forms its own cohort and the remainder
+keeps the old one — which is also where "the player holds one cohort at a time" lives in code, as a property
+rather than as a rule anybody has to enforce: any ordered set resolves to one cohort, never two.
+
+What adoption preserves is the identity, the roster, and — deliberately — the transit centroid and flow
+agreement. A cohort already moving together and turned toward somewhere else should carry its shape through
+the turn. Clearing it would make every re-order start from "we have not agreed on a direction yet", which is
+the one state station-keeping is written to stay out of. Only the slots are re-laid, because only the target
+changed.
+
+### There is no longer an "arrived" departure
+
+Deleted rather than left to read zero. Reaching the target used to release every member and retire the group;
+it now enters a state that nobody leaves by. A column that can never be anything but zero is worse than no
+column, because it invites the reader to conclude that arrivals are being counted somewhere.
+
+### Measured
+
+New assertion, *a cohort outlives its move and is adopted by the next order*. Four claims, asserted apart
+because they fail apart:
+
+```
+rested with its people=True | adopted by the next order=True (id 1, ledger unmoved=True)
+half ordered away split it in two=True (one cohort each=True) | ended only when empty=True
+```
+
+`--orderprobe` on the 450 m village, seven orders to the same twenty bodies. Before this section every leg
+after the first read `20 superseded`; now:
+
+```
+  far, across the map        cohort: new      | left it: 0 superseded, 0 overridden, 0 died, 0 INTERRUPTED
+  halfway back               cohort: adopted  | left it: 0 superseded, 0 overridden, 0 died, 0 INTERRUPTED
+  far again                  cohort: adopted  | ...
+  deep inside impassable ground, deep inside a wood, where they already stand, off the map entirely
+                             cohort: adopted  | left it: 0, 0, 0, 0
+```
+
+**One cohort formed and never rebuilt across seven orders, and a departure ledger that is zero in every column
+for the whole run.** The twenty superseded departures an order were the group being destroyed and recreated
+each time; there was nothing wrong with them except that they were describing work nobody needed done.
+
+Gate 3/3 green. Save format goes to version 8 — a reason left the ledger and `AtRest` joined the cohort.
+
+### One asymmetry found on the way
+
+Skipping `LeaveCohort` on the adopted path meant skipping `ClearCohortFields`, and `SeekingFieldEntry` — a
+fact about the route a body was on for the *last* order — survived into the new one. Downstream guards happen
+to catch it today, which is not a reason to leave a stale per-order flag lying about. `JoinCohort` now clears
+it, which makes the join symmetric with the leave and removes the need to reason about the guards at all.

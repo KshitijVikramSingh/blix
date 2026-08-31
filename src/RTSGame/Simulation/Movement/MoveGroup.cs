@@ -25,7 +25,21 @@ internal sealed class MoveGroup
     private const float FrontageBias = 2.2f;
 
     public int Id { get; }
-    public Vector2 Target { get; }
+
+    /// <summary>Where the current move is going. Changes when a new order adopts this cohort.</summary>
+    public Vector2 Target { get; private set; }
+
+    /// <summary>
+    /// Whether the cohort has finished moving and is standing on its slots.
+    /// </summary>
+    /// <remarks>
+    /// <b>This flag is the lifetime split.</b> Everybody settled used to mean the group was over: the members
+    /// were released and the group retired, because the group had never been anything but the move. It is now
+    /// a state the cohort is in rather than the end of it — the set outlives the walk, and the next order to
+    /// the same set adopts it instead of building a new one. Retirement moved to the only condition that
+    /// really ends a set, which is having nobody left in it.
+    /// </remarks>
+    public bool AtRest { get; set; }
 
     /// <summary>
     /// The roster, and the authority on who is in this cohort.
@@ -55,7 +69,7 @@ internal sealed class MoveGroup
     /// Distance from the command point at which a member stops following the
     /// shared route and heads for its own slot.
     /// </summary>
-    public float FormationRadius { get; }
+    public float FormationRadius { get; private set; }
     public int SettlingTicks { get; set; }
     /// <summary>Live centroid of the members still travelling as a cohort.</summary>
     public Vector2 TransitCentroid { get; set; }
@@ -89,6 +103,30 @@ internal sealed class MoveGroup
         return true;
     }
 
+    /// <summary>
+    /// Whether this cohort's roster is exactly the given set, which is the test for adopting it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Exactly, not "overlaps".</b> Ordering six of a cohort's ten is a genuinely different intention from
+    /// ordering all ten, and there is no reading of it under which the four left behind should be dragged
+    /// along or the six should inherit a formation laid out for ten. So a partial order forms its own cohort
+    /// and the remainder keeps the old one — which also gives the ruling that a player holds one cohort at a
+    /// time somewhere to stand: any ordered set resolves to exactly one cohort, old or new, never to two.
+    /// <para>
+    /// Both sides are in id order — the roster because it is built that way and removal preserves it, the
+    /// ordered set because every command path sorts before it queues — so this is a walk rather than a
+    /// lookup.
+    /// </para></remarks>
+    public bool RosterIs(IReadOnlyList<AgentId> ordered)
+    {
+        if (members.Count != ordered.Count) return false;
+        for (var i = 0; i < members.Count; i++)
+        {
+            if (members[i] != ordered[i]) return false;
+        }
+        return true;
+    }
+
     /// <summary>Takes the body at a known roster position off, for callers already walking the roster.</summary>
     public void RemoveAt(int index)
     {
@@ -114,6 +152,7 @@ internal sealed class MoveGroup
         writer.Int(SettlingTicks);
         writer.Vector(TransitCentroid);
         writer.Bool(HasTransitCentroid);
+        writer.Bool(AtRest);
         writer.Vector(TransitFlow);
         writer.Blob<AgentId>(CollectionsMarshal.AsSpan(members));
         writer.Blob<Vector2>(CollectionsMarshal.AsSpan(slots));
@@ -139,6 +178,7 @@ internal sealed class MoveGroup
         var settlingTicks = reader.Int();
         var transitCentroid = reader.Vector();
         var hasTransitCentroid = reader.Bool();
+        var atRest = reader.Bool();
         var transitFlow = reader.Vector();
         var members = new List<AgentId>(reader.Blob<AgentId>());
         var slots = new List<Vector2>(reader.Blob<Vector2>());
@@ -147,6 +187,7 @@ internal sealed class MoveGroup
             SettlingTicks = settlingTicks,
             TransitCentroid = transitCentroid,
             HasTransitCentroid = hasTransitCentroid,
+            AtRest = atRest,
             TransitFlow = transitFlow,
         };
     }
@@ -161,6 +202,46 @@ internal sealed class MoveGroup
         IReadOnlyList<AgentId> members,
         AgentStore agents,
         PathService paths)
+    {
+        var slots = Layout(target, members, agents, paths, out var formationRadius);
+        return new MoveGroup(id, target, new List<AgentId>(members), slots, formationRadius);
+    }
+
+    /// <summary>
+    /// Points an existing cohort at a new command point, keeping its identity and its membership.
+    /// </summary>
+    /// <remarks>
+    /// <b>Adoption, and the reason the roster had to become the cohort's before this was possible.</b> The
+    /// same twenty people ordered somewhere else are the same twenty people: rebuilding the group would give
+    /// them a new id, book twenty departures and twenty joins, and throw away what the cohort had learned
+    /// about how it was travelling — the transit centroid and the flow agreement that station-keeping reads.
+    /// Adopting keeps all of it and re-lays only what the new target actually changes, which is the slots.
+    /// <para>
+    /// The transit state is deliberately <em>not</em> cleared. A cohort that is already moving together and
+    /// is turned toward somewhere else should carry its shape through the turn; resetting it would make every
+    /// re-order start from "we have not agreed on a direction yet", which is the one state station-keeping is
+    /// written to stay out of.
+    /// </para></remarks>
+    public void Retarget(Vector2 target, AgentStore agents, PathService paths)
+    {
+        var laid = Layout(target, members, agents, paths, out var formationRadius);
+        Target = target;
+        slots.Clear();
+        slots.AddRange(laid);
+        FormationRadius = formationRadius;
+        SettlingTicks = 0;
+        AtRest = false;
+    }
+
+    /// <summary>
+    /// One slot per member around a command point, paired so approach order is preserved.
+    /// </summary>
+    private static List<Vector2> Layout(
+        Vector2 target,
+        IReadOnlyList<AgentId> members,
+        AgentStore agents,
+        PathService paths,
+        out float formationRadius)
     {
         var largestRadius = 0f;
         // Two different questions. How far apart to space slots is about how much room the bodies
@@ -201,19 +282,18 @@ internal sealed class MoveGroup
             .ThenBy(slot => slot.Y)
             .ToArray();
 
-        var slots = new Vector2[members.Count];
+        var laid = new Vector2[members.Count];
         for (var rank = 0; rank < memberOrder.Length; rank++)
         {
-            slots[memberOrder[rank].index] = rank < slotOrder.Length ? slotOrder[rank] : target;
+            laid[memberOrder[rank].index] = rank < slotOrder.Length ? slotOrder[rank] : target;
         }
 
         // One slot ring beyond the outermost occupied slot, so a member counts as
         // "arrived at the formation" slightly before it reaches its own square.
-        var formationRadius = MathF.Max(
+        formationRadius = MathF.Max(
             1.25f,
-            slots.Length == 0 ? 0f : slots.Max(slot => Vector2.Distance(slot, target)) + spacing);
-        return new MoveGroup(
-            id, target, new List<AgentId>(members), new List<Vector2>(slots), formationRadius);
+            laid.Length == 0 ? 0f : laid.Max(slot => Vector2.Distance(slot, target)) + spacing);
+        return new List<Vector2>(laid);
     }
 
     /// <summary>

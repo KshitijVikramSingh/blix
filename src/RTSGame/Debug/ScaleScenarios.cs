@@ -460,9 +460,9 @@ internal static class ScaleScenarios
         var departures = world.CohortDepartures;
         var interrupted = departures.Interrupted - departuresBefore.Interrupted;
         Console.WriteLine(
-            $"    left the cohort: {departures.Superseded - departuresBefore.Superseded} superseded, " +
+            $"    cohort: {(world.LastOrderAdoptedCohort ? "adopted — the same set as last time" : "new")} | " +
+            $"left it: {departures.Superseded - departuresBefore.Superseded} superseded, " +
             $"{departures.Overridden - departuresBefore.Overridden} overridden, " +
-            $"{departures.Arrived - departuresBefore.Arrived} arrived, " +
             $"{departures.Died - departuresBefore.Died} died, " +
             $"{interrupted} INTERRUPTED by the jobs layer" +
             (interrupted > 0 ? "  <-- nobody asked for these" : string.Empty));

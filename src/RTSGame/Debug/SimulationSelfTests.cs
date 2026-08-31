@@ -118,6 +118,7 @@ internal static class SimulationSelfTests
         Check("a standing assignment is parked by an order and given back on request", AssignmentSurvivesAnInterrupt());
         Check("an order holds until overridden and is never a trap", AnOrderNeverBecomesAMode());
         Check("a cohort owns its roster, and every departure names a reason", ACohortOwnsItsRoster());
+        Check("a cohort outlives its move and is adopted by the next order", ACohortOutlivesItsMove());
         Check("a crew survives the orders given to it and forgets its dead", ACrewSurvivesWhatIsDoneToIt());
         Check("a job's reach is written in bodies", JobReachIsWrittenInBodies());
         Check("an unreachable job fails politely", AnUnreachableJobFailsPolitely());
@@ -2730,6 +2731,82 @@ internal static class SimulationSelfTests
     /// with the same members and a different identity, and when the cohort is gone the crew is not. Collapsing
     /// them is the failure §82 named, and it would pass every other test in this file.
     /// </para></remarks>
+    /// <summary>
+    /// A cohort outlives its move: it goes to rest with its people, the next order to the same set adopts it
+    /// rather than building a new one, and only an empty roster ends it.
+    /// </summary>
+    /// <remarks>
+    /// <b>The seam §107 named and left uncut.</b> Retiring on "everybody has settled" was a locomotion
+    /// lifetime wearing the cohort's clothes: the set died the moment the walk did, so the next order could
+    /// not possibly be given to the same group — there was no group left to give it to. Splitting the two
+    /// makes adoption expressible, and adoption is the whole visible payoff, because the cohort keeps the
+    /// identity and the travel state that station-keeping reads instead of starting every re-order from "we
+    /// have not agreed on a direction yet".
+    /// <para>
+    /// The three claims are asserted apart because they fail apart. A cohort that survived but was not
+    /// adopted would show as a second id; a cohort that was adopted but did not survive is a contradiction
+    /// that would show as a departure count; and a cohort that survives everything would leak, so the empty
+    /// roster still has to end one.
+    /// </para>
+    /// <para>
+    /// Partial orders are the case that decides what "the player holds one cohort" means in code. Ordering
+    /// four of the eight must not drag the other four along and must not hand the four a formation laid out
+    /// for eight — so it forms its own cohort, the remainder keeps the old one, and the ordered set has
+    /// resolved to exactly one cohort either way.
+    /// </para></remarks>
+    private static bool ACohortOutlivesItsMove()
+    {
+        var world = new SimulationWorld(60f);
+        var ids = new List<AgentId>();
+        for (var i = 0; i < 8; i++)
+        {
+            ids.Add(world.SpawnAgent(new Vector2(-22f + i % 4 * 1.2f, -14f + i / 4 * 1.2f)));
+        }
+
+        world.QueueMove(ids, new Vector2(-8f, -4f));
+        Tick(world, 30 * 25);
+        var first = world.MoveGroups.Values.SingleOrDefault();
+        var restedWithItsPeople = first is { AtRest: true, Members.Count: 8 };
+        var firstId = first?.Id ?? 0;
+
+        // The same set again. Nobody joins and nobody leaves, so the ledger should not move at all.
+        var beforeSecond = world.CohortDepartures;
+        world.QueueMove(ids, new Vector2(10f, 6f));
+        Tick(world, 1);
+        var second = world.MoveGroups.Values.SingleOrDefault();
+        var adopted = world.LastOrderAdoptedCohort && second is not null && second.Id == firstId &&
+                      !second.AtRest && second.Members.Count == 8;
+        var after = world.CohortDepartures;
+        var quiet = after.Superseded == beforeSecond.Superseded &&
+                    after.Overridden == beforeSecond.Overridden &&
+                    after.Interrupted == beforeSecond.Interrupted &&
+                    after.Died == beforeSecond.Died;
+
+        // Half of them somewhere else: a different intention, so a different cohort — and the four left
+        // behind keep the one they were in.
+        var half = ids.Take(4).ToArray();
+        world.QueueMove(half, new Vector2(-10f, 12f));
+        Tick(world, 1);
+        var split = world.MoveGroups.Count == 2 &&
+                    !world.LastOrderAdoptedCohort &&
+                    world.MoveGroups.Values.Any(g => g.Id == firstId && g.Members.Count == 4) &&
+                    world.MoveGroups.Values.Any(g => g.Id != firstId && g.Members.Count == 4);
+        // Every body is in exactly one cohort, which is the invariant the split has to preserve.
+        var oneCohortEach = RosterDisagreements(world) == 0;
+
+        // And the only thing that ends a set is having nobody left in it.
+        world.QueueStop(ids);
+        Tick(world, 2);
+        var endedWhenEmpty = world.MoveGroups.Count == 0;
+
+        var passed = restedWithItsPeople && adopted && quiet && split && oneCohortEach && endedWhenEmpty;
+        Console.WriteLine(
+            $"    rested with its people={restedWithItsPeople} | adopted by the next order={adopted} " +
+            $"(id {firstId}, ledger unmoved={quiet}) | half ordered away split it in two={split} " +
+            $"(one cohort each={oneCohortEach}) | ended only when empty={endedWhenEmpty}");
+        return passed;
+    }
+
     private static bool ACrewSurvivesWhatIsDoneToIt()
     {
         var world = new SimulationWorld(60f);
@@ -2835,8 +2912,7 @@ internal static class SimulationSelfTests
         disagreements += RosterDisagreements(world);
 
         var ledger = world.CohortDepartures;
-        var accounted = ledger.Superseded + ledger.Overridden + ledger.Interrupted +
-                        ledger.Arrived + ledger.Died;
+        var accounted = ledger.Superseded + ledger.Overridden + ledger.Interrupted + ledger.Died;
         var stranded = 0;
         foreach (var group in world.MoveGroups.Values) stranded += group.Members.Count;
 
@@ -2846,7 +2922,7 @@ internal static class SimulationSelfTests
             (firstFaultTick >= 0 ? $" from tick {firstFaultTick}" : string.Empty) +
             $" | reclaimed by the jobs layer={reclaimed} overridden={stopped}" +
             $" | ledger superseded={ledger.Superseded} overridden={ledger.Overridden} " +
-            $"interrupted={ledger.Interrupted} arrived={ledger.Arrived} died={ledger.Died} " +
+            $"interrupted={ledger.Interrupted} died={ledger.Died} " +
             $"= {accounted} of 9 | still on a roster={stranded}");
         return passed;
     }

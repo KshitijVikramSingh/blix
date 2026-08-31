@@ -229,11 +229,10 @@ internal sealed class SimulationWorld
     /// the only reason in the list that means nobody asked, and a cohort shedding members to it is the
     /// jobs layer quietly taking the order back.
     /// </remarks>
-    public (long Superseded, long Overridden, long Interrupted, long Arrived, long Died) CohortDepartures =>
+    public (long Superseded, long Overridden, long Interrupted, long Died) CohortDepartures =>
         (cohortDepartures[(int)CohortDeparture.Superseded],
          cohortDepartures[(int)CohortDeparture.Overridden],
          cohortDepartures[(int)CohortDeparture.Interrupted],
-         cohortDepartures[(int)CohortDeparture.Arrived],
          cohortDepartures[(int)CohortDeparture.Died]);
 
     /// <summary>Why route requests came back empty, by cause. See PathService.PathNoStartCell.</summary>
@@ -254,6 +253,17 @@ internal sealed class SimulationWorld
     /// player to infer it from twenty bodies standing in a field.
     /// </remarks>
     public bool LastOrderWasBestEffort { get; private set; }
+
+    /// <summary>
+    /// Whether the last multi-body order was taken by a cohort that already existed.
+    /// </summary>
+    /// <remarks>
+    /// A report, like the goal-resolution flags beside it: nothing in the simulation reads it back. It is
+    /// here because "was this the same twenty people again" is the one fact about an order that adoption
+    /// makes interesting, and reading it off the departure ledger afterwards is inference rather than an
+    /// answer — an order that adopted books nothing, and so does an order given to nobody.
+    /// </remarks>
+    public bool LastOrderAdoptedCohort { get; private set; }
 
     public bool LastOrderFoundNothing { get; private set; }
 
@@ -2188,6 +2198,29 @@ internal sealed class SimulationWorld
         }
     }
 
+    /// <summary>
+    /// The live cohort whose roster is exactly this set, if there is one.
+    /// </summary>
+    /// <remarks>
+    /// A walk of the groups rather than an index off the bodies, because the question is about the whole
+    /// set and not about any one member: a body's cohort is one lookup away, but "is that cohort's roster
+    /// precisely these people" still has to be asked, and there are only ever a handful of live cohorts.
+    /// Ordered by id so two runs that adopt find the same one, which matters because adopting rather than
+    /// rebuilding changes every id allocated afterwards.
+    /// </remarks>
+    private MoveGroup? AdoptableCohort(IReadOnlyList<AgentId> ordered)
+    {
+        MoveGroup? found = null;
+        foreach (var id in moveGroups.Keys.Order())
+        {
+            var group = moveGroups[id];
+            if (!group.RosterIs(ordered)) continue;
+            found = group;
+            break;
+        }
+        return found;
+    }
+
     private void ApplyMove(MoveGroupCommand move)
     {
         var members = move.Agents
@@ -2247,10 +2280,24 @@ internal sealed class SimulationWorld
             LastOrderAnchorUnplaced = pathService.GoalsAnchorUnplaced != anchorFailuresBefore;
         }
 
-        var group = members.Length > 1
-            ? MoveGroup.Create(++nextMoveGroupId, target, members, Agents, pathService)
-            : null;
-        if (group is not null) moveGroups[group.Id] = group;
+        // <b>The same people ordered somewhere else are the same cohort.</b> Rebuilding would give them a new
+        // identity, book a departure and a join for every one of them, and throw away what the group had
+        // learned about how it was travelling — so an order whose set is exactly a live cohort's roster
+        // adopts that cohort and only re-lays the slots. Exactly, not overlapping: ordering six of ten is a
+        // different intention, and it forms its own cohort while the other four keep theirs. Which is also
+        // where "a player holds one cohort at a time" lives — any ordered set resolves to one, never two.
+        var group = members.Length > 1 ? AdoptableCohort(members) : null;
+        var adopted = group is not null;
+        if (adopted)
+        {
+            group!.Retarget(target, Agents, pathService);
+        }
+        else if (members.Length > 1)
+        {
+            group = MoveGroup.Create(++nextMoveGroupId, target, members, Agents, pathService);
+            moveGroups[group.Id] = group;
+        }
+        LastOrderAdoptedCohort = adopted;
 
         for (var slot = 0; slot < members.Length; slot++)
         {
@@ -2261,7 +2308,10 @@ internal sealed class SimulationWorld
                 continue;
             }
 
-            LeaveCohort(ref agent, CohortDeparture.Superseded);
+            // Nothing to leave when the cohort being joined is the one already held: LeaveCohort would
+            // strike the body off the very roster it is about to be put back on, and book a departure for
+            // an order in which nobody departed.
+            if (!adopted) LeaveCohort(ref agent, CohortDeparture.Superseded);
             agent.LocomotionState = AgentLocomotionState.Move;
             agent.BehaviorTarget = new AgentId(-1);
             agent.ReturningToHold = false;
@@ -3453,6 +3503,24 @@ internal sealed class SimulationWorld
                 cohortDepartures[(int)CohortDeparture.Died]++;
             }
 
+            // <b>The only thing that ends a set is having nobody left in it.</b> §107 named this seam and
+            // left it uncut: retiring on "everybody has settled" was a locomotion lifetime wearing the
+            // cohort's clothes, and it is why a group could not be adopted by its next order — it was gone
+            // before the order arrived. An empty roster is a different claim entirely, and it is the one
+            // that actually means the cohort is over. Asked here, straight after the sweep, so that it is
+            // asked of a resting cohort too — a set whose last member the jobs layer took back is over
+            // whether or not it was still walking when that happened.
+            if (group.Members.Count == 0)
+            {
+                retired.Add(group.Id);
+                continue;
+            }
+
+            // A cohort at rest is standing still by definition: nobody is in transit to average, nobody has
+            // a slot left to peel off to, and walking its members every tick to rediscover that is what a
+            // set that outlives its move would otherwise cost.
+            if (group.AtRest) continue;
+
             var settledMembers = 0;
             // Live centroid of the members still travelling together. Formation
             // steering is relative to this, not to the command point, so the
@@ -3517,11 +3585,6 @@ internal sealed class SimulationWorld
                 }
             }
 
-            if (group.Members.Count == 0)
-            {
-                retired.Add(group.Id);
-                continue;
-            }
             if (settledMembers < group.Members.Count)
             {
                 group.SettlingTicks = 0;
@@ -3530,21 +3593,16 @@ internal sealed class SimulationWorld
             group.SettlingTicks++;
             if (group.SettlingTicks < 30) continue;
 
-            // <b>This is a locomotion lifetime, and it is about to stop being the cohort's.</b> Everybody
-            // has stood on their slot for a second, so the move is over — which today also ends the group,
-            // because the group has never been anything but the move. Releasing the members is therefore
-            // still the right thing to do here; what will change is that ending the move stops meaning
-            // ending the set. Named now so the seam is visible before anything is built on it.
-            //
-            // Over a snapshot because releasing a member takes it off the roster being walked.
-            foreach (var id in group.Members.ToArray())
+            // Everybody has stood on their slot for a second: the move is finished. The cohort keeps its
+            // people and goes to rest, and the arrival bookkeeping that used to accompany release happens
+            // once, here, on the way into that state.
+            group.AtRest = true;
+            foreach (var id in group.Members)
             {
                 ref var agent = ref Agents.Get(id);
-                LeaveCohort(ref agent, CohortDeparture.Arrived);
                 agent.HoldPosition = agent.Position;
                 agent.HoldReturnCooldown = 0.75f;
             }
-            retired.Add(group.Id);
         }
 
         foreach (var id in retired) moveGroups.Remove(id);
@@ -3649,6 +3707,11 @@ internal sealed class SimulationWorld
     /// </remarks>
     private static void JoinCohort(ref AgentState agent, MoveGroup group, int slot)
     {
+        // Symmetric with ClearCohortFields, and that symmetry is load-bearing now that an adopted cohort
+        // skips the leave: escape-seeking is a fact about the route a body was on for the last order, and
+        // an order that keeps the cohort must still start the body on a clean one. Downstream guards happen
+        // to catch a stale flag today, which is not a reason to leave one.
+        agent.SeekingFieldEntry = false;
         agent.MoveGroupId = group.Id;
         agent.GroupSlot = group.Slots[slot];
         agent.FormationOffset = group.SlotOffset(slot);

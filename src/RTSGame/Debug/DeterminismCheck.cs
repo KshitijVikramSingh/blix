@@ -86,7 +86,7 @@ internal static class DeterminismCheck
         "EconomySystem.Raised",
         "EconomySystem.boardCooldown",
         "MoveGroup.Id", "MoveGroup.Target", "MoveGroup.members", "MoveGroup.slots",
-        "MoveGroup.FormationRadius", "MoveGroup.SettlingTicks", "MoveGroup.TransitCentroid",
+        "MoveGroup.FormationRadius", "MoveGroup.SettlingTicks", "MoveGroup.AtRest", "MoveGroup.TransitCentroid",
         "MoveGroup.HasTransitCentroid", "MoveGroup.TransitFlow",
     };
 
@@ -111,6 +111,9 @@ internal static class DeterminismCheck
             "get'. Written by every move order before any route is asked for and read by nothing the " +
             "simulation does, so it cannot carry a difference into a decision — and it is derived from the " +
             "target and the navigation mesh, both of which are fingerprinted.",
+        ["SimulationWorld.LastOrderAdoptedCohort"] =
+            "whether the last order was taken by a cohort that already existed. Written by every move order " +
+            "and read by nothing the simulation does; which cohort took an order IS carried, in moveGroups.",
         ["SimulationWorld.LastOrderFoundNothing"] = "as LastOrderWasBestEffort: a report, not an input.",
         ["SimulationWorld.LastOrderAnchorUnplaced"] = "as LastOrderWasBestEffort: a report, not an input.",
         ["SimulationWorld.LastOrderShortfall"] =
@@ -514,7 +517,6 @@ internal static class DeterminismCheck
         sink.Add("CohortSuperseded", departures.Superseded);
         sink.Add("CohortOverridden", departures.Overridden);
         sink.Add("CohortInterrupted", departures.Interrupted);
-        sink.Add("CohortArrived", departures.Arrived);
         sink.Add("CohortDied", departures.Died);
         sink.Add("RoutePlansThisTick", world.RoutePlansThisTick);
         sink.Add("CongestionRecoveryCooldown", world.CongestionRecoveryCooldown);
@@ -633,6 +635,7 @@ internal static class DeterminismCheck
             sink.Add("Members", group.Members.Count);
             sink.Add("FormationRadius", group.FormationRadius);
             sink.Add("SettlingTicks", group.SettlingTicks);
+            sink.Add("AtRest", group.AtRest);
             sink.Add("TransitCentroid", group.TransitCentroid);
             sink.Add("HasTransitCentroid", group.HasTransitCentroid);
             sink.Add("TransitFlow", group.TransitFlow);
