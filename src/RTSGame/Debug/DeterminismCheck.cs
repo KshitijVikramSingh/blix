@@ -85,9 +85,12 @@ internal static class DeterminismCheck
         "EconomySystem.RoutesFinished", "EconomySystem.Born", "EconomySystem.Emigrated",
         "EconomySystem.Raised",
         "EconomySystem.boardCooldown",
-        "MoveGroup.Id", "MoveGroup.Target", "MoveGroup.members", "MoveGroup.slots",
-        "MoveGroup.FormationRadius", "MoveGroup.SettlingTicks", "MoveGroup.AtRest", "MoveGroup.TransitCentroid",
+        "MoveGroup.Id", "MoveGroup.members", "MoveGroup.plan",
+        "MoveGroup.SettlingTicks", "MoveGroup.AtRest", "MoveGroup.TransitCentroid",
         "MoveGroup.HasTransitCentroid", "MoveGroup.TransitFlow",
+        // Read through the cohort that carries it — Target, FormationRadius and Slots are the group's
+        // accessors onto exactly these three fields, so the walk covers them without a second visit.
+        "SlotPlan.Target", "SlotPlan.slots", "SlotPlan.FormationRadius",
     };
 
     /// <summary>
@@ -221,7 +224,10 @@ internal static class DeterminismCheck
     /// one of these, plain data, or has a line in <see cref="Boundaries"/>.
     /// </summary>
     private static readonly Type[] Censused =
-        { typeof(SimulationWorld), typeof(MoveGroup), typeof(EconomySystem), typeof(ThreatSystem) };
+    {
+        typeof(SimulationWorld), typeof(MoveGroup), typeof(SlotPlan), typeof(EconomySystem),
+        typeof(ThreatSystem),
+    };
 
     /// <summary>
     /// Subsystems read through a named surface instead of field by field, and what that

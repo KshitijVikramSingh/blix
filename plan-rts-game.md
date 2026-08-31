@@ -9796,3 +9796,68 @@ set the player can put back with one marquee and one keypress is a convenience, 
 `ControlGroups` said "the costs are real" and now says what is actually true.
 
 Gate 3/3 green.
+
+## 111. The geometry the cohort was, and now carries
+
+The last of §82's four collapses. `MoveGroup` was three things at once — the identity and roster of a set, the
+lifetime and travel state of that set, and the block-with-frontage geometry that decides where each member
+stands when it arrives. §107 and §109 sorted out the first two. This separates the third.
+
+`SlotPlan` holds the target, one slot per member, the arrival envelope, and the layout itself: the block built
+in the approach frame, wider than deep, with concentric rings as the fallback for ground the block cannot use,
+and the rank-for-rank pairing that stops a cohort threading through itself. Moved verbatim — this is an
+extraction and not a rewrite, and none of the geometry changed.
+
+The cohort now carries a plan rather than being one:
+
+```
+  MoveGroup    Id, roster, AtRest, SettlingTicks, TransitCentroid, TransitFlow, HasTransitCentroid
+  SlotPlan     Target, Slots, FormationRadius, and the layout that produces them
+```
+
+`Retarget` becomes a plan swap. That is the shape the split was looking for, because **the target is the only
+thing a new order actually changes**: identity, roster and travel state all survive it, and after §109 they
+have to, since adoption is worth having precisely because a cohort turned toward somewhere else keeps what it
+had worked out about travelling together.
+
+### Why this one was worth doing even though nothing was broken
+
+Nothing was broken. The reason is the sentence §82 wrote about it: *a combat formation, which adds spatial
+roles and can wait until the combat arc needs it*. A combat formation is roles, a facing and ranks — who is in
+front, who is on the flank, which way the whole body points. It is a **consumer** of this geometry, or a
+replacement for it, and it should be able to be either without touching the class that holds identity,
+membership and travel state.
+
+Which is also why the type is not called `Formation`. What is here answers a much smaller question than a
+formation does — twenty people were sent to one square metre, so where does each of them stand — and taking
+the word now would leave the real thing without one. `FormationRadius` kept its name: it is the envelope at
+which a member stops following the shared route and goes to claim its ground, that is what it has always meant
+in this codebase, and renaming a well-understood term to make room for a type that does not exist yet is churn.
+
+### Measured
+
+Nothing to measure: no behaviour changed and none was meant to. What stands in for a measurement is the
+determinism census, which is why it exists. `SlotPlan` joins the censused types, its three fields join the
+ledger with the note that they are read through the cohort's own accessors, and the run confirms it:
+
+```
+PASS  every field of the world is fingerprinted or argued away
+PASS  a saved world has the same future
+```
+
+Save format goes to version 9 — the plan owns its own bytes now, so the group's record changed shape.
+
+Gate 3/3 green.
+
+### Where the four representations stand
+
+```
+  1  transient selection   SelectionController          unchanged all arc
+  2  command cohort        MoveGroup                    §107 roster, §109 lifetime, §110 never grown
+  3  persistent crew       ControlGroups                §108, view-layer by ruling
+  4  combat formation      — (SlotPlan is its geometry) unbuilt, and correctly so
+```
+
+The fourth is not built and should not be. §82 said formation geometry, facing and combat ranks are a later
+consumer rather than a prerequisite, and the combat arc is where the questions it would answer actually get
+asked. What this section buys is that when that arc opens, the thing it extends is one class with one job.

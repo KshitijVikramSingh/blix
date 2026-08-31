@@ -7,8 +7,8 @@ using RTSGame.Simulation.Persistence;
 namespace RTSGame.Simulation.Movement;
 
 /// <summary>
-/// Shared intent for a multi-unit move order, plus one destination slot per
-/// member.
+/// A set of units under one shared intent: who they are, whether they are moving, and what they have
+/// learned about travelling together.
 /// </summary>
 /// <remarks>
 /// Handing every selected unit the identical destination is what created the
@@ -16,18 +16,26 @@ namespace RTSGame.Simulation.Movement;
 /// and then spent its time deciding who was allowed to stand there. A group
 /// instead travels as a cohort toward the command point and, once it arrives,
 /// each member peels off to a slot it owns outright.
-/// </remarks>
+/// <para>
+/// <b>What this class is, after §107-§111, is worth stating because it was three things and is now one.</b>
+/// It owns the roster and is the authority on membership (§107). It has a lifetime of its own, longer than
+/// any one move: it goes to rest with its people and ends only when nobody is left in it (§109), which is
+/// what lets the next order to the same set adopt it rather than build a new one. It never grows or merges —
+/// a changed set is a new cohort (§110). And the geometry it used to <em>be</em> it now merely carries, in a
+/// <see cref="SlotPlan"/> that a new target swaps out (§111).
+/// </para>
+/// <para>
+/// The travel state is the part that makes carrying rather than embodying worth the indirection.
+/// <see cref="TransitCentroid"/> and <see cref="TransitFlow"/> are what the cohort has worked out about
+/// where it is and whether it agrees with itself, and they survive a re-order precisely because they belong
+/// to the set and not to the walk.
+/// </para></remarks>
 internal sealed class MoveGroup
 {
-    /// <summary>Gap between neighbouring slots, on top of both bodies.</summary>
-    private const float SlotGap = 0.32f;
-    /// <summary>Frontage-to-depth bias; above one makes the block wider than deep.</summary>
-    private const float FrontageBias = 2.2f;
-
     public int Id { get; }
 
     /// <summary>Where the current move is going. Changes when a new order adopts this cohort.</summary>
-    public Vector2 Target { get; private set; }
+    public Vector2 Target => plan.Target;
 
     /// <summary>
     /// Whether the cohort has finished moving and is standing on its slots.
@@ -60,16 +68,27 @@ internal sealed class MoveGroup
     public IReadOnlyList<AgentId> Members => members;
 
     /// <summary>Slot world position, parallel to <see cref="Members"/>.</summary>
-    public IReadOnlyList<Vector2> Slots => slots;
+    public IReadOnlyList<Vector2> Slots => plan.Slots;
 
     private readonly List<AgentId> members;
-    private readonly List<Vector2> slots;
+
+    /// <summary>
+    /// Where this cohort's members stand when they arrive, for the target they are going to now.
+    /// </summary>
+    /// <remarks>
+    /// <b>Carried, not embodied.</b> The cohort used to be its own geometry — slots, frontage, envelope and
+    /// all — which is the last of the four collapses §82 warned about: a set that owns a block layout has
+    /// opinions about frontage, and a combat formation with roles and facing would then have had to be
+    /// bolted onto the thing that also holds identity, roster and travel state. A plan is swapped by
+    /// <see cref="Retarget"/> and everything that makes this cohort itself survives the swap.
+    /// </remarks>
+    private SlotPlan plan;
 
     /// <summary>
     /// Distance from the command point at which a member stops following the
     /// shared route and heads for its own slot.
     /// </summary>
-    public float FormationRadius { get; private set; }
+    public float FormationRadius => plan.FormationRadius;
     public int SettlingTicks { get; set; }
     /// <summary>Live centroid of the members still travelling as a cohort.</summary>
     public Vector2 TransitCentroid { get; set; }
@@ -83,7 +102,7 @@ internal sealed class MoveGroup
     public Vector2 TransitFlow { get; set; }
 
     /// <summary>Slot position relative to the command point.</summary>
-    public Vector2 SlotOffset(int member) => slots[member] - Target;
+    public Vector2 SlotOffset(int member) => plan.Offset(member);
 
     /// <summary>
     /// Takes a body off the roster. Returns false if it was not on it.
@@ -140,31 +159,27 @@ internal sealed class MoveGroup
     public void RemoveAt(int index)
     {
         members.RemoveAt(index);
-        slots.RemoveAt(index);
+        plan.RemoveAt(index);
     }
 
-    private MoveGroup(int id, Vector2 target, List<AgentId> members, List<Vector2> slots, float formationRadius)
+    private MoveGroup(int id, List<AgentId> members, SlotPlan plan)
     {
         Id = id;
-        Target = target;
         this.members = members;
-        this.slots = slots;
-        FormationRadius = formationRadius;
+        this.plan = plan;
     }
 
     /// <summary>The order itself, its slots, and how far through settling it is.</summary>
     internal void Write(WorldWriter writer)
     {
         writer.Int(Id);
-        writer.Vector(Target);
-        writer.Float(FormationRadius);
         writer.Int(SettlingTicks);
         writer.Vector(TransitCentroid);
         writer.Bool(HasTransitCentroid);
         writer.Bool(AtRest);
         writer.Vector(TransitFlow);
         writer.Blob<AgentId>(CollectionsMarshal.AsSpan(members));
-        writer.Blob<Vector2>(CollectionsMarshal.AsSpan(slots));
+        plan.Write(writer);
     }
 
     /// <summary>
@@ -182,16 +197,13 @@ internal sealed class MoveGroup
         // Read into locals in order rather than into an initialiser: the fields go out in a fixed
         // sequence and two of them are constructor arguments, so the sequence has to be visible.
         var id = reader.Int();
-        var target = reader.Vector();
-        var formationRadius = reader.Float();
         var settlingTicks = reader.Int();
         var transitCentroid = reader.Vector();
         var hasTransitCentroid = reader.Bool();
         var atRest = reader.Bool();
         var transitFlow = reader.Vector();
         var members = new List<AgentId>(reader.Blob<AgentId>());
-        var slots = new List<Vector2>(reader.Blob<Vector2>());
-        return new MoveGroup(id, target, members, slots, formationRadius)
+        return new MoveGroup(id, members, SlotPlan.Read(reader))
         {
             SettlingTicks = settlingTicks,
             TransitCentroid = transitCentroid,
@@ -212,8 +224,8 @@ internal sealed class MoveGroup
         AgentStore agents,
         PathService paths)
     {
-        var slots = Layout(target, members, agents, paths, out var formationRadius);
-        return new MoveGroup(id, target, new List<AgentId>(members), slots, formationRadius);
+        return new MoveGroup(
+            id, new List<AgentId>(members), SlotPlan.Lay(target, members, agents, paths));
     }
 
     /// <summary>
@@ -233,11 +245,7 @@ internal sealed class MoveGroup
     /// </para></remarks>
     public void Retarget(Vector2 target, AgentStore agents, PathService paths)
     {
-        var laid = Layout(target, members, agents, paths, out var formationRadius);
-        Target = target;
-        slots.Clear();
-        slots.AddRange(laid);
-        FormationRadius = formationRadius;
+        plan = SlotPlan.Lay(target, members, agents, paths);
         SettlingTicks = 0;
         AtRest = false;
     }
@@ -245,122 +253,4 @@ internal sealed class MoveGroup
     /// <summary>
     /// One slot per member around a command point, paired so approach order is preserved.
     /// </summary>
-    private static List<Vector2> Layout(
-        Vector2 target,
-        IReadOnlyList<AgentId> members,
-        AgentStore agents,
-        PathService paths,
-        out float formationRadius)
-    {
-        var largestRadius = 0f;
-        // Two different questions. How far apart to space slots is about how much room the bodies
-        // take up; whether a slot exists at all is a path query, and those are asked at the class
-        // radius so a mixed cohort does not build a second identical field.
-        var largestNavigationRadius = 0f;
-        var centroid = Vector2.Zero;
-        foreach (var memberId in members)
-        {
-            ref readonly var agent = ref agents.Get(memberId);
-            largestRadius = MathF.Max(largestRadius, agent.Radius);
-            largestNavigationRadius = MathF.Max(largestNavigationRadius, agent.NavigationRadius);
-            centroid += agent.Position;
-        }
-        centroid /= members.Count;
-
-        var spacing = largestRadius * 2f + SlotGap;
-
-        // Sorting both members and slots along the approach axis and pairing them
-        // rank for rank keeps the cohort from threading through itself: the unit
-        // that arrives first takes the slot nearest the front.
-        var approach = target - centroid;
-        approach = approach.LengthSquared() > 0.0001f
-            ? Vector2.Normalize(approach)
-            : Vector2.UnitX;
-
-        var candidates = BuildSlotCandidates(
-            target, approach, spacing, largestNavigationRadius, members.Count, paths);
-
-        var memberOrder = members
-            .Select((memberId, index) => (memberId, index))
-            .OrderByDescending(entry => Vector2.Dot(agents.Get(entry.memberId).Position, approach))
-            .ThenBy(entry => entry.memberId.Value)
-            .ToArray();
-        var slotOrder = candidates
-            .OrderByDescending(slot => Vector2.Dot(slot, approach))
-            .ThenBy(slot => slot.X)
-            .ThenBy(slot => slot.Y)
-            .ToArray();
-
-        var laid = new Vector2[members.Count];
-        for (var rank = 0; rank < memberOrder.Length; rank++)
-        {
-            laid[memberOrder[rank].index] = rank < slotOrder.Length ? slotOrder[rank] : target;
-        }
-
-        // One slot ring beyond the outermost occupied slot, so a member counts as
-        // "arrived at the formation" slightly before it reaches its own square.
-        formationRadius = MathF.Max(
-            1.25f,
-            laid.Length == 0 ? 0f : laid.Max(slot => Vector2.Distance(slot, target)) + spacing);
-        return new List<Vector2>(laid);
-    }
-
-    /// <summary>
-    /// Lays out a rectangular block facing the direction of travel, falling back
-    /// to rings for any slot the block cannot place.
-    /// </summary>
-    /// <remarks>
-    /// Concentric rings pack well and read as a swarm. A move order is expected to
-    /// produce a body of troops with a frontage and a depth, oriented the way it
-    /// was sent, so the block is built in the approach frame and is wider than it
-    /// is deep. Rings remain as the fallback because a block has no answer when
-    /// the ground it wants is partly unusable.
-    /// </remarks>
-    private static List<Vector2> BuildSlotCandidates(
-        Vector2 target,
-        Vector2 approach,
-        float spacing,
-        float agentRadius,
-        int required,
-        PathService paths)
-    {
-        var candidates = new List<Vector2>(required);
-        var right = new Vector2(approach.Y, -approach.X);
-
-        // Wider than deep: a frontage reads as a formation, a square reads as a blob.
-        var columns = Math.Max(1, (int)MathF.Ceiling(MathF.Sqrt(required * FrontageBias)));
-        var rows = (int)MathF.Ceiling(required / (float)columns);
-        for (var row = 0; row < rows && candidates.Count < required; row++)
-        for (var column = 0; column < columns && candidates.Count < required; column++)
-        {
-            var lateral = (column - (columns - 1) * 0.5f) * spacing;
-            var depth = (row - (rows - 1) * 0.5f) * spacing;
-            var position = target + right * lateral - approach * depth;
-            if (!paths.IsPositionNavigable(position, agentRadius)) continue;
-            if (!paths.IsSlotReachable(target, position, agentRadius)) continue;
-            candidates.Add(position);
-        }
-
-        for (var ring = 1; candidates.Count < required && ring <= required; ring++)
-        {
-            var ringRadius = ring * spacing;
-            var slotCount = ring * 6;
-            for (var slot = 0; slot < slotCount && candidates.Count < required; slot++)
-            {
-                var angle = slot / (float)slotCount * MathF.Tau;
-                var position = target + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * ringRadius;
-                if (!paths.IsPositionNavigable(position, agentRadius)) continue;
-                if (!paths.IsSlotReachable(target, position, agentRadius)) continue;
-                if (candidates.Any(existing =>
-                        Vector2.DistanceSquared(existing, position) < spacing * spacing * 0.64f))
-                {
-                    continue;
-                }
-                candidates.Add(position);
-            }
-        }
-
-        if (candidates.Count == 0) candidates.Add(target);
-        return candidates;
-    }
 }
