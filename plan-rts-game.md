@@ -9989,3 +9989,60 @@ opened the section is still true and is now a decision that can be made rather t
 and the day, the seasons, the rates and the length of a sunrise follow, in proportions a test defends.
 
 Gate 3/3 green.
+
+## 113. --clocks, and a criterion that cannot be met
+
+§112 argued about numbers nobody could read off the running game. `--clocks` is the answer to that: it takes
+the dials, prints every quantity in the unit it is actually experienced in, and puts the dimensionless ratios
+at the top because those are what a setting is chosen on.
+
+It samples `Atmosphere.For` rather than reimplementing the trigonometry beside it. That is the point of it
+being in the game rather than in a scratch script — a report that computes its own answer is a second opinion
+about one quantity, and this project's whole history is two opinions drifting. It agrees with the independent
+Python that priced §112 (winter night 7.3 s against 7; a 45 s day's dawn 7 s against 4 + 3), which is what
+gives either of them any standing.
+
+```
+  ratios — what a setting is chosen on
+       270 days a year        reads as a year
+      0.07 dawn per command   AN ORDER OUTLASTS THE SUNRISE
+     16.76 days to cross      THE MAP CANNOT BE CROSSED IN A DAY
+     0.048 reach per map      a cutter's arm is 4.8% of the map
+```
+
+Overrides price a proposal without editing a constant: `--clocks --year 3.4h --days 270`. Durations are
+written the way a person says them and converted on the way in, because a year is chosen in wall hours and
+stored in simulated seconds and that is the arithmetic that keeps going wrong — §112 got it wrong in a test
+about units, and this file printed `16.76` beside "crossings a day" when the number was days per crossing.
+Both are the same fault: a quantity that is right under a name that is its own reciprocal.
+
+### What it found immediately
+
+The report solves for the crossover rather than leaving it to be read off a table:
+
+```
+  solved
+    a sunrise outlasts an 80 m order at a year of  14.23 h — 14.2x this one
+    a sunrise is a tenth of one at 85.4 min, a third at 4.74 h
+```
+
+**§82.2's criterion cannot be met.** *Avoid cycling from noon through night while the player is still
+carrying out one ordinary command* asks for a fourteen-hour year, because a dawn is a fixed share of a day
+and an order is a fixed number of wall seconds and there is no setting where the first beats the second at a
+length anybody would sit through. It is not a target the numbers missed; it is a target the geometry forbids.
+
+Which is worth more than a number would have been. The brief was written as though the day were badly tuned,
+and it is not tuned at all — it is structurally incapable of the thing being asked of it. That leaves two
+honest readings and the arithmetic no longer favours ducking between them:
+
+- a sunrise is a **transition you glimpse**, not a state you are in, in which case two seconds may be right
+  and nothing needs changing; or
+- the daily cycle **should not exist**, and the sun should turn with the season instead — which is the chair's
+  own proposal, and now has arithmetic under it rather than taste.
+
+Note the shape of that: the instrument's first useful act was not to tell us what the numbers should be, but
+to retire a question. §112 asked "how long should a day be" for an afternoon on the strength of a figure I
+invented. The answerable question is "what is a sunrise for", and it is a design question that no measurement
+was ever going to settle.
+
+Gate 3/3 green.

@@ -247,6 +247,20 @@ public static class Program
             Environment.Exit(0);
         }
 
+        // <b>What the clocks come to, before anybody argues about what they should come to.</b> §112 spent an
+        // afternoon on numbers nobody could read off the running game, and one of them was invented. The
+        // overrides price a proposal without editing a constant.
+        if (args.Contains("--clocks"))
+        {
+            var clockCompression = Value(args, "--compression") is { } cc
+                ? float.Parse(cc)
+                : RtsGameLoop.DefaultCompression;
+            var clockExtent = Value(args, "--extent") is { } ce ? float.Parse(ce) : 600f;
+            var clockYear = ParseDuration(Value(args, "--year"));
+            var clockDays = Value(args, "--days") is { } cd ? int.Parse(cd) : (int?)null;
+            Environment.Exit(Debug.ClockReport.Run(clockCompression, clockExtent, clockYear, clockDays));
+        }
+
         if (args.Contains("--orderprobe"))
         {
             var probeExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
@@ -513,6 +527,37 @@ public static class Program
     {
         var raw = Value(args, flag);
         return raw is null ? null : raw.Split(',').Select(int.Parse).ToArray();
+    }
+
+    /// <summary>
+    /// A duration written the way a person would say it: 3h, 90min, 5400s, or bare simulated seconds.
+    /// </summary>
+    /// <remarks>
+    /// <b>Wall units in, simulated seconds out, because that conversion is the one that keeps going wrong.</b>
+    /// A year is chosen in hours at the chair and stored in simulated seconds, and every time somebody does
+    /// that arithmetic in their head it is a chance to hand back the wrong unit — which §112 did, in a test
+    /// about units. So "3h" means three hours in the chair and comes back multiplied by the compression.
+    /// </remarks>
+    private static float? ParseDuration(string? text, float compression = RtsGameLoop.DefaultCompression)
+    {
+        if (text is null) return null;
+        var trimmed = text.Trim();
+        if (trimmed.EndsWith("h", StringComparison.OrdinalIgnoreCase))
+        {
+            return float.Parse(trimmed[..^1]) * 3600f * compression;
+        }
+
+        if (trimmed.EndsWith("min", StringComparison.OrdinalIgnoreCase))
+        {
+            return float.Parse(trimmed[..^3]) * 60f * compression;
+        }
+
+        if (trimmed.EndsWith("s", StringComparison.OrdinalIgnoreCase))
+        {
+            return float.Parse(trimmed[..^1]) * compression;
+        }
+
+        return float.Parse(trimmed);
     }
 
     private static string? Value(string[] args, string flag)
