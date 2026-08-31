@@ -89,12 +89,14 @@ internal sealed class MoveGroup
     /// Takes a body off the roster. Returns false if it was not on it.
     /// </summary>
     /// <remarks>
-    /// The slot goes with the member rather than being left behind, because the two lists are paired by
-    /// index and a slot with nobody to stand in it is not a vacancy the cohort can offer anyone: slots are
-    /// laid out once, against the ground and the approach, for the bodies that were there at the time.
-    /// Handing a departed member's slot to somebody else is a question for the arc that lets a cohort take
-    /// new members, and it is not answered here.
-    /// </remarks>
+    /// The slot goes with the member rather than being left behind, because a slot with nobody in it is not
+    /// a vacancy the cohort can offer anyone: slots are laid out once, against particular ground and a
+    /// particular approach, for the bodies that were there at the time.
+    /// <para>
+    /// <b>And there is no vacancy to offer, because cohorts do not take new members at all.</b> §107 left
+    /// that open; §110 closed it. A cohort only ever shrinks — a set that has changed is a new cohort, not a
+    /// grown one. That is what keeps this method from needing a counterpart.
+    /// </para></remarks>
     public bool Remove(AgentId member)
     {
         var index = members.IndexOf(member);
@@ -107,11 +109,18 @@ internal sealed class MoveGroup
     /// Whether this cohort's roster is exactly the given set, which is the test for adopting it.
     /// </summary>
     /// <remarks>
-    /// <b>Exactly, not "overlaps".</b> Ordering six of a cohort's ten is a genuinely different intention from
-    /// ordering all ten, and there is no reading of it under which the four left behind should be dragged
-    /// along or the six should inherit a formation laid out for ten. So a partial order forms its own cohort
-    /// and the remainder keeps the old one — which also gives the ruling that a player holds one cohort at a
-    /// time somewhere to stand: any ordered set resolves to exactly one cohort, old or new, never to two.
+    /// <b>Exactly, and the whole rule is that one word.</b> A set that matches a roster adopts it; every
+    /// other set — a subset, a superset, a reach across two cohorts — is a new cohort. Ordering six of a
+    /// cohort's ten is a genuinely different intention from ordering all ten, and there is no reading of it
+    /// under which the four left behind should be dragged along or the six should inherit a formation laid
+    /// out for ten. Nor is there a good answer to "whose travel state is this now" when two cohorts merge.
+    /// <para>
+    /// So cohorts shrink and are replaced, and never grow or merge. That also gives the ruling that a player
+    /// holds one cohort at a time somewhere to stand: any ordered set resolves to exactly one cohort, old or
+    /// new, never to two. All four corners are asserted — see <c>ACohortIsNeverGrown</c> — because three of
+    /// them fall out of "no match means create one" rather than being written anywhere, and behaviour that is
+    /// right by accident is one refactor from being wrong.
+    /// </para>
     /// <para>
     /// Both sides are in id order — the roster because it is built that way and removal preserves it, the
     /// ordered set because every command path sorts before it queues — so this is a walk rather than a

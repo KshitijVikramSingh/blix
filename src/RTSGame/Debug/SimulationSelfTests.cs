@@ -119,6 +119,7 @@ internal static class SimulationSelfTests
         Check("an order holds until overridden and is never a trap", AnOrderNeverBecomesAMode());
         Check("a cohort owns its roster, and every departure names a reason", ACohortOwnsItsRoster());
         Check("a cohort outlives its move and is adopted by the next order", ACohortOutlivesItsMove());
+        Check("a cohort is never grown, merged or reinforced", ACohortIsNeverGrown());
         Check("a crew survives the orders given to it and forgets its dead", ACrewSurvivesWhatIsDoneToIt());
         Check("a job's reach is written in bodies", JobReachIsWrittenInBodies());
         Check("an unreachable job fails politely", AnUnreachableJobFailsPolitely());
@@ -2804,6 +2805,83 @@ internal static class SimulationSelfTests
             $"    rested with its people={restedWithItsPeople} | adopted by the next order={adopted} " +
             $"(id {firstId}, ledger unmoved={quiet}) | half ordered away split it in two={split} " +
             $"(one cohort each={oneCohortEach}) | ended only when empty={endedWhenEmpty}");
+        return passed;
+    }
+
+    /// <summary>
+    /// A cohort is never grown or merged: exactly its roster adopts it, and every other set — a subset, a
+    /// superset, or a reach across two cohorts — is a new cohort.
+    /// </summary>
+    /// <remarks>
+    /// <b>Decided from the chair rather than left open.</b> §107 shelved "a cohort cannot take a new member"
+    /// as a question for a later pass; there is no later pass. Reinforcement is not a thing cohorts do. The
+    /// rule is one line — <em>exactly the roster adopts, anything else is new</em> — and the reason to want
+    /// it that plain is that every alternative needs an answer to "whose formation is this now": a slot laid
+    /// out for six against particular ground is not a vacancy that a seventh body can be given, and a merge
+    /// of two cohorts has two travel states and no principled way to pick one.
+    /// <para>
+    /// So this asserts the rule at all four of its corners, because three of them were emergent rather than
+    /// written: the exact match was built deliberately in §109, and subset, superset and overlap all fell out
+    /// of "no match means create one". Behaviour that is right by accident is behaviour that is one
+    /// refactor from being wrong, and the corners are cheap to pin down.
+    /// </para></remarks>
+    private static bool ACohortIsNeverGrown()
+    {
+        var world = new SimulationWorld(60f);
+        var ids = new List<AgentId>();
+        for (var i = 0; i < 12; i++)
+        {
+            ids.Add(world.SpawnAgent(new Vector2(-22f + i % 4 * 1.3f, -14f + i / 4 * 1.3f)));
+        }
+
+        var six = ids.Take(6).ToArray();
+        world.QueueMove(six, new Vector2(-6f, -2f));
+        Tick(world, 1);
+        var original = world.MoveGroups.Values.Single().Id;
+
+        // A superset. The obvious "reinforcement" gesture — the same six plus two more — and it must not
+        // extend the six; it is a different set, so it is a different cohort.
+        world.QueueMove(ids.Take(8), new Vector2(6f, 2f));
+        Tick(world, 2);
+        var supersetIsNew = !world.LastOrderAdoptedCohort &&
+                            world.MoveGroups.Count == 1 &&
+                            world.MoveGroups.Values.Single().Id != original &&
+                            world.MoveGroups.Values.Single().Members.Count == 8;
+        var eight = world.MoveGroups.Values.Single().Id;
+
+        // A subset keeps the parent alive with the rest in it, which §109 already required; asserted here
+        // beside its neighbours because the four corners are one rule and read as one.
+        world.QueueMove(ids.Take(3), new Vector2(-4f, 10f));
+        Tick(world, 2);
+        var subsetIsNew = !world.LastOrderAdoptedCohort &&
+                          world.MoveGroups.Count == 2 &&
+                          world.MoveGroups.Values.Any(g => g.Id == eight && g.Members.Count == 5) &&
+                          world.MoveGroups.Values.Any(g => g.Id != eight && g.Members.Count == 3);
+
+        // And a reach across both: three out of one cohort and three out of the other. Neither is grown,
+        // neither is merged, and the six that were asked for are one cohort.
+        var across = ids.Take(2).Concat(ids.Skip(3).Take(4)).OrderBy(id => id.Value).ToArray();
+        world.QueueMove(across, new Vector2(12f, -10f));
+        Tick(world, 2);
+        var reachIsNew = !world.LastOrderAdoptedCohort &&
+                         world.MoveGroups.Values.Any(g => g.Members.Count == 6 &&
+                                                          g.Members.All(across.Contains));
+        // Nobody is on two rosters and nobody claims a cohort that does not hold them, through all of it.
+        var consistent = RosterDisagreements(world) == 0;
+        // Every cohort alive holds at least one body: no husk is left behind by any of the three.
+        var noHusks = world.MoveGroups.Values.All(g => g.Members.Count > 0);
+
+        // The one case that does adopt, asserted last so the rule reads as a rule and not as a ban.
+        world.QueueMove(across, new Vector2(-12f, -10f));
+        Tick(world, 1);
+        var exactAdopts = world.LastOrderAdoptedCohort;
+
+        var passed = supersetIsNew && subsetIsNew && reachIsNew && consistent && noHusks && exactAdopts;
+        Console.WriteLine(
+            $"    superset is a new cohort={supersetIsNew} subset={subsetIsNew} " +
+            $"across two={reachIsNew} | exactly the roster still adopts={exactAdopts} " +
+            $"| one cohort each={consistent}, no empty husks={noHusks}, " +
+            $"{world.MoveGroups.Count} cohort(s) alive");
         return passed;
     }
 

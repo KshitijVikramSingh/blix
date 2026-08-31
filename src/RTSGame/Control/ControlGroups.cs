@@ -17,9 +17,9 @@ namespace RTSGame.Control;
 /// world has no idea it exists. That is cheap and it is safe: <see cref="AgentStore"/> tombstones rather than
 /// compacts and never reuses an id, precisely so a stale reference resolves to a dead body and is refused
 /// rather than resolving to somebody else — which is the one property a list of ids held outside the
-/// simulation needs. The costs are real and worth naming rather than discovering: a crew does not survive a
-/// save, and nothing computed at group resolution can be shared through it. Both become questions the moment
-/// something wants either, and neither is a reason to put it in the world today.
+/// simulation needs. Two things follow, and both are simply what a crew is rather than anything owed later: it
+/// lasts as long as the session, and nothing computed at group resolution passes through it. A set the player
+/// can put back with one marquee and one keypress is a convenience, not state.
 /// </para></remarks>
 internal sealed class ControlGroups
 {

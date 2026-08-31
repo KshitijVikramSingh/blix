@@ -9739,3 +9739,60 @@ Skipping `LeaveCohort` on the adopted path meant skipping `ClearCohortFields`, a
 fact about the route a body was on for the *last* order — survived into the new one. Downstream guards happen
 to catch it today, which is not a reason to leave a stale per-order flag lying about. `JoinCohort` now clears
 it, which makes the join symmetric with the leave and removes the need to reason about the guards at all.
+
+## 110. A cohort is never grown, merged or reinforced
+
+Decided from the chair, and it is a ruling rather than a feature. §107 shelved "a cohort still cannot take a
+new member" as a question for a later pass. There is no later pass: **reinforcement is not a thing cohorts
+do.** A set that has changed is a new cohort, not a grown one.
+
+The whole rule is one word from §109's adoption test — *exactly*:
+
+```
+  the ordered set is exactly a roster    adopt that cohort
+  anything else                          a new cohort
+```
+
+The case for keeping it that plain is that every alternative needs an answer to a question that does not have
+a good one. A slot laid out for six, against particular ground and a particular approach, is not a vacancy a
+seventh body can be given. Two cohorts merged have two travel states — two transit centroids, two flow
+agreements — and no principled way to pick one, so the merge would either throw both away or silently prefer
+whichever was found first.
+
+### Three of the four corners were right by accident
+
+Worth saying plainly, because it is the reason this section exists at all rather than being a comment. Only
+the exact match was built deliberately, in §109. Subset, superset and reaching across two cohorts all fell out
+of "no match means create one" — nobody wrote them, and nothing asserted them. Behaviour that is right by
+accident is one refactor away from being wrong, and these corners are cheap to pin down.
+
+New assertion, *a cohort is never grown, merged or reinforced*:
+
+```
+superset is a new cohort=True subset=True across two=True | exactly the roster still adopts=True
+| one cohort each=True, no empty husks=True, 3 cohort(s) alive
+```
+
+The superset is the corner that matters most, because it is the obvious reinforcement gesture: the same six
+plus two more. It must not extend the six, and it does not — it is a different set, so it is a different
+cohort, and the six leave the old one which empties and retires. The last clause asserts the rule is a rule
+and not a ban: exactly the roster still adopts.
+
+### One observed consequence, left alone
+
+A cohort can shrink to a single member and stay alive at rest — three cohorts alive at the end of that test,
+two of them holding one body each. `Create` refuses to build a cohort of one, but nothing stops one from
+becoming one, and a cohort of one is not a cohort in any useful sense.
+
+Left as it is on purpose. It costs a branch a tick, station-keeping already needs more than one member to do
+anything, and it dissolves the moment that body is ordered anywhere. Retiring it would mean inventing a
+departure with no reason behind it — the body did not leave, was not overridden, and nothing interrupted it —
+which is exactly the kind of unnamed exit §107 was written to abolish.
+
+### And crews
+
+Recorded so it stops being raised: a crew lasting as long as the session is what a crew *is*, not a debt. A
+set the player can put back with one marquee and one keypress is a convenience, not state. The doc comment on
+`ControlGroups` said "the costs are real" and now says what is actually true.
+
+Gate 3/3 green.
