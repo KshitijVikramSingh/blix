@@ -72,7 +72,8 @@ internal static class DeterminismCheck
         "SimulationWorld.CongestionRerouteCount", "SimulationWorld.CrowdedArrivalBlockCount",
         "SimulationWorld.LastCongestionRoot", "SimulationWorld.LastCongestionRepathAgent",
         "SimulationWorld.commands", "SimulationWorld.paths", "SimulationWorld.moveGroups",
-        "SimulationWorld.nextMoveGroupId", "SimulationWorld.blockColliders",
+        "SimulationWorld.nextMoveGroupId", "SimulationWorld.cohortDepartures",
+        "SimulationWorld.blockColliders",
         "ThreatSystem.Killed", "ThreatSystem.Dealt",
         "ThreatSystem.Standing", "ThreatSystem.Fleeing", "ThreatSystem.Surplus", "ThreatSystem.Crowded",
         "ThreatSystem.Contacts", "ThreatSystem.UnderAttack", "ThreatSystem.Attacking",
@@ -84,7 +85,7 @@ internal static class DeterminismCheck
         "EconomySystem.RoutesFinished", "EconomySystem.Born", "EconomySystem.Emigrated",
         "EconomySystem.Raised",
         "EconomySystem.boardCooldown",
-        "MoveGroup.Id", "MoveGroup.Target", "MoveGroup.Members", "MoveGroup.Slots",
+        "MoveGroup.Id", "MoveGroup.Target", "MoveGroup.members", "MoveGroup.slots",
         "MoveGroup.FormationRadius", "MoveGroup.SettlingTicks", "MoveGroup.TransitCentroid",
         "MoveGroup.HasTransitCentroid", "MoveGroup.TransitFlow",
     };
@@ -506,6 +507,15 @@ internal static class DeterminismCheck
         sink.Add("LiveBodies", world.Agents.LiveCount);
         sink.Add("PendingCommands", world.PendingCommands.Count);
         sink.Add("NextMoveGroupId", world.NextMoveGroupId);
+        // Why bodies have left cohorts, which is a decision record and not a position. Two runs that
+        // disagree here have disagreed about who was in a group, and that is upstream of everywhere the
+        // disagreement would otherwise first appear.
+        var departures = world.CohortDepartures;
+        sink.Add("CohortSuperseded", departures.Superseded);
+        sink.Add("CohortOverridden", departures.Overridden);
+        sink.Add("CohortInterrupted", departures.Interrupted);
+        sink.Add("CohortArrived", departures.Arrived);
+        sink.Add("CohortDied", departures.Died);
         sink.Add("RoutePlansThisTick", world.RoutePlansThisTick);
         sink.Add("CongestionRecoveryCooldown", world.CongestionRecoveryCooldown);
         sink.Add("RasterizedTerrainRevision", world.RasterizedTerrainRevision);
@@ -620,7 +630,7 @@ internal static class DeterminismCheck
             sink.Push("group", id);
             sink.Add("Id", group.Id);
             sink.Add("Target", group.Target);
-            sink.Add("Members", group.Members.Length);
+            sink.Add("Members", group.Members.Count);
             sink.Add("FormationRadius", group.FormationRadius);
             sink.Add("SettlingTicks", group.SettlingTicks);
             sink.Add("TransitCentroid", group.TransitCentroid);
@@ -628,7 +638,7 @@ internal static class DeterminismCheck
             sink.Add("TransitFlow", group.TransitFlow);
             if (scope == Scope.Tick) continue;
 
-            for (var member = 0; member < group.Members.Length; member++)
+            for (var member = 0; member < group.Members.Count; member++)
             {
                 sink.Add("Member", group.Members[member].Value);
                 sink.Add("Slot", group.Slots[member]);

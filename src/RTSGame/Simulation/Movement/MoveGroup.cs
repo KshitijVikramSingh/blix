@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Navigation;
 using RTSGame.Simulation.Persistence;
@@ -25,9 +26,31 @@ internal sealed class MoveGroup
 
     public int Id { get; }
     public Vector2 Target { get; }
-    public AgentId[] Members { get; }
+
+    /// <summary>
+    /// The roster, and the authority on who is in this cohort.
+    /// </summary>
+    /// <remarks>
+    /// <b>Membership was stored twice and the two copies meant different things.</b> This list was fixed at
+    /// creation and never edited — the roster at the moment of the order — while
+    /// <see cref="AgentState.MoveGroupId"/> was the live truth, and every read of the list was filtered by
+    /// the field to reconcile them. The group could therefore lose a member without anything happening: the
+    /// filter simply matched one fewer body, and a departure became indistinguishable from a body that was
+    /// never in the cohort. That is the shape §105 took two instruments and a chair report to find.
+    /// <para>
+    /// So the list is now the authority and it shrinks, through <see cref="Remove"/>, with a reason. The
+    /// field on the body stays as a back-pointer cache for the per-tick lookups that cannot afford a scan,
+    /// written only where this list is written. Kept in id order because it is created in id order and
+    /// <see cref="List{T}.RemoveAt"/> preserves it, which is what lets the fingerprint walk it directly.
+    /// </para></remarks>
+    public IReadOnlyList<AgentId> Members => members;
+
     /// <summary>Slot world position, parallel to <see cref="Members"/>.</summary>
-    public Vector2[] Slots { get; }
+    public IReadOnlyList<Vector2> Slots => slots;
+
+    private readonly List<AgentId> members;
+    private readonly List<Vector2> slots;
+
     /// <summary>
     /// Distance from the command point at which a member stops following the
     /// shared route and heads for its own slot.
@@ -46,14 +69,39 @@ internal sealed class MoveGroup
     public Vector2 TransitFlow { get; set; }
 
     /// <summary>Slot position relative to the command point.</summary>
-    public Vector2 SlotOffset(int member) => Slots[member] - Target;
+    public Vector2 SlotOffset(int member) => slots[member] - Target;
 
-    private MoveGroup(int id, Vector2 target, AgentId[] members, Vector2[] slots, float formationRadius)
+    /// <summary>
+    /// Takes a body off the roster. Returns false if it was not on it.
+    /// </summary>
+    /// <remarks>
+    /// The slot goes with the member rather than being left behind, because the two lists are paired by
+    /// index and a slot with nobody to stand in it is not a vacancy the cohort can offer anyone: slots are
+    /// laid out once, against the ground and the approach, for the bodies that were there at the time.
+    /// Handing a departed member's slot to somebody else is a question for the arc that lets a cohort take
+    /// new members, and it is not answered here.
+    /// </remarks>
+    public bool Remove(AgentId member)
+    {
+        var index = members.IndexOf(member);
+        if (index < 0) return false;
+        RemoveAt(index);
+        return true;
+    }
+
+    /// <summary>Takes the body at a known roster position off, for callers already walking the roster.</summary>
+    public void RemoveAt(int index)
+    {
+        members.RemoveAt(index);
+        slots.RemoveAt(index);
+    }
+
+    private MoveGroup(int id, Vector2 target, List<AgentId> members, List<Vector2> slots, float formationRadius)
     {
         Id = id;
         Target = target;
-        Members = members;
-        Slots = slots;
+        this.members = members;
+        this.slots = slots;
         FormationRadius = formationRadius;
     }
 
@@ -67,8 +115,8 @@ internal sealed class MoveGroup
         writer.Vector(TransitCentroid);
         writer.Bool(HasTransitCentroid);
         writer.Vector(TransitFlow);
-        writer.Blob<AgentId>(Members);
-        writer.Blob<Vector2>(Slots);
+        writer.Blob<AgentId>(CollectionsMarshal.AsSpan(members));
+        writer.Blob<Vector2>(CollectionsMarshal.AsSpan(slots));
     }
 
     /// <summary>
@@ -92,8 +140,8 @@ internal sealed class MoveGroup
         var transitCentroid = reader.Vector();
         var hasTransitCentroid = reader.Bool();
         var transitFlow = reader.Vector();
-        var members = reader.Blob<AgentId>();
-        var slots = reader.Blob<Vector2>();
+        var members = new List<AgentId>(reader.Blob<AgentId>());
+        var slots = new List<Vector2>(reader.Blob<Vector2>());
         return new MoveGroup(id, target, members, slots, formationRadius)
         {
             SettlingTicks = settlingTicks,
@@ -110,7 +158,7 @@ internal sealed class MoveGroup
     public static MoveGroup Create(
         int id,
         Vector2 target,
-        AgentId[] members,
+        IReadOnlyList<AgentId> members,
         AgentStore agents,
         PathService paths)
     {
@@ -127,7 +175,7 @@ internal sealed class MoveGroup
             largestNavigationRadius = MathF.Max(largestNavigationRadius, agent.NavigationRadius);
             centroid += agent.Position;
         }
-        centroid /= members.Length;
+        centroid /= members.Count;
 
         var spacing = largestRadius * 2f + SlotGap;
 
@@ -140,7 +188,7 @@ internal sealed class MoveGroup
             : Vector2.UnitX;
 
         var candidates = BuildSlotCandidates(
-            target, approach, spacing, largestNavigationRadius, members.Length, paths);
+            target, approach, spacing, largestNavigationRadius, members.Count, paths);
 
         var memberOrder = members
             .Select((memberId, index) => (memberId, index))
@@ -153,7 +201,7 @@ internal sealed class MoveGroup
             .ThenBy(slot => slot.Y)
             .ToArray();
 
-        var slots = new Vector2[members.Length];
+        var slots = new Vector2[members.Count];
         for (var rank = 0; rank < memberOrder.Length; rank++)
         {
             slots[memberOrder[rank].index] = rank < slotOrder.Length ? slotOrder[rank] : target;
@@ -164,7 +212,8 @@ internal sealed class MoveGroup
         var formationRadius = MathF.Max(
             1.25f,
             slots.Length == 0 ? 0f : slots.Max(slot => Vector2.Distance(slot, target)) + spacing);
-        return new MoveGroup(id, target, members, slots, formationRadius);
+        return new MoveGroup(
+            id, target, new List<AgentId>(members), new List<Vector2>(slots), formationRadius);
     }
 
     /// <summary>

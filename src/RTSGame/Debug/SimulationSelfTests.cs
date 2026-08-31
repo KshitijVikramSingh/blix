@@ -117,6 +117,7 @@ internal static class SimulationSelfTests
         Check("a standing assignment works with nobody watching", StandingAssignmentWorksUnwatched());
         Check("a standing assignment is parked by an order and given back on request", AssignmentSurvivesAnInterrupt());
         Check("an order holds until overridden and is never a trap", AnOrderNeverBecomesAMode());
+        Check("a cohort owns its roster, and every departure names a reason", ACohortOwnsItsRoster());
         Check("a job's reach is written in bodies", JobReachIsWrittenInBodies());
         Check("an unreachable job fails politely", AnUnreachableJobFailsPolitely());
         Check("a workplace holds more hands than fit on it", AWorkplaceHoldsMoreHandsThanFitOnIt());
@@ -2696,6 +2697,123 @@ internal static class SimulationSelfTests
     /// order, and it was measured disintegrating cohorts within seconds of arrival. And the work resumes when
     /// it is handed back, which is what keeps the assignment a parked thing rather than a lost one.
     /// </remarks>
+    /// <summary>
+    /// The roster is the cohort's, the field on the body is a cache of it, and nobody leaves a cohort
+    /// without a reason being booked.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the check §105 did not have.</b> Membership lived in two places that meant different
+    /// things — a roster fixed at the moment of the order, and a field on the body that was the live truth —
+    /// and every read of the roster was filtered by the field to reconcile them. A group could therefore
+    /// lose a member without anything happening: the filter matched one fewer body, and a departure became
+    /// indistinguishable from a body that had never joined. That is how the jobs layer took half a cohort
+    /// back two seconds after it arrived while every instrument in the arc reported success.
+    /// <para>
+    /// So two things are asserted. The two representations agree on every tick of a real move — which is
+    /// what lets the cohort loops walk the roster directly instead of defending themselves with a skip. And
+    /// the ledger accounts for every membership that ended, with the jobs layer's reclaim booked apart from
+    /// anything the player asked for, because that is the only exit nobody asked for and the only one worth
+    /// watching.
+    /// </para></remarks>
+    private static bool ACohortOwnsItsRoster()
+    {
+        // A wider world than the tuned one, for the single reason that the straggler has to still be
+        // walking when the near eight have long since stopped: on thirty metres the whole diagonal is
+        // sixteen seconds and the window closes before the cohort has settled into it.
+        var world = new SimulationWorld(60f);
+        var post = new Vector2(-25f, -16f);
+        var target = new Vector2(12f, 8f);
+
+        // <b>Eight bodies that will arrive at once and one that cannot.</b> Not decoration: after §106 the
+        // jobs layer is locked out of a body for as long as it is under orders, so the only window in which
+        // it can take a member out of a cohort is the one where that member has reached its slot and the
+        // cohort has not retired because somebody else is still walking. That window is exactly the §105
+        // mechanism — "the first bodies to reach their slots are reclaimed while the rest are still walking"
+        // — so the test builds it rather than hoping to catch it.
+        var ids = new List<AgentId>();
+        for (var i = 0; i < 8; i++)
+        {
+            ids.Add(world.SpawnAgent(target + new Vector2(i % 4 * 1.1f - 1.6f, i / 4 * 1.1f - 0.5f)));
+        }
+        var straggler = world.SpawnAgent(post);
+        ids.Add(straggler);
+
+        world.QueueMove(ids, target);
+
+        var disagreements = 0;
+        var firstFaultTick = -1;
+        for (var tick = 0; tick < 30 * 10; tick++)
+        {
+            Tick(world, 1);
+            var faults = RosterDisagreements(world);
+            if (faults > 0 && firstFaultTick < 0) firstFaultTick = tick;
+            disagreements += faults;
+        }
+
+        // The near eight are standing on their slots; the straggler is still crossing the map, so the
+        // cohort is alive and they are inside it with nothing to do. Work handed to them here is the jobs
+        // layer taking a member out of a cohort, which is the one exit the player did not ask for.
+        var beforeReclaim = world.CohortDepartures;
+        world.QueueAssign(ids.Take(8), Assignment.Hold(post, dwellSeconds: 0.5f));
+        Tick(world, 30);
+        var reclaimed = world.CohortDepartures.Interrupted - beforeReclaim.Interrupted;
+        disagreements += RosterDisagreements(world);
+
+        // And the straggler by hand, which is the same departure with somebody's name on it.
+        var beforeStop = world.CohortDepartures;
+        world.QueueStop(new[] { straggler });
+        Tick(world, 2);
+        var stopped = world.CohortDepartures.Overridden - beforeStop.Overridden;
+        disagreements += RosterDisagreements(world);
+
+        var ledger = world.CohortDepartures;
+        var accounted = ledger.Superseded + ledger.Overridden + ledger.Interrupted +
+                        ledger.Arrived + ledger.Died;
+        var stranded = 0;
+        foreach (var group in world.MoveGroups.Values) stranded += group.Members.Count;
+
+        var passed = disagreements == 0 && reclaimed == 8 && stopped == 1 && accounted == 9 && stranded == 0;
+        Console.WriteLine(
+            $"    roster/back-pointer disagreements={disagreements}" +
+            (firstFaultTick >= 0 ? $" from tick {firstFaultTick}" : string.Empty) +
+            $" | reclaimed by the jobs layer={reclaimed} overridden={stopped}" +
+            $" | ledger superseded={ledger.Superseded} overridden={ledger.Overridden} " +
+            $"interrupted={ledger.Interrupted} arrived={ledger.Arrived} died={ledger.Died} " +
+            $"= {accounted} of 9 | still on a roster={stranded}");
+        return passed;
+    }
+
+    /// <summary>
+    /// Counts every way the roster and the body's back-pointer can fail to say the same thing.
+    /// </summary>
+    /// <remarks>
+    /// Three distinct faults, deliberately summed rather than short-circuited so a run reports how bad the
+    /// disagreement is and not merely that there was one: a roster naming a body that does not agree it is
+    /// a member, a body on two rosters at once, and a body claiming a cohort no roster puts it in.
+    /// </remarks>
+    private static int RosterDisagreements(SimulationWorld world)
+    {
+        var faults = 0;
+        var onARoster = new Dictionary<int, int>();
+        foreach (var group in world.MoveGroups.Values)
+        foreach (var member in group.Members)
+        {
+            if (!world.Agents.Contains(member)) { faults++; continue; }
+            if (world.Agents.Get(member).MoveGroupId != group.Id) faults++;
+            if (!onARoster.TryAdd(member.Value, group.Id)) faults++;
+        }
+
+        foreach (ref readonly var agent in world.Agents.All)
+        {
+            if (!agent.IsAlive || agent.MoveGroupId == 0) continue;
+            if (!onARoster.TryGetValue(agent.Id.Value, out var roster) || roster != agent.MoveGroupId)
+            {
+                faults++;
+            }
+        }
+        return faults;
+    }
+
     private static bool AssignmentSurvivesAnInterrupt()
     {
         var world = new SimulationWorld();

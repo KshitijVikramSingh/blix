@@ -357,6 +357,7 @@ internal static class ScaleScenarios
         var searchBefore = world.PathSearch;
         var dropsBefore = world.FlowTransitDrops;
         var deniedBefore = world.SearchesDeniedByOrderBudget;
+        var departuresBefore = world.CohortDepartures;
 
         var orderStart = Stopwatch.GetTimestamp();
         world.QueueMove(movers, target);
@@ -450,6 +451,21 @@ internal static class ScaleScenarios
             $"{drops.Rejected - dropsBefore.Rejected} rejected, " +
             $"{drops.NoGradient - dropsBefore.NoGradient} no gradient | " +
             $"{world.SearchesDeniedByOrderBudget - deniedBefore} searches DENIED by the order budget");
+        // <b>Who stopped being part of the cohort, and who asked.</b> The previous line of this probe could
+        // say that thirteen bodies stopped short and that thirteen held a standing job, and it took reading
+        // the jobs layer to join those two facts into "the jobs layer took them back" (§105). The cohort now
+        // books every departure with a reason as it happens, so the join is done here: superseded,
+        // overridden and arrived are the player's doing or the order's, and interrupted is the only column
+        // that means a cohort lost members with nobody having asked.
+        var departures = world.CohortDepartures;
+        var interrupted = departures.Interrupted - departuresBefore.Interrupted;
+        Console.WriteLine(
+            $"    left the cohort: {departures.Superseded - departuresBefore.Superseded} superseded, " +
+            $"{departures.Overridden - departuresBefore.Overridden} overridden, " +
+            $"{departures.Arrived - departuresBefore.Arrived} arrived, " +
+            $"{departures.Died - departuresBefore.Died} died, " +
+            $"{interrupted} INTERRUPTED by the jobs layer" +
+            (interrupted > 0 ? "  <-- nobody asked for these" : string.Empty));
         // <b>Per body, because an aggregate cannot see a straggler.</b> Reported from the chair: "individuals
         // path away correctly while some of the group just stalls midway never catching the lead" — and a
         // centroid with a mean speed says nothing about that. What matters is the spread: how many are at the

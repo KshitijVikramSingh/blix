@@ -129,6 +129,18 @@ internal sealed class SimulationWorld
     private readonly AgentSpatialIndex agentIndex;
     private readonly Dictionary<int, MoveGroup> moveGroups = new();
     private int nextMoveGroupId;
+
+    /// <summary>
+    /// Departures from cohorts for the life of the run, indexed by <see cref="CohortDeparture"/>.
+    /// </summary>
+    /// <remarks>
+    /// Carried and fingerprinted rather than kept with the routing diagnostics, on the same argument the
+    /// solver's counters are: two runs that lost cohort members a different number of times, or for a
+    /// different set of reasons, have already disagreed about a decision, and this says so long before the
+    /// positions drift far enough to notice. It is also the ledger the order probe differences, which is
+    /// what makes "who left, and who asked" answerable per order instead of per session.
+    /// </remarks>
+    private readonly long[] cohortDepartures = new long[Enum.GetValues<CohortDeparture>().Length];
     private readonly Dictionary<GridCell, ColliderId> blockColliders = new();
     private readonly List<ColliderId> placementHits = new();
     private readonly List<ColliderId> holdPositionHits = new();
@@ -208,6 +220,21 @@ internal sealed class SimulationWorld
     /// </remarks>
     public (long Transit, long SlotPath, long Refused) OrderOutcomes =>
         (pathService.OrdersOnTransit, pathService.OrdersOnSlotPath, pathService.OrdersRefused);
+
+    /// <summary>
+    /// How bodies have left cohorts, by reason. See <see cref="CohortDeparture"/>.
+    /// </summary>
+    /// <remarks>
+    /// Read as a difference across an order rather than as a total. Interrupted is the one to watch: it is
+    /// the only reason in the list that means nobody asked, and a cohort shedding members to it is the
+    /// jobs layer quietly taking the order back.
+    /// </remarks>
+    public (long Superseded, long Overridden, long Interrupted, long Arrived, long Died) CohortDepartures =>
+        (cohortDepartures[(int)CohortDeparture.Superseded],
+         cohortDepartures[(int)CohortDeparture.Overridden],
+         cohortDepartures[(int)CohortDeparture.Interrupted],
+         cohortDepartures[(int)CohortDeparture.Arrived],
+         cohortDepartures[(int)CohortDeparture.Died]);
 
     /// <summary>Why route requests came back empty, by cause. See PathService.PathNoStartCell.</summary>
     public (long NoStartCell, long NoGoalCell, long StartUnresolvable, long GoalUnresolvable,
@@ -1801,6 +1828,7 @@ internal sealed class SimulationWorld
         writer.Int(rasterizedTerrainRevision);
         writer.Int(routePlansThisTick);
         writer.Int(nextMoveGroupId);
+        writer.Blob<long>(cohortDepartures);
         writer.Int(Navigation.Revision);
         // The record of work done, which is not derived: a loaded career reports the same lifetime
         // totals as the one it continues, and the determinism check reads them as a canary.
@@ -1849,6 +1877,7 @@ internal sealed class SimulationWorld
         rasterizedTerrainRevision = reader.Int();
         routePlansThisTick = reader.Int();
         nextMoveGroupId = reader.Int();
+        reader.Blob<long>(cohortDepartures);
         var navigationRevision = reader.Int();
         pathService.ReadCounters(reader);
         steeringSystem.Solver.ReadCounters(reader);
@@ -2148,7 +2177,7 @@ internal sealed class SimulationWorld
                 case JobStep.WalkTo:
                     if (TryApproachPoint(in agents[i], out var approach))
                     {
-                        BeginSoloMove(ref agents[i], approach);
+                        BeginSoloMove(ref agents[i], approach, CohortDeparture.Interrupted);
                     }
 
                     break;
@@ -2228,22 +2257,18 @@ internal sealed class SimulationWorld
             ref var agent = ref Agents.Get(members[slot]);
             if (group is null)
             {
-                BeginSoloMove(ref agent, target);
+                BeginSoloMove(ref agent, target, CohortDeparture.Superseded);
                 continue;
             }
 
-            DetachFromMoveGroup(ref agent);
+            LeaveCohort(ref agent, CohortDeparture.Superseded);
             agent.LocomotionState = AgentLocomotionState.Move;
             agent.BehaviorTarget = new AgentId(-1);
             agent.ReturningToHold = false;
             agent.CrowdedArrivalAttempts = 0;
             agent.CrowdedArrivalContactFrames = 0;
             agent.RepathCooldown = 0f;
-            agent.MoveGroupId = group.Id;
-            agent.GroupSlot = group.Slots[slot];
-            agent.FormationOffset = group.SlotOffset(slot);
-            agent.ApproachingSlot = false;
-            agent.UsesFlowTransit = false;
+            JoinCohort(ref agent, group, slot);
 
             // Transit is a cohort behaviour. Members steer directly down one
             // shared cost field instead of each materialising a polyline through
@@ -3344,17 +3369,21 @@ internal sealed class SimulationWorld
     /// layer needs exactly this and must not go through the command path: a command marks the
     /// unit as interrupted, and a unit walking to its own workplace is not being interrupted
     /// by anybody. The target is expected to be clamped to the terrain already.
-    /// </remarks>
-    private void BeginSoloMove(ref AgentState agent, Vector2 target)
+    /// <para>
+    /// <b>The caller says why, because the two callers mean opposite things.</b> A one-body move order is
+    /// the player superseding whatever the body was doing; the jobs layer sending a hand back to a granary
+    /// is the one path that takes a body out of a cohort with nobody having asked. Booking both as the same
+    /// event is how §105 stayed invisible for an arc.
+    /// </para></remarks>
+    private void BeginSoloMove(ref AgentState agent, Vector2 target, CohortDeparture reason)
     {
-        DetachFromMoveGroup(ref agent);
+        LeaveCohort(ref agent, reason);
         agent.LocomotionState = AgentLocomotionState.Move;
         agent.BehaviorTarget = new AgentId(-1);
         agent.ReturningToHold = false;
         agent.CrowdedArrivalAttempts = 0;
         agent.CrowdedArrivalContactFrames = 0;
         agent.RepathCooldown = 0f;
-        agent.MoveGroupId = 0;
         agent.GroupSlot = target;
         agent.FormationOffset = Vector2.Zero;
         agent.ApproachingSlot = true;
@@ -3412,8 +3441,19 @@ internal sealed class SimulationWorld
 
         foreach (var group in moveGroups.Values)
         {
+            // <b>The dead come off the roster before anything counts it.</b> A body that left the world did
+            // not decide to leave the cohort, and the store cannot tell a cohort it is gone — Despawn
+            // neutralises the slot and has no way to reach this dictionary. So the roster is swept here,
+            // once, in the one method that already walks every group; every count below is then about
+            // bodies that can still act. Backwards because the index is what removal takes.
+            for (var index = group.Members.Count - 1; index >= 0; index--)
+            {
+                if (Agents.Contains(group.Members[index])) continue;
+                group.RemoveAt(index);
+                cohortDepartures[(int)CohortDeparture.Died]++;
+            }
+
             var settledMembers = 0;
-            var liveMembers = 0;
             // Live centroid of the members still travelling together. Formation
             // steering is relative to this, not to the command point, so the
             // cohort keeps its shape while it moves instead of collapsing into a
@@ -3423,9 +3463,8 @@ internal sealed class SimulationWorld
             var transitMembers = 0;
             foreach (var memberId in group.Members)
             {
-                if (!Agents.Contains(memberId)) continue;
                 ref readonly var member = ref Agents.Get(memberId);
-                if (member.MoveGroupId != group.Id || !member.UsesFlowTransit) continue;
+                if (!member.UsesFlowTransit) continue;
                 transitCentroid += member.Position;
                 transitFlow += member.SmoothedFlow;
                 transitMembers++;
@@ -3444,13 +3483,14 @@ internal sealed class SimulationWorld
                 group.HasTransitCentroid = false;
             }
 
-            for (var slot = 0; slot < group.Members.Length; slot++)
+            // <b>The roster, not a filtered scan of it.</b> Every body named here is alive, is in this
+            // cohort, and is here because nothing has struck it off — which is a fact the roster now
+            // carries rather than one rediscovered from the back-pointer each tick. The invariant that
+            // makes it safe is asserted in the self-tests rather than defended with a skip here, because a
+            // skip would go on hiding a stale back-pointer exactly the way the old filter did.
+            foreach (var id in group.Members)
             {
-                var id = group.Members[slot];
-                if (!Agents.Contains(id)) continue;
                 ref var agent = ref Agents.Get(id);
-                if (agent.MoveGroupId != group.Id) continue;
-                liveMembers++;
                 if (!agent.HasDestination && agent.ApproachingSlot)
                 {
                     settledMembers++;
@@ -3477,12 +3517,12 @@ internal sealed class SimulationWorld
                 }
             }
 
-            if (liveMembers == 0)
+            if (group.Members.Count == 0)
             {
                 retired.Add(group.Id);
                 continue;
             }
-            if (settledMembers < liveMembers)
+            if (settledMembers < group.Members.Count)
             {
                 group.SettlingTicks = 0;
                 continue;
@@ -3490,12 +3530,17 @@ internal sealed class SimulationWorld
             group.SettlingTicks++;
             if (group.SettlingTicks < 30) continue;
 
-            foreach (var id in group.Members)
+            // <b>This is a locomotion lifetime, and it is about to stop being the cohort's.</b> Everybody
+            // has stood on their slot for a second, so the move is over — which today also ends the group,
+            // because the group has never been anything but the move. Releasing the members is therefore
+            // still the right thing to do here; what will change is that ending the move stops meaning
+            // ending the set. Named now so the seam is visible before anything is built on it.
+            //
+            // Over a snapshot because releasing a member takes it off the roster being walked.
+            foreach (var id in group.Members.ToArray())
             {
-                if (!Agents.Contains(id)) continue;
                 ref var agent = ref Agents.Get(id);
-                if (agent.MoveGroupId != group.Id) continue;
-                DetachFromMoveGroup(ref agent);
+                LeaveCohort(ref agent, CohortDeparture.Arrived);
                 agent.HoldPosition = agent.Position;
                 agent.HoldReturnCooldown = 0.75f;
             }
@@ -3570,7 +3615,56 @@ internal sealed class SimulationWorld
     /// <summary>Bodies that rejoined the shared field after escaping a pocket. See RejoinFieldTransit.</summary>
     public long FieldRejoins => pathService.FieldRejoins;
 
-    private static void DetachFromMoveGroup(ref AgentState agent)
+    /// <summary>
+    /// Takes a body out of its cohort, naming why it left.
+    /// </summary>
+    /// <remarks>
+    /// <b>The one way out, and the reason is not optional.</b> Before this, leaving was four assignments to
+    /// four fields on the body, made from six different places, and the cohort found out by counting fewer
+    /// members next tick. §105 is what that costs: the jobs layer reclaimed half a cohort two seconds after
+    /// it arrived, and the only instrument that could see it was one written afterwards, per body, on
+    /// purpose. A departure that has to carry a reason is an event the cohort can be asked about.
+    /// <para>
+    /// Order matters here. The body's fields are cleared first so that nothing observing mid-call sees a
+    /// body still claiming a cohort it has been struck from, and the roster is the thing that decides
+    /// whether this was a departure at all — a body whose back-pointer is stale is not counted twice.
+    /// </para></remarks>
+    private void LeaveCohort(ref AgentState agent, CohortDeparture reason)
+    {
+        var cohort = agent.MoveGroupId;
+        ClearCohortFields(ref agent);
+        if (cohort == 0 || !moveGroups.TryGetValue(cohort, out var group)) return;
+        if (!group.Remove(agent.Id)) return;
+        cohortDepartures[(int)reason]++;
+    }
+
+    /// <summary>
+    /// Puts a body on a cohort's roster and points it at the slot laid out for it.
+    /// </summary>
+    /// <remarks>
+    /// The counterpart of <see cref="LeaveCohort"/>, and the only writer of
+    /// <see cref="AgentState.MoveGroupId"/> that sets it to anything but zero. The roster already holds the
+    /// member — <see cref="MoveGroup.Create"/> laid a slot out for it — so this joins the body to the
+    /// cohort rather than the cohort to the body.
+    /// </remarks>
+    private static void JoinCohort(ref AgentState agent, MoveGroup group, int slot)
+    {
+        agent.MoveGroupId = group.Id;
+        agent.GroupSlot = group.Slots[slot];
+        agent.FormationOffset = group.SlotOffset(slot);
+        agent.ApproachingSlot = false;
+        agent.UsesFlowTransit = false;
+    }
+
+    /// <summary>
+    /// Clears what a body carries about a cohort, without touching the roster.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="LeaveCohort"/> for exactly one caller: a body being given a fresh solo
+    /// route has no cohort to be struck from and no departure to count, and going through the counted path
+    /// to clear four fields would book a departure every time a villager walked to a granary.
+    /// </remarks>
+    private static void ClearCohortFields(ref AgentState agent)
     {
         agent.SeekingFieldEntry = false;
         agent.MoveGroupId = 0;
@@ -3584,7 +3678,7 @@ internal sealed class SimulationWorld
         {
             if (!Agents.Contains(id)) continue;
             ref var agent = ref Agents.Get(id);
-            DetachFromMoveGroup(ref agent);
+            LeaveCohort(ref agent, CohortDeparture.Overridden);
             agent.LocomotionState = AgentLocomotionState.Idle;
             agent.BehaviorTarget = new AgentId(-1);
             HaltMovement(ref agent);
@@ -3601,7 +3695,7 @@ internal sealed class SimulationWorld
         {
             if (!Agents.Contains(id) || id == target) continue;
             ref var agent = ref Agents.Get(id);
-            DetachFromMoveGroup(ref agent);
+            LeaveCohort(ref agent, CohortDeparture.Overridden);
             agent.LocomotionState = behavior;
             agent.BehaviorTarget = target;
             agent.ReturningToHold = false;
@@ -3616,7 +3710,7 @@ internal sealed class SimulationWorld
         {
             if (!Agents.Contains(id)) continue;
             ref var agent = ref Agents.Get(id);
-            DetachFromMoveGroup(ref agent);
+            LeaveCohort(ref agent, CohortDeparture.Overridden);
             agent.LocomotionState = AgentLocomotionState.Patrol;
             agent.BehaviorTarget = new AgentId(-1);
             agent.ReturningToHold = false;

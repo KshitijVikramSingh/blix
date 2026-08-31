@@ -9491,3 +9491,100 @@ the same move as §103's impassable slope.
   state, that handing work back always takes, and that clearing the assignment stops the work for good.
 
 Gate 3/3 green.
+
+## 107. The cohort owns its roster, and every departure names a reason
+
+The groups arc opens where §82 said it would have to: with the four representations kept apart. Three
+questions were settled from the chair before any code, and the first is the one this section is about.
+
+- **Player-authored groups need not enter the simulation.** A control group can be a list of ids in the view
+  layer — no sim state, no save entry, no fingerprint cost. `AgentStore` tombstones rather than compacts and
+  never reuses an id, precisely so a stale reference resolves to a dead body and is refused rather than
+  resolving to somebody else, which is exactly the property a view-layer group needs. Recorded as a decision;
+  not built here.
+- **An order holds until overridden, and nothing reclaims a member implicitly except an interrupt** (§106).
+- **Who owns membership** — worked through below, because the answer was not obvious from either side.
+
+### It was already stored twice, and the two copies meant different things
+
+`MoveGroup.Members` was an array fixed at `Create` and never edited: the roster at the moment of the order.
+`AgentState.MoveGroupId` was the live truth. Every read of the roster — three loops in
+`UpdateGroupFormations`, plus the station-keeping lookup — was filtered by the field to reconcile them.
+
+So the question was never "which one", it was "which becomes the authority, and what does the other become".
+And the reason the answer matters is what the old arrangement could not express: **a group could lose a member
+without anything happening.** The filter matched one fewer body, and a departure was indistinguishable from a
+body that had never joined. That is the exact shape of §105 — the jobs layer walked half a cohort back to work
+two seconds after it arrived, `liveMembers` quietly came out lower, and nothing in the arc's instrumentation
+said a word. It took a chair report and an instrument written afterwards, per body, on purpose.
+
+Body-owned formalises today: despawn is free, save is free, the hot path stays a dictionary lookup — and the
+roster still cannot be dropped, because "who is in group G" would otherwise be a scan of every body in the
+world. Two copies either way, then, and no event.
+
+**Cohort-owned it is.** The roster is the authority and it shrinks; `MoveGroupId` is demoted from truth to a
+back-pointer cache, written in exactly two places. Leaving becomes a call that takes a reason.
+
+### The six exits, and the one nobody asks for
+
+`DetachFromMoveGroup` had six call sites and no idea why it was being called. They sort cleanly:
+
+```
+  a newer move order                       superseded    the player
+  stop / follow / chase / flee / patrol    overridden    the player
+  the cohort settled and retired           arrived       the order, finished
+  the body left the world                  died          nobody
+  the jobs layer walking it back to work   INTERRUPTED   nobody asked
+```
+
+The last row is the payoff of §106. Since an order now outranks a standing job until something overrides it,
+`BeginSoloMove` from the jobs layer is the **only** way a body leaves a cohort without the player having said
+anything — one call site to watch and one column to read. It is not dead, either: `JobSystem` is locked out of
+a body for as long as it is under orders, so the window in which it can take a member is the one where that
+member has reached its slot and the cohort has not retired because somebody else is still walking. That window
+is §105's mechanism stated exactly.
+
+Two supporting moves came with it. The dead are swept off rosters in `UpdateGroupFormations` — `AgentStore.Despawn`
+neutralises a slot and has no way to reach the dictionary, so the sweep goes in the one method that already
+walks every group. And the cohort loops now walk the roster directly instead of filtering it by the
+back-pointer: a skip would go on hiding a stale field the way the old filter did, so the invariant is asserted
+in a test rather than defended in a loop.
+
+### Measured
+
+New assertion, *a cohort owns its roster, and every departure names a reason*. Eight bodies that arrive at
+once and one that cannot, so the reclaim window is built rather than hoped for:
+
+```
+roster/back-pointer disagreements=0 | reclaimed by the jobs layer=8 overridden=1
+ledger superseded=0 overridden=1 interrupted=8 arrived=0 died=0 = 9 of 9 | still on a roster=0
+```
+
+`--orderprobe` gained the same ledger per order. On the 450 m village, seven orders, twenty bodies:
+
+```
+    left the cohort: 20 superseded, 0 overridden, 0 arrived, 0 died, 0 INTERRUPTED by the jobs layer
+```
+
+Every order books twenty superseded — each body leaving the previous cohort for this one — and **interrupted
+is zero on every leg**, which is §106's rule confirmed on the real map by an instrument that did not exist
+when it was written. Compare §105's table for the same probe, where the halfway order lost thirteen bodies to
+this exact path and the probe could only report that thirteen "hold a standing job" and leave the join to a
+reader.
+
+Full self-test green. The save format goes to version 7 for the departure ledger, which is carried and
+fingerprinted on the same argument as the solver's counters: two runs that lost members a different number of
+times, or for a different set of reasons, have disagreed about a decision well before the positions show it.
+
+### The seam that is named but not cut
+
+The retire rule — everybody settled for thirty ticks, release and dissolve — is a **locomotion** lifetime. It
+is still the right thing to do today, because the cohort has never been anything but the move. What changes
+next is that ending the move stops meaning ending the set: `MoveGroup` is simultaneously the identity, the
+formation geometry and the shared-transit state, which is precisely the collapse §82 warned against, and it is
+owned by locomotion. Named in the code where it happens so the split is visible before anything is built on it.
+
+Also left standing, deliberately: a cohort still cannot take a new member. `Remove` takes the slot with the
+member, because slots are laid out once against the ground and the approach for the bodies that were there at
+the time, and handing a departed member's slot to somebody else is a question for the pass that lets a cohort
+grow.
