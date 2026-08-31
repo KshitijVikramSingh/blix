@@ -1503,6 +1503,30 @@ internal sealed class SimulationWorld
     /// <summary>The pace route seconds are denominated at, for converting a budget into them.</summary>
     internal static float RouteReferenceSpeed => AgentDefaults.WorldPace;
 
+    /// <summary>
+    /// One route, priced, for a harness comparing two ways of searching for it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Exists because "21x fewer expansions" is only half a claim.</b> §121's guided search steers by the
+    /// corner graph's cost-to-goal, which is not an admissible lower bound, so the routes it returns may cost
+    /// more than the best ones — and a faster search that walks people the long way round is not an
+    /// improvement. This is how the other half gets measured: same pair, same world, both arms, and the length
+    /// of what came back.
+    /// </remarks>
+    internal (float Metres, int Waypoints)? MeasureRoute(Vector2 from, Vector2 to, float agentRadius)
+    {
+        if (pathService.FindPath(from, to, agentRadius, RouteReason.SoloMove) is not { } route) return null;
+        var metres = 0f;
+        var previous = from;
+        foreach (var waypoint in route.Waypoints)
+        {
+            metres += Vector2.Distance(previous, waypoint);
+            previous = waypoint;
+        }
+
+        return (metres, route.Waypoints.Length);
+    }
+
     public ReadOnlySpan<Vector2> GetRemainingPath(AgentId id)
     {
         if (!Agents.Contains(id)) return ReadOnlySpan<Vector2>.Empty;
@@ -3731,7 +3755,7 @@ internal sealed class SimulationWorld
     /// first attempt at "any pressure at all" (0.01) blocked precisely the case this exists to fix, which is
     /// what measuring the drop site rather than guessing at it is for.
     /// </remarks>
-    private const float FieldEntryPressureCeiling = 0.5f;
+    private const float FieldEntryPressureCeiling = PathService.CrowdedPressure;
 
     /// <summary>How often an escaping body is asked whether the field will take it back.</summary>
     private const int FieldRejoinIntervalTicks = 10;

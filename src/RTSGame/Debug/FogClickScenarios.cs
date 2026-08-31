@@ -31,6 +31,140 @@ internal static class FogClickScenarios
 {
     private const int TicksPerSecond = (int)(1.0 / SimulationWorld.FixedDeltaSeconds);
 
+    /// <summary>
+    /// What the guided search costs in route quality, against the search it replaces.
+    /// </summary>
+    /// <remarks>
+    /// <b>The other half of the claim.</b> Steering by the corner graph's cost-to-goal is not an admissible
+    /// lower bound, so the guided search may return a route costing more than the optimum — and a search that
+    /// is twenty times cheaper while walking people the long way round is not an improvement, it is a
+    /// different bug. Same world, same pairs, both arms, in one process: whichever way the trade falls, it
+    /// falls on a number here rather than on an argument.
+    /// <para>
+    /// One warm-up per arm and the pairs run in the same order, because both arms fill tiles and build fields
+    /// as they go and a comparison that let one arm inherit the other's caches would be measuring the order
+    /// the questions arrived in.
+    /// </para></remarks>
+    private static int ReportRouteQuality(
+        float extentMeters,
+        float reliefAmplitudeMetres,
+        int warmupSeconds,
+        Region region,
+        Archetype archetype,
+        uint mapSeed)
+    {
+        var wasEnabled = PathService.GuidedSearch;
+        Console.WriteLine("  route quality, guided against flat — same pairs, same world, one process");
+        // <b>Anchored on the village and aimed at compass points, because the map's corners are water.</b> The
+        // first version of this used the four corners and four of its five pairs came back unroutable from
+        // both arms — a comparison of two nothings. The village site is walkable by construction (it was
+        // chosen to be), and a ring around it at a third of the map crosses the ridges and the wood without
+        // starting in a lake.
+        var reach = extentMeters * 0.33f;
+        // <b>Taken from a body, not from a coordinate.</b> Three tries at writing this anchor by hand put it
+        // under a building, then in a lake: the founding point is covered by the settlement it founded, and a
+        // start cell that does not admit a body is resolved outward by only 2.25 cells where a goal is
+        // resolved much further — so pairs leaving the village came back unroutable while their reverses
+        // routed fine. A villager is standing somewhere walkable by definition.
+        var site = Vector2.Zero;
+        var pairs = Array.Empty<(string Name, Vector2 From, Vector2 To)>();
+
+        var results = new List<(string Name, float Flat, float Guided)>();
+        foreach (var guided in new[] { false, true })
+        {
+            // Both halves, because the restart is what makes a field exist at all: without it the "guided"
+            // arm finds nothing to steer by and the comparison is two identical searches reporting a perfect
+            // 1.000x. That is exactly what the first version of this leg did, five times over.
+            PathService.GuidedSearch = guided;
+            PathService.GuidedRestart = guided;
+            var world = SettlementScenarios.BuildVillage(
+                extentMeters,
+                out _,
+                reliefAmplitudeMetres,
+                region,
+                archetype,
+                mapSeed,
+                SettlementScenarios.VillageRecipe.AsPlayed);
+            for (var tick = 0; tick < warmupSeconds * TicksPerSecond; tick++)
+            {
+                world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            }
+
+            foreach (ref readonly var body in world.Agents.All)
+            {
+                if (!body.IsAlive) continue;
+                site = body.Position;
+                break;
+            }
+
+            pairs = new (string Name, Vector2 From, Vector2 To)[]
+            {
+                ("out, south-west", site, site + new Vector2(-reach, -reach)),
+                ("out, west", site, site + new Vector2(-reach, 0f)),
+                ("out, south", site, site + new Vector2(0f, -reach)),
+                ("out, north-west", site, site + new Vector2(-reach, reach * 0.4f)),
+                ("back, south-west", site + new Vector2(-reach, -reach), site),
+                ("back, west", site + new Vector2(-reach, 0f), site),
+            };
+            if (results.Count == 0)
+            {
+                Console.WriteLine($"    anchored on a villager at ({site.X:F0}, {site.Y:F0})");
+            }
+
+            for (var i = 0; i < pairs.Length; i++)
+            {
+                var measured = world.MeasureRoute(
+                    pairs[i].From, pairs[i].To, Simulation.Agents.AgentDefaults.RoutingRadius);
+                var metres = measured?.Metres ?? float.NaN;
+                if (!guided) results.Add((pairs[i].Name, metres, float.NaN));
+                else results[i] = (results[i].Name, results[i].Flat, metres);
+            }
+        }
+
+        PathService.GuidedSearch = wasEnabled;
+        PathService.GuidedRestart = wasEnabled;
+        var worst = 1f;
+        foreach (var (name, flat, guidedMetres) in results)
+        {
+            var ratio = flat > 0f && float.IsFinite(flat) && float.IsFinite(guidedMetres)
+                ? guidedMetres / flat
+                : float.NaN;
+            if (float.IsFinite(ratio)) worst = MathF.Max(worst, ratio);
+            Console.WriteLine(
+                $"    {name,-20} flat {flat,7:F0} m | guided {guidedMetres,7:F0} m | " +
+                $"{(float.IsFinite(ratio) ? $"{ratio:F3}x" : "one arm found nothing")}");
+        }
+
+        // <b>Five per cent, and the number is a judgement rather than a discovery.</b> A body walking five per
+        // cent further is invisible from the chair; a search costing twenty times more is not. Anything past
+        // this and the trade has stopped being worth taking — which is what happened: §121 measured 5.02x and
+        // turned the lever off.
+        const float WorstRatioCeiling = 1.05f;
+        var verdict = worst > WorstRatioCeiling
+            ? $"worst {worst:F3}x, past the {WorstRatioCeiling:F2}x ceiling"
+            : $"worst {worst:F3}x, inside the {WorstRatioCeiling:F2}x ceiling";
+
+        // <b>A fault only when somebody has turned the lever on.</b> With guided search off — which is the
+        // shipped state — this leg is a standing measurement of what the rejected idea would cost, and a
+        // fixture that fails on every run for a thing nobody enabled is the wolf-crying that §120 had to fix
+        // in the jobs trace. Enable it and the same number becomes a fault, which is the acceptance test for
+        // the next attempt.
+        if (!wasEnabled)
+        {
+            Console.WriteLine($"    {verdict} — measured with the lever off, so a report and not a fault");
+            return 0;
+        }
+
+        if (worst > WorstRatioCeiling)
+        {
+            Console.WriteLine($"    FAULT: {verdict} — the guided search is buying its speed with detours");
+            return 1;
+        }
+
+        Console.WriteLine($"    {verdict}");
+        return 0;
+    }
+
     public static int Run(
         float extentMeters,
         float reliefAmplitudeMetres,
@@ -130,6 +264,26 @@ internal static class FogClickScenarios
                 if (distance > 2f) moved++;
             }
 
+            // <b>And then called home, one body at a time.</b> The corner order is a cohort and takes the
+            // shared field, so the searches it provokes are all crowd-side — dropped bodies and congestion
+            // recovery — which are exactly the ones §121 must not steer. The event a player actually reported
+            // was the other kind: a lone villager, spread out and unjammed, asked for a route back across the
+            // map. A single-body order is that path exactly, and it is what BeginSoloMove serves.
+            var homeRoutesBefore = world.Routes.Snapshot();
+            var homeLogFrom = world.Routes.Recorded;
+            var worstHomeTickMs = 0.0;
+            foreach (var id in movers)
+            {
+                world.QueueMove(new[] { id }, startPositions[0]);
+                for (var tick = 0; tick < 3; tick++)
+                {
+                    var tickStart = Stopwatch.GetTimestamp();
+                    world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+                    worstHomeTickMs = Math.Max(
+                        worstHomeTickMs, Stopwatch.GetElapsedTime(tickStart).TotalMilliseconds);
+                }
+            }
+
             var resolution = world.LastOrderFoundNothing
                 ? "NOTHING REACHABLE near it"
                 : world.LastOrderWasBestEffort
@@ -146,6 +300,20 @@ internal static class FogClickScenarios
             foreach (var line in world.Routes.Describe(routesBefore, logFrom, verbatimLimit: 6))
             {
                 Console.WriteLine($"    {line}");
+            }
+
+            Console.WriteLine(
+                $"    called home one at a time — worst tick {worstHomeTickMs,7:F1} ms");
+            foreach (var line in world.Routes.Describe(homeRoutesBefore, homeLogFrom, verbatimLimit: 4))
+            {
+                Console.WriteLine($"      {line}");
+            }
+
+            if (worstHomeTickMs > 50.0)
+            {
+                Console.WriteLine(
+                    $"    FAULT: calling one villager home cost {worstHomeTickMs:F1} ms in a tick");
+                faults++;
             }
 
             // <b>Where the work went in the bin.</b> A route the search found and the smoothing discarded is
@@ -198,6 +366,9 @@ internal static class FogClickScenarios
 
             Console.WriteLine();
         }
+
+        faults += ReportRouteQuality(
+            extentMeters, reliefAmplitudeMetres, warmupSeconds, region, archetype, mapSeed);
 
         Console.WriteLine(faults == 0
             ? "  every corner: somebody walked, nothing was searched for and discarded, and no tick hitched"

@@ -23,6 +23,37 @@ namespace RTSGame.Simulation.Navigation;
 /// <see cref="ReturnToHold"/> — is the simulation acting on a standing intention. Everything else is
 /// <b>recovery</b>: a route that stopped working, for six distinct reasons.
 /// </para></remarks>
+internal static class RouteReasons
+{
+    /// <summary>
+    /// Whether this request exists in order to differ from the shared answer.
+    /// </summary>
+    /// <remarks>
+    /// <b>The gate on §121's guided search, and the pen tests wrote it.</b> Steering a cell search by the cost
+    /// field for its goal makes it twenty times cheaper and returns identical routes — measured — but every
+    /// body steered by one field agrees with every other body steered by that field, and for three callers
+    /// that agreement is the bug rather than the feature. Turned on for everything, "group distributes across
+    /// multiple pen exits" went to <c>exits=[0,2,28,0]</c>: thirty bodies, one gate.
+    /// <para>
+    /// The three are the ones whose documented purpose is divergence. <see cref="RouteReason.TransitStranded"/>
+    /// exists because §96 found that a body solving its own route can pick a different exit and in a pen that
+    /// diversity is the whole behaviour. <see cref="RouteReason.CongestionReroute"/> and
+    /// <see cref="RouteReason.CongestionRecovery"/> are asked for precisely when the shared answer is jammed,
+    /// and they carry avoidance centres and dynamic costs to say so — a heuristic that is not a lower bound
+    /// can outvote those costs, so guiding them would steer a body back into the jam it was sent around.
+    /// </para>
+    /// <para>
+    /// Everything else wants the best route it can get and does not care that its neighbour wants the same
+    /// one — a villager walking to work, a body repairing a disconnected first segment, a cohort member
+    /// claiming its slot. That is where the twenty-fold saving lives, and it is where the stall a player
+    /// reported was coming from.
+    /// </para></remarks>
+    public static bool WantsItsOwnAnswer(RouteReason reason) => reason is
+        RouteReason.TransitStranded or
+        RouteReason.CongestionReroute or
+        RouteReason.CongestionRecovery;
+}
+
 internal enum RouteReason
 {
     /// <summary>

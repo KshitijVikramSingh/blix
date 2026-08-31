@@ -43,7 +43,9 @@ internal readonly record struct RouteLogEntry(
     bool Answered,
     long Expansions,
     double Milliseconds,
-    int CellSpan);
+    int CellSpan,
+    int GoalIndex,
+    bool GoalFieldExisted);
 
 /// <summary>One reason's share of the routing, over some window.</summary>
 /// <summary>
@@ -58,6 +60,7 @@ internal readonly record struct RouteRow(
     RouteReason Reason,
     long Queries,
     long Answered,
+    long Fielded,
     long Expansions,
     double Milliseconds,
     long[] Outcomes);
@@ -91,6 +94,22 @@ internal sealed class RouteAttribution
 
     private readonly long[] queries = new long[Reasons.Length];
     private readonly long[] answered = new long[Reasons.Length];
+
+    /// <summary>
+    /// Every goal asked about, and how many asks already had a cost field for theirs.
+    /// </summary>
+    /// <remarks>
+    /// <b>The one number that decides whether the hierarchy can replace these searches.</b> A field costs tens
+    /// of milliseconds to build and nothing to reuse, so routing down one is free where goals repeat and a
+    /// straight loss where every ask is somewhere new. Distinct goals against total asks says which this
+    /// settlement is, and it is a measurement rather than an assumption. §121.
+    /// </remarks>
+    private readonly HashSet<int> goals = new();
+
+    private long goalsAlreadyFielded;
+
+    /// <summary>Per reason, asks whose goal already had a field. Which caller could use one is the question.</summary>
+    private readonly long[] fielded = new long[Reasons.Length];
     private readonly long[] expansions = new long[Reasons.Length];
     private readonly long[] ticks = new long[Reasons.Length];
     private readonly long[,] outcomes = new long[Reasons.Length, Outcomes.Length];
@@ -105,8 +124,20 @@ internal sealed class RouteAttribution
         bool wasAnswered,
         long expansionCount,
         long elapsedTicks,
-        int cellSpan)
+        int cellSpan,
+        int goalIndex,
+        bool goalFieldExisted)
     {
+        if (goalIndex >= 0)
+        {
+            goals.Add(goalIndex);
+            if (goalFieldExisted)
+            {
+                goalsAlreadyFielded++;
+                fielded[(int)reason]++;
+            }
+        }
+
         var index = (int)reason;
         queries[index]++;
         if (wasAnswered) answered[index]++;
@@ -120,7 +151,9 @@ internal sealed class RouteAttribution
             wasAnswered,
             expansionCount,
             Stopwatch.GetElapsedTime(0, elapsedTicks).TotalMilliseconds,
-            cellSpan);
+            cellSpan,
+            goalIndex,
+            goalFieldExisted);
         Recorded++;
     }
 
@@ -130,6 +163,9 @@ internal sealed class RouteAttribution
         var copy = new RouteAttribution();
         Array.Copy(queries, copy.queries, queries.Length);
         Array.Copy(answered, copy.answered, answered.Length);
+        copy.goals.UnionWith(goals);
+        copy.goalsAlreadyFielded = goalsAlreadyFielded;
+        Array.Copy(fielded, copy.fielded, fielded.Length);
         Array.Copy(expansions, copy.expansions, expansions.Length);
         Array.Copy(ticks, copy.ticks, ticks.Length);
         Array.Copy(outcomes, copy.outcomes, outcomes.Length);
@@ -156,6 +192,7 @@ internal sealed class RouteAttribution
                 reason,
                 count,
                 answered[index] - before.answered[index],
+                fielded[index] - before.fielded[index],
                 expansions[index] - before.expansions[index],
                 Stopwatch.GetElapsedTime(0, ticks[index] - before.ticks[index]).TotalMilliseconds,
                 byOutcome));
@@ -181,7 +218,14 @@ internal sealed class RouteAttribution
         var rows = Since(before);
         if (rows.Count == 0) return lines;
 
-        lines.Add($"routing, by who asked ({rows.Sum(row => row.Queries):N0} queries)");
+        var asked = rows.Sum(row => row.Queries);
+        lines.Add($"routing, by who asked ({asked:N0} queries)");
+        // Distinct goals, and how many asks found a field already built for theirs. Both are cumulative sets,
+        // so the window figure is the growth: a window that adds few goals is one the hierarchy could serve.
+        var freshGoals = goals.Count - before.goals.Count;
+        lines.Add(
+            $"  goals: {freshGoals} new of {asked} asks, " +
+            $"{goalsAlreadyFielded - before.goalsAlreadyFielded} asks already had a field for theirs");
         foreach (var row in rows)
         {
             var endings = string.Join(", ", Outcomes
@@ -189,7 +233,7 @@ internal sealed class RouteAttribution
                 .Select(outcome => $"{row.Outcomes[(int)outcome]} {outcome.ToString().ToLowerInvariant()}"));
             lines.Add(
                 $"  {row.Reason,-18} {row.Queries,5:N0} queries {row.Milliseconds,9:F1} ms " +
-                $"{row.Expansions,9:N0} cells — {row.Answered} answered, {endings}");
+                $"{row.Expansions,9:N0} cells — {row.Answered} answered, {row.Fielded} had a field, {endings}");
         }
 
         var (entries, lost) = LogSince(logFrom);
@@ -202,7 +246,8 @@ internal sealed class RouteAttribution
                 $"    #{entry.Sequence,-6} {entry.Reason,-18} {entry.Outcome,-12} " +
                 $"{(entry.Answered ? "routed  " : "NOTHING ")} " +
                 $"{entry.Expansions,9:N0} cells {entry.Milliseconds,8:F1} ms " +
-                $"over {entry.CellSpan:N0} cells of map");
+                $"over {entry.CellSpan:N0} cells of map, goal {entry.GoalIndex}" +
+                (entry.GoalFieldExisted ? " (field already built)" : string.Empty));
         }
 
         return lines;

@@ -10598,3 +10598,114 @@ now a hitch rather than a livelock, which is a different severity, and it is the
   exercised. A fixture can now provoke it in a thirty-metre world, and says so in its output when it does.
 - `--fogclick` — the click a player made, headless, on the same map, ordered to every corner rather than the
   one that failed. A fixture that tests the direction somebody happened to complain about is how §119 happened.
+
+## 121. Twenty-seven times cheaper and five times longer: the guided search, measured and rejected
+
+§120 left the click a hitch rather than a livelock and named what remained: a cross-map cell search costs
+60–210 ms because it expands up to 17% of the map, while a rectangle hierarchy that answers exactly that
+question sits unused beside it. §95 had proposed the fix years of sections ago — *the estimate prices a cell at
+the cheapest surface cost that exists while the real step charges surface, elevation, turning and congestion on
+top; the real fix is upstream of here.* This section tried it, and the answer is no.
+
+### The measurement that made it look certain
+
+Every route request now reports its goal and whether a cost field for that goal already existed. Across a
+fog-click run:
+
+```
+TransitStranded     3 queries  327.2 ms  750,000 cells — 3 had a field
+CongestionRecovery  3 queries  335.5 ms  750,000 cells — 3 had a field
+RouteRepair         1 queries  112.3 ms  250,000 cells — 1 had a field
+FieldEntry         20 queries   11.4 ms       51 cells — 0 had a field
+ReturnToHold       26 queries    7.1 ms       39 cells — 0 had a field
+```
+
+**Eight of eight.** Every search that ran to its expansion ceiling had the answer already sitting in a cost
+field and ignored it; every cheap search had none. That is as clean a correlation as this arc has produced,
+and it pointed at a fix that costs nothing to obtain — read the field, never build it.
+
+### Two gates it needed, and the second was found by a test rather than by thinking
+
+Turned on everywhere, `group distributes across multiple pen exits` went to `exits=[0,2,28,0]`: thirty bodies,
+one gate. Every body steered by one field agrees with every other body steered by it, and for three callers
+that agreement is the bug — `TransitStranded` exists because §96 found a body solving its own route can pick a
+different exit, and the two congestion reasons carry avoidance centres precisely to differ from the shared
+answer. Exempting those three by name fixed the four-exit pen and left the two-exit one still failing, with two
+bodies stranded whose reason was on the permitted list.
+
+**It is not *who* asks, it is *where the body is standing*.** The second gate is the crowd itself, at the
+pressure threshold §96 already measured for the same judgement, now read by both rules instead of one. With
+that, every self-test passed.
+
+### The half that made it reach anything
+
+Gated, the guide almost never fired: across a session only four asks in twenty-four found a field, and the
+expensive uncrowded searches — the ones a player actually reported — had none. But within a burst the picture
+reverses. Thirteen villagers called home across the map are **thirteen asks for one goal**, so an expensive
+search can build the field once and the other twelve ride it free. The trigger is the search itself rather than
+a distance threshold guessing from outside: at twenty thousand expansions it abandons, builds, and starts again,
+which bounds the waste by construction.
+
+```
+13 villagers called home        flat            guided
+routing                    741 / 859 ms         113 ms
+cells expanded                2,233,924         82,474      27x
+worst tick                 80.3 / 89.5 ms   32.9 / 31.4 ms
+```
+
+### And then the raid leg failed, and it was right
+
+```
+                    flat                     guided
+raiders home        13 of 24                 2 of 24
+longest a raider    164 s                    297 s, against a 194 s round trip
+```
+
+Guide without the restart is byte-identical to flat — no field exists for a raider's goal, so nothing is
+steered. Guide with it, and raiders stop getting home. The route quality harness says why, pair by pair:
+
+```
+out, south-west   flat 300 m | guided 538 m | 1.793x
+out, west         flat 289 m | guided 546 m | 1.891x
+out, south        flat 202 m | guided 276 m | 1.370x
+out, north-west   flat 125 m | guided 627 m | 5.024x
+back, west        flat 482 m | guided 551 m | 1.144x
+```
+
+A 125 m walk becomes 627 m. The corner-graph estimate is not an admissible lower bound and overestimates by
+enough to turn A\* into something close to greedy best-first — which is precisely this shape: fast searches,
+bad paths. A body walking five times round is not a performance win, and the raid leg found it independently
+before the harness did.
+
+**So the lever is off, on §84's precedent, rather than deleted.** The idea is still right and only the estimate
+is wrong: the next attempt should steer by the field's own `CostAt` — exact where its tiles are filled — rather
+than the analytic corner-graph figure, or scale the estimate until the route-quality leg stops complaining.
+
+### The instrument that nearly agreed with me
+
+The first version of the route-quality harness reported **1.000x on five pairs out of five**, and I believed
+it. It was comparing two unguided arms: the restart did not exist yet, no field existed for any of those goals,
+and both arms ran the identical flat search. A harness that cannot tell its two arms apart will report perfect
+agreement forever, and perfect agreement is exactly what a hopeful author wants to see.
+
+Two smaller versions of the same fault, both from this section:
+
+- **`--flat-heuristic` was parsed two hundred lines below `--selftest`,** which calls `Environment.Exit`. So
+  the control arm and the arm under test were the same arm, agreed perfectly, and nearly bought the conclusion
+  that the pen failure predated the change. A lever parsed after the branch it is meant to affect is not a
+  lever.
+- **"had a field" was set from the guide rather than from the lookup,** so the moment the crowd gate began
+  declining fields the report read `0 had a field` — "there was nothing to use" instead of "there was, and we
+  declined it on purpose".
+
+### What this section leaves
+
+Kept, and all of it earned: goal identity and field availability on every logged request; `--fogclick`'s second
+phase, which reproduces the uncrowded solo route the live stall was made of; the route-quality harness, which
+is the acceptance test any future attempt has to pass; `ExpansionBudgetOverride`; and one pressure constant
+where there were two.
+
+The debt is unchanged and better specified. A cross-map cell search still costs 60–210 ms, `--fogclick` still
+faults on a 135 ms worst tick in the crowded corner order, and the hierarchy still holds an answer nobody can
+currently afford to use. What is now known is that the cheap way of using it costs five times the route, and
+what the next attempt must measure before anything else.

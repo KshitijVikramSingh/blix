@@ -717,9 +717,12 @@ internal sealed partial class PathService
             start,
             requestedGoal,
             agentRadius,
+            reason,
             congestionAvoidanceCenter,
             additionalNavigationCosts,
-            agentSpeed);
+            agentSpeed,
+            out var resolvedGoal,
+            out var goalFieldExisted);
         var spent = PathExpansions - expansionsAtEntry;
         // <b>Ordered narrowest cause first, and nullness is not one of the causes.</b> A truncation is also a
         // budget stop and a refusal ran no search at all, so the tests have to run inwards. Nullness was in
@@ -740,7 +743,9 @@ internal sealed partial class PathService
             result is not null,
             spent,
             Stopwatch.GetTimestamp() - startTimestamp,
-            CellSpan(start, requestedGoal));
+            CellSpan(start, requestedGoal),
+            resolvedGoal is { } reached ? grid.Transform.Index(reached) : -1,
+            goalFieldExisted);
         return result;
     }
 
@@ -757,10 +762,15 @@ internal sealed partial class PathService
         Vector2 start,
         Vector2 requestedGoal,
         float agentRadius,
+        RouteReason reason,
         Vector2? congestionAvoidanceCenter,
         float[]? additionalNavigationCosts,
-        float agentSpeed)
+        float agentSpeed,
+        out GridCell? reportedGoal,
+        out bool goalFieldExisted)
     {
+        reportedGoal = null;
+        goalFieldExisted = false;
         PathQueries++;
         if (!OrderBudgetRemains)
         {
@@ -821,13 +831,52 @@ internal sealed partial class PathService
             PathGoalUnresolvable++;
             return null;
         }
+        reportedGoal = goal;
+        // Asked before the search runs, because the search does not build fields and asking afterwards would
+        // report the state this query left rather than the state it found.
+        // <b>Not in a crowd, and not asking for a way round one.</b> Both halves earned their place: the
+        // reason list keeps a body that was sent to find a different answer from being steered back to the
+        // shared one, and the pressure test keeps a body standing in a jam from being steered at all. The
+        // first alone stranded two bodies in the two-exit pen.
+        var crowded = grid.TryWorldToCell(start, out var pressureCell) &&
+                      congestion.At(pressureCell) >= CrowdedPressure;
+        var available = FieldForGoal(goal, agentRadius, agentSpeed);
+        var mayGuide = GuidedSearch && !crowded && !RouteReasons.WantsItsOwnAnswer(reason);
+        var guide = mayGuide ? available : null;
+        // <b>That a field existed, not that it was used.</b> Conflating the two made the report say "0 had a
+        // field" the moment the crowd gate started refusing them, which reads as "there was nothing to use"
+        // when what happened is "there was, and we declined it on purpose".
+        goalFieldExisted = available is not null;
         var cells = FindCellPath(
             resolvedStartCell,
             goal,
             agentRadius,
             congestionAvoidanceCenter,
             additionalNavigationCosts,
-            CongestionSpeedScale(agentSpeed));
+            CongestionSpeedScale(agentSpeed),
+            guide,
+            abandonAt: mayGuide && GuidedRestart && guide is null ? GuideRestartExpansions : int.MaxValue);
+        // <b>The search says when it is worth building a field, rather than a distance threshold guessing.</b>
+        // A field costs tens of milliseconds and serves every later ask for the same goal, so the question is
+        // never "is this far" but "is this search expensive" — and the search itself is the only thing that
+        // knows. Measured: thirteen villagers called home from across the map are thirteen asks for ONE goal,
+        // 2.23M cells between them, so the first ask paying for a field makes the other twelve nearly free.
+        // Bounded by construction: the wasted prefix is GuideRestartExpansions and never more.
+        if (cells is null && abandonedToGuide)
+        {
+            abandonedToGuide = false;
+            GuidedRestarts++;
+            var built = GetFlowField(goal, agentRadius, congestion.Revision, agentSpeed: agentSpeed);
+            goalFieldExisted = true;
+            cells = FindCellPath(
+                resolvedStartCell,
+                goal,
+                agentRadius,
+                congestionAvoidanceCenter,
+                additionalNavigationCosts,
+                CongestionSpeedScale(agentSpeed),
+                built);
+        }
         if (cells is null)
         {
             PathSearchFoundNothing++;
@@ -1441,6 +1490,39 @@ internal sealed partial class PathService
     /// reads as indecision even when each decision is correct. A caller that asks
     /// for a revision no longer held simply gets the current one.
     /// </remarks>
+    /// <summary>
+    /// Whether a cost field for this goal already exists, ignoring congestion.
+    /// </summary>
+    /// <remarks>
+    /// <b>Asked before deciding whether the hierarchy can replace a cell search.</b> The trade is entirely
+    /// about repetition: a field costs tens of milliseconds to build and nothing to reuse, so routing a solo
+    /// body down one is free if its goal has been asked about before and a straight loss if it has not.
+    /// "Villagers walk to the same few places" is a claim about this settlement's behaviour and not something
+    /// to assume — see §121.
+    /// <para>
+    /// Congestion is deliberately out of the key: <see cref="latestFields"/> holds the newest field per goal
+    /// regardless of congestion revision precisely so the next revision can adopt what is still valid, so a
+    /// field that exists at all is one this query could have started from.
+    /// </para></remarks>
+    internal RectangleFlowField? FieldForGoal(
+        GridCell goal,
+        float agentRadius,
+        float agentSpeed,
+        bool chargeTurns = true)
+    {
+        var speedScale = congestion.LiveCellCount == 0 ? 1f : CongestionSpeedScale(agentSpeed);
+        // <b>Read, never built.</b> Going through GetFlowField would key on the current congestion revision
+        // and build a fresh field on a miss, which is exactly the cost this exists to avoid: measured, only
+        // four asks in twenty-four find a field, so paying to build one per query is a straight loss.
+        // Congestion staleness is acceptable in a guide — it steers a search, it does not price the route.
+        return latestFields.GetValueOrDefault((
+            grid.Transform.Index(goal),
+            (int)MathF.Round(agentRadius * 100f),
+            (int)MathF.Round(speedScale * 8f),
+            grid.Revision,
+            chargeTurns));
+    }
+
     private RectangleFlowField GetFlowField(
         GridCell goal,
         float agentRadius,
@@ -2118,13 +2200,87 @@ internal sealed partial class PathService
         return best;
     }
 
+    /// <summary>
+    /// Whether a cell search may steer by the cost field for its goal. <b>Off: it was measured and rejected.</b>
+    /// </summary>
+    /// <remarks>
+    /// <b>Twenty-seven times cheaper and up to five times longer, so it is off.</b> §121 tried the thing §95
+    /// had proposed — the flat estimate prices a cell at the cheapest surface cost that exists anywhere, while
+    /// the corner graph knows what the ground between here and the goal actually costs — and the speed was
+    /// everything hoped for: thirteen villagers called home across the map fell from 2,233,924 expansions and
+    /// 741 ms to 82,474 and 113 ms, with the worst tick going 89 to 31.
+    /// <para>
+    /// The routes were the problem. Measured pair by pair against the search it replaces: <b>1.14x, 1.37x,
+    /// 1.79x, 1.89x and 5.02x</b> — a 125 m walk became 627 m. The corner-graph estimate is not an admissible
+    /// lower bound and is a large enough overestimate to turn A* into something close to greedy best-first,
+    /// which is exactly the shape of that result: fast searches, bad paths. The raid leg failed it
+    /// independently and for the same reason — raiders walked so far round that two of twenty-four got home
+    /// against thirteen, and one lived 297 s against a 194 s round trip.
+    /// </para>
+    /// <para>
+    /// Kept as a lever rather than deleted, on §84's precedent, because the <em>idea</em> is still right and
+    /// only this estimate is wrong: the next attempt should guide with the field's own <c>CostAt</c> — the
+    /// tile-filled figure, which is exact where it is filled — rather than the analytic corner-graph one, or
+    /// scale the estimate until the fixture's route-quality leg stops complaining. That leg exists now and is
+    /// the acceptance test, and it earned its place by catching this after a first version of it compared two
+    /// unguided arms and reported a perfect 1.000x five times over.
+    /// </para></remarks>
+    internal static bool GuidedSearch;
+
+    /// <summary>
+    /// Local pressure above which a body is treated as being in a crowd.
+    /// </summary>
+    /// <remarks>
+    /// <b>Measured in §96 and now read by two rules instead of one.</b> The village's cross-map transit drops
+    /// sit at 0.083 — bodies with room, standing near each other because they were ordered together — and a
+    /// pen holding fifty against a single-cell gate is an order of magnitude above that. Half sits between the
+    /// two with room on both sides.
+    /// <para>
+    /// It decided one thing: whether a dropped body hops back onto the shared field or solves its own route.
+    /// §121 gives it a second, and it is the same judgement — a body in a crowd is not steered by the shared
+    /// answer either. Exempting callers by name was tried first and was the wrong cut: it is not <em>who</em>
+    /// asks that matters but <em>where the body is standing</em>, and the two-exit pen said so by stranding
+    /// two bodies whose reason was on the permitted list.
+    /// </para></remarks>
+    internal const float CrowdedPressure = 0.5f;
+
+    /// <summary>
+    /// Cells an unguided search may close before it is worth building a field and starting again.
+    /// </summary>
+    /// <remarks>
+    /// Roughly seven milliseconds here, and it is a ceiling on waste rather than a tuning dial: a search that
+    /// has closed this many cells without finishing is one the flat estimate has stopped steering, and every
+    /// cell after it would be spent at the same rate. The alternative was a distance threshold, which guesses
+    /// at the same question from the outside and is wrong on any map where the ground is not what the straight
+    /// line suggests — which is every map this game generates.
+    /// </remarks>
+    private const int GuideRestartExpansions = 20_000;
+
+    /// <summary>
+    /// Whether an expensive search may build a field and start again. Off with <see cref="GuidedSearch"/>.
+    /// </summary>
+    /// <remarks>
+    /// This is the half that made the guide reach anything: a field only helps where one exists, and measured
+    /// across a session only four asks in twenty-four found one. Within a single burst the picture reverses —
+    /// thirteen villagers called home are thirteen asks for one goal — so the first ask paying to build it
+    /// makes the rest nearly free. The mechanism worked; what it steered was wrong.
+    /// </remarks>
+    internal static bool GuidedRestart;
+
+    /// <summary>Searches abandoned partway and rerun against a freshly built field.</summary>
+    public long GuidedRestarts { get; private set; }
+
+    private bool abandonedToGuide;
+
     private List<GridCell>? FindCellPath(
         GridCell start,
         GridCell goal,
         float agentRadius,
         Vector2? congestionAvoidanceCenter,
         float[]? additionalNavigationCosts,
-        float congestionSpeedScale)
+        float congestionSpeedScale,
+        RectangleFlowField? guide = null,
+        int abandonAt = int.MaxValue)
     {
         // Reused across calls. A* was allocating three full-grid arrays every
         // time it ran, and once every obstructed unit started re-planning against
@@ -2159,7 +2315,23 @@ internal sealed partial class PathService
         var heuristicScale = SecondsPerCell *
                              (terrain.Revision == 0 ? 1f : TerrainSurfaceRules.MinimumPathCost) *
                              HeuristicWeight;
-        open.Enqueue(start, Heuristic(start, goal) * heuristicScale);
+        // <b>The estimate the hierarchy already holds, when it holds one.</b> Measured in §121: every search
+        // that ran to its 250,000-cell ceiling had a cost field for its goal already built and ignored it,
+        // while every cheap search had none. So this costs nothing to obtain — the field is read, never built
+        // — and it is the difference between an estimate that prices a cell at the cheapest surface cost that
+        // exists anywhere and one that knows what the ground between here and the goal actually costs.
+        //
+        // Falls back per cell rather than per search: the corner graph cannot price a cell in a pocket it does
+        // not reach into, and an infinite estimate there would put that cell behind every other candidate
+        // forever. The admissible straight-line figure is the honest answer for those.
+        float Estimate(GridCell cell)
+        {
+            if (guide is null) return Heuristic(cell, goal) * heuristicScale;
+            var guided = guide.AnalyticCostAt(cell);
+            return float.IsFinite(guided) ? guided : Heuristic(cell, goal) * heuristicScale;
+        }
+
+        open.Enqueue(start, Estimate(start));
 
         while (open.TryDequeue(out var current, out _))
         {
@@ -2186,6 +2358,14 @@ internal sealed partial class PathService
             {
                 bestReach = reach;
                 bestIndex = currentIndex;
+            }
+
+            // Before the budget test, because this is not a refusal: the caller is being told to ask again
+            // with a guide, and the expansions spent so far are the price of finding that out.
+            if (PathExpansions - expansionsAtEntry >= abandonAt)
+            {
+                abandonedToGuide = true;
+                return null;
             }
 
             if (PathExpansions - expansionsAtEntry >= ExpansionBudget || !OrderBudgetRemains)
@@ -2233,7 +2413,7 @@ internal sealed partial class PathService
                 cost[nextIndex] = nextCost;
                 searchArrival[nextIndex] = directionIndex;
                 cameFrom[nextIndex] = currentIndex;
-                open.Enqueue(next, nextCost + Heuristic(next, goal) * heuristicScale);
+                open.Enqueue(next, nextCost + Estimate(next));
             }
         }
 

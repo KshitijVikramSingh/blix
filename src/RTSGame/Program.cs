@@ -15,6 +15,22 @@ public static class Program
         System.Globalization.CultureInfo.DefaultThreadCurrentCulture =
             System.Globalization.CultureInfo.InvariantCulture;
 
+        // <b>Before every scenario branch, because each of them exits.</b> This sat two hundred lines lower
+        // once, after `--selftest` had already run and called Environment.Exit — so the control arm and the
+        // arm under test were the same arm, agreed perfectly, and nearly bought a conclusion that the pen
+        // failure predated the change. A lever parsed after the branch it is meant to affect is not a lever.
+        // <b>Off by default because §121 measured it and rejected it: 27x cheaper, up to 5x longer.</b> The
+        // lever stays so the next attempt at steering a cell search by the hierarchy can be measured against
+        // the same fixture rather than rebuilt from the plan.
+        if (args.Contains("--guided-search"))
+        {
+            Simulation.Navigation.PathService.GuidedSearch = true;
+            Simulation.Navigation.PathService.GuidedRestart = true;
+            Console.WriteLine(
+                "  cell searches steer by the goal's cost field (--guided-search) — REJECTED in §121, " +
+                "routes ran to 5x the flat search's");
+        }
+
         if (args.Contains("--selftest"))
         {
             Environment.Exit(SimulationSelfTests.Run());
