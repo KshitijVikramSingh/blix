@@ -222,6 +222,19 @@ internal struct AgentState
     public bool ReturningToHold;
     /// <summary>Member has left the shared route and is heading for its own slot.</summary>
     public bool ApproachingSlot;
+
+    /// <summary>
+    /// This body is walking to the nearest cell its cohort's flow field can price, and means to rejoin it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Explicit because two attempts at deriving it broke crowd tests.</b> The condition was first taken as
+    /// "Destination differs from RequestedDestination", which is also true whenever AssignPath resolves an
+    /// unwalkable goal to a nearby cell, and then as "a group member with no path left", which is also true of
+    /// bodies the congestion machinery is about to repath. Both pulled bodies off deliberate individual routes
+    /// and onto the shared gradient, and the pen and chokepoint tests said so — four of them. A body's
+    /// intention is not reliably inferable from its geometry, so it is written down.
+    /// </remarks>
+    public bool SeekingFieldEntry;
     /// <summary>Steering from the shared cost field rather than from a stored path.</summary>
     public bool UsesFlowTransit;
     /// <summary>Consecutive ticks the shared field asked for a step the body could not take.</summary>

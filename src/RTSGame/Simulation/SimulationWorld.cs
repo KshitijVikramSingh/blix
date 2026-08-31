@@ -198,6 +198,25 @@ internal sealed class SimulationWorld
     }
     public long PathQueries => pathService.PathQueries;
 
+    /// <summary>Whether a dropped body found priced ground again. See PathService.FindFieldEntry.</summary>
+    /// <summary>Highest local pressure at a transit drop. See FieldEntryPressureCeiling.</summary>
+    public float WorstDropPressure => pathService.WorstDropPressure;
+
+    public (long Found, long Missed) FieldEntries =>
+        (pathService.FieldEntriesFound, pathService.FieldEntriesMissed);
+
+    /// <summary>
+    /// Why bodies leave the cohort's shared field, split by cause. See §96.
+    /// </summary>
+    /// <remarks>
+    /// Held by the path service rather than here, and that is the determinism census talking: a field on the
+    /// world must be fingerprinted, argued as derived, or argued as wall-clock, and a diagnostic counter is
+    /// none of the three. The service is already argued away as derived, so counters that nothing reads back
+    /// live there and are forwarded through properties, which have no field for the census to find.
+    /// </remarks>
+    public (long Rejected, long NoGradient) FlowTransitDrops =>
+        (pathService.FlowTransitDropsRejected, pathService.FlowTransitDropsNoGradient);
+
     /// <summary>What the cell search actually explored. See PathService.PathExpansions.</summary>
     public (long Expansions, long Worst, long Failures, int GridCells) PathSearch =>
         (pathService.PathExpansions, pathService.PathExpansionsWorst,
@@ -3190,6 +3209,7 @@ internal sealed class SimulationWorld
             return false;
         }
         CompletePath(ref agent);
+        agent.SeekingFieldEntry = false;
         agent.UsesFlowTransit = true;
         agent.SmoothedFlow = Vector2.Zero;
         agent.AdoptedCongestionRevision = pathService.CongestionRevision;
@@ -3318,8 +3338,74 @@ internal sealed class SimulationWorld
         foreach (var id in retired) moveGroups.Remove(id);
     }
 
+    /// <summary>
+    /// Puts a body that fell off the cohort's field back on it, once it is standing somewhere priced.
+    /// </summary>
+    /// <remarks>
+    /// <b>Without this, escaping a pocket is a one-way trip.</b> The fallback sends a dropped body to the
+    /// nearest cell the field can serve; arriving there and then walking the rest of the way on its own route
+    /// would be the very cross-map path the fallback exists to avoid. So the moment the field can price where
+    /// the body is standing, it goes back on the shared route.
+    /// <para>
+    /// The condition carries no new state: a body on an escape path has a Destination that is not its
+    /// RequestedDestination, which no other path in this file produces. Retried on a stagger rather than every
+    /// tick, because the check samples the field and a hundred bodies asking every tick is its own stall.
+    /// </para>
+    /// </remarks>
+    private void RejoinFieldTransit(ref AgentState agent)
+    {
+        if (!agent.SeekingFieldEntry) return;
+        if (agent.MoveGroupId == 0 || agent.ApproachingSlot) return;
+        // <b>Only a body with no route left, and that precision matters.</b> The first version asked whether
+        // Destination differed from RequestedDestination, on the reasoning that only an escape path produces
+        // that — which is false: AssignPath resolves an unwalkable goal to a nearby cell and leaves exactly the
+        // same difference. So it also fired for bodies on deliberate individual routes, pulled them back onto
+        // the shared gradient, and broke both pen-distribution tests. A body still holding a path is going
+        // somewhere on purpose; a group member with no path and its target still ahead of it is the escape
+        // case and nothing else.
+        if (agent.Path != PathHandle.None) return;
+        if (Vector2.DistanceSquared(agent.Position, agent.RequestedDestination) <=
+            ArrivalDistance * ArrivalDistance)
+        {
+            return;
+        }
+        if ((TickNumber + agent.Id.Value) % FieldRejoinIntervalTicks != 0) return;
+        if (pathService.SampleFlowGradient(
+                agent.Position,
+                agent.RequestedDestination,
+                agent.NavigationRadius,
+                agent.AdoptedCongestionRevision,
+                agent.MaximumSpeed) == Vector2.Zero)
+        {
+            return;
+        }
+
+        agent.SeekingFieldEntry = false;
+        pathService.FieldRejoins++;
+        BeginFlowTransit(ref agent, agent.RequestedDestination);
+    }
+
+    /// <summary>
+    /// Local pressure above which a dropped body solves its own route instead of rejoining the field.
+    /// </summary>
+    /// <remarks>
+    /// <b>Measured, not chosen.</b> The village's cross-map drops sit at 0.083 — twenty bodies with room,
+    /// standing near each other because they were ordered together. A pen holding fifty against a single-cell
+    /// gate is an order of magnitude above that. Half sits between the two with room on both sides, and the
+    /// first attempt at "any pressure at all" (0.01) blocked precisely the case this exists to fix, which is
+    /// what measuring the drop site rather than guessing at it is for.
+    /// </remarks>
+    private const float FieldEntryPressureCeiling = 0.5f;
+
+    /// <summary>How often an escaping body is asked whether the field will take it back.</summary>
+    private const int FieldRejoinIntervalTicks = 10;
+
+    /// <summary>Bodies that rejoined the shared field after escaping a pocket. See RejoinFieldTransit.</summary>
+    public long FieldRejoins => pathService.FieldRejoins;
+
     private static void DetachFromMoveGroup(ref AgentState agent)
     {
+        agent.SeekingFieldEntry = false;
         agent.MoveGroupId = 0;
         agent.ApproachingSlot = false;
         agent.UsesFlowTransit = false;
@@ -3674,6 +3760,7 @@ internal sealed class SimulationWorld
         paths.Release(agent.Path);
         agent.Path = PathHandle.None;
         agent.WaypointIndex = 0;
+        agent.SeekingFieldEntry = false;
         // A stored route supersedes the shared field. Without this a body granted
         // a repath kept steering by the gradient and simply ignored the route it
         // had just been given — which is why a unit wedged against terrain the
@@ -3753,6 +3840,10 @@ internal sealed class SimulationWorld
             ref var agent = ref agents[i];
             if (!agent.IsAlive) continue;
             agent.PreviousPosition = agent.Position;
+
+            // Before the destination check, because the body this serves has just arrived at its entry point
+            // and therefore has no destination left to hold it in the loop.
+            RejoinFieldTransit(ref agent);
 
             if (!agent.HasDestination)
             {
@@ -3936,6 +4027,10 @@ internal sealed class SimulationWorld
 
         if (agent.FlowStepRejections >= FlowTransitRejectionLimit)
         {
+            // Counted separately from the no-gradient drop below, because they are different faults with the
+            // same symptom: this one is a body the field keeps pointing into something it cannot walk through,
+            // and that one is a field with no answer for where the body is standing. §96.
+            pathService.FlowTransitDropsRejected++;
             agent.UsesFlowTransit = false;
             agent.FlowStepRejections = 0;
             AssignPath(ref agent, agent.RequestedDestination, preserveCurrentPathOnFailure: true);
@@ -3950,10 +4045,43 @@ internal sealed class SimulationWorld
             agent.MaximumSpeed);
         if (flow == Vector2.Zero)
         {
-            // The field no longer offers this body a route (terrain edit, or it
-            // was pushed somewhere disconnected). Fall back to a real path.
+            // The field no longer offers this body a route: it is standing where the region tile could not
+            // price it. §96 — the old answer searched the whole map to the final goal, a quarter of a million
+            // expansions, when the field already knew the way from anywhere it HAD priced. So ask the cheap
+            // question instead: where is the nearest cell this field can serve. A short path there, and the
+            // body rejoins the cohort's route rather than replacing it.
+            pathService.FlowTransitDropsNoGradient++;
             agent.UsesFlowTransit = false;
-            AssignPath(ref agent, agent.RequestedDestination, preserveCurrentPathOnFailure: true);
+            // <b>Under crowd pressure the old answer is the right one, and that is not a compromise.</b>
+            // A body that solves its own route is a body that can pick a different exit, and in a pen that
+            // diversity is the whole behaviour — both pen self-tests assert it, and they failed when every
+            // dropped body was put back on one shared gradient. In the open there is nothing to diversify
+            // around and the field is simply correct: the village's freeze was twenty bodies crossing empty
+            // ground, each running a quarter-million-expansion search to reach a field they were standing one
+            // cell away from. Pressure is what tells those two situations apart.
+            var pressure = Navigation.TryWorldToCell(agent.Position, out var pressureCell)
+                ? Congestion.At(pressureCell)
+                : 0f;
+            pathService.WorstDropPressure = MathF.Max(pathService.WorstDropPressure, pressure);
+            var crowded = pressure >= FieldEntryPressureCeiling;
+            var entry = crowded
+                ? null
+                : pathService.FindFieldEntry(
+                    agent.Position,
+                    agent.RequestedDestination,
+                    agent.NavigationRadius,
+                    agent.AdoptedCongestionRevision,
+                    agent.MaximumSpeed);
+            // Destination becomes the entry point while RequestedDestination stays the real target, and that
+            // difference is what marks a body as escaping — no new state to save or fingerprint. See
+            // RejoinFieldTransit.
+            AssignPath(
+                ref agent,
+                entry ?? agent.RequestedDestination,
+                preserveCurrentPathOnFailure: true);
+            // Set after the assignment, because AssignPath clears it: an ordinary route means the body is no
+            // longer looking for the field.
+            agent.SeekingFieldEntry = entry is not null;
             return Vector2.Zero;
         }
 

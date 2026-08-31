@@ -254,6 +254,7 @@ internal static class ScaleScenarios
             var quietBefore = world.RoutingCost;
             var queriesBefore = world.PathQueries;
             var expansionsBefore = world.PathSearch.Expansions;
+            var dropsBefore = world.FlowTransitDrops;
             var failuresBefore = world.PathSearch.Failures;
             var searchesQuietBefore = world.RegionSearches;
             for (var tick = 0; tick < 20; tick++) world.Tick((float)SimulationWorld.FixedDeltaSeconds);
@@ -293,6 +294,13 @@ internal static class ScaleScenarios
                     $"({(search.Expansions - expansionsBefore) / (double)search.GridCells * 100.0:F0}% of the " +
                     $"grid's {search.GridCells:N0} cells), worst single {search.Worst:N0}, " +
                     $"{search.Failures - failuresBefore} exhausted the map");
+                var drops = world.FlowTransitDrops;
+                Console.WriteLine(
+                    $"           | transit drops: {drops.Rejected - dropsBefore.Rejected} rejected steps, " +
+                    $"{drops.NoGradient - dropsBefore.NoGradient} no gradient | " +
+                    $"entries {world.FieldEntries.Found}/{world.FieldEntries.Found + world.FieldEntries.Missed} " +
+                    $"found, {world.FieldRejoins} rejoins, " +
+                    $"worst drop pressure {world.WorstDropPressure:F3}");
             }
         }
 

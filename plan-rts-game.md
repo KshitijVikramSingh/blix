@@ -8851,3 +8851,72 @@ alternative was shipping a locomotion regression to make a number look better.
 Also recorded, because it is the third time in two arcs: a fix that improves a number and breaks a test is not
 a trade to make quietly. The measurement said 9x and the gate said no, and the gate is the one that knows what
 the game is supposed to do.
+
+## 96. Bodies were searching the map to reach a field they were standing beside
+
+§95 said the bound was not the fix and the fallback was. It was, and the numbers are absurd in the good
+direction: the stall window after a cross-map order falls from **300.6 ms a tick to 1.17**, and the expansions
+that produced it from **1,348,421 to four**.
+
+### Why transit dropped
+
+Instrumented by cause, because "transit drops" is two different faults: a body the field keeps pointing into
+something it cannot walk through (rejected steps), and a field with no answer where the body is standing (no
+gradient). On the village, over twenty ticks: **zero rejected, two no-gradient.**
+
+No gradient means `CostAt` returned infinity for the body's cell. The tile is filled on demand, so this is not
+a missing tile — it is a tile that could not price that cell. Region tiles are seeded from their perimeter
+through the analytic corner graph, and a cell in a pocket the perimeter cannot see into stays infinite. With
+twenty-five thousand tree and outcrop blockers cutting the walkable area into 5,871 rectangles, those pockets
+exist.
+
+And the old answer to "the field cannot price you" was **search the whole map to the final goal**. The field
+already knows the way from every cell it *has* priced, so the only question worth asking is where the nearest
+one is. On the village, it was **one cell away**.
+
+### The fix, and the two ways it was wrong first
+
+`FindFieldEntry` is a bounded breadth-first walk for the nearest cell the cohort's field can price. A short
+path there, and the body rejoins the shared route rather than replacing it.
+
+Getting the rejoin condition right took three attempts, and the two failures are the interesting part:
+
+1. **"Destination differs from RequestedDestination"** — on the reasoning that only an escape path produces
+   that. False: `AssignPath` resolves an unwalkable goal to a nearby cell and leaves the same difference. It
+   fired for bodies on deliberate individual routes and broke both pen tests plus the fingerprint census.
+2. **"A group member with no path left"** — also true of bodies the congestion machinery is about to repath.
+   Four crowd tests failed: chokepoint filing, the single-cell gate, pen backpressure, congestion sweeps.
+3. **An explicit `AgentState.SeekingFieldEntry`.** A body's intention is not reliably inferable from its
+   geometry, so it is written down. The save signature and the fingerprint both pick it up automatically —
+   `Marshal.SizeOf<AgentState>()` and `AgentStateSchema` were built for exactly this, so a new body field costs
+   one declaration.
+
+### And the thing the old fallback was doing by accident
+
+With the rejoin correct, two pen tests still failed — and the cause was not a bug. **A body that solves its own
+route can pick a different exit; every body solving separately is diversity, expensively bought.** Replacing
+that wholesale with one shared gradient funnels the cohort, and the pen tests exist to assert it does not.
+
+Distance did not separate the cases: bounding the entry search to a few cells' radius changed nothing, because
+pen bodies are also standing beside priced ground. **Crowd pressure does**, and that is what the pen tests are
+for. Measured at the drop site rather than guessed: the village's cross-map drops sit at **0.083** — twenty
+bodies with room, near each other only because they were ordered together — and a pen holding fifty against a
+single-cell gate is an order of magnitude above. The ceiling is 0.5, with room on both sides. The first
+attempt, "any pressure at all" at 0.01, blocked precisely the case the change exists to fix, which is what
+measuring the drop site is for.
+
+### Where the order tick stands now
+
+```
+order 1 | 414 ms | tiles 112 ms (7 fills) | field 296 ms (2 built) |  2.13 ms/tick after
+order 2 | 436 ms | tiles 146 ms (9 fills) | field 289 ms (2 built) |  1.11 ms/tick after
+order 3 |  17 ms | tiles  16 ms (1 fill)  | field   0 ms (cached)  |  0.26 ms/tick after
+order 4 |   0 ms | nothing to build       | field   0 ms (cached)  |  1.17 ms/tick after
+```
+
+The freeze after an order is gone. What remains is the order tick itself on a *new* goal: two flow fields at
+about 150 ms each, plus tile fills. That is §93's item 3, untouched and now the largest single cost in the
+game's response to a click — and §95's `LegBetween` question is still the way in.
+
+The expansion budget stays at 250,000. It never fires on this map any more, which is what a ceiling should
+look like.

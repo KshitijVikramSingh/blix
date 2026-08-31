@@ -1558,6 +1558,125 @@ internal sealed partial class PathService
         point.X >= minimum.X && point.X <= maximum.X &&
         point.Y >= minimum.Y && point.Y <= maximum.Y;
 
+    /// <summary>
+    /// The nearest position the cohort's field can actually price, within a bounded radius.
+    /// </summary>
+    /// <remarks>
+    /// <b>The replacement for a cross-map A* that a dropped body did not need.</b> §96 measured why bodies
+    /// leave shared transit on a real village: not rejected steps, but the field returning no gradient — the
+    /// body is standing in a pocket the region tile's perimeter seeding could not reach, which happens
+    /// wherever twenty-five thousand tree blockers cut the walkable area into rectangles a perimeter cannot
+    /// see into. The old answer was to give up on the field and search the whole map to the final goal, at a
+    /// quarter of a million expansions. The field already knows the way from any priced cell, so the only
+    /// question worth asking is "where is the nearest one", and that is a few hundred cells of breadth-first
+    /// search rather than a map.
+    /// <para>
+    /// Bounded hard: past this radius the body is somewhere the field genuinely cannot serve and the caller
+    /// should do whatever it did before. Half a per cent of the grid, not a fraction of the answer.
+    /// </para>
+    /// </remarks>
+    public Vector2? FindFieldEntry(
+        Vector2 position,
+        Vector2 requestedGoal,
+        float agentRadius,
+        int congestionRevision = int.MaxValue,
+        float agentSpeed = 0f)
+    {
+        if (!grid.TryWorldToCell(position, out var origin) ||
+            !grid.TryWorldToCell(requestedGoal, out var requestedGoalCell))
+        {
+            return null;
+        }
+
+        var goal = grid.IsWalkable(requestedGoalCell, agentRadius)
+            ? requestedGoalCell
+            : FindNearestWalkable(requestedGoalCell, agentRadius);
+        if (goal is not { } resolvedGoal) return null;
+        var costs = GetFlowField(resolvedGoal, agentRadius, congestionRevision, agentSpeed: agentSpeed);
+
+        // Breadth-first over cells, nearest out, so the first priced cell found is the nearest one. The
+        // visited set is a stamp array rather than a fresh allocation: this runs on the tick.
+        fieldEntryStamp ??= new int[grid.Width * grid.Height];
+        if (fieldEntryStamp.Length != grid.Width * grid.Height)
+        {
+            fieldEntryStamp = new int[grid.Width * grid.Height];
+        }
+
+        fieldEntryGeneration++;
+        var queue = fieldEntryQueue;
+        queue.Clear();
+        queue.Enqueue(origin);
+        fieldEntryStamp[grid.Transform.Index(origin)] = fieldEntryGeneration;
+        var examined = 0;
+        while (queue.TryDequeue(out var current))
+        {
+            if (++examined > FieldEntryBudget) return null;
+            if (grid.IsWalkable(current, agentRadius) && float.IsFinite(costs.CostAt(current)))
+            {
+                FieldEntriesFound++;
+                return grid.CellCenter(current);
+            }
+
+            for (var i = 0; i < 4; i++)
+            {
+                var offset = NeighborOffsets[i];
+                var next = new GridCell(current.X + offset.X, current.Z + offset.Z);
+                if (!grid.Contains(next)) continue;
+                var index = grid.Transform.Index(next);
+                if (fieldEntryStamp[index] == fieldEntryGeneration) continue;
+                fieldEntryStamp[index] = fieldEntryGeneration;
+                queue.Enqueue(next);
+            }
+        }
+
+        FieldEntriesMissed++;
+        return null;
+    }
+
+    /// <summary>
+    /// Cells the field-entry search may examine — a few cells' radius, deliberately.
+    /// </summary>
+    /// <remarks>
+    /// <b>Small because the old fallback was doing a second job by accident.</b> A body that dropped out of
+    /// transit used to get its own cross-map A*, and in a pen that is what spread the cohort across several
+    /// exits: every body solving separately is diversity, expensively bought. Replacing it wholesale with the
+    /// shared gradient funnels them, and both pen-distribution self-tests said so.
+    /// <para>
+    /// So the two cases are separated by distance, which is what actually distinguishes them. A body standing
+    /// a cell or two off priced ground is in a pocket the tile's perimeter seeding could not see into, and
+    /// stepping onto the field is exactly right — that was the village's freeze, and its entry was one cell
+    /// away. A body that would have to walk a long way to find the field is in a different situation, and it
+    /// gets the old answer, diversity included.
+    /// </para>
+    /// </remarks>
+    private const int FieldEntryBudget = 400;
+
+    private int[]? fieldEntryStamp;
+    private int fieldEntryGeneration;
+    private readonly Queue<GridCell> fieldEntryQueue = new();
+
+    /// <summary>How often a dropped body found its way back onto the field, and how often it could not.</summary>
+    public long FieldEntriesFound { get; private set; }
+
+    public long FieldEntriesMissed { get; private set; }
+
+    /// <summary>
+    /// Transit-drop and rejoin counters, kept here rather than on the world.
+    /// </summary>
+    /// <remarks>
+    /// The determinism census walks the world's fields and demands each be fingerprinted or argued away; this
+    /// service is already argued as derived, so diagnostics that nothing reads back belong here. Public fields
+    /// rather than properties because the world increments them.
+    /// </remarks>
+    public long FlowTransitDropsRejected;
+
+    public long FlowTransitDropsNoGradient;
+
+    public long FieldRejoins;
+
+    /// <summary>The highest local pressure seen at a transit drop, for choosing the ceiling by measurement.</summary>
+    public float WorstDropPressure;
+
     private GridCell? FindNearestWalkable(
         GridCell origin,
         float agentRadius,
