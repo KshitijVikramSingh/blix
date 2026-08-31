@@ -314,6 +314,36 @@ internal static class ScaleScenarios
             }
         }
 
+        // <b>What a finished building costs.</b> Construction changes the placement grid, which re-rasterises
+        // navigation, which bumps the revision every mesh and field is keyed by — so the click after a
+        // building completes pays for the whole map twice over. Measured here rather than argued about: force
+        // one rebuild, then order again.
+        Console.WriteLine();
+        Console.WriteLine("  what a placement change costs the next click");
+        var rasterBefore = world.NavRasterCost;
+        var rasterStart = Stopwatch.GetTimestamp();
+        world.RebuildTerrainNavigation();
+        var rasterMs = Stopwatch.GetElapsedTime(rasterStart).TotalMilliseconds;
+        var after0 = world.NavRasterCost;
+        Console.WriteLine(
+            $"  raster {rasterMs,8:F1} ms ({after0.Rebuilds - rasterBefore.Rebuilds} rebuild, " +
+            $"{world.Navigation.Width * world.Navigation.Height:N0} cells) — " +
+            $"terrain pass {after0.TerrainMs - rasterBefore.TerrainMs:F1} ms, " +
+            $"clearance {after0.RestMs - rasterBefore.RestMs:F1} ms, " +
+            $"apply {after0.ApplyMs - rasterBefore.ApplyMs:F1} ms");
+
+        var coldBefore = world.RoutingCost;
+        var coldStart = Stopwatch.GetTimestamp();
+        world.QueueMove(movers, new Vector2(half * 0.5f, half * 0.5f));
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        var coldMs = Stopwatch.GetElapsedTime(coldStart).TotalMilliseconds;
+        var cold = world.RoutingCost;
+        Console.WriteLine(
+            $"  order  {coldMs,8:F1} ms | mesh {cold.MeshMs - coldBefore.MeshMs,7:F1} ms " +
+            $"({cold.MeshBuilds - coldBefore.MeshBuilds} builds) | " +
+            $"tiles {cold.TileMs - coldBefore.TileMs,7:F1} ms | " +
+            $"field {cold.FieldMs - coldBefore.FieldMs,7:F1} ms");
+
         return 0;
     }
 

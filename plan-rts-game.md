@@ -9042,3 +9042,50 @@ green tests prove no invariant broke, not that the routes are the same routes.
 A six-second freeze became a 138 ms click, and the remaining 138 is two thirds tile fills. Still open, in
 order: the ~125 ns of distance arithmetic above (with fidelity checked, not assumed), and §93's 233 ms mesh
 rebuild on any navigation change, which is the one an actively building village trips over.
+
+## 99. What a finished building costs, and why the mesh is the wrong half to attack
+
+§93 listed a 233 ms mesh rebuild on any navigation change as the thing an actively building village trips
+over. Measured properly on the village the game builds, the event costs more than that and the mesh is not
+most of it. `--pathprofile` now forces one placement change and orders again:
+
+```
+raster     774.1 ms  (1,440,000 cells) — terrain pass 288.5 | clearance 459.3 | apply 26.1
+next order 677.4 ms  — mesh 380.8 | tiles 123.8 | field 170.4
+```
+
+**About 1.45 seconds per completed building**, and the split matters because the two halves land in different
+places. The raster is paid *in the tick the building completes* — unavoidably, synchronously. The mesh and the
+field are paid on the next click, and the field's 170 ms is the §97 climb cache being invalidated with the
+mesh, which is correct and cheap to re-earn.
+
+### Why the mesh is the harder half and the smaller one
+
+`WalkableRectangles.Build` is a global row sweep that carries open rectangles down the grid and emits maximal
+ones. Rectangles are not clipped to regions, so a change anywhere can split one that spans a quarter of the
+map: "rebuild only what changed" is not expressible without changing what a rectangle *is*, and what a
+rectangle is happens to be the thing the routing-fidelity suite is written against.
+
+What is expressible is **amortisation**. The sweep's whole state is a handful of per-column arrays and a row
+index, so it is resumable by row: build the new mesh over N ticks while the old one keeps serving. The click
+pays nothing, and the staleness is bounded and behaviourally safe — the fine layer refuses to walk through a
+new building whatever the abstract layer thinks, so a stale rectangle costs a re-plan and not a wall walked
+through. It needs determinism care (the mesh in use at a tick becomes a function of build progress, so a save
+must either finish the build or record it) which is exactly the sort of thing that has bitten this arc twice.
+
+### Why the raster is the better target
+
+Two thirds of it is provably unnecessary work rather than work that needs restructuring:
+
+- **The terrain pass, 288.5 ms**, samples surface and height for 1.44M cells. A placement change cannot move
+  terrain. Every one of those samples is recomputing a value that is already correct.
+- **The clearance pass, 459.3 ms**, is a distance-to-nearest-obstacle over the whole map. It is already tiled
+  and indexed — it used to be twelve seconds — but it is still whole-map, and only cells within
+  `ObstacleIndex.Reach` of a *changed* obstacle can have changed.
+
+Both want the same missing thing: the placement grid does not say **what** changed, only that something did.
+Give it a dirty rectangle and both passes become local, and the 774 ms becomes tens.
+
+So the order is the reverse of §93's guess: raster first, and the mesh by amortisation rather than by
+incrementalisation. Recorded rather than acted on, because the raster fix touches the navigation grid's
+contents and revision semantics, which is where a quiet divergence would live.

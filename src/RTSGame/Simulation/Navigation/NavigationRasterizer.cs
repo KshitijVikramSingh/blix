@@ -138,7 +138,36 @@ internal sealed class ObstacleIndex
 
 internal static class NavigationRasterizer
 {
+    /// <summary>
+    /// What re-rasterising has cost, cumulatively. Static, so the determinism census skips it — it walks
+    /// instance fields, and a diagnostic counter that nothing reads back has no business on the world.
+    /// </summary>
+    internal static long RebuildTicks;
+
+    internal static int Rebuilds;
+
+    /// <summary>The terrain-sampling pass, and everything after it. See §99.</summary>
+    internal static long TerrainPassTicks;
+
+    internal static long RestPassTicks;
+
+    internal static long ApplyPassTicks;
+
     public static void Rebuild(PlacementGrid placement, NavigationGrid navigation, TerrainMap terrain)
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        try
+        {
+            RebuildCore(placement, navigation, terrain);
+        }
+        finally
+        {
+            RebuildTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+            Rebuilds++;
+        }
+    }
+
+    private static void RebuildCore(PlacementGrid placement, NavigationGrid navigation, TerrainMap terrain)
     {
         var blocked = new bool[navigation.Width * navigation.Height];
         var clearance = new float[blocked.Length];
@@ -147,6 +176,7 @@ internal static class NavigationRasterizer
         var speedMultipliers = new float[blocked.Length];
         var obstacleBounds = GatherObstacleBounds(placement);
 
+        var terrainStart = System.Diagnostics.Stopwatch.GetTimestamp();
         for (var z = 0; z < navigation.Height; z++)
         for (var x = 0; x < navigation.Width; x++)
         {
@@ -164,6 +194,9 @@ internal static class NavigationRasterizer
                 obstacleBounds.Add((minimum, maximum));
             }
         }
+
+        TerrainPassTicks += System.Diagnostics.Stopwatch.GetTimestamp() - terrainStart;
+        var restStart = System.Diagnostics.Stopwatch.GetTimestamp();
 
         // <b>Slope's cost is not here, and putting it here was a mistake worth recording.</b> A slope band
         // per cell was added to this pass, folded into the traversal cost, on the reasoning that the router
@@ -295,7 +328,10 @@ internal static class NavigationRasterizer
             }
         }
 
+        RestPassTicks += System.Diagnostics.Stopwatch.GetTimestamp() - restStart;
+        var applyStart = System.Diagnostics.Stopwatch.GetTimestamp();
         navigation.ReplaceRaster(blocked, clearance, heights, traversalCosts, speedMultipliers);
+        ApplyPassTicks += System.Diagnostics.Stopwatch.GetTimestamp() - applyStart;
     }
 
     private static bool IsNonTraversableHeightEdge(float first, float second, float distance)

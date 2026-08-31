@@ -199,6 +199,14 @@ internal sealed class SimulationWorld
     public long PathQueries => pathService.PathQueries;
 
     /// <summary>Whether a dropped body found priced ground again. See PathService.FindFieldEntry.</summary>
+    /// <summary>What re-rasterising navigation has cost. See NavigationRasterizer.RebuildTicks.</summary>
+    public (double Milliseconds, int Rebuilds, double TerrainMs, double RestMs, double ApplyMs) NavRasterCost =>
+        (NavigationRasterizer.RebuildTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency,
+         NavigationRasterizer.Rebuilds,
+         NavigationRasterizer.TerrainPassTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency,
+         NavigationRasterizer.RestPassTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency,
+         NavigationRasterizer.ApplyPassTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+
     /// <summary>What the abstract layer's climb term costs, in calls and height samples. See §97.</summary>
     public (long Calls, long Samples) ClimbCost => (pathService.ClimbCalls, pathService.ClimbSamples);
 
