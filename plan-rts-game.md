@@ -9089,3 +9089,58 @@ Give it a dirty rectangle and both passes become local, and the 774 ms becomes t
 So the order is the reverse of §93's guess: raster first, and the mesh by amortisation rather than by
 incrementalisation. Recorded rather than acted on, because the raster fix touches the navigation grid's
 contents and revision semantics, which is where a quiet divergence would live.
+
+## 100. The distance in the grade test, and a fidelity harness earning its keep
+
+§98 left ~125 ns a visit of corner cost on the table and declined to take it, because the candidate was
+replacing `Vector2.Distance(CellCenter(from), CellCenter(to))` with a constant and this code's own comment
+warns that a different float in the last place is a different route out of a Dijkstra. Taken now, lightly, and
+the declining was right about the risk and wrong about the fix.
+
+**A constant is not needed.** A cell centre is `Origin + (cell + 0.5) * CellSize`, so the difference between
+two of them is `cellDelta * CellSize` — the same value, reached without rebuilding either centre. `CellDistance`
+computes that and passes it to the same square root, so nothing about the arithmetic changes except how many
+operations produce it.
+
+Whether that is *bit*-identical is a property of the grid's parameters rather than of the method: half-metre
+cells on a map within a few hundred metres of the origin make every product exactly representable, so the
+subtraction is exact and both routes agree. An awkward cell size or a distant origin could round them
+differently. So it was checked against the routing-fidelity harness rather than the test suite alone:
+
+```
+                 before                                              after
+clear ground     mean 1.0014 | p99 1.0977 | worst 1.187 at 345,70    identical, to the cell
+with a jam       mean 1.0019 | p99 1.0977 | worst 1.187              identical
+lost             0/154104                                            0/154104
+```
+
+Identical including *which cell* the worst ratio is at, which is the part a summary statistic would have hidden.
+That is what the harness is for, and it is the difference between "the tests still pass" and "the routes are
+the same routes".
+
+Measured cost: the tile search **80.7 to 69.5 ms**, 393 to 339 ns a visit, and the click's tile term 93 to 81
+ms. Cumulatively with §98 the corner work has gone from 491 to 339 ns a visit, against a floor of 268 with the
+corner tests removed entirely.
+
+### A note on a number not to quote
+
+The field term in the profile has become bimodal between runs — 38 ms in some, 66 in others, stable within a
+run and unaffected by anything either section touched. It is tiered JIT in a Debug build reaching different
+methods at different points, and it is a reminder that this profile's *deltas within one run* are the
+trustworthy part. The tile figures above repeat to a tenth of a millisecond across runs; the field figures do
+not, and are not claimed.
+
+### Where the click stands
+
+```
+                        order tick    field      tiles
+§97 (climb cached)         158 ms      38 ms     113 ms
+§98 (diagonal reads)       138 ms      38 ms      93 ms
+§100 (cell distance)       ~155 ms    ~66 ms      81 ms
+```
+
+The tile term is down 29% across the two sections. The order tick reads worse only because the field term
+moved for unrelated reasons; the parts that were changed are the parts that improved.
+
+Still open, from §99: the raster's 774 ms on a placement change — two thirds of it provably unnecessary — and
+the mesh's 380 ms, which wants amortisation rather than incrementalisation.

@@ -128,9 +128,32 @@ internal sealed class NavigationGrid
         // otherwise paying two cell-centre reconstructions and a square root to arrive at
         // that same answer. Most of a map is flat, and all of an unsculpted one is.
         if (heightDelta <= 0f) return true;
-        var horizontalDistance = Vector2.Distance(CellCenter(from), CellCenter(to));
+        var horizontalDistance = CellDistance(from, to);
         return heightDelta / MathF.Max(horizontalDistance, 0.0001f) <=
                Terrain.TerrainMap.MaximumTraversableGrade;
+    }
+
+    /// <summary>
+    /// The distance between two cell centres, from the cell delta rather than by rebuilding both centres.
+    /// </summary>
+    /// <remarks>
+    /// Same value passed to the same square root: a centre is <c>Origin + (cell + 0.5) * CellSize</c>, so the
+    /// difference of two of them is <c>(cellDelta) * CellSize</c>, and on this grid — half-metre cells, a map
+    /// within a few hundred metres of the origin — every one of those products is exactly representable, so
+    /// the subtraction is exact and the two routes to the argument agree bit for bit. What is saved is two
+    /// centre reconstructions per call, on the hottest predicate in the simulation.
+    /// <para>
+    /// The exactness is a property of these parameters and not of the method. A grid with an awkward cell size
+    /// or an origin far from zero could round the two differently, and a different float in the last place is
+    /// a different route out of a Dijkstra — so this is checked against the routing-fidelity harness rather
+    /// than against the test suite alone.
+    /// </para>
+    /// </remarks>
+    private float CellDistance(GridCell from, GridCell to)
+    {
+        var dx = (from.X - to.X) * Transform.CellSize;
+        var dz = (from.Z - to.Z) * Transform.CellSize;
+        return MathF.Sqrt(dx * dx + dz * dz);
     }
 
     /// <summary>
@@ -177,7 +200,7 @@ internal sealed class NavigationGrid
         var heightDelta = MathF.Abs(toGround.Height - fromGround.Height);
         if (heightDelta > Terrain.TerrainMap.MaximumStepHeight) return false;
         if (heightDelta <= 0f) return true;
-        var horizontalDistance = Vector2.Distance(CellCenter(from), CellCenter(to));
+        var horizontalDistance = CellDistance(from, to);
         return heightDelta / MathF.Max(horizontalDistance, 0.0001f) <=
                Terrain.TerrainMap.MaximumTraversableGrade;
     }
