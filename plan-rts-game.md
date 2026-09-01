@@ -11200,3 +11200,63 @@ The supported camera envelope §82 asked for can now be stated in the units that
 comfortable at 49 fps, 118 m is exactly on the boundary at 30, and 240 m is 23.** That is a judgement to make
 from the chair rather than from a table, but the table is finally in frames a player would see rather than in
 milliseconds a frame cost.
+
+## 129. Two settlements on one map, and the first one founded does not work
+
+Perf is parked with its residual specified (§128), and the road forward is the one §82 set: a second player
+that plays the same game through the same verbs, so that a rule-bot can be pitted against a person on one map,
+with the combat roster arriving after there is something to fight over. Everything in that sentence rests on a
+precondition nobody had tested: **can this world hold two settlements at all?**
+
+Most of the answer was already yes. Nodes carry a faction, bodies carry a faction, and hauling, catchment and
+housing all filter on it — the economy was written faction-aware and has simply never had a second faction in
+it. The one gap was the recipe: `SettlementScenarios.Populate` never took a faction, so every settlement this
+project has ever laid down belonged to faction zero by omission.
+
+So: thread a faction through the recipe, found two villages a third of the map apart, and run the year leg's
+own acceptance test twice over.
+
+### What it found on the first run
+
+```
+faction 0 at (160, 205) founded first, faction 1 at (286, 52) second — 198 m apart
+faction 0 owns 68,973 nodes (1 stores), faction 1 owns 16 (1 stores)
+
+  date                 | f0 grain | f0 wood | f1 grain | f1 wood
+  year 1, Summer, d 60 |    4,200 |   1,000 |    3,426 |     792
+  year 1, Summer, d 67 |    4,200 |   1,000 |    3,327 |     779
+```
+
+**The first settlement founded is inert.** Thirteen people, a granary, sixteen buildings, and stores that do
+not move by a single unit while its neighbour eats and spends normally. Conservation holds every tick, which
+is exactly what an economy doing nothing looks like.
+
+### Which is a fact about order, not about identity
+
+Trees are nodes and they belong to faction zero by default — sixty-nine thousand of them — so "faction zero
+behaves differently" was as live an explanation as "the first one founded does". Those want opposite fixes, so
+the probe takes `--swapfactions` and the answer is unambiguous: with the identities exchanged the numbers are
+identical and the columns swap. **The settlement founded first is the one that stops, whichever faction owns
+it.** The forest is not involved.
+
+### And my acceptance test passed it
+
+Worth recording separately, because it is the same mistake this session has now made four times in different
+clothes. The test asked whether each faction ended with people and with grain above zero — and **an economy
+that does nothing at all satisfies both**. It reported "both settlements fed themselves" over a settlement
+that had not eaten a grain in ninety days.
+
+A test for "it works" has to name something that must *change*, not something that must remain. The next
+version asserts that each faction's stores move and its people are fed, which is what the year leg means by
+feeding itself and what this borrowed the words for without borrowing the substance.
+
+### Where the diagnosis stands
+
+`Populate` queues its hands' assignments as commands rather than applying them, so both batches should drain on
+the first tick; the settlement-node index maintains both settlements correctly; and `BindCatchments` filters
+stores by faction, which is right. None of those explain it. The next measurement is the one this section
+stopped short of: per faction, how many bodies hold a working assignment and how many nodes have hands on them
+— which separates "never assigned" from "assigned and not producing", and those want different fixes.
+
+The probe is `--twovillages`, it takes `--years` and `--swapfactions`, and it is not in the gate until it
+passes.

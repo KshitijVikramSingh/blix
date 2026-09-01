@@ -87,6 +87,16 @@ public static class Program
             Environment.Exit(CongestionSpeedScenarios.Run());
         }
 
+        if (args.Contains("--twovillages"))
+        {
+            var twoExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var twoYears = Value(args, "--years") is { } span ? float.Parse(span) : 1f;
+            var twoRelief = Value(args, "--relief-amplitude") is { } amp ? float.Parse(amp) : 32f;
+            var twoSeed = Value(args, "--mapseed") is { } seed ? uint.Parse(seed) : 1592594996u;
+            Environment.Exit(TwoSettlementScenarios.Run(
+                twoExtent, twoYears, twoRelief, twoSeed, args.Contains("--swapfactions")));
+        }
+
         if (args.Contains("--settlement"))
         {
             var settlementExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;

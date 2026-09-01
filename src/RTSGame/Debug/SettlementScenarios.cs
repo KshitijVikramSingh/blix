@@ -769,6 +769,13 @@ internal static class SettlementScenarios
     /// drift, and the one thing worth being able to say about the thing on screen is that it is the
     /// same arrangement the year-long run asserts about.
     /// </remarks>
+    /// <param name="faction">
+    /// Who this settlement belongs to. <b>Added because a second player needs a settlement of its own.</b>
+    /// Everything underneath already carries a faction — nodes have one, bodies have one, and hauling,
+    /// catchment and housing all filter on it — but the recipe that lays a village down never passed one, so
+    /// every settlement this project has ever built belonged to faction zero. That is the single assumption
+    /// standing between the world and two players in it.
+    /// </param>
     public static NodeId Populate(
         SimulationWorld world,
         int farms,
@@ -776,9 +783,10 @@ internal static class SettlementScenarios
         int quarriers,
         int carts,
         int wagons,
-        Vector2 centre = default)
+        Vector2 centre = default,
+        Simulation.Collision.FactionId? faction = null)
     {
-        var granary = world.AddNode(NodeKind.Granary, centre, capacity: 9000);
+        var granary = world.AddNode(NodeKind.Granary, centre, capacity: 9000, faction: faction);
 
         // There is one harvest a year, so a settlement founded in spring lives on its stores until the
         // fiftieth day of the harvest season — 3,000 of the year's 5,400 seconds, better than half of it.
@@ -826,7 +834,7 @@ internal static class SettlementScenarios
                 NodeKind.House,
                 centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * houseArc,
                 capacity: 0,
-                occupancy: Occupancy);
+                occupancy: Occupancy, faction: faction);
         }
 
         var producers = new List<(NodeId Node, Vector2 At)>();
@@ -850,7 +858,7 @@ internal static class SettlementScenarios
             var at = centre + new Vector2(
                 firstColumn + column * slot,
                 (row - (across - 1) * 0.5f) * slot);
-            producers.Add((world.AddNode(NodeKind.Farm, at, YardCapacity, Resource.Grain), at));
+            producers.Add((world.AddNode(NodeKind.Farm, at, YardCapacity, Resource.Grain, faction: faction), at));
         }
 
         // A settlement that starts partway through a year has already worked the windows that have passed.
@@ -896,7 +904,7 @@ internal static class SettlementScenarios
             // own work before it had even started.
             var hand = world.SpawnAgent(
                 placed + outward * (world.Nodes.Get(node).HalfExtent + UnitType.Villager.Radius + 0.9f),
-                UnitType.Villager);
+                UnitType.Villager, faction: faction);
             ref readonly var site = ref world.Nodes.Get(node);
             world.QueueAssign(
                 new[] { hand },
@@ -922,7 +930,7 @@ internal static class SettlementScenarios
             var at = trunk.Position;
             var extent = trunk.FootprintRadius;
             var hand = world.SpawnAgent(
-                at + new Vector2(0f, extent + UnitType.Villager.Radius + 0.6f), UnitType.Villager);
+                at + new Vector2(0f, extent + UnitType.Villager.Radius + 0.6f), UnitType.Villager, faction: faction);
             world.QueueAssign(
                 new[] { hand },
                 Assignment.Work(
@@ -948,7 +956,7 @@ internal static class SettlementScenarios
             var at = face.Position;
             var extent = face.FootprintRadius;
             var hand = world.SpawnAgent(
-                at + new Vector2(0f, extent + UnitType.Villager.Radius + 0.6f), UnitType.Villager);
+                at + new Vector2(0f, extent + UnitType.Villager.Radius + 0.6f), UnitType.Villager, faction: faction);
             world.QueueAssign(
                 new[] { hand },
                 Assignment.Work(
@@ -969,7 +977,7 @@ internal static class SettlementScenarios
         {
             var angle = i / (float)(carts + wagons) * MathF.Tau;
             world.SpawnAgent(
-                centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 7f, UnitType.Villager);
+                centre + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 7f, UnitType.Villager, faction: faction);
         }
 
         return granary;
