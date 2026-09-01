@@ -111,6 +111,7 @@ internal static class FogClickScenarios
                 Console.WriteLine($"    anchored on a villager at ({site.X:F0}, {site.Y:F0})");
             }
 
+            var estimatesBefore = world.GuideEstimates;
             for (var i = 0; i < pairs.Length; i++)
             {
                 var measured = world.MeasureRoute(
@@ -119,6 +120,39 @@ internal static class FogClickScenarios
                 if (!guided) results.Add((pairs[i].Name, metres, float.NaN));
                 else results[i] = (results[i].Name, results[i].Flat, metres);
             }
+
+            if (!guided) continue;
+            // <b>The estimate's own accuracy, on THIS map.</b> §100's harness reports mean 1.0014 / worst
+            // 1.187 — on a tuned world with a single rectangle in it, where the corner graph is trivial. The
+            // village decomposes into thousands, and an estimate is only as good as the graph it comes from.
+            // If this comes back near one, a 5x route is not the estimate's fault and the fault is mine.
+            // Two goals, because one is an anecdote. The harness costs a whole-map flat field per goal, which
+            // is why it is two rather than twenty.
+            foreach (var (label, at) in new[]
+                     {
+                         ("from a villager", pairs[0].From),
+                         ("from the west", pairs[5].From),
+                     })
+            {
+                var fidelity = world.MeasureRectangleFidelity(
+                    at, Simulation.Agents.AgentDefaults.RoutingRadius);
+                if (fidelity.ReachableCells == 0)
+                {
+                    Console.WriteLine($"    estimate fidelity {label}: nothing reachable, skipped");
+                    continue;
+                }
+
+                Console.WriteLine(
+                    $"    estimate fidelity {label}: mean {fidelity.MeanRatio:F4}, p99 " +
+                    $"{fidelity.NinetyNinthRatio:F4}, worst {fidelity.WorstRatio:F3} over " +
+                    $"{fidelity.ReachableCells:N0} cells, {fidelity.RefinedRegions:N0} rectangles");
+            }
+            var estimates = world.GuideEstimates;
+            var priced = estimates.Priced - estimatesBefore.Priced;
+            var fell = estimates.FellBack - estimatesBefore.FellBack;
+            Console.WriteLine(
+                $"    guide lookups: {priced:N0} priced by the corner graph, {fell:N0} fell back to the flat " +
+                $"estimate ({(priced + fell > 0 ? fell * 100.0 / (priced + fell) : 0.0):F1}%)");
         }
 
         PathService.GuidedSearch = wasEnabled;

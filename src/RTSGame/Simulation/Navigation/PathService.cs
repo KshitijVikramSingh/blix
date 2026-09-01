@@ -2270,6 +2270,11 @@ internal sealed partial class PathService
     /// <summary>Searches abandoned partway and rerun against a freshly built field.</summary>
     public long GuidedRestarts { get; private set; }
 
+    /// <summary>Guide lookups that the corner graph could price, and those it could not. See Estimate.</summary>
+    public long GuidedEstimates { get; private set; }
+
+    public long GuidedFallbacks { get; private set; }
+
     private bool abandonedToGuide;
 
     private List<GridCell>? FindCellPath(
@@ -2327,8 +2332,25 @@ internal sealed partial class PathService
         float Estimate(GridCell cell)
         {
             if (guide is null) return Heuristic(cell, goal) * heuristicScale;
+            // <b>The analytic figure, and CostAt is not the fix.</b> §122 tried it — the tile-filled cost, exact
+            // within a region and the thing transit actually steers by — and the worst route went 5.02x to
+            // 4.86x. A tile is seeded from its own perimeter priced by the corner graph, so it inherits that
+            // error rather than correcting it, and CostAt fills tiles as a side effect of being asked. Left on
+            // the analytic answer, which is cheaper and no less accurate.
             var guided = guide.AnalyticCostAt(cell);
-            return float.IsFinite(guided) ? guided : Heuristic(cell, goal) * heuristicScale;
+            if (float.IsFinite(guided))
+            {
+                GuidedEstimates++;
+                return guided;
+            }
+
+            // <b>Counted, because the two branches are not on one scale.</b> The analytic figure is about what
+            // the ground really costs; this one is a weak lower bound and is several times smaller. A cell the
+            // corner graph cannot price therefore looks CHEAPER than its priced neighbours, which is an
+            // invitation to dive into exactly the pockets the hierarchy could not see into. Whether that is
+            // what ruined §121's routes is a question about how often this line runs.
+            GuidedFallbacks++;
+            return Heuristic(cell, goal) * heuristicScale;
         }
 
         open.Enqueue(start, Estimate(start));

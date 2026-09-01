@@ -10709,3 +10709,80 @@ The debt is unchanged and better specified. A cross-map cell search still costs 
 faults on a 135 ms worst tick in the crowded corner order, and the hierarchy still holds an answer nobody can
 currently afford to use. What is now known is that the cheap way of using it costs five times the route, and
 what the next attempt must measure before anything else.
+
+## 122. The speed was real: the hierarchy is 28% out on the map the game actually generates
+
+§121 rejected the guided search on route quality and reached for the nearest explanation — an inadmissible
+estimate — without asking how far out it actually was. Challenged from the chair:
+
+> *I think the speed wins might have been real, what if the raid leg failed because of the weird spaced out
+> formation they're following?*
+
+The formation half is answered below and the answer is no. The first half was right, and chasing it found
+something worth more than the optimisation it was defending.
+
+### Three explanations, measured in order, and the first two are wrong
+
+**My fallback was inconsistent, and it never ran.** `Estimate` returned the analytic figure where the corner
+graph could price a cell and the flat lower bound where it could not — two different scales, the second much
+smaller, so an unpriceable cell would look *cheaper* than its priced neighbours and invite the search into
+exactly the pockets the hierarchy cannot see into. A real bug, and irrelevant: **0 of 60,894 lookups fell
+back.** The corner graph priced every cell either search ever asked about.
+
+**The estimate is accurate, said the only measurement anybody had.** §100's fidelity harness reports mean
+1.0014, p99 1.0977, worst 1.187 — and an estimate 19% high cannot send a body five times round. Except that
+harness has only ever been pointed at the tuned world, and the tuned world **decomposes into one rectangle**.
+The relief sweep is no better: at 32 m of amplitude it also reports one rectangle, because it builds the legacy
+scattered-landform shape rather than the composed archetypes the game plays on.
+
+**So it was measured where the failure was.** On the village — same seed, same archetype, 8,915 rectangles:
+
+```
+                             mean      p99     worst    cells
+tuned world (1 rectangle)   1.0014   1.0977    1.187   154,104
+village, from a villager    1.2767   2.2013    3.959   896,480
+village, from the west      1.3583   2.4745   24.349   896,480
+```
+
+**The routing hierarchy is 28–36% out on average on the map the game generates, 2.2–2.5x at the ninety-ninth
+percentile, and as much as twenty-four times out at worst.** Against 1.0014 and 1.187, which is the figure this
+project has believed for twenty sections.
+
+That fully accounts for §121's routes without any help: an estimate that overshoots by two to four times over
+large stretches of ground is one that steers A\* around the cheap way rather than down it.
+
+### It is not the tiles either
+
+The obvious repair — steer by `CostAt`, the tile-filled cost, exact within a region and the thing transit
+itself follows — moves the worst route from 5.02x to **4.86x**. A tile is seeded from its own perimeter priced
+by the corner graph, so it inherits that error instead of correcting it. Reverted: it is no more accurate and
+it fills tiles as a side effect of being asked a question.
+
+### The formation hypothesis, answered
+
+Raiders walk in, fight and walk home on stored routes; the formation station-keeping that could plausibly slow
+them lives in `ResolveFlowTransitVelocity` and applies only to bodies on the shared field. And the arithmetic
+closes without it: the guided routes measure 1.25x to 4.86x longer, the mid-range being about 1.8x, and
+**164 s x 1.8 = 295 s against the 297 s a raider was measured to live.** A body walking 1.8 times as far at
+the same speed takes 1.8 times as long, which is the whole of it. Route length is measured directly — the
+summed polyline the body would actually walk — rather than inferred, so there is nothing left for formation to
+explain.
+
+### What this changes, and it is not the guided search
+
+The guided search stays off; its verdict is unchanged and now properly attributed. What is new is a defect
+underneath it, in production, unmeasured until now:
+
+- **The economy asks this hierarchy how far things are.** `TryOptimalTravelTime` and `IsSlotReachable` price
+  catchments and slot detours off `CostAt`. A systematic 28% overestimate makes the settlement believe its
+  fields and quarries are further away than they are, and §70's catchment constants were tuned against it.
+- **A 24x local error is a spike, not a scaling.** A smooth overestimate would leave gradients intact, and
+  transit only ever asks for a direction — but a field with spikes in it points bodies at them. Whether that
+  reaches cohort movement is a measurement nobody has taken.
+- **§100's harness needs to run where the game runs.** It has been green for twenty sections on a map with one
+  rectangle in it. That is the same failure as §120's village recipe: an instrument aimed at a world nobody
+  plays, reporting on a world nobody tested.
+
+The next thing on this thread is therefore not the search. It is to find out why the corner graph is this far
+out on composed terrain — and the harness now runs on the real map inside `--fogclick`, which is where that
+work starts.

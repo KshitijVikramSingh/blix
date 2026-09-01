@@ -334,6 +334,10 @@ internal sealed class SimulationWorld
     /// </remarks>
     internal RouteAttribution Routes => pathService.Routes;
 
+    /// <summary>Guide lookups the corner graph could price, and those that fell back. See §122.</summary>
+    internal (long Priced, long FellBack) GuideEstimates =>
+        (pathService.GuidedEstimates, pathService.GuidedFallbacks);
+
     /// <summary>What the cell search actually explored. See PathService.PathExpansions.</summary>
     public (long Expansions, long Worst, long Failures, int GridCells) PathSearch =>
         (pathService.PathExpansions, pathService.PathExpansionsWorst,
