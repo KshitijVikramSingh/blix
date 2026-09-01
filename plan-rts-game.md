@@ -10994,3 +10994,70 @@ What remains is the thing that has been true since §122 and is now the only ope
 hierarchy is 28% out on the map the game generates, nobody had measured it because the harness only ever ran on
 a world with one rectangle in it, and the cost of that is currently paid in a per-tick hitch on cross-map
 searches rather than in any decision the settlement takes.
+
+## 126. The field solve is a dictionary, and 480,000 lookups a build
+
+§118 left one instrument question open: the field solve measured 45–51 ms in Debug and 75–77 in Release on
+byte-identical work, and a term that improves when you stop optimising is either a real deoptimisation or a
+mis-attributed region. Those want opposite work, so nothing could be done to the field until it was known
+which.
+
+Four phase timers inside the constructor — mark which rectangles hold pressure, lay out the corner positions,
+seed from the goal's rectangle, run the corner Dijkstra — answer the first half immediately.
+
+```
+Release  search 75.2 / 75.3 / 75.4 ms
+Debug    search 49.6 / 48.0 / 48.3 ms
+             both: 34,340 corners, 29,248 settled, 480,048 legs, 479,756 climb hits, 292 misses
+```
+
+**All of it is the Dijkstra**, at identical counts, and the inversion is tight and reproducible rather than
+thermal. The other three phases are a fraction of a millisecond between them.
+
+### Which term, isolated with two stopwatch levers
+
+`--field-noclimb` removes the climb charge; `--field-climbkey` forms the cache key and does not look it up.
+Both say routes are wrong with them on, because they are.
+
+```
+                        Debug    Release
+full                     47.7      81.6
+key formed, not used     50.7      22.6
+no climb at all          44.9      28.7
+```
+
+So **forming the key is free in both** — four `MathF.Round`s and a tuple, lost in the noise — and the
+**dictionary lookup is 59 ms in Release and nothing in Debug.** Hit and miss counts are identical to the digit,
+so the optimised build is not missing the cache: it is paying about 120 ns for each of 479,756 hits that Debug
+gets for nothing measurable.
+
+**I cannot explain that from black-box timing and will not invent a mechanism for it.** What is measurable is
+that the lookup is **72% of the Release field solve** and therefore about **20% of the whole click**.
+
+### And the finding does not depend on the explanation
+
+Whatever makes a `Dictionary<(int,int,int,int), float>` cost 120 ns in one build and nothing in another, **the
+real defect is asking it 480,048 questions per field build.** The legs are enumerated rectangle by rectangle,
+which means the answers do not need a hash at all: a flat array of 480,048 floats — under two megabytes, held
+against the mesh exactly as the climb cache is held against the terrain revision — indexed by a per-rectangle
+offset, turns every one of those lookups into an array read.
+
+The prize is the difference already measured: **the field solve goes from ~76 ms to ~23 ms, which is ~53 ms off
+a ~290 ms click, about 18%.** It is a bigger, cheaper and better-specified win than §99's mesh amortisation,
+which was the next item on the list and whose floor §118 put at the cost of an ordinary order.
+
+### A note on the measurement, because it went wrong twice in one session
+
+Two of the figures in this section were wrong before they were right, and both times the fault was in reading
+the output rather than in the code:
+
+- A `tail -22 | grep` pulled a quiet-leg field-split line instead of the click's, and reported the full arm at
+  20.3 ms and 122.7 ms — a spread wide enough that **I concluded the inversion was thermal noise and said so.**
+  Pinning the extraction to the section it belongs to gave three consecutive Release samples inside 0.2 ms.
+- The build had been failing on a name collision for several runs while `--no-build` kept executing the
+  previous binary, so a lever that did not exist yet appeared to have been measured.
+
+Both are the same mistake as §121's `--flat-heuristic` parsed below `--selftest`: **an arm that is not the arm
+you think it is will agree with whatever you already believe.** The fix in all three cases was to make the
+harness say out loud which arm it ran — the levers print a banner, and the extraction now names the section it
+reads.

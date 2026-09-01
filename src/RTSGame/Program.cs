@@ -31,6 +31,20 @@ public static class Program
                 "routes ran to 5x the flat search's");
         }
 
+        // A stopwatch lever for §126: it removes the corner-climb dictionary lookups from the field solve and
+        // leaves the rest. Routes are wrong with it on, which is why it says so.
+        if (args.Contains("--field-noclimb"))
+        {
+            Simulation.Navigation.PathService.ChargeFieldClimb = false;
+            Console.WriteLine("  cost fields charge no climb (--field-noclimb) — ROUTES ARE WRONG, measurement only");
+        }
+
+        if (args.Contains("--field-climbkey"))
+        {
+            Simulation.Navigation.PathService.LookUpFieldClimb = false;
+            Console.WriteLine("  climb keys are formed and not looked up (--field-climbkey) — measurement only");
+        }
+
         if (args.Contains("--selftest"))
         {
             Environment.Exit(SimulationSelfTests.Run());

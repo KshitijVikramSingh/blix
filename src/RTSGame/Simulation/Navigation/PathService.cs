@@ -450,6 +450,47 @@ internal sealed partial class PathService
     internal long FieldSetupTicks;
 
     /// <summary>
+    /// What building one cost field spends its time on, split four ways.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because this term got slower under optimisation and nobody could say why.</b> §118 measured the
+    /// field solve at 45–51 ms in Debug and 75–77 in Release, on byte-identical work — two fields, 27,624
+    /// climb calls — and the terms are additive in both configs, so it is not a boundary absorbing tile time.
+    /// A term that improves when you stop optimising is either a real deoptimisation or a mis-attributed
+    /// region, and those want opposite work.
+    /// <para>
+    /// The four are the four things the constructor does: mark which rectangles hold pressure, lay out the
+    /// corner positions, seed from the goal's rectangle, and run the corner Dijkstra.
+    /// </para></remarks>
+    internal long FieldPressureTicks;
+
+    internal long FieldCornerTicks;
+
+    internal long FieldSeedTicks;
+
+    internal long FieldSearchTicks;
+
+    internal long FieldCorners;
+
+    internal long FieldSettled;
+
+    internal long FieldLegs;
+
+    /// <summary>
+    /// Corner-climb lookups that found an answer and those that had to sample the ground.
+    /// </summary>
+    /// <remarks>
+    /// §126: the climb term costs 55 ms in Release and 3 ms in Debug on the same number of legs, which is
+    /// eighteen times and cannot be a property of the same work done twice. Either the optimised build is
+    /// missing this cache far more often — which would be a correctness question about the key, not a speed
+    /// one — or the same hits are somehow dearer. A hit and a miss differ by a height sampling, so counting
+    /// them apart is the whole question.
+    /// </remarks>
+    internal long ClimbCacheHits;
+
+    internal long ClimbCacheMisses;
+
+    /// <summary>
     /// What routing has spent, split into the three places an order's time can go.
     /// </summary>
     /// <remarks>
@@ -1576,7 +1617,7 @@ internal sealed partial class PathService
             goal,
             SecondsPerCell,
             BendSeconds(goal, agentRadius, chargeTurns),
-            chargeClimb: true,
+            ChargeFieldClimb,
             congestion,
             CongestionSecondsPerPressure,
             this,
@@ -2227,6 +2268,20 @@ internal sealed partial class PathService
     /// unguided arms and reported a perfect 1.000x five times over.
     /// </para></remarks>
     internal static bool GuidedSearch;
+
+    /// <summary>
+    /// Whether a cost field charges climb. A measurement lever, not a game option.
+    /// </summary>
+    /// <remarks>
+    /// §126 needs to know why the corner Dijkstra is slower in Release than in Debug at identical work, and
+    /// 94% of its legs resolve to a lookup in the corner-climb dictionary. Turning the charge off removes
+    /// those lookups and leaves everything else, which is the cheapest way to ask whether they are the term
+    /// that inverts. Routes are wrong with this off — it is for a stopwatch, never for play.
+    /// </remarks>
+    internal static bool ChargeFieldClimb = true;
+
+    /// <summary>Whether the climb key is looked up once formed. A stopwatch lever; see ChargeFieldClimb.</summary>
+    internal static bool LookUpFieldClimb = true;
 
     /// <summary>
     /// Local pressure above which a body is treated as being in a crowd.

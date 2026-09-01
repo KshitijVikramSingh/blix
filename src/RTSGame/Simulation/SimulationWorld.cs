@@ -471,6 +471,24 @@ internal sealed class SimulationWorld
     /// </remarks>
     internal RouteAttribution Routes => pathService.Routes;
 
+    /// <summary>Corner-climb lookups that hit and those that sampled. See §126.</summary>
+    internal (long Hits, long Misses) ClimbCache =>
+        (pathService.ClimbCacheHits, pathService.ClimbCacheMisses);
+
+    /// <summary>What building a cost field spends its time on, split four ways. See §126.</summary>
+    internal (double PressureMs, double CornerMs, double SeedMs, double SearchMs,
+              long Corners, long Settled, long Legs) FieldPhases =>
+        (Milliseconds(pathService.FieldPressureTicks),
+         Milliseconds(pathService.FieldCornerTicks),
+         Milliseconds(pathService.FieldSeedTicks),
+         Milliseconds(pathService.FieldSearchTicks),
+         pathService.FieldCorners,
+         pathService.FieldSettled,
+         pathService.FieldLegs);
+
+    private static double Milliseconds(long ticks) =>
+        Stopwatch.GetElapsedTime(0, ticks).TotalMilliseconds;
+
     /// <summary>Guide lookups the corner graph could price, and those that fell back. See §122.</summary>
     internal (long Priced, long FellBack) GuideEstimates =>
         (pathService.GuidedEstimates, pathService.GuidedFallbacks);

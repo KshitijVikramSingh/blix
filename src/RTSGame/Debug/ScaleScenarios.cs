@@ -666,6 +666,8 @@ internal static class ScaleScenarios
         var coldQueriesBefore = world.PathQueries;
         var coldRoutesBefore = world.Routes.Snapshot();
         var coldRefusalsBefore = world.GradientRefusals;
+        var fieldBefore = world.FieldPhases;
+        var climbCacheBefore = world.ClimbCache;
         var coldLogFrom = world.Routes.Recorded;
         var coldAgents = world.Agents.LiveCount;
         // <b>The whole tick, and every phase of it.</b> This line timed a Tick and then named three routing
@@ -716,6 +718,23 @@ internal static class ScaleScenarios
                   $"needing {(AgentDefaults.RoutingRadius + BodyFootprint.NavigationMargin) * 100f:F0}, " +
                   $"so it fails by {refusals.WorstShortfall * 100f:F0} cm)"
                 : string.Empty));
+
+        // <b>The field solve, split four ways.</b> §118 measured this term slower in Release than in Debug on
+        // identical work, which is either a deoptimisation or a mis-attributed region — and those want
+        // opposite work. Printed per phase so the comparison can say which phase moved.
+        var fieldSplit = world.FieldPhases;
+        Console.WriteLine(
+            $"    field split: pressure {fieldSplit.PressureMs - fieldBefore.PressureMs,6:F1} | " +
+            $"corners {fieldSplit.CornerMs - fieldBefore.CornerMs,6:F1} " +
+            $"({fieldSplit.Corners - fieldBefore.Corners:N0} laid out) | " +
+            $"seed {fieldSplit.SeedMs - fieldBefore.SeedMs,6:F1} | " +
+            $"search {fieldSplit.SearchMs - fieldBefore.SearchMs,6:F1} ms " +
+            $"({fieldSplit.Settled - fieldBefore.Settled:N0} settled, " +
+            $"{fieldSplit.Legs - fieldBefore.Legs:N0} legs)");
+        var climbCache = world.ClimbCache;
+        Console.WriteLine(
+            $"    climb cache: {climbCache.Hits - climbCacheBefore.Hits:N0} hits, " +
+            $"{climbCache.Misses - climbCacheBefore.Misses:N0} misses");
 
         // Stages summed, accumulators reported apart. Adding the two together is how this line first
         // claimed 4,259 ms of a 2,662 ms tick.

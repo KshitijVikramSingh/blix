@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Numerics;
 using RTSGame.Simulation.Spatial;
 
@@ -88,6 +89,7 @@ internal sealed class RectangleFlowField
     {
         this.cornerClimb = cornerClimb;
         this.owner = owner;
+        var phaseStart = Stopwatch.GetTimestamp();
         AgentRadius = agentRadius;
         CongestionSpeedScale = congestionSpeedScale;
         ChargeTurns = chargeTurns;
@@ -111,6 +113,8 @@ internal sealed class RectangleFlowField
             anyPressure = true;
             break;
         }
+        owner.FieldPressureTicks += Stopwatch.GetTimestamp() - phaseStart;
+        phaseStart = Stopwatch.GetTimestamp();
         this.goal = goal;
         goalRectangle = index.RectangleAt(goal);
 
@@ -140,8 +144,11 @@ internal sealed class RectangleFlowField
             }
         }
 
+        owner.FieldCornerTicks += Stopwatch.GetTimestamp() - phaseStart;
+        owner.FieldCorners += corners;
         if (goalRectangle < 0) return;
 
+        phaseStart = Stopwatch.GetTimestamp();
         var open = new PriorityQueue<int, float>();
         var settled = new bool[corners];
         var goalGround = mesh.All[goalRectangle];
@@ -163,6 +170,8 @@ internal sealed class RectangleFlowField
             }
         }
 
+        owner.FieldSeedTicks += Stopwatch.GetTimestamp() - phaseStart;
+        phaseStart = Stopwatch.GetTimestamp();
         while (open.TryDequeue(out var current, out _))
         {
             if (settled[current]) continue;
@@ -173,6 +182,9 @@ internal sealed class RectangleFlowField
             Expand(crossingHere.RectangleA, current, cost, open);
             Expand(crossingHere.RectangleB, current, cost, open);
         }
+
+        owner.FieldSearchTicks += Stopwatch.GetTimestamp() - phaseStart;
+        owner.FieldSettled += SettledCrossings;
     }
 
     /// <summary>
@@ -203,6 +215,7 @@ internal sealed class RectangleFlowField
             {
                 var corner = other * 2 + end;
                 if (corner == from) continue;
+                owner.FieldLegs++;
                 var next = cost + LegBetween(
                     cornerX[from],
                     cornerZ[from],
@@ -406,7 +419,16 @@ internal sealed class RectangleFlowField
         // what the old key cost: a placement change rebuilt the mesh, renumbered every corner, and made the
         // next click re-sample two and a half million heights that had not moved.
         var key = (Round2(fromX), Round2(fromZ), Round2(toX), Round2(toZ));
-        if (cornerClimb.TryGetValue(key, out var cached)) return cached;
+        // A stopwatch arm for §126: build the key and go no further, so that the cost of forming it can be
+        // told from the cost of looking it up. Routes are wrong with this on.
+        if (!PathService.LookUpFieldClimb) return key.Item1 * 0f;
+        if (cornerClimb.TryGetValue(key, out var cached))
+        {
+            owner.ClimbCacheHits++;
+            return cached;
+        }
+
+        owner.ClimbCacheMisses++;
         var climbed = owner.ClimbSecondsAlong(fromX, fromZ, toX, toZ);
         cornerClimb[key] = climbed;
         return climbed;
