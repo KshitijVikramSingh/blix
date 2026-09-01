@@ -25,4 +25,14 @@ public interface IRenderHost
     // profiling — the displayed FPS reflects real frame cost, not what
     // the refresh rate clamps it to). On is the user-facing default.
     void SetVSync(bool enabled);
+
+    // The display's refresh rate in hertz, or null where the platform will not say.
+    //
+    // Needed because vsync-on pacing is measured against a deadline, and a deadline
+    // cannot be inferred from the frames that miss it. Three attempts at deriving it
+    // from a run went wrong in three different ways — a tenth percentile concluded the
+    // display refreshed at 33 ms when every frame was a double, a minimum picked up
+    // jitter at 14.18 ms on a 16.67 ms panel, and a "cheap case" median read 63 ms once
+    // the machine was busy. The display knows; ask the display.
+    int? DisplayRefreshHz { get; }
 }

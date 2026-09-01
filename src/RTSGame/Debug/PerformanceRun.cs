@@ -56,6 +56,72 @@ internal sealed class PerformanceRun
         int ChunksDrawn,
         float CameraDistance);
 
+    /// <summary>
+    /// How a run's frames fell against the display's own cadence.
+    /// </summary>
+    /// <remarks>
+    /// A frame that takes two refresh periods is a frame the player did not get, and one that takes three is
+    /// worse than three that take two spread apart — so the clumping is reported as well as the rate. Sound
+    /// only with vsync on; with it off the intervals are costs rather than a cadence and the estimator has no
+    /// period to find.
+    /// </remarks>
+    private readonly record struct Cadence(
+        double RefreshMs,
+        double OnTime,
+        double Doubled,
+        double Worse,
+        int WorstRun,
+        double MeanPeriods);
+
+    private Cadence Pacing(List<Sample> body)
+    {
+        if (body.Count == 0) return new Cadence(0, 0, 0, 0, 0, 0);
+        // <b>Told, not inferred, and the first version of this inferred it.</b> It took the tenth-percentile
+        // interval as the refresh period, which is sound only while some frames make their deadline — and on
+        // the first run four of five cases were missing every deadline, so the estimator concluded the display
+        // refreshed at 33 ms and reported 60% to 97% "on time". A run that never once hits its cadence cannot
+        // measure that cadence, and an instrument that answers anyway is worse than one that refuses.
+        //
+        // So the period comes from outside: perf-pacing.sh measures it once on a near view whose frame costs a
+        // fraction of a refresh, and passes it to every case. Zero means nobody said, and then this reports
+        // nothing rather than something flattering.
+        var refresh = RefreshMilliseconds;
+        if (refresh <= 0.01) return new Cadence(0, 0, 0, 0, 0, 0);
+
+        var onTime = 0;
+        var doubled = 0;
+        var worse = 0;
+        var run = 0;
+        var worstRun = 0;
+        // <b>And the mean, because "three or more" hides the difference between twenty fps and eight.</b>
+        // Periods per presented frame divides straight into the refresh to give the rate a player sees, and it
+        // is the figure that says whether a case is stuttering or simply running slowly — those feel nothing
+        // alike and the buckets above cannot tell them apart.
+        var periodsTotal = 0.0;
+        foreach (var sample in body)
+        {
+            // Rounded rather than floored, because a frame at 1.4 periods made its deadline late and one at
+            // 1.6 missed it — and a floor calls both of them on time.
+            var periods = (int)Math.Round(sample.FrameMilliseconds / refresh, MidpointRounding.AwayFromZero);
+            periodsTotal += Math.Max(1, periods);
+            if (periods <= 1)
+            {
+                onTime++;
+                run = 0;
+                continue;
+            }
+
+            if (periods == 2) doubled++;
+            else worse++;
+            run++;
+            worstRun = Math.Max(worstRun, run);
+        }
+
+        var total = (double)body.Count;
+        return new Cadence(
+            refresh, onTime / total, doubled / total, worse / total, worstRun, periodsTotal / total);
+    }
+
     private readonly List<Sample> warmUp = new();
     private readonly List<Sample> steady = new();
     private readonly int warmUpFrames;
@@ -70,6 +136,9 @@ internal sealed class PerformanceRun
     /// </remarks>
     private readonly bool vsync;
     private double[] scratch = new double[256];
+
+    /// <summary>The display's refresh period in milliseconds, or zero if nobody has told this run.</summary>
+    internal static double RefreshMilliseconds;
 
     public PerformanceRun(string label, int warmUpFrames, bool vsync)
     {
@@ -215,6 +284,33 @@ internal sealed class PerformanceRun
                     : "  gpu passes: this device reports no timestamp support; `wait` is the device figure");
         }
 
+        // <b>Cadence, which is the only thing vsync-on frame times can tell you.</b> Owed since §83 and left
+        // owed through eight sections of frame work, because percentiles are the wrong summary here: with the
+        // display in the loop every frame that made its deadline costs one refresh period whether it was easy
+        // or nearly missed, so p50 and p95 both read 16.7 ms and say nothing. What a player feels is the
+        // frames that took TWO periods, and how they are clumped.
+        //
+        // The period is estimated from the run rather than assumed: a tenth percentile of the intervals is a
+        // refresh that nothing interfered with, and it is printed so the estimate can be checked against the
+        // display it came from — 16.7 for sixty, 8.3 for a hundred and twenty. Everything else is that
+        // estimate applied.
+        var pacing = Pacing(body);
+        if (vsync && pacing.RefreshMs <= 0.01)
+        {
+            Console.WriteLine(
+                "  cadence: not computed — no refresh period supplied (--perf-refresh), and a run cannot " +
+                "infer one it never achieves");
+        }
+        else if (vsync)
+        {
+            Console.WriteLine(
+                $"  cadence: refresh {pacing.RefreshMs:F2} ms · " +
+                $"{pacing.OnTime * 100.0:F1}% on time · {pacing.Doubled * 100.0:F1}% took two · " +
+                $"{pacing.Worse * 100.0:F1}% took three or more · longest run of late frames {pacing.WorstRun} · " +
+                $"{pacing.MeanPeriods:F2} refreshes a frame " +
+                $"({1000.0 / (pacing.RefreshMs * pacing.MeanPeriods):F1} fps presented)");
+        }
+
         // The line the matrix script reads. Deliberately flat, single-space separated and free of the units
         // and punctuation above: a table generated from prose is a table with a parser bug in it.
         Console.WriteLine(
@@ -236,6 +332,13 @@ internal sealed class PerformanceRun
             $"overlay_p50={Percentile(body, s => s.Overlay, 0.50):F2} " +
             $"stage_p50={Percentile(body, s => s.Stage, 0.50):F2} " +
             $"record_p50={Percentile(body, s => s.Record, 0.50):F2} " +
+            $"refresh_ms={pacing.RefreshMs:F2} " +
+            $"frame_min={Percentile(body, s => s.FrameMilliseconds, 0.0):F2} " +
+            $"pace_ontime={pacing.OnTime:F4} " +
+            $"pace_doubled={pacing.Doubled:F4} " +
+            $"pace_worse={pacing.Worse:F4} " +
+            $"pace_worstrun={pacing.WorstRun} " +
+            $"pace_periods={pacing.MeanPeriods:F3} " +
             $"wait_p50={Percentile(body, s => s.HostWait, 0.50):F2} " +
             $"encode_p50={Percentile(body, s => s.HostEncode, 0.50):F2} " +
             $"present_p50={Percentile(body, s => s.HostSubmitPresent, 0.50):F2} " +

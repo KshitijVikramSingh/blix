@@ -378,6 +378,9 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     public void SetVSync(bool enabled) => window.VSync = enabled;
 
+    /// <summary>The refresh rate of the monitor this window is on, if the platform reports one.</summary>
+    public int? DisplayRefreshHz => window.Monitor?.VideoMode.RefreshRate;
+
     // IAudioHost facet. Returns the live OpenAL device. Throws if accessed
     // before OnLoad runs or when no audio backend is available (Game captures
     // it through `host as IAudioHost`, so a missing device surfaces there).

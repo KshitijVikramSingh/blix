@@ -445,6 +445,22 @@ public static class Program
         // The opt-in half of the vsync question: keep the display's cadence and measure pacing as a player
         // feels it, rather than what the frame cost. See RtsGameLoop.performanceVsync.
         var performanceVsync = args.Contains("--perf-vsync");
+        // <b>The display's period in MILLISECONDS, as a fact rather than an inference.</b> A vsync-on run
+        // reports its cadence against this; without it the cadence is not reported at all, because a run whose
+        // every frame misses cannot discover the deadline it is missing. perf-pacing.sh measures it on a near
+        // view and passes it to every case in the matrix.
+        //
+        // Milliseconds only, and the first version of this accepted either: "above five is hertz, below is
+        // milliseconds, since one is unambiguous". Sixteen point seven is above five. The script duly passed a
+        // period of 14.18 ms, the fixture read it as 14 Hz, and every case reported a hundred per cent on time
+        // against a 70 ms deadline. A unit inferred from a magnitude is a unit waiting to be wrong.
+        if (Value(args, "--perf-refresh") is { } refreshText)
+        {
+            Debug.PerformanceRun.RefreshMilliseconds = double.Parse(refreshText);
+            Console.WriteLine(
+                $"  performance fixture: refresh {Debug.PerformanceRun.RefreshMilliseconds:F2} ms " +
+                $"({1000.0 / Debug.PerformanceRun.RefreshMilliseconds:F1} Hz) as given");
+        }
         // The caster ablation: how many cascades are allowed to receive casters at all. Default -1 leaves
         // every cascade alone. See RtsGameLoop.performanceCascadeMask for what it is bounding.
         var performanceCascades = Value(args, "--perf-cascades") is { } casc ? int.Parse(casc) : -1;

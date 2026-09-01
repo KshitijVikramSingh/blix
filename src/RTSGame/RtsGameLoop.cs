@@ -1913,6 +1913,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         this.host = host;
+        // <b>The deadline, from the display rather than from the run, and read here because the host does not
+        // exist until now.</b> The first version asked in the constructor and crashed every case with a null
+        // reference — a fixture that cannot start is at least loud about it, which is more than the three
+        // estimators it replaced managed. A vsync-on case reports its cadence against this; an explicit
+        // --perf-refresh still wins, for measuring against a deadline the panel does not have.
+        if (performanceRun && PerformanceRun.RefreshMilliseconds <= 0.01 &&
+            host.DisplayRefreshHz is { } refreshHz && refreshHz > 0)
+        {
+            PerformanceRun.RefreshMilliseconds = 1000.0 / refreshHz;
+            Console.WriteLine(
+                $"  performance fixture: display reports {refreshHz} Hz " +
+                $"({PerformanceRun.RefreshMilliseconds:F2} ms)");
+        }
         this.graphicsDevice = graphicsDevice;
         vk = (VulkanGraphicsDevice)graphicsDevice;
         if (performanceRun && !performanceVsync)

@@ -11128,3 +11128,75 @@ unchanged. And Debug is now slower than it was, which costs the gate a little wa
 figure that ships is the Release one, which is the rule §83 wrote down and the launcher enforces since §119.
 
 Gate 5/5 green, years included.
+
+## 128. The vsync-on pacing pass, and the deadline that had to come from the display
+
+Owed since §83 and deferred through nine sections of frame work. The matrix this arc has been run on measures
+with vsync **off**, which answers what a frame costs — the right question for finding the work and the wrong
+one for saying whether the game feels smooth. With the display in the loop, every frame that makes its deadline
+costs exactly one refresh period, so p50 and p95 both read the refresh and say nothing at all. What a player
+feels is the frames that took two periods, and how they clump.
+
+`PerformanceRun` now reports cadence: the share of frames on time, at two periods, at three or more, the
+longest consecutive run of late ones, and the mean periods per frame — which divides into the refresh to give
+the rate actually presented. `tools/perf-pacing.sh` runs five cases, repeats them interleaved, and prints the
+range beside the middle.
+
+### The deadline cannot be inferred from the frames that miss it
+
+Three estimators were written and all three were wrong, each in its own way:
+
+- **The tenth-percentile interval.** Sound while some frames make the deadline. On the first run four cases out
+  of five were missing every deadline, so it concluded the display refreshed at 33 ms and reported 60% to 97%
+  "on time". A run that never once hits its cadence cannot measure that cadence.
+- **The minimum interval.** 14.18 ms on a panel whose period is 16.67 — jitter, because an interval measured
+  after a long one can appear short.
+- **The median of a case chosen to be cheap.** Correct in principle and it read 63 ms once the machine was
+  busy, because a near view with fog off is only cheap when nothing else is running.
+
+So the period comes from the display. `IRenderHost.DisplayRefreshHz` reports the monitor's video mode, the
+fixture prints what it got — `display reports 60 Hz (16.67 ms)` — and a run that cannot read one reports **no
+cadence at all** rather than a flattering one. `--perf-refresh` overrides it in milliseconds only; an earlier
+version accepted "hertz above five, milliseconds below, since one is unambiguous", was handed 14.18, read it as
+14 Hz, and declared every case perfect against a 70 ms deadline. **A unit inferred from a magnitude is a unit
+waiting to be wrong.**
+
+### What the game actually presents
+
+Release, three repeats of four hundred frames each, interleaved, on the 600 m village.
+
+```
+                     default trees & casters        as played (--cheap-trees --shadow-proxy)
+case              on time   per frame    fps       on time      per frame    fps
+still  60 m          0.0%      2.18     27.5       76.9%           1.23     48.7
+still 118 m          0.0%      3.78     15.9        3.7%           2.01     29.9
+pan   118 m          0.0%      3.70     16.2        8.7%           2.00     30.0
+night 118 m          0.4%      4.14     14.5        0.2%           2.04     29.4
+still 240 m          0.2%      5.29     11.3        0.4%           2.63     22.8
+```
+
+**Two things follow, and the second is the useful one.**
+
+The longest run of late frames is the whole run in almost every case. **This is not stutter, it is a steady low
+rate** — and those feel nothing alike. A game at a solid 30 fps and a game at 60 with a drop every second are
+both "half the frames", and only one of them is a pacing problem. This one is a frame-cost problem, which is
+where the arc has been working anyway.
+
+And **as played at 118 m the game sits at 2.00 refreshes a frame.** Not 2.4, not 2.8 — two, almost exactly,
+with the on-time share ranging from 0.3% to 19.7% across repeats. The frame is *just* over the 16.7 ms line, so
+it rounds up to two refreshes and presents at 30. A few milliseconds either way is the difference between 30
+and 60 fps, which is the sharpest thing this pass has to say: **at the standoff the game is actually played
+from, the remaining frame work pays off nonlinearly.** §127's 53 ms off a placement click is worth little to
+this; three milliseconds off the steady frame would be worth double the rate.
+
+### And the configuration is part of the claim
+
+The two columns differ by a factor of about two everywhere. `--cheap-trees --shadow-proxy` is what this project
+is played with from the chair and the defaults are what a fixture runs, so **a pacing figure without its
+configuration beside it is not a figure about the game.** The script records the flags in its own log directory
+name, on the same reasoning as §118's config labelling and §119's launcher banner.
+
+The supported camera envelope §82 asked for can now be stated in the units that matter, as played: **60 m is
+comfortable at 49 fps, 118 m is exactly on the boundary at 30, and 240 m is 23.** That is a judgement to make
+from the chair rather than from a table, but the table is finally in frames a player would see rather than in
+milliseconds a frame cost.
