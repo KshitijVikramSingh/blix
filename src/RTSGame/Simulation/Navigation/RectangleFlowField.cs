@@ -29,6 +29,7 @@ internal sealed class RectangleFlowField
     private readonly RectangleIndex index;
     private readonly float secondsPerCell;
     private readonly float bendSeconds;
+    private readonly bool chargeClimb;
     private readonly CongestionField congestion;
     private readonly float congestionSecondsPerPressure;
     // Which rectangles hold any pressure at all, walked once from the live set. A leg across
@@ -76,6 +77,7 @@ internal sealed class RectangleFlowField
         GridCell goal,
         float secondsPerCell,
         float bendSeconds,
+        bool chargeClimb,
         CongestionField congestion,
         float congestionSecondsPerPressure,
         PathService owner,
@@ -93,6 +95,7 @@ internal sealed class RectangleFlowField
         this.index = index;
         this.secondsPerCell = secondsPerCell;
         this.bendSeconds = bendSeconds;
+        this.chargeClimb = chargeClimb;
         this.congestion = congestion;
         this.congestionSecondsPerPressure = congestionSecondsPerPressure;
         pressured = new bool[mesh.Count];
@@ -332,9 +335,14 @@ internal sealed class RectangleFlowField
         // are keyed by the navigation revision. Measured: 496,040 of these a click, costing 4.6M height
         // samples, recomputed in full for every field built on the same mesh. Corner pairs are cached; a leg
         // from a goal or a cell is not, because those move.
-        var climb = fromCorner >= 0 && toCorner >= 0
-            ? CachedCornerClimb(fromCorner, toCorner, fromX, fromZ, toX, toZ)
-            : owner.ClimbSecondsAlong(fromX, fromZ, toX, toZ);
+        // <b>Switchable only so the error can be attributed.</b> §123 needs to know which term of this
+        // estimate carries the 28% it is out by on generated ground, and the way to find out is to price the
+        // same map with each term removed. Nothing in the game turns this off.
+        var climb = !chargeClimb
+            ? 0f
+            : fromCorner >= 0 && toCorner >= 0
+                ? CachedCornerClimb(fromCorner, toCorner, fromX, fromZ, toX, toZ)
+                : owner.ClimbSecondsAlong(fromX, fromZ, toX, toZ);
         var seconds = Leg(dx, dz, traversalCost) + climb;
         if (!anyPressure || !pressured[rectangle]) return seconds;
 

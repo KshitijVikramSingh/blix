@@ -358,7 +358,20 @@ internal sealed partial class PathService
     /// from both — the comparison runs on a static map with no bodies — so what this reports is
     /// whether a partition that follows the ground routes as well as one that searches cells.
     /// </remarks>
-    internal RoutingFidelity MeasureRectangleFidelity(GridCell goal, float agentRadius)
+    /// <summary>
+    /// How far the rectangle decomposition's answers sit above the flat optimum, with terms removable.
+    /// </summary>
+    /// <remarks>
+    /// <b>The overrides exist because §122 found this 28% out and could not say on which term.</b> An
+    /// estimate is a sum — legs across uniform ground, one bend per leg that turns, and the climb along the
+    /// straight line between two corners — and the only way to attribute an error in a sum is to price the
+    /// same ground with each part removed. Nothing in the game passes them.
+    /// </remarks>
+    internal RoutingFidelity MeasureRectangleFidelity(
+        GridCell goal,
+        float agentRadius,
+        float? bendOverride = null,
+        bool chargeClimb = true)
     {
         var reference = BuildFlowField(goal, agentRadius);
         var mesh = WalkableRectangles.Build(grid, agentRadius);
@@ -371,7 +384,8 @@ internal sealed partial class PathService
             rectangleIndex,
             goal,
             SecondsPerCell,
-            bend,
+            bendOverride ?? bend,
+            chargeClimb,
             congestion,
             CongestionSecondsPerPressure,
             this,

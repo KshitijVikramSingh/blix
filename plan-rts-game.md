@@ -10786,3 +10786,88 @@ underneath it, in production, unmeasured until now:
 The next thing on this thread is therefore not the search. It is to find out why the corner graph is this far
 out on composed terrain — and the harness now runs on the real map inside `--fogclick`, which is where that
 work starts.
+
+## 123. The error, attributed: two thirds is climb, and the estimate has the wrong sign to be a heuristic
+
+§122 found the hierarchy 28% out on generated ground and could not say on which term. An error in a sum is
+attributed by subtraction, so the same map was priced four ways — the harness can now drop the bend charge and
+the climb charge independently, and nothing in the game passes either override.
+
+```
+from a villager — 896,480 cells, 8,915 rectangles
+  as shipped    mean 1.2767 | p99 2.2013 | worst  3.959
+  no bend       mean 1.2743 | p99 2.1968 | worst  3.954
+  no climb      mean 1.1017 | p99 2.0987 | worst  3.655
+  neither       mean 1.0996 | p99 2.0942 | worst  3.650
+
+from the west — same map, different goal
+  as shipped    mean 1.3583 | p99 2.4745 | worst 24.349
+  no bend       mean 1.3566 | p99 2.4728 | worst 24.332
+  no climb      mean 1.1203 | p99 1.9137 | worst 17.658
+  neither       mean 1.1187 | p99 1.9120 | worst 17.641
+```
+
+**Climb is about two thirds of the mean error. Bends are 0.2% of it.** The bend charge was added because the
+first cut of this estimate came out 9% *under* the route it approximates, and on this map it is doing almost
+nothing either way — worth knowing before anybody spends a section on it.
+
+**And a third of the error is the graph itself.** With both charges removed the estimate is still 10–12% high
+on average and, from the western goal, **17.6x out at worst** — that is what forcing every route through the
+corners of crossings costs on ground that decomposes into nine thousand rectangles. Neither term explains it,
+so it is the approximation and not the pricing.
+
+### Why climb overcharges, which is a fact about what it measures
+
+A climb charge is *the sum of absolute height differences along a line* between two corners — the total
+variation of the straight leg. The route it is approximating does not have to walk that line: across a
+rectangle it can follow a contour, gaining nothing where the straight line goes over a rise and back down. On
+32 m of relief with 2 m of undulation, straight-line total variation is a large overcharge, and on flat ground
+it is exactly zero.
+
+Which is the other half of §122's discovery. The tuned world has one rectangle, no crossings, and no relief:
+**every term that could be wrong is zero there.** 1.0014 was not a measurement of this estimate, it was a
+measurement of the case in which the estimate is trivially exact.
+
+### The structural finding, and it retires §121 permanently
+
+The fidelity harness states its own contract in its header:
+
+> *Ratio is the router's cost over the flat whole-map search it replaced, so 1.000 is the exact answer and
+> anything below it is a route that does not exist.*
+
+So this hierarchy is deliberately built **never to report below the true cost.** That is the right contract for
+what it was built for — a route priced cheaper than reality is a promise the ground cannot keep, and the jam
+test in `--routingtest` exists to catch it drifting under.
+
+An A\* heuristic has the opposite contract: it must never report **above** the true cost, or the search stops
+being able to recognise the best route when it finds one.
+
+**They are incompatible by construction.** §121 did not fail because of an inadmissible estimate that needed
+tuning, or a fallback bug, or the analytic answer rather than the tile-filled one. It failed because it used a
+conservative upper bound as a heuristic, and the sign was wrong before a line of it was written. No amount of
+work on this field fixes that.
+
+### What a future attempt has to build instead
+
+The attribution hands over the recipe, because both terms that push the estimate up have obvious lower-bound
+counterparts on the same graph:
+
+- **Climb: charge the net gain, not the total variation.** A body going from one height to another must gain at
+  least the difference; charging `|h(to) − h(from)|` instead of the sum along the line is a provable lower
+  bound and removes two thirds of the error in the direction a heuristic needs.
+- **Legs: the straight-line distance between the ends, without the corner detour.** Forcing the route through
+  crossing corners can only make a path longer than the free-space line, so dropping it is a lower bound too —
+  and it is the term carrying the 17.6x worst case.
+- **Bends: drop the charge.** It is worth 0.2% and a bend is not something a lower bound may assume.
+
+That is a second, cheaper oracle over the existing decomposition rather than a change to the one the game
+routes and prices catchments with — and its fidelity is measured with the same harness, read from the other
+side: a lower bound is sound while the ratio stays **at or below** 1.000, and useful in proportion to how close
+to it it stays.
+
+### And the debt this leaves in production, unchanged
+
+None of the above touches what the settlement currently believes. `TryOptimalTravelTime` and `IsSlotReachable`
+still price catchments off an estimate that is 28–36% high on the map the game generates, with a 24x spike in
+it, and §70's constants were tuned against those numbers. That is its own thread and it is now specified: the
+mean is a scaling anyone could correct for, and the spike is not.

@@ -128,24 +128,38 @@ internal static class FogClickScenarios
             // If this comes back near one, a 5x route is not the estimate's fault and the fault is mine.
             // Two goals, because one is an anecdote. The harness costs a whole-map flat field per goal, which
             // is why it is two rather than twenty.
+            // <b>The same ground priced four ways, because an error in a sum is attributed by subtraction.</b>
+            // §122 found the estimate 28% out here against 1.0014 on the tuned world, and the tuned world has
+            // one rectangle in it — so every term that could be wrong was zero there. These say which.
             foreach (var (label, at) in new[]
                      {
                          ("from a villager", pairs[0].From),
                          ("from the west", pairs[5].From),
                      })
             {
-                var fidelity = world.MeasureRectangleFidelity(
-                    at, Simulation.Agents.AgentDefaults.RoutingRadius);
-                if (fidelity.ReachableCells == 0)
+                var radius = Simulation.Agents.AgentDefaults.RoutingRadius;
+                var arms = new[]
+                {
+                    ("as shipped   ", world.MeasureRectangleFidelity(at, radius)),
+                    ("no bend      ", world.MeasureRectangleFidelity(at, radius, bendOverride: 0f)),
+                    ("no climb     ", world.MeasureRectangleFidelity(at, radius, chargeClimb: false)),
+                    ("neither      ", world.MeasureRectangleFidelity(at, radius, 0f, chargeClimb: false)),
+                };
+                if (arms[0].Item2.ReachableCells == 0)
                 {
                     Console.WriteLine($"    estimate fidelity {label}: nothing reachable, skipped");
                     continue;
                 }
 
                 Console.WriteLine(
-                    $"    estimate fidelity {label}: mean {fidelity.MeanRatio:F4}, p99 " +
-                    $"{fidelity.NinetyNinthRatio:F4}, worst {fidelity.WorstRatio:F3} over " +
-                    $"{fidelity.ReachableCells:N0} cells, {fidelity.RefinedRegions:N0} rectangles");
+                    $"    estimate fidelity {label} — {arms[0].Item2.ReachableCells:N0} cells, " +
+                    $"{arms[0].Item2.RefinedRegions:N0} rectangles");
+                foreach (var (arm, fidelity) in arms)
+                {
+                    Console.WriteLine(
+                        $"      {arm} mean {fidelity.MeanRatio:F4} | p99 {fidelity.NinetyNinthRatio:F4} | " +
+                        $"worst {fidelity.WorstRatio:F3}");
+                }
             }
             var estimates = world.GuideEstimates;
             var priced = estimates.Priced - estimatesBefore.Priced;

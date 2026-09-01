@@ -1576,6 +1576,7 @@ internal sealed partial class PathService
             goal,
             SecondsPerCell,
             BendSeconds(goal, agentRadius, chargeTurns),
+            chargeClimb: true,
             congestion,
             CongestionSecondsPerPressure,
             this,

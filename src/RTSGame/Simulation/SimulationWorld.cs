@@ -199,14 +199,18 @@ internal sealed class SimulationWorld
         return (mesh.Count, mesh.Crossings.Count, mesh.ResidentBytes);
     }
 
-    internal RoutingFidelity MeasureRectangleFidelity(Vector2 goalPosition, float agentRadius)
+    internal RoutingFidelity MeasureRectangleFidelity(
+        Vector2 goalPosition,
+        float agentRadius,
+        float? bendOverride = null,
+        bool chargeClimb = true)
     {
         if (!Navigation.TryWorldToCell(Terrain.ClampPosition(goalPosition), out var goal))
         {
             throw new ArgumentOutOfRangeException(nameof(goalPosition));
         }
 
-        return pathService.MeasureRectangleFidelity(goal, agentRadius);
+        return pathService.MeasureRectangleFidelity(goal, agentRadius, bendOverride, chargeClimb);
     }
     public long PathQueries => pathService.PathQueries;
 
