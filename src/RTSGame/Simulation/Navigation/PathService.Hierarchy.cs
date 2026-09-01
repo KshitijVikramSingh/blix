@@ -439,6 +439,72 @@ internal sealed partial class PathService
     }
 
     /// <summary>
+    /// How close the lower-bound oracle gets without ever going over. See <see cref="LowerBoundField"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>The same harness read from the other side.</b> For the cost field, 1.000 is exact and anything below
+    /// it is a route that does not exist; for this, 1.000 is exact and anything <em>above</em> it is a bound
+    /// that is not one. So the fault here is <see cref="RoutingFidelity.WorstRatio"/> exceeding one, and the
+    /// mean is a measure of usefulness rather than of correctness: a bound of zero is perfectly sound and
+    /// steers nothing.
+    /// </remarks>
+    internal RoutingFidelity MeasureLowerBoundFidelity(GridCell goal, float agentRadius)
+    {
+        var reference = BuildFlowField(goal, agentRadius);
+        var mesh = WalkableRectangles.Build(grid, agentRadius);
+        var rectangleIndex = new RectangleIndex(mesh, grid.Width, grid.Height);
+        var bound = new LowerBoundField(
+            mesh,
+            rectangleIndex,
+            goal,
+            SecondsPerCell,
+            Terrain.TerrainSurfaceRules.MinimumPathCost);
+
+        var reachable = 0;
+        var lost = 0;
+        var ratioSum = 0.0;
+        var worst = 0f;
+        var worstCell = goal;
+        var ratios = new List<float>();
+        for (var z = 0; z < grid.Height; z++)
+        for (var x = 0; x < grid.Width; x++)
+        {
+            var cell = new GridCell(x, z);
+            var flat = reference[grid.Transform.Index(cell)];
+            if (!float.IsFinite(flat) || flat <= 0f) continue;
+            reachable++;
+            var estimate = bound.At(cell);
+            if (!float.IsFinite(estimate))
+            {
+                lost++;
+                continue;
+            }
+
+            var ratio = estimate / flat;
+            ratioSum += ratio;
+            ratios.Add(ratio);
+            if (ratio <= worst) continue;
+            worst = ratio;
+            worstCell = cell;
+        }
+
+        ratios.Sort();
+        var measured = Math.Max(1, ratios.Count);
+        return new RoutingFidelity(
+            reachable,
+            lost,
+            (float)(ratioSum / measured),
+            ratios.Count > 0 ? ratios[Math.Min((int)(ratios.Count * 0.99f), ratios.Count - 1)] : 0f,
+            worst,
+            worstCell,
+            bound.SettledCrossings,
+            mesh.Count,
+            bound.FreeLegs,
+            bound.PricedLegs,
+            0);
+    }
+
+    /// <summary>
     /// The flat whole-map field, kept only so the hierarchy can be measured against it.
     /// </summary>
     /// <remarks>

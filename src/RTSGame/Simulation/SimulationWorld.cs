@@ -199,6 +199,23 @@ internal sealed class SimulationWorld
         return (mesh.Count, mesh.Crossings.Count, mesh.ResidentBytes);
     }
 
+    /// <summary>How close the lower-bound oracle gets, and whether it ever goes over. See §124.</summary>
+    internal RoutingFidelity MeasureLowerBoundFidelity(Vector2 goalPosition, float agentRadius)
+    {
+        if (!Navigation.TryWorldToCell(goalPosition, out var goal))
+        {
+            throw new ArgumentOutOfRangeException(nameof(goalPosition));
+        }
+
+        return pathService.MeasureLowerBoundFidelity(goal, agentRadius);
+    }
+
+    /// <summary>The ground under one cell, for explaining why an estimate about it is wrong.</summary>
+    internal string DescribeFidelityAt(GridCell cell, float agentRadius) =>
+        $"clearance {Navigation.Clearance(cell):F2} m, height {Navigation.HeightAt(cell):F1} m, " +
+        $"cost {Navigation.TraversalCost(cell):F2}, walkable {Navigation.IsWalkable(cell, agentRadius)}, " +
+        $"at ({Navigation.CellCenter(cell).X:F0}, {Navigation.CellCenter(cell).Y:F0})";
+
     internal RoutingFidelity MeasureRectangleFidelity(
         Vector2 goalPosition,
         float agentRadius,

@@ -10871,3 +10871,64 @@ None of the above touches what the settlement currently believes. `TryOptimalTra
 still price catchments off an estimate that is 28–36% high on the map the game generates, with a 24x spike in
 it, and §70's constants were tuned against those numbers. That is its own thread and it is now specified: the
 mean is a scaling anyone could correct for, and the spike is not.
+
+## 124. The lower-bound oracle: sound, and twenty-five times too loose to steer with
+
+§123 handed over a recipe — a second oracle over the same decomposition, relaxed until it cannot exceed the
+truth, so that a cell search finally has something admissible to steer by. `LowerBoundField` is that oracle,
+and it works exactly as specified. It is also useless, for a reason worth having measured.
+
+Every term relaxed until it cannot overshoot: crossings priced as the **segments** they are rather than through
+their two corners (the nearest point on an axis-aligned run is a clamp), distance Euclidean rather than octile,
+ground charged at the cheapest surface that exists anywhere, and no climb or bend charge at all — zero is a
+lower bound on each. Any real path passes through a sequence of rectangles whose consecutive members share a
+crossing, so it corresponds to a walk in this graph, and every leg of that walk is at least the straight-line
+gap between the two borders it joins.
+
+```
+                     mean      p99     worst
+from a villager     0.0394   0.1510   0.6878
+from the west       0.1533   0.3736   0.5782
+```
+
+**It never exceeds the truth** — worst 0.688 and 0.578, so the bound is genuinely a bound, which is the one
+thing it had to be. And it reports four to fifteen per cent of the real cost, which steers nothing: an
+admissible heuristic that small is barely distinguishable from no heuristic at all, and the search it was meant
+to rescue would explore the same quarter of a million cells.
+
+### Where the tightness goes, counted
+
+```
+11,640 legs free of 37,206
+```
+
+**Thirty-one per cent of the graph's legs cost nothing**, and a Dijkstra chains precisely those. The cause is
+structural rather than a matter of pricing the terms better: each leg is charged from the nearest point of one
+crossing to the nearest point of the next, and **nothing requires two consecutive legs to use the same point on
+the border they share.** The walk may reposition itself along every crossing for free. Where two crossings of
+one rectangle touch or overlap in projection the leg between them is zero outright, and with ten thousand
+crossings on this map there is a free chain across most of it.
+
+That is the standard weakness of a portal-graph bound with segment nodes, and the standard fix is to carry the
+entry point along the walk — any-angle propagation over the portals, which is a different and much larger piece
+of work than this was.
+
+### So the guided-search thread closes here, properly
+
+Three sections tried to make a cell search cheaper by giving it what the hierarchy knows:
+
+- **§121** used the cost field. Twenty-seven times cheaper, routes up to five times longer.
+- **§122–123** found why, and it was not a bug: that field is built never to report below the true cost, which
+  is the opposite of what a heuristic needs. Two thirds of its overestimate is climb charged as total variation
+  along a straight line; a third is the corner detour, which is worst next to the goal where the true cost is
+  smallest — the 24x cell turns out to sit one metre from its goal.
+- **§124** built the admissible counterpart the recipe called for. Sound, and twenty-five times too loose,
+  because a third of its legs are free.
+
+**What is left is not a tuning problem.** Either somebody builds any-angle propagation over the crossing graph
+— and then a tight admissible bound exists and the twenty-seven-fold saving is available — or a cross-map cell
+search stays as expensive as it is. Both arms live behind `--guided-search`, both harnesses read the same map
+from both sides, and the next attempt starts from a measurement rather than from §95's hopeful sentence.
+
+The remaining per-tick cost in `--fogclick` is unchanged and correctly attributed: a search that reaches its
+expansion ceiling still costs a visible hitch, and that is now a known price rather than an open question.

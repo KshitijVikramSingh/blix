@@ -69,6 +69,7 @@ internal static class FogClickScenarios
         var site = Vector2.Zero;
         var pairs = Array.Empty<(string Name, Vector2 From, Vector2 To)>();
 
+        var faults = 0;
         var results = new List<(string Name, float Flat, float Guided)>();
         foreach (var guided in new[] { false, true })
         {
@@ -154,11 +155,35 @@ internal static class FogClickScenarios
                 Console.WriteLine(
                     $"    estimate fidelity {label} — {arms[0].Item2.ReachableCells:N0} cells, " +
                     $"{arms[0].Item2.RefinedRegions:N0} rectangles");
+                // <b>Where the spike is, because §123 named it the blocker and not the mean.</b> A mean anybody
+                // could scale away; a single cell priced twenty-four times over is either a bug with an address
+                // or a property of the approximation, and the address is the cheapest way to find out which.
+                var spike = arms[0].Item2.WorstCell;
+                Console.WriteLine(
+                    $"      worst cell ({spike.X},{spike.Z}) — {world.DescribeFidelityAt(spike, radius)}");
                 foreach (var (arm, fidelity) in arms)
                 {
                     Console.WriteLine(
                         $"      {arm} mean {fidelity.MeanRatio:F4} | p99 {fidelity.NinetyNinthRatio:F4} | " +
                         $"worst {fidelity.WorstRatio:F3}");
+                }
+
+                // <b>And the same ground from below.</b> Sound while the worst ratio stays at or under 1.000;
+                // useful in proportion to how close the mean gets to it. A bound of zero is perfectly correct
+                // and steers nothing, so both numbers have to be read together.
+                var below = world.MeasureLowerBoundFidelity(at, radius);
+                Console.WriteLine(
+                    $"      lower bound   mean {below.MeanRatio:F4} | p99 {below.NinetyNinthRatio:F4} | " +
+                    $"worst {below.WorstRatio:F4} | {below.SettledNodes:N0} crossings settled | " +
+                    $"{below.RegionSearches:N0} legs free of " +
+                    $"{below.RegionSearches + below.UnpricedSeedRegions:N0}" +
+                    (below.UnreachableCells > 0 ? $" | {below.UnreachableCells:N0} unpriced" : string.Empty));
+                if (below.WorstRatio > 1.0001f)
+                {
+                    Console.WriteLine(
+                        $"      FAULT: the lower bound exceeded the true cost at " +
+                        $"({below.WorstCell.X},{below.WorstCell.Z}) — it is not a bound");
+                    faults++;
                 }
             }
             var estimates = world.GuideEstimates;
@@ -200,17 +225,17 @@ internal static class FogClickScenarios
         if (!wasEnabled)
         {
             Console.WriteLine($"    {verdict} — measured with the lever off, so a report and not a fault");
-            return 0;
+            return faults;
         }
 
         if (worst > WorstRatioCeiling)
         {
             Console.WriteLine($"    FAULT: {verdict} — the guided search is buying its speed with detours");
-            return 1;
+            return faults + 1;
         }
 
         Console.WriteLine($"    {verdict}");
-        return 0;
+        return faults;
     }
 
     public static int Run(
