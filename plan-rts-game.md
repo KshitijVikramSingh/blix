@@ -10932,3 +10932,65 @@ from both sides, and the next attempt starts from a measurement rather than from
 
 The remaining per-tick cost in `--fogclick` is unchanged and correctly attributed: a search that reaches its
 expansion ceiling still costs a visible hitch, and that is now a known price rather than an open question.
+
+## 125. The 28% reaches one decision, and that decision is not currently taken
+
+§122 flagged a consequence and did not measure it: `TryOptimalTravelTime` and `IsSlotReachable` price the
+settlement's world off an estimate that runs 28% high, and §70's constants were tuned against those numbers.
+The place to start was not the size of the error but where a number that size can change an answer.
+
+### Most of the consumers cannot be affected at all
+
+Both economy call sites that price a haul use travel seconds to **rank** candidates — `seconds < bestSeconds`
+— and a systematic overestimate cancels out of a ranking exactly. `RemainingRouteDistance` uses it for a
+flow-transit body's progress, compared against its own previous value, where a scaling also cancels.
+`IsSlotReachable` compares against `direct * 2.0 + 0.45`, and a 1.17x displacement cannot cross a tolerance
+with two-fold headroom — it would need the true ratio to sit between 1.56 and 2.0.
+
+**One consumer thresholds it.** `EconomySystem`'s catchment test refuses a source outright once
+`seconds > budget`, and there an estimate that runs high shrinks every catchment.
+
+### Measured on the played village, against the flat truth
+
+```
+18,946 store/source pairs priced | mean 1.171x | worst 2.646x | budget 37 s
+64 nodes inside the budget by the truth and outside it by the price
+   — of which 0 hold stock today
+```
+
+So the displacement is real and its size is now known in the units that matter: **sixty-four nodes that a
+hauler could reach and the settlement believes it cannot.** And none of them hold anything, because this
+village keeps its entire store in one granary — one node holds stock, so the threshold has nothing to be wrong
+about and no haul is currently lost to it.
+
+That is the honest verdict: **a latent error of a specified size, not a live bug.** It becomes a live bug the
+day a settlement keeps piles at between one and 1.3 times its catchment radius, and `--fogclick` now faults
+exactly then — the wider count is printed every run as a standing figure and the fault fires only on nodes that
+actually hold stock.
+
+### Three things the measurement needed, all of them the same mistake
+
+The first version reported zero pairs, three times over, and each cause is worth writing down because they are
+one lesson wearing three hats:
+
+- **A node stands on the ground it occupies.** Trees and buildings block their own cells, so a flat reference
+  field reads infinity at every node position and all thirty thousand were skipped.
+- **The store is under the store.** A flat field seeded on a blocked cell reaches nothing, so the whole
+  measurement was empty until the granary's own cell was resolved outward.
+- **Eight cells is not far enough to get out of a settlement.** The first resolution searched four metres and
+  found nothing but more buildings, and reported a budget of zero rather than a failure.
+
+`TryOptimalTravelTime` already carries the first two cares, with a comment explaining that a query from inside
+a building means from the ground beside it. A measurement of a function has to reproduce the function's own
+preconditions, and mine kept not doing it — quietly, by returning a plausible zero each time.
+
+### What is left of §122's list
+
+The mean is answered: it reaches one threshold, and that threshold is not currently exercised. The spike is
+answered too, and by §123 rather than here — the 24x cell sits one metre from its goal, where the true cost is
+near zero and any fixed error is a large ratio. Neither is a reason to change the hierarchy today.
+
+What remains is the thing that has been true since §122 and is now the only open item on this thread: the
+hierarchy is 28% out on the map the game generates, nobody had measured it because the harness only ever ran on
+a world with one rectangle in it, and the cost of that is currently paid in a per-tick hitch on cross-map
+searches rather than in any decision the settlement takes.

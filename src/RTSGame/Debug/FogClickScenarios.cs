@@ -194,6 +194,47 @@ internal static class FogClickScenarios
                 $"estimate ({(priced + fell > 0 ? fell * 100.0 / (priced + fell) : 0.0):F1}%)");
         }
 
+        // <b>And what the overestimate costs the settlement, which is the only consumer that thresholds it.</b>
+        {
+            var world = SettlementScenarios.BuildVillage(
+                extentMeters,
+                out _,
+                reliefAmplitudeMetres,
+                region,
+                archetype,
+                mapSeed,
+                SettlementScenarios.VillageRecipe.AsPlayed);
+            // <b>Long enough for there to be piles to haul from.</b> At twenty seconds the village has its
+            // granary and nothing else that holds stock, so the catchment test has no pairs to get wrong and a
+            // zero means "not measured" rather than "nothing flips". Ten sim minutes puts loads on the ground.
+            for (var tick = 0; tick < 600 * TicksPerSecond; tick++)
+            {
+                world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            }
+
+            var stores = 0;
+            var sources = 0;
+            foreach (ref readonly var node in world.Nodes.All)
+            {
+                if (!node.IsAlive) continue;
+                if (node.Stores && node.CatchmentSeconds > 0f) stores++;
+                if (node.Stores || node.IsPile) sources++;
+            }
+
+            Console.WriteLine(
+                $"    catchment: {stores} store(s) with a catchment, {sources} node(s) holding stock");
+            var flips = world.MeasureCatchmentFlips(Simulation.Agents.AgentDefaults.RoutingRadius);
+            Console.WriteLine(
+                $"      {flips.Pairs} pairs priced, mean {flips.MeanRatio:F3}x the flat truth, worst " +
+                $"{flips.WorstRatio:F3}x, budget {flips.BudgetSeconds:F0} s");
+            Console.WriteLine(
+                $"      {flips.Flipped} node(s) inside the budget by the truth and outside it by the price, " +
+                $"of which {flips.FlippedWithStock} hold stock today");
+            // A fault only where it costs the settlement something now. The wider count is a standing figure:
+            // it says how many hauls a village with piles at that range would lose.
+            if (flips.FlippedWithStock > 0) faults++;
+        }
+
         PathService.GuidedSearch = wasEnabled;
         PathService.GuidedRestart = wasEnabled;
         var worst = 1f;

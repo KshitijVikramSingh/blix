@@ -199,6 +199,122 @@ internal sealed class SimulationWorld
         return (mesh.Count, mesh.Crossings.Count, mesh.ResidentBytes);
     }
 
+    /// <summary>
+    /// What the hierarchy's overestimate costs a catchment, in decisions rather than in per cent.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because a 28% error only matters where a number is compared against something.</b> Both economy call
+    /// sites that price a haul use travel seconds to <em>rank</em> candidate sources — <c>seconds &lt;
+    /// bestSeconds</c> — and a systematic overestimate cancels out of a ranking entirely. The one place it
+    /// cannot cancel is <c>EconomySystem</c>'s catchment test, which rejects a source outright once
+    /// <c>seconds &gt; budget</c>: there an estimate that runs high shrinks every catchment, and the settlement
+    /// stops hauling from piles it could reach.
+    /// <para>
+    /// So this counts the flips: every store with a catchment against every source holding stock, priced by the
+    /// hierarchy and by the flat whole-map search, and how many pairs the two put on opposite sides of the
+    /// budget. One flat field per store, which is why this lives in a fixture.
+    /// </para></remarks>
+    internal (int Pairs, int Flipped, int FlippedWithStock, float MeanRatio, float WorstRatio,
+              float BudgetSeconds) MeasureCatchmentFlips(float agentRadius)
+    {
+        var pairs = 0;
+        var flipped = 0;
+        var ratioSum = 0.0;
+        var worst = 0f;
+        var budgetSeconds = 0f;
+        var flippedWithStock = 0;
+        foreach (ref readonly var store in Nodes.All)
+        {
+            if (!store.IsAlive || !store.Stores || store.CatchmentSeconds <= 0f) continue;
+            if (!Navigation.TryWorldToCell(store.Position, out var storeCell)) continue;
+            // <b>And the store itself stands on ground it occupies.</b> A flat field seeded on a blocked cell
+            // reaches nothing at all, so the whole measurement came back empty until this line existed — the
+            // granary is under the granary. Same care as the source end, one level up.
+            if (!TryNearestWalkableCell(storeCell, agentRadius, out var storeStand)) continue;
+            var budget = store.CatchmentSeconds * EconomySystem.HaulerPace / EconomySystem.RouteReferencePace;
+            budgetSeconds = budget;
+            var reference = pathService.BuildReferenceFlowField(storeStand, agentRadius);
+            foreach (ref readonly var source in Nodes.All)
+            {
+                if (!source.IsAlive || source.Id == store.Id) continue;
+                // <b>Every node, not only the ones holding stock today.</b> This village keeps its whole store
+                // in one granary, so the economy's own predicate finds no pairs and the threshold is never
+                // exercised — which is worth reporting, and is not the same as the displacement being
+                // harmless. Priced against every node, the count of those the two figures put on opposite
+                // sides of the budget is the number of hauls a settlement with piles WOULD lose.
+                var holdsStock = source.Stores || source.IsPile;
+                if (!Navigation.TryWorldToCell(source.Position, out var sourceCell)) continue;
+                // <b>Resolved outward, because a node stands on the ground it occupies.</b> A tree or a
+                // building blocks its own cell, so a flat field reads infinity there and the first version of
+                // this measured nothing at all — thirty thousand nodes, every one skipped. TryOptimalTravelTime
+                // has the same care in it for the same reason: a query from inside a building means from the
+                // ground beside it.
+                if (!TryNearestPricedCell(reference, sourceCell, agentRadius, out var truth)) continue;
+                if (!TryTravelSeconds(source.Position, store.Position, agentRadius, out var priced)) continue;
+
+                pairs++;
+                var ratio = priced / truth;
+                ratioSum += ratio;
+                worst = MathF.Max(worst, ratio);
+                // The flip that matters is one direction only: the truth is inside the budget and the price
+                // the settlement acts on is outside it, so a reachable pile is refused.
+                if (truth <= budget && priced > budget)
+                {
+                    flipped++;
+                    if (holdsStock) flippedWithStock++;
+                }
+            }
+        }
+
+        return (
+            pairs,
+            flipped,
+            flippedWithStock,
+            pairs > 0 ? (float)(ratioSum / pairs) : 0f,
+            worst,
+            budgetSeconds);
+    }
+
+    /// <summary>The nearest cell to this one that admits a body of this radius.</summary>
+    private bool TryNearestWalkableCell(GridCell at, float agentRadius, out GridCell found)
+    {
+        // Twenty-four cells, which is twelve metres: a granary sits in the middle of a settlement and the
+        // first eight rings of it are other buildings. Eight found nothing and reported a budget of zero.
+        for (var ring = 0; ring <= 24; ring++)
+        for (var dz = -ring; dz <= ring; dz++)
+        for (var dx = -ring; dx <= ring; dx++)
+        {
+            if (Math.Max(Math.Abs(dx), Math.Abs(dz)) != ring) continue;
+            var cell = new GridCell(at.X + dx, at.Z + dz);
+            if (!Navigation.Contains(cell) || !Navigation.IsWalkable(cell, agentRadius)) continue;
+            found = cell;
+            return true;
+        }
+
+        found = at;
+        return false;
+    }
+
+    /// <summary>The nearest cell to this one that a body fits on and the field can price.</summary>
+    private bool TryNearestPricedCell(float[] field, GridCell at, float agentRadius, out float seconds)
+    {
+        for (var ring = 0; ring <= 6; ring++)
+        for (var dz = -ring; dz <= ring; dz++)
+        for (var dx = -ring; dx <= ring; dx++)
+        {
+            if (Math.Max(Math.Abs(dx), Math.Abs(dz)) != ring) continue;
+            var cell = new GridCell(at.X + dx, at.Z + dz);
+            if (!Navigation.Contains(cell) || !Navigation.IsWalkable(cell, agentRadius)) continue;
+            var cost = field[Navigation.Transform.Index(cell)];
+            if (!float.IsFinite(cost) || cost <= 0f) continue;
+            seconds = cost;
+            return true;
+        }
+
+        seconds = 0f;
+        return false;
+    }
+
     /// <summary>How close the lower-bound oracle gets, and whether it ever goes over. See §124.</summary>
     internal RoutingFidelity MeasureLowerBoundFidelity(Vector2 goalPosition, float agentRadius)
     {
