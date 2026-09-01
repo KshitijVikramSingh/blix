@@ -11061,3 +11061,70 @@ Both are the same mistake as §121's `--flat-heuristic` parsed below `--selftest
 you think it is will agree with whatever you already believe.** The fix in all three cases was to make the
 harness say out loud which arm it ran — the levers print a banner, and the extraction now names the section it
 reads.
+
+## 127. The field solve, halved twice: a key that was the wrong type and a hash that was not needed
+
+§126 pinned 72% of the field solve to the corner-climb dictionary lookup — 120 ns for each of 479,756 hits in
+Release, nothing measurable in Debug, identical hit counts — and said the fix did not depend on explaining it.
+Two changes, measured separately, and the second is the one that generalises.
+
+### The key was the wrong type, which was worth thirty-three milliseconds
+
+The cache had a `(int, int, int, int)` key, and the comment above it explains why: the obvious packed long
+collided catastrophically, because .NET hashes a long by folding its halves with XOR and two corner indices
+under 2^16 hash to `from ^ to`. That was true and the conclusion drawn from it was too strong. **A fold is a
+fine hash when the thing being folded is already random.** Four doubled coordinates pack into 64 bits exactly
+— a 1,200-cell map doubles to 2,400, and corner coordinates are never negative — and one round of splitmix64's
+finaliser is a bijection, so no two pairs can collide that were not already equal.
+
+```
+Release field search    tuple key    75.2 / 75.3 / 75.4 ms
+                        mixed long   43.8 / 43.9 / 42.7 ms
+```
+
+**And Debug went the other way**, 48 to 79. Whatever makes a ValueTuple lookup cheap in an unoptimised build
+makes a long lookup dear, and the reverse. That is a reason to stop using either as the hot path rather than to
+pick a favourite.
+
+### The hash was not needed, which was worth another six and change
+
+Every leg the corner Dijkstra prices joins two corners of **one rectangle**, and both are named by their
+position in that rectangle's own crossing list. So the answers form a small square matrix per rectangle:
+`CornerClimbMatrix`, one flat array with a per-rectangle offset, about eight hundred kilobytes on this map,
+held against the mesh it is indexed by and evicted with it. A lookup is an array read, and one rectangle's legs
+are contiguous.
+
+`Expand` finds the local number of the corner it is expanding from once per expansion — O(crossings) against
+O(1) per leg, and there are several legs per expansion — and the loop index gives the other for nothing.
+
+**Filled from the durable table rather than from the ground**, because a matrix indexed by mesh-local positions
+cannot survive a mesh rebuild and §115 exists so that climbs do. A miss consults the coordinate-keyed table; a
+miss there samples terrain. The split says exactly that:
+
+```
+climb answers: 240,024 from the matrix, 239,732 from the table, 292 sampled
+```
+
+The first field built on a decomposition fills it and the second reads it, which in this click is a clean half
+each. In play, where many goals share one mesh, the share keeps rising.
+
+### What the click costs now
+
+```
+Release          field solve        the click
+tuple key        ~76 ms             ~291 ms
+mixed long       ~43 ms             ~247 ms
++ matrix         ~37 ms             ~245 ms
+                 39.9 / 35.9 / 34.2 / 37.1 ms over four runs
+```
+
+**The field term is less than half what it was, and the click is about 16% down.** The floor for this structure
+is the first field's table lookups plus the Dijkstra itself, which the key-only arm measured at ~22 ms — so
+~37 ms is close to it, and there is nothing else cheap left here.
+
+Two things worth keeping in view. The remaining largest term in the click is the mesh build at ~134 ms, and
+§99's amortisation is still the only shape of fix that reaches a per-tick ceiling — §118's argument stands
+unchanged. And Debug is now slower than it was, which costs the gate a little wall clock and nothing else: the
+figure that ships is the Release one, which is the rule §83 wrote down and the launcher enforces since §119.
+
+Gate 5/5 green, years included.

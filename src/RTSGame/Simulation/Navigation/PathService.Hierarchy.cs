@@ -59,8 +59,8 @@ internal sealed partial class PathService
 
     private static int RadiusKey(float agentRadius) => (int)MathF.Round(agentRadius * 100f);
 
-    private readonly Dictionary<(int Nav, int Radius), (WalkableRectangles Mesh, RectangleIndex Index)>
-        meshes = new();
+    private readonly Dictionary<(int Nav, int Radius),
+        (WalkableRectangles Mesh, RectangleIndex Index, CornerClimbMatrix Climbs)> meshes = new();
 
     /// <summary>
     /// The rectangle decomposition for a body of this radius, built once per terrain edit.
@@ -92,13 +92,13 @@ internal sealed partial class PathService
     /// The eviction is what keeps it honest: the moment the ground itself changes, every answer in here is
     /// suspect and the whole table goes. That is the only thing this cache is allowed to survive.
     /// </para></remarks>
-    private readonly Dictionary<int, Dictionary<(int, int, int, int), float>> cornerClimbs = new();
+    private readonly Dictionary<int, Dictionary<long, float>> cornerClimbs = new();
 
     /// <summary>Entries currently held, for a profile that would rather report growth than assume it.</summary>
     internal int CornerClimbEntries =>
         cornerClimbs.TryGetValue(grid.TerrainRevision, out var live) ? live.Count : 0;
 
-    internal Dictionary<(int, int, int, int), float> CornerClimbCache()
+    internal Dictionary<long, float> CornerClimbCache()
     {
         var key = grid.TerrainRevision;
         if (cornerClimbs.TryGetValue(key, out var existing)) return existing;
@@ -107,12 +107,12 @@ internal sealed partial class PathService
             cornerClimbs.Remove(stale);
         }
 
-        var created = new Dictionary<(int, int, int, int), float>();
+        var created = new Dictionary<long, float>();
         cornerClimbs[key] = created;
         return created;
     }
 
-    internal (WalkableRectangles Mesh, RectangleIndex Index) Mesh(float agentRadius)
+    internal (WalkableRectangles Mesh, RectangleIndex Index, CornerClimbMatrix Climbs) Mesh(float agentRadius)
     {
         var key = (grid.Revision, RadiusKey(agentRadius));
         if (meshes.TryGetValue(key, out var existing))
@@ -133,7 +133,8 @@ internal sealed partial class PathService
         // mesh reused look identical from outside and want opposite fixes.
         var meshStart = Stopwatch.GetTimestamp();
         var mesh = WalkableRectangles.Build(grid, agentRadius);
-        var built = (mesh, new RectangleIndex(mesh, grid.Width, grid.Height));
+        // The climb matrix belongs to the decomposition it is indexed by, so it is built and evicted with it.
+        var built = (mesh, new RectangleIndex(mesh, grid.Width, grid.Height), new CornerClimbMatrix(mesh));
         MeshBuildTicks += Stopwatch.GetTimestamp() - meshStart;
         MeshBuilds++;
         MeshRectangles = mesh.Count;
@@ -392,7 +393,8 @@ internal sealed partial class PathService
             agentRadius,
             1f,
             chargeTurns: true,
-            CornerClimbCache());
+            CornerClimbCache(),
+            new CornerClimbMatrix(mesh));
 
         var reachable = 0;
         var lost = 0;

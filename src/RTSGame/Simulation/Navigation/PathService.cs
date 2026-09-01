@@ -490,6 +490,9 @@ internal sealed partial class PathService
 
     internal long ClimbCacheMisses;
 
+    /// <summary>Climb answers served from the per-mesh matrix without touching a hash at all. §127.</summary>
+    internal long ClimbMatrixHits;
+
     /// <summary>
     /// What routing has spent, split into the three places an order's time can go.
     /// </summary>
@@ -1608,7 +1611,7 @@ internal sealed partial class PathService
         // portal corners with no cell-level search behind it; the tiles are filled only where
         // something asks, and are what keeps the gradient continuous.
         var lineage = (goalIndex, radiusKey, speedKey, grid.Revision, chargeTurns);
-        var (mesh, meshIndex) = Mesh(agentRadius);
+        var (mesh, meshIndex, meshClimbs) = Mesh(agentRadius);
         // After Mesh, so the decomposition's own cost is charged to it and not to the field.
         var fieldStart = Stopwatch.GetTimestamp();
         costs = new RectangleFlowField(
@@ -1624,7 +1627,8 @@ internal sealed partial class PathService
             agentRadius,
             speedScale,
             chargeTurns,
-            CornerClimbCache());
+            CornerClimbCache(),
+            meshClimbs);
         FieldSetupTicks += Stopwatch.GetTimestamp() - fieldStart;
         FlowFieldBuilds++;
         flowFields[key] = costs;
@@ -1880,7 +1884,7 @@ internal sealed partial class PathService
             return null;
         }
 
-        var (mesh, meshIndex) = Mesh(agentRadius);
+        var (mesh, meshIndex, _) = Mesh(agentRadius);
         var fromRectangle = meshIndex.RectangleAt(fromCell);
         if (fromRectangle < 0)
         {

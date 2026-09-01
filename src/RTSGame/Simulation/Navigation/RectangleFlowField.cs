@@ -62,7 +62,8 @@ internal sealed class RectangleFlowField
     private readonly float[] cornerCost;
 
     /// <summary>Corner-pair climb charges, owned by the mesh and shared by every field built on it.</summary>
-    private readonly Dictionary<(int, int, int, int), float> cornerClimb;
+    private readonly Dictionary<long, float> cornerClimb;
+    private readonly CornerClimbMatrix climbs;
     private readonly GridCell goal;
 
     /// <summary>The cell this field routes to.</summary>
@@ -85,9 +86,11 @@ internal sealed class RectangleFlowField
         float agentRadius,
         float congestionSpeedScale,
         bool chargeTurns,
-        Dictionary<(int, int, int, int), float> cornerClimb)
+        Dictionary<long, float> cornerClimb,
+        CornerClimbMatrix climbs)
     {
         this.cornerClimb = cornerClimb;
+        this.climbs = climbs;
         this.owner = owner;
         var phaseStart = Stopwatch.GetTimestamp();
         AgentRadius = agentRadius;
@@ -209,12 +212,28 @@ internal sealed class RectangleFlowField
     private void Expand(int rectangle, int from, float cost, PriorityQueue<int, float> open)
     {
         var ground = mesh.All[rectangle];
-        foreach (var other in mesh.CrossingsOf(rectangle))
+        var here = mesh.CrossingsOf(rectangle);
+        // <b>Where `from` sits in this rectangle's own crossing list, found once per expansion.</b> That local
+        // number and the loop's own index are what the climb matrix is indexed by, which is why the lookup
+        // inside the leg loop is an array read rather than a hash of four coordinates. O(crossings) per
+        // expansion against O(1) per leg, and there are several legs per expansion.
+        var fromCrossing = from >> 1;
+        var fromLocal = -1;
+        for (var i = 0; i < here.Length; i++)
         {
+            if (here[i] != fromCrossing) continue;
+            fromLocal = i * 2 + (from & 1);
+            break;
+        }
+
+        for (var slot = 0; slot < here.Length; slot++)
+        {
+            var other = here[slot];
             for (var end = 0; end < 2; end++)
             {
                 var corner = other * 2 + end;
                 if (corner == from) continue;
+                var toLocal = slot * 2 + end;
                 owner.FieldLegs++;
                 var next = cost + LegBetween(
                     cornerX[from],
@@ -224,7 +243,9 @@ internal sealed class RectangleFlowField
                     rectangle,
                     ground.TraversalCost,
                     from,
-                    corner);
+                    corner,
+                    fromLocal,
+                    toLocal);
                 if (next >= cornerCost[corner]) continue;
                 cornerCost[corner] = next;
                 open.Enqueue(corner, next);
@@ -335,7 +356,9 @@ internal sealed class RectangleFlowField
         int rectangle,
         float traversalCost,
         int fromCorner = -1,
-        int toCorner = -1)
+        int toCorner = -1,
+        int fromLocal = -1,
+        int toLocal = -1)
     {
         var dx = MathF.Abs(fromX - toX);
         var dz = MathF.Abs(fromZ - toZ);
@@ -354,7 +377,7 @@ internal sealed class RectangleFlowField
         var climb = !chargeClimb
             ? 0f
             : fromCorner >= 0 && toCorner >= 0
-                ? CachedCornerClimb(fromCorner, toCorner, fromX, fromZ, toX, toZ)
+                ? CachedCornerClimb(rectangle, fromLocal, toLocal, fromX, fromZ, toX, toZ)
                 : owner.ClimbSecondsAlong(fromX, fromZ, toX, toZ);
         var seconds = Leg(dx, dz, traversalCost) + climb;
         if (!anyPressure || !pressured[rectangle]) return seconds;
@@ -399,18 +422,37 @@ internal sealed class RectangleFlowField
     /// </para>
     /// </remarks>
     private float CachedCornerClimb(
-        int fromCorner,
-        int toCorner,
+        int rectangle,
+        int fromLocal,
+        int toLocal,
         float fromX,
         float fromZ,
         float toX,
         float toZ)
     {
-        // <b>A tuple key, because a packed long collided catastrophically.</b> The obvious key is
-        // (from << 32) | to, and .NET hashes a long by folding its halves with XOR — which for two corner
-        // indices under 2^16 is from ^ to, so thousands of distinct pairs share a bucket. With half a million
-        // entries the lookups degrade to chain walks and the field went from 290 ms to 4,487. A ValueTuple
-        // hashes through HashCode.Combine, which mixes.
+        // The fast path: this rectangle's own square of answers, indexed rather than hashed. Empty on a fresh
+        // mesh and filled by whatever asks, so the first field built on a decomposition pays the table below
+        // and every later one pays an array read.
+        var known = climbs.At(rectangle, fromLocal, toLocal);
+        if (!float.IsNaN(known))
+        {
+            owner.ClimbMatrixHits++;
+            return known;
+        }
+
+        // <b>A packed long that is mixed before it is stored, which is the third key this cache has had.</b>
+        // The first was (from << 32) | to and it collided catastrophically: .NET hashes a long by folding its
+        // halves with XOR, so for two corner indices under 2^16 the hash is from ^ to and thousands of
+        // distinct pairs shared a bucket — the field went from 290 ms to 4,487. The answer then was a
+        // ValueTuple, which hashes through HashCode.Combine and mixes properly.
+        //
+        // <b>And the tuple cost 120 ns a hit in Release against nothing measurable in Debug</b> — §126 pinned
+        // it to this lookup, on 479,756 hits with identical hit and miss counts in both builds, which is 72%
+        // of the field solve and about a fifth of the click after a placement change. The fold is not the
+        // problem when the value being folded is already random: four coordinates pack into 64 bits exactly,
+        // and one round of splitmix's finaliser leaves both halves random, so XOR-folding them is a fine hash.
+        // What is avoided is the ValueTuple's per-element EqualityComparer work, and what is measured is
+        // whatever §126 could not explain.
         //
         // <b>And the coordinates rather than the corner indices, so the answer outlives the mesh.</b> A
         // corner index is a position in one decomposition; the climb is a property of the two points. Every
@@ -418,19 +460,21 @@ internal sealed class RectangleFlowField
         // like — so twice the coordinate is an exact integer and the pair is an exact key. §114 measured
         // what the old key cost: a placement change rebuilt the mesh, renumbered every corner, and made the
         // next click re-sample two and a half million heights that had not moved.
-        var key = (Round2(fromX), Round2(fromZ), Round2(toX), Round2(toZ));
+        var key = ClimbKey(fromX, fromZ, toX, toZ);
         // A stopwatch arm for §126: build the key and go no further, so that the cost of forming it can be
         // told from the cost of looking it up. Routes are wrong with this on.
-        if (!PathService.LookUpFieldClimb) return key.Item1 * 0f;
+        if (!PathService.LookUpFieldClimb) return key * 0f;
         if (cornerClimb.TryGetValue(key, out var cached))
         {
             owner.ClimbCacheHits++;
+            climbs.Set(rectangle, fromLocal, toLocal, cached);
             return cached;
         }
 
         owner.ClimbCacheMisses++;
         var climbed = owner.ClimbSecondsAlong(fromX, fromZ, toX, toZ);
         cornerClimb[key] = climbed;
+        climbs.Set(rectangle, fromLocal, toLocal, climbed);
         return climbed;
     }
 
@@ -443,6 +487,31 @@ internal sealed class RectangleFlowField
     /// which is the one way this cache could be wrong rather than merely cold.
     /// </remarks>
     private static int Round2(float coordinate) => (int)MathF.Round(coordinate * 2f);
+
+    /// <summary>
+    /// One corner pair as a mixed 64-bit key. Exact, mesh-independent, and cheap to hash.
+    /// </summary>
+    /// <remarks>
+    /// Every corner sits at a half cell, so twice each coordinate is an exact integer — that is what makes the
+    /// key survive a mesh rebuild, which is the whole of §115. Four of them at sixteen bits each fill a long
+    /// exactly; a 1,200-cell map doubles to 2,400 and corner coordinates are never negative, so sixteen bits
+    /// is room to spare. The finaliser is splitmix64's, one round, which is a bijection — no two pairs can
+    /// collide that did not already collide in the packing, and the packing is injective.
+    /// </remarks>
+    private static long ClimbKey(float fromX, float fromZ, float toX, float toZ)
+    {
+        var packed =
+            ((ulong)(uint)Round2(fromX) & 0xFFFF) |
+            (((ulong)(uint)Round2(fromZ) & 0xFFFF) << 16) |
+            (((ulong)(uint)Round2(toX) & 0xFFFF) << 32) |
+            (((ulong)(uint)Round2(toZ) & 0xFFFF) << 48);
+        packed ^= packed >> 30;
+        packed *= 0xBF58476D1CE4E5B9UL;
+        packed ^= packed >> 27;
+        packed *= 0x94D049BB133111EBUL;
+        packed ^= packed >> 31;
+        return (long)packed;
+    }
 
     /// <summary>Cells between samples along a leg, and the ceiling on how many.</summary>
     private const float CellsPerSample = 4f;

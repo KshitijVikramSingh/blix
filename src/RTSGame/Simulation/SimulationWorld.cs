@@ -195,7 +195,7 @@ internal sealed class SimulationWorld
     /// </remarks>
     internal (int Rectangles, int Crossings, long Bytes) RouteMesh(float agentRadius)
     {
-        var (mesh, _) = pathService.Mesh(agentRadius);
+        var (mesh, _, _) = pathService.Mesh(agentRadius);
         return (mesh.Count, mesh.Crossings.Count, mesh.ResidentBytes);
     }
 
@@ -472,8 +472,8 @@ internal sealed class SimulationWorld
     internal RouteAttribution Routes => pathService.Routes;
 
     /// <summary>Corner-climb lookups that hit and those that sampled. See §126.</summary>
-    internal (long Hits, long Misses) ClimbCache =>
-        (pathService.ClimbCacheHits, pathService.ClimbCacheMisses);
+    internal (long MatrixHits, long Hits, long Misses) ClimbCache =>
+        (pathService.ClimbMatrixHits, pathService.ClimbCacheHits, pathService.ClimbCacheMisses);
 
     /// <summary>What building a cost field spends its time on, split four ways. See §126.</summary>
     internal (double PressureMs, double CornerMs, double SeedMs, double SearchMs,

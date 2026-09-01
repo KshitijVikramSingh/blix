@@ -733,8 +733,9 @@ internal static class ScaleScenarios
             $"{fieldSplit.Legs - fieldBefore.Legs:N0} legs)");
         var climbCache = world.ClimbCache;
         Console.WriteLine(
-            $"    climb cache: {climbCache.Hits - climbCacheBefore.Hits:N0} hits, " +
-            $"{climbCache.Misses - climbCacheBefore.Misses:N0} misses");
+            $"    climb answers: {climbCache.MatrixHits - climbCacheBefore.MatrixHits:N0} from the matrix, " +
+            $"{climbCache.Hits - climbCacheBefore.Hits:N0} from the table, " +
+            $"{climbCache.Misses - climbCacheBefore.Misses:N0} sampled");
 
         // Stages summed, accumulators reported apart. Adding the two together is how this line first
         // claimed 4,259 ms of a 2,662 ms tick.
