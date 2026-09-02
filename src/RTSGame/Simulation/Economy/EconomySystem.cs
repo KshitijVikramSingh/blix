@@ -341,20 +341,31 @@ internal sealed class EconomySystem
     }
 
     /// <summary>How long the stores last at the current net flow. §8's autonomy time.</summary>
+    /// <param name="faction">
+    /// Whose stores to answer about, or null for every node on the map.
+    /// <b>Added because a bot reading this unfiltered would be reading its opponent's larder.</b> §132: the
+    /// rule-bot may only know what a player at its own screen would know, and that has to be a property of
+    /// the code rather than a promise — so the figure it reasons from is this one, filtered. Null keeps every
+    /// existing caller answering exactly what it did, since until §130 there was only ever one settlement and
+    /// the question could not be asked any other way.
+    /// </param>
     public ResourceOutlook Outlook(
         Resource resource,
         NodeStore nodes,
         AgentStore agents,
-        Season season)
+        Season season,
+        Collision.FactionId? faction = null)
     {
         // What the settlement has, not what is growing in front of it. A woodland in reach is
         // twenty-five thousand units of standing timber, and counting it here would answer "how long
         // will the stores last" with a statement about the forest.
-        var stored = nodes.TotalHeld()[resource];
+        var stored = 0;
         var draw = 0f;
         foreach (var id in nodes.SettlementNodes)
         {
             ref readonly var node = ref nodes.Get(id);
+            if (!node.IsAlive || (faction is { } owner && node.Faction != owner)) continue;
+            stored += node.Stock[resource];
             if (!node.IsSink) continue;
             draw += EconomyRates.DrawPerSecond(resource, season, node.AppetiteSum);
         }
@@ -365,6 +376,7 @@ internal sealed class EconomySystem
             foreach (var id in nodes.SettlementNodes)
             {
                 ref readonly var node = ref nodes.Get(id);
+                if (!node.IsAlive || (faction is { } owner && node.Faction != owner)) continue;
                 if (node.Kind != NodeKind.Farm) continue;
                 // A field's contribution is what it will still yield this year spread over what is left of
                 // it, which is the honest answer to "how long will the stores last": a field standing
@@ -381,7 +393,7 @@ internal sealed class EconomySystem
             // Wood income is however many axes are actually swinging. Not a rate a building has and not
             // a headcount of people who call themselves woodcutters: a cutter walking a load in, or one
             // whose trees have run out, is contributing nothing this second and the figure should say so.
-            produced += DepositWorkersAtWork(agents, resource) * Deposits.TakePerSecond(resource);
+            produced += DepositWorkersAtWork(agents, resource, faction) * Deposits.TakePerSecond(resource);
         }
 
         var net = draw - produced;
@@ -1233,12 +1245,16 @@ internal sealed class EconomySystem
     /// distinction the wood income figure was built on and it matters more for stone, where the walk is
     /// longer and a larger share of a quarrier's day is spent on the road rather than at the face.
     /// </remarks>
-    public static int DepositWorkersAtWork(AgentStore agents, Resource resource)
+    public static int DepositWorkersAtWork(
+        AgentStore agents,
+        Resource resource,
+        Collision.FactionId? faction = null)
     {
         var working = 0;
         foreach (ref readonly var agent in agents.All)
         {
             if (!agent.IsAlive || agent.Jobs.IsInterrupted) continue;
+            if (faction is { } owner && agent.Faction != owner) continue;
             if (agent.Jobs.Assignment.Kind != AssignmentKind.Work) continue;
             if (agent.Jobs.Assignment.Cargo != resource) continue;
             if (agent.Jobs.Leg % 2 != 0 || !JobSystem.IsWorking(in agent)) continue;

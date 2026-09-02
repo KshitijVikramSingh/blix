@@ -3,6 +3,7 @@ using System.Numerics;
 using RTSGame.Simulation;
 using RTSGame.Simulation.Collision;
 using RTSGame.Simulation.Economy;
+using RTSGame.AI;
 using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Terrain;
 
@@ -41,7 +42,8 @@ internal static class TwoSettlementScenarios
         uint mapSeed,
         bool swapFactions = false,
         bool onlyOne = false,
-        bool dressTwice = false)
+        bool dressTwice = false,
+        bool bot = false)
     {
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         var world = new SimulationWorld(extentMeters);
@@ -124,6 +126,27 @@ internal static class TwoSettlementScenarios
         ReportWork(world, "after thirty seconds");
         Console.WriteLine();
 
+        // <b>The bot's settlement starts with nobody employed.</b> Founding posts every hand at a producer,
+        // which would leave a bot with nothing to do and an acceptance test that proved nothing. Stripping the
+        // assignments makes the claim the sharp one: can a rule-bot take a settlement that is standing idle
+        // and put it to work through the same commands a person has. §132.
+        SettlementBot? driver = null;
+        if (bot)
+        {
+            var theirs = new List<Simulation.Agents.AgentId>();
+            foreach (ref readonly var body in world.Agents.All)
+            {
+                if (body.IsAlive && body.Faction == secondFaction) theirs.Add(body.Id);
+            }
+
+            world.QueueAssign(theirs, Assignment.None);
+            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            driver = new SettlementBot(secondFaction);
+            Console.WriteLine(
+                $"  faction {secondFaction.Value} is driven by a bot, and starts with {theirs.Count} " +
+                "people and no work");
+        }
+
         // Recorded before the clock starts, because "did anything happen" is a comparison and needs both ends.
         var openingGrain = new[] { StockOf(world, 0, Resource.Grain), StockOf(world, 1, Resource.Grain) };
         var faults = new List<string>();
@@ -133,6 +156,10 @@ internal static class TwoSettlementScenarios
             "        date        | f0 grain | f0 wood | f0 people | f1 grain | f1 wood | f1 people | drift");
         for (var tick = 1; tick <= totalTicks; tick++)
         {
+            // Inside the loop and before the tick, on the RaidDirector's precedent: a driver stepped with the
+            // fixed step decides at the same moment however fast the clock is running, so a watched run and a
+            // headless one see the same game.
+            driver?.Update(world);
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
 
             // Conservation across BOTH, every tick, exactly as the one-village year leg does it. A unit of
@@ -177,6 +204,12 @@ internal static class TwoSettlementScenarios
                     $"{label} is inert: {people} people and {grain} grain, unchanged from the {openingGrain[faction]} " +
                     "it started with — nobody ate and nobody harvested");
             }
+        }
+
+        if (driver is { } ran)
+        {
+            Console.WriteLine(
+                $"  the bot: {ran.Decisions:N0} decisions, {ran.OrdersIssued:N0} assignments issued");
         }
 
         foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");

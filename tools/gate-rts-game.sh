@@ -89,10 +89,15 @@ run "every map the panel can ask for" --mapsweep
 # re-forested the first one's cleared ground and walled its houses off from its granary eleven metres away.
 # Cheap (a fraction of a year) and it guards a seam that only appears when the routine runs twice.
 run "two settlements on one map" --twovillages --years 0.1
+# <b>And one of them driven by a rule-bot, from a standing start.</b> §132: the bot's settlement is stripped of
+# every assignment before it takes over, so the leg asks whether a bot can put an idle settlement to work
+# through the same queued commands a person has — and the pass condition is the year leg's own, that it feeds
+# itself and the books balance.
+run "a bot runs a settlement" --twovillages --years 0.1 --bot
 
 echo
-legs=4
-[ "$years" -eq 1 ] && legs=6
+legs=5
+[ "$years" -eq 1 ] && legs=7
 if [ "$failed" -eq 0 ]; then
     if [ "$years" -eq 1 ]; then
         echo "gate: all $legs green, years included"

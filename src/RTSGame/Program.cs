@@ -102,7 +102,7 @@ public static class Program
             Environment.Exit(TwoSettlementScenarios.Run(
                 twoExtent, twoYears, twoRelief, twoSeed,
                 args.Contains("--swapfactions"), args.Contains("--onevillage"),
-                args.Contains("--dresstwice")));
+                args.Contains("--dresstwice"), args.Contains("--bot")));
         }
 
         if (args.Contains("--settlement"))

@@ -11419,3 +11419,65 @@ Nothing reads the knowledge yet, and it is gathered anyway — so that the state
 saved from the first tick rather than appearing the day something wants it. What reads it next is the rule-bot,
 which is the last piece before two players can be put on one map: it must issue the same queued commands a
 person does, so that "the AI plays the player's settlement" is checkable rather than claimed.
+
+## 132. A rule-bot that plays through the same verbs
+
+§130 put two settlements on one map and §131 gave each faction its own knowledge. What was left before two
+players can share a map is a player that is not a person — and the acceptance test §4 set for it is
+*the AI can play the player's settlement*, which is only checkable if the AI has no other way in.
+
+So `SettlementBot` holds a `SimulationWorld` and touches it through `QueueAssign` and nothing else. No node's
+fields, no body's state, no reaching into the jobs layer. Everything it decides is a command a mouse could
+have issued, which makes "no resource cheats, no vision cheats" a property of the code rather than a promise.
+It lives outside the world on the `RaidDirector`'s precedent — a player is not part of the world — and is
+stepped inside the fixed tick, so a watched run and a headless one see the same game.
+
+### Two places it could have cheated, and both were closed by measurement rather than intent
+
+- **Its own larder, not the map's.** The bot decides on §8's autonomy time — seasons of eating left, the figure
+  the HUD puts in front of a person — read through the same `Economy.Outlook` call the HUD makes. That call
+  summed every node on the map, which until §130 was the only settlement there was and is now the opponent's
+  stores as well. It takes a faction now; null keeps every existing caller answering exactly what it did.
+  Recomputing the figure inside the bot from a rate of its own was the alternative and it is the same risk as a
+  second opinion about what can be seen: a bot reasoning in units nobody displays is a bot whose decisions
+  cannot be argued with from the chair.
+- **Trees it has seen.** Posting a cutter reads §131's knowledge, so the bot cannot send somebody to a trunk
+  its faction has never had eyes on. That is the one cheat this whole arrangement exists to make impossible,
+  and it is three lines because the knowledge was built first.
+
+**And a cadence, because §7 makes AI difficulty an attention budget rather than a cheat.** The bot decides
+twice a second. A bot re-deciding every tick would be spending attention no person has, thirty times a second
+on a settlement whose fastest meaningful change takes seconds.
+
+### The test is a settlement standing idle
+
+Founding posts every hand at a producer, so a bot handed a founded village has nothing to do and an acceptance
+test that proves nothing. `--twovillages --bot` therefore **strips its faction of every assignment** before the
+bot takes over, which makes the claim the sharp one: can a rule-bot take a settlement that is standing still
+and put it to work. The pass condition is the year leg's own — it feeds itself and the books balance.
+
+```
+faction 1 is driven by a bot, and starts with 13 people and no work
+
+  f0 (founded, hands posted)  grain 3,480 | wood   811
+  f1 (bot-driven, stripped)   grain 3,481 | wood 1,244
+  the bot: 1,080 decisions, 128 assignments issued
+```
+
+Fifty-five days in, the bot's settlement is level on grain and ahead on wood. **Stated as observed rather than
+as skill**: the founding posts a fixed four cutters and the bot puts whoever is idle onto wood, so the
+difference is a policy difference and not evidence that the bot plays better. What the run does establish is
+the thing worth establishing — a settlement can be run from outside, through the player's own interface,
+without reading anything a player could not see.
+
+Added as the gate's fifth quick leg, so the claim stays true.
+
+### What this deliberately does not do
+
+It does not build, train, defend, or know that another faction exists. Those are the next decisions and each
+wants its own measurement — and putting them in now would mean shipping four untested policies inside one
+untested loop. The loop is what this section is for, and it works.
+
+The pieces §82's road asked for are now all present: two settlements, per-faction knowledge, and a player that
+is not a person. What follows is contact — the bot noticing a neighbour, and the combat roster arriving when
+there is something to fight over.
