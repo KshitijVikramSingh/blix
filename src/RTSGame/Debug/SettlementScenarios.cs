@@ -769,6 +769,18 @@ internal static class SettlementScenarios
     /// drift, and the one thing worth being able to say about the thing on screen is that it is the
     /// same arrangement the year-long run asserts about.
     /// </remarks>
+    /// <param name="dressMap">
+    /// Whether to paint the biomes and scatter the woodland and outcrops, which is whole-map work.
+    /// <b>The second settlement on a map must pass false</b>, or it replants the forest over the first one's
+    /// cleared ground — see the note at the call site. Default true so every existing caller is unchanged.
+    /// <para>
+    /// Known consequence, recorded rather than hidden: the woodland scatter takes the settlement centre and
+    /// keeps a near band of trees around it, which §22 established is an economic fact about a site rather
+    /// than scenery. A second settlement founded with <c>dressMap: false</c> therefore gets the map's ambient
+    /// woodland and not its own ring, so its wood line is whatever the ground happened to give it. Splitting
+    /// the band from the scatter is the proper fix and is a separate piece of work.
+    /// </para>
+    /// </param>
     /// <param name="faction">
     /// Who this settlement belongs to. <b>Added because a second player needs a settlement of its own.</b>
     /// Everything underneath already carries a faction — nodes have one, bodies have one, and hauling,
@@ -784,7 +796,8 @@ internal static class SettlementScenarios
         int carts,
         int wagons,
         Vector2 centre = default,
-        Simulation.Collision.FactionId? faction = null)
+        Simulation.Collision.FactionId? faction = null,
+        bool dressMap = true)
     {
         var granary = world.AddNode(NodeKind.Granary, centre, capacity: 9000, faction: faction);
 
@@ -878,9 +891,22 @@ internal static class SettlementScenarios
 
         // The forest. Where it is, and how thin it has been cut, is the whole of the wood economy: there
         // is no woodcutter building any more, only trees and the people sent to them.
-        PaintBiomes(world);
-        ScatterWoodland(world, centre);
-        ScatterOutcrops(world);
+        //
+        // <b>Whole-map work, and therefore not a settlement's to do twice.</b> §130: these three paint the
+        // biomes, scatter woodland and scatter outcrops across the entire map, so a second call to Populate
+        // re-forests the ground the first settlement had already cleared to build on. Measured: founding a
+        // second village 198 m away put 144 trees back inside twenty metres of the first one's centre, walled
+        // its houses off from a granary eleven metres away, and its economy went inert without a single
+        // conservation fault — the books balance perfectly when nothing happens.
+        //
+        // With one settlement "found a settlement" and "dress the map" are the same act and nothing
+        // distinguishes them, which is why this stood for as long as there was only ever one.
+        if (dressMap)
+        {
+            PaintBiomes(world);
+            ScatterWoodland(world, centre);
+            ScatterOutcrops(world);
+        }
         // After the scatter, because both of these are readings of ground that has to exist first: the fields
         // have their fertility from the soil field and the wood line is a distance to actual trunks.
         ReportFarmland(world);

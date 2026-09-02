@@ -11260,3 +11260,83 @@ stopped short of: per faction, how many bodies hold a working assignment and how
 
 The probe is `--twovillages`, it takes `--years` and `--swapfactions`, and it is not in the gate until it
 passes.
+
+## 130. Populate is a map recipe with a settlement in it
+
+§129 left the first of two settlements inert — thirteen people, sixteen buildings, stores that had not moved a
+unit in ninety days — with three explanations eliminated and the diagnosis unfinished. Chased down, in the
+order the measurements came:
+
+- **Both factions are assigned and working.** Eight bodies each, eight nodes with hands each. Nobody is idle.
+- **The difference is the supply binding.** Faction 0's houses were bound to its granary at founding and the
+  **first tick unbound them**, 7/7 to 0/7. `BindCatchments` re-binds when the node revision moves and found no
+  store for them.
+- **It found none because the router refused the pair.** Counted apart, all four refusals were
+  `TravelUnpriced` — not a goal off the grid, not a start that would not resolve, but a cost field with no
+  finite answer for a house **eleven metres** from its own granary.
+- **And unpriced in both directions**, which makes it a fact about the ground rather than about which end the
+  Dijkstra started from.
+- **The ground had changed.** Within twenty metres of faction 0's centre: 5,425 walkable cells with one
+  settlement, **2,220 with two.** Split by cause, 792 cells marked solid in both — its own buildings, same
+  footprint, same span — and 2,886 extra solid cells that appear only when a second village is founded.
+- **They are trees, and they are alive.** Zero deposits standing inside twenty metres of faction 0 with one
+  settlement; **144 with two.** The founding fells the trees it builds among, and the second founding puts
+  them back.
+
+### Which it does because `Populate` dresses the whole map
+
+```csharp
+PaintBiomes(world);
+ScatterWoodland(world, centre);
+ScatterOutcrops(world);
+```
+
+Three whole-map operations, inside the routine that lays down one settlement. So the second call repaints the
+biomes and re-scatters the woodland across the entire map, including over the ground the first settlement had
+already cleared to build on — and the trees that land there wall its houses off from its granary. The second
+settlement is fine because its own clearing came last.
+
+**`Populate` is not a settlement recipe. It is a map recipe with a settlement in it**, and with only ever one
+settlement the two are the same act and nothing distinguishes them. That is the whole reason this stood: the
+seam has been there since the routine was written and could not be seen until something asked it to run twice.
+
+Fixed by making the dressing a parameter — `dressMap`, default true so every existing caller is unchanged, and
+false for the second settlement. Both villages then run identically:
+
+```
+  f0 grain 3,426 -> 3,303 | wood 792 -> 777 | 7/7 sinks bound | 0 travel refusals
+  f1 grain 3,426 -> 3,303 | wood 792 -> 777 | 7/7 sinks bound | 0 travel refusals
+```
+
+**One consequence recorded rather than hidden:** the woodland scatter takes the settlement centre and keeps a
+near band of trees around it, which §22 established is an economic fact about a site and not scenery. A second
+settlement founded with `dressMap: false` gets the map's ambient woodland and no ring of its own, so its wood
+line is whatever the ground happened to give it. Splitting the band from the scatter is the proper fix and is
+its own piece of work.
+
+### And the test that passed an inert settlement
+
+§129 recorded this and it is worth the repetition, because the correction is the transferable part. The
+acceptance test asked whether each faction ended with people and with grain above zero — **which is exactly
+what an economy doing nothing looks like.** It reported "both settlements fed themselves" over one that had
+not eaten a grain in three months, and the books balanced every tick while it did, because conservation is
+perfect when nothing moves.
+
+It now asserts that each faction's stores **changed**, and `--dresstwice` keeps the old behaviour reachable so
+the fault can still be produced on demand: with it, the probe says
+`FAULT: faction 0 is inert: 13 people and 4200 grain, unchanged from the 4200 it started with`. A fixed bug
+with no way left to reproduce it is a fix nobody can check.
+
+**A test for "it works" has to name something that must change, not something that must remain.** That is the
+fifth time this session that an instrument agreed with what was already believed, and the first four were all
+about arms and units and stale binaries — this one was about the assertion itself.
+
+### Where the arc stands
+
+The precondition is met: two settlements, one map, both feeding themselves, conservation exact every tick, and
+the travel-refusal counters at zero. `--twovillages` takes `--years`, `--swapfactions`, `--onevillage` and
+`--dresstwice`, and it is worth adding to the gate now that it passes.
+
+What comes next is the faction knowledge item — what a second player can see and remember, which §119 recorded
+as simulation state that belongs in the fingerprint and is not built — and then a rule-bot that issues the same
+queued commands a person does, so that "the AI plays the player's settlement" is checkable rather than claimed.

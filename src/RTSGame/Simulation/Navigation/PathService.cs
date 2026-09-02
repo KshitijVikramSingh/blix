@@ -683,15 +683,44 @@ internal sealed partial class PathService
         TileRefinements = reader.Long();
     }
 
+    /// <summary>
+    /// Why a travel-time query came back with nothing, by cause.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because "the router would not price it" is three different faults.</b> §130: founding a second
+    /// settlement made the first one's houses unpriceable to their own granary eleven metres away, and the
+    /// binder that reads this figure simply unbound them. A goal off the grid, a goal that cannot be resolved
+    /// to standable ground, a start that cannot, and a cost field with no answer for where the body stands are
+    /// four separate problems with one symptom — and the economy's catchment test cannot tell them apart
+    /// either, which is how a settlement went inert without anything saying so.
+    /// </remarks>
+    public long TravelNoCell { get; private set; }
+
+    public long TravelGoalUnresolved { get; private set; }
+
+    public long TravelStartUnresolved { get; private set; }
+
+    public long TravelUnpriced { get; private set; }
+
     public bool TryOptimalTravelTime(Vector2 goalPosition, Vector2 from, float agentRadius, out float seconds)
     {
         seconds = 0f;
-        if (!grid.TryWorldToCell(goalPosition, out var goalCell)) return false;
-        if (!grid.TryWorldToCell(from, out var fromCell)) return false;
+        if (!grid.TryWorldToCell(goalPosition, out var goalCell) ||
+            !grid.TryWorldToCell(from, out var fromCell))
+        {
+            TravelNoCell++;
+            return false;
+        }
+
         var resolved = grid.IsWalkable(goalCell, agentRadius)
             ? goalCell
             : FindNearestWalkable(goalCell, agentRadius);
-        if (resolved is not { } goal) return false;
+        if (resolved is not { } goal)
+        {
+            TravelGoalUnresolved++;
+            return false;
+        }
+
         var costs = GetFlowField(goal, agentRadius, congestion.Revision, chargeTurns: false);
         // Both ends, not just the goal. Once buildings occupy the cells they stand on, the natural way
         // to ask "how far is my granary from that house" is between two points that are both inside
@@ -706,9 +735,19 @@ internal sealed partial class PathService
         var start = grid.IsWalkable(fromCell, agentRadius)
             ? fromCell
             : FindNearestWalkable(fromCell, agentRadius);
-        if (start is not { } standing) return false;
+        if (start is not { } standing)
+        {
+            TravelStartUnresolved++;
+            return false;
+        }
+
         var cost = costs.CostAt(standing);
-        if (!float.IsFinite(cost)) return false;
+        if (!float.IsFinite(cost))
+        {
+            TravelUnpriced++;
+            return false;
+        }
+
         seconds = cost;
         return true;
     }

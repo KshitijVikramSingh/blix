@@ -84,10 +84,15 @@ fi
 #
 # Cheap because it stops at terrain and country rather than founding a settlement: 55 maps in 40 seconds.
 run "every map the panel can ask for" --mapsweep
+# <b>Two settlements on one map, which is the precondition for a second player.</b> §130: the first version of
+# this found the earlier-founded settlement inert — Populate dresses the whole map, so founding a second one
+# re-forested the first one's cleared ground and walled its houses off from its granary eleven metres away.
+# Cheap (a fraction of a year) and it guards a seam that only appears when the routine runs twice.
+run "two settlements on one map" --twovillages --years 0.1
 
 echo
-legs=3
-[ "$years" -eq 1 ] && legs=5
+legs=4
+[ "$years" -eq 1 ] && legs=6
 if [ "$failed" -eq 0 ]; then
     if [ "$years" -eq 1 ]; then
         echo "gate: all $legs green, years included"

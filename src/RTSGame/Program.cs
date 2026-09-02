@@ -94,7 +94,9 @@ public static class Program
             var twoRelief = Value(args, "--relief-amplitude") is { } amp ? float.Parse(amp) : 32f;
             var twoSeed = Value(args, "--mapseed") is { } seed ? uint.Parse(seed) : 1592594996u;
             Environment.Exit(TwoSettlementScenarios.Run(
-                twoExtent, twoYears, twoRelief, twoSeed, args.Contains("--swapfactions")));
+                twoExtent, twoYears, twoRelief, twoSeed,
+                args.Contains("--swapfactions"), args.Contains("--onevillage"),
+                args.Contains("--dresstwice")));
         }
 
         if (args.Contains("--settlement"))

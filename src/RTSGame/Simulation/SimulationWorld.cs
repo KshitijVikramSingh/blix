@@ -489,6 +489,11 @@ internal sealed class SimulationWorld
     private static double Milliseconds(long ticks) =>
         Stopwatch.GetElapsedTime(0, ticks).TotalMilliseconds;
 
+    /// <summary>Why travel-time queries came back empty, by cause. See PathService.TravelNoCell.</summary>
+    internal (long NoCell, long GoalUnresolved, long StartUnresolved, long Unpriced) TravelRefusals =>
+        (pathService.TravelNoCell, pathService.TravelGoalUnresolved,
+         pathService.TravelStartUnresolved, pathService.TravelUnpriced);
+
     /// <summary>Guide lookups the corner graph could price, and those that fell back. See §122.</summary>
     internal (long Priced, long FellBack) GuideEstimates =>
         (pathService.GuidedEstimates, pathService.GuidedFallbacks);
