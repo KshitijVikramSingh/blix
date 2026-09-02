@@ -326,6 +326,16 @@ internal sealed class SimulationWorld
         return pathService.MeasureLowerBoundFidelity(goal, agentRadius);
     }
 
+    /// <summary>
+    /// What each faction can see and remembers seeing. Simulation state; see <see cref="FactionKnowledge"/>.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not the renderer's fog. §119's rule is a direction: fog may read the simulation, the
+    /// simulation may never read fog. This is the aggregate that note reserved for decisions to read, so it is
+    /// fingerprinted and saved.
+    /// </remarks>
+    internal FactionKnowledge Knowledge { get; }
+
     /// <summary>The ground under one cell, for explaining why an estimate about it is wrong.</summary>
     internal string DescribeFidelityAt(GridCell cell, float agentRadius) =>
         $"clearance {Navigation.Clearance(cell):F2} m, height {Navigation.HeightAt(cell):F1} m, " +
@@ -1439,6 +1449,7 @@ internal sealed class SimulationWorld
         var extent = placementCells * PlacementCellSize;
         var navigationCells = (int)MathF.Round(extent / NavigationCellSize);
         ExtentMeters = extent;
+        Knowledge = new FactionKnowledge(extent);
 
         var origin = new Vector2(-extent * 0.5f);
         var navigationTransform =
@@ -2050,6 +2061,11 @@ internal sealed class SimulationWorld
         writer.Int(Navigation.Revision);
         // The record of work done, which is not derived: a loaded career reports the same lifetime
         // totals as the one it continues, and the determinism check reads them as a canary.
+        // <b>Saved, because it is carried.</b> A faction's memory of the map is not derivable from where its
+        // people are standing now — that is the whole difference between seeing and having seen — so a load
+        // that rebuilt it would hand the loaded world a blank map and a fingerprint mismatch on the first
+        // tick. §131.
+        Knowledge.Write(writer);
         pathService.WriteCounters(writer);
         steeringSystem.Solver.WriteCounters(writer);
         agentIndex.WriteCounters(writer);
@@ -2097,6 +2113,7 @@ internal sealed class SimulationWorld
         nextMoveGroupId = reader.Int();
         reader.Blob<long>(cohortDepartures);
         var navigationRevision = reader.Int();
+        Knowledge.Read(reader);
         pathService.ReadCounters(reader);
         steeringSystem.Solver.ReadCounters(reader);
         agentIndex.ReadCounters(reader);
@@ -2180,6 +2197,16 @@ internal sealed class SimulationWorld
         phaseStart = Stopwatch.GetTimestamp();
         // Before jobs, so a hauler handed a job this tick starts walking on it this tick, and so
         // production reflects who was standing where at the end of the last one.
+        // <b>Before the economy and the behaviours, because both are candidates to read it.</b> A faction's
+        // knowledge is a fact about where its people and buildings stood at the top of the tick, so it is
+        // gathered once, up front, and everything downstream sees one consistent answer. Nothing reads it yet
+        // — the rule-bot will — and it is gathered anyway so that the state exists to be fingerprinted and
+        // saved from the first tick rather than appearing the day something wants it.
+        phaseStart = Stopwatch.GetTimestamp();
+        Knowledge.Observe(this, TickNumber);
+        Timings.Record(SimulationPhase.Knowledge, Stopwatch.GetTimestamp() - phaseStart);
+
+        phaseStart = Stopwatch.GetTimestamp();
         economy.Update(
             Nodes, Agents, Date, deltaSeconds, TryTravelSeconds, BornAt, Emigrate, ReleaseForestCover);
         Timings.Record(SimulationPhase.Economy, Stopwatch.GetTimestamp() - phaseStart);

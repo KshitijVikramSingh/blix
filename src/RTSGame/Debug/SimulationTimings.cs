@@ -18,6 +18,7 @@ internal enum SimulationPhase
     AgentIndex,
     Commands,
     Economy,
+    Knowledge,
     Threat,
     Jobs,
     Behaviors,

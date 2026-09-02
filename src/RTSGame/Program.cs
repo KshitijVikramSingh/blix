@@ -45,6 +45,12 @@ public static class Program
             Console.WriteLine("  climb keys are formed and not looked up (--field-climbkey) — measurement only");
         }
 
+        if (args.Contains("--no-knowledge"))
+        {
+            Simulation.FactionKnowledge.Enabled = false;
+            Console.WriteLine("  faction knowledge is not gathered (--no-knowledge) — measurement only");
+        }
+
         if (args.Contains("--selftest"))
         {
             Environment.Exit(SimulationSelfTests.Run());

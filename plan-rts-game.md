@@ -11340,3 +11340,82 @@ the travel-refusal counters at zero. `--twovillages` takes `--years`, `--swapfac
 What comes next is the faction knowledge item — what a second player can see and remember, which §119 recorded
 as simulation state that belongs in the fingerprint and is not built — and then a rule-bot that issues the same
 queued commands a person does, so that "the AI plays the player's settlement" is checkable rather than claimed.
+
+## 131. Faction knowledge, which is not the fog
+
+§130 left two settlements running on one map, so the next item on §82's road is the one §119 reserved: what a
+second player can see and remember. That note is the whole design brief and it draws a line in both
+directions.
+
+> **Fog of war** is renderer-side… derived from unit positions and therefore perfectly deterministic, which is
+> the whole trap — the determinism argument for pulling it inside is sound and the consequence is not. The
+> moment a simulation decision reads it, "what the player can see" becomes "what the world does"… The rule is
+> a direction rather than a location: **fog may read the simulation; the simulation may never read fog.**
+>
+> **What is not an exclusion.** A per-faction knowledge aggregate — which cells a faction can currently see, as
+> read by an AI opponent or by a defence deciding whether it is needed — is simulation state and belongs in
+> `Carried` with a census entry, not here. **It is not built.**
+
+So `FactionKnowledge` is built as simulation state: fingerprinted every tick, saved, and read by decisions.
+One `long` per ten-metre cell per faction — the tick it was last seen on. Zero means never, and any other
+value answers both *do I know about this* and *how stale is it* without a second structure or a decay pass. The
+census entry says exactly that, so nobody adds a visible-now mask later and gets two answers.
+
+**One authority for who watches how far.** The per-kind building reaches — a granary 105 m, a depot 190, a
+dwelling 45 — lived in the renderer's fog settings and nothing outside it read them, which was fine while the
+only thing that cared about seeing was the thing that draws it. They are now `NodeWatch` in the simulation,
+because a fact decisions read cannot take its reach from a view tunable, and copying the numbers is precisely
+what `CanSee`'s own comment warns about.
+
+### Knowing is not seeing, and that turned out to be the design
+
+The first version asked `SimulationWorld.CanSee` for every cell of every watcher's radius — the one authority
+on what seeing means, and the obviously right call. **It cost 166 milliseconds a tick in a settlement.** That
+predicate marches the navigation raster at a quarter of a metre, so a granary's hundred-and-five-metre reach is
+four hundred samples per cell across five hundred cells; a simulated year of it is seven hours, which is why
+the gate stopped making progress and stayed stopped.
+
+The phase timer added alongside it is what said so, on the first run. **Which is the argument for adding the
+timer with the pass rather than after somebody complains.**
+
+Rather than invent a coarser ray — a second opinion about seeing being the thing to avoid — the question
+changed to the one this aggregate is for. **A settlement knows the lie of its own land whether or not a ridge
+stands between the granary and the far side of a field.** A bot asking "do I know what is over there" wants
+ground it has had people on, not ground currently in line of sight. So knowledge is reach and the fog keeps
+occlusion, and the two are allowed to differ because they answer different questions — which is the opposite
+of the failure §119 warns about, that being a decision reading the *view*.
+
+### And then it was still seven times the tick
+
+Reach instead of rays brought it to 1.3 ms, measured against 161.0 with the pass switched off. In absolute
+terms nothing; against a simulation whose whole tick is about 0.2 ms it is a sevenfold increase, and §85's rule
+is that per-tick work over the whole map is a trap whatever it costs today.
+
+Nothing needs it every tick. Cells are ten metres across and a body walks at 1.5 m/s, so it takes seven
+seconds to change a single answer and a building never changes one at all. Watchers are refreshed one slot per
+tick over a fifteen-tick interval, which makes the cost flat and brought it to **0.07 ms** — 161.306 without
+the pass against 161.379 with it.
+
+That changed one piece of the interface honestly: `CanSeeNow` became `SeenWithin(faction, at, tick, window)`,
+because with a staggered refresh an exact-tick test would call ground in plain view of a granary unseen most of
+the time. **The tightest question this structure can answer is the interval, so that is what it offers.**
+
+### The test, and two ways it was wrong first
+
+*a faction sees, remembers, and keeps its knowledge to itself* — the three properties that make this knowledge
+rather than fog. The third is the one a rule-bot depends on and the one a bug would quietly remove: an
+aggregate that answered for every faction at once would pass the first two.
+
+Both of its first two failures were the test's own fault, and both are worth recording:
+
+- **It asserted after two ticks**, and the refresh is staggered over fifteen — so it failed on a faction that
+  had simply not been asked yet. It now waits an interval and reads the interval from the constant rather than
+  assuming a number.
+- **It put the two factions sixteen metres apart on the default thirty-metre map**, with twenty-two metres of
+  sight each, so each could see the other's ground and privacy failed on a faction that was legitimately
+  looking at it. The privacy claim needs distance to mean anything.
+
+Nothing reads the knowledge yet, and it is gathered anyway — so that the state exists to be fingerprinted and
+saved from the first tick rather than appearing the day something wants it. What reads it next is the rule-bot,
+which is the last piece before two players can be put on one map: it must issue the same queued commands a
+person does, so that "the AI plays the player's settlement" is checkable rather than claimed.

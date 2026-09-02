@@ -76,6 +76,9 @@ internal static class SimulationSelfTests
         Check("terrain-aware simulations stay deterministic", TerrainSimulationsMatch());
         Check("repath recovers from a nearby invalid start cell", RepathRecoversFromInvalidStart());
         Check(
+            "a faction sees, remembers, and keeps its knowledge to itself",
+            FactionKnowledgeSeesRemembersAndStaysPrivate());
+        Check(
             "an order from ground the body does not fit on joins the field",
             AnOrderFromMarginalGroundJoinsTheField());
         Check("placement uses purpose-specific colliders", PlacementUsesColliderQuery());
@@ -1394,6 +1397,57 @@ internal static class SimulationSelfTests
             $"refusals={world.GradientRefusals} outcomes={world.OrderOutcomes} " +
             $"stoodAt=({standing.X:F3},{standing.Y:F3}) cell=({cell.X},{cell.Z}) " +
             $"clearance={world.Navigation.Clearance(cell):F3}");
+        return passed;
+    }
+
+    /// <summary>
+    /// A faction sees where it stands, remembers where it has been, and knows nothing of the rest.
+    /// </summary>
+    /// <remarks>
+    /// <b>The three properties that make this knowledge rather than fog.</b> §119 reserved a per-faction
+    /// aggregate as simulation state and §131 built it, and what has to be true of it is: a faction can see
+    /// around its own people, it still knows ground it has left — that is the difference between seeing and
+    /// having seen — and it knows nothing about ground only somebody else has walked. The third is the one a
+    /// rule-bot depends on and the one a bug would quietly remove: an aggregate that answered for every
+    /// faction at once would pass the first two.
+    /// </remarks>
+    private static bool FactionKnowledgeSeesRemembersAndStaysPrivate()
+    {
+        // <b>A world big enough for two factions to be strangers.</b> On the default thirty-metre square the
+        // two bodies stood sixteen metres apart with twenty-two metres of sight each, so each could see the
+        // other's ground and "keeps its knowledge to itself" failed on a faction that was simply looking at
+        // it. The privacy claim needs distance to mean anything.
+        var world = new SimulationWorld(240f);
+        var mine = new FactionId(0);
+        var theirs = new FactionId(1);
+        var here = new Vector2(-70f, 0f);
+        var away = new Vector2(70f, 0f);
+
+        var scout = world.SpawnAgent(here, mine);
+        world.SpawnAgent(away, theirs);
+        // <b>Past one refresh interval, because the observation is staggered.</b> Watchers are re-marked one
+        // slot per tick so the pass costs a flat fraction of itself, which means a body's ground is not known
+        // on the tick it appears. The first version of this asserted after two ticks and failed on a faction
+        // that had simply not been asked yet — a test racing an interval it did not know about.
+        Tick(world, FactionKnowledge.RefreshInterval + 2);
+
+        var seesItsOwnGround = world.Knowledge.Knows(mine, here);
+        var theirsIsPrivate = !world.Knowledge.Knows(mine, away);
+        var theySeeTheirs = world.Knowledge.Knows(theirs, away);
+
+        // Walk the scout away and check the ground it left is remembered rather than forgotten.
+        world.QueueMove(new[] { scout }, new Vector2(-70f, 30f));
+        Tick(world, 240 * WalkingPace);
+        var remembers = world.Knowledge.Knows(mine, here);
+        var stale = world.Knowledge.LastSeen(mine, here) < world.TickNumber;
+
+        var passed = seesItsOwnGround && theirsIsPrivate && theySeeTheirs && remembers && stale;
+        if (!passed) Console.WriteLine(
+            $"    knowledge: sees own={seesItsOwnGround}, theirs private={theirsIsPrivate}, " +
+            $"they see theirs={theySeeTheirs}, remembers after leaving={remembers}, " +
+            $"memory is stale={stale} (last seen {world.Knowledge.LastSeen(mine, here)} of tick " +
+            $"{world.TickNumber}), known cells mine={world.Knowledge.KnownCells(mine)} " +
+            $"theirs={world.Knowledge.KnownCells(theirs)}");
         return passed;
     }
 

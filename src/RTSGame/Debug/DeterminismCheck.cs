@@ -74,6 +74,11 @@ internal static class DeterminismCheck
         "SimulationWorld.commands", "SimulationWorld.paths", "SimulationWorld.moveGroups",
         "SimulationWorld.nextMoveGroupId", "SimulationWorld.cohortDepartures",
         "SimulationWorld.blockColliders",
+        // §131. The aggregate §119 reserved: what a faction can see and remembers seeing is simulation state,
+        // read by decisions, and therefore fingerprinted — as against the renderer's fog, which is view state
+        // and must never be read by the simulation. Getting these two the wrong way round is the mistake that
+        // note exists to prevent, in both directions.
+        "SimulationWorld.Knowledge",
         "ThreatSystem.Killed", "ThreatSystem.Dealt",
         "ThreatSystem.Standing", "ThreatSystem.Fleeing", "ThreatSystem.Surplus", "ThreatSystem.Crowded",
         "ThreatSystem.Contacts", "ThreatSystem.UnderAttack", "ThreatSystem.Attacking",
@@ -269,6 +274,10 @@ internal static class DeterminismCheck
             "every proxy ever added, in id order, with its owner, shape, centre and enabled " +
             "flag. Its hashes and partitions are rebuilt from those.",
         ["AgentCommand"] = "walked in full by PlainDataWalker, whatever kind of order it is.",
+        ["FactionKnowledge"] =
+            "every cell's last-seen tick, for every faction, in a fixed order. That single number is both " +
+            "what a faction knows and how stale it is, so there is nothing else to read: a visible-now mask " +
+            "would be the same value compared against the tick.",
         ["NodeStore"] =
             "every slot including tombstones, each walked in full by PlainDataWalker because a node " +
             "is plain data, plus its slot count, live count and revision.",
@@ -558,6 +567,25 @@ internal static class DeterminismCheck
         }
 
         WriteEconomy(world, ref sink);
+
+        // <b>What each faction knows, every tick.</b> Not at a checkpoint like the map: knowledge changes on
+        // every tick that anybody moves, and a divergence in it is a divergence in what a decision will be
+        // allowed to read. Cheap because it is one long per ten-metre cell per faction, in a fixed order.
+        sink.Push("knowledge", -1);
+        sink.Add("knowledgeCells", world.Knowledge.Cells);
+        for (var faction = 0; faction < FactionKnowledge.Factions; faction++)
+        {
+            var seen = world.Knowledge.SeenBy(faction);
+            for (var cell = 0; cell < seen.Length; cell++)
+            {
+                if (seen[cell] == 0) continue;
+                // Only what has been seen, and the cell index with it. Folding sixty thousand zeroes a tick
+                // would be the same hash for every run that has looked at nothing, and the index is what keeps
+                // two different cells from being one contribution.
+                sink.Add("seenCell", cell);
+                sink.Add("seenTick", seen[cell]);
+            }
+        }
 
         var bodies = world.Agents.All;
         for (var slot = 0; slot < bodies.Length; slot++)
