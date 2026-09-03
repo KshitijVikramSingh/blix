@@ -1986,7 +1986,23 @@ internal static class SettlementScenarios
     /// </remarks>
     private const float WadeableSiteDepth = 0.05f;
 
-    public static Vector2 ChooseSite(SimulationWorld world, float extentMeters)
+    /// <param name="away">
+    /// A site already taken, if there is one, so a second settlement is not founded on top of the first.
+    /// </param>
+    /// <param name="minimumApart">
+    /// How far a candidate must be from <paramref name="away"/> to be considered.
+    /// <b>Together these replace a second site-chooser that scored flatness and nothing else.</b> §130 needed
+    /// somewhere to put a neighbour and got one; §135 then measured a bot against a founding across the two
+    /// sites and found it was mostly measuring soil — village A's fields came out at a median fertility of
+    /// 1.02 and the pair together at 0.76, because the neighbour had been placed on the flattest ground the
+    /// geometry allowed and flatness is not what a settlement lives on. Two settlements founded by different
+    /// rules cannot be compared, and every later claim about an opponent inherits that.
+    /// </param>
+    public static Vector2 ChooseSite(
+        SimulationWorld world,
+        float extentMeters,
+        Vector2? away = null,
+        float minimumApart = 0f)
     {
         var span = ReliefSpan(world);
         if (span < 1f) return CornerSite(extentMeters);
@@ -2005,6 +2021,14 @@ internal static class SettlementScenarios
         for (var x = -limit; x <= limit; x += step)
         {
             var at = new Vector2(x, z);
+            // Ground already claimed by a neighbour, and the band it needs around it. Rejected before any of
+            // the sampling below, because the scoring is the expensive half and a site this close is not a
+            // candidate whatever it scores.
+            if (away is { } taken && Vector2.DistanceSquared(at, taken) < minimumApart * minimumApart)
+            {
+                continue;
+            }
+
             var here = terrain.SampleHeight(at);
 
             // A bench to build on. Sampled over the ground the village and its fields actually occupy
@@ -2144,33 +2168,16 @@ internal static class SettlementScenarios
     /// </para>
     /// </remarks>
     /// <summary>
-    /// Flat, walkable ground about <paramref name="apart"/> metres from a first site, for a neighbour.
+    /// The best site for a neighbour: <see cref="ChooseSite"/>, kept clear of one already taken.
     /// </summary>
     /// <remarks>
-    /// <b>Shared by the probe and the game, because two site choosers would be two maps.</b> Not
-    /// <see cref="ChooseSite"/>: that scores farmland, wood and backdrop over the whole map and would pick the
-    /// same best site twice. This asks a narrower question — somewhere level enough to lay a settlement on, at
-    /// roughly a given distance — and leaves the scoring to the founding that follows.
+    /// <b>The same scorer, because two choosers were two maps.</b> The first version of this scored flatness
+    /// and nothing else, which put the second settlement on the worst farmland the geometry allowed — see the
+    /// note on ChooseSite's own parameters for what that cost. A neighbour wants what any settlement wants,
+    /// asked of the ground it is allowed to have.
     /// </remarks>
-    public static Vector2 NeighbourSite(SimulationWorld world, Vector2 from, float apart)
-    {
-        var best = from;
-        var bestScore = float.NegativeInfinity;
-        for (var i = 0; i < 64; i++)
-        {
-            var angle = i / 64f * MathF.Tau;
-            var at = from + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * apart;
-            if (!world.Terrain.Contains(at, 8f)) continue;
-            if (!world.Navigation.TryWorldToCell(at, out var cell)) continue;
-            if (!world.Navigation.IsWalkable(cell, AgentDefaults.RoutingRadius)) continue;
-            var score = -world.Terrain.SampleGrade(at);
-            if (score <= bestScore) continue;
-            bestScore = score;
-            best = at;
-        }
-
-        return best;
-    }
+    public static Vector2 NeighbourSite(SimulationWorld world, Vector2 from, float apart) =>
+        ChooseSite(world, world.ExtentMeters, from, apart);
 
     public static Vector2 CornerSite(float extentMeters) =>
         new(-extentMeters * 0.25f, -extentMeters * 0.22f);

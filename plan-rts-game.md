@@ -11694,3 +11694,54 @@ Before build and train are worth adding:
   cutters stop when their trees run out and are never re-posted. The bot keeps everybody employed, which is
   the one thing it plainly does better, and it is worth knowing which of the two is right before either is
   taken as the standard.
+
+## 136. One scorer, and full employment turns out to be worse
+
+§135 owed two things before the bot could be given more to do. The first is done and the second has an answer
+nobody would have guessed.
+
+### The neighbour is founded the way any settlement is
+
+`NeighbourSite` scored flatness alone, so a second settlement went on the worst farmland the geometry allowed.
+It is now `ChooseSite` with two extra parameters — a site already taken and the band to keep clear of it — so
+one scorer answers for both settlements and there is nothing to drift.
+
+```
+                          before            after
+village A alone     median 1.02       median 1.02
+A and B together    median 0.76       median 1.00
+neighbour            198 m away        423 m away
+```
+
+The pair now sit on comparable soil, which is the whole point: two settlements founded by different rules
+cannot be compared, and every claim about an opponent inherited that.
+
+### And with the soil equal, the bot is worse
+
+The same faction, the same site, one year, with and without the bot driving it:
+
+```
+f1 without the bot   grain 3,259   wood 187   people 10   f5 w3 o0 i2
+f1 with the bot      grain 2,028   wood  38   people 10   f7 w3 o0 i0
+```
+
+**Seven hands on the fields produced less than five, and nobody idle produced less than two idle.** So §135's
+closing line — *the bot keeps everybody employed, which is the one thing it plainly does better* — is
+withdrawn. It was said on the strength of the bad-soil comparison, where the bot's extra people looked like a
+policy win, and on equal ground the same policy is a loss on both resources.
+
+That is worth stating as a claim about the *economy* rather than about the bot: **on this settlement, more hands
+on the fields yields less grain.** Something about a field's output is not linear in the hands posted to it,
+and until that is understood a bot cannot be tuned — every allocation policy would be tuning against a
+response nobody has measured.
+
+### The next measurement, named
+
+Not another allocation guess. The jobs layer already counts legs completed per body, and what is needed is that
+figure per faction and per field: whether the bot's seventh hand is walking rather than working, whether two
+hands on one field halve each other's shifts, or whether a field's yield is capped by something other than
+labour and the extra hands are simply eating. Those are three different mechanisms with one symptom, which is
+§51's recurring shape, and the counter that tells them apart already exists.
+
+Kept honest in the meantime: the bot is *competitive and behind* on equal ground, and nothing above should be
+read as it playing well.
