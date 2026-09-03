@@ -1062,13 +1062,15 @@ internal sealed class ReliefPlan
         // Cut in, the same term works the other way: downstream is deeper, so the surface sits <em>lower</em>
         // against its banks the further it goes. The growth that used to fight the gradient now helps it.
         var first = Drainage.Solve(lattice, side, DrainageCellMetres, inflow);
-        // <b>Sized on upslope area, not on the authored corridor, and that was measured rather than
-        // assumed.</b> §156: the criterion reads WidthAt, which takes the maximum of area-derived width and
-        // whatever the layout drew, so carving the authored corridors looked like the obvious correction —
-        // and it made things worse, 6,278 uphill reaches becoming 7,623 and the sweep's shortfall count
-        // going 148 to 156, which is the ratchet doing its job. An authored river is a corridor the layout
-        // wants water in; it is not evidence that this cell drains anything, and cutting a trough along it
-        // gives the solver a new low path that its own accumulation never justified.
+        // <b>Gated on real flow, sized on the width the level rule will use.</b> §158, and the distinction
+        // is the whole of why §156's attempt failed. Carving wherever the layout drew a corridor invented low
+        // paths the solver's own accumulation never justified — 6,278 uphill reaches became 7,623 and the
+        // ratchet caught it. But sizing the depth from area alone leaves an authored river cut to a fraction
+        // of the depth its level will claim. So: only cells that actually drain something are carved, and how
+        // deep is decided by WidthAt, which is what EnsureLevel reads.
+        first.Origin = transform.Origin;
+        first.SetWaterScale(RegionProfile.For(region).WaterScale);
+        first.PaintAuthoredWidth(AuthoredWidths(side, transform.Origin));
         Incise(lattice, side, transform.Origin, first);
 
         var drainage = Drainage.Solve(lattice, side, DrainageCellMetres, inflow);
@@ -1236,6 +1238,12 @@ internal sealed class ReliefPlan
     /// deepening it would be inventing relief the fill has already accounted for.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// How much a water surface must fall across one drainage cell. Small: a millimetre in four metres is
+    /// still monotone, and a larger figure would carve gorges out of gentle country to satisfy arithmetic.
+    /// </summary>
+    private const float MinimumFallPerCell = 0.002f;
+
     private static void Incise(float[] lattice, int side, Vector2 origin, Drainage found)
     {
         var carve = new float[lattice.Length];
@@ -1252,21 +1260,61 @@ internal sealed class ReliefPlan
         for (var index = 0; index < lattice.Length; index++)
         {
             if (lake[index] > 0.02f) continue;
-            var here = Drainage.WidthOf(found.Area[index]);
-            if (here <= DrainageCellMetres) continue;
+            // The gate is accumulation: does water actually come through here.
+            if (Drainage.WidthOf(found.Area[index]) <= DrainageCellMetres) continue;
+            // The depth is the width the level rule will use, authored corridor included.
+            var here = found.WidthAt(origin + new Vector2(index % side, index / side) * DrainageCellMetres);
             own[index] = 0.30f * MathF.Sqrt(here) * 1.15f;
             carve[index] = own[index];
+        }
+
+        // <b>And then the profile, which is the fix the dump actually justified.</b> §157 closed the
+        // arithmetic on the worst offenders: width roughly doubles across one four-metre cell, because
+        // accumulated area is discontinuous where a tributary joins, so the stacked depth jumps 27 cm against
+        // a bed falling 1 cm. <b>The level rule steps the surface up at every confluence.</b>
+        //
+        // A real confluence does not raise the water: the channel below it is deeper and the surface keeps
+        // falling. So the surface is made to fall, and the bed is cut to wherever it has to be to hold the
+        // channel's depth underneath it. Walked from the headwaters down — cells in order of decreasing
+        // filled height, so every contributor is settled before the cell it feeds — lowering the downstream
+        // surface whenever it would sit above its own upstream.
+        var order = new int[lattice.Length];
+        for (var i = 0; i < order.Length; i++) order[i] = i;
+        Array.Sort(order, (a, b) => found.Filled[b].CompareTo(found.Filled[a]));
+
+        var surface = new float[lattice.Length];
+        for (var i = 0; i < surface.Length; i++)
+        {
+            surface[i] = lattice[i] - carve[i] + (own[i] > 0f ? own[i] / 1.15f : 0f);
+        }
+
+        var receiver = found.Receiver;
+        var lakeDepth = found.LakeDepth;
+        foreach (var index in order)
+        {
+            if (own[index] <= 0f) continue;
+            var to = receiver[index];
+            if (to < 0 || to == index || own[to] <= 0f) continue;
+            // Left alone where the water is standing: a lake's surface is its sill and does not owe its
+            // inflow a gradient.
+            if (lakeDepth[to] > 0.02f) continue;
+            var wanted = surface[index] - MinimumFallPerCell;
+            if (surface[to] <= wanted) continue;
+            // The bed drops by exactly what the surface had to.
+            carve[to] += surface[to] - wanted;
+            surface[to] = wanted;
         }
 
         for (var index = 0; index < lattice.Length; index++)
         {
             if (lake[index] > 0.02f) continue;
-            var width = Drainage.WidthOf(found.Area[index]);
-            if (width <= DrainageCellMetres) continue;
+            if (own[index] <= 0f) continue;
+            var width = found.WidthAt(origin + new Vector2(index % side, index / side) * DrainageCellMetres);
 
             // Deeper than the water will fill, so the river has banks rather than brimming over them: the
             // level rule puts the surface at bed plus channel, and this cuts fifteen per cent past that.
-            var depth = 0.30f * MathF.Sqrt(width) * 1.15f;
+            var depth = carve[index];
+            if (depth <= 0f) continue;
             var half = MathF.Max(DrainageCellMetres, width * 0.5f);
             var reach = (int)MathF.Ceiling(half / DrainageCellMetres);
             var cx = index % side;

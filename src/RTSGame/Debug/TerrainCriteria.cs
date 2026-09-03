@@ -348,12 +348,17 @@ internal readonly record struct TerrainCriteria(
         // that has a basin under it reports a fault on every map ever generated. Fifty-five of the first
         // hundred and sixty-two shortfalls were this, and none of them were real. §147's rule is about
         // depressions, so the criterion has to be too.
+        // <b>Over the labelled bodies, not over every filled hollow.</b> §158, and the third definition this
+        // criterion has had: Bodies() flooded every wet cell (§151), LakeDepth is the fill depth at every
+        // cell — which every hollow on the map has — and this is the set §147's rule actually governs. A
+        // hollow the model has already refused to call a lake is not a basinless lake.
+        var standing = water.Standing;
         var basinless = 0;
         var seen = new bool[lake.Length];
         var stack = new Stack<int>();
         for (var start = 0; start < lake.Length; start++)
         {
-            if (seen[start] || lake[start] <= 0.05f) continue;
+            if (seen[start] || !standing[start] || lake[start] <= 0.05f) continue;
             stack.Push(start);
             seen[start] = true;
             var deepest = 0f;
@@ -385,7 +390,7 @@ internal readonly record struct TerrainCriteria(
         {
             if (x < 0 || z < 0 || x >= side || z >= side) return;
             var index = z * side + x;
-            if (seen[index] || lake[index] <= 0.05f) return;
+            if (seen[index] || !standing[index] || lake[index] <= 0.05f) return;
             seen[index] = true;
             stack.Push(index);
         }

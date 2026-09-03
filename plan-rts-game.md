@@ -12988,3 +12988,66 @@ its own components contradicted. **Not one was found by reading the code, and no
 about the underlying fault survived contact with a number.** The lesson this file keeps writing is the same
 one: build the instrument, then check the instrument against arithmetic that must hold, and only then
 believe what it says.
+
+## 158. A hydraulic profile, and the third definition of "lake"
+
+The fix §157's dump justified, and one more instrument correction of the same family it has been correcting
+all arc.
+
+### The carve now cuts a profile, not just a trough
+
+`Incise` walks the cells from the headwaters down — sorted by filled height, so every contributor is settled
+before the cell it feeds — and wherever a cell's water surface would sit **above its own upstream**, it cuts
+the bed deeper until it falls. That is the confluence step from §157 answered at its mechanism: a real
+junction does not raise the water, it deepens the channel.
+
+Two details are the difference between this and §156's failed attempt:
+
+- **Gated on accumulated flow, sized on `WidthAt`.** Carving wherever the layout drew a corridor invented low
+  paths the solver's accumulation never justified and made everything worse. But sizing depth from area alone
+  cuts an authored river to a fraction of the depth its own level will claim. So the gate asks "does water
+  come through here" and the depth asks "how wide will the level rule think this is" — two questions, two
+  sources.
+- **A minimum fall of two millimetres per cell**, which is monotone without carving gorges out of gentle
+  country to satisfy arithmetic.
+
+**Uphill reaches 6,278 → 5,540.**
+
+### And the criterion had "lake" wrong for the third time
+
+The carve on its own took the sweep from 148 shortfalls to **154** — the ratchet caught it — because basinless
+lakes went from 34 maps to 48. That looked like the carve creating hollows. It was the criterion:
+
+| what it flooded | what that is |
+|---|---|
+| `Bodies()` (§151) | every wet cell — so a whole river network came back as one body |
+| `LakeDepth` (§151's fix) | `filled - ground` at **every** cell, which every hollow on the map has |
+| `Standing` (now) | the labelled bodies: cleared a depth, a catchment, and §147's basin |
+
+Only the third is the set §147's rule governs. **A hollow the model has already refused to call a lake is not
+a basinless lake**, and the carve makes hollows, so it was being blamed for faults that were never faults.
+
+|  | before | after |
+|---|---|---|
+| eroded | 148 | **106** |
+| drainage-first | 134 | **93** |
+
+Remaining: 54 maps with uphill reaches, 17 short of fall, 7 with flanks over the limit, 3 with crossable
+ground in pieces. **And the drainage-first generator is now measurably ahead of the eroded one** on criteria
+that measure what they claim to — the first time that has been true.
+
+### The tally, and what it is actually telling me
+
+Nine instrument corrections against five generator changes. The pattern is stable enough to name: this model
+has **near-synonyms for its central quantities**, and I have been caught by all three pairs —
+
+- `LakeDepth` (fill depth anywhere) against `Standing` (a body that counts)
+- `WidthAt` (area *or* authored) against `WidthOf(Area)` (area alone)
+- `LevelAt` (bilinear sample) against `LevelField` (the per-cell array the rule wrote)
+
+Each pair has one member that answers "what does the renderer see here" and one that answers "what did the
+rule decide here", and a criterion is always asking the second. Every wrong hypothesis this arc came from
+reaching for whichever name was nearest.
+
+That is worth more than the fix: the next criterion written against this model should start by naming which
+of the pair it needs and why.

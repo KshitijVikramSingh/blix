@@ -231,6 +231,28 @@ internal sealed class Drainage
     /// </remarks>
     public float[] LevelField => EnsureLevel();
 
+    /// <summary>
+    /// Which cells hold a body of water that counts as one, rather than merely sitting under a fill.
+    /// </summary>
+    /// <remarks>
+    /// <b>Exposed because two different things were being called a lake.</b> §158: <see cref="LakeDepth"/> is
+    /// <c>filled - ground</c> at every cell — how far below its depression's sill a cell sits — and every
+    /// hollow on the map has it. This is the labelled set: the bodies that cleared a depth, a catchment and
+    /// §147's basin. §151 moved the basin criterion off <c>Bodies()</c> and onto <c>LakeDepth</c>, which was
+    /// closer and still not the set the rule governs, so a carve-induced hollow the rule had already refused
+    /// to call a lake was still being counted as a basinless one.
+    /// </remarks>
+    public bool[] Standing
+    {
+        get
+        {
+            EnsureLevel();
+            return standing ?? new bool[ground.Length];
+        }
+    }
+
+    private bool[]? standing;
+
     /// <summary>The bed per cell, likewise, and for the same reason.</summary>
     public float[] Ground => ground;
 
@@ -482,7 +504,7 @@ internal sealed class Drainage
         // So the depression is labelled first and asked about as a whole: how deep does it get anywhere, and
         // how much drains through it at its busiest point. Both are properties of the body. Same two
         // thresholds, finally applied to the thing they were always about.
-        var standing = new bool[ground.Length];
+        standing = new bool[ground.Length];
         var seen = new bool[ground.Length];
         var stack = new Stack<int>();
         var members = new List<int>();
