@@ -11803,3 +11803,160 @@ explained.
 The bot reaches parity by keeping hands employed on the right fields, which was the whole of item 2's
 precondition. Build and train can be added against a settlement that is no longer losing ground for reasons
 nobody has attributed — and the per-field report stays, because it is the thing that would say so again.
+
+## 138. One figure for the whole world, where there is now more than one world in it
+
+Item 2 was going to be build-and-train. §135's lesson said find the constraint before writing a policy —
+housing had turned out never to be one, and a house-building policy would have changed nothing while looking
+like it had been tried. So the first move was to read the birth condition rather than write against it.
+
+A birth needs, per house: a valid supply bound to a live store, no privation, and growth accumulated at
+
+```csharp
+house.Growth += deltaSeconds * Readiness;
+```
+
+and one line above it:
+
+```csharp
+var held = nodes.TotalHeld();
+var mouths = 0f;
+foreach (var id in nodes.SettlementNodes) { ...; mouths += sink.AppetiteSum; }
+Readiness = Population.Readiness(held.Grain, held.Wood, mouths, season);
+```
+
+`TotalHeld()` is every store on the map and `mouths` is every appetite on it. **Readiness was a single
+world-wide number, and every house of every faction accrued births at it.** A rich neighbour subsidised a poor
+one's children; a poor one's mouths slowed the rich one's.
+
+The third of exactly this shape in three sessions: `Outlook` (§132), `UnhousedCount` (§135), and now this. It
+is worth naming as a class rather than fixing three times, because **nothing about the code looked different
+in any of the three cases**. Each was a correct total over "the settlement", written when there was one, and
+each stayed compiling, stayed conservation-exact and stayed plausible once there were two. There is no type
+error in summing the wrong set. The only thing that catches it is a second faction and a report that shows
+both.
+
+Fixed by clearing three per-faction arrays at the top of the pass, filling them from live nodes by owner, and
+rating each house at its own faction's figure. The reported `Readiness` stays the player's, which is what
+every consumer of it displays — a HUD saying "can feed one more" is answering about the settlement the person
+is looking at.
+
+**One semantic change came with it, deliberately.** `TotalHeld()` is documented as "stores and heaps, not
+standing timber", and a heap on the road is `FactionId.None` on purpose — see the note at its creation:
+"nobody's, which is what makes looting a thing that happens rather than a rule that has to be written". A
+per-faction sum has to skip it, so **grain lying on the ground no longer counts toward anybody's readiness**.
+That is arguably the better answer — a heap is not in the larder, and no catchment feeds off it — but it is
+a change, not a refactor, and heaps are transient and small enough that the year gate stays green either way.
+The alternative, attributing a heap to whichever catchment covers it, would make looted grain feed the
+looter's children, which is a design decision and not this section's.
+
+The determinism census caught the four new arrays by name before any test did, and they are Derived: cleared
+and refilled from the node store before anything reads them, so a save that restores the nodes restores these.
+
+**The test asserts the two figures differ**, which is the thing a single world figure cannot do. Two
+settlements far enough apart that no catchment couples them, one stocked and one empty: the stocked one grows
+1 → 3 at 100%, the empty one 1 → 0 at 0%. Before the fix this test could not have failed the right way round.
+
+### And it changed nothing, which is how the real fault surfaced
+
+Re-run over a year with the fix in: the bot's settlement still shrank 17 → 10. The fix was right and it was
+not the constraint. What was, was sitting in a line of the report that had been printing for two sessions:
+
+```
+faction 0's site: 5425 walkable, 1136 refused within 20 m (792 marked solid), 0 deposits alive inside 20 m
+faction 1's site:  975 walkable, 5586 refused within 20 m (5095 marked solid), 219 deposits alive inside 20 m
+faction 1: 12 assigned (12 active), 2 nodes with hands, 2/7 sinks bound to a store
+  unbound House at (-14,-178) <-> Granary at (-5,-185), 12 m apart: unpriced
+```
+
+Six of the bot's eight fields read `0L 0%` — hands posted, nothing reaped, all year. Not a policy fault at
+all. See §139.
+
+## 139. A village founded in a forest, and two layers each right about its own question
+
+`IsBlocked(cell) => !Contains(cell) || GroundAt(cell).Blocked`, and blocked comes from one rule:
+
+```csharp
+public static bool IsPassable(TerrainSurface surface) =>
+    surface is not (TerrainSurface.Impassable or TerrainSurface.Forest);
+```
+
+**Navigation treats a painted Forest biome as solid ground.** The bot's settlement was founded inside one:
+5,095 cells solid within twenty metres, the 219 standing deposits being the trees of it, its granary
+unreachable from a house twelve metres away, and six fields that could not be worked. The books balanced every
+tick throughout, because nothing happened — §135's fault in a new costume, and the reason the acceptance test
+now asserts that stores *change*.
+
+`ChooseSite` scores grade over a five-point ring, water depth out to the field keep-out, woodland cover, soil
+fertility and how the site sits against the map. It never asked whether the ground could be stood on.
+
+This is the §51 family and the cleanest case of it yet, because **neither layer is wrong**. "Level, dry,
+wooded, sheltered, fertile" is a fair description of good ground to found on. "A forest is not walkable" is a
+fair rule for a path. Their conjunction is a village that cannot reach its own granary. Unlike the proxies of
+§113 and the site scorer's own wood term, nothing here stood in for anything — the scorer simply never
+consulted the layer that decides whether ground can be occupied.
+
+My first explanation of why the *first* settlement never caught this was that its site is chosen before the
+biomes are painted, on ground that is still all open. **That is wrong, and worth leaving in with its
+correction, because it was a comfortable story.** Every path paints first: `RtsGameLoop` at 1741 before
+`ChooseSite` at 1834, and `--twovillages` at 55 before choosing either site. `PaintCountry` *is*
+`PaintBiomes`, which makes the call inside `Populate`'s dressing block a second paint over an already-painted
+map — redundant rather than harmful, since it is a pure function of the terrain.
+
+So there is no accident of order. Both sites are chosen on a painted map by a scorer that never asks about
+passability, and f0 is simply not forced: it scores into ground that is 12% solid, while f1's exclusion band
+narrows the field until the best remaining candidate is a forest. **The second settlement is where an
+unguarded scorer bites, and the reason is exclusion, not sequence** — which also means the fault was always
+reachable with one settlement, on a map whose good ground happened to be wooded.
+
+`PaintBiomes` has no settlement keep-out anywhere in it, which is the source-level version of the same thing.
+
+Two fixes, prevention first, and they divide the problem cleanly:
+
+- **`MostlyWalkable` gates the site** — a 5×5 lattice over the keep-out square, three quarters of it passable
+  or the candidate is not a candidate. It samples the terrain surface, not the navigation raster, for the same
+  reason the grade test samples the height field: the raster is a reading of the terrain, and a scorer that
+  consults it is asking a cache whether the world is walkable.
+- **`ClearSiteSurface` clears the ground the settlers built on** — forest to grass inside the keep-out square,
+  unconditionally, whether or not this founding dressed the map. The gate keeps a village out of a forest; this
+  clears the copses inside ground it does occupy. Surface only, and deliberately **not** the trees standing in
+  it: a tree holds wood in the ledger, `Remove` zeroes a node's stock, and removing 219 stocked trees would
+  write their wood out of existence — which the conservation check would catch, correctly. Trees do not block
+  navigation anyway, so a settlement founded in woodland keeps its timber standing where its cutters can reach
+  it.
+
+### What it bought
+
+| | before | after |
+|---|---|---|
+| f1 walkable cells within 20 m | 975 | 3,172 |
+| f1 cells marked solid | 5,095 | 2,687 |
+| f1 sinks bound to a store | 2/7 | 7/7 |
+| f1 fields reaping at harvest | 2 of 8 | 8 of 8 |
+| f1 grain at winter | 3,824 | 6,338 |
+| f1 people over the year | 17 → 10 | 17 → 17 |
+| f0 people over the year | 13 → 18 | 13 → 22 |
+
+The site itself did not move — it was copse-heavy rather than majority forest, so the gate passed it and the
+clearing did the work. f0's numbers moved too, and that is §138: no longer slowed by mouths it does not feed.
+
+**Both changes were needed and neither would have shown alone.** Per-faction readiness with the village still
+in a forest reads as no change at all; clearing the forest without per-faction readiness leaves both
+settlements rated by a shared figure. The order they were found in is the point: the fix that was *reasoned*
+to was not the constraint, and running it anyway is what put the site line in front of me.
+
+### Still open
+
+- **Wood.** The gap (§137) narrowed at winter — 367 against 618 — and then closed the wrong way: by the end
+  of the year **both settlements are at zero**, f1 finishing on more grain than f0 (5,136 against 4,829) with
+  five fewer mouths. Wood is now a shared constraint rather than a bot fault, which makes it the next thing a
+  build policy would run into: there is nothing to build with. It is still not chased.
+- **`PaintBiomes` has no settlement keep-out**, which is why f0 carries 792 solid cells of its own — patched
+  after the fact by `ClearSiteSurface` rather than prevented at the source. The source fix is for the paint to
+  know where the settlements are, which means choosing all the sites before dressing rather than the reverse.
+- **`MostlyWalkable`'s three-quarters threshold is a first number**, not a measured one. It now has a test
+  that shows it does *something*: paint forest over the ground the scorer chose and the choice moves 62 m,
+  from (-50,190) to (-110,175), still walkable — a scorer that ignores passability returns the same point
+  both times, so the test can only pass because the gate exists. What the test does not establish is that
+  three quarters is the right fraction. It admitted the bot's copse-heavy site, which was the right call given
+  the clearing, and nothing yet exercises the boundary.

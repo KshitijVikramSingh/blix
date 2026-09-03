@@ -157,6 +157,8 @@ internal static class SimulationSelfTests
         Check("a palisade becomes stone on the same stable node", APalisadeBecomesStoneOnTheSameNode());
         Check("a barracks turns the same villager into militia", ABarracksTrainsTheSameVillager());
         Check("housing caps a population and food brakes it", PeopleArriveWhenThereIsRoomAndFood());
+        Check("a neighbour's full larder is not yours", NeighbourLarderIsNotYours());
+        Check("a village is not founded in a forest", AVillageIsNotFoundedInAForest());
         Check("a household that goes hungry loses somebody", PrivationSpendsItselfAsEmigration());
         Check("a wood hides what walks through it", TreesBlockSight());
         Check(
@@ -5563,6 +5565,106 @@ internal static class SimulationSelfTests
             $"house outside every catchment grew nobody={strandedGrewNobody}; the same map with an empty " +
             $"larder bore {poorBorn} at {poorReadiness * 100f:F0}% readiness; drift {drift.Grain}/{drift.Wood}");
         return passed;
+    }
+
+    /// <summary>
+    /// A full larder next door is not your larder: readiness is per faction.
+    /// </summary>
+    /// <remarks>
+    /// §138. Two settlements on one map, one stocked and one empty. Before the fix this test could not have
+    /// failed the right way round: readiness summed every store and every appetite on the map, so the empty
+    /// faction bore children out of its neighbour's granary and the stocked one was slowed by mouths it did
+    /// not feed. It asserts the two figures <b>differ</b>, which is the thing a single world figure cannot do.
+    /// </remarks>
+    private static bool NeighbourLarderIsNotYours()
+    {
+        var world = new SimulationWorld(600f);
+        var rich = new FactionId(0);
+        var poor = new FactionId(1);
+
+        // Far enough apart that neither granary is in the other's catchment, so the only thing that could
+        // couple them is the readiness figure itself.
+        var richGranary = world.AddNode(NodeKind.Granary, new Vector2(-200f, 0f), capacity: 9000, faction: rich);
+        world.AddNode(NodeKind.House, new Vector2(-190f, 0f), capacity: 0, occupancy: 4, faction: rich);
+        world.SeedStock(richGranary, Resource.Grain, 6000);
+        world.SeedStock(richGranary, Resource.Wood, 6000);
+
+        world.AddNode(NodeKind.Granary, new Vector2(200f, 0f), capacity: 9000, faction: poor);
+        world.AddNode(NodeKind.House, new Vector2(190f, 0f), capacity: 0, occupancy: 4, faction: poor);
+
+        world.SpawnAgent(new Vector2(-190f, 5f), UnitType.Villager, rich);
+        world.SpawnAgent(new Vector2(190f, 5f), UnitType.Villager, poor);
+
+        var before = (Rich: PeopleOf(world, rich), Poor: PeopleOf(world, poor));
+        Tick(world, (int)(30 * WorldCalendar.YearSeconds));
+        var after = (Rich: PeopleOf(world, rich), Poor: PeopleOf(world, poor));
+
+        var richReadiness = world.Economy.ReadinessOf(rich);
+        var poorReadiness = world.Economy.ReadinessOf(poor);
+        var passed = richReadiness > 0.9f && poorReadiness <= 0.001f && after.Rich > before.Rich &&
+                     after.Poor <= before.Poor;
+        Console.WriteLine(
+            $"    stocked neighbour at {richReadiness * 100f:F0}% grew {before.Rich}->{after.Rich}; " +
+            $"empty one at {poorReadiness * 100f:F0}% grew {before.Poor}->{after.Poor} " +
+            $"(one world figure would have fed both)");
+        return passed;
+    }
+
+    /// <summary>
+    /// A site is not a site if nobody can stand on it: founding refuses ground navigation calls solid.
+    /// </summary>
+    /// <remarks>
+    /// §139. The gate it exercises had no test when it was written, which is the whole complaint this project
+    /// makes about thresholds. It asserts the choice <b>moves</b> when the ground it settled on becomes
+    /// forest — a scorer that ignores passability returns the same point both times, so the test can only
+    /// pass because the gate is there.
+    /// </remarks>
+    private static bool AVillageIsNotFoundedInAForest()
+    {
+        const float extent = 600f;
+        var world = new SimulationWorld(extent);
+        world.Terrain.SetRegion(Region.Downland);
+        var layout = MapLayout.Composed(Archetype.YValley, extent, 7u, 40f);
+        ReliefPlan.FromLayout(layout, extent, 7u).Apply(world.Terrain);
+        SettlementScenarios.PaintCountry(world);
+        world.RebuildTerrainNavigation();
+
+        var chosen = SettlementScenarios.ChooseSite(world, extent);
+        var openBefore = world.Terrain.IsPassable(chosen);
+
+        // Forest over the ground it chose, wide enough that no part of the keep-out square escapes.
+        var step = world.Terrain.Transform.CellSize;
+        for (var z = -40f; z <= 40f; z += step)
+        for (var x = -40f; x <= 40f; x += step)
+        {
+            if (world.Terrain.Transform.TryWorldToCell(chosen + new Vector2(x, z), out var cell))
+            {
+                world.Terrain.SetSurface(cell, TerrainSurface.Forest);
+            }
+        }
+
+        world.RebuildTerrainNavigation();
+        var again = SettlementScenarios.ChooseSite(world, extent);
+        var moved = Vector2.Distance(again, chosen) > 16f;
+        var landedOpen = world.Terrain.IsPassable(again);
+
+        var passed = openBefore && moved && landedOpen;
+        Console.WriteLine(
+            $"    chose ({chosen.X:F0},{chosen.Y:F0}) on open ground={openBefore}; with that ground under " +
+            $"forest it chose ({again.X:F0},{again.Y:F0}), {Vector2.Distance(again, chosen):F0} m away " +
+            $"and walkable={landedOpen}");
+        return passed;
+    }
+
+    private static int PeopleOf(SimulationWorld world, FactionId faction)
+    {
+        var total = 0;
+        foreach (ref readonly var body in world.Agents.All)
+        {
+            if (body.IsAlive && body.Faction == faction) total++;
+        }
+
+        return total;
     }
 
     /// <summary>The same arrangement with nothing in the granary: housing alone grows nobody.</summary>

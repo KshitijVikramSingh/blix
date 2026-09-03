@@ -485,16 +485,35 @@ internal sealed class EconomySystem
         Birth? born,
         Departure? left)
     {
-        var held = nodes.TotalHeld();
-        var mouths = 0f;
+        // <b>Per faction, because one figure for the world made every settlement grow at everybody's rate.</b>
+        // §138: this summed every store and every appetite on the map, which was the only settlement there
+        // was until §130 — with two, a rich neighbour subsidises a poor one's births and a poor one's mouths
+        // suppress the rich one's. Third of its kind this session, after Outlook (§132) and UnhousedCount
+        // (§135): a figure that was correct while there was one settlement and silently wrong once there were
+        // two, and the reason it is worth naming as a class is that nothing about the code looked different.
+        Array.Clear(factionGrain);
+        Array.Clear(factionWood);
+        Array.Clear(factionMouths);
         foreach (var id in nodes.SettlementNodes)
         {
-            ref readonly var sink = ref nodes.Get(id);
-            if (!sink.IsSink) continue;
-            mouths += sink.AppetiteSum;
+            ref readonly var node = ref nodes.Get(id);
+            if (!node.IsAlive) continue;
+            var owner = node.Faction.Value;
+            if (owner < 0 || owner >= Factions) continue;
+            factionGrain[owner] += node.Stock[Resource.Grain];
+            factionWood[owner] += node.Stock[Resource.Wood];
+            if (node.IsSink) factionMouths[owner] += node.AppetiteSum;
         }
 
-        Readiness = Population.Readiness(held.Grain, held.Wood, mouths, season);
+        for (var owner = 0; owner < Factions; owner++)
+        {
+            factionReadiness[owner] = Population.Readiness(
+                factionGrain[owner], factionWood[owner], factionMouths[owner], season);
+        }
+
+        // The reported figure is the player's, which is what every consumer of it displays — a HUD saying
+        // "can feed one more" is answering about the settlement the person is looking at.
+        Readiness = factionReadiness[0];
 
         foreach (var id in nodes.SettlementNodes)
         {
@@ -525,7 +544,9 @@ internal sealed class EconomySystem
             }
 
             if (house.Privation > 0f) continue;
-            house.Growth += deltaSeconds * Readiness;
+            var owner = house.Faction.Value;
+            house.Growth += deltaSeconds *
+                            (owner >= 0 && owner < Factions ? factionReadiness[owner] : 0f);
             if (house.Growth < Population.PersonSeconds) continue;
             house.Growth -= Population.PersonSeconds;
             Born++;
@@ -548,6 +569,25 @@ internal sealed class EconomySystem
 
     /// <summary>How ready the settlement is to feed one more mouth, from nothing to all of it.</summary>
     public float Readiness { get; private set; }
+
+    /// <summary>
+    /// Factions the population pass keeps a readiness for. See the note where it is computed.
+    /// </summary>
+    /// <remarks>
+    /// Fixed rather than grown, for the same reason <see cref="Simulation.FactionKnowledge.Factions"/> is:
+    /// these are per-tick scratch arrays and a size that depended on the order factions were first mentioned
+    /// would be a size two peers could disagree about.
+    /// </remarks>
+    private const int Factions = 4;
+
+    private readonly int[] factionGrain = new int[Factions];
+    private readonly int[] factionWood = new int[Factions];
+    private readonly float[] factionMouths = new float[Factions];
+    private readonly float[] factionReadiness = new float[Factions];
+
+    /// <summary>How ready one faction is to feed another mouth. See <see cref="Readiness"/>.</summary>
+    internal float ReadinessOf(Collision.FactionId faction) =>
+        faction.Value >= 0 && faction.Value < Factions ? factionReadiness[faction.Value] : 0f;
 
     /// <summary>People born since the world began.</summary>
     public long Born { get; private set; }

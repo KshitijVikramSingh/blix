@@ -105,6 +105,16 @@ internal static class DeterminismCheck
     /// </summary>
     private static readonly Dictionary<string, string> Derived = new()
     {
+        // §138. Four per-faction scratch arrays behind Readiness, which is itself Carried below. All four are
+        // cleared and refilled from the node store at the top of every population pass, before anything reads
+        // them, so a save that restores the nodes restores these — and fingerprinting them would only be
+        // fingerprinting the node store a second time.
+        ["EconomySystem.factionGrain"] = "per-tick scratch, refilled from the node store before any read.",
+        ["EconomySystem.factionWood"] = "per-tick scratch, refilled from the node store before any read.",
+        ["EconomySystem.factionMouths"] = "per-tick scratch, refilled from the node store before any read.",
+        ["EconomySystem.factionReadiness"] =
+            "per-tick scratch, recomputed from the three above every pass. The player's figure is exposed " +
+            "as Readiness, which is fingerprinted.",
         ["SimulationWorld.pathService"] =
             "caches keyed by the revisions of terrain, navigation and congestion, all three of " +
             "which are fingerprinted; its work counters are read through the world and are.",

@@ -907,6 +907,11 @@ internal static class SettlementScenarios
             ScatterWoodland(world, centre);
             ScatterOutcrops(world);
         }
+        // The ground the settlers cleared to build on. After the dressing and outside the `if`, because a
+        // settlement founded on an already-dressed map needs it most — that is the one that gets founded in
+        // a forest. §139.
+        ClearSiteSurface(world, centre);
+
         // After the scatter, because both of these are readings of ground that has to exist first: the fields
         // have their fertility from the soil field and the wood line is a distance to actual trunks.
         ReportFarmland(world);
@@ -2082,6 +2087,22 @@ internal static class SettlementScenarios
                 if (wet > WadeableSiteDepth) continue;
             }
 
+            // <b>And on ground a villager can actually stand on, which is a different question from level
+            // and dry.</b> §139: navigation calls a painted Forest biome impassable — see
+            // TerrainSurfaceRules.IsPassable — and nothing here ever asked it. The first settlement never
+            // caught it because its site is chosen before PaintBiomes runs, when every cell is still open
+            // ground; the second is founded on a map already dressed, and it drew a forest. Measured on the
+            // run that found this: 5,095 of 6,561 cells within twenty metres of the site marked solid, its
+            // granary unreachable from a house twelve metres away, and six of its eight fields reaping
+            // nothing all year. The books balanced perfectly, because nothing happened.
+            //
+            // The §51 family again, and the clearest case of it yet: two layers each correct about its own
+            // question. "Level, dry, wooded and sheltered" is a fair description of good ground to found on,
+            // and "a forest is not walkable" is a fair rule for a path — and their conjunction is a village
+            // that cannot reach its own granary. A proxy is not what failed here; the scorer simply never
+            // consulted the layer that decides whether the ground can be occupied at all.
+            if (!MostlyWalkable(world, at)) continue;
+
             // <b>Where the wood actually is, and what the fields will actually grow.</b> Both of these were
             // proxies, and both proxies were reasonable right up until the thing they stood for existed.
             //
@@ -2178,6 +2199,71 @@ internal static class SettlementScenarios
     /// </remarks>
     public static Vector2 NeighbourSite(SimulationWorld world, Vector2 from, float apart) =>
         ChooseSite(world, world.ExtentMeters, from, apart);
+
+    /// <summary>
+    /// Whether the ground a settlement would occupy is ground its people can walk on.
+    /// </summary>
+    /// <remarks>
+    /// Sampled on the terrain's own surface rather than on the navigation grid, for the same reason the
+    /// grade test samples the height field: the raster is a <em>reading</em> of the terrain, it is rebuilt
+    /// when the terrain moves, and a scorer that consults it is asking a cache whether the world is
+    /// walkable. A settlement clears the trees where it builds — see <see cref="ClearSiteSurface"/> — so a
+    /// scattering of forest is survivable; what this rejects is a site whose ground is mostly forest, where
+    /// clearing the yard would leave a village walled in by its own fields.
+    /// </remarks>
+    private static bool MostlyWalkable(SimulationWorld world, Vector2 at)
+    {
+        var terrain = world.Terrain;
+        var walkable = 0;
+        var sampled = 0;
+        // A coarse lattice over the keep-out square, which is the ground the village and its fields occupy.
+        // Five by five at four-metre spacing: enough to tell a forest from a copse, cheap enough to run on
+        // every one of the 841 candidates.
+        for (var dz = -2; dz <= 2; dz++)
+        for (var dx = -2; dx <= 2; dx++)
+        {
+            var about = at + new Vector2(dx, dz) * (FieldKeepOut * 0.5f);
+            sampled++;
+            if (terrain.IsPassable(about)) walkable++;
+        }
+
+        return sampled > 0 && walkable >= sampled * 3 / 4;
+    }
+
+    /// <summary>
+    /// Clears the ground a settlement stands on: the forest it was built in becomes open ground.
+    /// </summary>
+    /// <remarks>
+    /// <b>Founding clears its own ground, and it does so whether or not it dressed the map.</b> §139. This is
+    /// the other half of <see cref="MostlyWalkable"/>: the gate keeps a village out of a forest, and this
+    /// clears the copses inside the ground it does occupy — because the alternative is a yard with
+    /// unwalkable patches in it and fields that cannot be reached from the granary next door.
+    /// <para>
+    /// Surface only, and deliberately not the trees standing in it. A tree holds wood in the ledger, and
+    /// removing a stocked node writes that wood out of existence — the conservation check catches it, and it
+    /// is right to. Trees do not block navigation anyway, so leaving them costs nothing and a settlement
+    /// founded in woodland keeps its timber standing where its cutters can reach it.
+    /// </para>
+    /// </remarks>
+    private static void ClearSiteSurface(SimulationWorld world, Vector2 centre)
+    {
+        var terrain = world.Terrain;
+        var cleared = 0;
+        var step = terrain.Transform.CellSize;
+        for (var z = -FieldKeepOut; z <= FieldKeepOut; z += step)
+        for (var x = -FieldKeepOut; x <= FieldKeepOut; x += step)
+        {
+            var at = centre + new Vector2(x, z);
+            if (!terrain.Transform.TryWorldToCell(at, out var cell)) continue;
+            if (TerrainSurfaceRules.IsPassable(terrain.Surface(cell))) continue;
+            // To grass rather than to whatever the biome would have been without its trees: this is ground
+            // that has been cleared and is about to be built on and ploughed, and that is grass.
+            terrain.SetSurface(cell, TerrainSurface.Grass);
+            cleared++;
+        }
+
+        if (cleared > 0) world.RebuildTerrainNavigation();
+    }
 
     public static Vector2 CornerSite(float extentMeters) =>
         new(-extentMeters * 0.25f, -extentMeters * 0.22f);
