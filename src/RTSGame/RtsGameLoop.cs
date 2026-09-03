@@ -1307,6 +1307,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private static readonly FactionId PlayerFaction = new(0);
 
+    /// <summary>§8's autonomy time as a word, matching what the settlement report prints.</summary>
+    private static string Seasons(float seasons) =>
+        float.IsPositiveInfinity(seasons) ? "no net draw" : $"{seasons:F1} seas";
+
     /// <summary>The neighbour's player, when one was asked for. Null in a single-settlement village.</summary>
     private SettlementBot? opponentBot;
 
@@ -3960,6 +3964,36 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             }
             routesAtLastReport = simulation.Routes.Snapshot();
             routeLogAtLastReport = simulation.Routes.Recorded;
+
+            // <b>Whether the opponent is alive, which the chair could not otherwise tell.</b> §133's run
+            // mentioned faction 1 exactly twice in three hundred and fifty kilobytes of log — once at its
+            // founding — so a neighbour standing idle and a neighbour thriving looked identical from here.
+            // That is §130's failure mode exactly: an inert settlement satisfies every impression of a
+            // working one, and the only reason the headless probe catches it is that it asserts on a number
+            // that has to move.
+            //
+            // <b>A diagnostic and never a HUD element.</b> It reports the neighbour's stores, which a player
+            // has no business seeing — it is behind --timings, which is a development flag, and it must not
+            // migrate into anything a person plays with. The bot's own counters are the honest half: they say
+            // whether it is deciding and acting, which is the question being asked.
+            if (opponentBot is { } bot)
+            {
+                var theirGrain = simulation.Economy.Outlook(
+                    Resource.Grain, simulation.Nodes, simulation.Agents, simulation.Date.Season, bot.Faction);
+                var theirWood = simulation.Economy.Outlook(
+                    Resource.Wood, simulation.Nodes, simulation.Agents, simulation.Date.Season, bot.Faction);
+                var theirPeople = 0;
+                foreach (ref readonly var body in simulation.Agents.All)
+                {
+                    if (body.IsAlive && body.Faction == bot.Faction) theirPeople++;
+                }
+
+                Console.WriteLine(
+                    $"  OPPONENT faction {bot.Faction.Value}: {theirPeople} people, " +
+                    $"grain {theirGrain.Stored:N0} ({Seasons(theirGrain.Seasons)}), " +
+                    $"wood {theirWood.Stored:N0} ({Seasons(theirWood.Seasons)}) · " +
+                    $"{bot.Decisions:N0} decisions, {bot.OrdersIssued:N0} assignments issued");
+            }
             Console.WriteLine($"  DRESSING {GeometryLine()}");
             nextTimingReport = time.Total + 1.0;
         }

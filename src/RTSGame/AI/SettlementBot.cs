@@ -63,6 +63,9 @@ internal sealed class SettlementBot
 
     public int Decisions { get; private set; }
 
+    /// <summary>Whose settlement this is, so a diagnostic can name it.</summary>
+    public FactionId Faction => faction;
+
     public SettlementBot(FactionId faction) => this.faction = faction;
 
     public void Update(SimulationWorld world)

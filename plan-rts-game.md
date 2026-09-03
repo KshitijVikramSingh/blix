@@ -11544,3 +11544,27 @@ None of the above needed a person: it came out of founding the opponent and then
 fixture cannot answer — whether two settlements *read* as two, whether it is clear whose is whose, and whether
 the knowledge asymmetry means anything perceptible. That is the next thing to do with it, and it is a
 five-minute run rather than a section.
+
+### Judged from the chair, and one line added because of it
+
+Reported: *both settlements are readable, bot is well at work.* So the half a fixture could not answer is
+answered — two settlements do read as two, whose is whose is clear, and the bot's work is visible as work.
+
+The run also showed what a chair cannot answer: **faction 1 was named exactly twice in three hundred and fifty
+kilobytes of log**, once at its founding. A neighbour standing idle and a neighbour thriving looked identical
+from here, and §130 is the whole reason that matters — an inert settlement satisfies every impression of a
+working one, and the only thing that caught it was a probe asserting on a number that had to move. So
+`--timings` now prints the neighbour beside the routing:
+
+```
+OPPONENT faction 1: 13 people, grain 4,195 (22.0 seas), wood 1,000 (5.0 seas) · 13 decisions, 5 assignments
+```
+
+**A diagnostic and never a HUD element.** It reports the neighbour's stores, which a player has no business
+seeing; it is behind a development flag and must not migrate into anything a person plays with. The bot's own
+counters are the honest half — they say whether it is deciding and acting, which is the question being asked.
+
+Frame from the chair, Release, as played: median 18.9 ms, p90 24.6, max 89.1, with the threat phase at a median
+of 1.44 ms and a maximum of 3.84 — the cost §133 attributed, now confirmed by somebody watching it rather than
+inferred from a fixture. Two hundred and sixty routing windows, every request answered.
+
