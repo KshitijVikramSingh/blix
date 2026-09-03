@@ -176,6 +176,8 @@ internal static class TwoSettlementScenarios
             if (world.Date.Season == reported) continue;
             reported = world.Date.Season;
             Report(world, granaryA, granaryB);
+            ReportFields(world, 0);
+            ReportFields(world, 1);
         }
 
         Report(world, granaryA, granaryB);
@@ -404,6 +406,51 @@ internal static class TwoSettlementScenarios
         }
 
         return total;
+    }
+
+    /// <summary>
+    /// Every field of a faction, with the hands on it, the legs they have finished and its crop progress.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because §136 measured seven hands producing less than five and no policy can be tuned against
+    /// that.</b> A field yielding less with more labour is three different mechanisms wearing one symptom, and
+    /// they want opposite fixes:
+    /// <list type="bullet">
+    /// <item>the extra hand is <b>walking rather than working</b> — it would show few legs finished of its
+    /// own while the others are unchanged;</item>
+    /// <item>two hands on one field <b>halve each other's shifts</b> — the field's total legs would be flat in
+    /// the hands posted to it;</item>
+    /// <item>the yield is <b>capped by something other than labour</b> — reap progress would be complete
+    /// either way and the extra hands are simply eating.</item>
+    /// </list>
+    /// Legs completed is the jobs layer's own counter and the figure §? built the jobs trace around, so this
+    /// is a report of an existing number rather than a new one.
+    /// </remarks>
+    private static void ReportFields(SimulationWorld world, int faction)
+    {
+        var hands = new Dictionary<int, (int Hands, int Legs)>();
+        foreach (ref readonly var body in world.Agents.All)
+        {
+            if (!body.IsAlive || body.Faction.Value != faction || body.HasCart) continue;
+            if (body.Jobs.Assignment.Kind != AssignmentKind.Work) continue;
+            if (body.Jobs.Assignment.Cargo != Resource.Grain) continue;
+            var site = body.Jobs.Assignment.Source.Value;
+            var seen = hands.GetValueOrDefault(site);
+            hands[site] = (seen.Hands + 1, seen.Legs + body.Jobs.LegsCompleted);
+        }
+
+        var line = new List<string>();
+        foreach (var id in world.Nodes.SettlementNodes)
+        {
+            ref readonly var node = ref world.Nodes.Get(id);
+            if (!node.IsAlive || node.Faction.Value != faction || node.Kind != NodeKind.Farm) continue;
+            var on = hands.GetValueOrDefault(id.Value);
+            var reap = CropCycle.ReapTargetOf(in node);
+            var progress = reap <= 0f ? 0f : node.ReapWork / reap * 100f;
+            line.Add($"[{on.Hands}h {on.Legs}L {progress:F0}%]");
+        }
+
+        Console.WriteLine($"    f{faction} fields: {string.Join(" ", line)}");
     }
 
     /// <summary>

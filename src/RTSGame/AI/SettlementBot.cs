@@ -155,6 +155,7 @@ internal sealed class SettlementBot
         // Everybody idle goes to work, on the fields if the larder is low and at the wood otherwise. Posted
         // one at a time so each gets its own site rather than all crowding the first.
         // A shortage of either resource takes everything until it is not one; otherwise the split holds.
+        var fieldHands = HandsPerField(world, fields);
         var placed = 0;
         foreach (var hand in idle)
         {
@@ -164,7 +165,7 @@ internal sealed class SettlementBot
                 : woodLeft < ShortSeasons ? false
                 : onFields < MathF.Ceiling((employed + 1) * FieldShare);
             var work = wantsGrain && fields.Count > 0
-                ? LeastMannedField(world, fields)
+                ? LeastManned(fields, fieldHands)
                 : NearestTreeTo(world, store);
             if (work is not { } site) continue;
             world.QueueAssign(new[] { hand }, site);
@@ -190,15 +191,20 @@ internal sealed class SettlementBot
     /// Counted from the bodies rather than remembered, so it cannot drift out of step with what the hands are
     /// actually doing — which is the same reason the ratio above counts the workforce instead of tracking it.
     /// </para></remarks>
-    private Assignment? LeastMannedField(
-        SimulationWorld world,
-        List<(NodeId Id, Vector2 At, float Extent)> fields)
+    /// <summary>
+    /// Hands already posted to each field, counted from the bodies.
+    /// </summary>
+    /// <remarks>
+    /// Counted rather than remembered so it cannot drift from what the hands are actually doing, and taken
+    /// once per decision because the caller then has to keep it up to date itself — see the note on
+    /// <see cref="LeastManned"/> for why that is not optional.
+    /// </remarks>
+    private int[] HandsPerField(SimulationWorld world, List<(NodeId Id, Vector2 At, float Extent)> fields)
     {
-        if (fields.Count == 0) return null;
         var hands = new int[fields.Count];
         foreach (ref readonly var body in world.Agents.All)
         {
-            if (!body.IsAlive || body.Faction != faction) continue;
+            if (!body.IsAlive || body.Faction != faction || body.HasCart) continue;
             if (body.Jobs.Assignment.Kind != AssignmentKind.Work) continue;
             for (var i = 0; i < fields.Count; i++)
             {
@@ -208,12 +214,36 @@ internal sealed class SettlementBot
             }
         }
 
+        return hands;
+    }
+
+    /// <summary>
+    /// The field with the fewest hands, counting the ones this decision has already posted.
+    /// </summary>
+    /// <remarks>
+    /// <b>The tally has to include what is still in the command queue, and leaving it out put every hand on
+    /// one field.</b> §137: `QueueAssign` enqueues, so nothing a decision issues has taken effect while that
+    /// decision is still running — every hand in the batch therefore looked at an empty field zero and went
+    /// there. Measured: twelve hands on the first field and none on the other seven, against the founding's
+    /// one apiece, which is the whole of the shortfall §136 could not explain and which a previous version of
+    /// this method had avoided by accident with a running counter.
+    /// <para>
+    /// So the caller counts once and increments here. A read-only count of applied state is exactly the wrong
+    /// shape for choosing between several things at once, which is the same mistake in miniature as reading a
+    /// figure back from a structure you are in the middle of writing.
+    /// </para></remarks>
+    private static Assignment? LeastManned(
+        List<(NodeId Id, Vector2 At, float Extent)> fields,
+        int[] hands)
+    {
+        if (fields.Count == 0) return null;
         var best = 0;
         for (var i = 1; i < fields.Count; i++)
         {
             if (hands[i] < hands[best]) best = i;
         }
 
+        hands[best]++;
         var (id, at, extent) = fields[best];
         return Assignment.Work(
             id, at, extent, Resource.Grain,

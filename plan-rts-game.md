@@ -11745,3 +11745,61 @@ labour and the extra hands are simply eating. Those are three different mechanis
 
 Kept honest in the meantime: the bot is *competitive and behind* on equal ground, and nothing above should be
 read as it playing well.
+
+## 137. A decision reading state it was in the middle of writing
+
+§136 left a question that no allocation policy could answer: seven hands on the fields produced less than five.
+The measurement it named — hands, legs finished and reap progress, per field, per faction — answered it in one
+run.
+
+```
+bot          [12h 0L 0%] [0h] [0h] [0h] [0h] [0h] [0h] [0h]
+founding     [1h] [1h] [1h 66L] [1h] [1h] [1h 66L] [1h] [1h]
+```
+
+**Every one of the bot's field hands was on the same field**, and the other seven lay fallow. Not a walking
+problem, not a shift-halving problem, not a yield cap — the three mechanisms that report was built to tell
+apart are all innocent. It was a counting bug in the bot, and it was mine.
+
+`QueueAssign` enqueues: nothing a decision issues has taken effect while that decision is still running. So
+`LeastMannedField` counted hands from applied state, every hand in the batch saw an empty field zero, and they
+all went there. The version it replaced had avoided this **by accident** — a running counter that wrapped, so
+it spread a batch and then piled later arrivals onto low-numbered fields.
+
+Which makes the whole sequence of §135 and §136 coherent at last:
+
+```
+counter that wraps            partial spreading    2,036 grain
+least-manned, applied only    no spreading         1,109
+least-manned, batch counted   full spreading       3,259
+```
+
+The fix is that the caller counts once per decision and the chooser increments as it goes. **A read-only count
+of applied state is the wrong shape for choosing between several things at once**, which is the same mistake in
+miniature as reading a figure back out of a structure you are still writing — and this project has now made
+that mistake at three different scales in one session: here, in §126's stale binary, and in §128's cadence
+estimator reading a deadline off the frames that were missing it.
+
+### On equal ground the bot now matches the founding
+
+Same faction, same site, one year:
+
+```
+f1 without the bot   grain 3,259   wood 187   people 10   f5 w3 o0 i2
+f1 with the bot      grain 3,259   wood  38   people 10   f7 w3 o0 i0
+```
+
+**Identical on grain and on population.** §136's withdrawal stands — full employment is not itself an
+advantage — but the shortfall it reported was one bug and not a policy difference, and the honest claim is now
+parity on the resource that decides growth.
+
+**The wood gap is open and not chased.** Both settlements have three hands on wood and the bot ends with
+thirty-eight against a hundred and eighty-seven. It could be which trees each posts to, it could be spending,
+and on one run of one seed it could be neither — §40's rule applies and it is written down rather than
+explained.
+
+### What is now worth building
+
+The bot reaches parity by keeping hands employed on the right fields, which was the whole of item 2's
+precondition. Build and train can be added against a settlement that is no longer losing ground for reasons
+nobody has attributed — and the per-field report stays, because it is the thing that would say so again.
