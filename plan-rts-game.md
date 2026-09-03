@@ -11619,3 +11619,78 @@ from the one this section is, and it is written down so the next person to see i
 
 The next thing is what §133's order set: the bot can maintain a settlement but never grow one, so an opponent
 is a fixed tableau rather than a rival. Building and training are what make it one.
+
+## 135. The bot's settlement, and a comparison that was mostly about the soil
+
+§133's order put building and training next, so that the opponent would grow instead of standing still. A year
+was run first to see what was actually stopping it, and the answer was none of the things that were about to be
+built.
+
+```
+                    people   grain   work
+f0 (founded)        13 -> 20  5,235   f8 w0 o0 i11
+f1 (bot)            13 -> 13  2,036   f9 w4 o0 i0
+```
+
+**Housing was never the constraint** — unhoused stayed at zero for both, all year, so a house-building policy
+would have changed nothing and looked like it had been tried. The bot fed itself and never grew.
+
+### Two real bugs, found by measuring rather than by reading
+
+- **A threshold with nothing below it.** The bot moved hands onto grain only when the larder fell under two and
+  a half seasons, and a settlement founded with twenty-two seasons in store is nowhere near that — so everybody
+  went to the wood and the larder drained until there was nothing spare to grow on. Replaced with the
+  founding's own ratio, two thirds to the fields, with the thresholds overriding it in either direction.
+- **A cart is not a spare pair of hands.** The bot employed its haulers in the fields, and the hauling board
+  finds carts by their being *idle* — so nothing carried the crop in and it sat in the farm yards. The board's
+  own comment says why the test is `HasCart` and not carry capacity: every villager carries now, a reaper walks
+  its own crop in, so capacity marks nobody. Grain went 680 to 2,036 and the bot's own churn fell from 316
+  assignments a year to 131.
+
+### One fix that is correct and did not help
+
+`NextField` indexed `fields[handsPlaced % fields.Count]`, which distributes an opening round perfectly and
+then wraps — a hand re-posted later returns to field zero while high-numbered fields lie fallow. Replaced with
+the least-manned field, counted from the bodies. **It measured slightly worse: 1,109 against 2,036.** Kept
+anyway, and labelled: the wrap is a genuine defect and the replacement is correct by construction, but §40's
+rule holds — one run of a chaotic simulation cannot tell a mechanism from a coin flip, and this is one run on
+one seed. It is not evidence of an improvement and is not claimed as one.
+
+### And then the comparison turned out to be about the ground
+
+Every figure above compares f1 against f0, which is two drivers **on two different sites**. The valid
+comparison is the same faction with and without the bot:
+
+```
+f1 without the bot   grain 2,700   people 10   f7 w0 o0 i3
+f1 with the bot      grain 1,109   people 12   f8 w4 o0 i0
+```
+
+More people and less grain — neither unambiguously better, and nothing like the gap against f0. The reason is
+in the founding's own report:
+
+```
+village A alone      8 fields at 0.70-1.10 fertility, median 1.02
+A and B together    16 fields at 0.41-1.10 fertility, median 0.76
+```
+
+**B's soil is about half A's, by construction.** `ChooseSite` scores farmland, wood, backdrop and grade over
+every eligible site on the map; `NeighbourSite` — written in §130 to put a second settlement somewhere — scores
+flatness and nothing else. So the neighbour is founded on the worst farmland the geometry allows, and a section
+that set out to measure a bot spent most of its runs measuring dirt.
+
+**The same shape as everything else this session**: §120's fixture ordering a different village about, §122's
+fidelity harness aimed at a world nobody plays, §130's acceptance test passing an inert settlement. An
+instrument that differs from the thing it is measuring in two ways at once cannot attribute either.
+
+### What this leaves
+
+The bot is roughly competitive with a fixed posting on the same ground, which is the honest claim available.
+Before build and train are worth adding:
+
+- **`NeighbourSite` needs to score what `ChooseSite` scores.** Two settlements founded on incomparable ground
+  cannot be compared, and every later claim about an opponent inherits the confound.
+- **The founding's own posting leaves hands idle** — f0 ends with eight working and twelve idle, and its
+  cutters stop when their trees run out and are never re-posted. The bot keeps everybody employed, which is
+  the one thing it plainly does better, and it is worth knowing which of the two is right before either is
+  taken as the standard.

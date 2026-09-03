@@ -1331,19 +1331,25 @@ internal sealed class SimulationWorld
     /// stores rising and people unhoused is the case §6 asks the interface to say out loud — "grain
     /// surplus rising, population capped by housing" — rather than one the player has to deduce.
     /// </remarks>
-    public int UnhousedCount
-    {
-        get
-        {
-            var unhoused = 0;
-            foreach (ref readonly var agent in Agents.All)
-            {
-                if (agent.IsAlive && !Nodes.Contains(agent.Home.House)) unhoused++;
-            }
+    public int UnhousedCount => UnhousedIn(null);
 
-            return unhoused;
+    /// <summary>People with no house, for one faction or for everybody. See <see cref="UnhousedCount"/>.</summary>
+    /// <remarks>
+    /// Filtered, on the same reasoning as <c>Outlook</c>'s faction: a bot deciding whether to build has to ask
+    /// about its own people, and the unfiltered figure now counts a neighbour's as well.
+    /// </remarks>
+    internal int UnhousedIn(Collision.FactionId? faction)
+    {
+        var unhoused = 0;
+        foreach (ref readonly var agent in Agents.All)
+        {
+            if (!agent.IsAlive || (faction is { } owner && agent.Faction != owner)) continue;
+            if (!Nodes.Contains(agent.Home.House)) unhoused++;
         }
+
+        return unhoused;
     }
+
 
     /// <summary>Puts whatever a body is carrying on the ground where it stands.</summary>
     /// <remarks>

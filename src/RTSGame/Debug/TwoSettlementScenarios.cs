@@ -153,7 +153,8 @@ internal static class TwoSettlementScenarios
         var totalTicks = (int)(years * WorldCalendar.YearSeconds * TicksPerSecond);
         var reported = world.Date.Season;
         Console.WriteLine(
-            "        date        | f0 grain | f0 wood | f0 people | f1 grain | f1 wood | f1 people | drift");
+            "        date        | f0 grain | f0 wood | f0 people | f1 grain | f1 wood | f1 people | " +
+            "f0 work | f1 work | drift");
         for (var tick = 1; tick <= totalTicks; tick++)
         {
             // Inside the loop and before the tick, on the RaidDirector's precedent: a driver stepped with the
@@ -365,6 +366,7 @@ internal static class TwoSettlementScenarios
             $"{StockOf(world, 0, Resource.Wood),7:N0} | {PeopleOf(world, 0),9} | " +
             $"{StockOf(world, 1, Resource.Grain),8:N0} | {StockOf(world, 1, Resource.Wood),7:N0} | " +
             $"{PeopleOf(world, 1),9} | " +
+            $"{Work(world, 0)} {Work(world, 1)} | " +
             $"{(world.Economy.Discrepancy(world.Nodes, world.Agents).IsZero ? "ok" : "BROKEN")}");
     }
 
@@ -402,6 +404,47 @@ internal static class TwoSettlementScenarios
         }
 
         return total;
+    }
+
+    /// <summary>
+    /// Where a faction's hands are, so two settlements' output can be compared by their labour.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because "the bot underproduces" is not a finding.</b> §135 had it feeding itself and never growing
+    /// against a founding that grew from thirteen to nineteen, and the candidate explanations — too few on the
+    /// fields, too much churn, hands idle — are distinguishable only by counting them. Carts excluded: they are
+    /// the hauling board's and belong to neither policy.
+    /// </remarks>
+    private static string Work(SimulationWorld world, int faction)
+    {
+        var fields = 0;
+        var wood = 0;
+        var other = 0;
+        var idle = 0;
+        foreach (ref readonly var body in world.Agents.All)
+        {
+            if (!body.IsAlive || body.Faction.Value != faction || body.HasCart) continue;
+            if (!body.Jobs.HasAssignment) { idle++; continue; }
+            if (body.Jobs.Assignment.Kind != AssignmentKind.Work) { other++; continue; }
+            if (body.Jobs.Assignment.Cargo == Resource.Grain) fields++;
+            else if (body.Jobs.Assignment.Cargo == Resource.Wood) wood++;
+            else other++;
+        }
+
+        return $"f{fields}w{wood}o{other}i{idle}";
+    }
+
+    /// <summary>Houses standing, so "growth is capped by housing" can be seen rather than assumed.</summary>
+    private static int HousesOf(SimulationWorld world, int faction)
+    {
+        var houses = 0;
+        foreach (var id in world.Nodes.SettlementNodes)
+        {
+            ref readonly var node = ref world.Nodes.Get(id);
+            if (node.IsAlive && node.Faction.Value == faction && node.Kind == NodeKind.House) houses++;
+        }
+
+        return houses;
     }
 
     private static int PeopleOf(SimulationWorld world, int faction)
