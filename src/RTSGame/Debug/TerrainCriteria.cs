@@ -222,6 +222,7 @@ internal readonly record struct TerrainCriteria(
         var receiver = water.Receiver;
         var filled = water.Filled;
 
+        var lake = water.LakeDepth;
         var lowest = float.MaxValue;
         var highest = float.MinValue;
         var uphill = 0;
@@ -253,6 +254,13 @@ internal readonly record struct TerrainCriteria(
                 continue;
             }
 
+            // <b>Not into standing water, which is uphill on purpose.</b> §152: a channel entering a lake has
+            // its surface below the lake's by definition — the lake stands at its outlet's level and the
+            // stream arrives underneath it — so every shoreline cell of every pool counted as a watercourse
+            // running uphill. With two to ten lakes a map and a long margin each, that is where "all
+            // fifty-five maps, six to six hundred and forty-three" came from. The fault is real; this many
+            // of it was not.
+            if (lake[to] > 0.05f) continue;
             var next = water.Origin + new Vector2(to % side, to / side) * step;
             if (water.LevelAt(at) < water.LevelAt(next) - 0.01f) uphill++;
         }
@@ -264,7 +272,6 @@ internal readonly record struct TerrainCriteria(
         // hundred and sixty-two shortfalls were this, and none of them were real. §147's rule is about
         // depressions, so the criterion has to be too.
         var basinless = 0;
-        var lake = water.LakeDepth;
         var seen = new bool[lake.Length];
         var stack = new Stack<int>();
         for (var start = 0; start < lake.Length; start++)

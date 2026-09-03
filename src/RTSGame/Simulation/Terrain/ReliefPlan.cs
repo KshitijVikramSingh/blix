@@ -922,6 +922,18 @@ internal sealed class ReliefPlan
     /// the same heights gives the same answer on any machine, which is the whole reason
     /// <see cref="Drainage"/> is written the way it is.
     /// </remarks>
+    /// <summary>
+    /// Whether the ground is built around an authored drainage network rather than eroded into shape.
+    /// </summary>
+    /// <remarks>
+    /// §152, stage B of §150. A switch and not a replacement, because the two have to be measurable on the
+    /// same seeds in the same binary or the comparison is between two thermal states of a laptop — §84's
+    /// rule, and it holds for a generator as much as for a frame time.
+    /// </remarks>
+    public bool DrainageFirst { get; set; }
+
+
+
     public void Apply(TerrainMap terrain)
     {
         region = terrain.Region;
@@ -942,6 +954,17 @@ internal sealed class ReliefPlan
             transform.Height * transform.CellSize);
         var side = Math.Max(8, (int)MathF.Ceiling(extent / DrainageCellMetres) + 1);
         var lattice = new float[side * side];
+        if (DrainageFirst)
+        {
+            // <b>The whole of the inversion is this branch.</b> §152: the ground comes out of an authored
+            // network instead of the network being looked for in the ground. Everything the other path does
+            // after its own shaping — the grade limit, the solve, the write into the terrain — is shared, so
+            // the two are comparable on the same seed in the same binary. §84's rule.
+            PlantRivers(lattice, side, transform.Origin, extent, out var headwaterInflow);
+            Finish(terrain, transform, heights, lattice, side, headwaterInflow);
+            return;
+        }
+
         for (var z = 0; z < side; z++)
         for (var x = 0; x < side; x++)
         {
@@ -1007,6 +1030,129 @@ internal sealed class ReliefPlan
         var ceiling = MathF.Min(SteepestGrade, TerrainMap.MaximumTraversableGrade * 0.92f);
         var inset = (int)MathF.Ceiling(RimWidthMetres / DrainageCellMetres);
         GradeLimit.Apply(lattice, side, DrainageCellMetres, ceiling, inset);
+        var drainage = Drainage.Solve(lattice, side, DrainageCellMetres, inflow);
+        drainage.Origin = transform.Origin;
+        drainage.SetSeaLevel(seaLevel);
+        drainage.SetWaterScale(RegionProfile.For(region).WaterScale);
+        drainage.PaintAuthoredWidth(AuthoredWidths(side, transform.Origin));
+
+        for (var z = 0; z <= transform.Height; z++)
+        for (var x = 0; x <= transform.Width; x++)
+        {
+            var local = new Vector2(x, z) * transform.CellSize;
+            heights[z * (transform.Width + 1) + x] = drainage.Sample(lattice, local);
+        }
+
+        terrain.ReplaceHeights(heights);
+        terrain.SetDrainage(drainage);
+        terrain.SetLayout(Layout);
+    }
+
+    /// <summary>
+    /// Builds the ground around an authored drainage network. §152.
+    /// </summary>
+    /// <remarks>
+    /// Height at a point is <b>the height of the lowest water near it, plus a rise for how far away that
+    /// water is</b> — which is what a valley is. Two consequences fall out for free and they are the two
+    /// things §151 measured the old generator failing:
+    /// <list type="bullet">
+    /// <item>Every channel runs downhill, because a reach's height is its distance from the outlet along its
+    /// own course and the ground takes its floor from the reach.</item>
+    /// <item>Water is confined, because the ground rises away from it in every direction by construction.
+    /// There is nowhere for a sheet to lie on a hillside, because the hillside <em>is</em> the rise.</item>
+    /// </list>
+    /// <para>
+    /// The valley rise is capped at the traversable grade rather than at a look: ground people cannot cross
+    /// is the fault §151 counted sixteen maps of, and a generator that can produce it will. Interfluves —
+    /// the ground between valleys — keep the authored vocabulary's undulation, scaled by distance from water
+    /// so it can roughen a watershed without ever damming a channel.
+    /// </para>
+    /// </remarks>
+    private void PlantRivers(float[] lattice, int side, Vector2 origin, float extent, out float[] inflow)
+    {
+        // Fall is an input here rather than an outcome. Two and a half metres per hundred is above §151's
+        // floor of two, which forty-six of fifty-five old maps were under.
+        var fallPerMetre = MathF.Max(0.025f, Amplitude * 0.45f / MathF.Max(1f, extent));
+        var branches = 4 + (int)MathF.Round(MathF.Min(Amplitude, 60f) / 12f);
+        var network = RiverNetwork.Grow(extent, seed, fallPerMetre, branches);
+
+        // What the valley sides may do. Capped below the traversable limit with room to spare, because the
+        // grade the navigation raster measures is over a cell and a half and this is over four metres.
+        var flank = MathF.Min(
+            0.30f + MathF.Min(Amplitude, 60f) / 60f * 0.28f,
+            TerrainMap.MaximumTraversableGrade * 0.62f);
+        var shoulder = MathF.Max(6f, Amplitude * 0.75f);
+
+        for (var z = 0; z < side; z++)
+        for (var x = 0; x < side; x++)
+        {
+            var at = origin + new Vector2(x, z) * DrainageCellMetres;
+            // Rising, then levelling off: a valley side is steepest near the water and flattens onto the
+            // interfluve, which is what stops the far corners of the map from being mountains.
+            var (ground, _, distance, width) = network.Floor(at, flank, shoulder);
+
+            // The vocabulary's own undulation on top, held well off the water so it cannot dam anything.
+            var bank = MathF.Max(width * 0.5f, DrainageCellMetres);
+            var away = Math.Clamp(
+                MathF.Max(0f, distance - bank) / MathF.Max(1f, shoulder * 1.5f), 0f, 1f);
+            lattice[z * side + x] = ground + Wrinkle(at) * away;
+        }
+
+        inflow = new float[lattice.Length];
+        foreach (var reach in network.Reaches)
+        {
+            // Discharge is handed to the solver at the heads, so what it accumulates is what was authored
+            // rather than whatever the lattice happens to collect.
+            if (!TryCell(reach.To, origin, side, out var index)) continue;
+            inflow[index] = MathF.Max(inflow[index], reach.Discharge * 0.02f);
+        }
+    }
+
+    /// <summary>The authored undulation at a point, without any of the landform shaping around it.</summary>
+    private float Wrinkle(Vector2 at) =>
+        Undulation <= 0f ? 0f : Undulation * 0.5f * (Noise(at * 0.021f) + Noise(at * 0.047f) * 0.5f);
+
+    private static float Noise(Vector2 at)
+    {
+        var x = MathF.Sin(at.X * 1.7f + 2.1f) * MathF.Cos(at.Y * 1.3f - 0.7f);
+        var y = MathF.Sin(at.X * 0.6f - 1.1f) * MathF.Cos(at.Y * 0.9f + 1.9f);
+        return x * 0.6f + y * 0.4f;
+    }
+
+    private static bool TryCell(Vector2 at, Vector2 origin, int side, out int index)
+    {
+        var local = (at - origin) / DrainageCellMetres;
+        var x = (int)MathF.Round(local.X);
+        var z = (int)MathF.Round(local.Y);
+        index = z * side + x;
+        return x >= 0 && z >= 0 && x < side && z < side;
+    }
+
+    /// <summary>
+    /// The tail both generators share: cap the grades, solve the drainage, write the ground.
+    /// </summary>
+    /// <remarks>
+    /// Extracted rather than copied, so that "the new path differs only in how the lattice was made" is a
+    /// fact about the code and not a claim in a commit message.
+    /// </remarks>
+    private void Finish(
+        TerrainMap terrain,
+        Spatial.GridTransform transform,
+        float[] heights,
+        float[] lattice,
+        int side,
+        float[] inflow)
+    {
+        var seaLevel = Coastline(lattice, side, transform.Origin);
+        // <b>The limiter runs on both paths, and I had switched it off for the new one on a hypothesis that
+        // measurement refused.</b> §152: it is a relaxation, so a gentle channel looked like exactly the
+        // pattern that would invert under it — and skipping it changed the shortfall count by nothing at all.
+        // The tails stay identical, so the comparison between the two generators is about the lattice and
+        // nothing else.
+        var ceiling = MathF.Min(SteepestGrade, TerrainMap.MaximumTraversableGrade * 0.92f);
+        var inset = (int)MathF.Ceiling(RimWidthMetres / DrainageCellMetres);
+        GradeLimit.Apply(lattice, side, DrainageCellMetres, ceiling, inset);
+
         var drainage = Drainage.Solve(lattice, side, DrainageCellMetres, inflow);
         drainage.Origin = transform.Origin;
         drainage.SetSeaLevel(seaLevel);

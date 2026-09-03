@@ -165,7 +165,10 @@ public static class Program
         {
             var sweepExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var sweepSeed = Value(args, "--mapseed") is { } s ? uint.Parse(s) : 0x5EED1234u;
-            Environment.Exit(Debug.MapSweep.Run(sweepExtent, sweepSeed));
+            // <b>Both generators, same seeds, same binary.</b> §152 / §84: a generator compared across two
+            // builds is compared across two of everything else too.
+            Environment.Exit(Debug.MapSweep.Run(
+                sweepExtent, sweepSeed, args.Contains("--drainage-first")));
         }
 
         if (args.Contains("--shapes"))

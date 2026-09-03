@@ -12744,3 +12744,53 @@ which means §147's rule does less than its section claims.
 like one.** Every one of the four was caught by reading the numbers for plausibility rather than by review:
 100% walkable on a map known to be two-thirds wooded, a share above one, a fault present on literally every
 map. A number that indicts everything is usually indicting its own definition.
+
+## 152. The drainage-first generator, first cut: 148 → 134 and the uphill fault survives
+
+§150 stage B. `RiverNetwork` grows a channel tree from an outlet on the map's edge — a stem inland,
+tributaries hung off it at junctions, **every reach's height set by its distance from the outlet along its own
+course**, which makes monotone downhill a property of construction. `ReliefPlan.DrainageFirst` switches the
+lattice construction and nothing else: the grade limit, the solve and the terrain write are extracted into a
+shared `Finish`, so "the new path differs only in how the lattice was made" is a fact about the code rather
+than a claim here. `--drainage-first` runs it, so both are measurable on the same seeds in the same binary
+(§84).
+
+The ground is then the lowest surface any nearby water can put under a point: `Floor` minimises
+`water + shoulder * (1 - e^(-distance * flank / shoulder))` over the reaches. Water is confined because the
+ground rises away from it in every direction — there is nowhere for a sheet to lie on a hillside, because the
+hillside *is* the rise. The flank is capped well below the traversable grade, and the authored undulation is
+scaled by distance from water so it can roughen a watershed without damming a channel.
+
+**148 → 134 shortfalls.** Real, and nowhere near passing.
+
+### Four hypotheses, three of them wrong
+
+The dominant fault is unchanged: **watercourses running uphill, on every map, in both generators at roughly
+equal rates** — including the one that is monotone by construction. So something between the lattice and the
+criterion inverts it, and I guessed at it four times:
+
+- **`Floor` mixed two criteria** — it chose the reach with the lowest *water* and then used *that* reach's
+  distance for the rise, so neighbouring cells could take unrelated heights. A real defect, and worth one
+  shortfall.
+- **`GradeLimit.Apply` un-builds drainage.** It is a relaxation, so a gentle channel looked like exactly the
+  pattern that would invert under it. Skipping it on the new path changed the count by **nothing**, and the
+  switch was reverted rather than kept — an unmeasured change that makes the two paths differ is worse than
+  no change.
+- **Channels entering lakes.** A stream arrives underneath a lake's surface by definition, so every shoreline
+  cell should have counted as uphill, and with two to ten pools a map that looked like the whole of it.
+  Excluding them moved 149 to **148**. One shortfall.
+- **The remainder is real** and belongs to neither generator's shaping in any way I have attributed.
+
+So the next move is not a fifth guess. It is the attribution instrument — which cells, on which reach, by how
+much, and what their receiver is — the same thing §116 did for routing and §132 for the click. Every finding
+in this file that stuck came from one of those, and every one that did not came from reasoning about the code.
+
+### What is honestly established
+
+- The inversion is built, switchable, and measurably better on the same seeds.
+- Fall is now an input: the new path asks for 2.5 m per 100 m of channel and the old one produced 0.21 to
+  1.45 across the map.
+- Basinless lakes went **up** on the new path, 1–5 becoming 2–11. Untouched and unexplained; the fill is
+  finding more depressions in valley-and-interfluve ground than in eroded ground, which is plausible and
+  unverified.
+- Five instrument corrections across §151 and §152 against four generator changes. The ratio is the lesson.
