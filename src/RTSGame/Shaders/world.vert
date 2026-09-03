@@ -71,6 +71,10 @@ layout(push_constant) uniform Push {
     vec4 uVeil;
     vec4 uVeilAir;
     vec4 uVeilDeep;
+    // x = how much sky water hands back at a grazing angle, y = glint gain, z = how opaque deep water gets,
+    // w = how far up the shore the film reaches, in wadeable depths. All four are dials in the look panel —
+    // see LookSettings, and see §148 for why they stopped being constants.
+    vec4 uWater;
 };
 
 layout(location = 0) out vec3 vNormal;

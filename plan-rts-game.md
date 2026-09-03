@@ -12483,3 +12483,139 @@ constant regardless of the light, and it is camera-driven — which is where any
 
 `--timings` now prints `CASTERS near/mid/far = tri` and `SUN <mode> <elevation>`, so the question is
 answerable from the chair in each mode rather than only from a performance case.
+
+## 145. Water, judged from the chair: four faults and two of them were the model's
+
+"Our water kind of looks bad." It had three things right — a level sheet, depth-based opacity for the
+shoreline, and correct flat lighting — and was missing everything that makes a surface read as one.
+
+**No specular, no Fresnel, no normal.** The wave trains modulated *albedo* by six per cent, so there was
+motion with no surface under it. Making them a height field and differentiating them analytically (a
+screen-space derivative of a function this smooth quantises to the pixel and reads as facets) gives a normal,
+and a normal is what every other cue needs: a mirror has to know which way it faces. Then Schlick Fresnel at
+F0 = 0.02, a sky reflection out of the `uHazeAway`/`uHazeToward` palette — which already tracks the date, so
+a winter dusk reflects a winter dusk without this code knowing the month — and a glint.
+
+**Everything about the old surface was view-independent, and that is exactly why it read as paint**: it
+looked the same whether you stood over it or across it. Fresnel also closes the surface at grazing angles,
+which fixed a second thing nobody had named: opacity was depth alone, so a lake seen across the valley was as
+see-through as a ford.
+
+### Then: flow, and the two model faults behind "creeps upstairs and vanishes into nothing"
+
+```csharp
+level[i] = max(standing ? filled : ground, ground + channel)
+```
+
+One line, both faults. A channel's surface is a **fixed depth above the local bed**, so it follows the ground
+wherever the ground goes — up a hillside included, where 30 cm of water is a wet ribbon draped on a slope.
+And `channel` was gated on a hard step at `TraceWidthMetres`, so a headwater does not thin, it *stops*: one
+cell has a river and its neighbour has dry grass.
+
+- **Confinement** — channel depth tapers to zero as the bed's own gradient rises, 6% to 22%. Both figures are
+  *shallower* than the 11% §51 calls buildable, which is the sense check: ground a village would stand on
+  happily is already too steep to hold standing water.
+- **A headwater ramp** over an octave of width instead of a step.
+
+**And the flow field had been sitting there since the solve with nothing ever asking it.** `Drainage.FlowAt`
+returns direction and a speed off the two quantities a real channel's comes from — discharge and fall — with
+the fall measured on the *filled* surface, which is level across a depression by construction, so lakes come
+out still. The shader advects the wave phase downstream, packs crests along the current and stretches them
+across it, and reduces exactly to the old crossed trains at zero flow.
+
+It rides in the vertex **normal** slot, which is free because this mesh is flat and derives its own. Said at
+both ends, because a field called `Normal` carrying a current is what becomes a bug two sessions from now.
+
+### The legibility ask was a request to depict a fact
+
+"At closer resolutions I should be able to tell what people can walk over and what they can't." The
+simulation has always known: `Biomes` splits water into `Shallows` and `Impassable` at
+`WadeableDepthMetres = 1.1`. The renderer never showed it. So the mesh now carries depth **in wadeable
+units** — 1.0 *is* the line — and there are two cues, for two different lines:
+
+- **A waterline film** within a hand's depth of the edge, where the water keeps almost none of its own colour
+  and takes a pale rim. That is the contact that was missing; without it the sheet ends at an alpha gradient
+  and reads as laid on top of the ground.
+- **A narrow darker band at wade depth 1.0.** Narrow on purpose — it should read as the water deepening, not
+  as a painted contour.
+
+### While we were in there
+
+**Forests were not a look problem.** `share = 0.12 + 0.34 × woodedness` is the fraction of map reaching
+closed canopy, and closed canopy becomes `Biome.Wood` → `TerrainSurface.Forest` → **impassable**. It was
+hitting **66%** on Downland, printed by the farmland report every run. Two thirds of the map unwalkable — and
+that is the whole of why §139's second settlement was founded in a forest with 5,095 of 6,561 cells solid
+around it. Now `0.10 + 0.20` with the ceiling down from 0.68 to 0.44: **66% → 42%**, median cover 0.97 →
+0.21, and that site went 3,172 → 3,604 walkable.
+
+**And the map is 480 m, not 600.** §3's crossing-time arithmetic was sound and done before anything lived
+here; what a player waits on is the distance between settlements, which was 270 m of mostly empty ground.
+Found on the way: **eighteen scenario extents hardcoded 600** rather than reading the default, so the gate
+had been asserting about a different map than the game plays.
+
+## 146. A low sun, and three causes ruled out by measurement
+
+Trees casting "weird, clipped yet clearly misplaced" shadows across a plain they were nowhere near, at mid
+zoom. Three candidates, each of which would have been a bug, each killed by a number:
+
+- **The caster proxy is a floating plate.** It is not — apex at `bounds.Max.Y`, nadir at `bounds.Min.Y`, a
+  bipyramid anchored on the ground. I said it was and had to withdraw it; I had read `waistY` and stopped.
+- **Wind lean shears the caster.** Capped at seven per cent of height — 80 cm on a tall tree.
+- **The far cascade's filter smears them.** Measured at zoom 200: cascades 124/208/299/406 m, texels
+  **19.9/24.3/65.0 cm**, penumbra 3.2 texels. About two metres of blur — enough to soften an edge, nowhere
+  near enough to stretch one.
+
+What was left is geometry, and it was **correct**. Winter noon at latitude 37 is about 30°, so every shadow is
+already 1.75× its caster's height — and the archetype in the HUD was `A HIGH SHELF ABOVE A LOW PLAIN`, so the
+tree line was casting onto ground that falls away. On a slope approaching the light's own angle the length
+runs off toward the horizon.
+
+So the shadow **fades as the light lowers** rather than the geometry being falsified: full strength above 30°,
+a third of it by 10°, never nothing — a long soft shadow at dusk is worth having. `uSunDir.y` is the sine of
+the elevation, so it needs nothing passed down and cannot disagree with where the light is.
+
+**And a played village now defaults to seasonal-only sun.** At 3x a day is forty seconds: the daily cycle is
+a strobe, swinging through dawn and dusk twice a minute with nothing in the scene judgeable against anything
+else. The seasonal swing is the half worth watching and the half the economy turns on.
+
+## 147. The chequerboard was mine, and a lake with no basin
+
+Two screenshots, three faults, two of them introduced by §145.
+
+**A discrete field asked to interpolate.** `FlowAt` read the D8 `receiver`: eight directions, constant inside
+a cell, jumping at every boundary. Sampled per vertex and interpolated across a water quad, the phase — a dot
+product with the flow direction — swung from one quad to the next, and the lake came out as a lattice of
+bright blobs the size of the mesh's own quads. It reads from the **gradient of the filled surface** now:
+continuous, downhill by construction, zero across a lake, and sampled bilinearly like every other reader here.
+
+**And the glint was a comparator, not a highlight.** Exponent 260 at a gain of 26 means every facet that
+lines up blows to white and its neighbour is black — invisible until the normals started varying at all, at
+which point it *was* the artefact. 90 and 3.2, clamped. The wave packing came down from 2.6 to 0.7 in the
+same breath: crests a metre apart on a surface tessellated every few metres is a moiré arriving from the
+other end of the same mistake.
+
+**The disjoint sheet was in the log all along.**
+
+```
+water: 1.8 ha (684 m across, 12.0 m deep), 0.2 ha (237 m across, 0.9 m deep), 0.1 ha (158 m across, 0.9 m deep)
+```
+
+237 m across and 0.9 m deep is not a lake. A depression fills to its outlet, and on a gentle valley floor an
+outlet a metre above the low point floods two hundred metres of ground a metre deep — an apron with no basin,
+which then breaks into patches as the depth fade cuts in and out along its margin. Hence "clearly disjoint",
+and hence "nothing about the ground suggests there could be water here", which was a true observation about
+the ground.
+
+The two existing tests ask how deep a body gets and how much drains through it. **Neither asks how much
+ground it covers to be that deep.** `LakeBasinSteepness = 1/80`: two hundred metres across wants two and a
+half metres somewhere in it, and the genuine twelve-metre basin in that same report passes easily. A ratio
+and not a depth, deliberately — `PondDepthMetres` at 35 cm is right for a pond, and what it cannot express is
+that 35 cm over 300 m is a flooded field. Measured after: water is 2–6% of the map across every archetype.
+
+### Open
+
+- **The sawtooth margin** on a shore, which is the mesh boundary following cell edges at the `wetEnough`
+  threshold. A real artefact, untouched, and deliberately not changed in the same pass as three other water
+  changes.
+- **Whether 1/80 removed water worth having**, and whether a third of shadow strength at 10° leaves a winter
+  afternoon looking unlit. Both are judgements from the chair and neither has been made yet.

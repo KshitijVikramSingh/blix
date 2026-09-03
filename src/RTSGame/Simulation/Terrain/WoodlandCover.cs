@@ -156,7 +156,18 @@ internal sealed class WoodlandCover
 
         // What share of the map is wood. Pastoral country keeps its copses and hedgerow trees; deeply wooded
         // country is wood with fields in it. Both ends are places, which "a few per cent" was not.
-        var share = Math.Clamp(0.12f + 0.34f * Math.Clamp(woodedness, 0f, 1.6f), 0.06f, 0.68f);
+        // <b>Reported from the chair as forests being too big, and it is worse than a look problem.</b> §145.
+        // Closed canopy becomes Biome.Wood, which becomes TerrainSurface.Forest, which
+        // TerrainSurfaceRules.IsPassable calls <em>impassable</em> — so this number is not "how wooded the
+        // country looks", it is "what fraction of the map nobody can walk across". At 0.12 + 0.34 it reached
+        // sixty-six per cent on Downland, measured and printed by the farmland report every run: two thirds of
+        // the map unwalkable, which is also the whole of why §139's second settlement was founded in a forest
+        // with 5,095 of 6,561 cells solid around it.
+        //
+        // 0.10 + 0.20 tops out near forty per cent, which leaves the wooded end of the range recognisably
+        // wood-with-fields-in-it and the pastoral end unchanged. The ceiling comes down with it: 0.68 was
+        // reachable and should not have been.
+        var share = Math.Clamp(0.10f + 0.20f * Math.Clamp(woodedness, 0f, 1.6f), 0.06f, 0.44f);
 
         // <b>A map with no relief has no woodland geography, because it has no geography.</b> Every term that
         // decides where a wood belongs — slope, shelter, aspect, height, soil depth — is constant on a plain, so

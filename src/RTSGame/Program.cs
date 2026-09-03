@@ -75,7 +75,7 @@ public static class Program
 
         if (args.Contains("--worldgen"))
         {
-            var genExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var genExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var watch = System.Diagnostics.Stopwatch.StartNew();
             var world = new Simulation.SimulationWorld(genExtent);
             Console.WriteLine($"  construct {watch.ElapsedMilliseconds} ms");
@@ -95,7 +95,7 @@ public static class Program
 
         if (args.Contains("--twovillages"))
         {
-            var twoExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var twoExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var twoYears = Value(args, "--years") is { } span ? float.Parse(span) : 1f;
             var twoRelief = Value(args, "--relief-amplitude") is { } amp ? float.Parse(amp) : 32f;
             var twoSeed = Value(args, "--mapseed") is { } seed ? uint.Parse(seed) : 1592594996u;
@@ -113,7 +113,7 @@ public static class Program
 
         if (args.Contains("--settlement"))
         {
-            var settlementExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var settlementExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var years = Value(args, "--years") is { } span ? float.Parse(span) : 1f;
             var settlementRelief = Value(args, "--relief-amplitude") is { } sa ? float.Parse(sa) : 0f;
             var settlementRegion = Value(args, "--region") is { } sr
@@ -134,20 +134,20 @@ public static class Program
 
         if (args.Contains("--placementcheck"))
         {
-            var pcExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var pcExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var pcMinutes = Value(args, "--minutes") is { } span ? float.Parse(span) : 3f;
             Environment.Exit(SettlementScenarios.RunPlacementCheck(pcExtent, pcMinutes));
         }
 
         if (args.Contains("--forestcost"))
         {
-            var forestExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var forestExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             Environment.Exit(SettlementScenarios.RunForestCost(forestExtent));
         }
 
         if (args.Contains("--raidtest"))
         {
-            var raidExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var raidExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var raidMinutes = Value(args, "--minutes") is { } span ? float.Parse(span) : 8f;
             var between = Value(args, "--every") is { } gap ? float.Parse(gap) : 60f;
             var health = Value(args, "--health") is { } hp ? float.Parse(hp) : 0f;
@@ -163,14 +163,14 @@ public static class Program
         // <b>Every map the panel can ask for, because the panel can ask for more than the gate ever tried.</b>
         if (args.Contains("--mapsweep"))
         {
-            var sweepExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var sweepExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var sweepSeed = Value(args, "--mapseed") is { } s ? uint.Parse(s) : 0x5EED1234u;
             Environment.Exit(Debug.MapSweep.Run(sweepExtent, sweepSeed));
         }
 
         if (args.Contains("--shapes"))
         {
-            var shapeExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var shapeExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var shapeAmplitude = Value(args, "--relief-amplitude") is { } amp ? float.Parse(amp) : 28f;
             var shapeSeed = Value(args, "--mapseed") is { } s ? uint.Parse(s) : 0x5EED1234u;
             var shapeRows = Value(args, "--rows") is { } r ? int.Parse(r) : 26;
@@ -180,7 +180,7 @@ public static class Program
 
         if (args.Contains("--relief"))
         {
-            var reliefExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var reliefExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var reliefSeed = Value(args, "--seed") is { } s ? uint.Parse(s) : 0x5EED1234u;
             var amplitudes = ParseFloats(args, "--amplitudes");
             Environment.Exit(ReliefScenarios.Run(
@@ -198,14 +198,14 @@ public static class Program
 
         if (args.Contains("--catchment"))
         {
-            var catchExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var catchExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var budget = Value(args, "--budget") is { } seconds ? float.Parse(seconds) : 60f;
             Environment.Exit(CatchmentScenarios.Run(catchExtent, budget));
         }
 
         if (args.Contains("--jobs"))
         {
-            var jobsExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var jobsExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var jobsMinutes = Value(args, "--minutes") is { } span ? int.Parse(span) : 6;
             Environment.Exit(JobScenarios.Run(jobsExtent, jobsMinutes));
         }
@@ -217,13 +217,13 @@ public static class Program
 
         if (args.Contains("--radiisweep"))
         {
-            var sweepExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var sweepExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             Environment.Exit(BodyRadiusSweep.Run(ParseFloats(args, "--radii"), sweepExtent));
         }
 
         if (args.Contains("--rectangles"))
         {
-            var rectExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var rectExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var rectWorld = new Simulation.SimulationWorld(rectExtent);
             if (args.Contains("--terrain")) WorldTerrainScenarios.Populate(rectWorld, issueGroupMove: false);
             var watch = System.Diagnostics.Stopwatch.StartNew();
@@ -264,7 +264,7 @@ public static class Program
 
         if (args.Contains("--mapdump"))
         {
-            var dumpExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var dumpExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var dump = new Simulation.SimulationWorld(dumpExtent);
             WorldTerrainScenarios.Populate(dump, issueGroupMove: false);
             Console.WriteLine($"  {dump.ExtentMeters:F0} m map, '.'=grass '='=road ':'=rough '~'=mud '#'=impassable");
@@ -309,7 +309,7 @@ public static class Program
             var clockCompression = Value(args, "--compression") is { } cc
                 ? float.Parse(cc)
                 : RtsGameLoop.DefaultCompression;
-            var clockExtent = Value(args, "--extent") is { } ce ? float.Parse(ce) : 600f;
+            var clockExtent = Value(args, "--extent") is { } ce ? float.Parse(ce) : RtsGameLoop.DefaultWorldExtentMeters;
             var clockYear = ParseDuration(Value(args, "--year"));
             var clockDays = Value(args, "--days") is { } cd ? int.Parse(cd) : (int?)null;
             Environment.Exit(Debug.ClockReport.Run(clockCompression, clockExtent, clockYear, clockDays));
@@ -317,7 +317,7 @@ public static class Program
 
         if (args.Contains("--orderprobe"))
         {
-            var probeExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var probeExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var probeRelief = Value(args, "--relief-amplitude") is { } probeAmplitude
                 ? float.Parse(probeAmplitude)
                 : 32f;
@@ -327,7 +327,7 @@ public static class Program
 
         if (args.Contains("--fogclick"))
         {
-            var clickExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var clickExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var clickRelief = Value(args, "--relief-amplitude") is { } amplitude
                 ? float.Parse(amplitude)
                 : 32f;
@@ -358,7 +358,7 @@ public static class Program
 
         if (args.Contains("--pathprofile"))
         {
-            var profileExtent = Value(args, "--extent") is { } size ? float.Parse(size) : 600f;
+            var profileExtent = Value(args, "--extent") is { } size ? float.Parse(size) : RtsGameLoop.DefaultWorldExtentMeters;
             var profileRelief = Value(args, "--relief-amplitude") is { } amplitude
                 ? float.Parse(amplitude)
                 : 32f;
@@ -592,6 +592,12 @@ public static class Program
             var other => throw new ArgumentException(
                 $"--sun wants dayandyear, yearonly or fixed, not '{other}'"),
         };
+        // <b>A played village holds the time of day still and lets the year move the sun.</b> §146. At 3x a
+        // day is forty seconds, so the daily cycle is a strobe: the light swings through dawn and dusk twice a
+        // minute and nothing in the scene can be judged against anything else. The seasonal swing is the half
+        // worth watching — it is the state the whole economy turns on — and it is slow enough to see.
+        // --sun still wins, and nothing headless is affected.
+        sunMotion ??= args.Contains("--village") ? LookSettings.SunMotion.YearOnly : null;
         var relief = Value(args, "--relief-amplitude") is { } metres ? float.Parse(metres) : 0f;
         // <b>A starting zoom, so a frame can be measured at the standoff somebody is complaining about.</b>
         // Everything the detail radius scales — how much ground is meshed, how many trees are drawn, how far

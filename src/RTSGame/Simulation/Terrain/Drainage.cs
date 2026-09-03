@@ -472,6 +472,10 @@ internal sealed class Drainage
             members.Clear();
             var deepest = 0f;
             var gathered = 0f;
+            var lowX = int.MaxValue;
+            var highX = int.MinValue;
+            var lowZ = int.MaxValue;
+            var highZ = int.MinValue;
             while (stack.Count > 0)
             {
                 var index = stack.Pop();
@@ -480,6 +484,10 @@ internal sealed class Drainage
                 gathered = MathF.Max(gathered, area[index]);
                 var cx = index % side;
                 var cz = index / side;
+                lowX = Math.Min(lowX, cx);
+                highX = Math.Max(highX, cx);
+                lowZ = Math.Min(lowZ, cz);
+                highZ = Math.Max(highZ, cz);
                 for (var k = 0; k < 8; k++)
                 {
                     var nx = cx + Offsets[k].X;
@@ -493,6 +501,21 @@ internal sealed class Drainage
             }
 
             if (deepest <= PondDepthMetres || gathered <= LakeCatchmentMetres2 / thirst) continue;
+
+            // <b>And it has to be deep for how broad it is.</b> §147, reported from the chair as water lying
+            // where nothing about the ground suggests any: "1.8 ha (684 m across, 12.0 m deep), 0.2 ha (237 m
+            // across, 0.9 m deep)". The second of those is not a lake. A depression fills to its outlet, and
+            // on a gentle valley floor an outlet a metre above the low point floods a couple of hundred
+            // metres of ground a metre deep — an apron with no basin, which then breaks into patches as the
+            // renderer's depth fade cuts in and out along its margin. Hence "clearly disjoint".
+            //
+            // The two tests above ask how deep a body gets and how much drains through it, and neither asks
+            // how much ground it covers to be that deep. One in eighty is the shape of a real lake basin at
+            // this scale: two hundred metres across wants two and a half metres somewhere in it. The deep
+            // basin in that same report passes at twelve metres over six hundred.
+            var span = MathF.Max(highX - lowX, highZ - lowZ) * cellMetres;
+            if (deepest < span * LakeBasinSteepness) continue;
+
             foreach (var index in members) standing[index] = true;
         }
 
@@ -508,6 +531,26 @@ internal sealed class Drainage
             // do not. The root is the same reasoning as width's own: a channel is about as deep as it is wide
             // over a broad range, so both come off the same curve rather than off two tables.
             var channel = width > TraceWidthMetres ? 0.30f * MathF.Sqrt(width) : 0f;
+
+            // <b>Two faults reported from the chair, and both are this one line's doing.</b> §145: "streams
+            // creep upstairs and vanish into nothing". A channel's level is its bed plus a depth that depends
+            // only on how much drains through it, so the surface follows the ground <em>wherever the ground
+            // goes</em> — including up a hillside, where thirty centimetres of water reads as a wet ribbon
+            // draped over a slope rather than as a stream. And the depth is gated on a hard step at
+            // TraceWidthMetres, so a headwater does not thin out, it stops: one cell has a river in it and
+            // its neighbour has dry grass.
+            //
+            // <b>Confinement.</b> Water lies in a sheet only where the ground can hold it. The test is the
+            // bed's own gradient: a channel bed is near-level along its length and a hillside is not, and on
+            // anything steeper than a gentle valley floor real water is moving too fast to stand — it is
+            // whitewater, which is not what a flat translucent sheet depicts either. Tapered rather than cut
+            // off, so a stream shallows as it climbs and dries where it steepens.
+            var slope = BedGradient(i);
+            channel *= 1f - Smooth(ChannelSlopeGentle, ChannelSlopeDry, slope);
+
+            // <b>And a headwater ramp.</b> The same figure the step used, faded over an octave of width
+            // rather than switched at it: a stream begins as a trickle nobody can see and grows.
+            channel *= Smooth(TraceWidthMetres, TraceWidthMetres * 2.2f, width);
             // The sea last, and as a plain maximum: it needs no catchment and no depression, because it is
             // not filling anything — the land is simply below it.
             var inland = MathF.Max(standing[i] ? filled[i] : ground[i], ground[i] + channel);
@@ -515,6 +558,89 @@ internal sealed class Drainage
         }
 
         return level;
+    }
+
+    /// <summary>How deep a standing body must get for how broad it is, before it counts as one.</summary>
+    /// <remarks>
+    /// One in eighty. Deliberately a ratio and not a depth: the existing depth floor is
+    /// <see cref="PondDepthMetres"/> and it is right — a pond really is only thirty-five centimetres deep —
+    /// and what it cannot express is that thirty-five centimetres over three hundred metres is not a pond,
+    /// it is a flooded field. Two quantities, two rules.
+    /// </remarks>
+    private const float LakeBasinSteepness = 0.0125f;
+
+    /// <summary>Gentlest bed gradient at which a channel starts to thin, and where it is dry.</summary>
+    /// <remarks>
+    /// Six per cent to twenty-two. The lower figure is about the steepest a valley floor gets while still
+    /// carrying a pool-and-riffle stream; the upper is where a watercourse is a cascade. Both are shallower
+    /// than the eleven per cent §51 calls buildable, which is the sense check: ground a village would happily
+    /// stand on is already too steep to hold standing water.
+    /// </remarks>
+    private const float ChannelSlopeGentle = 0.06f;
+
+    private const float ChannelSlopeDry = 0.22f;
+
+    /// <summary>The bed's own gradient at one cell, as a rise over run on the unfilled ground.</summary>
+    /// <remarks>
+    /// Central differences on the raw ground rather than on the filled surface: the fill is level across a
+    /// depression by construction, so asking it about gradient would answer zero everywhere it matters least.
+    /// </remarks>
+    private float BedGradient(int index)
+    {
+        var x = index % side;
+        var z = index / side;
+        var left = ground[z * side + Math.Max(0, x - 1)];
+        var right = ground[z * side + Math.Min(side - 1, x + 1)];
+        var up = ground[Math.Max(0, z - 1) * side + x];
+        var down = ground[Math.Min(side - 1, z + 1) * side + x];
+        var run = 2f * cellMetres;
+        var dx = (right - left) / run;
+        var dz = (down - up) / run;
+        return MathF.Sqrt(dx * dx + dz * dz);
+    }
+
+    private static float Smooth(float edge0, float edge1, float value)
+    {
+        var t = Math.Clamp((value - edge0) / MathF.Max(0.0001f, edge1 - edge0), 0f, 1f);
+        return t * t * (3f - 2f * t);
+    }
+
+    /// <summary>
+    /// Which way the water goes here and how fast, for anything that has to depict it.
+    /// </summary>
+    /// <remarks>
+    /// §145. The receiver field is a D8 flow direction and has been there since the solve; nothing had ever
+    /// asked it. Speed comes off the same two quantities a real channel's does — how much is coming through
+    /// and how steeply it is falling — normalised so that a valley-floor river is around a third and a
+    /// mountain torrent approaches one, because the consumer is a shader and not a hydrologist.
+    /// </remarks>
+    public (Vector2 Direction, float Speed) FlowAt(Vector2 world)
+    {
+        // <b>From the gradient of the filled surface, not from the receiver, and the receiver version put a
+        // checkerboard on every lake.</b> §147. The receiver field is D8: eight directions, constant inside a
+        // cell and jumping at every boundary. Sampled per vertex and interpolated across a water quad, that
+        // makes the wave phase — which is a dot product with the flow direction — swing wildly from one quad
+        // to the next, and the surface came out as a lattice of bright blobs the size of the mesh's own
+        // quads. A discrete field cannot be interpolated and should not have been asked to be.
+        //
+        // The filled surface's gradient is continuous, points downhill by construction, and is exactly zero
+        // across a lake — which is the same reason the fall was measured on it before. One field, sampled the
+        // way every other reader here samples: bilinearly.
+        var local = world - Origin;
+        var step = cellMetres;
+        var east = Sample(filled, local + new Vector2(step, 0f));
+        var west = Sample(filled, local - new Vector2(step, 0f));
+        var south = Sample(filled, local + new Vector2(0f, step));
+        var north = Sample(filled, local - new Vector2(0f, step));
+        var gradient = new Vector2((east - west) / (2f * step), (south - north) / (2f * step));
+        var fall = gradient.Length();
+        if (fall < 0.0005f) return (Vector2.Zero, 0f);
+
+        // Downhill is against the gradient. Speed off the two quantities a channel's own comes from: how much
+        // is coming through and how steeply it is falling, normalised for a shader rather than a hydrologist.
+        var discharge = MathF.Sqrt(MathF.Max(0f, AreaAt(world))) / 600f;
+        var speed = Math.Clamp(MathF.Sqrt(fall * 8f) * Math.Clamp(discharge, 0.15f, 1f), 0f, 1f);
+        return (-gradient / fall, speed);
     }
 
     public float WetnessAt(Vector2 world) => Sample(EnsureWetness(), world - Origin);

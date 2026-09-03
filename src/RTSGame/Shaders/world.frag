@@ -94,6 +94,10 @@ layout(push_constant) uniform Push {
     // The deep bank's own four: x = brightness, y = what share of the directional colouring it takes,
     // z = how solid the shared cloud reads under it, w = how sharply it retreats from ground already known.
     vec4 uVeilDeep;
+    // x = how much sky water hands back at a grazing angle, y = glint gain, z = how opaque deep water gets,
+    // w = how far up the shore the film reaches, in wadeable depths. All four are dials in the look panel —
+    // see LookSettings, and see §148 for why they stopped being constants.
+    vec4 uWater;
 };
 
 // The hues stay here and the intensities do not. A colour is a decision about what kind of
@@ -163,6 +167,29 @@ bool rts_cascade_at(int cascade, vec3 normal, float ndotl, vec2 pixel, out float
                        normal, ndotl, pixel, lit);
 }
 
+// <b>How much of a shadow a low sun is allowed to cast.</b> §146, and it is a look decision rather than a
+// correction: the shadows that made this necessary were <em>right</em>. Winter noon at this latitude is about
+// thirty degrees, so every shadow is already one and three quarter times its caster's height — and on ground
+// that falls away at the same angle as the light, which is precisely what the escarpment archetype puts a
+// tree line on top of, the length runs off toward the horizon. Reported from the chair as trees casting
+// "weird, clipped yet clearly misplaced" shadows across a plain they were nowhere near.
+//
+// Three things were ruled out by measurement first, and each would have been a bug: the caster proxy is a
+// bipyramid anchored on the ground rather than a floating plate, so nothing is offset; the wind lean is capped
+// at seven per cent of height, or eighty centimetres on a tall tree; and the far cascade's texel is 65 cm with
+// a 3.2-texel filter, so about two metres of blur — enough to soften an edge and nowhere near enough to
+// stretch one.
+//
+// So the shadow fades as the light lowers instead of the geometry being falsified. Full strength above thirty
+// degrees, down to a third of it at ten, and never to nothing: a long soft shadow at dusk is worth having, and
+// it is the ones lying a hundred metres down a scarp face in winter that were shouting. The sun's own height
+// is the input — uSunDir.y is the sine of its elevation — so this needs nothing passed down and cannot
+// disagree with where the light actually is.
+float rts_shadow_weight() {
+    float sine = normalize(uSunDir.xyz).y;
+    return mix(0.34, 1.0, smoothstep(0.17, 0.50, sine));
+}
+
 float rts_sun_shadow(vec3 normal, float ndotl, vec2 pixel) {
     // How far along the view this fragment is, which is what the splits are in.
     float viewDepth = dot(vWorldPos - uCamPos.xyz, uCameraAhead.xyz);
@@ -177,7 +204,7 @@ float rts_sun_shadow(vec3 normal, float ndotl, vec2 pixel) {
     for (int c = first; c < 3; c++) {
         if (rts_cascade_at(c, normal, ndotl, pixel, lit)) {
             gCascade = c;
-            return lit;
+            return mix(1.0, lit, rts_shadow_weight());
         }
     }
 
@@ -324,26 +351,134 @@ void main() {
     // albedo — far too little to see as motion in a still frame and enough that the surface is not dead. The
     // frequencies are deliberately close and not harmonic, so the interference never repeats on screen.
     if (isWater(surface)) {
-        float depth = clamp(vGround.y, 0.0, 1.0);
+        // <b>vGround.y is depth in wadeable units now: 1.0 is where a body can no longer cross.</b> §145.
+        float wade = max(vGround.y, 0.0);
+        float depth = clamp(wade * 0.48, 0.0, 1.0);
         // Toward a third of the shallow colour: deep water is not a darker shade of shallow water, it is the
         // same water with less bed showing through it, and the bed is what most of the brightness was.
         vec3 body = albedo * mix(1.0, 0.34, depth);
         float t = uWind.y;
-        float ripple =
-            sin(vWorldPos.x * 0.83 + t * 1.10) * sin(vWorldPos.z * 0.61 - t * 0.87) +
-            0.5 * sin(vWorldPos.x * 0.31 - t * 0.63) * sin(vWorldPos.z * 0.37 + t * 0.71);
-        body *= 1.0 + 0.062 * ripple;
-        // Lit as the flat, upward-facing thing it is, and computed here rather than borrowed from the block
-        // below — that one is derived from the interpolated normal and does not exist yet at this point in the
-        // shader. For a surface whose normal is straight up the hemispheric mix collapses to the sky term.
+
+        // <b>Which way it is going and how fast, recovered from the normal's own tilt.</b> §149. The vertex
+        // normal is the water sheet leaning downstream in proportion to its speed — see BuildWaterMesh for
+        // why it had to be an honest normal and not a packed triple. Normalisation scales all three
+        // components together, so dividing the horizontal part by the vertical recovers flow times speed
+        // exactly, and a still pond is (0,1,0) and comes out as zero rather than as a division by nothing.
+        vec2 flowVector = vNormal.xz / max(vNormal.y, 1e-4);
+        float flowing = clamp(length(flowVector), 0.0, 1.0);
+        vec2 flow = flowing > 0.001 ? flowVector / flowing : vec2(0.0);
+
+        // <b>The wave trains are a height field now, and that is the whole change.</b> §145. They were used
+        // to wobble the albedo by six per cent — motion you cannot see in a still frame and, more to the
+        // point, motion with no surface under it. Taking the gradient of the same two trains gives a normal,
+        // and a normal is what every cue below needs: a mirror has to know which way it faces.
+        //
+        // Same frequencies, kept deliberately close and non-harmonic so the interference never repeats on
+        // screen, and differentiated by hand rather than by dFdx — a screen-space derivative of a function
+        // this smooth is quantised to the pixel and reads as blocky facets.
+        // <b>And the waves travel with the current instead of drifting on the wind everywhere.</b> §145:
+        // "flows at a constant rate everywhere regardless of geography" — because the phase was
+        // position-and-clock only, so a mountain stream and a lowland pool shifted at one rate and neither of
+        // them went anywhere. A flowing surface advects: the phase is carried downstream at the channel's own
+        // speed, so a torrent streaks and a lake breathes.
+        //
+        // Crests are stretched across the current and packed along it, which is what a channel's chop looks
+        // like from above, and the cross wave is kept for the still case — at zero flow this reduces exactly
+        // to the two crossed trains a lake had.
+        vec2 downstream = flow;
+        vec2 across = vec2(-downstream.y, downstream.x);
+        float along = dot(vWorldPos.xz, downstream);
+        float sideways = dot(vWorldPos.xz, across);
+        // Faster water has shorter, busier waves; still water keeps the long lazy ones.
+        // <b>Modestly, because a wavelength shorter than a mesh quad is a moiré and not a wave.</b> §147:
+        // 2.6 put crests about a metre apart on a surface tessellated every few metres, and the beat between
+        // the two read as a regular lattice of blobs — the same fault as the flow field's, from the other end.
+        float pack = 1.0 + 0.7 * flowing;
+        float carried = t * (1.0 + 7.0 * flowing);
+
+        float ax = mix(vWorldPos.x * 0.83, along * 0.58 * pack, flowing) + carried * 1.10;
+        float az = mix(vWorldPos.z * 0.61, sideways * 0.42, flowing) - t * 0.87 * (1.0 - flowing);
+        float bx = mix(vWorldPos.x * 0.31, along * 0.27 * pack, flowing) - carried * 0.63;
+        float bz = mix(vWorldPos.z * 0.37, sideways * 0.28, flowing) + t * 0.71 * (1.0 - flowing);
+        float ripple = sin(ax) * sin(az) + 0.5 * sin(bx) * sin(bz);
+        float dhdx = 0.83 * cos(ax) * sin(az) + 0.5 * 0.31 * cos(bx) * sin(bz);
+        float dhdz = 0.61 * sin(ax) * cos(az) + 0.5 * 0.37 * sin(bx) * cos(bz);
+        // Steeper where there is water to move: a puddle a few centimetres deep over gravel is not choppy,
+        // and the shore should not sparkle like the middle of a lake.
+        // Steeper where there is water to move, and steeper again where it is moving: a millpond is glass and
+        // a run over gravel is not.
+        float chop = (0.09 + 0.16 * flowing) * smoothstep(0.0, 0.55, depth);
+        vec3 waterNormal = normalize(vec3(-dhdx * chop, 1.0, -dhdz * chop));
+
+        vec3 toEye = normalize(uCamPos.xyz - vWorldPos);
+        vec3 toSun = normalize(uSunDir.xyz);
+
+        // <b>Fresnel, which is what makes water look like water and not like tinted glass.</b> Reflectance
+        // climbs steeply toward grazing angles — F0 is about two per cent for water, and near the horizon it
+        // approaches one. Everything about the old surface was view-independent, and that is precisely why it
+        // read as paint: it looked the same whether you stood over it or across it.
+        float facing = clamp(dot(waterNormal, toEye), 0.0, 1.0);
+        float fresnel = 0.02 + 0.98 * pow(1.0 - facing, 5.0);
+
+        // The sky it reflects, from the palette that already tracks the date and the sun's own cycle, so a
+        // winter dusk reflects a winter dusk without anything here knowing what month it is.
+        vec3 skyward = mix(uHazeAway.rgb, uHazeToward.rgb, 0.35);
+
+        // Lit as a surface, not as a flat plane: the diffuse term keeps the perturbed normal so the body
+        // shades with the waves. Hemispheric ambient collapses to the sky term for anything facing broadly up.
         vec3 wet = uSkyAmbient.rgb * uLight.y
-            + uSunTint.rgb * uLight.x * max(normalize(uSunDir.xyz).y, 0.0);
-        vec3 litWater = body * wet;
+            + uSunTint.rgb * uLight.x * max(dot(waterNormal, toSun), 0.0);
+        // A little of the old albedo wobble kept, because it reads as the bed shimmering through rather than
+        // as the surface moving, and those are two different things now that the surface has its own.
+        vec3 litWater = body * (1.0 + 0.03 * ripple) * wet;
+
+        // <b>The glint.</b> Blinn-Phong on the perturbed normal, weighted by the same Fresnel and gated on the
+        // sun being up — at night this is the moon's, which is dim and low and gives a long thin streak, which
+        // is what a moon on water does. Tight exponent: a broad highlight on water reads as plastic.
+        // <b>And a glint that is a glint.</b> §147: an exponent of 260 with a gain of 26 does not make a
+        // highlight, it makes a binary — every facet whose normal happens to line up blows to white and its
+        // neighbour is black, which is what turned the lake into a chequerboard once the normals started
+        // varying at all. Broader and far weaker, and clamped, so it reads as sun on water rather than as
+        // sun through a grating.
+        vec3 halfway = normalize(toSun + toEye);
+        float glint = min(
+            pow(max(dot(waterNormal, halfway), 0.0), 90.0) * uLight.x * fresnel * uWater.y,
+            0.9) * step(0.02, toSun.y);
+        vec3 surfaceColor = mix(litWater, skyward, fresnel * uWater.x) + uSunTint.rgb * glint;
+
         float wetFog = smoothstep(uFog.x, uFog.y, length(vWorldPos - uCamPos.xyz)) * uFog.z;
         vec3 wetHaze = mix(uHazeAway.rgb, uHazeToward.rgb, 0.5);
+        // <b>And it hides its own bed at a grazing angle.</b> Opacity was depth alone, so a lake seen from
+        // across the valley was as see-through as a ford — which is backwards: the shallower the angle, the
+        // more of what reaches the eye is reflection and the less is bed. Fresnel closes the surface, and the
+        // depth fade still owns the shoreline because near the margin the water is both thin and looked
+        // down upon.
+        float opacity = clamp(vGround.x, 0.0, 1.0) * clamp(uWater.z, 0.0, 1.0);
+
+        // <b>The waterline, and the line a body cannot cross, which are two different lines.</b> §145.
+        //
+        // The first is contact: within a hand's depth of the edge the water is a wet film over gravel, so it
+        // keeps almost none of its own colour and takes a pale rim where it meets the land. Without it the
+        // sheet ends at an alpha gradient and reads as laid on top of the ground rather than as touching it —
+        // "no sense of actually being present in the same space".
+        float film = max(uWater.w, 0.02);
+        float shore = 1.0 - smoothstep(film * 0.2, film, wade);
+        float rim = smoothstep(film * 0.07, film * 0.3, wade) * (1.0 - smoothstep(film * 0.3, film * 0.73, wade));
+        vec3 shoreColor = mix(surfaceColor, albedo * wet * 1.06, shore * 0.72) + wetHaze * rim * 0.13;
+
+        // The second is passability, and it is not an art decision: Biomes classifies water as Shallows below
+        // WadeableDepthMetres and Impassable above it, and wade == 1.0 is exactly that line. A narrow darker
+        // band sits on it, so the ground a villager cannot walk into has a visible edge — the same reasoning
+        // as the shadow of a building telling you how tall it is. Narrow on purpose: it should read as the
+        // water deepening, not as a painted contour.
+        float brink = smoothstep(0.72, 1.0, wade) * (1.0 - smoothstep(1.0, 1.55, wade));
+        shoreColor *= 1.0 - 0.16 * brink;
+
         outColor = vec4(
-            rts_veil(mix(litWater, wetHaze, wetFog), vWorldPos),
-            clamp(vGround.x, 0.0, 1.0));
+            rts_veil(mix(shoreColor, wetHaze, wetFog), vWorldPos),
+            // Fresnel closes the surface at grazing angles, but never in the film at the very edge: a beach
+            // seen from across the valley is still a beach.
+            mix(opacity, 1.0, fresnel * 0.85 * (1.0 - shore)));
         return;
     }
 

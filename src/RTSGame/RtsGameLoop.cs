@@ -45,8 +45,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// <c>plan-rts-game.md</c> §3: at walking pace that is a map crossed in about six
     /// minutes, a sixteen per cent contested fraction, and roughly one and a half times the
     /// area of an AoE2 Large map per unit — where 1200 m was seven times emptier than one.
+    /// <para>
+    /// <b>600 down to 480, judged from the chair once there were two settlements on it.</b> §145. §3's
+    /// arithmetic was done before anything lived here: a crossing time is the right unit and six minutes was
+    /// the wrong number for it, because what a player actually waits on is the distance between the two
+    /// settlements — 270 m of it on the run this was reported from, most of it empty. 480 m is a crossing in
+    /// about four and a half minutes and a third less ground to fill, and it is the extent every scenario
+    /// takes its default from, so the two-settlement separation comes down with it.
+    /// </para>
     /// </remarks>
-    public const float DefaultWorldExtentMeters = 600f;
+    public const float DefaultWorldExtentMeters = 480f;
 
     /// <summary>Sim seconds per wall-clock second the game starts at.</summary>
     /// <remarks>
@@ -716,7 +724,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// the split distances, the camera's own axis, the fog of war's grid span and the two layer densities, the
     /// cloud the veil is drawn as, how that cloud is lit and pulled about, and the deep bank's own four.
     /// </summary>
-    private const int CascadeBlockSize = 64 * 2 + 16 * 8;
+    private const int CascadeBlockSize = 64 * 2 + 16 * 9;
 
     private readonly byte[] worldPush = new byte[CascadeBlockOffset + CascadeBlockSize];
     private readonly byte[] skyPush = new byte[128];     // invViewProj, camPos, sunDir, zenith, horizon
@@ -3041,6 +3049,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // on the map. Two centimetres is under a boot sole.
         const float wetEnough = 0.02f;
 
+        // Twice the width Biomes will not trust, which is the narrowest thing this mesh can depict honestly:
+        // a quad at the ground's render step is several metres across.
+        const float MinimumRenderedChannelMetres = 2f * Biomes.FordableWidthMetres;
+
         VertexPosition3NormalTexture Vertex(Vector2 at)
         {
             var level = water.LevelAt(at);
@@ -3050,12 +3062,31 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // visible ring of half-opaque water round every shore, which is the thing a shore should not have.
             var eased = Math.Clamp(depth / 1.5f, 0f, 1f);
             var opacity = 0.88f * eased * eased * (3f - 2f * eased);
-            // Colour keeps deepening for about three, which is why this is a second curve and not the same one.
-            var deep = Math.Clamp(depth / 2.4f, 0f, 1f);
+            // <b>Depth against the wadeable line rather than against a rendering constant.</b> §145: the
+            // simulation already divides water into Shallows and Impassable at Biomes.WadeableDepthMetres —
+            // see the note there on fords — and the surface never showed which was which. "I should be able
+            // to tell what people can walk over and what they cannot" asks for a fact that is already true to
+            // be depicted, so the shader is handed the fact and not a normalised number: 1.0 is exactly the
+            // depth at which the ground under it stops being crossable.
+            var wade = depth / Biomes.WadeableDepthMetres;
+            // <b>The flow field as a tilt of the normal, which is the only encoding that survives the vertex
+            // stage.</b> §149. The first version put (flow.x, speed, flow.z) in the normal slot and was
+            // broken two ways at once. world.vert does <c>normalize(mat3(model) * inNormal)</c>, so the
+            // magnitude — the speed — could never arrive; and <b>still water has no flow at all</b>, so
+            // FlowAt returns a zero vector, and <c>normalize(vec3(0))</c> is NaN. Every lake vertex handed
+            // the fragment stage a NaN normal, which propagated through the whole water block and rasterised
+            // white. That is the flat grey-white sheet, and it is why the surface got worse rather than
+            // better: the previous hard-coded (0,1,0) was at least a number.
+            //
+            // Encoded as an actual surface tilt instead: the normal of a sheet leaning downstream in
+            // proportion to its speed. Normalisation scales all three components together, so the shader
+            // recovers flow times speed exactly as <c>xz / y</c>, and still water is (0,1,0) — which is both
+            // NaN-free and the true normal of a flat pond, so anything else that reads it is right too.
+            var (flow, speed) = water.FlowAt(at);
             return new VertexPosition3NormalTexture(
                 new GraphicsVector3(at.X, level, at.Y),
-                new GraphicsVector3(0f, 1f, 0f),
-                new GraphicsVector2(opacity, deep));
+                new GraphicsVector3(flow.X * speed, 1f, flow.Y * speed),
+                new GraphicsVector2(opacity, wade));
         }
 
         void AddTriangle(Vector2 first, Vector2 second, Vector2 third)
@@ -3080,13 +3111,33 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             var c10 = new Vector2(x1, z0);
             var c01 = new Vector2(x0, z1);
             var c11 = new Vector2(x1, z1);
+            // <b>Sampled a step wider than the quad, so the sheet's silhouette sits inside its own fade.</b>
+            // §148: the test was the four corners, which puts exactly one quad of gradient outside the
+            // waterline — and at this render step a quad is several metres, so the staircase outline of the
+            // quad grid lands squarely in the visible part of it and reads as a sawtooth shore. One ring
+            // further out doubles the fade and hides the stairs in it.
             var wettest = 0f;
-            foreach (var corner in new[] { c00, c10, c01, c11 })
+            var widest = 0f;
+            var pooled = 0f;
+            for (var cz = -1; cz <= 2; cz++)
+            for (var cx = -1; cx <= 2; cx++)
             {
+                var corner = new Vector2(x0 + cx * step * size, z0 + cz * step * size);
                 wettest = MathF.Max(wettest, water.LevelAt(corner) - water.BedAt(corner));
+                widest = MathF.Max(widest, water.WidthAt(corner));
+                pooled = MathF.Max(pooled, water.LakeDepthAt(corner));
             }
 
             if (wettest <= wetEnough) continue;
+
+            // <b>And a watercourse narrower than a stride is wet ground, not a water surface.</b> §148,
+            // reported as "impossibly thin/shallow joins": a two-metre channel rendered as a translucent
+            // sheet is a pale thread lying across a field, and at this render step it cannot be anything else
+            // — the quad it is drawn on is wider than the stream. Biomes already treats anything under
+            // FordableWidthMetres as crossable whatever its depth says, for the same reason: at a four-metre
+            // lattice cell the width of something two metres across is not a number to trust. So the surface
+            // stops where the trust does. A standing body is exempt: a pond can be narrow and still be a pond.
+            if (pooled <= 0.02f && widest < MinimumRenderedChannelMetres) continue;
             AddTriangle(c00, c01, c10);
             AddTriangle(c11, c10, c01);
         }
@@ -4791,6 +4842,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             MathF.Max(0.05f, fogSettings.DeepSolidity),
             MathF.Max(1f, fogSettings.DeepEdgeFalloff));
         MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 240, 16), in veilDeep);
+        // <b>The water's four look numbers, on dials, because I had guessed them three times.</b> §148.
+        // Reflection, glint, how opaque deep water gets, and how far the shore film reaches were constants
+        // chosen without being able to see the result — and two of the three rounds of "the water looks
+        // worse" traced to one of them. A look number that can only be changed by a rebuild is a look number
+        // set by whoever is not looking.
+        var water = new Vector4(
+            look.WaterReflection, look.WaterGlint, look.WaterOpacity, look.WaterShoreMetres);
+        MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 256, 16), in water);
         for (var i = 0; i < Hearths.MaximumLights; i++)
         {
             // The tail is zeroed rather than left stale: the count bounds the loop, but a light left in the

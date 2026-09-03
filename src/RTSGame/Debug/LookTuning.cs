@@ -273,6 +273,44 @@ internal sealed class LookSettings
     // the thing we were after.
     public float ShadowPenumbraTexels = 3.2f;
 
+    /// <summary>
+    /// How much sky a water surface returns at a grazing angle.
+    /// </summary>
+    /// <remarks>
+    /// <b>On a dial because I set it three times without being able to see it.</b> §148. Fresnel decides
+    /// <em>where</em> the reflection goes — that is physics and stays in the shader — and this decides how
+    /// much of the sky it hands back when it gets there, which is a look. Too high and the water goes milky
+    /// and loses its depth; too low and it reads as tinted glass, which is what it did before there was any.
+    /// </remarks>
+    [Tune(0.0, 1.0, Label = "water reflection", Group = "water")]
+    public float WaterReflection = 0.45f;
+
+    /// <summary>How brightly the sun sits on the water.</summary>
+    /// <remarks>
+    /// The one that did the damage: at a gain of 26 with a tight exponent it was not a highlight but a
+    /// comparator, and every facet that lined up blew to white while its neighbour went black.
+    /// </remarks>
+    [Tune(0.0, 8.0, Label = "water glint", Group = "water")]
+    public float WaterGlint = 2.0f;
+
+    /// <summary>How much of its bed deep water is allowed to hide.</summary>
+    /// <remarks>
+    /// Scales the depth-derived opacity the mesh computes. At one, water a couple of metres deep is nearly
+    /// opaque; lower it and the bed shows through, which is wrong for a lake and right for the shallows —
+    /// hence the shore film below, which owns the margin separately.
+    /// </remarks>
+    [Tune(0.2, 1.0, Label = "water opacity", Group = "water")]
+    public float WaterOpacity = 0.85f;
+
+    /// <summary>How far up the shore the water is a film over gravel rather than a body.</summary>
+    /// <remarks>
+    /// In wadeable depths, so 0.3 is a third of the depth at which a body can no longer cross — see
+    /// Biomes.WadeableDepthMetres. This is the contact cue: without it the sheet ends at an alpha gradient
+    /// and reads as laid on the ground rather than as touching it.
+    /// </remarks>
+    [Tune(0.0, 1.0, Label = "water shore film", Group = "water")]
+    public float WaterShoreMetres = 0.30f;
+
     /// <summary>How far off its own surface a fragment is moved before the shadow lookup, in texels.</summary>
     /// <remarks>
     /// The cure for acne — the broad dirty smears a flat surface casts on itself. Too little and they come
