@@ -12073,3 +12073,227 @@ first.
 - **Wood is still the binding constraint.** Both settlements end the year at zero, now with buildings to show
   for it. This is where a build policy has to get cleverer or the wood economy has to change (§70's open
   item), and it is the first time the two are the same question.
+
+## 141. A vocabulary, and a planner whose rules cannot re-arm the trap
+
+The bot works and is unreadable as design: a fixed cascade of imperative acts in C#, where the shape of the
+code and the shape of the intent have nothing to do with each other. What follows is the layer that separates
+them, and the reason to build it is not expressiveness.
+
+### The vocabulary, as it is
+
+Four tiers, and the fourth decides how big the planner is.
+
+**Standing purposes** — what a body is *for*, through `QueueAssign`, persisting until replaced:
+`Work(node, resource)`, `Haul(source → sink, cargo)`, `Carry(anchor, cargo)`, `Build(site)`,
+`Train(barracks)`, `Hold/Post(point, dwell, extent)`, `Shuttle(a, b, dwell)`, `None`.
+
+`Hold` is the useful one: it **auto-converts** to `Work` or `Build` when its anchor is a node, so one verb
+covers "work this" and "help put this up" and the difference is a fact about the building rather than about
+the order. See `PostedOnAWorkSite`.
+
+**Orders** — interrupts that expire: `Move`, `Stop`, `Follow(body)`, `Patrol(to)`, `Chase(body)`,
+`Flee(body)`. A multi-body `Move` forms a cohort implicitly, so a sortie gets §107's formation and flow field
+for free and needs no group API.
+
+**Settlement acts** — not orders to units: `Place(kind, at)`, `BeginRepair(node)`,
+`BeginUpgrade(node, StoneWall)`, `Despawn`. The bot and the player use identical paths.
+
+**What the simulation owns, and no planner may touch:** who commits to a defence (§30's am-I-needed, §134's
+bounded proof), the hauling board, births and emigration and privation, the field year rollover, felling,
+catchment binding. All of it happens whether anything thinks or not.
+
+So the planner's job is narrower than "play the game": **decide standing purposes, place buildings, commit
+force.** That is the whole of it.
+
+**Gaps the vocabulary has**, found by writing the list: no cancel for a placed site (a planner that changes
+its mind strands timber), no rally point, no production queue, and — the one that matters here — **no
+standing purpose for a soldier**. See below.
+
+### Why the layer exists
+
+Three bugs this session, one shape: §137's tally, §138's world-wide total, §140's re-decided projects. Every
+one was an imperative rule asking *how many are already doing X*, which is a question about the queue and not
+about the world whenever the asker is the one filling the queue. Two of them I wrote after recording the
+first.
+
+So the planner is **declarative targets reconciled every decision**, not a cascade of acts. A rule states a
+target; it never issues a command. The framework computes
+
+```
+gap = target - (standing + ordered-and-not-yet-applied)
+```
+
+and owns the `ordered` half itself, per intent, with the cooldown inside it. **A new rule cannot re-arm the
+trap, because a rule has no way to issue anything.** That is the argument for the layer, and it has nothing
+to do with being able to express more.
+
+### The four concepts
+
+- **Reading** — census → number, string-named, and the rule is that it must be a figure the HUD shows or
+  could show. Already the rule for `Outlook` (a bot reasoning in units nobody displays cannot be argued with
+  from the chair); now the rule for the whole vocabulary. Computed from one census per decision, so every
+  reading is O(1) and no rule can pay for a sweep.
+- **Condition** — `reading op number`, and `all`/`any`. **No arithmetic and no state in a rule**: the moment
+  a script can accumulate, it can re-derive a figure nobody displays and hold state no save captures.
+- **Intent** — a target with a quantity that knows how to measure its own gap and close part of it:
+  `Employ(resource, share)`, `Structure(kind, count)`, `Upgrade(from → to, count)`, `Garrison(count)`,
+  `StaffProjects(hands)`, and later `Guard(anchor, radius)`.
+- **Plan** — an ordered list of `when → intent`. Order is priority; the first unsatisfied gap gets this
+  decision's hands.
+
+Typed C# to begin with, every reading and intent string-named from the first line so a text plan file is a
+transcription rather than a redesign. The parser is the least interesting part and the vocabulary will churn
+through the first few designs; it is an afternoon once the plan is thirty rules long.
+
+**Rejected: behaviour trees and utility scoring.** Both hide the firing reason behind a score, which is
+exactly what this project keeps finding bugs by making visible. A priority list is legible; a utility
+function is a number nobody can argue with.
+
+### Two things in the framework rather than in the rules
+
+- **The explainer.** Every command records the rule that produced it; the report prints which rules fired,
+  which gaps stayed open, and what was issued. A plan that cannot say why is untestable, and every finding in
+  this file came from an instrument rather than from reasoning.
+- **Attention as the budget.** §7 makes difficulty an attention budget and not a cheat. Here that is
+  literal: **how many gaps a plan may close per decision**, plus how often it decides. One knob, and no
+  resource or vision cheat anywhere in it.
+
+### What contact needs, which is one verb
+
+Chosen as the first thing to express, and writing the vocabulary out is what showed the obstacle: **militia
+have no standing purpose.** `Train` converts a villager and leaves it on `Assignment.None`, so militia stand
+about until §30 commits them. Posture is inexpressible not because the planner is dumb but because there is
+no verb for where a soldier belongs.
+
+`Assignment.Guard(anchor, radius)` — a standing purpose for a soldier, exactly parallel to `Work` for a
+villager:
+
+- §30 keeps deciding who commits. Untouched.
+- **A body that finishes a fight returns to its Guard**, the way `TrySendBackToWork` returns a reaper to its
+  field. That is §30's open half — "what a committed defence does on arrival" — answered in the terms the
+  jobs layer already has, rather than as a new mechanism.
+- A rally point is a Guard anchor. A stance is which anchor and radius the plan picks. No stance enum, no new
+  interrupt, no new command.
+
+Then contact is readings over §131's knowledge — `enemy_known_within(m)`, `enemy_last_seen_seconds` — and
+rules like `when enemy_known_within(140) → Garrison(8)`, `→ Guard(store, 40)`.
+
+### Order of work
+
+1. The layer, with today's five rules ported and nothing new. The proof is the existing gate plus a test that
+   the ported plan issues what the hand-written cascade issued.
+2. `Guard`, and the return-to-post path.
+3. Contact readings and posture rules, which is the first time faction knowledge decides anything.
+
+## 142. The layer, and what it found in the plan it was carrying
+
+Stage 1 of §141: `Census`, `Reading`, `Condition`, `Intent`, `Plan`, `Planner`, `OrderLedger`, `HandPool`.
+`SettlementBot` is gone; the settler plan prints itself:
+
+```
+plan 'settler' for faction 0:
+  when barracks < 1 and projects_open == 0 and timber >= 300 and stone >= 120 → structure barracks 1
+  always → staff projects 2
+  when barracks >= 1 → garrison 4
+  when barracks >= 1 and walls < 4 and projects_open == 0 and wood_seasons >= 4 and timber >= 60
+      → structure palisadewall 4
+  when stone >= 120 and projects_open == 0 and wood_seasons >= 4 → upgrade palisade->stone 4
+  when grain_seasons < 2.5 → employ grain 0.85
+  when wood_seasons < 2.5 → employ grain 0.35
+  always → employ grain 0.67
+  always → employ wood with the rest
+```
+
+The goal was to port the cascade with no new behaviour. **It did not port cleanly, and every divergence was
+worth having.**
+
+### The explainer earned itself in the first run
+
+The first run of the layer: no barracks, no militia, 1,804 gaps left open — and the report said why without
+any thinking on my part.
+
+```
+t17073 always → employ wood with the rest: gap 4, closed 0 (short)
+t17073 always → employ grain 0.67: gap 12, closed 0 (short)
+t17073 always → staff projects 2: gap 2, closed 0 (short)
+```
+
+Every rule firing, every gap real, everything closing nothing. That is not a symptom a hand-written cascade
+would have shown at all; the cascade's version of this bug was a settlement that looked busy.
+
+Three faults came out of it in order, and each was found by an instrument rather than by reading:
+
+**1. `Employ(Wood, 1f)` is not "the rest".** A share of one is a target the size of the settlement, so the
+gap could never close — and being an always-rule ahead of the structures, it spent the whole attention budget
+every decision. `Employ.Rest` targets the remainder, which is zero at equilibrium.
+
+**2. Rule order is the whole of what a priority list says.** The employment rules want every unemployed hand,
+so anything after them is reached only once the workforce is placed. Projects moved above them.
+
+**3. A share has to be a share of what the sharing rule can reach.** The census printed
+`workforce 9 = 1 grain + 3 wood + 0 idle + 5 elsewhere` — five hands on a building site — and "two thirds on
+grain" therefore targeted seven of nine and could never be met. So the employment rule pulled builders back
+to the fields twice a second while the staffing rule pulled them back to the site: **537 orders in 540
+decisions**, against about forty from the cascade. `EconomyHands` is now idle + grain + wood, and the pool
+shrinking is how a higher-priority rule expresses its priority. 537 → 75.
+
+The instrument that found the third one was one line — the census printed beside the gaps — and it is the
+whole reason to make a planner explain itself.
+
+### Two stories I told that measurement refused
+
+Worth recording because both were plausible and both were wrong, and the wrongness was free to discover.
+
+**"The attention budget made it aggressive."** The layer builds three stone walls in a year where the cascade
+built one, and 4 gaps per decision looked like the obvious cause. A/B at 1 and 2 gaps: **identical
+construction and near-identical population.** Over 5,400 decisions a budget of one is still ample. The knob
+is real and it was not the cause.
+
+**"It takes cutters to build, and that is what costs the wood."** Removing the wood tier from the hand pool
+produced a **byte-identical run** — the tier was never reached, because idle or field hands were always
+available. The comment claiming a measured effect was reverted rather than kept, and the tier stays as the
+honest rule for something that outranks the economy rather than as a fix for anything.
+
+### What the divergence actually was
+
+Two plans on one map, which is the instrument this layer exists to be — the same settler plan with the wall
+rules removed:
+
+| at winter of year 1 | walled | unwalled |
+|---|---|---|
+| f0 | 16 people, 4,073 grain, 0 wood | **19 people, 5,148 grain, 169 wood** |
+| f1 | 12 people, 3,689 grain | **17 people, 4,621 grain** |
+
+The unwalled plan beats the hand-written cascade it replaced (17 at winter). So the layer costs nothing:
+**four walls is more than this economy affords while it is also feeding itself**, and the cascade escaped it
+only by being worse at building.
+
+### The fix is a condition, and the resource in it is the finding
+
+`wood_seasons >= 4` on the wall and upgrade rules. I tried `grain_seasons` first and the run came back
+byte-identical: 4,200 grain in the founding cache is far above any threshold, and all the building happens
+before it runs down. **A condition has to name the resource the act actually spends** — a wall is 60 timber,
+a stone upgrade takes the hands that would be cutting, and wood is half of what §138's readiness is computed
+from, so a woodpile spent on walls stops the births two seasons later where nothing connects the two.
+
+| at winter of year 1 | no gate | wood-gated | unwalled |
+|---|---|---|---|
+| f0 people | 16 | 18 | 19 |
+| f1 people | 12 | 17 | 17 |
+| f0 built | 1 palisade + 3 stone | 1 palisade + 3 stone | nothing |
+| f1 built | 1 palisade + 3 stone | **nothing** | nothing |
+
+**The wood-rich settlement builds its walls and the wood-poor one declines to**, from one condition, on the
+merits of the ground each was founded on. That is the first thing in this arc that reads as a decision rather
+than as a schedule, and it is the argument for the whole layer better than anything I wrote in §141.
+
+### Still open
+
+- **`Guard` and the return-to-post path** — stage 2, and §30's open half.
+- **Contact readings** — stage 3, and the first time knowledge decides anything.
+- **The attention budget has no measured default.** Four is arbitrary and 1 and 2 behave the same over a
+  year. It will start to matter when a plan has rules that compete, which this one barely does.
+- **A plan cannot cancel.** Nothing abandons a site, so a plan that changes its mind strands timber.
+- **`grain_seasons` is in the vocabulary and does nothing in this plan.** Left in as a statement of when
+  building is wanted, with the measurement recorded next to it.

@@ -1312,7 +1312,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         float.IsPositiveInfinity(seasons) ? "no net draw" : $"{seasons:F1} seas";
 
     /// <summary>The neighbour's player, when one was asked for. Null in a single-settlement village.</summary>
-    private SettlementBot? opponentBot;
+    private AI.Planning.Planner? opponentBot;
 
     /// <summary>
     /// A bot on the player's own settlement, when the whole map is being left to play itself.
@@ -1324,7 +1324,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// "the player's" side, because a bot that ran the player's settlement differently would be measuring the
     /// wrong thing.
     /// </remarks>
-    private SettlementBot? playerBot;
+    private AI.Planning.Planner? playerBot;
 
     private readonly bool startOpponent;
 
@@ -1891,7 +1891,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             faction: PlayerFaction);
 
         // <b>And a bot on it too, if the map is being left to play itself.</b> §140.
-        playerBot = handsOffEverybody ? new SettlementBot(PlayerFaction) : null;
+        playerBot = handsOffEverybody ? new AI.Planning.Planner(PlayerFaction) : null;
         if (playerBot is not null)
         {
             Console.WriteLine(
@@ -1924,7 +1924,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 centre: neighbour,
                 faction: theirs,
                 dressMap: false);
-            opponentBot = new SettlementBot(theirs);
+            opponentBot = new AI.Planning.Planner(theirs);
             Console.WriteLine(
                 $"  opponent: faction {theirs.Value} founded at ({neighbour.X:F0}, {neighbour.Y:F0}), " +
                 $"{Vector2.Distance(founded, neighbour):F0} m away, run by a rule-bot");

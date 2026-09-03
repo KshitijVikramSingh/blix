@@ -5671,10 +5671,10 @@ internal static class SimulationSelfTests
         var wall = world.AddNode(NodeKind.PalisadeWall, new Vector2(10f, 0f), capacity: 0);
         var began = world.BeginUpgrade(wall, NodeKind.StoneWall);
         var real = StructuralProjects.CostFor(world.Nodes.Get(wall)).Stone;
-        var bots = AI.SettlementBot.StoneForAStoneWall;
+        var bots = AI.Planning.Upgrade.StoneForAWall;
         var passed = began && real > 0 && real == bots;
         Console.WriteLine(
-            $"    a palisade turns to stone for {real} stone; the bot budgets {bots}");
+            $"    a palisade turns to stone for {real} stone; the plan budgets {bots}");
         return passed;
     }
 

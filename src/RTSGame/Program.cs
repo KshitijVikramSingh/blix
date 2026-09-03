@@ -103,7 +103,12 @@ public static class Program
                 twoExtent, twoYears, twoRelief, twoSeed,
                 args.Contains("--swapfactions"), args.Contains("--onevillage"),
                 args.Contains("--dresstwice"), args.Contains("--bot") || args.Contains("--bots"),
-                args.Contains("--bots")));
+                args.Contains("--bots"),
+                // The attention budget, which §141 made a knob and §7 wants difficulty to be.
+                Value(args, "--gaps") is { } gaps
+                    ? int.Parse(gaps)
+                    : AI.Planning.Planner.GapsPerDecision,
+                Value(args, "--plan") ?? "settler"));
         }
 
         if (args.Contains("--settlement"))

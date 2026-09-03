@@ -44,7 +44,9 @@ internal static class TwoSettlementScenarios
         bool onlyOne = false,
         bool dressTwice = false,
         bool bot = false,
-        bool bothBots = false)
+        bool bothBots = false,
+        int gapsPerDecision = AI.Planning.Planner.GapsPerDecision,
+        string planName = "settler")
     {
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         var world = new SimulationWorld(extentMeters);
@@ -131,11 +133,11 @@ internal static class TwoSettlementScenarios
         // which would leave a bot with nothing to do and an acceptance test that proved nothing. Stripping the
         // assignments makes the claim the sharp one: can a rule-bot take a settlement that is standing idle
         // and put it to work through the same commands a person has. §132.
-        SettlementBot? driver = null;
-        SettlementBot? other = null;
+        AI.Planning.Planner? driver = null;
+        AI.Planning.Planner? other = null;
         if (bot || bothBots)
         {
-            driver = Unemploy(world, secondFaction);
+            driver = Unemploy(world, secondFaction, gapsPerDecision, planName);
         }
 
         // <b>And the first settlement too, when the whole map is left to itself.</b> §140. This is the state
@@ -144,7 +146,7 @@ internal static class TwoSettlementScenarios
         // have — same recipe, same starting cache, same driver, different ground.
         if (bothBots)
         {
-            other = Unemploy(world, firstFaction);
+            other = Unemploy(world, firstFaction, gapsPerDecision, planName);
         }
 
         // Recorded before the clock starts, because "did anything happen" is a comparison and needs both ends.
@@ -236,23 +238,28 @@ internal static class TwoSettlementScenarios
             {
                 faults.Add(
                     $"faction {ran.Faction.Value}'s bot never finished a barracks — " +
-                    $"{ran.SitesPlaced} site(s) laid, {standing.Unfinished} unfinished");
+                    $"{standing.Unfinished} unfinished");
             }
             else if (standing.Militia == 0)
             {
                 faults.Add(
-                    $"faction {ran.Faction.Value}'s bot has a barracks and no militia — " +
-                    $"{ran.MilitiaRaised} ordered");
+                    $"faction {ran.Faction.Value}'s bot has a barracks and no militia");
             }
         }
 
         foreach (var ran in new[] { other, driver })
         {
             if (ran is null) continue;
+            // <b>Orders and gaps, not sites laid.</b> §141: the planner has no tally of its own acts
+            // because the world already holds one — see the structures line above, which counts what is
+            // standing. What only the planner knows is how often a rule wanted something it could not have,
+            // and that is the figure worth printing.
             Console.WriteLine(
-                $"  faction {ran.Faction.Value}'s bot: {ran.Decisions:N0} decisions, " +
-                $"{ran.OrdersIssued:N0} assignments, {ran.SitesPlaced} site(s) laid, " +
-                $"{ran.MilitiaRaised} militia raised");
+                $"  faction {ran.Faction.Value}'s '{ran.PlanName}' plan: {ran.Decisions:N0} decisions, " +
+                $"{ran.OrdersIssued:N0} orders, {ran.GapsLeftOpen:N0} gap(s) left open");
+            // The plan as written and the last of what it did. §141's explainer: a plan that cannot say why
+            // is untestable, and this scenario is where "why" gets asked.
+            Console.WriteLine(ran.Describe());
         }
 
         foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");
@@ -543,7 +550,11 @@ internal static class TwoSettlementScenarios
     /// assignments makes the claim the sharp one: can a rule-bot take a settlement standing idle and put it
     /// to work through the same commands a person has. §132.
     /// </remarks>
-    private static SettlementBot Unemploy(SimulationWorld world, FactionId faction)
+    private static AI.Planning.Planner Unemploy(
+        SimulationWorld world,
+        FactionId faction,
+        int gapsPerDecision,
+        string planName)
     {
         var theirs = new List<Simulation.Agents.AgentId>();
         foreach (ref readonly var body in world.Agents.All)
@@ -555,7 +566,7 @@ internal static class TwoSettlementScenarios
         world.Tick((float)SimulationWorld.FixedDeltaSeconds);
         Console.WriteLine(
             $"  faction {faction.Value} is driven by a bot, and starts with {theirs.Count} people and no work");
-        return new SettlementBot(faction);
+        return new AI.Planning.Planner(faction, AI.Planning.Plan.Named(planName), gapsPerDecision);
     }
 
     /// <summary>What one faction has standing, counted from the world rather than from the bot's tally.</summary>
