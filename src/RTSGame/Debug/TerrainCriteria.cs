@@ -228,6 +228,10 @@ internal readonly record struct TerrainCriteria(
         var filled = water.Filled;
 
         var lake = water.LakeDepth;
+        // <b>Per cell, not sampled.</b> §157: LevelAt and BedAt interpolate, which is correct for a point
+        // between cells and wrong for checking the rule that wrote them — see the note on LevelField.
+        var level = water.LevelField;
+        var bedField = water.Ground;
         var lowest = float.MaxValue;
         var highest = float.MinValue;
         var uphill = 0;
@@ -245,7 +249,7 @@ internal readonly record struct TerrainCriteria(
         for (var index = 0; index < filled.Length; index++)
         {
             var at = water.Origin + new Vector2(index % side, index / side) * step;
-            var bed = water.BedAt(at);
+            var bed = bedField[index];
             lowest = MathF.Min(lowest, bed);
             highest = MathF.Max(highest, bed);
 
@@ -264,7 +268,7 @@ internal readonly record struct TerrainCriteria(
             // FordableWidthMetres and §148 gives for the render width gate: at a four-metre cell, the width
             // of something two metres across is not a number anybody should trust.
             if (wide <= MathF.Max(Drainage.TraceWidthMetres, step)) continue;
-            var depth = water.LevelAt(at) - bed;
+            var depth = level[index] - bed;
             if (depth <= 0.02f) continue;
 
             // A crossing: a reach a body can wade is a decision on the map rather than a wall.
@@ -289,7 +293,7 @@ internal readonly record struct TerrainCriteria(
             // of it was not.
             if (lake[to] > 0.05f) continue;
             var next = water.Origin + new Vector2(to % side, to / side) * step;
-            if (water.LevelAt(at) >= water.LevelAt(next) - 0.01f) continue;
+            if (level[index] >= level[to] - 0.01f) continue;
             uphill++;
             // <b>Banded by how much water the reach carries, to answer whether these are rivers or
             // trickles.</b> §155: the criterion holds every channel the solver can find to monotonicity, and
@@ -305,7 +309,7 @@ internal readonly record struct TerrainCriteria(
             // bed grows too. Where the bed's fall over one cell is smaller than that growth, the <em>surface</em>
             // climbs while the bed descends — which is not a terrain fault at all but the water model adding
             // depth upward instead of incising downward.
-            var climb = water.LevelAt(next) - water.LevelAt(at);
+            var climb = level[to] - level[index];
             // <b>The worst few, with every number that decides them.</b> §156: five hypotheses about this
             // fault have now been wrong — the taper, the grade limiter, lake inflow, the level's stacking,
             // and ponding in sub-threshold hollows — and every one was reasoning about the code. This prints
@@ -317,10 +321,13 @@ internal readonly record struct TerrainCriteria(
                     Climb: climb,
                     At: at,
                     BedHere: bed,
-                    BedNext: water.BedAt(next),
+                    BedNext: bedField[to],
                     FillHere: filled[index],
                     FillNext: filled[to],
                     WidthHere: wide,
+                    // The same definition at both ends. §157: printing WidthAt here and WidthOf(Area) there
+                    // made width appear to collapse from 4.4 m to 0.3 m downstream, which accumulated area
+                    // cannot do — the far figure was simply missing the authored corridor the near one had.
                     WidthNext: water.WidthAt(next),
                     LakeHere: lake[index]));
                 worst.Sort((a, b) => b.Climb.CompareTo(a.Climb));
@@ -330,9 +337,8 @@ internal readonly record struct TerrainCriteria(
             if (climb < 0.02f) trivial++;
             else if (climb < 0.20f) slight++;
             else real++;
-            var bedFall = bed - water.BedAt(next);
-            var depthGrowth =
-                (water.LevelAt(next) - water.BedAt(next)) - (water.LevelAt(at) - bed);
+            var bedFall = bed - bedField[to];
+            var depthGrowth = (level[to] - bedField[to]) - (level[index] - bed);
             if (bedFall > 0f && depthGrowth > bedFall) deepening++;
         }
 

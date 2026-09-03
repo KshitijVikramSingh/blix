@@ -219,6 +219,21 @@ internal sealed class Drainage
     }
 
     /// <summary>The depression-filled surface: what the ground would be if every hole were full.</summary>
+    /// <summary>
+    /// The water surface per cell, as the level rule wrote it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Exposed because measuring it through <see cref="LevelAt"/> measures something else.</b> §157: that
+    /// accessor samples bilinearly, which is right for a renderer asking about a point between cells and
+    /// wrong for a criterion checking the rule's own arithmetic. The dump built in §156 reported beds falling
+    /// one centimetre beside water climbing twenty, and the contradiction was the smoothing — four cells
+    /// averaged where the rule had used one.
+    /// </remarks>
+    public float[] LevelField => EnsureLevel();
+
+    /// <summary>The bed per cell, likewise, and for the same reason.</summary>
+    public float[] Ground => ground;
+
     public float[] Filled => filled;
 
     /// <summary>Index of the cell each cell drains into, or -1 where water leaves the map.</summary>

@@ -12939,3 +12939,52 @@ surface and a bed at the same height and no visible water. The channel has to be
 before the terrain is written — and the width that decides how deep to carve comes out of the solve, so it is
 a two-pass generation: solve, carve, re-solve. That is a real change to the shape of `Apply` and is where
 this goes next.
+
+## 157. The dump, read properly: the surface steps up at every confluence
+
+§156 built the attribution and then misread it twice, both times because the dump and the rule were not
+looking at the same numbers.
+
+**The accessors interpolate; the rule does not.** `LevelAt` and `BedAt` go through `Sample`, which is
+bilinear — correct for a renderer asking about a point between cells, wrong for a criterion checking the
+arithmetic of a per-cell rule. The dump reported beds falling one centimetre beside water climbing twenty,
+and the contradiction was four cells averaged where the rule had used one. `Drainage.LevelField` and
+`Drainage.Ground` are now exposed and the criterion indexes them directly.
+
+**And then the two ends were measured differently.** With sampling gone, width appeared to *collapse*
+downstream — 4.4 m to 0.3 m — which accumulated area cannot do. The near figure was `WidthAt`, which takes
+the maximum of area-derived width and the authored corridor; the far one was `WidthOf(Area)`, which does not.
+One definition at each end of the same comparison.
+
+### What it says once both ends agree
+
+```
+climb 0.26 m at (48,-40): bed -3.21->-3.22 (falls 0.01), width 4.4->8.9 m
+```
+
+- channel here = 0.30·√4.4 = **0.629 m**
+- channel next = 0.30·√8.9 = **0.895 m**
+- level here = −2.581, level next = −2.325, climb **+0.256** — the reported figure, to the centimetre.
+
+The arithmetic closes. **Width roughly doubles across a single four-metre cell**, and accumulated area can
+only do that where a tributary joins. So the fault has a name: `level = ground + 0.30·√width` **steps the
+water surface up at every confluence**, because area is discontinuous at a junction and the depth is stacked
+on top of the bed rather than cut into it.
+
+A real confluence does not raise the water. The channel below a junction is *deeper*, and its surface
+continues to fall. Which is the same conclusion as §156 reached and did not reach far enough: incision has to
+be sized on the width the rule uses — including the authored corridor — and applied so the *surface*, not the
+bed, is what comes out monotone.
+
+**One of the six worst does not fit.** `climb 0.17 m … width 9.5->9.6 m` is five millimetres of new depth
+against a centimetre of fall, and should read as falling. Left named rather than explained: there is a second
+mechanism in here and pretending otherwise is how the last five hypotheses went.
+
+### The count that matters
+
+Eight instrument corrections now, against four generator changes. Every one of the eight was found by an
+arithmetic check — a share above one, a fault on every map, a width that decreased downstream, a climb that
+its own components contradicted. **Not one was found by reading the code, and not one of my five hypotheses
+about the underlying fault survived contact with a number.** The lesson this file keeps writing is the same
+one: build the instrument, then check the instrument against arithmetic that must hold, and only then
+believe what it says.
