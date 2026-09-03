@@ -242,6 +242,7 @@ internal static class MapSweep
             // generator in §150 is judged against these numbers on these seeds.
             var criteria = TerrainCriteria.Measure(world);
             Console.WriteLine($"    criteria: {criteria}");
+            Console.WriteLine($"    {TerrainCriteria.LastUphillBands}");
             foreach (var shortfall in criteria.Shortfalls()) shortfalls.Add($"{what}: {shortfall}");
             MeasureDrawnGroundError(world, amplitude);
         }

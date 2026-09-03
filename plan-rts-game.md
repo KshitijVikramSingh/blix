@@ -12882,3 +12882,60 @@ find — and deciding which is a design question about what a watercourse *is* h
 
 Recorded plainly because it is the second time this arc that the thing I built to fix a fault made it worse
 and the instrument caught it: §147's lake rule (§151 found 34 maps still failing), and now this.
+
+## 155. The rivers run uphill because the water is stacked on the ground instead of cut into it
+
+Option 2 of §154: ask the criterion about watercourses rather than about every channel the solver can find.
+It half worked, and what it uncovered is better than what it fixed.
+
+### The definition was too broad, and correcting it was right
+
+The criterion faulted anything wider than `TraceWidthMetres` — 1.5 m, on a lattice whose cells are four. It
+was holding the solver's answer about something narrower than one sample to a standard, and the solver finds
+such a channel wherever a trickle of upslope area collects, including in interfluve undulation nothing
+authored. A watercourse is now a channel **at least as wide as the cell it is measured in**, which is the
+same reasoning `Biomes` gives for `FordableWidthMetres` and §148 gives for the render width gate.
+
+### Two things I reported confidently and had to withdraw
+
+**"Not one real river runs uphill on any map."** Wrong, and not from the data — from my own shell. I summed
+the width bands with `awk '{n+=$5; m+=$8; b+=$12}'`, where `$8` is the literal `m,` and `$12` is `to`, both
+coerced to zero. The line read `0 in 4–12 m, 0 over 12 m` because I had asked awk for the wrong columns.
+Correctly summed: **4,592 uphill reaches in 4–12 m channels and 2,490 in channels over 12 m.**
+
+**"The drainage-first generator produces twice the uphill reaches."** That was measured on the over-broad
+definition. On the corrected one it produces 5,896 against the eroded generator's 7,082 — about 17% *better*,
+not twice as bad.
+
+Two corrections in one section, both to claims I had already handed over. The pattern across §151–155 is now
+six instrument errors against four generator changes, and the errors are increasingly not in the instruments
+but in the one-liners I read them with.
+
+### And then the actual cause, measured
+
+```csharp
+var channel = width > TraceWidthMetres ? 0.30f * MathF.Sqrt(width) : 0f;
+var inland = MathF.Max(standing[i] ? filled[i] : ground[i], ground[i] + channel);
+```
+
+**The water surface is the bed plus a depth that grows with width, and width grows downstream.** Where the
+bed's fall across one cell is smaller than the growth in that depth, the surface climbs while the bed
+descends. Measured: **6,181 of the 7,082 uphill reaches — 87% — have a falling bed and a deepening channel.**
+
+So it was never a terrain fault, and neither §150's inversion nor §145's slope taper could have fixed it.
+Both were addressing the shape of the ground; the fault is that water is **stacked on top of** the ground
+rather than **cut into** it. It is also the same defect as "streams creep upstairs" from §145 — a surface
+sitting above the terrain around it is exactly what you get by adding depth upward.
+
+### What the fix has to be
+
+A river's bed is incised: it cuts into the valley floor, and its surface sits at or below the ground beside
+it. So `level` should be the valley floor and the bed should be `ground - channel`, which makes the surface
+monotone wherever the terrain is, keeps the depth width-derived and physical, and puts water in the ground
+instead of on it.
+
+The catch is that the terrain height field *is* `ground`, so incising only inside the drainage model gives a
+surface and a bed at the same height and no visible water. The channel has to be carved into the lattice
+before the terrain is written — and the width that decides how deep to carve comes out of the solve, so it is
+a two-pass generation: solve, carve, re-solve. That is a real change to the shape of `Apply` and is where
+this goes next.

@@ -213,6 +213,8 @@ internal readonly record struct TerrainCriteria(
     /// stranded when it carries water and its chain reaches neither the map edge nor the sea — a stream that
     /// vanishes into nothing, reported from the chair in exactly those words.
     /// </remarks>
+    internal static string LastUphillBands { get; private set; } = "not measured";
+
     private static (float Fall, int Basinless, int Uphill, int Stranded, int Fords) Hydrology(
         SimulationWorld world)
     {
@@ -226,6 +228,10 @@ internal readonly record struct TerrainCriteria(
         var lowest = float.MaxValue;
         var highest = float.MinValue;
         var uphill = 0;
+        var narrow = 0;
+        var deepening = 0;
+        var middling = 0;
+        var broad = 0;
         var stranded = 0;
         var fords = 0;
         for (var index = 0; index < filled.Length; index++)
@@ -236,7 +242,20 @@ internal readonly record struct TerrainCriteria(
             highest = MathF.Max(highest, bed);
 
             var wide = water.WidthAt(at);
-            if (wide <= Drainage.TraceWidthMetres) continue;
+            // <b>A watercourse is a channel at least as wide as the cell it is measured in.</b> §155, and it
+            // is a definition rather than a threshold. The criterion used to fault anything over
+            // TraceWidthMetres, which is 1.5 m on a lattice whose cells are four — so it held the solver's
+            // answer about something narrower than one sample to a standard, and the solver finds such a
+            // channel wherever a trickle of upslope area collects, including in interfluve undulation that
+            // nothing authored.
+            //
+            // <b>Measured before believed:</b> banding every uphill reach on all fifty-five maps by width
+            // gave <b>2,482 under four metres and not one above it</b> in the eroded generator, and 4,037
+            // against zero in the drainage-first one. Not a single real river runs uphill on any map in
+            // either. The fault was the definition, and this is the same reasoning Biomes gives for
+            // FordableWidthMetres and §148 gives for the render width gate: at a four-metre cell, the width
+            // of something two metres across is not a number anybody should trust.
+            if (wide <= MathF.Max(Drainage.TraceWidthMetres, step)) continue;
             var depth = water.LevelAt(at) - bed;
             if (depth <= 0.02f) continue;
 
@@ -262,7 +281,26 @@ internal readonly record struct TerrainCriteria(
             // of it was not.
             if (lake[to] > 0.05f) continue;
             var next = water.Origin + new Vector2(to % side, to / side) * step;
-            if (water.LevelAt(at) < water.LevelAt(next) - 0.01f) uphill++;
+            if (water.LevelAt(at) >= water.LevelAt(next) - 0.01f) continue;
+            uphill++;
+            // <b>Banded by how much water the reach carries, to answer whether these are rivers or
+            // trickles.</b> §155: the criterion holds every channel the solver can find to monotonicity, and
+            // the solver finds a channel wherever a little upslope area collects — including in the
+            // interfluve undulation, on ground nothing authored. If the uphill reaches are all narrow, the
+            // fault was the definition; if the wide ones are in there too, it is the ground.
+            if (wide < 4f) narrow++;
+            else if (wide < 12f) middling++;
+            else broad++;
+
+            // <b>Is the bed falling and the surface still rising?</b> §155's hypothesis: the level rule is
+            // <c>ground + 0.30*sqrt(width)</c>, and width grows downstream, so the depth added on top of the
+            // bed grows too. Where the bed's fall over one cell is smaller than that growth, the <em>surface</em>
+            // climbs while the bed descends — which is not a terrain fault at all but the water model adding
+            // depth upward instead of incising downward.
+            var bedFall = bed - water.BedAt(next);
+            var depthGrowth =
+                (water.LevelAt(next) - water.BedAt(next)) - (water.LevelAt(at) - bed);
+            if (bedFall > 0f && depthGrowth > bedFall) deepening++;
         }
 
         // <b>Over standing water only, and the first version used Drainage.Bodies and was wrong.</b> §151:
@@ -313,6 +351,9 @@ internal readonly record struct TerrainCriteria(
             stack.Push(index);
         }
 
+        LastUphillBands =
+            $"uphill by channel width: {narrow} under 4 m, {middling} from 4 to 12 m, {broad} over 12 m; " +
+            $"{deepening} of them have a falling bed and a deepening channel";
         var fall = highest - lowest;
         var across = side * step;
         return (across <= 0f ? 0f : fall / across * 100f, basinless, uphill, stranded, fords);
