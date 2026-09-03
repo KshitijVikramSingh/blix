@@ -592,7 +592,30 @@ internal sealed class Drainage
             // metre and a half — shallow in absolute terms and right relative to a body: one you wade, one you
             // do not. The root is the same reasoning as width's own: a channel is about as deep as it is wide
             // over a broad range, so both come off the same curve rather than off two tables.
-            var channel = width > TraceWidthMetres ? 0.30f * MathF.Sqrt(width) : 0f;
+            // <b>Depth from discharge, slope and roughness — not from width alone.</b> §161, and it is the
+            // absence the chair named as water having no pressure or momentum.
+            //
+            // The old rule was <c>0.30·√width</c>, and width comes from catchment area, so <b>depth was a
+            // function of catchment size and nothing else</b>: a torrent down a one-in-five grade and a
+            // sluggish reach across a floodplain carrying the same flow got identical depth. Every real
+            // distinction between them was absent by construction, and nothing was conserved along the
+            // channel — width, depth and velocity were three independent guesses that could not constrain
+            // each other, so nothing propagated.
+            //
+            // Manning's equation, for a channel wide enough that its hydraulic radius is its depth:
+            //   Q = (1/n)·w·d^(5/3)·√S   →   d = (Q·n / (w·√S))^(3/5)
+            // Discharge comes from the catchment, slope from the bed's own fall to its receiver. So a steep
+            // reach runs fast and shallow and a flat one slow and deep, which is the character a river
+            // changes along its length.
+            var channel = 0f;
+            if (width > TraceWidthMetres)
+            {
+                var q = MathF.Max(0f, area[i]) * RunoffPerArea;
+                var fall = MathF.Max(SlopeAt(i), MinimumChannelSlope);
+                channel = MathF.Pow(
+                    q * Roughness / MathF.Max(0.01f, width * MathF.Sqrt(fall)),
+                    0.6f);
+            }
 
             // <b>Two faults reported from the chair, and both are this one line's doing.</b> §145: "streams
             // creep upstairs and vanish into nothing". A channel's level is its bed plus a depth that depends
@@ -619,6 +642,7 @@ internal sealed class Drainage
             level[i] = ground[i] < sea ? MathF.Max(inland, sea) : inland;
         }
 
+        Backwater(level);
         return level;
     }
 
@@ -703,6 +727,85 @@ internal sealed class Drainage
         var discharge = MathF.Sqrt(MathF.Max(0f, AreaAt(world))) / 600f;
         var speed = Math.Clamp(MathF.Sqrt(fall * 8f) * Math.Clamp(discharge, 0.15f, 1f), 0f, 1f);
         return (-gradient / fall, speed);
+    }
+
+    /// <summary>
+    /// Water backs up behind whatever it cannot get past.
+    /// </summary>
+    /// <remarks>
+    /// <b>§161, and it is the other half of "no pressure".</b> A surface computed pointwise cannot know what
+    /// is downstream of it, so nothing ever piled up behind a constriction, slowed onto a flat, or responded
+    /// to its outlet at all. That response — the surface of a river answering to what is below it — is
+    /// pressure travelling upstream, and this model had no mechanism for it.
+    /// <para>
+    /// So the surface is walked from the outlets inland, and any reach whose water would sit below the water
+    /// it drains into is <b>raised to meet it</b>. Note which way that goes: §158 solved the same
+    /// non-monotonicity by cutting the bed <em>down</em> at the confluence, which is a bulldozer's answer.
+    /// Water's answer is to pond, and ponding is what a person watching a river actually sees above a
+    /// narrows.
+    /// </para>
+    /// <para>
+    /// Downstream-first, sorted by the filled surface, so a cell's receiver is always settled before the cell
+    /// itself — the fill is monotone along flow by construction, which is exactly the ordering this needs.
+    /// </para>
+    /// </remarks>
+    private void Backwater(float[] level)
+    {
+        var order = new int[level.Length];
+        for (var i = 0; i < order.Length; i++) order[i] = i;
+        Array.Sort(order, (a, b) => filled[a].CompareTo(filled[b]));
+
+        foreach (var index in order)
+        {
+            var to = receiver[index];
+            if (to < 0 || to == index) continue;
+            var run = Offsets2D(index, to) * cellMetres;
+            var wanted = level[to] + run * MinimumChannelSlope;
+            if (level[index] >= wanted) continue;
+            // Only where there is water to back up. Dry ground does not pond because its neighbour is wet.
+            if (level[index] - ground[index] <= 0.001f) continue;
+            level[index] = wanted;
+        }
+    }
+
+    /// <summary>
+    /// Runoff per square metre of catchment, as a discharge. The one calibration this model needs.
+    /// </summary>
+    /// <remarks>
+    /// Chosen so the trunk of a full-size catchment runs about a metre deep: six square kilometres against a
+    /// twenty-metre channel on a one-in-a-hundred slope. In real terms it is a few hundred millimetres a
+    /// year, which is a temperate lowland — the country this game is set in.
+    /// </remarks>
+    private const float RunoffPerArea = 1.0e-5f;
+
+    /// <summary>Manning's n. Natural channel with some weed and gravel.</summary>
+    private const float Roughness = 0.035f;
+
+    /// <summary>
+    /// The gentlest slope a channel is allowed to be solved on.
+    /// </summary>
+    /// <remarks>
+    /// Manning divides by the square root of slope, so a dead-flat reach would ask for infinite depth. Real
+    /// water on flat ground is not infinitely deep because it stops being a channel and becomes a pool, which
+    /// is what the depression fill is for — this floor is where one hands over to the other.
+    /// </remarks>
+    private const float MinimumChannelSlope = 0.0006f;
+
+    /// <summary>The bed's fall to its receiver, as a grade.</summary>
+    private float SlopeAt(int index)
+    {
+        var to = receiver[index];
+        if (to < 0 || to == index) return MinimumChannelSlope;
+        var run = Offsets2D(index, to) * cellMetres;
+        if (run <= 0f) return MinimumChannelSlope;
+        return MathF.Max(0f, ground[index] - ground[to]) / run;
+    }
+
+    private float Offsets2D(int from, int to)
+    {
+        var dx = (to % side) - (from % side);
+        var dz = (to / side) - (from / side);
+        return MathF.Sqrt(dx * dx + dz * dz);
     }
 
     public float WetnessAt(Vector2 world) => Sample(EnsureWetness(), world - Origin);

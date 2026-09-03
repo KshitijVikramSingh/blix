@@ -2892,7 +2892,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// resolution the quads are.
     /// </para>
     /// </remarks>
-    private int WaterRenderStep => GroundRenderStep;
+    /// <remarks>
+    /// <b>Half the ground's, from §162, because the waterline now has detail worth resolving.</b> The note
+    /// above is about a step that did not divide the chunk and produced a dark seam at every boundary; half
+    /// of the ground's step always does, since a chunk is sixty-four render cells by construction. What
+    /// changed is that it is worth paying for: with the depth measured against the real terrain and each cell
+    /// cut to the waterline, the mesh can follow a crevice, and at the ground's own step it had nowhere to
+    /// put the vertices to do it.
+    /// </remarks>
+    private int WaterRenderStep => Math.Max(1, GroundRenderStep / 2);
 
     private readonly Dictionary<(int X, int Z), List<TerrainSurfaceLayer>> groundChunks = new();
 
@@ -3090,10 +3098,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // a quad at the ground's render step is several metres across.
         const float MinimumRenderedChannelMetres = 2f * Biomes.FordableWidthMetres;
 
+        // <b>Against the ground that is actually drawn, not the lattice the surface was solved on.</b> §162,
+        // and it is why water read as tiles rather than as liquid: BedAt samples the four-metre drainage
+        // lattice, so a crevice two metres across does not exist in the field the depth was measured against
+        // and no amount of mesh resolution could have filled it. The surface stays where the solver put it —
+        // it is smooth by construction and belongs to the lattice — and what it is compared to is the terrain
+        // a player can see.
         VertexPosition3NormalTexture Vertex(Vector2 at)
         {
             var level = water.LevelAt(at);
-            var depth = MathF.Max(0f, level - water.BedAt(at));
+            var depth = MathF.Max(0f, level - terrain.SampleHeight(at));
             // Opacity saturates within a metre and a half: past that there is no more bed to hide. Eased
             // rather than linear so the shallows hold their transparency further out — a hard ramp puts a
             // visible ring of half-opaque water round every shore, which is the thing a shore should not have.
@@ -3124,6 +3138,31 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 new GraphicsVector3(at.X, level, at.Y),
                 new GraphicsVector3(flow.X * speed, 1f, flow.Y * speed),
                 new GraphicsVector2(opacity, wade));
+        }
+
+        float DepthAt(Vector2 at) => water.LevelAt(at) - terrain.SampleHeight(at);
+
+        /// Keeps the part of a triangle that is under water, cutting its edges where the depth reaches zero.
+        void ClipToWaterline(Vector2 a, Vector2 b, Vector2 c)
+        {
+            Span<Vector2> corners = stackalloc Vector2[3] { a, b, c };
+            Span<float> depths = stackalloc float[3] { DepthAt(a), DepthAt(b), DepthAt(c) };
+            Span<Vector2> kept = stackalloc Vector2[4];
+            var count = 0;
+            for (var i = 0; i < 3; i++)
+            {
+                var j = (i + 1) % 3;
+                var wetHere = depths[i] > 0f;
+                var wetNext = depths[j] > 0f;
+                if (wetHere) kept[count++] = corners[i];
+                if (wetHere == wetNext) continue;
+                // Where the edge crosses, by the depths at its ends. The crossing point has zero depth, so
+                // its own opacity is zero and the sheet fades out exactly at its own silhouette.
+                var t = depths[i] / (depths[i] - depths[j]);
+                kept[count++] = Vector2.Lerp(corners[i], corners[j], t);
+            }
+
+            for (var i = 2; i < count; i++) AddTriangle(kept[0], kept[i - 1], kept[i]);
         }
 
         void AddTriangle(Vector2 first, Vector2 second, Vector2 third)
@@ -3178,8 +3217,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // lattice cell the width of something two metres across is not a number to trust. So the surface
             // stops where the trust does. A standing body is exempt: a pond can be narrow and still be a pond.
             if (pooled <= 0.02f && widest < MinimumRenderedChannelMetres) continue;
-            AddTriangle(c00, c01, c10);
-            AddTriangle(c11, c10, c01);
+            // <b>Clipped to the waterline, so the edge is a contour and not a staircase of quads.</b> §162:
+            // emitting whole cells made the outline a picture of the render grid — "trying to be tiles
+            // instead of filling the crevices of the map like a liquid". Each triangle is cut against the
+            // line where the water meets the ground, which is exactly where depth reaches zero.
+            //
+            // Two triangles clipped independently rather than sixteen marching-squares cases: the contour
+            // comes out identical, and a case table is a place for one entry to be wrong for a year.
+            ClipToWaterline(c00, c01, c10);
+            ClipToWaterline(c11, c10, c01);
         }
 
         return (vertices.ToArray(), indices.ToArray());

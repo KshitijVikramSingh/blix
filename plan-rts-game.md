@@ -13111,3 +13111,83 @@ Two things worth keeping from how this one went:
   took was opening it the way a person would.
 - **It was mine, from this session.** I booted the lab with `--maplab --timings` and reported it as ready to
   compose maps in, having never checked that it had made one.
+
+## 161. Pressure and momentum: depth from flow, and water that backs up
+
+"Our water lacks pressure and momentum throughout the modelling", from the chair. It is the best diagnosis
+anybody has made of this arc, and it names why every fix since §145 has been a patch.
+
+### The three absences
+
+- **Depth did not know about slope.** `level = ground + 0.30·√width`, and width comes from catchment area, so
+  depth was a function of catchment size *alone*. A torrent down a one-in-five grade and a sluggish reach
+  across a floodplain carrying the same flow got identical depth.
+- **Nothing was conserved along a channel.** Real flow satisfies `Q = v·A`. Here width, depth and velocity
+  were three independent guesses — width from a curve, depth from width, and velocity invented in §145 purely
+  so the shader had something to advect. Nothing constrained anything, so nothing propagated. That is
+  precisely what "no pressure" means.
+- **No head, so no backwater.** Water never piled up behind a constriction or slowed onto a flat. A river's
+  surface answering to what is below it *is* pressure travelling upstream, and there was no mechanism for it.
+
+### What replaced it
+
+Manning, for a channel wide enough that its hydraulic radius is its depth:
+
+```
+Q = (1/n)·w·d^(5/3)·√S     →     d = (Q·n / (w·√S))^(3/5)
+```
+
+Discharge from the catchment, slope from the bed's own fall, roughness a real constant at 0.035, and one
+calibration — runoff per square metre, set so a full catchment's trunk runs about a metre deep. **A steep
+reach now runs fast and shallow and a flat one slow and deep**, which is the character a river changes along
+its length.
+
+And `Backwater` walks the surface from the outlets inland, raising any reach whose water would sit below what
+it drains into. **Note which way that goes.** §158 solved the same non-monotonicity by cutting the bed
+*down* at confluences, which is a bulldozer's answer. Water's answer is to pond, and ponding above a narrows
+is what a person watching a river actually sees.
+
+### What it did
+
+| | before | after |
+|---|---|---|
+| uphill reaches, eroded | 6,278 | **0** |
+| uphill reaches, drainage-first | 5,896 | **0** |
+| shortfalls, eroded | 106 | **50** |
+| shortfalls, drainage-first | 93 | **38** |
+
+**Zero.** The fault this arc has chased since §145 — through a slope taper, an incision, a profile carve, a
+definition change and five wrong hypotheses — is gone, and it went without being aimed at.
+
+That is the lesson, and it is worth more than the section: **every one of those fixes was an attempt to
+impose by hand a property that falls out of a solution for free.** A surface computed pointwise from local
+width cannot be monotone; a surface computed from conserved flow is monotone because it is a solution.
+Monotonicity stopped being a goal the moment depth and velocity had to agree with each other.
+
+Conservation clean, self-tests pass, gate 6/6, ratchet down to 50. What remains is terrain shape and not
+water: 17 maps short of hydraulic fall, 7 with flanks over the limit, 3 with crossable ground in pieces.
+
+## 162. Water that fills crevices instead of tiling them
+
+"Water is trying too hard to be tiles instead of filling the crevices of the map like a liquid." Two causes,
+and the first one meant no amount of mesh work could have fixed it.
+
+**It was being compared to the wrong ground.** The mesh measured depth as `level - BedAt`, and `BedAt` samples
+the **four-metre drainage lattice** — so a crevice two metres across does not exist in the field the depth is
+measured against. The surface stays where the solver put it, because it is smooth by construction and belongs
+to the lattice; what it is compared to is now `terrain.SampleHeight`, the ground a player can see.
+
+**And its outline was the render grid.** Whole cells were emitted wherever any corner was wet, so the
+silhouette was a staircase of quads — a picture of the mesh's own resolution. Each triangle is now cut against
+the line where depth reaches zero, so the edge is a contour. Two triangles clipped independently rather than
+sixteen marching-squares cases: the contour is identical and a case table is a place for one entry to be
+wrong for a year. The crossing point has zero depth by definition, so its opacity is zero and the sheet fades
+out exactly at its own silhouette.
+
+The water step is half the ground's now, which always divides a chunk — the seam that note warns about came
+from a step that did not. It was not worth paying for before; with the depth measured against real terrain and
+the cells cut to the waterline, the mesh can follow a crevice, and at the ground's step it had nowhere to put
+the vertices to do it.
+
+Measured: `ground_p50` 0.09 ms for the whole terrain and water build, so the finer step costs nothing worth
+naming.

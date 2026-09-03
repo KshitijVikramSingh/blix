@@ -187,7 +187,7 @@ internal static class MapSweep
     /// Criteria shortfalls this generator is known to have, so the sweep can refuse to make it worse.
     /// </summary>
     /// <remarks>
-    /// §151. Measured, not chosen: 106 across the sweep, and the shape of them is the argument for §150.
+    /// §151. Measured, not chosen: 50 across the sweep, and the shape of them is the argument for §150.
     /// <b>Every single map has between 139 and 422 watercourses running uphill</b> — "creeps upstairs",
     /// counted, and untouched by §145's slope taper, which reduced how much water sat on a slope without
     /// making the level field monotone. Most maps fall short of the two metres per hundred that water needs
@@ -199,7 +199,7 @@ internal static class MapSweep
     /// generator should take it to zero, and until it does, nothing may add to it.
     /// </para>
     /// </remarks>
-    private const int KnownShortfalls = 106;
+    private const int KnownShortfalls = 50;
 
     private static void Try(
         Archetype archetype,
