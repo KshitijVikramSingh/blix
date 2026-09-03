@@ -121,7 +121,26 @@ internal sealed class Plan
                 },
                 new Structure(NodeKind.Barracks, 1, ring: 16f))
             .Always(new StaffProjects(builders: 2))
+            // <b>Contact, and the first rule in this game that is about somebody else.</b> §143. The
+            // reading is hostiles this faction can <em>see</em> — §131's knowledge, gated on ground it is
+            // watching this moment — so a neighbour it has never looked at changes nothing, which is the
+            // property the whole knowledge layer exists to make true.
+            //
+            // Two rules and not a stance enum: a garrison of eight drawn in tight to the store, or four
+            // spread wide. Which one applies is the ordering, and the tight one is written first because a
+            // plan is read top to bottom the way a person would read it.
+            .When(
+                new[]
+                {
+                    new Condition(Reading.Barracks, Comparison.AtLeast, 1f),
+                    new Condition(Reading.EnemySeenWithin(120f), Comparison.AtLeast, 1f),
+                },
+                new Garrison(8))
+            .When(Reading.EnemySeenWithin(120f), Comparison.AtLeast, 1f, new Guard(radius: 18f))
             .When(Reading.Barracks, Comparison.AtLeast, 1f, new Garrison(4))
+            // Somewhere for them to be at peace. §143: without this a garrison is four bodies standing
+            // wherever training left them, and after their first fight, wherever the fight ended.
+            .Always(new Guard(radius: 40f))
             // <b>Walls out of a comfortable woodpile, and the resource in that condition is the whole
             // finding.</b> §141. The plan without a gate here builds four walls and upgrades three of them,
             // and both settlements end the year smaller for it. Measured against the same plan with the wall

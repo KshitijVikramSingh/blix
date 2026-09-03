@@ -90,6 +90,42 @@ internal sealed class Census
 
     public List<AgentId> OnWoodBodies { get; } = new();
 
+    /// <summary>
+    /// Militia with nowhere to be, which is every militia until a plan posts one.
+    /// </summary>
+    /// <remarks>
+    /// §143. Training leaves a body on <see cref="Assignment.None"/>, so this is the gap a Guard rule closes.
+    /// Bodies under a player's order are excluded for the usual reason: a militia a person has sent somewhere
+    /// is not the planner's to re-post.
+    /// </remarks>
+    public List<AgentId> UnpostedMilitia { get; } = new();
+
+    /// <summary>
+    /// Every militia and the post it is standing at, so a plan can move a garrison rather than only fill it.
+    /// </summary>
+    /// <remarks>
+    /// §143. A gap counted as "militia with no post at all" can fill a garrison and can never <em>change</em>
+    /// one — a body already guarding at forty metres is not unposted, so a rule wanting it at twenty would
+    /// state a target it never reaches. A posture is which anchor and radius the plan picks, and that is only
+    /// true if picking a different one moves somebody.
+    /// </remarks>
+    public List<(AgentId Id, Vector2 At, float Radius)> MilitiaPosts { get; } = new();
+
+    /// <summary>
+    /// Hostiles this faction can see right now, by distance from its store.
+    /// </summary>
+    /// <remarks>
+    /// <b>Seen now, not known to exist.</b> §143's contact reading, and the gate is
+    /// <see cref="FactionKnowledge.SeenWithin"/> — ground this faction is watching this moment, which is the
+    /// tightest question that structure answers honestly. Per body rather than per cell, which is what makes
+    /// it affordable: §131 measured CanSee per cell at 166 ms a tick, and there are a handful of bodies.
+    /// <para>
+    /// It deliberately does not remember. A last-seen-here would be simulation state that has to be
+    /// fingerprinted and saved, and it is worth having only once a plan has a rule that wants it.
+    /// </para>
+    /// </remarks>
+    public List<float> HostilesSeen { get; } = new();
+
     /// <summary>Hands standing at one site, by node slot.</summary>
     public Dictionary<int, int> HandsAtSite { get; } = new();
 
@@ -106,6 +142,9 @@ internal sealed class Census
         Idle.Clear();
         OnGrainBodies.Clear();
         OnWoodBodies.Clear();
+        UnpostedMilitia.Clear();
+        MilitiaPosts.Clear();
+        HostilesSeen.Clear();
         HandsAtSite.Clear();
 
         foreach (var id in world.Nodes.SettlementNodes)
@@ -144,11 +183,36 @@ internal sealed class Census
 
         foreach (ref readonly var body in world.Agents.All)
         {
-            if (!body.IsAlive || body.Faction != faction) continue;
+            if (!body.IsAlive) continue;
+            if (body.Faction != faction)
+            {
+                if (Store.IsValid && body.Strength > 0f &&
+                    (world.Colliders.Factions.Between(faction, body.Faction) & RelationMask.Enemy) != 0 &&
+                    world.Knowledge.SeenWithin(faction, body.Position, world.TickNumber))
+                {
+                    HostilesSeen.Add(Vector2.Distance(body.Position, Centre));
+                }
+
+                continue;
+            }
+
             Mouths++;
             if (body.Role == AgentRole.Militia)
             {
                 Militia++;
+                if (!body.Jobs.IsInterrupted)
+                {
+                    var duty = body.Jobs.Assignment;
+                    if (duty.Kind == AssignmentKind.Guard)
+                    {
+                        MilitiaPosts.Add((body.Id, duty.Anchor, duty.PlaceExtent));
+                    }
+                    else
+                    {
+                        UnpostedMilitia.Add(body.Id);
+                    }
+                }
+
                 continue;
             }
 

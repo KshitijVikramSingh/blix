@@ -12297,3 +12297,107 @@ than as a schedule, and it is the argument for the whole layer better than anyth
 - **A plan cannot cancel.** Nothing abandons a site, so a plan that changes its mind strands timber.
 - **`grain_seasons` is in the vocabulary and does nothing in this plan.** Left in as a statement of when
   building is wanted, with the measurement recorded next to it.
+
+## 143. Guard, and the first decision a faction makes about somebody else
+
+Stages 2 and 3 of §141.
+
+### The verb militia never had
+
+`AssignmentKind.Guard` and `Assignment.Guard(post, radius, dwell)` — a standing purpose for a soldier,
+exactly parallel to `Work` for a villager, and it earns the parallel: **a rally point is a Guard anchor, a
+stance is which anchor and radius a plan picks, and what a committed defence does on arrival is that it goes
+back to its Guard.** No stance enum, no new interrupt, no new command. It is in `RepeatsForever` with `Hold`
+and `Work`, so the jobs layer re-arms it with no special handover, and appended to the enum rather than
+inserted because the save format writes it by value.
+
+### Where the return-to-post actually lives, after two wrong homes
+
+`StandDown` said "the danger has passed: let the jobs layer have the body back" and did not do it. A stop
+halts the walk and leaves the interrupt standing, and an `InterruptKind.Order` never expires — by design, so
+that a body sent somewhere stays sent. **This had gone unnoticed because militia had no standing assignment
+to go back to**, so there was nothing for the bug to be visibly stopping.
+
+Fixing it in `StandDown` looked obvious and does not fire: **§134's bounded peace proof skips every body
+with no hostile in range**, so at peace nothing calls it at all. The optimisation is right and its premise is
+that a settlement at peace has nothing to decide. Measured as a guard that left its post for a raider at the
+granary and stopped 8.8 m short of home, for good.
+
+The rule that works is stated on the assignment, in `ServeInterrupt`:
+
+```csharp
+if (jobs.Interrupt == InterruptKind.Order && jobs.Assignment.Kind != AssignmentKind.Guard)
+{
+    return JobRequest.None;
+}
+```
+
+**A guard always goes back to its post.** Deliberately not "an order from the defence expires but a player's
+does not": that puts provenance into a layer that has done without it, and it would be wrong anyway — a
+soldier told to go and look at something is expected to come back, and that expectation is what a post *is*.
+
+Test: a guard posted 14 m out leaves for a raider at the granary door and comes home to 2.6 m of its post,
+still a guard. It fails without the rule. The first attempt put the raider 38 m out, where it is outside a
+militia's sight, so §30 never committed anybody and **the body sat at its post the whole time looking like a
+pass** — a test that cannot fail is worse than no test, and this one could only fail once the threat was
+somewhere a defence would actually answer.
+
+### Contact
+
+One reading, parameterised: `enemy_seen_within(m)` — hostiles within m of the store **standing on ground this
+faction is watching this moment**, gated on `FactionKnowledge.SeenWithin`. Per body and not per cell, which
+is what makes it affordable at all: §131 measured `CanSee` per cell at 166 ms a tick, and there are a handful
+of bodies. It deliberately does not remember: a last-seen-here is simulation state that has to be
+fingerprinted and saved, and it is worth having when a plan has a rule that wants it.
+
+Two rules, and no stance enum:
+
+```
+when barracks >= 1 and enemy_seen_within(120) >= 1  →  garrison 8
+when enemy_seen_within(120) >= 1                    →  guard the store within 18m
+when barracks >= 1                                  →  garrison 4
+always                                              →  guard the store within 40m
+```
+
+**`Guard`'s gap had to grow a second half for this to mean anything.** Counted as "militia with no post at
+all" it can fill a garrison and can never *change* one — a body already guarding at forty metres is not
+unposted, so the tight rule would state a target it never reaches. It now also counts militia standing at
+somebody else's post, which is what makes "a posture is which anchor and radius the plan picks" a true
+statement rather than a description.
+
+### What the contact test had to learn
+
+Introducing the neighbour *first* proved nothing, and the way it failed is the interesting part: **an alarm
+interrupts every villager in the settlement**, the census excludes interrupted bodies from the workforce for
+§7's reason, and so there was nobody left to train — the contact run came back with no militia at all. The
+claim is that contact *moves* a garrison, and a garrison has to exist before it can be moved. So: garrison at
+peace, then the neighbour arrives.
+
+```
+at peace 4 of the garrison stand at 40 m and 0 at 18 m
+with a hostile in view 2 at 40 m and 2 at 18 m
+```
+
+Two of four drew in, and the two that did not are the ones §30 committed to the fight — a body under that
+interrupt is not the planner's to re-post until it is released. My first assertion demanded all four, which
+contradicted the reasoning written two lines above it; the assertion was wrong, not the code.
+
+**Both halves are asserted, because only the pair is a finding.** A plan that always drew its garrison in
+tight would pass the first half alone, and a knowledge layer that leaked would pass the second by accident.
+The two settlements in the headless year never see each other, so these rules would otherwise be code that
+has never run.
+
+### Found on the way
+
+**Militia cost 30 wood and 30 stone each, drawn from the barracks**, and training is a two-leg errand whose
+source and sink are both the barracks. A barracks conjured already-built and empty equips nobody: the plan
+orders four militia and none appear. In a played settlement the timber carted out to raise it is what stocks
+it — which is a quiet argument for the founding stone cache being sized the way §140 sized it, since four
+militia is 120 of its 600.
+
+### Still open
+
+- **A last-seen-here.** Contact is "can see now"; a plan cannot yet say "an enemy was here recently".
+- **`Muster`** — sending a force somewhere is `QueueMove` over a set, which forms a cohort for free, but no
+  intent does it. That is the first offensive verb and it belongs with the roster.
+- **A plan cannot cancel**, still. Nothing abandons a site.

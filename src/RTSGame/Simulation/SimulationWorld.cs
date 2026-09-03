@@ -939,7 +939,24 @@ internal sealed class SimulationWorld
     }
 
     /// <summary>The danger has passed: drop the walk, and let the jobs layer have the body back.</summary>
-    private void StandDown(AgentId body) => QueueStop(new[] { body });
+    /// <remarks>
+    /// <b>"Let the jobs layer have the body back" was what this said and not what it did.</b> §143: a stop
+    /// halts the walk and leaves the interrupt standing, and an Order interrupt never expires — so a
+    /// defender stayed wherever the fight ended. It went unnoticed because militia had no standing
+    /// assignment to go back to, so there was nothing for the bug to be visibly stopping. Now that
+    /// <see cref="AssignmentKind.Guard"/> exists, it is the difference between a garrison and a scattering.
+    /// </remarks>
+    private void StandDown(AgentId body)
+    {
+        QueueStop(new[] { body });
+        if (!Agents.Contains(body)) return;
+        ref var agent = ref Agents.Get(body);
+        // Releases a guard at once rather than waiting for its interrupt grace, which is worth a line only
+        // because it is the tick the alarm actually ended. It is not what makes a guard come home — see the
+        // note in ServeInterrupt: this is not called at peace at all, because §134's proof has nothing to
+        // decide then, and the rule that brings a guard back has to hold without it.
+        if (agent.Jobs.Assignment.Kind == AssignmentKind.Guard) JobSystem.ReturnToAssignment(ref agent);
+    }
 
     /// <summary>Go at a body and keep going at it, which is what the chase order already does.</summary>
     private void ChargeThreat(AgentId body, AgentId target) => QueueChase(new[] { body }, target);

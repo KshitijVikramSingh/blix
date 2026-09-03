@@ -82,6 +82,28 @@ internal enum AssignmentKind
     /// Carry militia equipment to one barracks, then remain there until this same villager is trained.
     /// </summary>
     Train,
+
+    /// <summary>
+    /// Where a soldier belongs: stand about here, and come back here when a fight is over.
+    /// </summary>
+    /// <remarks>
+    /// <b>The standing purpose militia did not have.</b> §143. Training converted a villager and left it on
+    /// <see cref="Assignment.None"/>, so militia stood wherever the barracks happened to be until §30's
+    /// am-I-needed committed them, and after a fight they stood wherever the fight ended. There was no verb
+    /// for "this is your post", which is why a posture was inexpressible — not because a planner was too
+    /// simple, but because the vocabulary had no word for it.
+    /// <para>
+    /// Exactly parallel to <see cref="Work"/> for a villager, and it earns the parallel: a rally point is a
+    /// Guard anchor, a stance is which anchor and radius the plan picks, and <b>what a committed defence does
+    /// on arrival — §30's open half — is that it goes back to its Guard</b>, the way a reaper goes back to
+    /// its field. No stance enum, no new interrupt, no new command.
+    /// </para>
+    /// <para>
+    /// Appended rather than inserted, because the save format writes this enum by value and a settlement
+    /// saved before today has to load as the same settlement.
+    /// </para>
+    /// </remarks>
+    Guard,
 }
 
 /// <summary>What a unit is doing at this instant, in service of its assignment.</summary>
@@ -289,6 +311,24 @@ internal readonly record struct Assignment(
             AssignmentKind.Hold, at, at, dwellSeconds, site, NodeId.None, PlaceExtent: extent);
 
     /// <summary>Work one end, then the other, dwelling at each.</summary>
+    /// <summary>
+    /// Posts a soldier where it belongs. See <see cref="AssignmentKind.Guard"/>.
+    /// </summary>
+    /// <param name="radius">
+    /// How much ground counts as the post. It is the place's extent, which is the same term a building's
+    /// footprint uses — so a guard with a wide radius spreads out along its wall instead of stacking on one
+    /// point, and the crowding rules that already exist do the spreading.
+    /// </param>
+    /// <param name="dwellSeconds">
+    /// How long one turn of duty lasts before the leg finishes and the assignment repeats. Not a timeout: it
+    /// repeats forever, and the only reason it is finite is that a leg is the unit in which the jobs layer
+    /// notices anything at all.
+    /// </param>
+    public static Assignment Guard(Vector2 post, float radius, float dwellSeconds) =>
+        new(
+            AssignmentKind.Guard, post, post, dwellSeconds, NodeId.None, NodeId.None,
+            PlaceExtent: radius);
+
     public static Assignment Shuttle(Vector2 first, Vector2 second, float dwellSeconds) =>
         new(AssignmentKind.Shuttle, first, second, dwellSeconds, NodeId.None, NodeId.None);
 
@@ -311,7 +351,7 @@ internal readonly record struct Assignment(
     /// </remarks>
     public bool RepeatsForever =>
         Kind is AssignmentKind.Hold or AssignmentKind.Shuttle or AssignmentKind.Carry or AssignmentKind.Work or
-            AssignmentKind.Build or AssignmentKind.Train;
+            AssignmentKind.Build or AssignmentKind.Train or AssignmentKind.Guard;
 }
 
 /// <summary>

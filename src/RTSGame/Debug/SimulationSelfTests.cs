@@ -160,6 +160,8 @@ internal static class SimulationSelfTests
         Check("a neighbour's full larder is not yours", NeighbourLarderIsNotYours());
         Check("a village is not founded in a forest", AVillageIsNotFoundedInAForest());
         Check("the bot budgets what a wall really costs", TheBotKnowsWhatAWallCosts());
+        Check("a guard comes home after a fight", AGuardComesHome());
+        Check("seeing a neighbour moves the garrison", ContactMovesTheGarrison());
         Check("a household that goes hungry loses somebody", PrivationSpendsItselfAsEmigration());
         Check("a wood hides what walks through it", TreesBlockSight());
         Check(
@@ -1091,7 +1093,7 @@ internal static class SimulationSelfTests
         var id = world.SpawnAgent(new Vector2(-8f, 0f));
         world.QueueMove(new[] { id }, new Vector2(8f, 0f));
         var maximumDetour = 0f;
-        for (var tick = 0; tick < 900; tick++)
+        for (var tick = 0; tick < 3600; tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             maximumDetour = MathF.Max(maximumDetour, MathF.Abs(world.Agents.Get(id).Position.Y));
@@ -5676,6 +5678,139 @@ internal static class SimulationSelfTests
         Console.WriteLine(
             $"    a palisade turns to stone for {real} stone; the plan budgets {bots}");
         return passed;
+    }
+
+    /// <summary>
+    /// A soldier that fights comes back to its post, and its post is where the plan put it.
+    /// </summary>
+    /// <remarks>
+    /// §143. The assertion that matters is the <b>return</b>, and it could not have been written before
+    /// Guard existed: militia had no standing assignment, so a defender staying where the fight ended was
+    /// indistinguishable from a defender doing what it was told. This fails without the release in StandDown
+    /// — an Order interrupt never expires, so the body would sit on the ground it stopped on forever.
+    /// </remarks>
+    private static bool AGuardComesHome()
+    {
+        var world = new SimulationWorld(240f);
+        var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 4000);
+        world.SeedStock(granary, Resource.Grain, 400);
+
+        // The post is out at the edge of the settlement and the threat comes to the granary door, which is
+        // both the arrangement a guard is for and what makes "came back" a different place from "never
+        // left". A raider parked 38 m out proved nothing: it is outside a militia's sight, so §30 never
+        // committed anybody and the body sat at its post the whole time looking like a pass.
+        var post = new Vector2(14f, 0f);
+        var soldier = world.SpawnAgent(post, UnitType.Villager);
+        world.Agents.Get(soldier).Role = AgentRole.Militia;
+        world.Agents.Get(soldier).Strength = UnitType.Militia.Strength;
+        world.QueueAssign(new[] { soldier }, Assignment.Guard(post, radius: 3f, dwellSeconds: 30f));
+        Tick(world, 30);
+        var startedHome = Vector2.Distance(world.Agents.Get(soldier).Position, post) < 4f;
+
+        // A hostile well away from the post, so "came back" is a different place from "never left".
+        var raider = world.SpawnAgent(new Vector2(2.2f, 0f), UnitType.Raider, new FactionId(1));
+        world.Agents.Get(raider).Directed = true;
+        Tick(world, 240);
+        var wentOut = Vector2.Distance(world.Agents.Get(soldier).Position, post) > 5f;
+
+        // The danger removed rather than fought, so the test is about standing down and not about combat.
+        world.DespawnAgents(new[] { raider });
+        Tick(world, 600);
+
+        var home = Vector2.Distance(world.Agents.Get(soldier).Position, post);
+        var cameBack = home < 5f;
+        var keptItsPost = world.Agents.Get(soldier).Jobs.Assignment.Kind == AssignmentKind.Guard;
+
+        var passed = startedHome && wentOut && cameBack && keptItsPost;
+        Console.WriteLine(
+            $"    guard settled at its post={startedHome}, left it for a raider at the granary={wentOut}, " +
+            $"came back to {home:F1} m of it={cameBack}, still a guard={keptItsPost}");
+        return passed;
+    }
+
+    /// <summary>
+    /// Seeing a neighbour changes where the garrison stands, and not seeing one does not.
+    /// </summary>
+    /// <remarks>
+    /// §143. <b>The first thing in this game that a faction does because of what it knows.</b> Both halves are
+    /// asserted, because only the pair is a finding: a plan that always drew its garrison in tight would pass
+    /// the first half on its own, and a knowledge layer that leaked would pass the second half by accident.
+    /// The two settlements in the headless year never see each other, so these rules would otherwise be code
+    /// that has never run.
+    /// </remarks>
+    private static bool ContactMovesTheGarrison()
+    {
+        var world = new SimulationWorld(360f);
+        var us = new FactionId(0);
+        var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 4000, faction: us);
+        world.SeedStock(granary, Resource.Grain, 4000);
+        world.SeedStock(granary, Resource.Wood, 1000);
+
+        // <b>With kit in it.</b> Training is a two-leg errand that draws its cost from the barracks itself —
+        // Assignment.Train's source and sink are both the barracks — and MilitiaTraining.Cost is 30 wood and
+        // 30 stone a body, which is a third of what §140's founding cache of stone is for. A barracks
+        // conjured already-built and empty equips nobody, and the plan then orders four militia that never
+        // appear. In a played settlement the timber carted out to raise it is what stocks it.
+        var barracks = world.AddNode(NodeKind.Barracks, new Vector2(12f, 0f), capacity: 400, faction: us);
+        world.SeedStock(barracks, Resource.Wood, 200);
+        world.SeedStock(barracks, Resource.Stone, 200);
+        for (var i = 0; i < 10; i++)
+        {
+            world.SpawnAgent(new Vector2(-8f - i * 1.2f, 4f), UnitType.Villager, us);
+        }
+
+        var planner = new AI.Planning.Planner(us);
+        Run(2400);
+        var atPeace = (Wide: PostedAt(40f), Tight: PostedAt(18f));
+
+        // <b>The neighbour arrives after the garrison exists, and that ordering is the test.</b> Introducing
+        // it first proved nothing: an alarm interrupts every villager in the settlement, the census excludes
+        // interrupted bodies from the workforce for §7's reason, and so there is nobody left to train — the
+        // contact run came back with no militia at all. Which is the simulation being right; the claim here is
+        // that contact <em>moves</em> a garrison, and a garrison has to be there first to be moved.
+        //
+        // Thirty metres out: inside the 120 m the plan asks about, and inside the granary's own watch, so
+        // §131's knowledge marks the ground it stands on as seen.
+        var them = new FactionId(1);
+        world.AddNode(NodeKind.Granary, new Vector2(150f, 0f), capacity: 400, faction: them);
+        world.SpawnAgent(new Vector2(30f, 0f), UnitType.Raider, them);
+        Run(1200);
+        var onContact = (Wide: PostedAt(40f), Tight: PostedAt(18f));
+
+        // Not all of them: §30 commits as many as the fight needs and no more, and a body under that
+        // interrupt is not the planner's to re-post until it is released. What has to change is that some of
+        // the garrison has drawn in, and that none of it is still standing at the peacetime ring.
+        var passed = atPeace.Wide > 0 && atPeace.Tight == 0 &&
+                     onContact.Tight > 0 && onContact.Wide < atPeace.Wide;
+        Console.WriteLine(
+            $"    at peace {atPeace.Wide} of the garrison stand at 40 m and {atPeace.Tight} at 18 m; " +
+            $"with a hostile in view {onContact.Wide} at 40 m and {onContact.Tight} at 18 m");
+        return passed;
+
+        void Run(int ticks)
+        {
+            for (var tick = 0; tick < ticks; tick++)
+            {
+                planner.Update(world);
+                world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            }
+        }
+
+        int PostedAt(float radius)
+        {
+            var standing = 0;
+            foreach (ref readonly var body in world.Agents.All)
+            {
+                if (!body.IsAlive || body.Faction != us || body.Role != AgentRole.Militia) continue;
+                var duty = body.Jobs.Assignment;
+                if (duty.Kind == AssignmentKind.Guard && MathF.Abs(duty.PlaceExtent - radius) < 0.5f)
+                {
+                    standing++;
+                }
+            }
+
+            return standing;
+        }
     }
 
     private static int PeopleOf(SimulationWorld world, FactionId faction)

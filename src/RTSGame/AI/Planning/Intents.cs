@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using RTSGame.Simulation;
+using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Economy;
 using RTSGame.Simulation.Jobs;
 
@@ -207,6 +208,80 @@ internal sealed class Garrison : Intent
         }
 
         return closed;
+    }
+}
+
+/// <summary>
+/// Wants every militia standing somewhere, which is what a posture is.
+/// </summary>
+/// <remarks>
+/// <b>The whole of "posture", and it is one intent because the vocabulary got the verb it was missing.</b>
+/// §143: a rally point is a Guard anchor and a stance is which anchor and radius a plan picks, so there is no
+/// stance enum here and nothing to enumerate. Changing where a faction stands is changing this rule's radius
+/// or its anchor, and a plan can hold two of them under different conditions.
+/// <para>
+/// It draws from the militia directly rather than from the hand pool: the pool exists to arbitrate hands that
+/// several rules want, and nothing else in a plan wants a soldier.
+/// </para>
+/// </remarks>
+internal sealed class Guard : Intent
+{
+    private readonly float radius;
+
+    public Guard(float radius) => this.radius = radius;
+
+    public override string Name => $"guard the store within {radius:0}m";
+
+    public override int Gap(Census census, OrderLedger ledger, long now)
+    {
+        if (!census.Store.IsValid) return 0;
+        // Militia with no post, plus militia standing at somebody else's post: a plan that changes its
+        // posture has to be able to move a garrison and not only fill one.
+        var misplaced = 0;
+        foreach (var (_, at, held) in census.MilitiaPosts)
+        {
+            if (Math.Abs(held - radius) > 0.5f || Vector2.DistanceSquared(at, census.Centre) > 4f) misplaced++;
+        }
+
+        return Math.Max(0, census.UnpostedMilitia.Count + misplaced - ledger.Outstanding(Key, now));
+    }
+
+    private string Key => $"guard:{radius:0}";
+
+    public override int Close(
+        SimulationWorld world,
+        Census census,
+        OrderLedger ledger,
+        HandPool hands,
+        long now,
+        int allowance)
+    {
+        if (!census.Store.IsValid) return 0;
+        var closed = 0;
+        foreach (var body in census.UnpostedMilitia)
+        {
+            if (closed >= allowance) break;
+            Post(world, census, ledger, now, body);
+            closed++;
+        }
+
+        foreach (var (body, at, held) in census.MilitiaPosts)
+        {
+            if (closed >= allowance) break;
+            if (Math.Abs(held - radius) <= 0.5f && Vector2.DistanceSquared(at, census.Centre) <= 4f) continue;
+            Post(world, census, ledger, now, body);
+            closed++;
+        }
+
+        return closed;
+    }
+
+    private void Post(SimulationWorld world, Census census, OrderLedger ledger, long now, AgentId body)
+    {
+        world.QueueAssign(
+            new[] { body },
+            Assignment.Guard(census.Centre, radius, EconomySystem.WorkShiftSeconds));
+        ledger.Record(Key, now);
     }
 }
 

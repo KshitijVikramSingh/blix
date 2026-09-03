@@ -259,7 +259,22 @@ internal static class JobSystem
         // An order holds until something overrides it. A body that has been sent somewhere reaches it and
         // stays posted; it does not drift back to work two seconds later because it happened to stand still.
         // The assignment is kept, not cancelled — a new assignment, or being taken off work, resumes it.
-        if (jobs.Interrupt == InterruptKind.Order) return JobRequest.None;
+        //
+        // <b>Except a guard, which always goes back to its post.</b> §143. The rule is stated in terms of the
+        // assignment rather than of who gave the order, and that is deliberate: the alternative was to mark
+        // the defence's own chases as a different kind of interrupt, which puts provenance into a layer that
+        // has done without it, and it would still have been wrong for a player's order — a soldier told to go
+        // and look at something is expected to come back, and that expectation is what a post <em>is</em>.
+        //
+        // The first attempt at this released the interrupt in StandDown, where the threat system says the
+        // danger has passed. It does not fire: §134's bounded peace proof skips every body with no hostile
+        // in range, so at peace nothing calls it at all — the optimisation is right and its premise is that
+        // a settlement at peace has nothing to decide. Measured as a guard that left its post for a raider
+        // and stopped 8.8 m short of home for good.
+        if (jobs.Interrupt == InterruptKind.Order && jobs.Assignment.Kind != AssignmentKind.Guard)
+        {
+            return JobRequest.None;
+        }
 
         jobs.InterruptGrace -= deltaSeconds;
         if (jobs.InterruptGrace > 0f) return JobRequest.None;
@@ -271,6 +286,32 @@ internal static class JobSystem
         jobs.WalkIssued = false;
         jobs.RetryCooldown = 0f;
         return Advance(ref agent, deltaSeconds, place);
+    }
+
+    /// <summary>
+    /// Hands a body back to its standing assignment, dropping whatever was overriding it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because an order holds until something overrides it, and nothing overrode a defence.</b> §143: a
+    /// militia committed by §30 is issued a chase, which is an <see cref="InterruptKind.Order"/> — and
+    /// ServeInterrupt returns early for those forever, deliberately, so that a body sent somewhere stays
+    /// there instead of drifting back to work two seconds later. When the danger passed, the defence issued a
+    /// stop, which halts the walk and leaves the interrupt exactly where it was. So a defender stood on the
+    /// ground the fight ended on until something else happened to it, which for a settlement at peace is
+    /// never.
+    /// <para>
+    /// This is the "something" that overrides it, and the only caller is standing down from a threat. It is
+    /// not a general release: taking a worker off an order is still the player's business, and a hand told to
+    /// go somewhere is still expected to stay.
+    /// </para>
+    /// </remarks>
+    public static void ReturnToAssignment(ref AgentState agent)
+    {
+        ref var jobs = ref agent.Jobs;
+        jobs.Interrupt = InterruptKind.None;
+        jobs.InterruptGrace = 0f;
+        jobs.WalkIssued = false;
+        jobs.RetryCooldown = 0f;
     }
 
     private static JobRequest WalkToPlace(ref AgentState agent, PlaceCondition place)

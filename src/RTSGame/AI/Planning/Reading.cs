@@ -35,10 +35,34 @@ internal readonly record struct Reading(string Name, Func<Census, float> Of)
     public static readonly Reading EconomyHands = new("economy_hands", c => c.EconomyHands);
     public static readonly Reading Idle = new("idle", c => c.Idle.Count);
     public static readonly Reading Militia = new("militia", c => c.Militia);
+    public static readonly Reading MilitiaUnposted =
+        new("militia_unposted", c => c.UnpostedMilitia.Count);
     public static readonly Reading Walls = new("walls", c => c.Walls);
     public static readonly Reading Barracks = new("barracks", c => c.Barracks.IsValid ? 1 : 0);
     public static readonly Reading ProjectsOpen = new("projects_open", c => c.Projects.Count);
     public static readonly Reading Fields = new("fields", c => c.Fields.Count);
+
+    /// <summary>
+    /// Hostiles this faction can see within so many metres of its store.
+    /// </summary>
+    /// <remarks>
+    /// §143's contact reading, and the first one a plan can act on that is about somebody else. Parameterised
+    /// rather than fixed because "how close is close enough to change what I do" is exactly the kind of thing
+    /// a plan should be able to state twice with different numbers.
+    /// </remarks>
+    public static Reading EnemySeenWithin(float metres) =>
+        new(
+            $"enemy_seen_within({metres:0})",
+            census =>
+            {
+                var seen = 0;
+                foreach (var distance in census.HostilesSeen)
+                {
+                    if (distance <= metres) seen++;
+                }
+
+                return seen;
+            });
 
     public override string ToString() => Name;
 }
