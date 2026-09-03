@@ -58,6 +58,22 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     public const float DefaultCompression = 1.5f;
 
+    /// <summary>Sim seconds per wall-clock second a played village starts at.</summary>
+    /// <remarks>
+    /// <b>3x, because what is worth sitting through changed.</b> §144. 1.5 was judged on the slider when a
+    /// settlement was a handful of hands and the longest thing worth waiting for was a shuttle's round trip
+    /// (§3). The unit of interest now is a year — three windows of field work, a harvest, a barracks, a
+    /// garrison — and at 1.5 that is twenty-four minutes in the chair. At 3x it is twelve, a day is forty
+    /// seconds, and a season is between three and six minutes.
+    /// <para>
+    /// It remains a tick-rate multiplier and not a speed multiplier: nothing about a body or the geometry
+    /// moves with it, only how long the waiting takes. And it is the <em>village's</em> default, not this
+    /// class's — every headless scenario and every performance case still starts where it did, so no figure
+    /// quoted anywhere in the plan becomes incomparable.
+    /// </para>
+    /// </remarks>
+    public const float DefaultVillageCompression = 3f;
+
     /// <summary>Seconds a hand-assigned unit spends at each place before moving on.</summary>
     /// <remarks>
     /// Six seconds, which is long enough to read as work being done rather than as a unit
@@ -1093,6 +1109,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// </remarks>
     private Atmosphere sky = Atmosphere.For(default, 0.0, 37f, 1f);
 
+    /// <summary>Midday, for the sun mode that holds the time of day still.</summary>
+    private static double NoonSeconds => 12.0 / 24.0 * Atmosphere.DayLengthSeconds;
+
     private Vector3 SunDirection
     {
         get
@@ -1380,7 +1399,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // from Program.cs, and inserting a bool into the middle of twenty-nine arguments silently rebinds
         // every one after it. The compiler caught it because the neighbours happen to be an int and a float.
         bool startOpponent = false,
-        bool handsOffEverybody = false)
+        bool handsOffEverybody = false,
+        LookSettings.SunMotion? sunMotion = null)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
@@ -1390,6 +1410,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Hands off implies there is somebody else to watch: a lone bot settlement is the headless year leg
         // with a camera on it, which --twovillages already answers better.
         this.handsOffEverybody = handsOffEverybody;
+        if (sunMotion is { } motion) look.Motion = motion;
         this.shadowProxies = shadowProxies;
         this.performanceBlockingUpload = performanceBlockingUpload;
         this.cheapTrees = cheapTrees;
@@ -4037,9 +4058,16 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Simulated seconds, not wall time: the calendar runs on the tick count, so anything meant to keep
         // step with it has to read the same clock. At three times compression the wall clock advances a
         // third as fast as the date does.
+        // <b>Which clock the sun reads, which is now three answers and not two.</b> §144: the hour comes
+        // from the sim clock and the declination from the date, and those were always separate inputs with
+        // one switch between them. Year-only pins the hour at noon and leaves the date running, so a year's
+        // swing is watchable without the daily cycle making every two frames incomparable — at 3x
+        // compression a day is forty seconds, which is the frequency that spoils a comparison.
         var skySeconds = performanceHour >= 0f
             ? performanceHour / 24f * Atmosphere.DayLengthSeconds
-            : simulation.TickNumber / 30.0;
+            : look.Motion == LookSettings.SunMotion.YearOnly
+                ? NoonSeconds
+                : simulation.TickNumber / 30.0;
         sky = Atmosphere.For(
             simulation.Date,
             skySeconds,
@@ -4525,8 +4553,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// <summary>Whether anything at <paramref name="at"/> can appear in any cascade's map.</summary>
     /// <remarks>
     /// Outside all three, a caster rasterises into nothing and the work has nowhere to go — which was worth
-    /// 32 ms when the single box's version of this was added. Inside one of them it is drawn into all three,
-    /// which is the redraw this does not yet fix: see the note on the cascade passes.
+    /// 32 ms when the single box's version of this was added.
+    /// <para>
+    /// <b>This said "inside one of them it is drawn into all three, which is the redraw this does not yet
+    /// fix", and that has not been true since the fitted boxes landed.</b> §144: PartitionCasters puts an
+    /// instance only into the cascades whose box contains it, and the per-cascade instance buffers are what
+    /// make that sound — see the note there. The stale sentence was load-bearing in the wrong direction: I
+    /// had it recorded as an unpaid cost and would have gone looking for it again.
+    /// </para>
     /// </remarks>
     private bool CastsIntoAnyCascade(Vector2 at) => CascadeMaskAt(at) != 0;
 
@@ -8186,6 +8220,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             $"record {buildPhases.Record:F1} ms · " +
             $"LOAD {stagedLoad.Instances:N0} instances = {stagedLoad.Triangles / 1000L:N0}k triangles " +
             $"+ {stagedLoad.Casters / 1000L:N0}k cast · " +
+            // <b>Per cascade, and the sun mode beside it, because the question is whether a mode pays for
+            // shadows it does not use.</b> §144. These three numbers were already recorded for the
+            // performance cases and were not visible from the chair, which is where the sun modes are judged.
+            // What they establish: caster staging is fitted to the camera and the cascade boxes and has
+            // nothing to do with where the sun is — so the figures should be identical across the three
+            // modes, and a difference between them would be a real fault rather than a tuning question.
+            $"CASTERS {stagedCasterInstances[0]:N0}/{stagedCasterInstances[1]:N0}/" +
+            $"{stagedCasterInstances[2]:N0} = " +
+            $"{stagedCasterTriangles[0] / 1000L:N0}k/{stagedCasterTriangles[1] / 1000L:N0}k/" +
+            $"{stagedCasterTriangles[2] / 1000L:N0}k tri · " +
+            $"SUN {look.Motion} " +
+            $"{(look.SunFollowsTheYear ? $"{sky.SunElevationDegrees:F0}°" : "pinned")} · " +
             (colliderOverlay >= 2
                 ? $"COLLIDERS {collidersDrawn:N0} drawn" +
                   (collidersDropped > 0 ? $", {collidersDropped:N0} over budget · " : " · ")

@@ -12401,3 +12401,85 @@ militia is 120 of its 600.
 - **`Muster`** — sending a force somewhere is `QueueMove` over a set, which forms a cohort for free, but no
   intent does it. That is the first offensive verb and it belongs with the roster.
 - **A plan cannot cancel**, still. Nothing abandons a site.
+
+## 144. Three sun modes, 3x in the chair, and a shadow cost that was already paid
+
+Three asks from the chair, and the third one turned into a measurement that found nothing — which is the
+result, not a failure to find one.
+
+### The village runs at 3x
+
+`DefaultVillageCompression = 3f`, and `DefaultCompression` stays at 1.5 for everything else. 1.5 was judged
+on the slider in §3, when a settlement was a handful of hands and the longest thing worth waiting for was a
+shuttle's round trip. **The unit of interest is now a year** — three windows of field work, a harvest, a
+barracks going up, a garrison raised — and at 1.5 that is twenty-four minutes of sitting. At 3x it is twelve,
+a day is forty seconds and a season is three to six minutes. Explicit `--compression` still wins, and every
+headless scenario and performance case starts where it did, so no figure quoted anywhere in this file becomes
+incomparable.
+
+### The sun has three modes because it always had two inputs
+
+`Atmosphere.For` takes an **hour**, from the sim clock, and a **declination**, from the date. There was one
+switch across both. Splitting it along the seam that was already there:
+
+- **DayAndYear** — what the game looks like played.
+- **YearOnly** — noon every day, the year still swinging the sun north and south. At 3x a day passes in
+  forty seconds, so the daily cycle is what makes two frames incomparable while the seasonal swing is the
+  thing worth watching.
+- **Fixed** — pinned to the two dials. For judging a material, a shadow, or a cost.
+
+`SunFollowsTheYear` is now derived from the mode rather than stored beside it — two fields that have to agree
+about the same thing are two fields that will one day disagree — and every existing reader kept working.
+`--sun dayandyear|yearonly|fixed` exposes it, because **a mode that can only be set from the panel cannot be
+measured**: comparing the three needs paired runs of a sealed binary, and `--perf-run` does not draw the
+panel.
+
+### The shadow question, answered with numbers
+
+"Are we building more shadow maps than we need in any of these?" No. Three findings, in the order they came:
+
+**The threefold redraw was already fixed and I had it recorded as unpaid.** `CascadeMaskAt`'s remark still
+said "inside one of them it is drawn into all three, which is the redraw this does not yet fix". Not true
+since the fitted boxes landed: `PartitionCasters` puts an instance only into the cascades whose box contains
+it, and the per-cascade instance buffers are what make that sound. **A stale comment claiming an unpaid cost
+is worse than no comment** — it was in my notes as work outstanding, and I would have gone looking for it
+again.
+
+**Skipping shadows at night is not available, and the reason is a deliberate look.** At night
+`above = 0`, so the directional light becomes the *moon*: `direction = Lerp(moonward, sunward, above)` and
+`moon = Nightfall.SunStrength * (1 - above)` at 0.52 against a day's 2.1–3.4. A fifth of daylight is visible,
+and a moonlit scene with no shadows would be flat and wrong. The obvious win is not one.
+
+**The cost barely moves with the light.** Per-cascade caster load, still camera at 118 m:
+
+| | near | mid | far | total |
+|---|---|---|---|---|
+| midnight | 825k | 2,627k | 2,926k | 6.38M |
+| dawn | 825k | 2,626k | 2,926k | 6.38M |
+| 9am | 750k | 2,479k | 2,926k | 6.16M |
+| noon | 733k | 2,447k | 2,926k | 6.11M |
+
+Four per cent across the whole day, and across the three sun modes the figures are the same to within the
+same margin. **Caster staging is fitted to the camera and the cascade boxes and has nothing to do with where
+the sun is**, which is what makes all three modes cost the same. My first spot check suggested a fivefold
+difference and that was proxies being off, not elevation — measured before it was believed, which is the only
+reason it did not become a section.
+
+**And the one signal that looked real did not survive a paired run.** `render_p50` came back 3.45 and 3.51 ms
+at midnight and dawn against 1.95 and 2.18 at nine and noon — a 75% penalty for 4% more triangles, which is
+exactly the shape of a real finding. Interleaved ABBA, noon/midnight/midnight/noon:
+
+```
+noon      2.57      midnight  4.35
+midnight  3.37      noon      6.15
+```
+
+**Noon produced both the lowest figure and the highest.** It is machine drift, and every frame figure in that
+batch had drifted to 30–33 ms by the end from a 13.5 ms start. §83's rule about this laptop earns itself
+again: a single-run comparison here measures the thermal state of the machine.
+
+So there is no shadow work to remove. The standing cost is the far cascade's 2.9M triangles a frame, it is
+constant regardless of the light, and it is camera-driven — which is where any future work on it belongs.
+
+`--timings` now prints `CASTERS near/mid/far = tri` and `SUN <mode> <elevation>`, so the question is
+answerable from the chair in each mode rather than only from a performance case.

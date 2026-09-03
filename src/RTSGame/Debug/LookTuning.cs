@@ -63,8 +63,48 @@ internal sealed class LookSettings
     /// material or a shadow rather than a mood: a moving sun makes two screenshots incomparable.
     /// </para>
     /// </remarks>
-    [Tune(Label = "sun follows the year", Group = "sun")]
-    public bool SunFollowsTheYear = true;
+    [Tune(Label = "sun motion", Group = "sun")]
+    public SunMotion Motion = SunMotion.DayAndYear;
+
+    /// <summary>
+    /// Whether the light comes from the calendar rather than from the dials below.
+    /// </summary>
+    /// <remarks>
+    /// Derived from <see cref="Motion"/> rather than stored beside it, because two fields that have to agree
+    /// about the same thing are two fields that will one day disagree. Every reader of this kept working when
+    /// the bool became a mode.
+    /// </remarks>
+    public bool SunFollowsTheYear => Motion != SunMotion.Fixed;
+
+    /// <summary>
+    /// Which parts of the sun's movement are running.
+    /// </summary>
+    /// <remarks>
+    /// §144. The sun has two independent inputs and only ever had one switch: an <em>hour</em>, from the sim
+    /// clock, and a <em>declination</em>, from the date — see <c>Atmosphere.For</c>. Splitting the switch
+    /// along the seam that was already there costs nothing and answers three different questions from the
+    /// chair: what the game looks like as it is played, what a year does to the light with the time of day
+    /// held still, and what the scene costs with the sun nailed down.
+    /// </remarks>
+    public enum SunMotion
+    {
+        /// <summary>The sun crosses the sky and the year moves it. What the game looks like played.</summary>
+        DayAndYear,
+
+        /// <summary>
+        /// Noon every day, and the year still swings the sun north and south.
+        /// </summary>
+        /// <remarks>
+        /// The seasons are the most important state in this economy, and at 3x compression a day passes in
+        /// forty seconds — so the daily cycle is the thing that makes a screenshot incomparable to the one
+        /// before it, while the seasonal swing is the thing worth watching. This holds the first still and
+        /// leaves the second running.
+        /// </remarks>
+        YearOnly,
+
+        /// <summary>Pinned where the two dials below put it. For judging a material, a shadow, or a cost.</summary>
+        Fixed,
+    }
 
     /// <summary>How much the year is allowed to change the light, from a fixed look to full swing.</summary>
     [Tune(0.0, 1.0, Label = "seasonality", Group = "sun")]

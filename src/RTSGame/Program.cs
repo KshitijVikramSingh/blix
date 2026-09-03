@@ -569,9 +569,29 @@ public static class Program
         var extent = Value(args, "--extent") is { } raw
             ? float.Parse(raw)
             : RtsGameLoop.DefaultWorldExtentMeters;
+        // <b>The village runs at 3x unless somebody says otherwise.</b> §144. 1.5 was settled on the slider
+        // when a settlement was a handful of hands walking about (§3) and the longest thing worth waiting for
+        // was a shuttle's round trip. What is worth watching now is a year — three seasons of field work, a
+        // harvest, a barracks going up, a garrison being raised — and 1.5 makes that twenty-four minutes in
+        // the chair. Explicit --compression still wins, and the default for every other scenario is
+        // untouched, so no figure anybody has quoted moves.
         var compression = Value(args, "--compression") is { } rate
             ? float.Parse(rate)
-            : RtsGameLoop.DefaultCompression;
+            : args.Contains("--village")
+                ? RtsGameLoop.DefaultVillageCompression
+                : RtsGameLoop.DefaultCompression;
+        // <b>The sun mode from the command line, because a mode that can only be set from the panel cannot
+        // be measured.</b> §144: comparing what the three cost needs paired runs of a sealed binary, and the
+        // panel is not rendered in one.
+        var sunMotion = Value(args, "--sun") switch
+        {
+            "yearonly" or "year" => LookSettings.SunMotion.YearOnly,
+            "fixed" or "none" => LookSettings.SunMotion.Fixed,
+            "dayandyear" or "day" => LookSettings.SunMotion.DayAndYear,
+            null => (LookSettings.SunMotion?)null,
+            var other => throw new ArgumentException(
+                $"--sun wants dayandyear, yearonly or fixed, not '{other}'"),
+        };
         var relief = Value(args, "--relief-amplitude") is { } metres ? float.Parse(metres) : 0f;
         // <b>A starting zoom, so a frame can be measured at the standoff somebody is complaining about.</b>
         // Everything the detail radius scales — how much ground is meshed, how many trees are drawn, how far
@@ -614,7 +634,8 @@ public static class Program
             cheapTrees,
             // --handsoff implies --opponent: two settlements is the thing worth watching play itself.
             args.Contains("--opponent") || args.Contains("--handsoff"),
-            args.Contains("--handsoff"));
+            args.Contains("--handsoff"),
+            sunMotion);
         using var window = new Window(
             game, new WindowOptions("RTSGame — Greybox Kingdom", windowWidth, windowHeight));
         window.Run();
