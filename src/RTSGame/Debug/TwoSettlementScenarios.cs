@@ -170,6 +170,12 @@ internal static class TwoSettlementScenarios
             // grain moving from one faction's books to the other's would net to zero here and has to be
             // caught by the per-faction stores below instead.
             var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+            if (!drift.IsZero && faults.Count == 0)
+            {
+                Console.WriteLine(
+                    $"  drift at tick {tick}: grain {drift.Grain}, wood {drift.Wood}, stone {drift.Stone}");
+            }
+
             if (!drift.IsZero)
             {
                 faults.Add($"conservation broke on tick {tick} ({world.Date})");

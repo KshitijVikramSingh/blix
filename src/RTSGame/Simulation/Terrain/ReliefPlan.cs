@@ -930,6 +930,13 @@ internal sealed class ReliefPlan
     /// same seeds in the same binary or the comparison is between two thermal states of a laptop — §84's
     /// rule, and it holds for a generator as much as for a frame time.
     /// </remarks>
+    /// <remarks>
+    /// <b>Ready by the criteria and held back by the ledger.</b> §159: it scores 93 criteria shortfalls
+    /// against the eroded generator's 106 and is the model that matches how water works — and on its terrain
+    /// the two-settlement economy <b>breaks conservation at tick 695</b>, one unit of stone becoming one of
+    /// wood. Not a leak, a swap. A default that breaks the invariant this whole simulation is built on is not
+    /// a default, whatever else it is better at, so this stays opt-in until that is found.
+    /// </remarks>
     public bool DrainageFirst { get; set; }
 
     /// <summary>

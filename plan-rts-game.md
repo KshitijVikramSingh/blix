@@ -13051,3 +13051,44 @@ reaching for whichever name was nearest.
 
 That is worth more than the fix: the next criterion written against this model should start by naming which
 of the pair it needs and why.
+
+## 159. The renderer's own near-synonym, and a default held back by the ledger
+
+Two things asked for: make the drainage-first generator the default, and make the renderer draw the water the
+model says is there. The second landed. The first is ready by the criteria and stopped by the invariant.
+
+### The renderer had the same bug the criterion had, three times over
+
+The water mesh drew a quad wherever `LakeDepthAt` was above zero — which is `filled - ground`, true of
+**every hollow on the map**. So the broad shallow apron that §147's rule had already refused to call a lake
+was still being drawn as one. That is "clearly disjoint, nothing about the ground suggests there could be
+water here", reported from the chair three sessions ago and fixed everywhere except where it was visible.
+
+`Drainage.StandsAt` asks the labelled set instead. The renderer now draws what the model says is there.
+
+**Which makes four places that confused those two ideas**: `Bodies()`, `LakeDepth` twice in the criterion,
+and the mesh. The pattern named in §158 was not a curiosity — it was load-bearing in every layer.
+
+### The default is held back, and the reason is worth more than the flip
+
+Drainage-first scores **93 criteria shortfalls against 106**, and on its terrain the two-settlement economy
+**breaks conservation at tick 695: wood +1, stone −1.**
+
+Not a leak — a **swap**. One unit of stone became one unit of wood. The terrain does not cause it; it exposes
+it, and the eroded generator's terrain happens never to reach the path that does. A default that breaks the
+invariant this entire simulation rests on is not a default, whatever it is better at, so it stays opt-in until
+the swap is found.
+
+**The lead, for whoever picks it up:** `Assignment.Build` hard-codes `Resource.Wood` as its cargo, and a
+builder takes from `source.Stock[jobs.Assignment.Cargo]` then sets `jobs.Carrying` to the same. A barracks
+wants 300 timber *and 120 stone*, and a palisade becoming a stone wall wants stone alone. Somewhere on that
+path a unit is removed as one resource and credited as the other. Tick 695 is about twenty-three seconds in,
+which is early enough that the founding's own construction reaches it.
+
+### And a false step recorded
+
+The first attempt to confirm the terrain was the cause ran `--twovillages --eroded` and got the same fault —
+which looked like exculpating the generator. It was not: **`--twovillages` never reads that flag**, so both
+runs used the new default. The isolation only worked once the property default itself was flipped. A flag
+that does not reach the scenario under test is a control that is not controlling anything, and it very nearly
+sent me looking in the wrong layer.

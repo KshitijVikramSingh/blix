@@ -3154,7 +3154,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
                 var corner = new Vector2(x0 + cx * step * size, z0 + cz * step * size);
                 wettest = MathF.Max(wettest, water.LevelAt(corner) - water.BedAt(corner));
                 widest = MathF.Max(widest, water.WidthAt(corner));
-                pooled = MathF.Max(pooled, water.LakeDepthAt(corner));
+                // <b>Does water stand here, not is this cell under a fill.</b> §159: LakeDepthAt is
+                // filled - ground, true of every hollow, so an apron the model had already refused to call a
+                // lake was drawn as one anyway. See Drainage.StandsAt.
+                if (water.StandsAt(corner)) pooled = MathF.Max(pooled, 1f);
             }
 
             if (wettest <= wetEnough) continue;

@@ -193,6 +193,24 @@ internal sealed class Drainage
     /// <summary>Standing water at a world position, in metres.</summary>
     public float LakeDepthAt(Vector2 world) => Sample(lake, world - Origin);
 
+    /// <summary>
+    /// Whether a body of water actually stands here, as opposed to the ground merely sitting under a fill.
+    /// </summary>
+    /// <remarks>
+    /// §159. The renderer had been asking <see cref="LakeDepthAt"/>, which is <c>filled - ground</c> and true
+    /// of every hollow on the map — so a broad shallow apron that §147's rule had already refused to call a
+    /// lake was still drawn as one. That is the "disjoint sheet on ground that suggests no water" from the
+    /// chair, and it is the same near-synonym that had the basin criterion wrong three times over. The
+    /// renderer should draw what the model says is there.
+    /// </remarks>
+    public bool StandsAt(Vector2 world)
+    {
+        var local = world - Origin;
+        var x = Math.Clamp((int)MathF.Round(local.X / cellMetres), 0, side - 1);
+        var z = Math.Clamp((int)MathF.Round(local.Y / cellMetres), 0, side - 1);
+        return Standing[z * side + x];
+    }
+
     /// <summary>The watercourse's width at a world position, in metres.</summary>
     /// <remarks>
     /// <b>Nearest cell, not interpolated, and the difference was a map three times too wet.</b> Upslope area
