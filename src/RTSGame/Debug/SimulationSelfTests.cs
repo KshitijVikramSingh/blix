@@ -554,7 +554,8 @@ internal static class SimulationSelfTests
             projection,
             100,
             100,
-            additive: false);
+            additive: false,
+            player: new FactionId(0));
         return selection.Contains(inside) && !selection.Contains(outside);
     }
 

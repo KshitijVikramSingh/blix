@@ -1,5 +1,6 @@
 using System.Numerics;
 using RTSGame.Simulation.Agents;
+using RTSGame.Simulation.Collision;
 
 namespace RTSGame.Control;
 
@@ -41,13 +42,22 @@ internal sealed class SelectionController
         if (IsPointerDown) DragCurrent = new Vector2(screenX, screenY);
     }
 
+    /// <param name="player">
+    /// Whose units may be selected.
+    /// <b>Added before an opponent went on the map, because until then there was nobody else's to take.</b>
+    /// §133: a marquee had no faction filter, so dragging across a neighbour's village would have handed the
+    /// player its villagers and the right to order them about — which is the same class of cheat
+    /// <see cref="AI.SettlementBot"/> is built to make impossible in the other direction, and it would have
+    /// been the player's to commit.
+    /// </param>
     public void End(
         AgentStore agents,
         Func<Vector2, float> groundAt,
         Matrix4x4 viewProjection,
         int width,
         int height,
-        bool additive)
+        bool additive,
+        FactionId player)
     {
         if (!IsPointerDown) return;
         IsPointerDown = false;
@@ -55,7 +65,7 @@ internal sealed class SelectionController
 
         if (Vector2.DistanceSquared(DragStart, DragCurrent) <= DragThreshold * DragThreshold)
         {
-            SelectClick(agents, groundAt, viewProjection, width, height, additive);
+            SelectClick(agents, groundAt, viewProjection, width, height, additive, player);
             return;
         }
 
@@ -63,6 +73,9 @@ internal sealed class SelectionController
         var maximum = Vector2.Max(DragStart, DragCurrent);
         foreach (ref readonly var agent in agents.All)
         {
+            // Alive and ours. The liveness test was missing too, which was harmless while a tombstone was the
+            // only thing it could have caught.
+            if (!agent.IsAlive || agent.Faction != player) continue;
             if (!TryProject(agent.Position, groundAt(agent.Position), viewProjection, width, height, out var screen))
             {
                 continue;
@@ -88,12 +101,14 @@ internal sealed class SelectionController
         Matrix4x4 viewProjection,
         int width,
         int height,
-        bool additive)
+        bool additive,
+        FactionId player)
     {
         AgentId? nearest = null;
         var nearestDistanceSquared = ClickRadius * ClickRadius;
         foreach (ref readonly var agent in agents.All)
         {
+            if (!agent.IsAlive || agent.Faction != player) continue;
             if (!TryProject(agent.Position, groundAt(agent.Position), viewProjection, width, height, out var screen))
             {
                 continue;

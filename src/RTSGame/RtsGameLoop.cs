@@ -9,6 +9,7 @@ using Blix.Graphics;
 using Blix.Graphics.Primitives;
 using Blix.Graphics.Vulkan;
 using Blix.Render;
+using RTSGame.AI;
 using RTSGame.Control;
 using RTSGame.Debug;
 using RTSGame.Rendering;
@@ -1296,6 +1297,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private int rolls;
     private double nextTimingReport;
 
+    /// <summary>
+    /// The faction the person at the keyboard is playing.
+    /// </summary>
+    /// <remarks>
+    /// Zero, and a constant rather than a setting — every scenario founds the player's settlement first and
+    /// nothing yet lets somebody play the other side. It exists as a name so that the places which must ask
+    /// "is this mine" say so, rather than assuming the answer the way selection did until §133.
+    /// </remarks>
+    private static readonly FactionId PlayerFaction = new(0);
+
+    /// <summary>The neighbour's player, when one was asked for. Null in a single-settlement village.</summary>
+    private SettlementBot? opponentBot;
+
+    private readonly bool startOpponent;
+
     /// <summary>Routing as it stood at the last report, so each second is a window rather than a total.</summary>
     private RouteAttribution routesAtLastReport = new();
 
@@ -1340,12 +1356,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         int performanceTierBias = 0,
         int msaaSamples = 4,
         (float Mid, float Far)? treeCrowd = null,
-        bool cheapTrees = false)
+        bool cheapTrees = false,
+        // Appended rather than slotted in beside the other village flags: this list is passed positionally
+        // from Program.cs, and inserting a bool into the middle of twenty-nine arguments silently rebinds
+        // every one after it. The compiler caught it because the neighbours happen to be an int and a float.
+        bool startOpponent = false)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
         this.performanceHour = performanceHour;
         this.performanceVsync = performanceVsync;
+        this.startOpponent = startOpponent;
         this.shadowProxies = shadowProxies;
         this.performanceBlockingUpload = performanceBlockingUpload;
         this.cheapTrees = cheapTrees;
@@ -1843,7 +1864,39 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             recipe.Quarriers,
             recipe.Carts,
             recipe.Wagons,
-            centre: founded);
+            centre: founded,
+            faction: PlayerFaction);
+
+        // <b>A neighbour, and somebody to run it.</b> §133: the pieces for this have all been proved headless
+        // — two settlements that feed themselves (§130), per-faction knowledge (§131), and a bot that plays
+        // through the player's own verbs (§132) — and none of them had ever been on screen. What a chair run
+        // answers that a fixture cannot: whether two settlements READ as two, whether it is clear whose is
+        // whose, and whether the knowledge asymmetry means anything a person can perceive.
+        //
+        // dressMap is false for the second, because Populate paints the biomes and scatters the woodland over
+        // the whole map and doing it twice re-forests the first settlement's cleared ground — §130, which cost
+        // a session to find and is one parameter to avoid.
+        opponentBot = null;
+        if (startOpponent)
+        {
+            var neighbour = SettlementScenarios.NeighbourSite(
+                simulation, founded, worldExtentMeters * 0.33f);
+            var theirs = new FactionId(1);
+            SettlementScenarios.Populate(
+                simulation,
+                recipe.Farms,
+                recipe.Woodcutters,
+                recipe.Quarriers,
+                recipe.Carts,
+                recipe.Wagons,
+                centre: neighbour,
+                faction: theirs,
+                dressMap: false);
+            opponentBot = new SettlementBot(theirs);
+            Console.WriteLine(
+                $"  opponent: faction {theirs.Value} founded at ({neighbour.X:F0}, {neighbour.Y:F0}), " +
+                $"{Vector2.Distance(founded, neighbour):F0} m away, run by a rule-bot");
+        }
         cameraFocus = founded;
         cameraDistance = cameraDistanceTarget = startingZoomMetres > 0f ? startingZoomMetres : 78f;
         Console.WriteLine(
@@ -3879,6 +3932,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // Inside the fixed step, so a raid arrives at the same moment whatever the time compression is
             // and a watched run sees what a headless one would.
             raiders?.Update(simulation, (float)SimulationWorld.FixedDeltaSeconds);
+            // Inside the fixed step, on the same reasoning as the raid director above: a player that decides
+            // with the tick decides at the same moment however fast the clock is running, so what is watched
+            // from the chair is what a headless run would have produced.
+            opponentBot?.Update(simulation);
             // Look at the raid when it appears. A test-bench convenience: finding out whether defence is
             // interesting requires being able to see the fight.
             if (raiders?.TakeLookAt() is { } lookAt) cameraFocus = lookAt;
@@ -8232,7 +8289,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             camera.GetViewProjection(aspect),
             width,
             height,
-            additiveSelection);
+            additiveSelection,
+            PlayerFaction);
 
         // <b>A click that caught no bodies, on something on the ground, picks that instead.</b> Ordered after
         // the marquee on purpose: dragging a box is about units and must not be hijacked, and a drag that

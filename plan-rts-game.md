@@ -11481,3 +11481,66 @@ untested loop. The loop is what this section is for, and it works.
 The pieces §82's road asked for are now all present: two settlements, per-faction knowledge, and a player that
 is not a person. What follows is contact — the bot noticing a neighbour, and the combat roster arriving when
 there is something to fight over.
+
+## 133. The opponent on the map, and the peace that was proved by having nobody to fight
+
+Three things had been proved headless and none had been on screen: two settlements that feed themselves
+(§130), per-faction knowledge (§131), and a bot that plays through the player's own verbs (§132).
+`--village --opponent` founds a neighbour a third of the map away, `dressMap: false` so it does not re-forest
+the first one's ground, and gives it to a `SettlementBot`.
+
+```
+  opponent: faction 1 founded at (286, 52), 198 m away, run by a rule-bot
+  settlement: 34390 nodes, 26 people
+```
+
+### One seam closed before it could be used, and it was the player's
+
+**Selection had no faction filter.** A marquee walked every body in the store, so dragging across a
+neighbour's village would have handed the player its villagers and the right to order them about — and no
+`IsAlive` test either, which was harmless only because a tombstone was the only thing it could catch. That is
+the same class of cheat `SettlementBot` is built to make impossible in the other direction, except this one
+would have been the player's to commit, and it existed for as long as there was nobody else's units to take.
+
+`RtsGameLoop.PlayerFaction` now exists as a name so the places that must ask *is this mine* say so rather than
+assuming the answer.
+
+### And a cost that only appears when somebody is there
+
+The frame is unchanged — 16.69 and 18.94 ms alone against 16.88 and 18.68 with the opponent, interleaved. The
+**simulation tick is not**: 0.038 ms to **3.3 ms**, near enough a hundredfold. Broken down by phase:
+
+```
+threat 3.120 | economy 0.013 | knowledge 0.004 | steering 0.030 | ... | total 3.211 ms
+```
+
+**All of it is the defence layer, and §82 had already found and fixed this exact cost.** That section measured
+"roughly 4.2-5.1 ms in the defence layer rebuilding guarded resources once per villager when no enemy faction
+existed", and removed it by proving peace first — one faction comparison per body pair, ahead of any
+guarded-resource search.
+
+The proof is global: *does any pair of living bodies stand in an enemy relation, anywhere on the map.* With one
+faction it is false and the cheap path runs. **With a neighbour it is true from the moment they are founded**,
+so every villager rebuilds its guarded-resource list every tick for a war that is not happening a hundred and
+ninety-eight metres away. The optimisation was correct and its premise was that there was nobody to fight.
+
+**Not fixed here, and the reason is a question rather than a scope call.** Making peace local needs a radius,
+and the obvious one is wrong: `ThreatMetres` is twelve metres, the distance at which a hostile is reaching for
+a granary, and the cheap branch also decays resolve and clears quarries — so proving peace at twelve metres
+would stop alarms being raised at any distance, and §30's muster picks defenders by *arrival seconds*, which
+needs warning well before contact. The right radius is the largest range at which the full pass can still
+change an outcome, and that is the defence layer's own number to state. The spatial index would then answer it
+in O(neighbours) instead of O(bodies squared), and it is not currently passed to `ThreatSystem.Update`.
+
+**What it costs today is headroom rather than frames.** The frame is GPU-bound at the played standoff so 3.2 ms
+of CPU hides under the wait — but §128 measured that standoff at exactly 2.00 refreshes a frame, and a few
+milliseconds either way is thirty against sixty. Spending three of them on a war nobody is fighting is the
+wrong place for them to go.
+
+### What a chair run is for
+
+None of the above needed a person: it came out of founding the opponent and then measuring, which is what
+§118's habit of pairing every change with its instrument is for. What still needs a person is the half a
+fixture cannot answer — whether two settlements *read* as two, whether it is clear whose is whose, and whether
+the knowledge asymmetry means anything perceptible. That is the next thing to do with it, and it is a
+five-minute run rather than a section.

@@ -2143,6 +2143,35 @@ internal static class SettlementScenarios
     /// with half its catchment off the map.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Flat, walkable ground about <paramref name="apart"/> metres from a first site, for a neighbour.
+    /// </summary>
+    /// <remarks>
+    /// <b>Shared by the probe and the game, because two site choosers would be two maps.</b> Not
+    /// <see cref="ChooseSite"/>: that scores farmland, wood and backdrop over the whole map and would pick the
+    /// same best site twice. This asks a narrower question — somewhere level enough to lay a settlement on, at
+    /// roughly a given distance — and leaves the scoring to the founding that follows.
+    /// </remarks>
+    public static Vector2 NeighbourSite(SimulationWorld world, Vector2 from, float apart)
+    {
+        var best = from;
+        var bestScore = float.NegativeInfinity;
+        for (var i = 0; i < 64; i++)
+        {
+            var angle = i / 64f * MathF.Tau;
+            var at = from + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * apart;
+            if (!world.Terrain.Contains(at, 8f)) continue;
+            if (!world.Navigation.TryWorldToCell(at, out var cell)) continue;
+            if (!world.Navigation.IsWalkable(cell, AgentDefaults.RoutingRadius)) continue;
+            var score = -world.Terrain.SampleGrade(at);
+            if (score <= bestScore) continue;
+            bestScore = score;
+            best = at;
+        }
+
+        return best;
+    }
+
     public static Vector2 CornerSite(float extentMeters) =>
         new(-extentMeters * 0.25f, -extentMeters * 0.22f);
 

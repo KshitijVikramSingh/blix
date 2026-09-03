@@ -62,7 +62,7 @@ internal static class TwoSettlementScenarios
         // crowd.
         var first = SettlementScenarios.ChooseSite(world, extentMeters);
         var apart = extentMeters * 0.33f;
-        var second = FarthestWalkable(world, first, apart);
+        var second = SettlementScenarios.NeighbourSite(world, first, apart);
         var recipe = SettlementScenarios.VillageRecipe.AsPlayed;
         siteA = first;
         siteB = second;
@@ -415,27 +415,4 @@ internal static class TwoSettlementScenarios
         return total;
     }
 
-    /// <summary>Ground about <paramref name="apart"/> metres from the first site that a body can stand on.</summary>
-    private static Vector2 FarthestWalkable(SimulationWorld world, Vector2 from, float apart)
-    {
-        var best = from;
-        var bestScore = float.NegativeInfinity;
-        for (var i = 0; i < 64; i++)
-        {
-            var angle = i / 64f * MathF.Tau;
-            var at = from + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * apart;
-            if (!world.Terrain.Contains(at, 8f)) continue;
-            if (!world.Navigation.TryWorldToCell(at, out var cell)) continue;
-            if (!world.Navigation.IsWalkable(cell, Simulation.Agents.AgentDefaults.RoutingRadius)) continue;
-            // Flattest wins, because a settlement wants a floor and this is the same judgement ChooseSite
-            // makes — without repeating its scoring, which is about farmland and backdrop and is not what
-            // this probe is measuring.
-            var score = -world.Terrain.SampleGrade(at);
-            if (score <= bestScore) continue;
-            bestScore = score;
-            best = at;
-        }
-
-        return best;
-    }
 }

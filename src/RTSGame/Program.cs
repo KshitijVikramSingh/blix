@@ -605,7 +605,8 @@ public static class Program
             tierBias,
             msaa,
             treeCrowd,
-            cheapTrees);
+            cheapTrees,
+            args.Contains("--opponent"));
         using var window = new Window(
             game, new WindowOptions("RTSGame — Greybox Kingdom", windowWidth, windowHeight));
         window.Run();
