@@ -932,6 +932,22 @@ internal sealed class ReliefPlan
     /// </remarks>
     public bool DrainageFirst { get; set; }
 
+    /// <summary>
+    /// The drainage-first generator's shape, when something has an opinion about it.
+    /// </summary>
+    /// <remarks>
+    /// §154. Null means "derive it from the amplitude as before", so nothing that does not ask is affected —
+    /// the sweep and the gate keep the figures §152 measured. The map builder asks, because that is where a
+    /// generator gets tuned and every constant in here was previously set by a rebuild.
+    /// </remarks>
+    public float? ChannelFallPer100M { get; set; }
+
+    public float? ValleyFlank { get; set; }
+
+    public float? ValleyShoulderMetres { get; set; }
+
+    public int? Tributaries { get; set; }
+
 
 
     public void Apply(TerrainMap terrain)
@@ -1072,16 +1088,20 @@ internal sealed class ReliefPlan
     {
         // Fall is an input here rather than an outcome. Two and a half metres per hundred is above §151's
         // floor of two, which forty-six of fifty-five old maps were under.
-        var fallPerMetre = MathF.Max(0.025f, Amplitude * 0.45f / MathF.Max(1f, extent));
-        var branches = 4 + (int)MathF.Round(MathF.Min(Amplitude, 60f) / 12f);
+        var fallPerMetre = ChannelFallPer100M is { } asked
+            ? asked / 100f
+            : MathF.Max(0.025f, Amplitude * 0.45f / MathF.Max(1f, extent));
+        var branches = Tributaries ?? 4 + (int)MathF.Round(MathF.Min(Amplitude, 60f) / 12f);
         var network = RiverNetwork.Grow(extent, seed, fallPerMetre, branches);
 
         // What the valley sides may do. Capped below the traversable limit with room to spare, because the
         // grade the navigation raster measures is over a cell and a half and this is over four metres.
+        // Capped against the traversable limit whatever was asked for: a dial that can generate ground nobody
+        // can cross is a dial that will, and §151 counted sixteen maps of exactly that.
         var flank = MathF.Min(
-            0.30f + MathF.Min(Amplitude, 60f) / 60f * 0.28f,
+            ValleyFlank ?? 0.30f + MathF.Min(Amplitude, 60f) / 60f * 0.28f,
             TerrainMap.MaximumTraversableGrade * 0.62f);
-        var shoulder = MathF.Max(6f, Amplitude * 0.75f);
+        var shoulder = MathF.Max(2f, ValleyShoulderMetres ?? MathF.Max(6f, Amplitude * 0.75f));
 
         for (var z = 0; z < side; z++)
         for (var x = 0; x < side; x++)

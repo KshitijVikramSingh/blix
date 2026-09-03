@@ -109,6 +109,51 @@ internal sealed class MapTuning
     [Tune(0.0, 60.0, Label = "relief (m)", Group = "map")]
     public float ReliefMetres;
 
+    /// <summary>
+    /// Whether the next map is built around an authored drainage network. §152's switch, on a dial.
+    /// </summary>
+    /// <remarks>
+    /// <b>The comparison the whole terrain arc turns on, and it was a command-line flag.</b> §154: two
+    /// generators on the same seed is the only honest way to judge either, and reaching that comparison meant
+    /// relaunching — which also meant re-entering the seed and losing the framing you had found. Here it is a
+    /// toggle and a regenerate.
+    /// </remarks>
+    [Tune(Label = "drainage first", Group = "relief")]
+    public bool DrainageFirst;
+
+    /// <summary>
+    /// How much a channel climbs per hundred metres of its own course, in the drainage-first generator.
+    /// </summary>
+    /// <remarks>
+    /// <b>The number §151 measured the old generator short of on forty-six maps out of fifty-five</b>, and the
+    /// criteria's floor is two. It is a dial and not a constant for the reason the water's four look numbers
+    /// became dials in §148: a figure that can only be changed by a rebuild is a figure set by whoever is not
+    /// looking at it.
+    /// </remarks>
+    [Tune(0.5, 8.0, Label = "channel fall (m/100m)", Group = "relief")]
+    public float ChannelFallPer100M = 2.5f;
+
+    /// <summary>How steeply a valley side climbs away from its water, as a grade.</summary>
+    /// <remarks>
+    /// Capped in the generator against the traversable limit whatever this says, because ground people cannot
+    /// cross is the fault §151 counted sixteen maps of and a dial that can produce it will.
+    /// </remarks>
+    [Tune(0.05, 0.60, Label = "valley flank (grade)", Group = "relief")]
+    public float ValleyFlank = 0.34f;
+
+    /// <summary>How high a valley side climbs before it levels onto the interfluve, in metres.</summary>
+    /// <remarks>
+    /// This and the flank together are the whole shape of a valley: the flank is how fast it rises and this is
+    /// how far it gets. A large shoulder with a gentle flank is downland; a small one with a steep flank is a
+    /// gorge in a plain.
+    /// </remarks>
+    [Tune(2.0, 60.0, Label = "valley shoulder (m)", Group = "relief")]
+    public float ValleyShoulderMetres = 24f;
+
+    /// <summary>How many tributaries hang off the trunk.</summary>
+    [Tune(0.0, 16.0, Label = "tributaries", Group = "relief")]
+    public float Tributaries = 7f;
+
     /// <summary>Builds the configured map on the seed already loaded.</summary>
     /// <remarks>
     /// <b>Two actions rather than one, because the two questions a map browser asks are different questions.</b>

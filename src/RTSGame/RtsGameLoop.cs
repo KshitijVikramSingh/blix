@@ -1788,7 +1788,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // No longer lab-only. The whole point of the lab was to judge maps the game would then play, and a lab
         // that generates through one path while the game generates through another judges nothing.
         simulation.Terrain.SetRegion(labRegion);
-        plan.DrainageFirst = drainageFirst;
+        // <b>The builder's dials, or the defaults when nothing has an opinion.</b> §154: the sweep and the
+        // gate ask for none of these, so the figures §152 measured are the figures they keep measuring.
+        plan.DrainageFirst = drainageFirst || mapTuning.DrainageFirst;
+        if (plan.DrainageFirst)
+        {
+            plan.ChannelFallPer100M = mapTuning.ChannelFallPer100M;
+            plan.ValleyFlank = mapTuning.ValleyFlank;
+            plan.ValleyShoulderMetres = mapTuning.ValleyShoulderMetres;
+            plan.Tributaries = (int)MathF.Round(mapTuning.Tributaries);
+        }
+
         var clock = System.Diagnostics.Stopwatch.StartNew();
         plan.Apply(simulation.Terrain);
         var shaped = clock.Elapsed.TotalMilliseconds;
@@ -1802,6 +1812,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // a canvas with seven on it.
         (labFloor, labSpan) = SettlementScenarios.InteriorReliefOf(simulation);
         labFloorSpan = (labFloor, labSpan);
+
+        // <b>The verdict, once, here.</b> §154: measured after the country is painted because walkability is
+        // read off the navigation raster and an unpainted map answers "all crossable" — the exact mistake
+        // §151 made in the sweep and had to correct. Rasterised first for the same reason: PaintCountry
+        // writes surfaces and bumps the revision, and nothing sees them until somebody rebuilds.
+        simulation.RebuildTerrainNavigation();
+        labCriteria = TerrainCriteria.Measure(simulation);
+        Console.WriteLine($"  criteria: {labCriteria}");
+        foreach (var shortfall in labCriteria.Value.Shortfalls())
+        {
+            Console.WriteLine($"    SHORT: {shortfall}");
+        }
         var measured = clock.Elapsed.TotalMilliseconds - shaped - painted;
         // <b>Skipped in the lab, and it was fourteen seconds of every roll.</b> The lab has no agents in it:
         // nothing routes, nothing is placed, nothing asks whether a cell is walkable. Rebuilding the walkable
@@ -3541,8 +3563,33 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         return
             $"{labArchetype} · {profile.Name} — {profile.Character}\n" +
             $"seed {labSeed} · scores {score:F2} ({why})\n" +
+            $"{(mapTuning.DrainageFirst ? "DRAINAGE FIRST" : "eroded")} · {LabVerdict()}\n" +
             "Q/E archetype · I region · Y next seed · enter print";
     }
+
+    /// <summary>
+    /// Whether the map on screen is one the criteria would accept, and what is wrong with it if not.
+    /// </summary>
+    /// <remarks>
+    /// <b>§154, and it is the point of the whole builder.</b> §151 wrote down what a map has to be true of and
+    /// §152 measured two generators against it — in a table, from a sweep, over fifty-five maps at once. None
+    /// of that told anybody looking at <em>this</em> map whether it was any good. So the verdict sits on the
+    /// screen beside the seed that produced it: generate, look, read, turn a dial.
+    /// <para>
+    /// Cached on generation rather than computed per frame: it walks the navigation grid and floods every
+    /// pool, which is a hundred thousand cells and change — fine once a map, absurd sixty times a second.
+    /// </para>
+    /// </remarks>
+    private string LabVerdict()
+    {
+        if (labCriteria is not { } criteria) return "criteria not measured";
+        var shortfalls = string.Join("; ", criteria.Shortfalls());
+        return shortfalls.Length == 0
+            ? $"PASSES — {criteria}"
+            : $"FAILS — {shortfalls}";
+    }
+
+    private TerrainCriteria? labCriteria;
 
     /// <summary>
     /// Whether the woodland is patchy or evenly sprinkled, which no figure printed so far could tell.
@@ -7766,6 +7813,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         var lake = water.LakeDepth;
         var uphill = 0;
         var drawn = 0;
+        var worstRise = 0f;
+        var worstAt = Vector2.Zero;
         for (var index = 0; index < receiver.Length && drawn < OverlayLineBudget; index++)
         {
             var at = water.Origin + new Vector2(index % side, index / side) * step;
@@ -7780,8 +7829,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // The one thing this overlay exists for. A channel entering standing water is below its surface
             // by definition — see the note in TerrainCriteria — so those are left out of the count here for
             // the same reason they are left out there.
-            var wrong = lake[to] <= 0.05f && here < water.LevelAt(next) - 0.01f;
-            if (wrong) uphill++;
+            var rise = water.LevelAt(next) - here;
+            var wrong = lake[to] <= 0.05f && rise > 0.01f;
+            if (wrong)
+            {
+                uphill++;
+                // <b>The worst one, named, because localising was the entire point.</b> §153: a count with no
+                // position is what §152 failed on four times over. This says where to go and look.
+                if (rise > worstRise)
+                {
+                    worstRise = rise;
+                    worstAt = at;
+                }
+            }
             var weight = Math.Clamp(water.WidthAt(at) / 24f, 0.15f, 1f);
             AddGroundLine(
                 at,
@@ -7793,7 +7853,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             drawn++;
         }
 
-        Report($"drainage: {drawn:N0} reach(es) drawn, {uphill:N0} of them running uphill");
+        // <b>Keyed on the uphill count and not on the drawn count.</b> The drawn count changes every frame
+        // the camera moves, because only what is near it is drawn — so the first version printed a line per
+        // frame while panning, which is the opposite of legible.
+        Report(
+            $"uphill:{uphill}",
+            uphill == 0
+                ? $"drainage: {drawn:N0} reach(es) in view, none running uphill"
+                : $"drainage: {drawn:N0} reach(es) in view, {uphill:N0} running uphill; " +
+                  $"worst rises {worstRise:F2} m at ({worstAt.X:F0}, {worstAt.Y:F0})");
     }
 
     /// <summary>Standing water, ringed, and coloured by whether there is a basin under it.</summary>
@@ -7858,7 +7926,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             }
         }
 
-        Report($"standing water: {pools:N0} pool(s), {basinless:N0} without a basin under them");
+        Report(
+            $"pools:{pools}/{basinless}",
+            $"standing water: {pools:N0} pool(s) in view, {basinless:N0} without a basin under them");
         return;
 
         void Spread(int x, int z)
@@ -7924,6 +7994,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         }
 
         Report(
+            steepOnly ? $"steep:{marked}" : $"blocked:{marked}",
             steepOnly
                 ? $"grade: {marked:N0} sample(s) over the traversable limit on ground meant to be crossed"
                 : $"blocked: {marked:N0} sample(s) a body cannot walk on");
@@ -7944,11 +8015,18 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// <summary>Lines one overlay may spend. A budget, because these are debug draws and not a renderer.</summary>
     private const int OverlayLineBudget = 6000;
 
-    /// <summary>Said once per change rather than every frame, which is what makes it readable.</summary>
-    private void Report(string line)
+    /// <summary>
+    /// Said when the finding changes, not when the picture does.
+    /// </summary>
+    /// <param name="key">
+    /// What counts as the same finding. Deliberately narrower than the message: an overlay draws only what is
+    /// near the camera, so a figure that includes how much was drawn changes on every frame of a pan and
+    /// reports nothing worth reading.
+    /// </param>
+    private void Report(string key, string line)
     {
-        if (line == lastOverlayReport) return;
-        lastOverlayReport = line;
+        if (key == lastOverlayReport) return;
+        lastOverlayReport = key;
         Console.WriteLine($"  {line}");
     }
 

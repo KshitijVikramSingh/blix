@@ -12833,3 +12833,52 @@ on change rather than every frame, for the same reason.
 
 `--drainage-first` also reaches the played game now, not just the sweep, so §152's two generators are
 comparable in the chair as well as in a table.
+
+## 154. The map builder gets the verdict, and the new generator is worse at the thing it was for
+
+Tooling on the builder rather than on the ground, because §152 had two generators and no way to look at
+either: the comparison lived in a fifty-five-map table produced by a sweep, and nothing told somebody looking
+at *this* map whether it was any good.
+
+**The verdict is on screen.** `LabVerdict` puts `TerrainCriteria` beside the seed that produced it —
+`PASSES — walkable 96% …` or `FAILS — 73 watercourses running uphill; 1 lake with no basin`. Cached on
+generation, because it walks the navigation grid and floods every pool: fine once a map, absurd sixty times a
+second. Measured *after* `PaintCountry` and after a rasterise, which is the same mistake §151 made in the
+sweep and had to correct — an unpainted, un-rasterised map answers "all crossable".
+
+**The generator is a toggle and its shape is four dials.** `drainage first`, `channel fall (m/100m)`,
+`valley flank (grade)`, `valley shoulder (m)`, `tributaries`. All four were constants inside `PlantRivers`
+that only a rebuild could change, which is the §148 lesson restated: a figure that can only be changed by a
+rebuild is a figure set by whoever is not looking at it. Null means "derive from amplitude as before", so the
+sweep and the gate keep measuring exactly what §152 measured. The flank is capped against the traversable
+limit whatever the dial says — a dial that can generate ground nobody can cross is a dial that will.
+
+### And the first thing the tooling said
+
+Same seed, same binary, same everything but the lattice:
+
+| | eroded | drainage-first |
+|---|---|---|
+| walkable | 96% | **100%** |
+| steepest grade | 0.67 | **0.40** |
+| fall m/100 m | 6.61 | 5.30 |
+| basinless lakes | 1 | **5** |
+| uphill reaches | 73 | **144** |
+| fords | 768 | 946 |
+
+The flank cap does exactly what it was built to do. And **the generator whose whole premise is monotone
+drainage by construction produces twice the uphill reaches of the one it replaces** — 144 against 73, on
+ground where every authored reach is monotone by arithmetic.
+
+So the premise is too weak, and this is the finding: **an authored network being monotone does not make the
+terrain derived from it monotone along the paths the solver actually finds.** `Floor` takes the minimum over
+reaches, which raises a divide wherever two valleys meet; the solver then routes water along that divide's
+saddles, over ground shaped by two different reaches and by the interfluve undulation on top. Those paths were
+never authored and nothing made them fall.
+
+Which means the next step is not more shaping. It is either to constrain the solver's paths to the authored
+network, or to make the criterion ask about the authored network rather than every channel the solver can
+find — and deciding which is a design question about what a watercourse *is* here, not a tuning one.
+
+Recorded plainly because it is the second time this arc that the thing I built to fix a fault made it worse
+and the instrument caught it: §147's lake rule (§151 found 34 maps still failing), and now this.
