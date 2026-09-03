@@ -809,6 +809,18 @@ internal static class SettlementScenarios
         world.SeedStock(granary, Resource.Grain, 4200);
         world.SeedStock(granary, Resource.Wood, 1000);
 
+        // <b>And stone, which is the founding's first cache of a material it cannot dig for itself at any
+        // useful rate.</b> §140. Sized off the recipes rather than picked: a barracks wants 120 and a sound
+        // palisade wants 120 to become a stone wall, so this is one barracks and four walls turned to stone,
+        // which is what a settlement can plausibly have quarried before the map begins. The one quarrier is
+        // what replaces it afterwards, slowly, which is the intended shape — stone is the material you plan
+        // around rather than the one you run on.
+        //
+        // The timber those same recipes want is already here: a barracks at 300 and four palisades at 60
+        // apiece is 540 of the 1,000 above, so nothing needed adding for the buildings to be reachable. That
+        // is worth stating because it was checked rather than assumed.
+        world.SeedStock(granary, Resource.Stone, 600);
+
         // The village core: houses on an arc to one side of the granary, tucked as close to it as their
         // own walls allow. A household outside every catchment goes hungry however full the stores are,
         // so near is the safe direction, and the arc is sized to leave a cart's width between

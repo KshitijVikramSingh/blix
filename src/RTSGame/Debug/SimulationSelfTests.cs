@@ -159,6 +159,7 @@ internal static class SimulationSelfTests
         Check("housing caps a population and food brakes it", PeopleArriveWhenThereIsRoomAndFood());
         Check("a neighbour's full larder is not yours", NeighbourLarderIsNotYours());
         Check("a village is not founded in a forest", AVillageIsNotFoundedInAForest());
+        Check("the bot budgets what a wall really costs", TheBotKnowsWhatAWallCosts());
         Check("a household that goes hungry loses somebody", PrivationSpendsItselfAsEmigration());
         Check("a wood hides what walks through it", TreesBlockSight());
         Check(
@@ -5653,6 +5654,27 @@ internal static class SimulationSelfTests
             $"    chose ({chosen.X:F0},{chosen.Y:F0}) on open ground={openBefore}; with that ground under " +
             $"forest it chose ({again.X:F0},{again.Y:F0}), {Vector2.Distance(again, chosen):F0} m away " +
             $"and walkable={landedOpen}");
+        return passed;
+    }
+
+    /// <summary>
+    /// The bot's idea of what a stone wall costs is what a stone wall costs.
+    /// </summary>
+    /// <remarks>
+    /// §140. The bot has to know a project's price <em>before</em> it commits, and StructuralProjects only
+    /// answers for a node already upgrading — so the figure is duplicated, and a duplicated constant that
+    /// nothing checks is a constant that drifts. This is the check.
+    /// </remarks>
+    private static bool TheBotKnowsWhatAWallCosts()
+    {
+        var world = new SimulationWorld(120f);
+        var wall = world.AddNode(NodeKind.PalisadeWall, new Vector2(10f, 0f), capacity: 0);
+        var began = world.BeginUpgrade(wall, NodeKind.StoneWall);
+        var real = StructuralProjects.CostFor(world.Nodes.Get(wall)).Stone;
+        var bots = AI.SettlementBot.StoneForAStoneWall;
+        var passed = began && real > 0 && real == bots;
+        Console.WriteLine(
+            $"    a palisade turns to stone for {real} stone; the bot budgets {bots}");
         return passed;
     }
 

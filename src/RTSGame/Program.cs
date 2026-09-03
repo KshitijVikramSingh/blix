@@ -102,7 +102,8 @@ public static class Program
             Environment.Exit(TwoSettlementScenarios.Run(
                 twoExtent, twoYears, twoRelief, twoSeed,
                 args.Contains("--swapfactions"), args.Contains("--onevillage"),
-                args.Contains("--dresstwice"), args.Contains("--bot")));
+                args.Contains("--dresstwice"), args.Contains("--bot") || args.Contains("--bots"),
+                args.Contains("--bots")));
         }
 
         if (args.Contains("--settlement"))
@@ -606,7 +607,9 @@ public static class Program
             msaa,
             treeCrowd,
             cheapTrees,
-            args.Contains("--opponent"));
+            // --handsoff implies --opponent: two settlements is the thing worth watching play itself.
+            args.Contains("--opponent") || args.Contains("--handsoff"),
+            args.Contains("--handsoff"));
         using var window = new Window(
             game, new WindowOptions("RTSGame — Greybox Kingdom", windowWidth, windowHeight));
         window.Run();

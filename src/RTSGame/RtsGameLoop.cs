@@ -1314,7 +1314,22 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// <summary>The neighbour's player, when one was asked for. Null in a single-settlement village.</summary>
     private SettlementBot? opponentBot;
 
+    /// <summary>
+    /// A bot on the player's own settlement, when the whole map is being left to play itself.
+    /// </summary>
+    /// <remarks>
+    /// §140. Two rule-bots on one map is the state §7's acceptance test actually wants to watch: a settlement
+    /// nobody is steering shows what the rules produce, rather than what the rules plus a person's attention
+    /// produce. It is the same class with the same verbs — there is deliberately no second implementation for
+    /// "the player's" side, because a bot that ran the player's settlement differently would be measuring the
+    /// wrong thing.
+    /// </remarks>
+    private SettlementBot? playerBot;
+
     private readonly bool startOpponent;
+
+    /// <summary>Whether every settlement on the map is left to a rule-bot, the player's included.</summary>
+    private readonly bool handsOffEverybody;
 
     /// <summary>Routing as it stood at the last report, so each second is a window rather than a total.</summary>
     private RouteAttribution routesAtLastReport = new();
@@ -1364,13 +1379,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // Appended rather than slotted in beside the other village flags: this list is passed positionally
         // from Program.cs, and inserting a bool into the middle of twenty-nine arguments silently rebinds
         // every one after it. The compiler caught it because the neighbours happen to be an int and a float.
-        bool startOpponent = false)
+        bool startOpponent = false,
+        bool handsOffEverybody = false)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
         this.performanceHour = performanceHour;
         this.performanceVsync = performanceVsync;
         this.startOpponent = startOpponent;
+        // Hands off implies there is somebody else to watch: a lone bot settlement is the headless year leg
+        // with a camera on it, which --twovillages already answers better.
+        this.handsOffEverybody = handsOffEverybody;
         this.shadowProxies = shadowProxies;
         this.performanceBlockingUpload = performanceBlockingUpload;
         this.cheapTrees = cheapTrees;
@@ -1870,6 +1889,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             recipe.Wagons,
             centre: founded,
             faction: PlayerFaction);
+
+        // <b>And a bot on it too, if the map is being left to play itself.</b> §140.
+        playerBot = handsOffEverybody ? new SettlementBot(PlayerFaction) : null;
+        if (playerBot is not null)
+        {
+            Console.WriteLine(
+                $"  hands off: faction {PlayerFaction.Value} is run by a rule-bot as well — " +
+                "selection and orders still work, and anything issued is an interrupt the bot leaves alone");
+        }
 
         // <b>A neighbour, and somebody to run it.</b> §133: the pieces for this have all been proved headless
         // — two settlements that feed themselves (§130), per-faction knowledge (§131), and a bot that plays
@@ -3940,6 +3968,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             // with the tick decides at the same moment however fast the clock is running, so what is watched
             // from the chair is what a headless run would have produced.
             opponentBot?.Update(simulation);
+            playerBot?.Update(simulation);
             // Look at the raid when it appears. A test-bench convenience: finding out whether defence is
             // interesting requires being able to see the fight.
             if (raiders?.TakeLookAt() is { } lookAt) cameraFocus = lookAt;

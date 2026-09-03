@@ -43,7 +43,8 @@ internal static class TwoSettlementScenarios
         bool swapFactions = false,
         bool onlyOne = false,
         bool dressTwice = false,
-        bool bot = false)
+        bool bot = false,
+        bool bothBots = false)
     {
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         var world = new SimulationWorld(extentMeters);
@@ -131,20 +132,19 @@ internal static class TwoSettlementScenarios
         // assignments makes the claim the sharp one: can a rule-bot take a settlement that is standing idle
         // and put it to work through the same commands a person has. §132.
         SettlementBot? driver = null;
-        if (bot)
+        SettlementBot? other = null;
+        if (bot || bothBots)
         {
-            var theirs = new List<Simulation.Agents.AgentId>();
-            foreach (ref readonly var body in world.Agents.All)
-            {
-                if (body.IsAlive && body.Faction == secondFaction) theirs.Add(body.Id);
-            }
+            driver = Unemploy(world, secondFaction);
+        }
 
-            world.QueueAssign(theirs, Assignment.None);
-            world.Tick((float)SimulationWorld.FixedDeltaSeconds);
-            driver = new SettlementBot(secondFaction);
-            Console.WriteLine(
-                $"  faction {secondFaction.Value} is driven by a bot, and starts with {theirs.Count} " +
-                "people and no work");
+        // <b>And the first settlement too, when the whole map is left to itself.</b> §140. This is the state
+        // the design is actually heading for: nobody steering either side, so what a year produces is what
+        // the rules produce. It also makes the two settlements comparable in a way §136 wanted and could not
+        // have — same recipe, same starting cache, same driver, different ground.
+        if (bothBots)
+        {
+            other = Unemploy(world, firstFaction);
         }
 
         // Recorded before the clock starts, because "did anything happen" is a comparison and needs both ends.
@@ -161,6 +161,7 @@ internal static class TwoSettlementScenarios
             // fixed step decides at the same moment however fast the clock is running, so a watched run and a
             // headless one see the same game.
             driver?.Update(world);
+            other?.Update(world);
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
 
             // Conservation across BOTH, every tick, exactly as the one-village year leg does it. A unit of
@@ -209,10 +210,49 @@ internal static class TwoSettlementScenarios
             }
         }
 
-        if (driver is { } ran)
+        // <b>What it built, not how many orders it issued.</b> §140: "four sites laid" is a count of the
+        // bot's own decisions and says nothing about whether anything is standing — the same distinction as
+        // §135's stores-changed rule. A run where a bot lays four sites and finishes none looks identical in
+        // the counters and is a total failure on the ground.
+        foreach (var ran in new[] { other, driver })
         {
+            if (ran is null) continue;
+            var standing = Structures(world, ran.Faction);
             Console.WriteLine(
-                $"  the bot: {ran.Decisions:N0} decisions, {ran.OrdersIssued:N0} assignments issued");
+                $"  faction {ran.Faction.Value} built: {standing.Barracks} barracks, " +
+                $"{standing.Palisades} palisade, {standing.StoneWalls} stone wall, " +
+                $"{standing.Unfinished} still going up; {standing.Militia} militia standing");
+            // Only where the clock allows it at all. I first set this at nine tenths of a year on the
+            // arithmetic — a barracks is 1,800 labour-seconds and two hands cannot spend that in the 540 a
+            // tenth of a year gives them — and the gate's own short leg then built one with four militia
+            // standing. The arithmetic is not the measurement, so the threshold is the measured one: every
+            // leg long enough to have been observed doing it asserts that it did.
+            if (years < 0.09f)
+            {
+                continue;
+            }
+
+            if (standing.Barracks == 0)
+            {
+                faults.Add(
+                    $"faction {ran.Faction.Value}'s bot never finished a barracks — " +
+                    $"{ran.SitesPlaced} site(s) laid, {standing.Unfinished} unfinished");
+            }
+            else if (standing.Militia == 0)
+            {
+                faults.Add(
+                    $"faction {ran.Faction.Value}'s bot has a barracks and no militia — " +
+                    $"{ran.MilitiaRaised} ordered");
+            }
+        }
+
+        foreach (var ran in new[] { other, driver })
+        {
+            if (ran is null) continue;
+            Console.WriteLine(
+                $"  faction {ran.Faction.Value}'s bot: {ran.Decisions:N0} decisions, " +
+                $"{ran.OrdersIssued:N0} assignments, {ran.SitesPlaced} site(s) laid, " +
+                $"{ran.MilitiaRaised} militia raised");
         }
 
         foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");
@@ -492,6 +532,66 @@ internal static class TwoSettlementScenarios
         }
 
         return houses;
+    }
+
+    /// <summary>
+    /// Takes a faction's whole workforce off work and hands it to a bot.
+    /// </summary>
+    /// <remarks>
+    /// <b>The bot's settlement starts with nobody employed.</b> Founding posts every hand at a producer,
+    /// which would leave a bot with nothing to do and an acceptance test that proved nothing. Stripping the
+    /// assignments makes the claim the sharp one: can a rule-bot take a settlement standing idle and put it
+    /// to work through the same commands a person has. §132.
+    /// </remarks>
+    private static SettlementBot Unemploy(SimulationWorld world, FactionId faction)
+    {
+        var theirs = new List<Simulation.Agents.AgentId>();
+        foreach (ref readonly var body in world.Agents.All)
+        {
+            if (body.IsAlive && body.Faction == faction) theirs.Add(body.Id);
+        }
+
+        world.QueueAssign(theirs, Assignment.None);
+        world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+        Console.WriteLine(
+            $"  faction {faction.Value} is driven by a bot, and starts with {theirs.Count} people and no work");
+        return new SettlementBot(faction);
+    }
+
+    /// <summary>What one faction has standing, counted from the world rather than from the bot's tally.</summary>
+    private static (int Barracks, int Palisades, int StoneWalls, int Unfinished, int Militia) Structures(
+        SimulationWorld world,
+        FactionId faction)
+    {
+        var barracks = 0;
+        var palisades = 0;
+        var stone = 0;
+        var unfinished = 0;
+        foreach (ref readonly var node in world.Nodes.All)
+        {
+            if (!node.IsAlive || node.Faction != faction) continue;
+            if (!node.IsBuilt)
+            {
+                if (node.Kind is NodeKind.Barracks or NodeKind.PalisadeWall) unfinished++;
+                continue;
+            }
+
+            if (node.Kind == NodeKind.Barracks) barracks++;
+            else if (node.Kind == NodeKind.PalisadeWall) palisades++;
+            else if (node.Kind == NodeKind.StoneWall) stone++;
+        }
+
+        var militia = 0;
+        foreach (ref readonly var body in world.Agents.All)
+        {
+            if (body.IsAlive && body.Faction == faction &&
+                body.Role == Simulation.Agents.AgentRole.Militia)
+            {
+                militia++;
+            }
+        }
+
+        return (barracks, palisades, stone, unfinished, militia);
     }
 
     private static int PeopleOf(SimulationWorld world, int faction)

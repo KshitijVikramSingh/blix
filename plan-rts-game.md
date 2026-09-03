@@ -11960,3 +11960,116 @@ to was not the constraint, and running it anyway is what put the site line in fr
   both times, so the test can only pass because the gate exists. What the test does not establish is that
   three quarters is the right fraction. It admitted the bot's copse-heavy site, which was the right call given
   the clearing, and nothing yet exercises the boundary.
+
+## 140. Nobody steering, a cache of stone, and the same trap for the third time
+
+Three things, asked for together: the whole map left to rule-bots, a founding cache of stone, and a bot that
+spends it on walls, a barracks and a few militia. The first two are small. The third found the same bug twice
+more in one sitting.
+
+### The cache
+
+`Populate` already seeded 4,200 grain and 1,000 wood; it now seeds 600 stone. Sized off the recipes rather
+than picked: a barracks wants 120 stone and a sound palisade wants 120 to become a stone wall, so 600 is one
+barracks and four walls turned to stone. **The timber those same recipes want was already there** — a
+barracks at 300 and four palisades at 60 apiece is 540 of the existing 1,000 — which is worth stating because
+it was checked rather than assumed. The one quarrier is what replaces the cache afterwards, slowly, which is
+the intended shape: stone is the material you plan around, not the one you run on.
+
+### Nobody steering
+
+`--bots` on `--twovillages` and `--handsoff` in the live game put a `SettlementBot` on *both* settlements.
+There is deliberately no second implementation for the player's side: a bot that ran the player's settlement
+differently would be measuring the wrong thing. It also makes the two settlements comparable in the way §136
+wanted and could not have — same recipe, same cache, same driver, different ground.
+
+### And then the third costume of §137
+
+The build-and-train step, first version, re-decided everything twice a second against applied state. A hand
+posted at a site has not arrived yet, so the count says nobody is there, so it posts two more:
+
+| | first version | after |
+|---|---|---|
+| assignments issued in a year | 24,693 | 318 |
+| militia ordered against a target of four | 28 | 4 |
+| hands on the sixteen fields, all year | 0 | 7–9 and 3 |
+| outcome | both settlements starving | both fed, books balanced |
+
+§137 was one decision reading a tally it was in the middle of writing. §138 was a total over a set that had
+grown a second member. This is the first again, and I wrote it having written that section — which is the
+useful part of recording it. **The shape is: any rule of the form "how many are already doing X" is a
+question about the queue, not about the world, whenever the asker is the one filling the queue.**
+
+The fix is not a cleverer count. It is that the bot remembers its own orders: a per-site cooldown
+(`LookAgainTicks`, ten seconds — long enough for a hand to cross a settlement) and a `militiaOrdered` counter,
+because *a villager walking to the barracks is not militia yet*. That is also what a player does: post two
+villagers and go look at something else.
+
+### The two-way ternary, again, and this time the bot armed it
+
+With the thrash fixed, faction 1 ran a whole summer with **zero hands on eight fields** while thirteen stood
+in the woods. Not the same bug. The allocation rule was
+
+```csharp
+grainLeft < ShortSeasons ? true : woodLeft < ShortSeasons ? false : ratio
+```
+
+— a two-way switch that held up for exactly as long as the bot did not spend anything. **Buying a barracks
+costs 300 timber, which drops the woodpile under the threshold in a single act**, and the switch then sent
+the entire workforce to the trees, walking a settlement that had been feeding itself into a harvest with
+nothing planted.
+
+§71 named this shape when stone was added: a two-way ternary between two resources has no room for the third
+case, and "both matter, one more than the other" is the ordinary case rather than the exception. So a
+shortage now *leans* the split — 0.85 to the fields when grain is short, 0.35 when wood is — and always
+leaves the other resource somebody. Faction 1 went from 0 hands on fields to 3 and stopped starving.
+
+What is new is who armed it: §71's version needed a third resource to expose. **This one was exposed by the
+bot acquiring the ability to spend**, which no amount of measuring the allocation rule in isolation would have
+found. A policy layer is a load on every rule beneath it.
+
+### What it produces
+
+A year, two bots, nobody steering:
+
+```
+faction 0 built: 1 barracks, 1 palisade, 0 stone wall, 1 still going up; 4 militia standing
+faction 1 built: 1 barracks, 0 palisade, 1 stone wall, 1 still going up; 3 militia standing
+faction 0's bot: 5,400 decisions, 318 assignments, 4 site(s) laid, 4 militia raised
+faction 1's bot: 5,400 decisions, 290 assignments, 4 site(s) laid, 4 militia raised
+both settlements fed themselves, and the books balanced every tick
+```
+
+The stone was spent as designed — faction 1's palisade is a stone wall.
+
+**The report says what is standing, not how many orders were issued**, and the run faults if a bot finishes
+no barracks or has a barracks and no militia. §135's rule: "four sites laid" is a count of the bot's own
+decisions, and a run that lays four and finishes none looks identical in the counters. **And the threshold for that assertion came from a measurement after I got the arithmetic wrong.** I set it at
+nine tenths of a year on the reasoning that a barracks is 1,800 labour-seconds and two hands cannot spend that
+in the 540 a tenth of a year allows — and the gate's own short leg then finished one with four militia
+standing. So it asserts from a tenth of a year, which is every leg that has been observed doing it. The
+arithmetic is not the measurement; that is the whole method of this file and I still reached for the sum
+first.
+
+### Seams left open on purpose
+
+- **Placement is not a queued command.** The bot calls `AddNode`, and so does the player's build key — see
+  `RtsGameLoop.Build`. Placing a site is not an order to a unit and there is nothing about it to interrupt or
+  to survive a save: it happens between one tick and the next or not at all. What the bot does not get is
+  ground the player could not use, which is why it goes through the same `Terrain.CanPlace`.
+- **The bot's memory does not survive a save.** `lastPosted` and `militiaOrdered` live outside the world, on
+  the RaidDirector's precedent (§132). A reload would re-order a garrison it already has. Cheap to fix when
+  saves matter for a bot game; wrong to fix before, because the bot's state has no business in the save
+  format until the bot is part of the game rather than a test driver.
+- **`StoneWallUpgradeCost` is duplicated in the bot** because `StructuralProjects` only prices a project that
+  has already begun, and the bot needs the price before it commits. A duplicated constant nothing checks is a
+  constant that drifts, so there is a self-test holding the two together.
+- **The lean leaves fields fallow.** Faction 1 spends the year wood-short, so 0.35 puts three hands on eight
+  fields: the three it works reap 100% and the other five stand empty all year. It ends on 1,369 grain and
+  loses five people over the winter while faction 0, on better ground with more wood, holds seventeen. That is
+  the ratio behaving exactly as written and it is still probably wrong — a hand on a fallow field is worth
+  more than the fourth hand in a wood line — but it is now a question about field assignment rather than a
+  settlement walking into a harvest with nothing planted.
+- **Wood is still the binding constraint.** Both settlements end the year at zero, now with buildings to show
+  for it. This is where a build policy has to get cleverer or the wood economy has to change (§70's open
+  item), and it is the first time the two are the same question.

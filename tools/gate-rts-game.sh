@@ -94,10 +94,19 @@ run "two settlements on one map" --twovillages --years 0.1
 # through the same queued commands a person has — and the pass condition is the year leg's own, that it feeds
 # itself and the books balance.
 run "a bot runs a settlement" --twovillages --years 0.1 --bot
+# <b>And the whole map left to itself.</b> §140: two rule-bots, nobody steering either side. Short by default
+# because the economy fault is what a tenth of a year can show; the structure assertions — a barracks standing,
+# militia raised — need a full year to be meetable at all, so they only fire on the long leg. Asserting a
+# barracks on a tenth of a year would be asserting the clock.
+if [ "$years" -eq 1 ]; then
+    run "two bots and nobody steering" --twovillages --years 1 --bots
+else
+    run "two bots and nobody steering" --twovillages --years 0.1 --bots
+fi
 
 echo
-legs=5
-[ "$years" -eq 1 ] && legs=7
+legs=6
+[ "$years" -eq 1 ] && legs=8
 if [ "$failed" -eq 0 ]; then
     if [ "$years" -eq 1 ]; then
         echo "gate: all $legs green, years included"
