@@ -12619,3 +12619,128 @@ that 35 cm over 300 m is a flooded field. Measured after: water is 2–6% of the
   changes.
 - **Whether 1/80 removed water worth having**, and whether a third of shadow strength at 10° leaves a winter
   afternoon looking unlit. Both are judgements from the chair and neither has been made yet.
+
+## 150. Drainage first: inverting the terrain pipeline
+
+Decided after a session of patching water: the generator is old, tuned for a vision the game has left, and
+**it indicts itself in its own log line on every run.**
+
+```
+relief: 1 uplands, 3 troughs, 6 separators, 6 connectors, 2 woods;
+amplitude 32.0 m, steepest flank 1.26 grade against a limit of 0.82,
+undulation 2.0 m, fall 0.73 m per 100 m
+```
+
+- **`steepest flank 1.26 against a limit of 0.82`.** It generates flanks 54% steeper than
+  `TerrainMap.MaximumTraversableGrade`, prints the violation, and nothing fails. Ground nobody can walk on,
+  produced by the layer that knows the limit.
+- **`fall 0.73 m per 100 m`.** Three quarters of a per cent of overall tilt. **This is the cause of every
+  water complaint in §145–149.** With that little hydraulic gradient a depression's outlet sits barely above
+  its floor, so a fill spreads wide and paper-thin — the 237 m × 0.9 m apron — and a channel has no
+  confinement to lie in. Every fix in those sections was teaching the *solver* to reject what the
+  *generator* should not have made.
+
+### The structural fault
+
+The order is: sample authored landforms (troughs, uplands, separators, connectors, coast, undulation, tilt) →
+`Erosion.Carve` → basins → `Drainage.Solve` **discovers** the water. The landform vocabulary has no concept
+of a drainage network, so water has to find a story in ground that was not built to tell one.
+
+So the pipeline inverts. **Author the drainage network first, then build the terrain around it**: a valley
+exists because a river does, rather than a river being looked for in a valley.
+
+1. **An outlet and a channel tree.** Pick an outlet — a map edge, or the sea where there is one — and grow a
+   bifurcating network inland. Each reach carries an accumulated area, hence a width and a depth, off the
+   curve `Drainage.WidthOf` already uses. **Monotone downhill by construction**, which is the property the
+   whole class of §145 faults came from not having.
+2. **Valleys around the tree.** Height is the reach's own profile plus distance-to-channel times a valley
+   slope drawn from the archetype — with the slope **capped at the traversable grade** except where a cliff
+   is asked for on purpose.
+3. **Interfluves from the existing vocabulary.** Uplands, separators and plateaus keep their jobs: they shape
+   the ground *between* valleys, which is what they were always good at.
+4. **Erosion for texture**, constrained so it cannot break monotonicity — the check being the invariant
+   below rather than an argument about strength.
+5. **`Drainage.Solve` still runs, but now it confirms.** The flow it finds should follow the tree it was
+   handed, and *that is a testable statement*: this turns map generation from something judged by eye into
+   something the gate asserts.
+
+### What the terrain answers to
+
+Three criteria, chosen from the chair, and each one assertable:
+
+- **Walkability** — no ground steeper than the traversable limit outside deliberate cliffs, and a stated
+  walkable fraction. The 1.26-against-0.82 line stops being a complaint and becomes a failure.
+- **Coherent drainage** — every watercourse runs monotonically downhill to an outlet, no lake without a
+  basin, no water on ground that cannot hold it.
+- **Legible for play** — chokepoints, fords and valley routes that read as decisions. A ford becomes an
+  authored wide shallow reach of a known channel rather than an accident of the depth field.
+
+Not chosen: settleable sites. The site scorer already earns its living (§139's `MostlyWalkable` and the
+farmland/wood/backdrop terms), and constraining generation to please it would put the same opinion on both
+sides of the test.
+
+### Order of work
+
+- **A. The acceptance test first**, over the sweep the panel already drives: archetype × region × seed, with
+  grade violations, hydraulic fall, lake plausibility, walkable fraction and drainage connectivity. It fails
+  on today's generator — that is the point, and it is the baseline the new one is judged against.
+- **B. The drainage-first generator behind a flag**, so both can be measured on the same seeds in the same
+  binary. §84's rule.
+- **C. Flip the default** when A passes on the new path, and delete the flag.
+
+The reason for that order rather than building the generator first: every water fault this session was found
+by an instrument and none by reading, and a generator judged from two screenshots is how the present one got
+here.
+
+## 151. The ruler, corrected three times before it could be trusted
+
+§150 stage A: what a generated map has to be true of, measured across the 55 maps the panel can ask for.
+`TerrainCriteria` holds three criteria — walkability, coherent drainage, legible for play — and the sweep
+now prints them for every map and **ratchets**: the count may fall and may not rise. A gate leg going red on
+the first run would have blocked every other piece of work until the whole terrain arc landed.
+
+### What it found, on the fourth try
+
+| fault | maps affected (of 55) |
+|---|---|
+| watercourses running uphill | **all 55**, between 6 and 643 each |
+| fall below 2 m per 100 m | 46 |
+| lakes with no basin | 34 |
+| flanks over the traversable 0.82 | 16 |
+| crossable ground in pieces | 3 |
+
+**Every map has watercourses running uphill, and §145's slope taper did not fix that.** It reduced how much
+water *sat* on a slope without making the level field monotone, and I had reported the complaint as
+addressed. This is the single most-confirmed fault in the generator and the clearest argument for §150's
+inversion: monotone downhill has to be a property of construction, not something a taper approximates
+afterwards.
+
+### And three of the four runs were measuring the wrong thing
+
+Worth recording in full, because the pattern is the finding.
+
+**`walkable 100%` on every map.** The sweep painted the biomes and never rebuilt the navigation raster, so
+`IsBlocked` was answering about bare relief — on a generator §145 had just measured at 42% closed canopy.
+An instrument that cannot see the fault it was written for is worse than none, because it argues the other
+way.
+
+**`steepest 3.46` was the rim doing its job.** `GradeLimit.Apply` caps the lattice at 0.92 of the traversable
+limit *inset from the border*, because a map's edge is deliberately unclimbable. Measured inside the rim and
+skipping surfaces that are impassable on purpose — crag, deep water — the worst flank fell from 3.46 to 1.67.
+§150 had said "outside deliberate cliffs" and the first implementation ignored its own brief.
+
+**`largest piece 221% of it`**, which is arithmetic rather than terrain: the island fill runs over the whole
+grid and I had put the inside-the-rim count in its denominator.
+
+**Fifty-five basinless lakes that were one river each.** `Drainage.Bodies` floods every cell whose level is
+above its bed, so a connected river network comes back as a single body spanning the map diagonal at a metre
+and a half — and asking whether *that* has a basin under it reports a fault on every map ever generated.
+§147's rule is about depressions, so the criterion had to be too. **34 of the 55 remain and those are real**,
+which means §147's rule does less than its section claims.
+
+166 → 149 shortfalls, all four corrections being to the ruler and none to the ground.
+
+**The lesson is not "write instruments more carefully" — it is that a measurement is a claim and gets checked
+like one.** Every one of the four was caught by reading the numbers for plausibility rather than by review:
+100% walkable on a map known to be two-thirds wooded, a share above one, a fault present on literally every
+map. A number that indicts everything is usually indicting its own definition.

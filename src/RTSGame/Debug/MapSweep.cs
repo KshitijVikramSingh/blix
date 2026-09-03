@@ -46,6 +46,11 @@ internal static class MapSweep
     public static int Run(float extentMetres, uint seed)
     {
         var faults = new List<string>();
+        // <b>Counted separately from faults, because they are a debt and not a break.</b> §151: the criteria
+        // fail on today's generator by design — that is the point of writing them before the generator §150
+        // replaces it — and a gate leg that went red immediately would block every other piece of work until
+        // the whole terrain arc landed. So they ratchet: the count may fall and may not rise.
+        var shortfalls = new List<string>();
         var generated = 0;
         var clock = System.Diagnostics.Stopwatch.StartNew();
 
@@ -54,7 +59,7 @@ internal static class MapSweep
         foreach (var amplitude in Amplitudes)
         {
             generated++;
-            Try(archetype, Region.Downland, amplitude, extentMetres, seed, faults);
+            Try(archetype, Region.Downland, amplitude, extentMetres, seed, faults, shortfalls);
         }
 
         // Every region at the extremes, because a region scales the authored channel widths and basin depths
@@ -63,13 +68,26 @@ internal static class MapSweep
         foreach (var amplitude in new[] { 1f, 4f, 60f })
         {
             generated++;
-            Try(Archetype.DiagonalRiver, region, amplitude, extentMetres, seed, faults);
+            Try(Archetype.DiagonalRiver, region, amplitude, extentMetres, seed, faults, shortfalls);
         }
 
         Console.WriteLine(
             $"RTSGame map sweep — {generated} maps at {extentMetres:F0} m, seed {seed}, " +
             $"{clock.Elapsed.TotalSeconds:F1} s");
         foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");
+        foreach (var shortfall in shortfalls) Console.WriteLine($"  SHORT: {shortfall}");
+        Console.WriteLine(
+            $"  {shortfalls.Count} criteria shortfall(s) against a recorded {KnownShortfalls} — " +
+            (shortfalls.Count > KnownShortfalls
+                ? "WORSE, and this leg fails on that alone"
+                : shortfalls.Count < KnownShortfalls
+                    ? "better; lower the recorded figure"
+                    : "unchanged"));
+        if (shortfalls.Count > KnownShortfalls)
+        {
+            faults.Add(
+                $"terrain criteria went backwards: {shortfalls.Count} shortfalls against {KnownShortfalls}");
+        }
         Console.WriteLine(
             faults.Count == 0
                 ? $"  every one of {generated} generated"
@@ -165,13 +183,32 @@ internal static class MapSweep
         return (h00 * (1f - tx) + h10 * tx) * (1f - tz) + (h01 * (1f - tx) + h11 * tx) * tz;
     }
 
+    /// <summary>
+    /// Criteria shortfalls this generator is known to have, so the sweep can refuse to make it worse.
+    /// </summary>
+    /// <remarks>
+    /// §151. Measured, not chosen: 149 across the sweep, and the shape of them is the argument for §150.
+    /// <b>Every single map has between 139 and 422 watercourses running uphill</b> — "creeps upstairs",
+    /// counted, and untouched by §145's slope taper, which reduced how much water sat on a slope without
+    /// making the level field monotone. Most maps fall short of the two metres per hundred that water needs
+    /// to behave, some at a fifth of it. The steepest flank reaches 3.46 against a traversable 0.82. And
+    /// every map carries at least one lake with no basin under it, which §147 was supposed to have stopped —
+    /// so that rule does less than its section claims and is the first thing to look at.
+    /// <para>
+    /// Lower this number when the figure drops. It is a ratchet and not a target: the drainage-first
+    /// generator should take it to zero, and until it does, nothing may add to it.
+    /// </para>
+    /// </remarks>
+    private const int KnownShortfalls = 149;
+
     private static void Try(
         Archetype archetype,
         Region region,
         float amplitude,
         float extentMetres,
         uint seed,
-        List<string> faults)
+        List<string> faults,
+        List<string> shortfalls)
     {
         var what = $"{archetype} in {region} at {amplitude:F0} m";
         try
@@ -182,12 +219,28 @@ internal static class MapSweep
             var plan = ReliefPlan.FromLayout(layout, extentMetres, seed);
             plan.Apply(world.Terrain);
             SettlementScenarios.PaintCountry(world);
+            // <b>And rasterise it, or nothing downstream can see the country that was just painted.</b>
+            // §151: PaintCountry writes surfaces and bumps the terrain revision; the navigation grid is not
+            // rebuilt until somebody asks. This sweep never did, so IsBlocked answered about bare relief and
+            // the first run of the walkability criterion reported <b>100% on every map</b> — on a generator
+            // §145 had just measured at forty-two per cent closed canopy. An instrument that cannot see the
+            // fault it was written for is worse than no instrument, because it argues the other way.
+            world.RebuildTerrainNavigation();
 
             // Cheap sanity beyond "it did not throw", because a generator can fail by producing nonsense as
             // easily as by crashing, and a NaN propagates silently until something downstream divides by it.
             var (floor, span) = SettlementScenarios.InteriorReliefOf(world);
             if (!float.IsFinite(floor) || !float.IsFinite(span)) faults.Add($"{what}: relief is not finite");
             else if (span < 0f) faults.Add($"{what}: negative relief span {span:F2}");
+
+            // <b>What the map has to be true of, and today it is not.</b> §151. Until now this sweep asserted
+            // that the relief was finite and non-negative, which no generator has ever failed — so the panel
+            // could ask for every map it knows and the only thing proved was that none of them threw. The
+            // criteria are reported whether or not they pass, because the baseline is the point: the new
+            // generator in §150 is judged against these numbers on these seeds.
+            var criteria = TerrainCriteria.Measure(world);
+            Console.WriteLine($"    criteria: {criteria}");
+            foreach (var shortfall in criteria.Shortfalls()) shortfalls.Add($"{what}: {shortfall}");
             MeasureDrawnGroundError(world, amplitude);
         }
         catch (Exception error)

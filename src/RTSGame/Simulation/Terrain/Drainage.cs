@@ -147,6 +147,13 @@ internal sealed class Drainage
     /// <summary>Samples per side of the lattice this was solved on.</summary>
     public int Side => side;
 
+    /// <summary>Metres a side of one drainage cell, for a reader that has to walk the lattice itself.</summary>
+    /// <remarks>
+    /// §151's criteria walk the receiver chain to check that a watercourse never runs uphill, which needs the
+    /// lattice's own spacing rather than the navigation grid's.
+    /// </remarks>
+    public float CellMetres => cellMetres;
+
     /// <summary>World position of the lattice's first sample, so world queries need no second lookup.</summary>
     public Vector2 Origin { get; internal set; }
 
