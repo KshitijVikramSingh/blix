@@ -381,6 +381,24 @@ internal sealed class ThreatSystem
         // decision. Previously each villager rebuilt the list of guarded stores by walking every node in
         // the world — including tens of thousands of trees — even when every living body was an ally. One
         // faction comparison per body pair proves there can be no alarm at all and avoids those scans.
+        //
+        // <b>And the proof was "is there anybody to fight", which stopped being cheap the day there was.</b>
+        // §133: founding a neighbour a hundred and ninety-eight metres away made an enemy relation exist
+        // somewhere on the map, so every villager rebuilt its guarded list every tick for a war nobody was
+        // fighting — 1.44 ms of a 1.55 ms tick, measured from the chair. The optimisation was right and its
+        // premise was that there was nobody else in the world.
+        //
+        // <b>The range is stated by the tests below rather than chosen.</b> A body reacts to a resource
+        // within its own <see cref="AgentState.SightMetres"/>, and to a hostile within
+        // <see cref="ThreatMetres"/> of that resource — those are the two filters in Question, and together
+        // they mean no hostile further than the sum of them can change any decision this pass makes. A
+        // hostile carrying loot is itself the resource, so it is covered by the same bound at a gap of zero.
+        // Conservative in the safe direction: the sum is an upper bound, so the full pass still runs in some
+        // cases where nothing would have changed, and never fails to run in one where something would.
+        //
+        // Still one pair of comparisons per hostile per body, which is what it was — the expensive thing was
+        // never this proof but the scans it gates. If body counts grow enough for an O(n squared) proof to
+        // matter, the spatial index answers the same question in O(neighbours) and is not currently passed in.
         var enemyPresent = false;
         foreach (var hostileIndex in hostiles)
         {
@@ -389,6 +407,12 @@ internal sealed class ThreatSystem
             {
                 if (i == hostileIndex || !bodies[i].IsAlive) continue;
                 if ((factions.Between(hostile.Faction, bodies[i].Faction) & RelationMask.Enemy) == 0)
+                {
+                    continue;
+                }
+
+                var matters = bodies[i].SightMetres + ThreatMetres;
+                if (Vector2.DistanceSquared(hostile.Position, bodies[i].Position) > matters * matters)
                 {
                     continue;
                 }

@@ -11568,3 +11568,54 @@ Frame from the chair, Release, as played: median 18.9 ms, p90 24.6, max 89.1, wi
 of 1.44 ms and a maximum of 3.84 — the cost §133 attributed, now confirmed by somebody watching it rather than
 inferred from a fixture. Two hundred and sixty routing windows, every request answered.
 
+
+## 134. Peace, proved at the range it can be disproved
+
+§133 measured the cost of having a neighbour and left the fix as a question rather than a scope call: making
+peace local needs a radius, and the obvious candidate was wrong. Twelve metres is how close a hostile has to
+be to a granary; the cheap branch also decays resolve and clears quarries, and §30's muster picks defenders by
+arrival seconds, so proving peace at twelve metres would silence alarms at every distance.
+
+**The right range is stated by the code and not chosen.** `Question` applies exactly two filters: a body only
+considers a resource within its own `SightMetres`, and only counts a hostile within `ThreatMetres` of that
+resource. Together they mean **no hostile further than `SightMetres + ThreatMetres` can change any decision
+the pass makes** — thirty-four metres for a villager. A hostile carrying loot is itself the resource, so the
+same bound covers it at a gap of zero. And it is an upper bound, which errs the safe way: the full pass still
+runs in some cases where nothing would have changed, and never fails to run in one where something would.
+
+So the peace proof keeps its shape and gains a distance test.
+
+```
+                     threat    total tick
+one settlement        0.008      0.038 ms
+neighbour, before     3.120      3.211 ms
+neighbour, after      0.008      0.143 ms
+```
+
+Back to what it costs alone. §128 measured the played standoff at exactly two refreshes a frame, so three
+milliseconds of headroom is the difference between thirty and sixty — and it was going on a war nobody was
+fighting.
+
+### Verified against a baseline, because this is the defence layer
+
+Gate 7/7 green with years, and that is not enough on its own: §40 established that a single run of a chaotic
+simulation cannot distinguish a mechanism from a coin flip, and the raid leg's kill counts move run to run
+inside exactly that spread. So the leg was run at three seeds against a build of the parent commit.
+
+```
+seed  17   before  13 home of 24   after  13 home of 24
+seed  73   before  14 home of 24   after  14 home of 24
+seed 211   before  14 home of 24   after  14 home of 24
+```
+
+**Identical on every seed** — the change is a cost removal and not a behaviour change, which is also the
+strongest evidence the derived bound is right: a bound one metre too tight would let raiders through and the
+numbers would say so.
+
+**And it found something pre-existing.** Seed 211 faults on both builds: *a raider lived 200 s against a round
+trip of 194 s.* Six seconds over, three per cent, on a seed the gate's default does not draw — so it has been
+there and unreported. Not touched here, because a marginal outlier in a fixture is a different investigation
+from the one this section is, and it is written down so the next person to see it knows it is not theirs.
+
+The next thing is what §133's order set: the bot can maintain a settlement but never grow one, so an opponent
+is a fixed tableau rather than a rival. Building and training are what make it one.
