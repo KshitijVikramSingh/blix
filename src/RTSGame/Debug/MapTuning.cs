@@ -36,6 +36,62 @@ namespace RTSGame.Debug;
 /// </remarks>
 internal sealed class MapTuning
 {
+    /// <summary>
+    /// What to draw on the ground about how this map was made.
+    /// </summary>
+    /// <remarks>
+    /// <b>§153. Because the fault that will not go away has no picture.</b> §151 counted watercourses running
+    /// uphill on every map and §152 failed four times to attribute them — three of the four guesses were
+    /// wrong, and the one instrument that would have settled it was the one nobody had built: <em>which
+    /// cells, on which reach, by how much</em>. Every finding in this file that stuck came from an
+    /// attribution and every one that did not came from reasoning about the code.
+    /// <para>
+    /// Immediate rather than configure-and-fire, unlike the generation dials above it: these cost a frame's
+    /// worth of lines and nothing else, so the right model is the one where you turn it and look.
+    /// </para>
+    /// </remarks>
+    [Tune(Label = "overlay", Group = "map")]
+    public MapOverlay Overlay = MapOverlay.None;
+
+    /// <summary>What the ground can be asked to show about itself.</summary>
+    internal enum MapOverlay
+    {
+        /// <summary>The map as it is meant to be looked at.</summary>
+        None,
+
+        /// <summary>
+        /// The drainage network, one line per channel cell toward the cell it drains into.
+        /// </summary>
+        /// <remarks>
+        /// Coloured by what is wrong rather than by what is there: a reach whose water rises downstream is
+        /// red, and the rest fade from pale to deep with discharge. So the answer to "where are the 300
+        /// uphill reaches" is a picture and not a number.
+        /// </remarks>
+        Drainage,
+
+        /// <summary>
+        /// Standing water, ringed, and told apart by whether it has a basin under it.
+        /// </summary>
+        /// <remarks>
+        /// §147 added a rule that a lake must be deep for how broad it is, §151 measured 34 maps still
+        /// failing it, and §152 measured the drainage-first path making it <em>worse</em> — 1–5 becoming
+        /// 2–11 — with no explanation offered. This is where that gets looked at.
+        /// </remarks>
+        Standing,
+
+        /// <summary>
+        /// Ground too steep to cross, on surfaces that are meant to be crossed.
+        /// </summary>
+        /// <remarks>
+        /// The same test the criteria use — inside the rim, skipping deliberately impassable surfaces — so
+        /// what is marked here is exactly what is counted there. Sixteen maps of it.
+        /// </remarks>
+        Grade,
+
+        /// <summary>Everything a body cannot walk on, whatever the reason.</summary>
+        Blocked,
+    }
+
     /// <summary>Which topology the next map has. Rendered as its own names.</summary>
     [Tune(Label = "archetype", Group = "map")]
     public Archetype Archetype;

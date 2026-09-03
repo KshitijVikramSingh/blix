@@ -12794,3 +12794,42 @@ in this file that stuck came from one of those, and every one that did not came 
   finding more depressions in valley-and-interfluve ground than in eroded ground, which is plausible and
   unverified.
 - Five instrument corrections across §151 and §152 against four generator changes. The ratio is the lesson.
+
+## 153. Overlays, because the fault that would not attribute itself had no picture
+
+§152 spent four hypotheses on 134 shortfalls and got three of them wrong, and the reason is plain in
+hindsight: **nobody had ever seen one of the faults.** The count said "watercourses running uphill, on every
+map"; it could not say which, or where, or next to what. Every finding in this file that stuck came from an
+attribution — §114's click, §116's routes, §132's bot — and every one that did not came from reasoning about
+code.
+
+Four overlays on `MapTuning.Overlay`, and `--overlay drainage|standing|grade|blocked` so a look can be the
+reason you start the game rather than something you go hunting for once it is up. Each uses **the same test
+the matching criterion in `TerrainCriteria` uses**, so the picture and the count cannot disagree — including
+the exclusions, so a channel entering standing water is left out of both.
+
+- **Drainage** — one line per channel cell toward the cell it drains into, fading from pale to deep with
+  discharge, and **red where the water rises downstream**.
+- **Standing** — the margin of every pool, ringed blue where there is a basin under it and orange where there
+  is not. §147 claimed to have stopped those, §151 found 34 maps of them, §152 made it worse and shrugged.
+- **Grade** — ground over the traversable limit on surfaces meant to be crossed, inside the rim.
+- **Blocked** — everything a body cannot walk on, whatever the reason.
+
+First run of the drainage overlay on the played village, in one line:
+
+```
+drainage: 706 reach(es) drawn, 40 of them running uphill
+standing water: 2 pool(s), 1 without a basin under them
+grade: 0 sample(s) over the traversable limit on ground meant to be crossed
+blocked: 2,009 sample(s) a body cannot walk on
+```
+
+**Forty of seven hundred and six**, and now they have positions. That is the number §152 could not attribute
+in four attempts, and it took a frame's worth of lines to localise.
+
+Drawn only within 260 m of the camera and capped at six thousand lines a frame — an overlay of a whole map is
+a fog of lines, and a debug draw that costs a frame is a debug draw nobody leaves on. Reported to the console
+on change rather than every frame, for the same reason.
+
+`--drainage-first` also reaches the played game now, not just the sweep, so §152's two generators are
+comparable in the chair as well as in a table.

@@ -601,6 +601,20 @@ public static class Program
         // worth watching — it is the state the whole economy turns on — and it is slow enough to see.
         // --sun still wins, and nothing headless is affected.
         sunMotion ??= args.Contains("--village") ? LookSettings.SunMotion.YearOnly : null;
+
+        // <b>The overlay from the command line, so a look can be the reason you started the game.</b> §153:
+        // it is a panel dial, and reaching a panel dial means launching, finding it, and only then seeing
+        // what you came for — on a map that regenerates from a seed you now have to re-enter.
+        var overlay = Value(args, "--overlay") switch
+        {
+            "drainage" or "flow" => MapTuning.MapOverlay.Drainage,
+            "standing" or "lakes" => MapTuning.MapOverlay.Standing,
+            "grade" or "steep" => MapTuning.MapOverlay.Grade,
+            "blocked" or "walk" => MapTuning.MapOverlay.Blocked,
+            null => (MapTuning.MapOverlay?)null,
+            var other => throw new ArgumentException(
+                $"--overlay wants drainage, standing, grade or blocked, not '{other}'"),
+        };
         var relief = Value(args, "--relief-amplitude") is { } metres ? float.Parse(metres) : 0f;
         // <b>A starting zoom, so a frame can be measured at the standoff somebody is complaining about.</b>
         // Everything the detail radius scales — how much ground is meshed, how many trees are drawn, how far
@@ -644,7 +658,9 @@ public static class Program
             // --handsoff implies --opponent: two settlements is the thing worth watching play itself.
             args.Contains("--opponent") || args.Contains("--handsoff"),
             args.Contains("--handsoff"),
-            sunMotion);
+            sunMotion,
+            overlay,
+            args.Contains("--drainage-first"));
         using var window = new Window(
             game, new WindowOptions("RTSGame — Greybox Kingdom", windowWidth, windowHeight));
         window.Run();

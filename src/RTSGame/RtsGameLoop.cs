@@ -1408,7 +1408,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // every one after it. The compiler caught it because the neighbours happen to be an int and a float.
         bool startOpponent = false,
         bool handsOffEverybody = false,
-        LookSettings.SunMotion? sunMotion = null)
+        LookSettings.SunMotion? sunMotion = null,
+        MapTuning.MapOverlay? overlay = null,
+        bool drainageFirst = false)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
@@ -1419,6 +1421,10 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // with a camera on it, which --twovillages already answers better.
         this.handsOffEverybody = handsOffEverybody;
         if (sunMotion is { } motion) look.Motion = motion;
+        if (overlay is { } asked) mapTuning.Overlay = asked;
+        // §152's switch, reachable from the played game as well as the sweep: the two generators have to be
+        // comparable in the chair for the same reason they have to be comparable in a table.
+        this.drainageFirst = drainageFirst;
         this.shadowProxies = shadowProxies;
         this.performanceBlockingUpload = performanceBlockingUpload;
         this.cheapTrees = cheapTrees;
@@ -1782,6 +1788,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // No longer lab-only. The whole point of the lab was to judge maps the game would then play, and a lab
         // that generates through one path while the game generates through another judges nothing.
         simulation.Terrain.SetRegion(labRegion);
+        plan.DrainageFirst = drainageFirst;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         plan.Apply(simulation.Terrain);
         var shaped = clock.Elapsed.TotalMilliseconds;
@@ -5333,6 +5340,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         selectionPlateInstances.Clear();
         BuildObstacleInstances();
         DrawWindow();
+        DrawMapOverlay();
         var nodeClock = Stopwatch.StartNew();
         BuildNodeInstances();
         nodeMilliseconds = nodeClock.Elapsed.TotalMilliseconds;
@@ -6230,6 +6238,9 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private readonly bool mapLab;
 
     private readonly MapTuning mapTuning = new();
+
+    /// <summary>Whether this session builds its ground around an authored drainage network. §152.</summary>
+    private readonly bool drainageFirst;
 
     /// <summary>How much relief the village generates when nobody has said. See the constructor.</summary>
     /// <remarks>
@@ -7716,6 +7727,232 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
             }
         }
     }
+
+    /// <summary>
+    /// Draws what the map is doing, for the fault that would not attribute itself.
+    /// </summary>
+    /// <remarks>
+    /// §153. Every overlay here answers a question a criterion in <see cref="Debug.TerrainCriteria"/> asks
+    /// with a number, and uses the same test the criterion does — so what is drawn is exactly what is
+    /// counted. That is the whole point: §152 spent four hypotheses on 134 shortfalls without ever seeing
+    /// one of them.
+    /// </remarks>
+    private void DrawMapOverlay()
+    {
+        if (mapTuning.Overlay == MapTuning.MapOverlay.None) return;
+        if (simulation.Terrain.Drainage is not { } water) return;
+
+        switch (mapTuning.Overlay)
+        {
+            case MapTuning.MapOverlay.Drainage:
+                DrawDrainage(water);
+                break;
+            case MapTuning.MapOverlay.Standing:
+                DrawStanding(water);
+                break;
+            case MapTuning.MapOverlay.Grade:
+            case MapTuning.MapOverlay.Blocked:
+                DrawGround(mapTuning.Overlay == MapTuning.MapOverlay.Grade);
+                break;
+        }
+    }
+
+    /// <summary>One line per channel cell, toward whatever it drains into.</summary>
+    private void DrawDrainage(Simulation.Terrain.Drainage water)
+    {
+        var side = water.Side;
+        var step = water.CellMetres;
+        var receiver = water.Receiver;
+        var lake = water.LakeDepth;
+        var uphill = 0;
+        var drawn = 0;
+        for (var index = 0; index < receiver.Length && drawn < OverlayLineBudget; index++)
+        {
+            var at = water.Origin + new Vector2(index % side, index / side) * step;
+            if (!Within(at)) continue;
+            if (water.WidthAt(at) <= Simulation.Terrain.Drainage.TraceWidthMetres) continue;
+            var here = water.LevelAt(at);
+            if (here - water.BedAt(at) <= 0.02f) continue;
+            var to = receiver[index];
+            if (to < 0 || to == index) continue;
+            var next = water.Origin + new Vector2(to % side, to / side) * step;
+
+            // The one thing this overlay exists for. A channel entering standing water is below its surface
+            // by definition — see the note in TerrainCriteria — so those are left out of the count here for
+            // the same reason they are left out there.
+            var wrong = lake[to] <= 0.05f && here < water.LevelAt(next) - 0.01f;
+            if (wrong) uphill++;
+            var weight = Math.Clamp(water.WidthAt(at) / 24f, 0.15f, 1f);
+            AddGroundLine(
+                at,
+                next,
+                wrong
+                    ? new Vector4(1f, 0.16f, 0.12f, 1f)
+                    : new Vector4(0.30f, 0.55f + 0.40f * weight, 0.95f, 0.55f + 0.45f * weight),
+                wrong ? 1.4f : 0.5f + weight);
+            drawn++;
+        }
+
+        Report($"drainage: {drawn:N0} reach(es) drawn, {uphill:N0} of them running uphill");
+    }
+
+    /// <summary>Standing water, ringed, and coloured by whether there is a basin under it.</summary>
+    private void DrawStanding(Simulation.Terrain.Drainage water)
+    {
+        var side = water.Side;
+        var step = water.CellMetres;
+        var lake = water.LakeDepth;
+        var pools = 0;
+        var basinless = 0;
+        var drawn = 0;
+        var seen = new bool[lake.Length];
+        var stack = new Stack<int>();
+        for (var start = 0; start < lake.Length; start++)
+        {
+            if (seen[start] || lake[start] <= 0.05f) continue;
+            stack.Push(start);
+            seen[start] = true;
+            var members = new List<int>();
+            var deepest = 0f;
+            var lowX = int.MaxValue;
+            var highX = int.MinValue;
+            var lowZ = int.MaxValue;
+            var highZ = int.MinValue;
+            while (stack.Count > 0)
+            {
+                var index = stack.Pop();
+                members.Add(index);
+                deepest = MathF.Max(deepest, lake[index]);
+                var cx = index % side;
+                var cz = index / side;
+                lowX = Math.Min(lowX, cx);
+                highX = Math.Max(highX, cx);
+                lowZ = Math.Min(lowZ, cz);
+                highZ = Math.Max(highZ, cz);
+                Spread(cx - 1, cz);
+                Spread(cx + 1, cz);
+                Spread(cx, cz - 1);
+                Spread(cx, cz + 1);
+            }
+
+            pools++;
+            var span = MathF.Max(highX - lowX, highZ - lowZ) * step;
+            var hasBasin = deepest >= span * 0.0125f;
+            if (!hasBasin) basinless++;
+
+            // The margin only: a filled interior tells you nothing a colour cannot, and the shape of the
+            // edge is the thing that says "apron" or "basin" at a glance.
+            var colour = hasBasin
+                ? new Vector4(0.25f, 0.75f, 1f, 0.85f)
+                : new Vector4(1f, 0.55f, 0.10f, 0.95f);
+            foreach (var index in members)
+            {
+                if (drawn >= OverlayLineBudget) break;
+                var cx = index % side;
+                var cz = index / side;
+                if (!Edge(cx, cz)) continue;
+                var at = water.Origin + new Vector2(cx, cz) * step;
+                if (!Within(at)) continue;
+                AddGroundLine(at - new Vector2(step * 0.4f, 0f), at + new Vector2(step * 0.4f, 0f), colour, 0.9f);
+                drawn++;
+            }
+        }
+
+        Report($"standing water: {pools:N0} pool(s), {basinless:N0} without a basin under them");
+        return;
+
+        void Spread(int x, int z)
+        {
+            if (x < 0 || z < 0 || x >= side || z >= side) return;
+            var index = z * side + x;
+            if (seen[index] || lake[index] <= 0.05f) return;
+            seen[index] = true;
+            stack.Push(index);
+        }
+
+        bool Edge(int x, int z)
+        {
+            for (var k = 0; k < 4; k++)
+            {
+                var nx = x + (k == 0 ? -1 : k == 1 ? 1 : 0);
+                var nz = z + (k == 2 ? -1 : k == 3 ? 1 : 0);
+                if (nx < 0 || nz < 0 || nx >= side || nz >= side) return true;
+                if (lake[nz * side + nx] <= 0.05f) return true;
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>Ground the criteria would fault: too steep where it should be crossable, or blocked.</summary>
+    private void DrawGround(bool steepOnly)
+    {
+        var grid = simulation.Navigation.Transform;
+        var rim = (int)MathF.Ceiling(Simulation.Terrain.ReliefPlan.RimWidthMetres / grid.CellSize);
+        var marked = 0;
+        var stride = Math.Max(1, grid.Width / 190);
+        for (var z = rim; z < grid.Height - rim && marked < OverlayLineBudget; z += stride)
+        for (var x = rim; x < grid.Width - rim && marked < OverlayLineBudget; x += stride)
+        {
+            var cell = new Simulation.Spatial.GridCell(x, z);
+            var at = grid.CellCenter(cell);
+            if (!Within(at)) continue;
+            bool bad;
+            if (steepOnly)
+            {
+                // The criterion's own test, so the picture and the count cannot disagree.
+                if (!Simulation.Terrain.TerrainSurfaceRules.IsPassable(simulation.Terrain.Surface(cell)))
+                {
+                    continue;
+                }
+
+                bad = simulation.Terrain.SampleGrade(at) > Simulation.Terrain.TerrainMap.MaximumTraversableGrade;
+            }
+            else
+            {
+                bad = simulation.Navigation.IsBlocked(cell);
+            }
+
+            if (!bad) continue;
+            var reach = grid.CellSize * stride * 0.45f;
+            AddGroundLine(
+                at - new Vector2(reach, 0f),
+                at + new Vector2(reach, 0f),
+                steepOnly ? new Vector4(1f, 0.20f, 0.55f, 0.9f) : new Vector4(0.85f, 0.35f, 0.95f, 0.55f),
+                0.8f);
+            marked++;
+        }
+
+        Report(
+            steepOnly
+                ? $"grade: {marked:N0} sample(s) over the traversable limit on ground meant to be crossed"
+                : $"blocked: {marked:N0} sample(s) a body cannot walk on");
+    }
+
+    /// <summary>
+    /// Only what the camera can see, because an overlay of the whole map is a fog of lines.
+    /// </summary>
+    /// <remarks>
+    /// Generous — twice the drawn-ground reach — so panning does not make marks appear at the edge of
+    /// attention, which is the thing that makes an overlay feel like it is lying.
+    /// </remarks>
+    private bool Within(Vector2 at) =>
+        Vector2.DistanceSquared(at, cameraFocus) <= OverlayReachMetres * OverlayReachMetres;
+
+    private const float OverlayReachMetres = 260f;
+
+    /// <summary>Lines one overlay may spend. A budget, because these are debug draws and not a renderer.</summary>
+    private const int OverlayLineBudget = 6000;
+
+    /// <summary>Said once per change rather than every frame, which is what makes it readable.</summary>
+    private void Report(string line)
+    {
+        if (line == lastOverlayReport) return;
+        lastOverlayReport = line;
+        Console.WriteLine($"  {line}");
+    }
+
+    private string? lastOverlayReport;
 
     private void AddGroundLine(Vector2 start, Vector2 end, Vector4 color, float height)
     {
