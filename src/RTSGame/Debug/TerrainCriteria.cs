@@ -215,6 +215,9 @@ internal readonly record struct TerrainCriteria(
     /// </remarks>
     internal static string LastUphillBands { get; private set; } = "not measured";
 
+    /// <summary>The worst few uphill reaches with the numbers behind them. See the note where it is built.</summary>
+    internal static string LastWorstUphill { get; private set; } = "not measured";
+
     private static (float Fall, int Basinless, int Uphill, int Stranded, int Fords) Hydrology(
         SimulationWorld world)
     {
@@ -230,6 +233,11 @@ internal readonly record struct TerrainCriteria(
         var uphill = 0;
         var narrow = 0;
         var deepening = 0;
+        var worst = new List<(float Climb, Vector2 At, float BedHere, float BedNext, float FillHere,
+            float FillNext, float WidthHere, float WidthNext, float LakeHere)>();
+        var trivial = 0;
+        var slight = 0;
+        var real = 0;
         var middling = 0;
         var broad = 0;
         var stranded = 0;
@@ -297,6 +305,31 @@ internal readonly record struct TerrainCriteria(
             // bed grows too. Where the bed's fall over one cell is smaller than that growth, the <em>surface</em>
             // climbs while the bed descends — which is not a terrain fault at all but the water model adding
             // depth upward instead of incising downward.
+            var climb = water.LevelAt(next) - water.LevelAt(at);
+            // <b>The worst few, with every number that decides them.</b> §156: five hypotheses about this
+            // fault have now been wrong — the taper, the grade limiter, lake inflow, the level's stacking,
+            // and ponding in sub-threshold hollows — and every one was reasoning about the code. This prints
+            // the offenders instead: what the bed does, what the fill does, what the width does, and which of
+            // those the climb actually follows.
+            if (worst.Count < 6 || climb > worst[^1].Climb)
+            {
+                worst.Add((
+                    Climb: climb,
+                    At: at,
+                    BedHere: bed,
+                    BedNext: water.BedAt(next),
+                    FillHere: filled[index],
+                    FillNext: filled[to],
+                    WidthHere: wide,
+                    WidthNext: water.WidthAt(next),
+                    LakeHere: lake[index]));
+                worst.Sort((a, b) => b.Climb.CompareTo(a.Climb));
+                if (worst.Count > 6) worst.RemoveAt(worst.Count - 1);
+            }
+
+            if (climb < 0.02f) trivial++;
+            else if (climb < 0.20f) slight++;
+            else real++;
             var bedFall = bed - water.BedAt(next);
             var depthGrowth =
                 (water.LevelAt(next) - water.BedAt(next)) - (water.LevelAt(at) - bed);
@@ -353,7 +386,15 @@ internal readonly record struct TerrainCriteria(
 
         LastUphillBands =
             $"uphill by channel width: {narrow} under 4 m, {middling} from 4 to 12 m, {broad} over 12 m; " +
-            $"{deepening} of them have a falling bed and a deepening channel";
+            $"{deepening} of them have a falling bed and a deepening channel; " +
+            $"by how far the water climbs: {trivial} under 2 cm, {slight} 2-20 cm, {real} over 20 cm";
+        LastWorstUphill = string.Join(
+            "\n      ",
+            worst.ConvertAll(w =>
+                $"climb {w.Climb:F2} m at ({w.At.X:F0},{w.At.Y:F0}): " +
+                $"bed {w.BedHere:F2}->{w.BedNext:F2} (falls {w.BedHere - w.BedNext:F2}), " +
+                $"fill {w.FillHere:F2}->{w.FillNext:F2}, " +
+                $"width {w.WidthHere:F1}->{w.WidthNext:F1} m, lake here {w.LakeHere:F2}"));
         var fall = highest - lowest;
         var across = side * step;
         return (across <= 0f ? 0f : fall / across * 100f, basinless, uphill, stranded, fords);

@@ -1046,6 +1046,31 @@ internal sealed class ReliefPlan
         var ceiling = MathF.Min(SteepestGrade, TerrainMap.MaximumTraversableGrade * 0.92f);
         var inset = (int)MathF.Ceiling(RimWidthMetres / DrainageCellMetres);
         GradeLimit.Apply(lattice, side, DrainageCellMetres, ceiling, inset);
+        // <b>Solve, cut the channels in, solve again.</b> §156. The first solve is asked one question only —
+        // how wide is the water here — because width comes from upslope area and that is a property of the
+        // uncarved surface. Then the channels are incised into the lattice, and the second solve runs on
+        // ground that has a bed in it.
+        //
+        // <b>Why this was the fault under almost everything.</b> The level rule is
+        // <c>max(standing ? filled : ground, ground + channel)</c> — the surface is the bed <em>plus</em> a
+        // depth that grows with width. §155 measured the consequence: 87% of the seven thousand uphill
+        // reaches had a falling bed and a deepening channel, because downstream the depth grows faster than
+        // the bed falls on gentle ground. Water stacked on top of the ground climbs whenever it widens, and
+        // it also sits above the land beside it — which is "streams creep upstairs" from the first water
+        // report, the same defect seen from the chair.
+        //
+        // Cut in, the same term works the other way: downstream is deeper, so the surface sits <em>lower</em>
+        // against its banks the further it goes. The growth that used to fight the gradient now helps it.
+        var first = Drainage.Solve(lattice, side, DrainageCellMetres, inflow);
+        // <b>Sized on upslope area, not on the authored corridor, and that was measured rather than
+        // assumed.</b> §156: the criterion reads WidthAt, which takes the maximum of area-derived width and
+        // whatever the layout drew, so carving the authored corridors looked like the obvious correction —
+        // and it made things worse, 6,278 uphill reaches becoming 7,623 and the sweep's shortfall count
+        // going 148 to 156, which is the ratchet doing its job. An authored river is a corridor the layout
+        // wants water in; it is not evidence that this cell drains anything, and cutting a trough along it
+        // gives the solver a new low path that its own accumulation never justified.
+        Incise(lattice, side, transform.Origin, first);
+
         var drainage = Drainage.Solve(lattice, side, DrainageCellMetres, inflow);
         drainage.Origin = transform.Origin;
         drainage.SetSeaLevel(seaLevel);
@@ -1189,6 +1214,82 @@ internal sealed class ReliefPlan
         terrain.ReplaceHeights(heights);
         terrain.SetDrainage(drainage);
         terrain.SetLayout(Layout);
+    }
+
+    /// <summary>
+    /// Cuts the channels the first solve found into the ground, so water lies in the land and not on it.
+    /// </summary>
+    /// <remarks>
+    /// <b>§156, and it is the fault under most of the water arc.</b> A river's bed is incised: it cuts down
+    /// into its valley floor and its surface sits at or below the ground beside it. Every previous version of
+    /// this model put the surface <em>above</em> the ground by the channel's depth, which produced two of the
+    /// three complaints from the chair — a sheet draped over a hillside, and a surface that climbs as the
+    /// river widens.
+    /// <para>
+    /// Carved as a cross-section rather than a slot: each channel cell lowers the ground within half its own
+    /// width, deepest at the middle and easing to nothing at the bank, so a twenty-metre river gets a
+    /// twenty-metre trough with sides rather than a four-metre gash. Taken as a maximum over the channels
+    /// that reach a cell, because at a confluence the ground belongs to the deeper one.
+    /// </para>
+    /// <para>
+    /// Standing water is left alone. A lake is already a basin — the depression it fills is the hole — and
+    /// deepening it would be inventing relief the fill has already accounted for.
+    /// </para>
+    /// </remarks>
+    private static void Incise(float[] lattice, int side, Vector2 origin, Drainage found)
+    {
+        var carve = new float[lattice.Length];
+        var own = new float[lattice.Length];
+        var lake = found.LakeDepth;
+
+        // <b>A channel cell is cut to its own depth, and only the banks take the spread.</b> §156: the first
+        // version took a maximum over every cross-section reaching a cell, which is right for a bank and
+        // ruinous along the channel — two neighbouring reaches inherit each other's depth, so the deeper one
+        // lifts the shallower and the fall between them is erased. Measured: a reach whose width doubled from
+        // 4.4 m to 8.9 m had its bed fall one centimetre while its channel deepened twenty-seven, and the
+        // carve that should have dropped the wider cell thirty-one centimetres had been flattened by its own
+        // smoothing.
+        for (var index = 0; index < lattice.Length; index++)
+        {
+            if (lake[index] > 0.02f) continue;
+            var here = Drainage.WidthOf(found.Area[index]);
+            if (here <= DrainageCellMetres) continue;
+            own[index] = 0.30f * MathF.Sqrt(here) * 1.15f;
+            carve[index] = own[index];
+        }
+
+        for (var index = 0; index < lattice.Length; index++)
+        {
+            if (lake[index] > 0.02f) continue;
+            var width = Drainage.WidthOf(found.Area[index]);
+            if (width <= DrainageCellMetres) continue;
+
+            // Deeper than the water will fill, so the river has banks rather than brimming over them: the
+            // level rule puts the surface at bed plus channel, and this cuts fifteen per cent past that.
+            var depth = 0.30f * MathF.Sqrt(width) * 1.15f;
+            var half = MathF.Max(DrainageCellMetres, width * 0.5f);
+            var reach = (int)MathF.Ceiling(half / DrainageCellMetres);
+            var cx = index % side;
+            var cz = index / side;
+            for (var dz = -reach; dz <= reach; dz++)
+            for (var dx = -reach; dx <= reach; dx++)
+            {
+                var nx = cx + dx;
+                var nz = cz + dz;
+                if (nx < 0 || nz < 0 || nx >= side || nz >= side) continue;
+                var away = MathF.Sqrt(dx * dx + dz * dz) * DrainageCellMetres / half;
+                if (away > 1f) continue;
+                var at = nz * side + nx;
+                // The channel's own cells keep their own depth, whatever a bigger neighbour would have given
+                // them. This is the line that preserves the fall.
+                if (own[at] > 0f) continue;
+                // A rounded bank: full depth at the water, nothing at the top, and no corner in between.
+                var profile = MathF.Cos(away * MathF.PI * 0.5f);
+                carve[at] = MathF.Max(carve[at], depth * profile);
+            }
+        }
+
+        for (var index = 0; index < lattice.Length; index++) lattice[index] -= carve[index];
     }
 
     /// <summary>

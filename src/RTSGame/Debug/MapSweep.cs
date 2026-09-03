@@ -243,6 +243,10 @@ internal static class MapSweep
             var criteria = TerrainCriteria.Measure(world);
             Console.WriteLine($"    criteria: {criteria}");
             Console.WriteLine($"    {TerrainCriteria.LastUphillBands}");
+            if (criteria.UphillReaches > 0)
+            {
+                Console.WriteLine($"      {TerrainCriteria.LastWorstUphill}");
+            }
             foreach (var shortfall in criteria.Shortfalls()) shortfalls.Add($"{what}: {shortfall}");
             MeasureDrawnGroundError(world, amplitude);
         }
