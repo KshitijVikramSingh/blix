@@ -1538,7 +1538,15 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         // and why the woodland never showed its shaped form.
         //
         // The flag still wins when given, and so does the panel. This is only what happens when nobody said.
-        if (startVillage && reliefAmplitudeMetres <= 0f) this.reliefAmplitudeMetres = DefaultVillageRelief;
+        // <b>The lab gets the village's relief default too, because a flat canvas is not a map.</b> §160:
+        // this line covered --village only, so --maplab with no --relief-amplitude opened at zero amplitude —
+        // which takes Apply's early return, produces no landforms and no drainage at all, and presents a
+        // perfectly flat plane to somebody who came to compose terrain. Reported from the chair as "all maps
+        // are entirely flat", and it was true of every map the lab could make.
+        if ((startVillage || startMapLab) && reliefAmplitudeMetres <= 0f)
+        {
+            this.reliefAmplitudeMetres = DefaultVillageRelief;
+        }
         mapTuning.Archetype = labArchetype;
         mapTuning.Region = labRegion;
         mapTuning.ReliefMetres = this.reliefAmplitudeMetres;

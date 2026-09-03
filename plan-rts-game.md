@@ -13092,3 +13092,22 @@ which looked like exculpating the generator. It was not: **`--twovillages` never
 runs used the new default. The isolation only worked once the property default itself was flipped. A flag
 that does not reach the scenario under test is a control that is not controlling anything, and it very nearly
 sent me looking in the wrong layer.
+
+## 160. The map lab opened flat
+
+Reported from the chair as "all maps are entirely flat", and it was true of every map the lab could make.
+
+`--village` has had a relief default since it was written: no `--relief-amplitude`, and it takes 32 m. The
+lab was never included in that line, so `--maplab` opened at **amplitude zero** — which takes `Apply`'s early
+return, produces no landforms and no drainage at all, and presents a perfectly flat plane to somebody who came
+to compose terrain.
+
+Both scenarios take the default now, and the flag is an override rather than a requirement.
+
+Two things worth keeping from how this one went:
+
+- **It survived because nobody had used the tool for its purpose.** The lab has existed for many sections and
+  is exercised by `--shapes` and the sweep, both of which pass an amplitude explicitly. The one path nobody
+  took was opening it the way a person would.
+- **It was mine, from this session.** I booted the lab with `--maplab --timings` and reported it as ready to
+  compose maps in, having never checked that it had made one.
