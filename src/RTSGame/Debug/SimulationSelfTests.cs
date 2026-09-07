@@ -162,6 +162,7 @@ internal static class SimulationSelfTests
         Check("the bot budgets what a wall really costs", TheBotKnowsWhatAWallCosts());
         Check("a guard comes home after a fight", AGuardComesHome());
         Check("seeing a neighbour moves the garrison", ContactMovesTheGarrison());
+        Check("an attack ends with its target", AnAttackEndsWithItsTarget());
         Check("a household that goes hungry loses somebody", PrivationSpendsItselfAsEmigration());
         Check("a wood hides what walks through it", TreesBlockSight());
         Check(
@@ -5811,6 +5812,57 @@ internal static class SimulationSelfTests
 
             return standing;
         }
+    }
+
+    /// <summary>
+    /// An attack ends when what it was aimed at is gone, and not before or after.
+    /// </summary>
+    /// <remarks>
+    /// §166. The end condition <em>is</em> the verb — "attack this" with no duration, no leash and no retreat
+    /// rule — so it is the thing worth asserting. Both targets, because one verb covers both: a building
+    /// comes down and the attacker is released, and a body dies and the attacker is released. And the
+    /// building half could not have been written before today, because nothing in this game had ever damaged
+    /// a structure: <c>DamageStructure</c> existed since repair did and its only caller was a self-test.
+    /// </remarks>
+    private static bool AnAttackEndsWithItsTarget()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        var them = new FactionId(1);
+
+        // A wall of theirs, and one of ours stood next to it under orders.
+        var wall = world.AddNode(NodeKind.PalisadeWall, new Vector2(12f, 0f), capacity: 0, faction: them);
+        var full = world.Nodes.Get(wall).Condition;
+        var soldier = world.SpawnAgent(new Vector2(9f, 0f), UnitType.Villager, us);
+        world.Agents.Get(soldier).Role = AgentRole.Militia;
+        world.Agents.Get(soldier).Strength = UnitType.Militia.Strength;
+        world.QueueAttack(new[] { soldier }, AgentId.None, wall);
+        Tick(world, 60);
+        var chewing = world.Nodes.Get(wall).Condition < full;
+        var stillOn = world.Agents.Get(soldier).Jobs.Assignment.Kind == AssignmentKind.Attack;
+
+        Tick(world, 1800);
+        var flattened = world.Nodes.Get(wall).Condition <= 0f;
+        var released = world.Agents.Get(soldier).Jobs.Assignment.Kind != AssignmentKind.Attack;
+
+        // And the same verb on a body: it holds until the body dies, then lets go.
+        var hunter = world.SpawnAgent(new Vector2(-20f, 0f), UnitType.Villager, us);
+        world.Agents.Get(hunter).Role = AgentRole.Militia;
+        world.Agents.Get(hunter).Strength = UnitType.Militia.Strength;
+        var prey = world.SpawnAgent(new Vector2(-14f, 0f), UnitType.Raider, them);
+        world.QueueAttack(new[] { hunter }, prey, NodeId.None);
+        Tick(world, 30);
+        var chasing = world.Agents.Get(hunter).Jobs.Assignment.Kind == AssignmentKind.Attack;
+        world.DespawnAgents(new[] { prey });
+        Tick(world, 120);
+        var letGo = world.Agents.Get(hunter).Jobs.Assignment.Kind != AssignmentKind.Attack;
+
+        var passed = chewing && stillOn && flattened && released && chasing && letGo;
+        Console.WriteLine(
+            $"    a wall at {full:F0} condition: chewed={chewing}, held while it stood={stillOn}, " +
+            $"flattened={flattened}, attacker released={released}; " +
+            $"on a body: held while it lived={chasing}, let go when it died={letGo}");
+        return passed;
     }
 
     private static int PeopleOf(SimulationWorld world, FactionId faction)

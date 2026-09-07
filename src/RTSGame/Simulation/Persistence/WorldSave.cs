@@ -236,6 +236,9 @@ internal static class WorldSave
         writer.Float(assignment.PlaceExtent);
         writer.Float(assignment.FarPlaceExtent);
         writer.Float(assignment.FarDwellSeconds);
+        // §166's target. Appended, so a save written before the verb existed reads back as an attack on
+        // nobody — which is what it was.
+        writer.Int(assignment.Quarry.Value);
     }
 
     private static AgentCommand ReadAssign(WorldReader reader)
@@ -251,9 +254,11 @@ internal static class WorldSave
         var extent = reader.Float();
         var farExtent = reader.Float();
         var farDwell = reader.Float();
+        var quarry = new AgentId(reader.Int());
         return new AssignGroupCommand(
             agents,
-            new Assignment(kind, anchor, farAnchor, dwell, source, sink, cargo, extent, farExtent, farDwell));
+            new Assignment(
+                kind, anchor, farAnchor, dwell, source, sink, cargo, extent, farExtent, farDwell, quarry));
     }
 
     /// <summary>Every kind of order the save format handles, for the census that keeps it honest.</summary>

@@ -13329,3 +13329,62 @@ Attributed to a position and a surface, and *not* to a mechanism. One is a chann
 ground, both genuinely interior. That is a fourth hypothesis away and it is not being taken: the position and
 the surface are written down so whoever picks it up starts where the evidence is rather than where the
 plausible story is.
+
+## 166. Attack, which is one verb because its end condition is one sentence
+
+From the chair: muster is not a verb, it is a family of them, and the atomic one is **attack a particular
+thing** — done when the thing cannot be found or seen any more, or is already dead. Buildings, people,
+everything. Siege, blockade, raid and skirmish come later and are compositions: attack-this or guard-this plus
+a rule about which target, what next, and when to leave, driven by the roster, the economy and the moment
+("in winter I might raid, get out, and live off it for a while").
+
+That is exactly right, and building it showed why.
+
+### Almost all of it already existed
+
+- **Bodies already fight when adjacent.** ThreatSystem's proximity rule, with §143's crowding limit. An
+  attack order needs no combat of its own for people.
+- **`Guard` already says where a soldier belongs**, and §143 built the path home.
+- **A multi-body move already forms a cohort** with formation and flow field.
+
+So the verb is its **end condition**, and that makes it an `Assignment` rather than an interrupt: what a body
+is *for* until satisfied, after which the Guard takes it back with nobody issuing an order. One verb for
+buildings and bodies, because the difference is a fact about the target and not about the order — and the
+two live in separate fields rather than one "target of some sort", which is the shape that cost this session
+nine corrections.
+
+**Not called `Muster`.** `ThreatSystem.Muster` already means "how much strength can reach this place in
+time": a query, defensive, automatic. Using the name would have manufactured the tenth near-synonym on
+purpose.
+
+### And nothing had ever damaged a building
+
+`DamageStructure` has existed as long as repair has. Its only caller was a self-test. So §71's stone walls,
+the condition bar and the material costs were a whole ledger for undoing damage that could not happen. A body
+under an attack order that has *arrived* now takes a structure's condition down at its own strength — stated
+only for bodies under orders, because a militia walking past an enemy granary should not knock it down by
+proximity and a besieger standing on it should.
+
+### Four faults getting there, and three were one pattern
+
+- **`DwellSeconds: 0`.** A leg with no dwell finishes on the tick it begins, so an attacker spent every tick
+  being re-aimed and none *standing* at what it was hitting. It chewed a palisade at a fraction of its
+  strength and never broke through. One second is a swing.
+- **A contact test of my own.** `FootprintRadius + radius + slack`, while the jobs layer stops a body by a
+  distance to the building's *box* with its own slack and raster reach. Two notions of touching the same
+  wall, and the tighter one won: a soldier stood at the palisade all day and did not scratch it. It asks
+  `JobSystem.IsWorking` now — the predicate the economy already uses for "this hand has arrived".
+- **`default(AgentId)` is agent zero, and agent zero is somebody.** An attack on a building was never
+  released, because its end condition asked whether the body target was still alive and the first villager
+  ever spawned usually is. `AgentId.None` is −1 now, as `NodeId.None` and `FactionId.None` already were.
+- **"Dead" for a building is not removal.** `DamageStructure` floors the condition and leaves the node
+  standing, because repair has to have something to repair. Gone means a ruin, not an absence.
+
+Three of the four are the same fault: **two names for one idea, and I reached for whichever was nearest.**
+`LakeDepth`/`Standing`, `WidthAt`/`WidthOf`, `LevelAt`/`LevelField`, and now contact/contact and
+none/zero. It is the defining failure mode of this codebase as I have experienced it, and the defence is the
+one §158 wrote down: name which of the pair you need, and why, before writing the line.
+
+The test asserts all six properties of the sentence — a wall chewed, held while it stood, flattened, the
+attacker released; a body held while it lived and let go when it died. The building half could not have been
+written yesterday.

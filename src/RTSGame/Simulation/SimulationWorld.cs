@@ -1567,6 +1567,37 @@ internal sealed class SimulationWorld
         if (snapshot.Length > 0) commands.Enqueue(new AssignGroupCommand(snapshot, assignment));
     }
 
+    /// <summary>
+    /// Puts bodies onto one particular thing until it is dead or gone. §166.
+    /// </summary>
+    /// <remarks>
+    /// The one offensive verb, and it takes either a body or a structure because the difference between them
+    /// is a fact about the target rather than about the order. Queued like every other assignment: it is what
+    /// these bodies are <em>for</em> until it is satisfied, not an interrupt they drift out of — and when it
+    /// is satisfied §143's Guard takes them back to their posts without anybody being told to go.
+    /// </remarks>
+    public void QueueAttack(IEnumerable<AgentId> agents, AgentId quarry, NodeId structure)
+    {
+        var at = Vector2.Zero;
+        var extent = 0f;
+        if (Nodes.Contains(structure))
+        {
+            ref readonly var target = ref Nodes.Get(structure);
+            at = target.Position;
+            extent = target.FootprintRadius;
+        }
+        else if (quarry.IsValid && Agents.Contains(quarry))
+        {
+            at = Agents.Get(quarry).Position;
+        }
+        else
+        {
+            return;
+        }
+
+        QueueAssign(agents, Assignment.Attack(quarry, structure, at, extent));
+    }
+
     /// <summary>Commits existing villagers to permanent militia conversion at a completed barracks.</summary>
     public void QueueTrainMilitia(IEnumerable<AgentId> agents, NodeId barracks)
     {
@@ -2255,6 +2286,7 @@ internal sealed class SimulationWorld
             ChargeThreat);
         // The errand outlives the reason for it, so it is advanced whatever the defence decided this tick.
         AdvanceStowing();
+        BreakStructures(deltaSeconds);
         Timings.Record(SimulationPhase.Threat, Stopwatch.GetTimestamp() - phaseStart);
 
         phaseStart = Stopwatch.GetTimestamp();
@@ -2622,8 +2654,40 @@ internal sealed class SimulationWorld
     /// or discards a unit, and what will not fit stays where it was. A body carrying cargo it cannot
     /// deliver keeps it and the board leaves it alone until it has.
     /// </remarks>
+    /// <summary>
+    /// Whether what this body was sent at is still there to be attacked.
+    /// </summary>
+    /// <remarks>
+    /// <b>The whole of the verb's end condition.</b> §166: an attack is over when its target cannot be found
+    /// any more or is already dead. A structure that has been demolished is gone from the node store; a body
+    /// that has died is not alive; and either of those is enough. There is no timer and no leash, because
+    /// "how long do I keep at this" and "when do I give up and go home" are the composed verbs' questions and
+    /// not this one's.
+    /// </remarks>
+    private bool QuarryStands(in Assignment order)
+    {
+        if (Nodes.Contains(order.Source))
+        {
+            ref readonly var structure = ref Nodes.Get(order.Source);
+            // <b>A building is dead at zero condition, not at removal.</b> §166: DamageStructure floors the
+            // condition and leaves the node standing, because §71's repair has to have something to repair —
+            // so "gone" for a structure is a ruin rather than an absence, and an attack that waited for the
+            // node to disappear would never end.
+            if (structure.IsAlive && structure.Condition > 0f) return true;
+        }
+
+        return order.Quarry.IsValid && Agents.Contains(order.Quarry) &&
+               Agents.Get(order.Quarry).IsAlive;
+    }
+
     private void Handover(ref AgentState agent, int leg)
     {
+        if (agent.Jobs.Assignment.Kind == AssignmentKind.Attack)
+        {
+            AttackerHandover(ref agent);
+            return;
+        }
+
         if (agent.Jobs.Assignment.Kind == AssignmentKind.Build)
         {
             BuilderHandover(ref agent, leg);
@@ -3599,6 +3663,82 @@ internal sealed class SimulationWorld
     /// and not because anything was told about lumber camps.</item>
     /// </list>
     /// </remarks>
+    /// <summary>
+    /// Keeps an attacker on its target, or lets it go when the target is gone.
+    /// </summary>
+    /// <remarks>
+    /// A body follows a body, because a quarry that runs is still the quarry — the anchor is re-aimed every
+    /// leg rather than fixed where the target once stood. A structure does not move, so its anchor never
+    /// changes and the leg simply repeats until the thing is rubble.
+    /// </remarks>
+    private void AttackerHandover(ref AgentState agent)
+    {
+        ref var jobs = ref agent.Jobs;
+        if (!QuarryStands(in jobs.Assignment))
+        {
+            // Done. Assignment.None rather than a retreat: a soldier with a Guard goes back to it by
+            // §143's rule, and one without simply stands where the fight ended, which is what it did before
+            // anybody gave it an order.
+            JobSystem.Assign(ref agent, Assignment.None);
+            return;
+        }
+
+        var order = jobs.Assignment;
+        if (order.Quarry.IsValid && Agents.Contains(order.Quarry) && Agents.Get(order.Quarry).IsAlive)
+        {
+            ref readonly var quarry = ref Agents.Get(order.Quarry);
+            order = order with { Anchor = quarry.Position, FarAnchor = quarry.Position };
+        }
+
+        JobSystem.Retarget(ref agent, order, leg: 0);
+    }
+
+    /// <summary>
+    /// A body attacking a building takes its condition down while it stands at it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Nothing in this game has ever damaged a building.</b> §166: <c>DamageStructure</c> has existed since
+    /// repair did, and the only caller was a self-test — so the whole repair and upgrade ledger (§71's stone
+    /// walls, the condition bar, the material costs) has been machinery for undoing damage that could not
+    /// happen. This is the other end of it.
+    /// <para>
+    /// Two bodies in reach of each other already fight without being told — that is the proximity rule in
+    /// ThreatSystem, and it is why <see cref="AssignmentKind.Attack"/> needs no combat of its own for people.
+    /// A building is not a body, has no <c>Strength</c> and cannot be in the collider sweep, so contact with
+    /// one has to be stated. Stated <em>only for a body under an attack order</em>, deliberately: a militia
+    /// walking past an enemy granary should not knock it down by proximity, and a besieging army standing on
+    /// it should.
+    /// </para>
+    /// </remarks>
+    private void BreakStructures(float deltaSeconds)
+    {
+        var bodies = Agents.MutableSpan();
+        for (var i = 0; i < bodies.Length; i++)
+        {
+            ref var body = ref bodies[i];
+            if (!body.IsAlive || body.Sheltered || body.Strength <= 0f) continue;
+            if (body.Jobs.Assignment.Kind != AssignmentKind.Attack) continue;
+            var target = body.Jobs.Assignment.Source;
+            if (!Nodes.Contains(target)) continue;
+            ref readonly var structure = ref Nodes.Get(target);
+            if (!structure.IsBuilt || !structure.IsStructure) continue;
+            if ((Colliders.Factions.Between(body.Faction, structure.Faction) & RelationMask.Enemy) == 0)
+            {
+                continue;
+            }
+
+            // <b>"In contact" is the jobs layer's own arrival test, not a second distance.</b> §166: the
+            // first version measured a reach of its own — footprint radius plus body radius plus slack — and
+            // it never fired, because the body stops where JobSystem says it has arrived, which is a distance
+            // to the building's <em>box</em> with its own slack and raster reach. Two notions of touching the
+            // same wall, and the tighter one won: a soldier stood at the palisade all day and did not scratch
+            // it. IsWorking is the predicate the economy already uses to decide a hand has arrived somewhere,
+            // and this is the same question.
+            if (!JobSystem.IsWorking(in body)) continue;
+            DamageStructure(target, body.Strength * deltaSeconds);
+        }
+    }
+
     private bool TrySendBackToWork(ref AgentState agent)
     {
         var assignment = agent.Jobs.Assignment;

@@ -1,4 +1,5 @@
 using System.Numerics;
+using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Economy;
 
 namespace RTSGame.Simulation.Jobs;
@@ -104,6 +105,30 @@ internal enum AssignmentKind
     /// </para>
     /// </remarks>
     Guard,
+
+    /// <summary>
+    /// Stay on one particular thing until it is dead or gone.
+    /// </summary>
+    /// <remarks>
+    /// <b>The atomic offensive verb, and deliberately the only one.</b> §166. A whole family of words —
+    /// siege, blockade, raid, skirmish — reads like a family of verbs and is not: each is <em>attack this</em>
+    /// or <em>guard this</em> plus a rule about what to do next, which target to pick, and when to leave.
+    /// Those rules belong to the roster, the economy and the moment ("in winter I might raid, get out, and
+    /// live off it for a while"), so they are plans built on this and not mechanisms beside it.
+    /// <para>
+    /// One verb for buildings and bodies alike, because the difference between them is a fact about the
+    /// target and not about the order. And one end condition, which is the part that makes it atomic:
+    /// <b>an attack is over when what it was aimed at cannot be found any more or is already dead.</b> No
+    /// duration, no leash, no retreat rule — those are the composed verbs' business.
+    /// </para>
+    /// <para>
+    /// Note what it is <em>not</em>: the name <c>Muster</c> was the obvious one and is already taken by
+    /// <c>ThreatSystem.Muster</c>, which asks how much strength can reach a place in time. That is a query,
+    /// defensive, and automatic — and calling a command by the same name would have manufactured this
+    /// session's tenth near-synonym on purpose.
+    /// </para>
+    /// </remarks>
+    Attack,
 }
 
 /// <summary>What a unit is doing at this instant, in service of its assignment.</summary>
@@ -185,7 +210,8 @@ internal readonly record struct Assignment(
     Resource Cargo = default,
     float PlaceExtent = 0f,
     float FarPlaceExtent = 0f,
-    float FarDwellSeconds = -1f)
+    float FarDwellSeconds = -1f,
+    AgentId Quarry = default)
 {
     public static Assignment None => default;
 
@@ -324,6 +350,36 @@ internal readonly record struct Assignment(
     /// repeats forever, and the only reason it is finite is that a leg is the unit in which the jobs layer
     /// notices anything at all.
     /// </param>
+    /// <summary>Puts a body onto one particular target until it is gone. See <see cref="AssignmentKind.Attack"/>.</summary>
+    /// <param name="quarry">The body to attack, or <see cref="AgentId.None"/> for a structure.</param>
+    /// <param name="structure">The node to attack, or <c>NodeId.None</c> when the target is a body.</param>
+    /// <remarks>
+    /// The two are exclusive and one field holds each, rather than one field holding "whatever it is": a
+    /// target that could be either, read through one accessor, is precisely the shape that made
+    /// <c>LakeDepth</c>, <c>WidthAt</c> and <c>LevelAt</c> cost this session nine corrections.
+    /// </remarks>
+    public static Assignment Attack(
+        AgentId quarry,
+        NodeId structure,
+        Vector2 at,
+        float extent) =>
+        new(
+            AssignmentKind.Attack, at, at, SwingSeconds, structure, NodeId.None,
+            PlaceExtent: extent, Quarry: quarry);
+
+    /// <summary>
+    /// How long a body stays put between re-aiming at its target.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not zero, and zero was the first answer.</b> §166: a leg with no dwell finishes on the tick it
+    /// begins, so an attacker spent every tick being re-aimed and none of them <em>standing</em> at what it
+    /// was hitting — and the damage rule, which asks the jobs layer whether the body has arrived, saw a body
+    /// permanently in transit. A soldier chewed a palisade at a fraction of its strength and never brought it
+    /// down. One second is a swing: long enough to be arrival, short enough that a quarry which moves is
+    /// followed rather than lost.
+    /// </remarks>
+    private const float SwingSeconds = 1f;
+
     public static Assignment Guard(Vector2 post, float radius, float dwellSeconds) =>
         new(
             AssignmentKind.Guard, post, post, dwellSeconds, NodeId.None, NodeId.None,
@@ -351,7 +407,7 @@ internal readonly record struct Assignment(
     /// </remarks>
     public bool RepeatsForever =>
         Kind is AssignmentKind.Hold or AssignmentKind.Shuttle or AssignmentKind.Carry or AssignmentKind.Work or
-            AssignmentKind.Build or AssignmentKind.Train or AssignmentKind.Guard;
+            AssignmentKind.Build or AssignmentKind.Train or AssignmentKind.Guard or AssignmentKind.Attack;
 }
 
 /// <summary>
