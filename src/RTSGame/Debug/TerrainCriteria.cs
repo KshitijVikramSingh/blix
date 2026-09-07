@@ -26,6 +26,7 @@ internal readonly record struct TerrainCriteria(
     float LargestIslandShare,
     float SteepestGrade,
     float FallPer100M,
+    float MovingShare,
     int LakesWithoutBasin,
     int UphillReaches,
     int StrandedReaches,
@@ -52,22 +53,49 @@ internal readonly record struct TerrainCriteria(
     public const float IslandFloor = 0.90f;
 
     /// <summary>
-    /// Overall hydraulic fall the ground needs for water to behave, in metres per hundred.
+    /// Overall hydraulic fall below which the ground is a plain, in metres per hundred.
     /// </summary>
     /// <remarks>
-    /// <b>The number the whole of §150 turns on.</b> The generator reports 0.73 m per 100 m and every water
-    /// fault this session followed from it: with that little gradient a depression's outlet sits barely above
-    /// its floor, so a fill spreads wide and paper-thin and a channel has nothing to lie in. Two per cent is
-    /// the gentlest real lowland river valley; below it, water cannot be made to look right by any amount of
-    /// shading.
+    /// <b>Two per cent was wrong by two orders of magnitude and I wrote the justification myself.</b> §164:
+    /// the note here said two metres per hundred was "the gentlest real lowland river valley". Two metres per
+    /// hundred is a <em>two per cent</em> gradient — a mountain stream. The Rhine falls about 0.05%, the
+    /// Mississippi about 0.01%. Every one of the seventeen maps this faulted was at one, four or seven metres
+    /// of amplitude and landed between 1.35 and 1.92, which is to say it was faulting lowlands for being
+    /// lowlands.
+    /// <para>
+    /// Half a per cent instead, which is still distinctly sloping country and still an order of magnitude
+    /// above the <c>MinimumChannelSlope</c> at which the water model itself stops solving a channel and hands
+    /// over to ponding. It is kept as a floor on <em>being a landscape at all</em> rather than as a
+    /// requirement on rivers, because §164 gave that job to the criterion below, which can ask it directly.
+    /// </para>
     /// </remarks>
-    public const float FallFloor = 2.0f;
+    public const float FallFloor = 0.5f;
+
+    /// <summary>
+    /// Share of a map's watercourses that have to be moving rather than standing.
+    /// </summary>
+    /// <remarks>
+    /// <b>The question the fall floor was standing in for, now that the model can answer it.</b> §161 solves
+    /// depth from discharge and slope, so continuity gives velocity for nothing — and "does the water move"
+    /// is a direct question where "has the ground got enough gradient" was a proxy for it. A map whose rivers
+    /// are everywhere ponded fails; one with water running through it passes, at whatever amplitude.
+    /// <para>
+    /// Two thirds, and a tenth of a metre a second counts as moving — walking pace is about fifteen times
+    /// that, so this is a low bar deliberately: the fault it is looking for is a map of standing water, not a
+    /// map of slow water. Slow water is most of England.
+    /// </para>
+    /// </remarks>
+    public const float FlowingShare = 0.66f;
+
+    /// <summary>Metres a second above which a watercourse counts as running rather than standing.</summary>
+    public const float MovingMetresPerSecond = 0.1f;
 
     public bool Passes =>
         WalkableShare >= WalkableFloor &&
         LargestIslandShare >= IslandFloor &&
         SteepestGrade <= TerrainMap.MaximumTraversableGrade &&
         FallPer100M >= FallFloor &&
+        MovingShare >= FlowingShare &&
         LakesWithoutBasin == 0 &&
         UphillReaches == 0 &&
         StrandedReaches == 0;
@@ -75,7 +103,7 @@ internal readonly record struct TerrainCriteria(
     public override string ToString() =>
         $"walkable {WalkableShare * 100f:F0}% (largest piece {LargestIslandShare * 100f:F0}% of it), " +
         $"steepest {SteepestGrade:F2} against {TerrainMap.MaximumTraversableGrade:F2}, " +
-        $"fall {FallPer100M:F2} m/100 m, " +
+        $"fall {FallPer100M:F2} m/100 m, {MovingShare * 100f:F0}% of it moving, " +
         $"{LakesWithoutBasin} basinless lake(s), {UphillReaches} uphill reach(es), " +
         $"{StrandedReaches} stranded reach(es), {Fords} ford(s)";
 
@@ -101,7 +129,13 @@ internal readonly record struct TerrainCriteria(
 
         if (FallPer100M < FallFloor)
         {
-            yield return $"only {FallPer100M:F2} m of fall per 100 m, so water has nowhere to go";
+            yield return $"only {FallPer100M:F2} m of fall per 100 m — this is a plain, not a landscape";
+        }
+
+        if (MovingShare < FlowingShare)
+        {
+            yield return
+                $"only {MovingShare * 100f:F0}% of its watercourses are moving; the rest stand";
         }
 
         if (LakesWithoutBasin > 0) yield return $"{LakesWithoutBasin} lake(s) with no basin under them";
@@ -123,23 +157,26 @@ internal readonly record struct TerrainCriteria(
         // this criterion reported flanks of 3.46 and they were the boundary doing its job. A criterion that
         // indicts a deliberate cliff is measuring the wrong ground, and §150 said "outside deliberate cliffs"
         // for exactly this reason.
-        var rim = (int)MathF.Ceiling(ReliefPlan.RimWidthMetres / grid.CellSize);
+        var rim = (int)MathF.Ceiling(ReliefPlan.RimReachMetres / grid.CellSize);
         var walkable = 0;
         var total = 0;
         var crossable = 0;
         var steepest = 0f;
+        var steepestAt = Vector2.Zero;
+        var steepestSurface = TerrainSurface.Grass;
         var passable = new bool[grid.Width * grid.Height];
         for (var z = 0; z < grid.Height; z++)
         for (var x = 0; x < grid.Width; x++)
         {
             var cell = new Simulation.Spatial.GridCell(x, z);
             var ok = !world.Navigation.IsBlocked(cell);
-            passable[z * grid.Width + x] = ok;
-            // Counted over the whole grid, because the island fill runs over the whole grid and a share of
-            // one count against another's denominator is how the first version reported "largest piece 221%".
-            if (ok) crossable++;
             var inside = x >= rim && z >= rim && x < grid.Width - rim && z < grid.Height - rim;
+            // <b>The island fill is inside the rim as well.</b> §165: it ran over the whole grid, so the
+            // boundary wall's own far side counted as crossable ground cut off from the rest — the map's
+            // edge shattering the map's interior on paper.
+            passable[z * grid.Width + x] = ok && inside;
             if (!inside) continue;
+            if (ok) crossable++;
             total++;
             if (ok) walkable++;
 
@@ -147,17 +184,30 @@ internal readonly record struct TerrainCriteria(
             // asking either of them to be gentle is asking the map not to have cliffs or lakes. This is the
             // other half of §150's "outside deliberate cliffs" — the rim above is the first.
             if (!TerrainSurfaceRules.IsPassable(terrain.Surface(cell))) continue;
-            steepest = MathF.Max(steepest, terrain.SampleGrade(grid.CellCenter(cell)));
+            var grade = terrain.SampleGrade(grid.CellCenter(cell));
+            if (grade > steepest)
+            {
+                steepest = grade;
+                // <b>Where, because five hypotheses about the last fault were wrong.</b> §165: a flank of
+                // 2.37 on a map with one metre of amplitude cannot be a hill, and knowing that is not the
+                // same as knowing what it is.
+                steepestAt = grid.CellCenter(cell);
+                steepestSurface = terrain.Surface(cell);
+            }
         }
 
+        LastSteepest =
+            $"steepest {steepest:F2} at ({steepestAt.X:F0},{steepestAt.Y:F0}) on {steepestSurface}, " +
+            $"water there {(world.Terrain.Drainage is { } d ? d.LevelAt(steepestAt) - d.BedAt(steepestAt) : 0f):F2} m";
         var island = LargestIsland(passable, grid.Width, grid.Height);
-        var (fall, basinless, uphill, stranded, fords) = Hydrology(world);
+        var (fall, moving, basinless, uphill, stranded, fords) = Hydrology(world);
 
         return new TerrainCriteria(
             total == 0 ? 0f : walkable / (float)total,
             crossable == 0 ? 0f : island / (float)crossable,
             steepest,
             fall,
+            moving,
             basinless,
             uphill,
             stranded,
@@ -215,13 +265,16 @@ internal readonly record struct TerrainCriteria(
     /// </remarks>
     internal static string LastUphillBands { get; private set; } = "not measured";
 
+    /// <summary>Where the worst flank is and what it is made of. See the note where it is recorded.</summary>
+    internal static string LastSteepest { get; private set; } = "not measured";
+
     /// <summary>The worst few uphill reaches with the numbers behind them. See the note where it is built.</summary>
     internal static string LastWorstUphill { get; private set; } = "not measured";
 
-    private static (float Fall, int Basinless, int Uphill, int Stranded, int Fords) Hydrology(
+    private static (float Fall, float Moving, int Basinless, int Uphill, int Stranded, int Fords) Hydrology(
         SimulationWorld world)
     {
-        if (world.Terrain.Drainage is not { } water) return (0f, 0, 0, 0, 0);
+        if (world.Terrain.Drainage is not { } water) return (0f, 1f, 0, 0, 0, 0);
         var side = water.Side;
         var step = water.CellMetres;
         var receiver = water.Receiver;
@@ -235,6 +288,8 @@ internal readonly record struct TerrainCriteria(
         var lowest = float.MaxValue;
         var highest = float.MinValue;
         var uphill = 0;
+        var courses = 0;
+        var moving = 0;
         var narrow = 0;
         var deepening = 0;
         var worst = new List<(float Climb, Vector2 At, float BedHere, float BedNext, float FillHere,
@@ -273,6 +328,10 @@ internal readonly record struct TerrainCriteria(
 
             // A crossing: a reach a body can wade is a decision on the map rather than a wall.
             if (depth < Biomes.WadeableDepthMetres) fords++;
+
+            // <b>Is it running or standing?</b> §164, and it is the question the fall floor was a proxy for.
+            courses++;
+            if (water.VelocityAt(index) >= MovingMetresPerSecond) moving++;
 
             var to = receiver[index];
             if (to < 0 || to == index)
@@ -408,6 +467,12 @@ internal readonly record struct TerrainCriteria(
                 $"width {w.WidthHere:F1}->{w.WidthNext:F1} m, lake here {w.LakeHere:F2}"));
         var fall = highest - lowest;
         var across = side * step;
-        return (across <= 0f ? 0f : fall / across * 100f, basinless, uphill, stranded, fords);
+        return (
+            across <= 0f ? 0f : fall / across * 100f,
+            courses == 0 ? 1f : moving / (float)courses,
+            basinless,
+            uphill,
+            stranded,
+            fords);
     }
 }

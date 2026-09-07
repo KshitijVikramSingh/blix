@@ -724,9 +724,18 @@ internal sealed class Drainage
 
         // Downhill is against the gradient. Speed off the two quantities a channel's own comes from: how much
         // is coming through and how steeply it is falling, normalised for a shader rather than a hydrologist.
-        var discharge = MathF.Sqrt(MathF.Max(0f, AreaAt(world))) / 600f;
-        var speed = Math.Clamp(MathF.Sqrt(fall * 8f) * Math.Clamp(discharge, 0.15f, 1f), 0f, 1f);
-        return (-gradient / fall, speed);
+        // <b>The velocity the depth was solved with, not a second opinion about it.</b> §164: this used to
+        // invent a speed out of fall and catchment size for the shader to advect with, which was the third
+        // independent guess §161 named — width, depth and velocity all free of each other, so nothing was
+        // conserved. Now that depth comes from Manning, continuity gives velocity for nothing:
+        //   Q = v·A   →   v = Q / (w·d)
+        // and the number the water is drawn moving at is the number it was solved at.
+        var flow = MathF.Max(0f, AreaAt(world)) * RunoffPerArea;
+        var wide = WidthAt(world);
+        var deep = MathF.Max(0.01f, LevelAt(world) - BedAt(world));
+        var metresPerSecond = flow / MathF.Max(0.01f, wide * deep);
+        // Normalised for a shader against a brisk river: two metres a second is fast water.
+        return (-gradient / fall, Math.Clamp(metresPerSecond / 2f, 0f, 1f));
     }
 
     /// <summary>
@@ -806,6 +815,22 @@ internal sealed class Drainage
         var dx = (to % side) - (from % side);
         var dz = (to / side) - (from / side);
         return MathF.Sqrt(dx * dx + dz * dz);
+    }
+
+    /// <summary>
+    /// How fast the water is moving here, in metres a second, from the continuity the depth was solved with.
+    /// </summary>
+    /// <remarks>
+    /// §164. Exposed unnormalised because a criterion wants the physical figure and a shader wants a
+    /// zero-to-one — see <see cref="FlowAt"/> for the second of those.
+    /// </remarks>
+    public float VelocityAt(int index)
+    {
+        var width = WidthOf(area[index]);
+        if (authored is not null) width = MathF.Max(width, authored[index]);
+        if (width <= TraceWidthMetres) return 0f;
+        var deep = MathF.Max(0.01f, EnsureLevel()[index] - ground[index]);
+        return MathF.Max(0f, area[index]) * RunoffPerArea / MathF.Max(0.01f, width * deep);
     }
 
     public float WetnessAt(Vector2 world) => Sample(EnsureWetness(), world - Origin);

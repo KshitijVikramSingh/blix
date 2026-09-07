@@ -847,6 +847,19 @@ internal sealed class ReliefPlan
     public const float RimWidthMetres = 78f;
 
     /// <summary>
+    /// How far inward the rim can actually reach, wander included.
+    /// </summary>
+    /// <remarks>
+    /// <b>§165: the rim is not <see cref="RimWidthMetres"/> wide, it is that plus its own wander.</b> Its
+    /// inner edge is displaced by up to <c>±0.275 · RimWidthMetres</c> of noise so it does not run straight,
+    /// which puts its toe as much as ninety-nine metres in. Anything wanting to exclude the boundary — and
+    /// §151's criteria do, because a map's edge is deliberately unclimbable — has to exclude the wander too.
+    /// The first three hypotheses about a flank of 2.37 were all about water, and it was the rim's toe two
+    /// metres inside a band meant to have skipped it.
+    /// </remarks>
+    public const float RimReachMetres = RimWidthMetres * 1.30f;
+
+    /// <summary>
     /// Whether the map gets a mountain frontier at all.
     /// </summary>
     /// <remarks>
@@ -1211,7 +1224,16 @@ internal sealed class ReliefPlan
         drainage.Origin = transform.Origin;
         drainage.SetSeaLevel(seaLevel);
         drainage.SetWaterScale(RegionProfile.For(region).WaterScale);
-        drainage.PaintAuthoredWidth(AuthoredWidths(side, transform.Origin));
+        // <b>Not in the drainage-first path, where the network already is the authored river.</b> §164: the
+        // layout's corridor is painted as a width with no discharge behind it, and the grown network has
+        // discharge of its own — so a map got both, and the corridor came out wide, shallow and standing
+        // still. Measured: the DiagonalRiver archetype ran at 21% to 48% of its watercourses moving against
+        // 80% to 97% elsewhere, which is the archetype whose entire point is a through-river having the only
+        // river that does not flow.
+        //
+        // Two authorships of one river is the fault. The eroded path needs the paint because its rivers come
+        // from the layout; this path grows them, so the paint is a second opinion and it loses.
+        if (!DrainageFirst) drainage.PaintAuthoredWidth(AuthoredWidths(side, transform.Origin));
 
         for (var z = 0; z <= transform.Height; z++)
         for (var x = 0; x <= transform.Width; x++)
@@ -1275,42 +1297,18 @@ internal sealed class ReliefPlan
             carve[index] = own[index];
         }
 
-        // <b>And then the profile, which is the fix the dump actually justified.</b> §157 closed the
-        // arithmetic on the worst offenders: width roughly doubles across one four-metre cell, because
-        // accumulated area is discontinuous where a tributary joins, so the stacked depth jumps 27 cm against
-        // a bed falling 1 cm. <b>The level rule steps the surface up at every confluence.</b>
+        // <b>The profile pass is gone, and §161 is why.</b> §165: it walked the network lowering any cell
+        // whose surface sat above its upstream, by <c>carve[to] += surface[to] - wanted</c> — unbounded, and
+        // propagating, because every cell it lowered forced the next one lower still. On flat ground that
+        // runs away: measured on CentralHighGround at one metre of amplitude, a flank of <b>2.37</b> against
+        // a traversable 0.82, standing on a Shallows surface with 0.73 m of water in it. A channel that
+        // shallow cannot make a bank that steep — the trench under it could, and it also cut eleven per cent
+        // of the map's walkable ground off from the rest.
         //
-        // A real confluence does not raise the water: the channel below it is deeper and the surface keeps
-        // falling. So the surface is made to fall, and the bed is cut to wherever it has to be to hold the
-        // channel's depth underneath it. Walked from the headwaters down — cells in order of decreasing
-        // filled height, so every contributor is settled before the cell it feeds — lowering the downstream
-        // surface whenever it would sit above its own upstream.
-        var order = new int[lattice.Length];
-        for (var i = 0; i < order.Length; i++) order[i] = i;
-        Array.Sort(order, (a, b) => found.Filled[b].CompareTo(found.Filled[a]));
-
-        var surface = new float[lattice.Length];
-        for (var i = 0; i < surface.Length; i++)
-        {
-            surface[i] = lattice[i] - carve[i] + (own[i] > 0f ? own[i] / 1.15f : 0f);
-        }
-
-        var receiver = found.Receiver;
-        var lakeDepth = found.LakeDepth;
-        foreach (var index in order)
-        {
-            if (own[index] <= 0f) continue;
-            var to = receiver[index];
-            if (to < 0 || to == index || own[to] <= 0f) continue;
-            // Left alone where the water is standing: a lake's surface is its sill and does not owe its
-            // inflow a gradient.
-            if (lakeDepth[to] > 0.02f) continue;
-            var wanted = surface[index] - MinimumFallPerCell;
-            if (surface[to] <= wanted) continue;
-            // The bed drops by exactly what the surface had to.
-            carve[to] += surface[to] - wanted;
-            surface[to] = wanted;
-        }
+        // It is redundant now besides. It existed to make the water surface monotone, and §161's Manning
+        // depth plus Backwater does that as a property of the flow rather than by earthworks — <b>two
+        // mechanisms for one job, and the physical one wins</b>. What stays is the cross-section, which is
+        // the part that gives a river a bed.
 
         for (var index = 0; index < lattice.Length; index++)
         {
@@ -1532,8 +1530,26 @@ internal sealed class ReliefPlan
         // <b>Only the trunk inherits a catchment.</b> A tributary carries what the ground above it sheds and
         // nothing else — that is what makes it a tributary rather than a second river — so it is carved and
         // then left to earn its own discharge from the hillsides it drains.
+        // <b>The inflow an authored river needs is the one its own width implies.</b> §164: the layout paints
+        // a corridor — <c>river.WidthMetres</c> — and the head was seeded with a flat constant of about 400
+        // thousand square metres, which <see cref="Drainage.WidthOf"/> says supports a five-metre stream. So
+        // a river drawn twenty metres wide arrived with a fifth of the catchment it claimed, and once §161
+        // solved velocity from continuity the consequence became visible: <c>v = Q / (w·d)</c> with a small Q
+        // and a large w is a wide, shallow, <b>motionless</b> ribbon.
+        //
+        // Measured before this line: the DiagonalRiver archetype had 21% to 48% of its watercourses moving,
+        // against 80% to 97% everywhere else — the archetype whose whole point is an authored through-river
+        // was the one whose river stood still. Two answers to "how big is this river" that never had to
+        // agree, which is §158's near-synonym pattern once more.
+        //
+        // Inverting the width curve makes them agree: <c>WidthOf(a) = 0.008·√a</c>, so the area a given width
+        // claims is <c>(w / 0.008)²</c>. The old constant stays as a floor — a through-river inherits a
+        // catchment from off the map whatever its width — and it is expressed in the map's own extent now
+        // rather than in the 600 m the map used to be.
         var main = rivers[0];
-        inflow[Inward(main.Path[0] - origin, side, extent)] = InheritedCatchmentMetres2;
+        var claimed = MathF.Pow(main.WidthMetres / 0.008f, 2f);
+        inflow[Inward(main.Path[0] - origin, side, extent)] =
+            MathF.Max(InheritedCatchmentMetres2 * extent * extent / (600f * 600f), claimed);
         return (main.Path[0] - origin, main.Path[^1] - origin);
     }
 
@@ -1780,8 +1796,19 @@ internal sealed class ReliefPlan
                     (Landform.Undulate(world, seed * 9781u + 29u, MathF.Max(28f, reach * 0.42f)) - 0.5f) * 0.30f;
                 var relief = 1f + summits * shoulder;
 
+                // <b>A ramp opens the upland all the way, because four fifths of the way up is not a way
+                // up.</b> §165: this removed at most 80% of the lift, so every authored ramp left a lip of
+                // the remaining fifth where it should have met the plain — eight metres of it on a sixty-metre
+                // map. Measured on CentralHighGround, the archetype whose own description is "four sides
+                // around one defensible hill": flanks of 2.37 and 2.48 against a traversable 0.82, and
+                // <b>eleven to twelve per cent of the map's crossable ground stranded on top of the hill</b>
+                // with no way onto it. A hill nobody can climb is not defensible, it is scenery.
+                //
+                // The taper is the connector's own falloff, so the centre of a ramp is level with the ground
+                // it leaves and the sides climb back to the upland — which is what makes it a ramp rather
+                // than a notch.
                 lattice[z * side + x] += upland.HeightMetres * shoulder * relief
-                    * (1f - 0.80f * layout.Opening(world, ConnectorOf.Upland, slot));
+                    * (1f - layout.Opening(world, ConnectorOf.Upland, slot));
             }
         }
     }

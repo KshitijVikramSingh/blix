@@ -13247,3 +13247,85 @@ Ratchet at 38, `--eroded` correctly reports itself as worse, conservation clean,
 green with years**. Water is solved from flow, cut into the ground rather than stacked on it, drawn against
 the terrain a player sees and clipped to its own waterline — and the generator that makes valleys because
 rivers exist is the one the game now runs on.
+
+## 164. The fall floor was wrong by two orders of magnitude, and the authored river stood still
+
+Item 2 of §159's list: seventeen maps short of hydraulic fall. Every one of them was at one, four or seven
+metres of amplitude, landing between 1.35 and 1.92 against a floor of 2.0.
+
+**The floor was mine and its justification was wrong.** §151's note said two metres per hundred was "the
+gentlest real lowland river valley". Two metres per hundred is a **two per cent** gradient — a mountain
+stream. The Rhine falls about 0.05%, the Mississippi about 0.01%. The criterion was faulting lowlands for
+being lowlands, and it was doing so an order of magnitude above the `MinimumChannelSlope` at which the water
+model itself stops solving a channel and hands over to ponding.
+
+Lowered to 0.5%, and kept only as a floor on *being a landscape at all* — because the question it was
+standing in for can now be asked directly.
+
+### Velocity, from continuity rather than invention
+
+§161 solves depth from discharge and slope, so `Q = v·A` gives velocity for nothing. `FlowAt` returns that
+now instead of the heuristic it used to make up for the shader, so **the speed the water is drawn moving at
+is the speed it was solved at** — which is the third of §161's independent guesses finally retired.
+
+The new criterion asks whether two thirds of a map's watercourses are moving, at a tenth of a metre a second.
+A low bar deliberately: the fault it looks for is a map of standing water, not a map of slow water. Slow
+water is most of England.
+
+### Which immediately found what the proxy could not
+
+Standing water clustered in one archetype: **DiagonalRiver, at 21% to 48% moving against 80% to 97%
+everywhere else.** The archetype whose entire point is an authored through-river had the only river that did
+not flow.
+
+`PlantRivers` grows a network *with* discharge; `PaintAuthoredWidth` then painted the layout's corridor over
+it *without* any. `v = Q/(w·d)` with a small Q and a large w is a wide, shallow, motionless ribbon. **Two
+authorships of one river** — §158's near-synonym pattern in yet another costume. In the drainage-first path
+the network *is* the authored river, so the paint is a second opinion and it loses.
+
+**38 → 19 → 4 shortfalls.**
+
+Unmeasured and not claimed as a fix: the eroded path's inherited catchment now agrees with its authored width
+(inverting `WidthOf`, since 400,000 m² supports a five-metre stream while the layout paints far wider), and
+that constant is expressed in the map's own extent rather than the 600 m the map used to be. It had no
+measured effect, because drainage-first is the default and that path did not run.
+
+## 165. The ways up, and it was the rim's toe all along
+
+The last four shortfalls were one archetype, `CentralHighGround`, whose own description is "four sides around
+one defensible hill": flanks of 2.37 and 2.48 against a traversable 0.82, and eleven to twelve per cent of
+crossable ground stranded.
+
+**Three hypotheses, all wrong, and two of them acted on.**
+
+- **The ramps leave a lip.** `1 - 0.80 · Opening` removes at most four fifths of an upland's lift, so every
+  authored way up ended in a step of the remaining fifth — eight metres of it on a sixty-metre map. Changed
+  to open fully, which changed *nothing* measurable. Kept, because four fifths of the way up is not a way up.
+- **My own §158 profile carve running away.** It lowered any cell whose surface sat above its upstream by an
+  unbounded amount, and propagated, so on flat ground it could trench. Changed nothing measurable.
+  **Removed anyway, and that one I would defend**: §161's Manning depth plus Backwater makes the surface
+  monotone as a property of the flow, so the carve was a second mechanism doing the same job with earthworks.
+  Two mechanisms for one job, and the physical one wins.
+- Both were water hypotheses. It was not water.
+
+**It was the rim.** `steepest 2.37 at (96,-160)` — on a map spanning ±240, that is eighty metres from the
+edge, and the criterion skipped exactly `RimWidthMetres`, seventy-eight. The rim's inner edge wanders inward
+by up to `±0.275 · RimWidthMetres`, so its toe reaches ninety-nine metres in. **I was measuring the boundary
+wall two metres inside the band meant to exclude it.** And the island fill ran over the whole grid, so the
+map's edge was shattering the map's interior on paper.
+
+`RimReachMetres` covers the wander now, and the island fill is confined to the interior. **4 → 2.**
+
+### Where it stands
+
+Two shortfalls across fifty-five maps, both `CentralHighGround`, at the extreme amplitudes:
+
+```
+steepest 2.03 at (120,-93) on Shallows, water there 0.24 m
+steepest 2.48 at (116,-116) on Heath, water there 0.00 m
+```
+
+Attributed to a position and a surface, and *not* to a mechanism. One is a channel bank and one is dry
+ground, both genuinely interior. That is a fourth hypothesis away and it is not being taken: the position and
+the surface are written down so whoever picks it up starts where the evidence is rather than where the
+plausible story is.
