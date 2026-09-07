@@ -815,6 +815,16 @@ internal sealed class EconomySystem
                     var earned = field.Pending.Accrue(
                         Resource.Grain,
                         (field.ReapWork - before) * EconomyRates.ReapedPerSecond(in field));
+                    // <b>The same conversion as the deposit below, on the reaping side.</b> §163: a hand
+                    // holding wood that reaps a field would have had its wood re-labelled as grain, because
+                    // a body's cargo is one resource and one count. Handed back to the field rather than
+                    // dropped, so the crop is still there for whoever comes with empty hands.
+                    if (earned > 0 && body.Jobs.CarriedUnits > 0 && body.Jobs.Carrying != Resource.Grain)
+                    {
+                        field.ReapWork = before;
+                        earned = 0;
+                    }
+
                     if (earned > 0)
                     {
                         // Straight into the reaper's hands. It never sits in the field: grain a body is
@@ -955,6 +965,23 @@ internal sealed class EconomySystem
         if (whole > 0)
         {
             var taken = Math.Min(whole, Math.Min(room, deposit.Stock[resource]));
+
+            // <b>Not while holding something else, because assigning Carrying is a conversion.</b> §163: a
+            // body's cargo is one resource and one count, so <c>Carrying = resource</c> beside
+            // <c>CarriedUnits += taken</c> re-labels whatever it was already holding. Caught in the act by a
+            // probe rather than by reading — <c>RECLASSIFIED body 25: was 1 Stone, now 2 Wood</c> — after
+            // three call sites had been guarded on a hypothesis and the drift had not moved an inch.
+            //
+            // The ledger hears about the wood that was cut and nothing about the stone, which is exactly the
+            // wood +1 / stone -1 of §159. Not a leak, a swap, and this is where it happened.
+            //
+            // The bot reassigns loaded hands freely — §140's TakeHand pulls workers off jobs mid-load — so
+            // all it took was terrain putting an outcrop and a tree near enough together, which is why the
+            // drainage-first generator triggered it and the eroded one never did.
+            //
+            // Refusing is safe: a loaded body is on its delivery leg and the jobs layer sends it to a store
+            // before it works anything again. The swing is left on the deposit either way, by the note below.
+            if (taken > 0 && body.Jobs.CarriedUnits > 0 && body.Jobs.Carrying != resource) taken = 0;
             if (taken > 0)
             {
                 deposit.Stock[resource] -= taken;

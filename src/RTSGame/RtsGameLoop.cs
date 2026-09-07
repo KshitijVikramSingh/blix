@@ -1410,7 +1410,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         bool handsOffEverybody = false,
         LookSettings.SunMotion? sunMotion = null,
         MapTuning.MapOverlay? overlay = null,
-        bool drainageFirst = false)
+        bool eroded = false)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
@@ -1424,7 +1424,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         if (overlay is { } asked) mapTuning.Overlay = asked;
         // §152's switch, reachable from the played game as well as the sweep: the two generators have to be
         // comparable in the chair for the same reason they have to be comparable in a table.
-        this.drainageFirst = drainageFirst;
+        this.eroded = eroded;
         this.shadowProxies = shadowProxies;
         this.performanceBlockingUpload = performanceBlockingUpload;
         this.cheapTrees = cheapTrees;
@@ -1798,7 +1798,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         simulation.Terrain.SetRegion(labRegion);
         // <b>The builder's dials, or the defaults when nothing has an opinion.</b> §154: the sweep and the
         // gate ask for none of these, so the figures §152 measured are the figures they keep measuring.
-        plan.DrainageFirst = drainageFirst || mapTuning.DrainageFirst;
+plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         if (plan.DrainageFirst)
         {
             plan.ChannelFallPer100M = mapTuning.ChannelFallPer100M;
@@ -6344,7 +6344,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private readonly MapTuning mapTuning = new();
 
     /// <summary>Whether this session builds its ground around an authored drainage network. §152.</summary>
-    private readonly bool drainageFirst;
+    private readonly bool eroded;
 
     /// <summary>How much relief the village generates when nobody has said. See the constructor.</summary>
     /// <remarks>

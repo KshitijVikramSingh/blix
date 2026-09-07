@@ -13191,3 +13191,59 @@ the vertices to do it.
 
 Measured: `ground_p50` 0.09 ms for the whole terrain and water build, so the finer step costs nothing worth
 naming.
+
+## 163. The swap: a body's cargo is one resource and one count
+
+§159 held the drainage-first default back because the two-settlement economy broke conservation on its
+terrain — wood +1, stone −1, a swap rather than a leak. Found, and the finding is smaller than the hunt.
+
+`EconomySystem`, the deposit path:
+
+```csharp
+deposit.Stock[resource] -= taken;
+body.Jobs.Carrying = resource;
+body.Jobs.CarriedUnits += taken;
+```
+
+**A body's cargo is one resource and one count.** So a hand holding one stone that is put on a tree comes
+away holding *two wood* — the stone silently re-labelled. The ledger hears about the wood that was cut and
+nothing about the stone, which is exactly what the discrepancy reported. The reaping path had the same shape
+and is guarded too.
+
+It needed two things at once: the bot reassigning a **loaded** hand (§140's `TakeHand` pulls workers off jobs
+mid-load) and terrain putting an outcrop and a tree near enough together. Which is why drainage-first reached
+it and the eroded generator never did across fifty-five maps — the bug was latent, not new.
+
+### How it was actually found, and a new way to be wrong
+
+Three call sites were guarded on the hypothesis, and the drift did not move an inch. Then a probe: snapshot
+every body's `(Carrying, CarriedUnits)` each tick and, when the discrepancy first appears, name any body whose
+resource changed while it was holding something.
+
+```
+RECLASSIFIED body 25: was 1 Stone, now 2 Wood; job Work cargo Wood leg 0
+```
+
+One line, one body, one tick.
+
+**And one of those three sites was the right one all along.** The edit that added it contained two
+replacements; the second assert failed; the file is written after both asserts; so the `AssertionError`
+discarded the correct guard along with the failed one. The other half was re-applied on its own, the drift
+did not move, and the hypothesis was written off. **The fix was right and the build under test did not
+contain it.**
+
+That is a worse failure mode than the near-synonyms of §158, because it does not look like a mistake — it
+looks like evidence. Anything scripted that edits several places at once has to either verify each landed or
+write each separately.
+
+### And the default flips
+
+| | shortfalls |
+|---|---|
+| drainage-first, now the default | **38** |
+| `--eroded` | 50 |
+
+Ratchet at 38, `--eroded` correctly reports itself as worse, conservation clean, self-tests pass, **gate 8/8
+green with years**. Water is solved from flow, cut into the ground rather than stacked on it, drawn against
+the terrain a player sees and clipped to its own waterline — and the generator that makes valleys because
+rivers exist is the one the game now runs on.

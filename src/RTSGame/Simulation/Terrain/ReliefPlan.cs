@@ -931,13 +931,13 @@ internal sealed class ReliefPlan
     /// rule, and it holds for a generator as much as for a frame time.
     /// </remarks>
     /// <remarks>
-    /// <b>Ready by the criteria and held back by the ledger.</b> §159: it scores 93 criteria shortfalls
-    /// against the eroded generator's 106 and is the model that matches how water works — and on its terrain
-    /// the two-settlement economy <b>breaks conservation at tick 695</b>, one unit of stone becoming one of
-    /// wood. Not a leak, a swap. A default that breaks the invariant this whole simulation is built on is not
-    /// a default, whatever else it is better at, so this stays opt-in until that is found.
+    /// <b>The default from §163, once the ledger let it be.</b> It scores 38 criteria shortfalls against the
+    /// eroded generator's 50 and is the model that matches how water works — a valley exists because a river
+    /// does. §159 held it back because the two-settlement economy broke conservation on its terrain, which
+    /// turned out to be a latent swap in the deposit path that this terrain merely reached first. The old
+    /// path stays behind <c>--eroded</c> for as long as there is a comparison worth making.
     /// </remarks>
-    public bool DrainageFirst { get; set; }
+    public bool DrainageFirst { get; set; } = true;
 
     /// <summary>
     /// The drainage-first generator's shape, when something has an opinion about it.

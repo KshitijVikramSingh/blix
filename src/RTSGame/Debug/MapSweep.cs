@@ -43,7 +43,7 @@ internal static class MapSweep
     /// </remarks>
     private static readonly float[] Amplitudes = { 1f, 4f, 7f, 30f, 60f };
 
-    public static int Run(float extentMetres, uint seed, bool drainageFirst = false)
+    public static int Run(float extentMetres, uint seed, bool eroded = false)
     {
         var faults = new List<string>();
         // <b>Counted separately from faults, because they are a debt and not a break.</b> §151: the criteria
@@ -59,7 +59,7 @@ internal static class MapSweep
         foreach (var amplitude in Amplitudes)
         {
             generated++;
-            Try(archetype, Region.Downland, amplitude, extentMetres, seed, faults, shortfalls, drainageFirst);
+            Try(archetype, Region.Downland, amplitude, extentMetres, seed, faults, shortfalls, eroded);
         }
 
         // Every region at the extremes, because a region scales the authored channel widths and basin depths
@@ -68,7 +68,7 @@ internal static class MapSweep
         foreach (var amplitude in new[] { 1f, 4f, 60f })
         {
             generated++;
-            Try(Archetype.DiagonalRiver, region, amplitude, extentMetres, seed, faults, shortfalls, drainageFirst);
+            Try(Archetype.DiagonalRiver, region, amplitude, extentMetres, seed, faults, shortfalls, eroded);
         }
 
         Console.WriteLine(
@@ -187,7 +187,7 @@ internal static class MapSweep
     /// Criteria shortfalls this generator is known to have, so the sweep can refuse to make it worse.
     /// </summary>
     /// <remarks>
-    /// §151. Measured, not chosen: 50 across the sweep, and the shape of them is the argument for §150.
+    /// §151. Measured, not chosen: 38 across the sweep, and the shape of them is the argument for §150.
     /// <b>Every single map has between 139 and 422 watercourses running uphill</b> — "creeps upstairs",
     /// counted, and untouched by §145's slope taper, which reduced how much water sat on a slope without
     /// making the level field monotone. Most maps fall short of the two metres per hundred that water needs
@@ -199,7 +199,7 @@ internal static class MapSweep
     /// generator should take it to zero, and until it does, nothing may add to it.
     /// </para>
     /// </remarks>
-    private const int KnownShortfalls = 50;
+    private const int KnownShortfalls = 38;
 
     private static void Try(
         Archetype archetype,
@@ -209,7 +209,7 @@ internal static class MapSweep
         uint seed,
         List<string> faults,
         List<string> shortfalls,
-        bool drainageFirst)
+        bool eroded)
     {
         var what = $"{archetype} in {region} at {amplitude:F0} m";
         try
@@ -218,7 +218,7 @@ internal static class MapSweep
             world.Terrain.SetRegion(region);
             var layout = MapLayout.Composed(archetype, extentMetres, seed, amplitude);
             var plan = ReliefPlan.FromLayout(layout, extentMetres, seed);
-            plan.DrainageFirst = drainageFirst;
+            plan.DrainageFirst = !eroded;
             plan.Apply(world.Terrain);
             SettlementScenarios.PaintCountry(world);
             // <b>And rasterise it, or nothing downstream can see the country that was just painted.</b>

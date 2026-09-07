@@ -124,7 +124,7 @@ internal sealed class MapTuning
     /// field it cannot see being written. Saying <c>false</c> out loud is the honest way to quiet it.
     /// </remarks>
     [Tune(Label = "drainage first", Group = "relief")]
-    public bool DrainageFirst = false;
+    public bool DrainageFirst = true;
 
     /// <summary>
     /// How much a channel climbs per hundred metres of its own course, in the drainage-first generator.

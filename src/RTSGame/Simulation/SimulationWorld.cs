@@ -3044,8 +3044,14 @@ internal sealed class SimulationWorld
         ref var jobs = ref agent.Jobs;
         var projectId = jobs.Project;
 
+        // <b>And not while already holding something, because the load below overwrites.</b> §163: this is
+        // the third of these and the last one unguarded — a body's cargo is one resource and one count, so
+        // <c>Carrying = x; CarriedUnits = taken;</c> discards whatever it held and re-labels the total.
+        // Every sibling of this line guards on an empty hand; the surplus-collection path did not, and a
+        // builder that finished a project while carrying a stone came away with wood instead of it. Exactly
+        // the wood +1 / stone -1 §159 measured.
         if (leg % 2 == 0 && jobs.Assignment.Source == projectId && jobs.ReservedUnits > 0 &&
-            Nodes.Contains(projectId))
+            jobs.CarriedUnits <= 0 && Nodes.Contains(projectId))
         {
             ref var source = ref Nodes.Get(projectId);
             var taken = Math.Min(

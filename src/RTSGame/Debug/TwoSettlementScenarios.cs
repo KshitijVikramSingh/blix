@@ -152,6 +152,7 @@ internal static class TwoSettlementScenarios
         // Recorded before the clock starts, because "did anything happen" is a comparison and needs both ends.
         var openingGrain = new[] { StockOf(world, 0, Resource.Grain), StockOf(world, 1, Resource.Grain) };
         var faults = new List<string>();
+        var carried = new Dictionary<int, (Resource, int)>();
         var totalTicks = (int)(years * WorldCalendar.YearSeconds * TicksPerSecond);
         var reported = world.Date.Season;
         Console.WriteLine(
@@ -174,6 +175,30 @@ internal static class TwoSettlementScenarios
             {
                 Console.WriteLine(
                     $"  drift at tick {tick}: grain {drift.Grain}, wood {drift.Wood}, stone {drift.Stone}");
+                // <b>Catch the body in the act.</b> §163: three call sites were guarded on a hypothesis and
+                // the drift did not move, which is the same way five hypotheses about the uphill reaches went.
+                // A body's cargo is one resource and one count, so a swap has to be a body whose Carrying
+                // changed while it was holding something. This says which one, and what it was holding.
+                foreach (ref readonly var body in world.Agents.All)
+                {
+                    if (!body.IsAlive) continue;
+                    var was = carried.TryGetValue(body.Id.Value, out var seen) ? seen : (Resource.Grain, 0);
+                    var now = (body.Jobs.Carrying, body.Jobs.CarriedUnits);
+                    if (was == now) continue;
+                    if (was.Item2 > 0 && was.Item1 != now.Carrying)
+                    {
+                        Console.WriteLine(
+                            $"    RECLASSIFIED body {body.Id.Value}: was {was.Item2} {was.Item1}, " +
+                            $"now {now.CarriedUnits} {now.Carrying}; " +
+                            $"job {body.Jobs.Assignment.Kind} cargo {body.Jobs.Assignment.Cargo} " +
+                            $"leg {body.Jobs.Leg} project {body.Jobs.Project.Value}");
+                    }
+                }
+            }
+
+            foreach (ref readonly var body in world.Agents.All)
+            {
+                if (body.IsAlive) carried[body.Id.Value] = (body.Jobs.Carrying, body.Jobs.CarriedUnits);
             }
 
             if (!drift.IsZero)

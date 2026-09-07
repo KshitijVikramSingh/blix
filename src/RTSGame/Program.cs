@@ -168,7 +168,7 @@ public static class Program
             // <b>Both generators, same seeds, same binary.</b> §152 / §84: a generator compared across two
             // builds is compared across two of everything else too.
             Environment.Exit(Debug.MapSweep.Run(
-                sweepExtent, sweepSeed, args.Contains("--drainage-first")));
+                sweepExtent, sweepSeed, args.Contains("--eroded")));
         }
 
         if (args.Contains("--shapes"))
@@ -660,7 +660,7 @@ public static class Program
             args.Contains("--handsoff"),
             sunMotion,
             overlay,
-            args.Contains("--drainage-first"));
+            args.Contains("--eroded"));
         using var window = new Window(
             game, new WindowOptions("RTSGame — Greybox Kingdom", windowWidth, windowHeight));
         window.Run();
