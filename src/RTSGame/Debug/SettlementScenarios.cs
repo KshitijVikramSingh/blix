@@ -301,8 +301,18 @@ internal static class SettlementScenarios
         // their area share at these fractions, which is where the coefficient comes from — and on a map with no
         // woodland on it nothing changes at all.
         var closed = ClosedShare(world);
-        var round = (3f * settings.ArrivesAt / UnitType.Raider.MaximumSpeed + settings.LootSeconds)
-            * (1f + 1.4f * closed);
+        // <b>The way home is slower than the way out, from §167.</b> A laden body loses a quarter of its pace
+        // at full capacity, and a raider leaves with a full load by construction — so a budget of three legs
+        // at walking speed condemned a raider that was walking perfectly well. Reported as "something
+        // scripted to walk has stopped walking" at 196 s against 190, which is the check being right about
+        // its own arithmetic and wrong about the world.
+        //
+        // Two legs empty and one laden, rather than a fatter constant: the fault this looks for is a body
+        // that has stopped, and every metre of slack given to the budget is a stopped body it stops catching.
+        var laden = 1f - SimulationWorld.LadenSlowdown;
+        var legs = 2f * settings.ArrivesAt / UnitType.Raider.MaximumSpeed +
+                   settings.ArrivesAt / (UnitType.Raider.MaximumSpeed * laden);
+        var round = (legs + settings.LootSeconds) * (1f + 1.4f * closed);
         if (longestRaider > round)
         {
             faults.Add(

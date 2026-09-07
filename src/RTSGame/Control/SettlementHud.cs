@@ -540,6 +540,36 @@ internal sealed class SettlementHud : IDisposable
         if (world.Nodes.Contains(hovered))
         {
             ref readonly var node = ref world.Nodes.Get(hovered);
+
+            // <b>Somebody else's building, and what the hint says depends on who you are holding.</b> §167.
+            // The order carries no number, so the only way a player can read how much they are about to
+            // steal is off their own selection — which makes the hint doing the counting part of the design
+            // rather than decoration. It comes first for the same reason the command does: none of the
+            // friendly readings below apply to a stranger's wall.
+            if (world.IsHostile(selected, hovered))
+            {
+                var load = 0;
+                foreach (var id in selected)
+                {
+                    if (world.Agents.Contains(id)) load += world.Agents.Get(id).CarryCapacity;
+                }
+
+                var worthRobbing = node.Stores && node.Stock.Total > 0 && load > 0;
+                lines.Add((
+                    worthRobbing
+                        ? $"RIGHT-CLICK — LOOT THIS {node.Kind.ToString().ToUpperInvariant()} " +
+                          $"(UP TO {Math.Min(load, node.Stock.Total)}, ONE TRIP)"
+                        : $"RIGHT-CLICK — ATTACK THIS {node.Kind.ToString().ToUpperInvariant()}",
+                    Action));
+                if (worthRobbing && selected.Any(id =>
+                        world.Agents.Contains(id) && world.Agents.Get(id).CarryCapacity <= 0))
+                {
+                    lines.Add(("ESCORT ATTACKS WHILE CARRIERS LOAD", Body));
+                }
+
+                return;
+            }
+
             if (node.HasStructuralProject)
             {
                 var verb = node.IsUnderConstruction

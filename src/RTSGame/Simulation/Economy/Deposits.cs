@@ -21,6 +21,15 @@ internal static class Deposits
     /// <summary>Whether this resource is taken out of something standing on the map.</summary>
     public static bool IsDeposit(Resource resource) => resource is Resource.Wood or Resource.Stone;
 
+    /// <summary>Whether a node of this kind is standing natural stock rather than anybody's property.</summary>
+    /// <remarks>
+    /// Lives here rather than beside <see cref="EconomyNode.IsNaturalDeposit"/> because two places now need
+    /// it and only one of them has a node to ask: ownership is resolved while the node is being built. One
+    /// definition, and <c>IsNaturalDeposit</c> defers to it — a second spelling of this list is precisely the
+    /// near-synonym that keeps costing this codebase days.
+    /// </remarks>
+    public static bool IsNaturalDepositKind(NodeKind kind) => kind is NodeKind.Tree or NodeKind.Outcrop;
+
     /// <summary>How far from its store a body will go for this resource.</summary>
     public static float ReachMetres(Resource resource) => resource switch
     {

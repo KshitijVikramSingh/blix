@@ -129,6 +129,27 @@ internal enum AssignmentKind
     /// </para>
     /// </remarks>
     Attack,
+
+    /// <summary>
+    /// Take what is in somebody else's store and carry it home, until there is none left.
+    /// </summary>
+    /// <remarks>
+    /// <b>A haul with a hostile source, and that is the whole mechanism.</b> §167. The economy has been
+    /// physical since §6 — stock sits in nodes and rides on bodies, and a body killed drops what it held —
+    /// so robbery needs no new substance, only somebody willing to walk into a place that is not theirs.
+    /// <para>
+    /// <b>Who can do it is the design.</b> Militia carry nothing at all: their capacity is zero, so an army
+    /// can wreck a granary and cannot rob one. To loot you send <em>villagers</em> — the labour force, at
+    /// strength one and health twenty — which makes a raid a bill paid out of the harvest and the escort,
+    /// rather than a trick of the hands. Nobody had to design that; it was already true in the roster.
+    /// </para>
+    /// <para>
+    /// Distinct from <see cref="Attack"/> on purpose: looting is <em>taking</em> and attacking is
+    /// <em>breaking</em>. Keeping them apart is what lets the richer words be compositions — a sack is both,
+    /// a raid is this plus an escort, a blockade is a guard on the ground between.
+    /// </para>
+    /// </remarks>
+    Loot,
 }
 
 /// <summary>What a unit is doing at this instant, in service of its assignment.</summary>
@@ -380,6 +401,12 @@ internal readonly record struct Assignment(
     /// </remarks>
     private const float SwingSeconds = 1f;
 
+    /// <summary>Sends a carrier to empty somebody else's store. See <see cref="AssignmentKind.Loot"/>.</summary>
+    public static Assignment Loot(NodeId theirs, Vector2 at, float extent, float handoverSeconds) =>
+        new(
+            AssignmentKind.Loot, at, at, handoverSeconds, theirs, NodeId.None,
+            PlaceExtent: extent, FarPlaceExtent: extent, Quarry: AgentId.None);
+
     public static Assignment Guard(Vector2 post, float radius, float dwellSeconds) =>
         new(
             AssignmentKind.Guard, post, post, dwellSeconds, NodeId.None, NodeId.None,
@@ -394,7 +421,7 @@ internal readonly record struct Assignment(
     /// <summary>Whether this assignment alternates between two places.</summary>
     public bool HasTwoEnds =>
         Kind is AssignmentKind.Shuttle or AssignmentKind.Haul or AssignmentKind.Carry or AssignmentKind.Work or
-            AssignmentKind.Build or AssignmentKind.Train;
+            AssignmentKind.Build or AssignmentKind.Train or AssignmentKind.Loot;
 
     /// <summary>
     /// Whether the assignment goes on indefinitely, or ends when its last leg does.
@@ -407,7 +434,7 @@ internal readonly record struct Assignment(
     /// </remarks>
     public bool RepeatsForever =>
         Kind is AssignmentKind.Hold or AssignmentKind.Shuttle or AssignmentKind.Carry or AssignmentKind.Work or
-            AssignmentKind.Build or AssignmentKind.Train or AssignmentKind.Guard or AssignmentKind.Attack;
+            AssignmentKind.Build or AssignmentKind.Train or AssignmentKind.Guard or AssignmentKind.Attack or AssignmentKind.Loot;
 }
 
 /// <summary>

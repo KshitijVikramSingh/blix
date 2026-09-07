@@ -13388,3 +13388,120 @@ one §158 wrote down: name which of the pair you need, and why, before writing t
 The test asserts all six properties of the sentence — a wall chewed, held while it stood, flattened, the
 attacker released; a body held while it lived and let go when it died. The building half could not have been
 written yesterday.
+
+## 167. Loot, and the question of how much
+
+Loot is the second offensive verb, and by §166's test it is a verb: **see a store that is not yours, take a
+load, carry it home.** The end condition is one sentence, and the same three exits close it — the store is
+gone, the store is empty, or the load is home.
+
+The mechanics fell out of a question about interaction rather than about code. A raid is not a command in
+this game; **raiding is what looting plus attacking plus a retreat look like when you do them well**, which
+is the answer §166 already gave for siege and skirmish. So the only thing loot itself had to decide was how
+a store gives up what it holds, and there were two candidates:
+
+- **A pillage timer.** Stand on it for N seconds, receive a lump. It reads as a capture, and it makes the
+  haul independent of who is standing there — which means the roster cannot say anything about raiding.
+- **Leaking on contact at the hauling rate.** A body in contact takes from the store exactly the way a body
+  in contact with a heap takes from a heap. Chosen. It reuses the economy's only transfer primitive, so the
+  ledger balances with no new accounting, and **it makes carriers the unit of theft**: hands, capacity and
+  walking speed are already what decide how fast grain moves, so they decide how fast it is stolen too.
+  Militia carry nothing, so militia cannot loot — that falls out, it is not a rule.
+
+### Laden bodies
+
+Carrying now costs speed, but not linearly: **a body under half its capacity walks at full pace, and past
+that loses up to a quarter.** The threshold is the point. A linear penalty would tax the whole economy — a
+villager with one sheaf in hand would be slower than one with none, forever, everywhere — and taxes that
+apply always are not decisions. The threshold means an ordinary carrying trip is free and only a *full* one
+is slow, so "get out heavy" and "get out fast" become different things to want.
+
+It applies at both speed sites: the preferred velocity, and the formation-flow path, which do not share a
+line (§107's cohorts read the field, singletons do not).
+
+### And how much is not on the order
+
+I first wrote loot as **take a share of capacity**, with `loot(store, 0.5)` as the winter raid and
+`loot(store, 1.0)` as greed, and asked how a player would say it. The question killed the design, correctly:
+
+**no order in this game has ever carried a number.** Work that field. Guard that post. Attack that thing.
+Build there. Every one points at a thing, and the only magnitudes anywhere are in the *planner's* rules —
+garrison four, four walls, employ two thirds. Quantities live in plans; clicks point at things. A share on
+the click would have been the first scalar a player had to express, and there is no honest gesture for it:
+a modifier key does not say "heavier", and nobody types 0.5 into an RTS.
+
+So how much comes off the roster instead.
+
+- **How much in total** is how many carriers you sent — which is how players have always expressed
+  magnitude in this genre, and it needs no interface because selection already is one.
+- **How much each** is what that body can hold. Villager thirty, raider forty.
+- **Whether you stay** is whether you issue it again.
+
+Which turns the laden threshold from a knob into a **design axis for units**: a high-capacity body is a slow
+thief and a light one is a quick thief, and a scout that carries ten at full pace is a genuinely different
+raider from a bearer that carries sixty and crawls. That is a space to put units in later, not a widget.
+
+The leave condition is therefore the simplest one available: **one load, then home, then done.** The first
+version came back until the store was dry, which made staying the default — a column stood in a stranger's
+granary because nobody had said stop. Leaving is the default now, and staying is a decision taken again,
+which is what "raid in winter, get out, live off it a while" actually asks for.
+
+The self-test asserts the property, because it is the kind of thing that quietly becomes greed the next time
+somebody edits a handover: a store holding 240 loses **exactly thirty** however long the run goes on, all
+thirty arrive, the carrier is released, and the ledger drifts by nothing.
+
+Two failures came out of building it, both mine and both familiar:
+
+- **An unguarded dereference.** A laden raider now satisfied a filter it never used to reach, and the test
+  that hands are freed before a fight read an agent that was not there.
+- **A budget that forgot the return leg.** The raid round-trip assertion priced three legs at full pace when
+  the third is now laden — 196 s measured against 190 s allowed. The budget derives the slowdown from
+  `LadenSlowdown` rather than restating it, so the next tune to the constant moves the assertion with it.
+
+### The click, and the raid that nobody commanded
+
+Both verbs were reachable only from tests until now, so the interface answer had to be built as well as
+argued. It needed **no new key**. The right-click was already contextual — a work site posts hands, a
+barracks trains them, ctrl on a wall repairs or upgrades it, bare ground moves — so hostility joins that
+list as the first test rather than a new gesture: **a hostile node takes none of the friendly branches**,
+which also fixes the absurdity of pointing at a foreign barracks and training your villagers inside it.
+
+And *hostile* is not *not mine*, which is the mistake I wrote first and wrote twice — once in the command
+and once in the hint describing it. `node.Faction != mine` is wrong in both directions: unowned timber is
+not mine, and an **ally's** granary is not mine either, so the obvious spelling offers to rob your friends.
+`FactionRelations.Between` has answered this since the threat system needed it — `None` on either side is
+neutral, and diplomacy overrides win — so there is now one `IsHostile(hands, node)` on the world that both
+callers ask. The acting faction comes off the hands, not from a notion of "the player": the simulation has
+no business knowing who is holding the mouse. A test pins all four cases, because the two it rules out are
+exactly what the naive version got wrong.
+
+What happens then is decided by the party you sent, not by a modifier:
+
+- Hands that can carry rob the place. The hint counts their capacity and says how much, because with no
+  number on the order the selection is the only place a player can read the size of what they are about to
+  take — so the panel doing that arithmetic is part of the design rather than decoration.
+- Hands that cannot fight it.
+- An empty store has nothing to say to carriers, so everybody attacks it — pointing at a stripped granary
+  should do the obvious thing rather than nothing.
+
+Which means **the raid falls out of one click and was never implemented as a command.** Send militia and
+villagers together at a granary: the escort starts breaking it while the carriers take a load and leave.
+That is exactly the composition §166 promised for siege and skirmish, and it arrived for free because the
+verbs were kept small enough to combine. Nothing about "raid" appears in the code.
+
+It also earns the one thing an interface like this must earn: **the answer to "how much" is legible without
+being stated.** More carriers is more grain, heavier carriers is slower carriers, and both are visible in
+the selection you made before you clicked.
+
+### And a third sighting of the sentinel
+
+Building it turned up the trap §166 named, in a new place: `AddNode` resolved an unspecified owner to
+`new FactionId(0)` — and faction zero is the player. Every tree and outcrop on every map was nominally
+player property. It had cost nothing, because deposits are found by `IsNaturalDeposit` and never by owner,
+but it made "not yours" mean the wrong thing the moment a right-click started asking. Unowned kinds now
+resolve to `FactionId.None`, and the kind predicate lives in one place with `IsNaturalDeposit` deferring to
+it, because a second spelling of that list is how this fault reproduces.
+
+Three sightings now — `AgentId`, `FactionId`, and `NodeId` before them. The rule is worth stating flatly:
+**`default` of an id type in this codebase is a real entity, so every id type needs its `None` and no default
+may stand in for absence.**

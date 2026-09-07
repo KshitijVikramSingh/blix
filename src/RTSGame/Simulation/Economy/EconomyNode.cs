@@ -499,7 +499,7 @@ internal struct EconomyNode
     /// must not treat it as loot. Stone in the rock is on the same side of that line as wood in a trunk and the
     /// opposite side from a pile of either in the yard.
     /// </remarks>
-    public readonly bool IsNaturalDeposit => Kind is NodeKind.Tree or NodeKind.Outcrop;
+    public readonly bool IsNaturalDeposit => Deposits.IsNaturalDepositKind(Kind);
 
     /// <summary>Somewhere goods can be delivered to. A pile is not: nobody delivers to a pile.</summary>
     public readonly bool Stores => IsBuilt && Kind is NodeKind.Granary or NodeKind.ForwardDepot;

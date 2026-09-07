@@ -571,7 +571,13 @@ internal sealed class SimulationWorld
         FactionId? faction = null,
         bool built = true)
     {
-        var resolved = faction ?? new FactionId(0);
+        // <b>An unspecified owner is nobody's, if the kind is nobody's.</b> §167. This resolved to
+        // <c>new FactionId(0)</c> for everything, and faction zero is the player — so every tree and outcrop
+        // on the map was nominally player property. Nothing read it that way (deposits are found by
+        // <c>IsNaturalDeposit</c>, never by owner) so it cost nothing, and it was the third sighting of the
+        // same trap: <c>default</c> of an id type is a real entity. It matters now, because a right-click on
+        // something that is not yours is an attack, and standing timber must not answer to that.
+        var resolved = faction ?? (Deposits.IsNaturalDepositKind(kind) ? FactionId.None : new FactionId(0));
         var at = Terrain.ClampPosition(position);
         var id = Nodes.Add(new EconomyNode
         {
@@ -1576,6 +1582,29 @@ internal sealed class SimulationWorld
     /// these bodies are <em>for</em> until it is satisfied, not an interrupt they drift out of — and when it
     /// is satisfied §143's Guard takes them back to their posts without anybody being told to go.
     /// </remarks>
+    /// <summary>Whether pointing these hands at that node means a fight. §167.</summary>
+    /// <remarks>
+    /// <b>One notion of hostile, asked by both the command and the hint that describes it.</b> The obvious
+    /// spelling — <c>node.Faction != mine</c> — was written twice and was wrong twice over: it called an
+    /// unowned tree hostile, and it called an <em>ally's</em> granary lootable, because it never consulted
+    /// the diplomacy the threat system has always used. <see cref="FactionRelations.Between"/> answers both
+    /// (<c>None</c> on either side is neutral, and overrides win), so this is a delegation rather than a
+    /// rule. The acting faction comes from the hands, not from a notion of "the player": the simulation has
+    /// no business knowing who is holding the mouse.
+    /// </remarks>
+    public bool IsHostile(IEnumerable<AgentId> actors, NodeId target)
+    {
+        if (!Nodes.Contains(target)) return false;
+        var theirs = Nodes.Get(target).Faction;
+        foreach (var id in actors)
+        {
+            if (!Agents.Contains(id)) continue;
+            if (Colliders.Factions.Between(Agents.Get(id).Faction, theirs) == RelationMask.Enemy) return true;
+        }
+
+        return false;
+    }
+
     public void QueueAttack(IEnumerable<AgentId> agents, AgentId quarry, NodeId structure)
     {
         var at = Vector2.Zero;
@@ -1596,6 +1625,29 @@ internal sealed class SimulationWorld
         }
 
         QueueAssign(agents, Assignment.Attack(quarry, structure, at, extent));
+    }
+
+    /// <summary>
+    /// Sends carriers to empty a hostile store. §167.
+    /// </summary>
+    /// <remarks>
+    /// <b>Refuses bodies that cannot carry, which is the design and not a guard clause.</b> Militia have a
+    /// capacity of zero, so an order to loot means nothing to them — and silently accepting it would give a
+    /// player an army that appears to be robbing a granary and never brings anything home. An escort escorts.
+    /// </remarks>
+    public void QueueLoot(IEnumerable<AgentId> agents, NodeId theirs)
+    {
+        if (!Nodes.Contains(theirs)) return;
+        ref readonly var store = ref Nodes.Get(theirs);
+        if (!store.Stores) return;
+        var carriers = agents
+            .Where(id => Agents.Contains(id) && Agents.Get(id).CarryCapacity > 0)
+            .ToArray();
+        if (carriers.Length == 0) return;
+        QueueAssign(
+            carriers,
+            Assignment.Loot(
+                theirs, store.Position, store.FootprintRadius, EconomySystem.HandoverSeconds));
     }
 
     /// <summary>Commits existing villagers to permanent militia conversion at a completed barracks.</summary>
@@ -2688,6 +2740,12 @@ internal sealed class SimulationWorld
             return;
         }
 
+        if (agent.Jobs.Assignment.Kind == AssignmentKind.Loot)
+        {
+            LooterHandover(ref agent, leg);
+            return;
+        }
+
         if (agent.Jobs.Assignment.Kind == AssignmentKind.Build)
         {
             BuilderHandover(ref agent, leg);
@@ -3739,6 +3797,150 @@ internal sealed class SimulationWorld
         }
     }
 
+    /// <summary>
+    /// How much a load costs a body in pace: nothing up to a point, then something.
+    /// </summary>
+    /// <remarks>
+    /// <b>§167, and the shape of it is the decision.</b> A flat penalty makes carrying uniformly worse and
+    /// changes no choice; a penalty that only bites above a share of capacity turns <em>how much to take</em>
+    /// into a question. A raider deciding between a quick half-load and a slow full one is making the
+    /// interesting version of "how do you get away with it".
+    /// <para>
+    /// Half a load is free — a villager walking its own grain in is unaffected, so nothing calibrated in the
+    /// economy moves for the ordinary case. A full load is a quarter slower, which over a hundred metres is
+    /// about eight seconds: long enough that an escort matters and short enough that it is not a death
+    /// sentence.
+    /// </para>
+    /// </remarks>
+    private static float LadenScale(in AgentState agent)
+    {
+        if (agent.CarryCapacity <= 0 || agent.Jobs.CarriedUnits <= 0) return 1f;
+        var share = agent.Jobs.CarriedUnits / (float)agent.CarryCapacity;
+        var over = MathF.Max(0f, share - FreeShareOfCapacity) / (1f - FreeShareOfCapacity);
+        return 1f - MathF.Min(1f, over) * LadenSlowdown;
+    }
+
+    /// <summary>Share of a body's capacity it can carry for nothing.</summary>
+    internal const float FreeShareOfCapacity = 0.5f;
+
+    /// <summary>How much slower a body is at full capacity.</summary>
+    /// <remarks>
+    /// Internal because a time budget that assumes a body walks at its own speed has to know when it does
+    /// not — see the raider round trip in SettlementScenarios, which §167 broke by making the way home
+    /// slower than the way out.
+    /// </remarks>
+    internal const float LadenSlowdown = 0.25f;
+
+    /// <summary>
+    /// A looter fills its arms at a hostile store, walks the load home, and comes back for more.
+    /// </summary>
+    /// <remarks>
+    /// Two legs, like every hauling errand here: out to theirs, back to ours. It ends when their store is
+    /// gone or empty, and then §143's Guard — or nothing, for a villager — takes the body back.
+    /// <para>
+    /// <b>It takes more of what it already holds, or picks the fullest shelf when empty-handed.</b> §163
+    /// bought that lesson expensively: a body's cargo is one resource and one count, so taking a second kind
+    /// re-labels the first and the ledger never hears about it.
+    /// </para>
+    /// </remarks>
+    private void LooterHandover(ref AgentState agent, int leg)
+    {
+        ref var jobs = ref agent.Jobs;
+        var theirs = jobs.Assignment.Source;
+
+        if (leg % 2 == 0)
+        {
+            if (!Nodes.Contains(theirs))
+            {
+                if (jobs.CarriedUnits > 0) SendLootHome(ref agent);
+                else JobSystem.Assign(ref agent, Assignment.None);
+                return;
+            }
+
+            ref var store = ref Nodes.Get(theirs);
+            // One load: whatever this body can hold, taken in one visit.
+            var room = agent.CarryCapacity - jobs.CarriedUnits;
+            if (room > 0)
+            {
+                var wanted = jobs.CarriedUnits > 0 ? jobs.Carrying : Fullest(in store);
+                var taken = Math.Min(room, store.Stock[wanted]);
+                if (taken > 0)
+                {
+                    store.Stock.Add(wanted, -taken);
+                    jobs.Carrying = wanted;
+                    jobs.CarriedUnits += taken;
+                }
+            }
+
+            if (jobs.CarriedUnits > 0) SendLootHome(ref agent);
+            else JobSystem.Assign(ref agent, Assignment.None);
+            return;
+        }
+
+        // <b>Home, and that is the end of it. One load, then done.</b> §168.
+        //
+        // The first version came back for more until the store was dry, which is greed rather than a raid —
+        // and it made staying the default, so a column stood in somebody else's granary because nobody had
+        // said stop. Leaving is the default now and <b>staying is a decision you take again</b>, which is
+        // what "raid in winter, get out, live off it for a while" actually asks for.
+        //
+        // <b>And there is no "how much" on the order, deliberately.</b> Every order in this game points at a
+        // thing — work that field, guard that post, attack that thing — and the only magnitudes anywhere are
+        // in the planner's rules. A share on the click would be the first scalar a player had to express, and
+        // there is no honest gesture for it. So how much comes off the roster instead: how many carriers you
+        // sent, and what each of them can hold. A villager takes thirty and a raider forty, and §167's laden
+        // threshold turns that into a real axis — a high-capacity body is a slow thief and a light one is a
+        // quick one. That is a design space for units rather than a widget.
+        if (Nodes.Contains(jobs.Assignment.Sink) && jobs.CarriedUnits > 0)
+        {
+            ref var home = ref Nodes.Get(jobs.Assignment.Sink);
+            var delivered = Math.Min(jobs.CarriedUnits, home.RoomFor(jobs.Carrying));
+            home.Stock.Add(jobs.Carrying, delivered);
+            jobs.CarriedUnits -= delivered;
+        }
+
+        JobSystem.Assign(ref agent, Assignment.None);
+    }
+
+    /// <summary>Points a loaded looter at its own nearest store.</summary>
+    private void SendLootHome(ref AgentState agent)
+    {
+        var home = EconomySystem.NearestStoreWithRoom(
+            Nodes, agent.Jobs.Carrying, agent.Faction, agent.Position);
+        if (!Nodes.Contains(home))
+        {
+            JobSystem.Assign(ref agent, Assignment.None);
+            return;
+        }
+
+        ref readonly var store = ref Nodes.Get(home);
+        JobSystem.Retarget(
+            ref agent,
+            agent.Jobs.Assignment with
+            {
+                Sink = home,
+                FarAnchor = store.Position,
+                FarPlaceExtent = store.FootprintRadius,
+            },
+            leg: 1);
+    }
+
+    /// <summary>Whichever shelf has most on it, which is what a thief with empty arms takes.</summary>
+    private static Resource Fullest(in EconomyNode store)
+    {
+        var best = Resource.Grain;
+        var most = 0;
+        foreach (var resource in Resources.All)
+        {
+            var held = store.Stock[resource];
+            if (held <= most) continue;
+            most = held;
+            best = resource;
+        }
+
+        return best;
+    }
+
     private bool TrySendBackToWork(ref AgentState agent)
     {
         var assignment = agent.Jobs.Assignment;
@@ -4704,7 +4906,8 @@ internal sealed class SimulationWorld
             }
 
             var terrainSpeed = Terrain.SpeedMultiplier(agent.Position);
-            agent.PreferredVelocity = heading * agent.MaximumSpeed * terrainSpeed * arrivalScale;
+            agent.PreferredVelocity =
+                heading * agent.MaximumSpeed * terrainSpeed * arrivalScale * LadenScale(in agent);
         }
 
     }
@@ -4842,7 +5045,9 @@ internal sealed class SimulationWorld
         }
 
         var terrainSpeed = Terrain.SpeedMultiplier(agent.Position);
-        var speed = agent.MaximumSpeed * terrainSpeed;
+        // The same load penalty the preferred velocity takes, so a body's own idea of how fast it can go
+        // agrees with how fast it is allowed to go. Two answers to that would be §158's pattern again.
+        var speed = agent.MaximumSpeed * terrainSpeed * LadenScale(in agent);
         var desired = flow * speed;
 
         // No station-keeping into a gap. A formation cannot be held through an opening one

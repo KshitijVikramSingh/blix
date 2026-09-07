@@ -163,6 +163,8 @@ internal static class SimulationSelfTests
         Check("a guard comes home after a fight", AGuardComesHome());
         Check("seeing a neighbour moves the garrison", ContactMovesTheGarrison());
         Check("an attack ends with its target", AnAttackEndsWithItsTarget());
+        Check("hostile is what diplomacy says, not what ownership says", HostileIsWhatDiplomacySays());
+        Check("loot carries it home and militia cannot", LootCarriesItHome());
         Check("a household that goes hungry loses somebody", PrivationSpendsItselfAsEmigration());
         Check("a wood hides what walks through it", TreesBlockSight());
         Check(
@@ -5865,6 +5867,105 @@ internal static class SimulationSelfTests
         return passed;
     }
 
+    /// <summary>
+    /// Loot moves stock from their store to ours, the books balance, and militia cannot do it.
+    /// </summary>
+    /// <remarks>
+    /// §167. Three properties, and the third is the design rather than a guard: militia carry nothing, so an
+    /// army can wreck a granary and cannot rob one, and looting is therefore a bill paid out of the harvest —
+    /// you send the labour force. Asserted because it is the fact the whole raid vocabulary rests on, and a
+    /// later change to the roster that quietly gave militia capacity would take the decision out of the game
+    /// without anybody noticing.
+    /// <para>
+    /// The ledger is asserted too. Robbery is a transfer, not production, so it must net to zero — and §163
+    /// showed exactly how a body carrying one thing and picking up another silently mints resources.
+    /// </para>
+    /// </remarks>
+    /// <summary>What counts as hostile, and the two things that must not. §167.</summary>
+    /// <remarks>
+    /// The right-click picks its verb off this predicate, so a wrong answer here is a player attacking their
+    /// own forest. Both failures it guards against were live in the obvious spelling of the test
+    /// (<c>node.Faction != mine</c>): standing timber is unowned and read as hostile, and an ally read as
+    /// hostile because ownership was compared instead of asking the diplomacy.
+    /// </remarks>
+    private static bool HostileIsWhatDiplomacySays()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        var them = new FactionId(1);
+        var friends = new FactionId(2);
+
+        var theirs = world.AddNode(NodeKind.Granary, new Vector2(30f, 0f), capacity: 4000, faction: them);
+        var allied = world.AddNode(NodeKind.Granary, new Vector2(0f, 30f), capacity: 4000, faction: friends);
+        var tree = world.AddNode(NodeKind.Tree, new Vector2(6f, 0f), capacity: (int)Woodland.WoodPerTree);
+        var mine = world.AddNode(NodeKind.Granary, new Vector2(-30f, 0f), capacity: 4000, faction: us);
+        world.Colliders.Factions.Set(us, friends, RelationMask.Ally);
+
+        var hand = new[] { world.SpawnAgent(new Vector2(-26f, 0f), UnitType.Villager, us) };
+
+        var stranger = world.IsHostile(hand, theirs);
+        var ally = world.IsHostile(hand, allied);
+        var timber = world.IsHostile(hand, tree);
+        var own = world.IsHostile(hand, mine);
+        var unowned = world.Nodes.Get(tree).Faction == FactionId.None;
+
+        var passed = stranger && !ally && !timber && !own && unowned;
+        Console.WriteLine(
+            $"    a stranger's granary={stranger}, an ally's={ally}, a tree={timber}, our own={own}; " +
+            $"standing timber is nobody's={unowned}");
+        return passed;
+    }
+
+    private static bool LootCarriesItHome()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        var them = new FactionId(1);
+
+        var ours = world.AddNode(NodeKind.Granary, new Vector2(-30f, 0f), capacity: 4000, faction: us);
+        var theirs = world.AddNode(NodeKind.Granary, new Vector2(30f, 0f), capacity: 4000, faction: them);
+        world.SeedStock(theirs, Resource.Grain, 240);
+
+        var thief = world.SpawnAgent(new Vector2(-26f, 0f), UnitType.Villager, us);
+        var escort = world.SpawnAgent(new Vector2(-26f, 4f), UnitType.Villager, us);
+        world.Agents.Get(escort).Role = AgentRole.Militia;
+        world.Agents.Get(escort).Strength = UnitType.Militia.Strength;
+        // Militia carry nothing, so this is the roster refusing the order rather than the code declining it.
+        WearMilitiaFrame(world, escort);
+
+        world.QueueLoot(new[] { thief, escort }, theirs);
+        Tick(world, 4);
+        var carrierTook = world.Agents.Get(thief).Jobs.Assignment.Kind == AssignmentKind.Loot;
+        var escortRefused = world.Agents.Get(escort).Jobs.Assignment.Kind != AssignmentKind.Loot;
+
+        Tick(world, 3600);
+        var stolen = 240 - world.Nodes.Get(theirs).Stock[Resource.Grain];
+        var athome = world.Nodes.Get(ours).Stock[Resource.Grain];
+        var drift = world.Economy.Discrepancy(world.Nodes, world.Agents);
+
+        // <b>One load, and then it stops.</b> §168: the order is "take a load and come home", so a store with
+        // two hundred and forty in it loses exactly one villager's thirty however long the run goes on. That
+        // is the whole leave condition — staying is a decision taken again, not the absence of one — and it
+        // has to be asserted or it will quietly become greed the next time somebody touches the handover.
+        var oneLoad = stolen == UnitType.Villager.CarryCapacity;
+        var released = world.Agents.Get(thief).Jobs.Assignment.Kind != AssignmentKind.Loot;
+
+        var passed = carrierTook && escortRefused && oneLoad && athome == stolen && released &&
+                     drift.IsZero;
+        Console.WriteLine(
+            $"    a carrier took the order={carrierTook}, militia refused it={escortRefused}; " +
+            $"{stolen} grain left a granary of 240 and {athome} reached ours; one load only={oneLoad}, " +
+            $"carrier released={released}; drift {drift.Grain}/{drift.Wood}/{drift.Stone}");
+        return passed;
+    }
+
+    /// <summary>Makes a body a militia in the way training does, so its capacity is a militia's.</summary>
+    private static void WearMilitiaFrame(SimulationWorld world, AgentId body)
+    {
+        ref var agent = ref world.Agents.Get(body);
+        agent.CarryCapacity = UnitType.Militia.CarryCapacity;
+    }
+
     private static int PeopleOf(SimulationWorld world, FactionId faction)
     {
         var total = 0;
@@ -6062,8 +6163,13 @@ internal static class SimulationSelfTests
             ref readonly var it = ref world.Agents.Get(carrier);
             if (!it.IsAlive) break;
             if (it.Jobs.CarriedUnits <= 0) stowed = true;
-            // Never within a raider's reach with its hands still full.
-            else if (Vector2.Distance(it.Position, world.Agents.Get(raider).Position) < 2f)
+            // Never within a raider's reach with its hands still full. Guarded on the raider still being
+            // alive, which it had not needed to be until §167: a loaded body is now slower than an empty
+            // one, so a raider carrying somebody's grain gets caught by the eight villagers it used to
+            // outrun, and this line dereferenced a corpse. The test is about the carrier stowing; the
+            // raider's survival was never its subject.
+            else if (world.Agents.Contains(raider) && world.Agents.Get(raider).IsAlive &&
+                     Vector2.Distance(it.Position, world.Agents.Get(raider).Position) < 2f)
             {
                 carriedIntoTheFight = true;
             }

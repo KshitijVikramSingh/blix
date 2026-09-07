@@ -2661,6 +2661,16 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         if (simulation.Nodes.Contains(target))
         {
             ref readonly var node = ref simulation.Nodes.Get(target);
+
+            // <b>Somebody else's building takes none of the friendly branches.</b> §167. Pointing at a
+            // foreign barracks must not train your villagers in it, and pointing at a foreign field must not
+            // post them to work it, so hostility is tested before anything else a right-click can mean.
+            if (simulation.IsHostile(selection.Selected, target))
+            {
+                IssueRaid(target);
+                return;
+            }
+
             if (additiveSelection && node.IsStructure && !node.HasStructuralProject)
             {
                 var began = node.Condition < node.MaxCondition - 0.0001f
@@ -2701,6 +2711,49 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         }
 
         simulation.QueueMove(selection.Snapshot(), pointerWorld);
+    }
+
+    /// <summary>Right-clicking a hostile node: the party you sent decides what happens to it. §167.</summary>
+    /// <remarks>
+    /// <b>There is no loot key and no attack key, and no number anywhere.</b> Which is the whole answer to
+    /// "how does a player say loot half a load": they do not, because no order in this game carries a
+    /// magnitude — every one of them points at a thing, and the quantities all live in plans. So the verb
+    /// comes off the selection instead. Hands that can carry rob the place; hands that cannot fight it.
+    /// <para>
+    /// Which makes a raid fall out of one click rather than needing to be a command. Send militia and
+    /// villagers together at a granary and the escort starts breaking it while the carriers take a load and
+    /// leave — the composition §166 promised, expressed by who you picked. And it scales with the roster
+    /// without an interface: how much you steal is how many carriers you brought and what each can hold.
+    /// </para>
+    /// <para>
+    /// An empty store has nothing to say to carriers, so everybody attacks it. That is deliberate: it means
+    /// pointing at a stripped granary does the obvious thing instead of nothing at all.
+    /// </para>
+    /// </remarks>
+    private void IssueRaid(NodeId target)
+    {
+        if (selection.Selected.Count == 0) return;
+        shuttleAnchor = null;
+        ref readonly var node = ref simulation.Nodes.Get(target);
+
+        var carriers = new List<AgentId>();
+        var fighters = new List<AgentId>();
+        foreach (var id in selection.Snapshot())
+        {
+            if (!simulation.Agents.Contains(id)) continue;
+            (simulation.Agents.Get(id).CarryCapacity > 0 ? carriers : fighters).Add(id);
+        }
+
+        var worthRobbing = node.Stores && node.Stock.Total > 0 && carriers.Count > 0;
+        if (worthRobbing) simulation.QueueLoot(carriers, target);
+        else fighters.AddRange(carriers);
+
+        if (fighters.Count > 0) simulation.QueueAttack(fighters, AgentId.None, target);
+
+        Console.WriteLine(
+            $"  {node.Kind} #{target.Value} of faction {node.Faction.Value}: " +
+            (worthRobbing ? $"{carriers.Count} carrier(s) looting" : "nothing to carry") +
+            (fighters.Count > 0 ? $", {fighters.Count} attacking" : string.Empty));
     }
 
     /// <summary>
