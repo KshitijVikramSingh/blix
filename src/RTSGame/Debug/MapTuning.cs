@@ -118,8 +118,13 @@ internal sealed class MapTuning
     /// relaunching — which also meant re-entering the seed and losing the framing you had found. Here it is a
     /// toggle and a regenerate.
     /// </remarks>
+    /// <remarks>
+    /// Initialised explicitly rather than left to the default, because nothing in the code assigns it — the
+    /// panel writes every <c>[Tune]</c> field by reflection — and the compiler is right to say so about a
+    /// field it cannot see being written. Saying <c>false</c> out loud is the honest way to quiet it.
+    /// </remarks>
     [Tune(Label = "drainage first", Group = "relief")]
-    public bool DrainageFirst;
+    public bool DrainageFirst = false;
 
     /// <summary>
     /// How much a channel climbs per hundred metres of its own course, in the drainage-first generator.
