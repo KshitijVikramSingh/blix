@@ -13505,3 +13505,35 @@ it, because a second spelling of that list is how this fault reproduces.
 Three sightings now — `AgentId`, `FactionId`, and `NodeId` before them. The rule is worth stating flatly:
 **`default` of an id type in this codebase is a real entity, so every id type needs its `None` and no default
 may stand in for absence.**
+
+### What a raid is actually worth, which is where the roster's debt shows
+
+Priced from the constants rather than guessed at, because "is one load worth the walk" is arithmetic. A
+villager walks 1.79 m/s, carries 30, eats one grain a day, and a full load costs it a quarter of its pace;
+a year is 5,400 s over 270 days.
+
+**Villager looting breaks even against farming at 168 m.** Closer than that and a body steals faster than
+a field feeds; further and it should have stayed home. The maps generate neighbours at 171 m and 272 m — so
+as played, looting with villagers is at or past the line before anything else is counted.
+
+And something else has to be counted: **a party eats while it walks.** Eight villagers at 272 m are away
+17.7 game-days, bring 240 grain, and eat 142 of ours doing it — **net 98**, six days of food for fifteen
+mouths. Against a 67-day winter costing 1,005 grain that is 10.2 trips and **181 game-days of walking to
+cover 67 days of winter.** Villager looting cannot be a livelihood. It is opportunism, and the 168 m figure
+says exactly how local it has to be.
+
+**Raiders close it, and nobody designed them to.** `UnitType.Raider` already carries 40, moves at 2.05, and
+has `Appetite: 0f` — it does not eat. Eight of them at 272 m are away 15.5 days, bring 320, eat nothing:
+**net 320, three trips, 49 game-days of walking against 67 days of winter.** That closes with room to
+spare, and it closes for the reason §167 claimed rather than by a tuning pass — *who you send is how much
+you take*, and the roster already had the body.
+
+Which is the strongest evidence the interface answer was right. The identical click is a losing errand with
+villagers and a winter strategy with raiders, and a player expresses the difference entirely by selection.
+No share, no modifier, no number.
+
+**The debt it exposes:** `UnitType.Raider` exists only as *the thing that attacks you* — `RaidDirector` and
+the fight benchmarks spawn it, and there is no way for a player or a plan to field one. So the verb is built
+and the body that makes it a strategy is unobtainable. That is the roster's first concrete owed item, and it
+is a better place to start §7 than any balance dial: **the first unit the roster needs is the one that makes
+an existing verb worth using.**
