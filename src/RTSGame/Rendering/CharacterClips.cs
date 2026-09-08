@@ -97,8 +97,9 @@ internal static class CharacterClips
         (BodyAction.Strike,
             new[]
             {
-                "Sword_Attack", "Strike", "Attack", "Man_SwordSlash", "SwordSlash",
-                "Sword And Shield Slash", "Punch_Cross", "Punch_Jab", "Man_Punch", "Punch",
+                "Sword_Attack", "Sword_Slash", "Strike", "Attack", "Man_SwordSlash", "SwordSlash",
+                "Sword And Shield Slash", "Punch_Cross", "Punch_Jab", "Punch_Right", "Punch_Left",
+                "Man_Punch", "Punch",
             },
             Array.Empty<string>()),
         (BodyAction.Fall,

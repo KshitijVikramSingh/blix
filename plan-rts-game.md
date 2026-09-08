@@ -13659,3 +13659,90 @@ royalty-free use in a project but not redistributing the animation data on its o
 the FBX or the merged GLB is arguably that. Every other asset here is CC0 with a `CREDITS.md` line.
 Quaternius's Universal Animation Library is the clean alternative — CC0, 120+ clips, locomotion included —
 on a different skeleton, which is the retargeting the pipeline already needs Blender for.
+
+## 169. Everything the asset can tell you, and the mistake I made three times
+
+§168 put rigged bodies on screen. Judging them from the chair produced four complaints in three sittings —
+"invisible villagers", "floating in the air", "no colors", "foot placement and facing is weird" — and all
+but the last were one fault wearing different clothes.
+
+### The pattern, which is the only part worth remembering
+
+| reported | cause |
+|---|---|
+| invisible | measured the **bind** pose, drew the **posed** pose |
+| floating | measured **one clip's** root offset, drew **another's** |
+| stride 0.00 m | measured in **raw bone space**, scaled against a **mesh-node** height |
+
+**Every one is measuring through a different transform from the one I draw through.** Each was found by
+instrumenting, each looked like a rendering fault, and in each case every value I could print was correct —
+because the arithmetic was right and the *frame* was wrong. Three instances is a class, so the defence is
+written into the code rather than fixed case by case: the measurement now calls the same
+`StripRootMotion` the draw calls, and takes the same `MeshNodeTransform` the model matrix takes. A body is
+measured through exactly the transform it is drawn through, and cannot disagree with itself about where it
+is or how big it is.
+
+The related discipline: `0.00 m` was a **silent measurement failure** that fell back to a guessed constant
+without a word. It is printed now, and a fallback says it is falling back.
+
+### What is derived instead of assumed
+
+- **Height, from the posed body.** One pass over every vertex at load, skinning each by the idle pose's
+  palette. glTF permits bind ≠ rest freely and a Blender round trip produces it as a matter of course — the
+  same character stored standing at the origin came back with its bind geometry five units under the floor,
+  and the file is not wrong. Also centred horizontally, not only floored vertically: correcting the one axis
+  that happened to be wrong is how the second bug hid behind the first.
+- **Colour, from the asset.** Tints were guessed from material names against a vocabulary from a different
+  pack, so eleven materials — `Black`, `Grey`, `Green`, `Gold`, `Eyebrows` — all resolved to one wool
+  brown. That is what "no colors" looks like. glTF carries `BaseColorFactor` per material; the name guess is
+  now only for files without one.
+- **Facing, from the rig.** The draw's yaw assumed a model facing `+X`, true of the prop villager it was
+  written for and false of every rigged glTF humanoid — so bodies had been ninety degrees off since the
+  first one loaded. Measured: **on any humanoid, ankle to toe is forward.** Came back −90° from
+  `DEF-foot.L → DEF-toe.L`. A per-asset dial would have been wrong the first time somebody forgot it.
+- **Stride, from the walk clip.** The gait advances by metres covered, which needs to know what one cycle of
+  *this* clip is worth; I had set 1.5 m by picking a plausible number. Root motion is stripped so the body
+  does not travel, but a foot still swings — and the fore-and-aft distance a foot covers relative to the
+  hips over one cycle is half a stride. Measured 0.75 m against my 1.5 m: **exactly twice too long**, which
+  drags the feet.
+- **Root placement, discarded outright.** §168 stripped only the horizontal, reasoning that a gait's bob
+  lives in the vertical. True of a well-authored in-place clip whose root sits at the origin; false of a
+  library where every clip's root carries its own constant offset. A body normalised against its idle and
+  drawn walking came out at a different height. The root bone is a placement handle, not a body part.
+
+### The dressed body, and why it was reverted
+
+A dressed Quaternius character was cooked through the pipeline — five skinned meshes joined into one, its
+bones renamed to the animation library's naming, forty-five clips carried across — and it **bound
+perfectly**: 186 channels, all 62 joints driven, every clip playing. Reported from the chair as "scary,
+weird broken animations".
+
+**A name map is not a retarget**, and this is the sentence to keep. Renaming bones makes another rig's clips
+*address* this one; it does nothing about the two rigs disagreeing on rest pose and bone roll, and a
+rotation authored against a different rest orientation applies to a different starting frame. Limbs twist.
+Every objective check passed. The presets are marked in `tools/character_merge.py` as safe only between rigs
+that share a rest pose — same pack, same generation, where a rename is fixing a spelling change — and the
+real answer is named there: constrain each target bone to its source in world space and bake, which
+*corrects* the difference instead of ignoring it. This script does not do that yet.
+
+So the body is the grey mannequin again: it animates correctly, its forty-five clips are the library's own,
+and `Fixing_Kneeling` gives labour a real work animation. It is an honest placeholder and not a villager —
+"the model choice itself looks a bit out of touch" is the standing verdict, and the answer to it is the CC0
+*Modular Character Outfits — Fantasy* pack plus a real retarget, which is its own piece of work.
+
+### What the pipeline learned by being run
+
+Four bugs came out of the first real Blender runs, none of which reading the script would have found:
+
+- **`STEP` interpolation.** The importer accepts only `LINEAR`, and `export_optimize_animation_size` (on by
+  default) collapses any unchanging channel to a single keyframe — which needs no interpolation, so it is
+  written as `STEP`. Every keyframe in the source was already `LINEAR`; the `STEP` was manufactured at
+  export. Looking at the keys could never have found it.
+- **Renaming bones orphans the body's own clips.** They still export, as animations that move nothing. The
+  script drops them when a rename is applied and refuses outright if you rename without supplying the clips
+  the rename is for.
+- **One action per file was the wrong shape.** Right for Mixamo, which exports one clip per file; a library
+  export is one file carrying fifty, and taking the first would have imported a fiftieth of the content.
+- **`Action.fcurves` no longer exists** in Blender 5.x — actions are slotted, and the curves live under
+  layers → strips → channelbags. Both spellings are handled, because the failure mode of picking one is a
+  pipeline that works only on the machine it was written on.

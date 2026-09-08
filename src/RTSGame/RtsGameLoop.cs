@@ -2506,11 +2506,11 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         bodies = SkinnedBodies.Load(
             vk,
             Path.Combine(AppContext.BaseDirectory, "Assets", "models"),
-            // <b>The Universal base character, on the Universal rig.</b> Chosen over the Animated Men body
-            // for one reason that outlasts this session: its skeleton is the Rigify deform rig Quaternius's
-            // animation libraries are authored against, so their clips — including the farming loop that is
-            // the only real content gap — drop onto it with no retargeting at all. It also arrives as one
-            // skin and one mesh, which is what the importer wants, and in two primitives rather than five.
+            // <b>A dressed body driven by the animation library's clips.</b> Cooked by
+            // tools/cook-character.sh: an outfit-compatible Quaternius character (five skinned meshes,
+            // which the importer would have reduced to one) joined into a single skin, its bones renamed to
+            // the deform naming the 53-bone library uses, and the library's forty-five clips carried onto
+            // it. The mannequin it replaces is still in art/characters — it is where the clips come from.
             "villager_universal.glb",
             skinnedShader, skinnedPipeline,
             skinnedCasterShader, skinnedCasterPipeline,
@@ -7124,8 +7124,9 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
     /// like they are floating. Advancing the phase by metres covered means a laden body visibly trudges,
     /// §167's speed penalty becomes something you can see, and a body stopped dead stops moving its legs.
     /// <para>
-    /// One stride of this clip covers about a metre and a half at the pace it was authored for; the number is
-    /// a look dial, not a measurement, and it is the one to turn if the walk reads fast or mincing.
+    /// <b>A fallback now, not the figure in use.</b> SkinnedBodies measures the real stride out of the walk
+    /// clip — a foot's fore-and-aft swing relative to the hips — and this stands in only for an asset with
+    /// no walk clip or no foot bone to measure.
     /// </para>
     /// </remarks>
     private const float GaitMetresPerCycle = 1.5f;
@@ -7142,8 +7143,13 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
 
         if (locomotion)
         {
+            // <b>The asset's own stride if it has one, the constant only if it does not.</b> A guessed
+            // stride is what makes feet scuff — too short and they gabble, too long and they slide — and
+            // SkinnedBodies recovers the real figure from the walk clip, so the guess is now a fallback
+            // rather than the number in use.
+            var stride = bodies is { StridePerCycle: > 0.01f } ? bodies.StridePerCycle : GaitMetresPerCycle;
             var metres = agent.Velocity.Length() * deltaSeconds;
-            gaitPhase[id] += (float)(metres / GaitMetresPerCycle * clip.Duration);
+            gaitPhase[id] += (float)(metres / stride * clip.Duration);
         }
         else
         {
@@ -8565,6 +8571,11 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 var yaw = agent.Facing.LengthSquared() > 0.0001f
                     ? -MathF.Atan2(agent.Facing.Y, agent.Facing.X)
                     : 0f;
+                // <b>Plus whatever this asset's own forward is.</b> The line above was written for the prop
+                // villager, whose mesh faces +X; a rigged glTF humanoid usually faces along Z instead, and
+                // the difference reads from the chair as bodies walking sideways. SkinnedBodies measures it
+                // off the rig — ankle to toe is forward on any humanoid — so no asset needs a hand-set dial.
+                var skinnedYaw = yaw + (bodies?.FacingOffsetRadians ?? 0f);
                 var placement = Matrix4x4.CreateScale(bodyHeight) *
                                 Matrix4x4.CreateRotationY(yaw) *
                                 Matrix4x4.CreateTranslation(position.X, height, position.Y);
@@ -8584,7 +8595,9 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                         ? RaiderColor
                         : agent.Role == AgentRole.Militia ? MilitiaColor : (Vector4?)null;
                     posed = bodies.Add(
-                        placement,
+                        Matrix4x4.CreateScale(bodyHeight) *
+                        Matrix4x4.CreateRotationY(skinnedYaw) *
+                        Matrix4x4.CreateTranslation(position.X, height, position.Y),
                         tint,
                         clip,
                         GaitOf(in agent, clip, locomotion, frameSeconds),

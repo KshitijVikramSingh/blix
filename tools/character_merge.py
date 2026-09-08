@@ -23,6 +23,9 @@
 #     RTSGame/Rendering/CharacterClips.cs.
 #   * Vertices stay mesh-local; the mesh node's transform is exposed separately. So do
 #     NOT "apply all transforms" as a tidy-up step — it will move the skinning frame.
+#   * LINEAR interpolation ONLY. Blender writes CONSTANT keys as glTF STEP and BEZIER as
+#     CUBICSPLINE, both of which the importer refuses, so every keyframe is flattened to
+#     LINEAR before export. See flatten_interpolation.
 
 import argparse
 import os
@@ -38,7 +41,12 @@ def argv_after_dashes():
 def parse_args():
     p = argparse.ArgumentParser(description="Merge a rig and its animation clips into one .glb")
     p.add_argument("--base", required=True, help="the rigged character (.fbx or .glb)")
-    p.add_argument("--clips", required=True, help="folder of single-animation .fbx files")
+    p.add_argument(
+        "--clips",
+        default="",
+        help="folder of single-animation files to carry onto the rig. Optional: with no --clips the "
+             "character is joined and re-exported with whatever animations it already carries, which is "
+             "what a modular Quaternius character needs (several skinned meshes, clips already on board).")
     p.add_argument("--out", required=True, help="the .glb to write")
     p.add_argument(
         "--name-map",
@@ -56,9 +64,10 @@ def parse_args():
     p.add_argument(
         "--preset",
         default="",
-        choices=["", "quaternius-2022-to-base"],
-        help="a worked-out --bone-map. 'quaternius-2022-to-base' renames the 2022 Animated Men rig "
-             "to the naming Quaternius's Universal Animation Library and base characters use.")
+        choices=["", "basechar-to-rigify", "quaternius-2022-to-base"],
+        help="a worked-out --bone-map. 'basechar-to-rigify' renames an outfit-compatible base character "
+             "(Root/Hips/Torso/UpperLeg, 62 joints) to the DEF- deform names the 53-bone animation library "
+             "uses, so those clips drive a dressed body. 'quaternius-2022-to-base' is the older 2022 rig.")
     p.add_argument(
         "--no-join",
         action="store_true",
@@ -84,7 +93,60 @@ def parse_args():
 # Dropped bones simply receive no animation and keep their rest pose. At eighty metres that costs a
 # slightly stiffer torso and fingers nobody can see, which is why mapping is a real option rather than a
 # compromise — but retargeting nothing at all is better, so prefer a body on the current naming.
+# ============================================================================================
+# WARNING, PAID FOR FROM THE CHAIR: A NAME MAP IS NOT A RETARGET.
+#
+# `basechar-to-rigify` below binds perfectly — 186 channels, all 62 joints driven, the asset loads
+# and every clip plays — and the result was reported as "scary, weird broken animations". Renaming
+# bones makes another rig's clips ADDRESS this one; it does nothing about the two rigs disagreeing
+# on rest pose and bone roll. A rotation authored for a bone whose rest orientation differs applies
+# that rotation to a different starting frame, and limbs twist.
+#
+# So these presets are only safe between rigs that share a rest pose — which, in practice, means
+# rigs from the same generation of the same pack, where a rename is fixing a spelling change and
+# nothing else. Between generations, use each character's OWN clips (omit --clips and --preset,
+# which joins and re-exports what it came with), or do a real retarget: constrain each target bone
+# to its source in world space and bake, which corrects the rest-pose difference instead of
+# ignoring it. That is a job this script does not yet do.
+# ============================================================================================
+#
+# <b>Base-character names to the Rigify deform names.</b> Quaternius has three skeletons in circulation and
+# they do not interoperate by accident:
+#
+#   HumanArmature   31 joints  the 2022 packs (Animated Men)
+#   Root            62 joints  base characters, modular men, the fantasy OUTFITS, and current library exports
+#   DEF-*           53 joints  the "Animated Base Character" and the 45 clips that ship on it
+#
+# The outfits are built for the second. So dressing a villager means a body on that rig — and then the
+# 53-bone library's clips need renaming to drive it. Every bone a gait needs corresponds exactly; only the
+# spelling differs, which is why this is a name map and not a retarget.
+#
+# Applied to the BASE rig, because the script renames the body to match the clips. Read the warning
+# above before reaching for either of them.
 PRESETS = {
+    "basechar-to-rigify": {
+        "Root": "root",
+        "Hips": "DEF-hips",
+        "Abdomen": "DEF-spine.001",
+        "Torso": "DEF-spine.002",
+        "Chest": "DEF-spine.003",
+        "Neck": "DEF-neck",
+        "Head": "DEF-head",
+        "Shoulder.L": "DEF-shoulder.L",
+        "Shoulder.R": "DEF-shoulder.R",
+        "UpperArm.L": "DEF-upper_arm.L",
+        "UpperArm.R": "DEF-upper_arm.R",
+        "LowerArm.L": "DEF-forearm.L",
+        "LowerArm.R": "DEF-forearm.R",
+        "Wrist.L": "DEF-hand.L",
+        "Wrist.R": "DEF-hand.R",
+        "UpperLeg.L": "DEF-thigh.L",
+        "UpperLeg.R": "DEF-thigh.R",
+        "LowerLeg.L": "DEF-shin.L",
+        "LowerLeg.R": "DEF-shin.R",
+        "Foot.L": "DEF-foot.L",
+        "Foot.R": "DEF-foot.R",
+    },
     "quaternius-2022-to-base": {
         "Bone": "Root",
         "Palm.L": "Wrist.L",
@@ -130,6 +192,50 @@ def strip_bone_prefix(armature, prefix):
             bone.name = bone.name[len(prefix):]
             renamed += 1
     return renamed
+
+
+def flatten_interpolation():
+    """Force every keyframe to LINEAR, because that is the only mode the importer reads.
+
+    src/Blix/GltfImporter.cs rejects anything else outright — BuildVector3Curve and
+    BuildQuaternionCurve both throw on a sampler whose InterpolationMode is not LINEAR. Blender maps
+    CONSTANT keys to glTF STEP and BEZIER keys to CUBICSPLINE, so an author's perfectly ordinary choice
+    in the animation package becomes an asset this engine will not load. Found the hard way: a library
+    export failed on 'Crouch_Fwd_Loop' translation with mode STEP, and the character fell back to the
+    unrigged prop.
+
+    Flattening is safe for skeletal motion at this camera distance — the difference between linear and
+    Bezier between two keys a frame or two apart is not visible on a body a metre and a half tall — and it
+    is far better than the alternative, which is an asset that loads on some clips and not others.
+    """
+    changed = 0
+    for action in bpy.data.actions:
+        for curve in action_fcurves(action):
+            for key in curve.keyframe_points:
+                if key.interpolation != "LINEAR":
+                    key.interpolation = "LINEAR"
+                    changed += 1
+    return changed
+
+
+def action_fcurves(action):
+    """Every f-curve in an action, across both Blender's action APIs.
+
+    <b>Blender 4.4 made actions slotted and 5.x removed the flat accessor.</b> `action.fcurves` used to be
+    the whole story; now the curves live under layers → strips → channelbags, and reaching for the old
+    attribute on 5.2 raises AttributeError halfway through a cook. Both spellings are handled because this
+    script has to survive whichever Blender somebody has installed, and the failure mode of guessing is a
+    pipeline that works on one machine.
+    """
+    flat = getattr(action, "fcurves", None)
+    if flat is not None:
+        yield from flat
+        return
+
+    for layer in getattr(action, "layers", ()):
+        for strip in getattr(layer, "strips", ()):
+            for bag in getattr(strip, "channelbags", ()):
+                yield from getattr(bag, "fcurves", ())
 
 
 def rename_bones(armature, mapping):
@@ -196,6 +302,20 @@ def main():
     remapped = rename_bones(base_armature, bone_renames)
     if remapped:
         print(f"[merge] renamed {remapped} bone(s) on the base rig to match the clips")
+        # <b>Renaming bones orphans the body's own animations.</b> An action addresses bones by name, so
+        # every clip the character shipped with is now pointing at bones that no longer exist — and it
+        # would still export, as a file full of animations that move nothing. If the rig has been renamed
+        # to accept somebody else's clips, its own are gone by that act; say so and drop them.
+        own = list(bpy.data.actions)
+        if own and args.clips:
+            for action in own:
+                bpy.data.actions.remove(action)
+            print(f"[merge] dropped the character's own {len(own)} clip(s): renaming its bones orphaned "
+                  f"them, and the incoming clips are what the new names are for")
+        elif own:
+            raise SystemExit(
+                "bones were renamed but no --clips were given, which would export a character whose own "
+                "animations address bones that no longer exist. Supply the clips the rename is for.")
     if not args.no_join:
         joined = join_skinned_meshes(base_armature)
         print(f"[merge] joined {joined} skinned mesh(es) into one — the importer takes one skin per file")
@@ -206,10 +326,17 @@ def main():
     # Every action in the file lives in bpy.data.actions and survives its armature being
     # deleted, so the merge is: import each clip file, take its action, drop its rig.
     kept = []
-    if not os.path.isdir(args.clips):
+    if args.clips and not os.path.isdir(args.clips):
         raise SystemExit(f"--clips '{args.clips}' is not a folder")
 
-    for entry in sorted(os.listdir(args.clips)):
+    if not args.clips:
+        existing = sorted(a.name for a in bpy.data.actions)
+        for action in bpy.data.actions:
+            action.use_fake_user = True
+        print(f"[merge] no --clips given; keeping the {len(existing)} clip(s) already on the character")
+        kept = existing
+
+    for entry in sorted(os.listdir(args.clips)) if args.clips else []:
         if not entry.lower().endswith((".fbx", ".glb", ".gltf")):
             continue
         before = {a.name for a in bpy.data.actions}
@@ -225,18 +352,28 @@ def main():
                 if obj.name != base_armature.name and obj.parent is not base_armature:
                     bpy.data.objects.remove(obj, do_unlink=True)
 
+        # <b>Every action in the file, not the first.</b> Mixamo gives one animation per file, so the first
+        # draft took fresh[0] — but a library export is the other shape entirely: one file carrying fifty
+        # clips on one rig. Taking the first would have silently imported a fiftieth of the content.
         stem = os.path.splitext(entry)[0]
-        name = renames.get(stem, stem)
-        action = fresh[0]
-        action.name = name
-        # Without a fake user an unassigned action is dropped on save, and the glTF
-        # exporter would then write a file with one animation in it.
-        action.use_fake_user = True
-        kept.append(name)
-        print(f"[merge] {entry}: action '{name}', {len(action.fcurves)} curve(s)")
+        for action in fresh:
+            # One action in the file: the file name is the clip name, which is the Mixamo convention.
+            # Several: each keeps its own name, because the file name cannot describe fifty of them.
+            name = renames.get(stem, stem) if len(fresh) == 1 else renames.get(action.name, action.name)
+            action.name = name
+            # Without a fake user an unassigned action is dropped on save, and the glTF exporter would
+            # then write a file with nothing in it.
+            action.use_fake_user = True
+            kept.append(name)
 
-    if not kept:
+        print(f"[merge] {entry}: {len(fresh)} action(s) — "
+              f"{', '.join(a.name for a in fresh[:6])}{' …' if len(fresh) > 6 else ''}")
+
+    if not kept and args.clips:
         raise SystemExit(f"no animations found under '{args.clips}'")
+
+    flattened = flatten_interpolation()
+    print(f"[merge] set {flattened} keyframe(s) to LINEAR — the only mode the importer reads")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     # export_animation_mode NLA_TRACKS is what writes every action as its own glTF
@@ -249,6 +386,16 @@ def main():
         export_skins=True,
         export_apply=False,          # see the note at the top: do NOT bake transforms
         export_yup=True,
+        # <b>The one flag that decides whether this asset loads at all.</b> Left at its default of True,
+        # the exporter collapses any channel whose value never changes down to a single keyframe — and a
+        # single keyframe needs no interpolation, so it is written as glTF STEP. The importer accepts only
+        # LINEAR and refuses the whole file. Every keyframe in the source is already LINEAR; the STEP was
+        # manufactured at export time by an optimisation, which is why looking at the keys found nothing.
+        # Costs a larger file, and the alternative is an asset the game will not open.
+        export_optimize_animation_size=False,
+        # Already the defaults, stated because they are load-bearing here rather than incidental.
+        export_force_sampling=True,
+        export_sampling_interpolation_fallback="LINEAR",
     )
     print(f"[merge] wrote {args.out} with {len(kept)} clip(s): {', '.join(kept)}")
     print("[merge] verify with: dotnet run --project src/Blix.Tools.Cook -- inspect " + args.out)

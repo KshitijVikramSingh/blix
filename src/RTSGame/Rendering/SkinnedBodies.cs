@@ -84,6 +84,45 @@ internal sealed class SkinnedBodies : IDisposable
         List<InstanceData> Instances,
         List<InstanceData>[] CasterInstances);
 
+    /// <summary>
+    /// The yaw to add so this asset faces the way the steering layer thinks it does.
+    /// </summary>
+    /// <remarks>
+    /// <b>Measured off the rig, not guessed and not a per-asset constant.</b> The draw's yaw assumes a model
+    /// whose forward is +X, which was true of the prop villager it was written for; a glTF humanoid is
+    /// usually authored facing along Z, so every rigged character arrives turned ninety degrees and it reads
+    /// from the chair as bodies walking sideways. A dial would need setting per asset and would be wrong the
+    /// first time somebody forgot.
+    /// <para>
+    /// So it is derived: <b>on any humanoid, the direction from the ankle to the toe is forward.</b> Every
+    /// rig in circulation here names those bones something containing "foot" and "toe", and the bind pose
+    /// has the feet flat and pointing ahead. Bind-space offsets do not matter because this is a difference
+    /// between two positions in the same space.
+    /// </para>
+    /// <para>
+    /// Zero when the rig has no toe — reported at load rather than assumed correct, because a rig without
+    /// one needs a human to say which way it looks.
+    /// </para>
+    /// </remarks>
+    public float FacingOffsetRadians { get; private init; }
+
+    /// <summary>
+    /// How far this asset's walk cycle carries a body, in normalised body heights.
+    /// </summary>
+    /// <remarks>
+    /// <b>Measured out of the walk clip rather than picked.</b> The gait's phase advances by metres covered
+    /// (that is what stops feet skating), which needs to know how many metres one cycle of THIS clip
+    /// represents. That number was a constant I guessed at 1.5 m, and a guess there is exactly what makes
+    /// feet scuff: too small and they gabble, too large and they slide.
+    /// <para>
+    /// It is recoverable from the animation. Root motion is stripped, so the body does not travel — but a
+    /// foot still swings, and <b>the distance a foot travels fore-and-aft relative to the hips, over one
+    /// cycle, is the stride.</b> Sampled across the clip and taken along the rig's own forward axis. Zero
+    /// if there is no walk clip or no foot, in which case the caller's constant stands in.
+    /// </para>
+    /// </remarks>
+    public float StridePerCycle { get; private init; }
+
     /// <summary>How many bone matrices one body owns — the stride the skinned shaders index by.</summary>
     public int BonesPerBody => skeleton.BoneCount;
 
@@ -208,26 +247,28 @@ internal sealed class SkinnedBodies : IDisposable
     /// Holds the body where the simulation put it, whatever the clip thinks.
     /// </summary>
     /// <remarks>
-    /// <b>Root motion is somebody else's job.</b> A walk clip authored to travel carries the character
-    /// forward in its own translation tracks — which is right in an animation package and wrong here,
-    /// because position is the simulation's and only the simulation's. Left in, a body slides away from the
-    /// coordinates the locomotion layer, the collision layer and the mouse all agree it occupies; the
-    /// reported symptom is a sway.
+    /// <b>The root bone is a placement handle, not a body part.</b> Where a body is belongs to the
+    /// simulation and to nothing else, so a clip's root translation is discarded outright — all three axes.
     /// <para>
-    /// Horizontal only. The vertical component is a gait's own bob and rise, which is motion in place and
-    /// wanted — flattening it too would make the walk read as a shuffle.
+    /// <b>It was horizontal-only first, and that was wrong twice over.</b> The argument for keeping the
+    /// vertical was that a gait's bob and rise live there and flattening them would make a walk read as a
+    /// shuffle. That is true of a well-authored in-place clip whose root sits at the origin; it is false of
+    /// a library where each clip's root carries its own constant offset. This character's roots sit five
+    /// units below the floor and differ from clip to clip — so a body normalised against its idle and then
+    /// drawn walking came out at a different height, reported from the chair as floating in the air. A
+    /// gait's vertical motion is in the hips and the spine anyway, which is where it survives.
+    /// </para>
+    /// <para>
+    /// Static, and used by the measurement as well as the draw, which is the point: a body is measured
+    /// through exactly the transform it is drawn through, so the two cannot disagree about where it is.
     /// </para>
     /// </remarks>
-    private void StripRootMotion()
+    private static void StripRootMotion(Skeleton skeleton, Pose pose)
     {
         for (var i = 0; i < skeleton.BoneCount; i++)
         {
             if (skeleton.Bones[i].ParentIndex >= 0) continue;
-            var local = pose.Locals[i];
-            pose.Locals[i] = local with
-            {
-                Translation = new Vector3(0f, local.Translation.Y, 0f),
-            };
+            pose.Locals[i] = pose.Locals[i] with { Translation = Vector3.Zero };
         }
     }
 
@@ -282,26 +323,47 @@ internal sealed class SkinnedBodies : IDisposable
             return null;
         }
 
-        // <b>Height measured through the mesh node, because that is where the file's scale lives.</b> This
-        // asset is authored at a hundredth and scaled back up by its ancestor chain, so the primitives'
-        // own bounds are not in metres and normalising against them would give a body a centimetre tall.
+        // <b>Measured from the body as it will be POSED, not as it is stored.</b> §168.
+        //
+        // The obvious thing is to read each primitive's bounds and normalise against those, and it works
+        // right up until an asset arrives whose bind pose is not its rest pose. glTF permits that freely —
+        // the inverse-bind matrices are what bridge the two — and a Blender round trip produces it as a
+        // matter of course: the same character that was stored standing at the origin came back with its
+        // bind geometry three to five units below the floor, and the file is not wrong. Normalising against
+        // that put a correct, correctly-scaled villager several hundred metres from the village. Invisible,
+        // twice, for a reason no matrix in the draw could show.
+        //
+        // So this poses the body and measures that, which is the only thing that answers the question being
+        // asked. It costs one pass over the vertices at load, once.
+        var restForMeasure = model.Skeleton.CreateRestPose();
+        var measureClip = PickMeasuringClip(model);
+        measureClip?.Sample(0.0, restForMeasure);
+        // The same strip the draw applies, or the box describes a body that is never drawn.
+        StripRootMotion(model.Skeleton, restForMeasure);
+        var measurePalette = new BonePalette(model.Skeleton.BoneCount);
+        model.Skeleton.ComputeBonePalette(restForMeasure, measurePalette);
+
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);
+        var measured = 0;
         foreach (var primitive in model.Primitives)
         {
-            foreach (var corner in Corners(primitive.Mesh.Bounds))
-            {
-                var at = Vector3.Transform(corner, model.MeshNodeTransform);
-                min = Vector3.Min(min, at);
-                max = Vector3.Max(max, at);
-            }
+            measured += PosedBounds(
+                primitive.Mesh, measurePalette, model.MeshNodeTransform, ref min, ref max);
+        }
+
+        if (measured == 0)
+        {
+            Console.WriteLine($"  bodies: {fileName} has no readable vertices, keeping the prop villager");
+            return null;
         }
 
         var tall = MathF.Max(0.0001f, max.Y - min.Y);
-        // Feet to the origin, then scaled to the height the locomotion layer was calibrated against. A
-        // person is the one thing in the settlement whose scale is set by how tall it is rather than by its
-        // footprint — see the note on the unrigged villager, which said the same thing first.
-        var normalise = Matrix4x4.CreateTranslation(0f, -min.Y, 0f) *
+        // Feet to the origin and the body over it, then scaled to unit height for the caller's placement to
+        // size. <b>Horizontally centred as well as vertically floored</b>, because a bind pose can be
+        // offset in any axis and correcting only the one that happened to be wrong is how this hid.
+        var centre = (min + max) * 0.5f;
+        var normalise = Matrix4x4.CreateTranslation(-centre.X, -min.Y, -centre.Z) *
                         Matrix4x4.CreateScale(metresTall / tall);
 
         var boneLayout = new UniformBlockLayout(
@@ -324,9 +386,18 @@ internal sealed class SkinnedBodies : IDisposable
         {
             var name = primitive.Material?.Name ?? primitive.Mesh.Name;
             var mesh = device.CreateMesh(primitive.Mesh, name);
+            // <b>The asset's own colour, not a guess from its material name.</b> The name guess below was
+            // written against a pack whose materials were called Skin/Shirt/Pants/Hair, and it silently
+            // turns any other vocabulary into one flat wool brown — reported from the chair as "no
+            // colours", which is exactly what eleven materials all resolving to the same default looks
+            // like. glTF carries a base colour per material; that is the answer and the guess is the
+            // fallback for a file that has none.
+            var authored = primitive.Material?.BaseColorFactor;
             var tint = tints is not null && tints.TryGetValue(name ?? string.Empty, out var found)
                 ? found
-                : DefaultTint(name);
+                : authored is { } colour && colour.W > 0f
+                    ? new Vector4(colour.X, colour.Y, colour.Z, MaterialClassBody)
+                    : DefaultTint(name);
             var sceneBuffer = new InstanceBuffer(device, sceneShader, $"bodies.{name}");
             var casterBuffers = new InstanceBuffer[casterPassCount];
             var casters = new InstancedBatch[casterPassCount];
@@ -350,10 +421,209 @@ internal sealed class SkinnedBodies : IDisposable
             $"  bodies: {fileName} — {model.Skeleton.BoneCount} bones, {model.Primitives.Length} " +
             $"primitive(s), {model.Animations.Length} clip(s), {tall:F2} authored units scaled to " +
             $"{metresTall:F2} m");
+        // <b>The measured box, printed, because a body in the air is this box being wrong.</b> Floating
+        // means the floor correction lifted too far, which means the lowest thing measured was below the
+        // feet — and there is no way to tell that from a height alone.
+        Console.WriteLine(
+            $"  bodies: posed box X[{min.X:F2},{max.X:F2}] Y[{min.Y:F2},{max.Y:F2}] " +
+            $"Z[{min.Z:F2},{max.Z:F2}] from {measured} vertices in " +
+            $"'{measureClip?.Name ?? "the rest pose"}'");
+
+        var (facing, how) = MeasureFacing(model.Skeleton);
+        Console.WriteLine(
+            $"  bodies: forward measured {facing * 180f / MathF.PI:F0}° off +X {how}");
+
+        var stride = MeasureStride(model, facing, model.MeshNodeTransform) * (metresTall / tall);
+        Console.WriteLine(
+            stride > 0f
+                ? $"  bodies: walk stride measured {stride:F2} m per cycle at {metresTall:F2} m tall"
+                : "  bodies: no walk stride measurable; the caller's constant stands in");
 
         return new SkinnedBodies(
             device, parts.ToArray(), palette, model.Skeleton,
-            model.MeshNodeTransform, normalise, model.Animations);
+            model.MeshNodeTransform, normalise, model.Animations)
+        {
+            FacingOffsetRadians = facing,
+            StridePerCycle = stride,
+        };
+    }
+
+    /// <summary>
+    /// The clip to measure the body in: its idle if it has one, else whatever it has.
+    /// </summary>
+    /// <remarks>
+    /// A body is measured standing, because that is the pose its height means something in. Falling back
+    /// to the first clip is fine and falling back to none is fine too — an asset whose bind pose IS its
+    /// rest pose measures identically either way, which is why this went unnoticed for an asset that had
+    /// no animation problem at all.
+    /// </remarks>
+    private static AnimationClip? PickMeasuringClip(GltfModel model)
+    {
+        foreach (var (action, names, standIns) in CharacterClips.Table)
+        {
+            if (action != BodyAction.Idle) continue;
+            foreach (var wanted in names.Concat(standIns))
+            {
+                foreach (var clip in model.Animations)
+                {
+                    var bar = clip.Name.LastIndexOf('|');
+                    var bare = bar >= 0 ? clip.Name[(bar + 1)..] : clip.Name;
+                    if (bare.Equals(wanted, StringComparison.OrdinalIgnoreCase)) return clip;
+                }
+            }
+        }
+
+        return model.Animations.Length > 0 ? model.Animations[0] : null;
+    }
+
+    /// <summary>
+    /// Every vertex of a primitive, skinned by this palette and lifted through the mesh node.
+    /// </summary>
+    /// <remarks>
+    /// Reads the packed skinned vertex directly: position at 0, joint indices at float 8, weights at
+    /// float 12, twenty floats to a vertex. Tied to
+    /// <c>VertexPosition3NormalTextureSkin4Tangent</c>, which is the only layout the glTF importer emits
+    /// for a skinned mesh — a layout change would land here as a wrong measurement rather than a crash, so
+    /// the stride is asserted rather than assumed.
+    /// </remarks>
+    private static int PosedBounds(
+        MeshData mesh, BonePalette palette, Matrix4x4 meshNode, ref Vector3 min, ref Vector3 max)
+    {
+        const int Floats = 20;
+        var stride = mesh.Layout.Stride;
+        if (stride != Floats * sizeof(float)) return 0;
+
+        var floats = MemoryMarshal.Cast<byte, float>(mesh.VertexBytes.AsSpan());
+        var count = floats.Length / Floats;
+        for (var i = 0; i < count; i++)
+        {
+            var at = i * Floats;
+            var position = new Vector3(floats[at], floats[at + 1], floats[at + 2]);
+            var skinned = Vector3.Zero;
+            var total = 0f;
+            for (var influence = 0; influence < 4; influence++)
+            {
+                var weight = floats[at + 12 + influence];
+                if (weight <= 0f) continue;
+                var bone = (int)floats[at + 8 + influence];
+                if (bone < 0 || bone >= palette.BoneCount) continue;
+                skinned += Vector3.Transform(position, palette.Matrices[bone]) * weight;
+                total += weight;
+            }
+
+            // An unweighted vertex is rigid, not at the origin.
+            if (total <= 0f) skinned = position;
+            var at3 = Vector3.Transform(skinned, meshNode);
+            min = Vector3.Min(min, at3);
+            max = Vector3.Max(max, at3);
+        }
+
+        return count;
+    }
+
+    /// <summary>How far a foot swings fore-and-aft relative to the hips over one walk cycle.</summary>
+    private static float MeasureStride(GltfModel model, float facingOffset, Matrix4x4 meshNode)
+    {
+        var skeleton = model.Skeleton;
+        var foot = IndexOf(skeleton, "foot");
+        var hips = IndexOf(skeleton, "hips");
+        if (foot < 0 || hips < 0) return 0f;
+
+        AnimationClip? walk = null;
+        foreach (var (action, names, standIns) in CharacterClips.Table)
+        {
+            if (action != BodyAction.Walk) continue;
+            foreach (var wanted in names)
+            {
+                foreach (var clip in model.Animations)
+                {
+                    var bar = clip.Name.LastIndexOf('|');
+                    var bare = bar >= 0 ? clip.Name[(bar + 1)..] : clip.Name;
+                    if (bare.Equals(wanted, StringComparison.OrdinalIgnoreCase)) walk = clip;
+                    if (walk is not null) break;
+                }
+
+                if (walk is not null) break;
+            }
+        }
+
+        if (walk is null || walk.Duration <= 0.0) return 0f;
+
+        // The rig's forward, in its own space: undo the offset that turns it to +X.
+        var ahead = new Vector2(MathF.Cos(-facingOffset), MathF.Sin(-facingOffset));
+        var pose = skeleton.CreateRestPose();
+        var palette = new BonePalette(skeleton.BoneCount);
+        var least = float.MaxValue;
+        var most = float.MinValue;
+
+        const int Samples = 24;
+        for (var i = 0; i < Samples; i++)
+        {
+            pose.CopyFrom(skeleton.CreateRestPose());
+            walk.Sample(walk.Duration * i / (Samples - 1.0), pose);
+            StripRootMotion(skeleton, pose);
+            skeleton.ComputeBonePalette(pose, palette);
+            if (!Matrix4x4.Invert(skeleton.Bones[foot].InverseBindPose, out var footBind)) return 0f;
+            if (!Matrix4x4.Invert(skeleton.Bones[hips].InverseBindPose, out var hipsBind)) return 0f;
+
+            // <b>Through meshNode, like everything else that is measured here.</b> The height this is
+            // scaled against was measured in mesh-node space, and this asset's mesh node carries a
+            // hundredfold scale — so a stride taken in raw bone space is a hundred times too small and
+            // arrives as 0.00 m, which is how a silent measurement failure looks. Third time this session
+            // that measuring through a different transform from the drawing was the bug.
+            var footAt = Vector3.Transform(
+                Vector3.Transform(footBind.Translation, palette.Matrices[foot]), meshNode);
+            var hipsAt = Vector3.Transform(
+                Vector3.Transform(hipsBind.Translation, palette.Matrices[hips]), meshNode);
+            var along = (footAt.X - hipsAt.X) * ahead.X + (footAt.Z - hipsAt.Z) * ahead.Y;
+            least = MathF.Min(least, along);
+            most = MathF.Max(most, along);
+        }
+
+        var swing = most - least;
+        // <b>One foot's swing is half a stride</b>, because the other foot covers the rest of it.
+        return swing > 0f ? swing * 2f : 0f;
+    }
+
+    private static int IndexOf(Skeleton skeleton, string contains)
+    {
+        for (var i = 0; i < skeleton.BoneCount; i++)
+        {
+            var name = skeleton.Bones[i].Name ?? string.Empty;
+            if (name.IndexOf(contains, StringComparison.OrdinalIgnoreCase) >= 0) return i;
+        }
+
+        return -1;
+    }
+
+    /// <summary>Which way this rig faces, from the ankle-to-toe direction of either foot.</summary>
+    private static (float Radians, string How) MeasureFacing(Skeleton skeleton)
+    {
+        for (var i = 0; i < skeleton.BoneCount; i++)
+        {
+            var name = skeleton.Bones[i].Name ?? string.Empty;
+            if (name.IndexOf("toe", StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+            var parent = skeleton.Bones[i].ParentIndex;
+            if (parent < 0) continue;
+            var parentName = skeleton.Bones[parent].Name ?? string.Empty;
+            if (parentName.IndexOf("foot", StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+            if (!Matrix4x4.Invert(skeleton.Bones[i].InverseBindPose, out var toe)) continue;
+            if (!Matrix4x4.Invert(skeleton.Bones[parent].InverseBindPose, out var foot)) continue;
+
+            var ahead = new Vector2(
+                toe.Translation.X - foot.Translation.X,
+                toe.Translation.Z - foot.Translation.Z);
+            if (ahead.LengthSquared() < 1e-8f) continue;
+
+            // The draw computes yaw as -atan2(facing.z, facing.x) for a model whose forward is +X. This
+            // rig's own forward, expressed the same way, is what has to be cancelled out.
+            var mine = -MathF.Atan2(ahead.Y, ahead.X);
+            return (-mine, $"from {parentName} → {name}");
+        }
+
+        return (0f, "— no toe bone; assuming the model already faces +X");
     }
 
     private static IEnumerable<Vector3> Corners(Bounds3 bounds)
@@ -451,7 +721,7 @@ internal sealed class SkinnedBodies : IDisposable
         // has no leg tracks and the body sampled before it was mid-stride.
         pose.CopyFrom(restPose);
         clip.Sample(atSeconds, pose);
-        StripRootMotion();
+        StripRootMotion(skeleton, pose);
         skeleton.ComputeBonePalette(pose, bonePalette);
         bonePalette.Matrices.AsSpan().CopyTo(
             paletteScratch.AsSpan(count * skeleton.BoneCount, skeleton.BoneCount));
