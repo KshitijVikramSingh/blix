@@ -456,6 +456,9 @@ public static class Program
             : (Simulation.Terrain.Archetype?)null;
         var labSeed = Value(args, "--mapseed") is { } ms ? uint.Parse(ms) : (uint?)null;
         var debugAll = args.Contains("--debug-all");
+        // One line a second per selected body: its action, its assignment, whether the jobs layer counts it
+        // as working, and how far it is from its place. For reproducing "it just stands there".
+        var bodyLog = args.Contains("--bodylog");
         // A frame run used to keep accepting the real mouse and keyboard. That made a recorded wide-view
         // sample depend on where the pointer happened to be and on whether somebody touched the wheel while
         // it ran. --perf-run is the sealed version: timings are on, the panel is not rendered, and the game
@@ -660,7 +663,8 @@ public static class Program
             args.Contains("--handsoff"),
             sunMotion,
             overlay,
-            args.Contains("--eroded"));
+            args.Contains("--eroded"),
+            bodyLog: bodyLog);
         using var window = new Window(
             game, new WindowOptions("RTSGame — Greybox Kingdom", windowWidth, windowHeight));
         window.Run();

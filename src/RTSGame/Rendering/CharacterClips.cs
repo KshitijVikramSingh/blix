@@ -102,9 +102,12 @@ internal static class CharacterClips
             // A push reads as shifting something heavy, which is nearer the truth than empty hands.
             new[] { "Push_Loop", "Walk_Loop", "Walk" }),
 
+        // Farm_Harvest is a one-shot too, but a short repeated stoop reads as reaping rather than as a
+        // glitch — the pose starts and ends standing, so the wrap is not a snap. Worth knowing that the
+        // distinction is whether the first and last frames agree, not whether the name says Loop.
         (BodyAction.Reap,
             new[] { "Farm_Harvest", "Harvest", "Reap", "Scythe", "Farming" },
-            new[] { "Farm_PlantSeed", "Farm_Watering", "Fixing_Kneeling", "Interact" }),
+            new[] { "Farm_PlantSeed", "Farm_Watering", "TreeChopping_Loop", "Interact" }),
 
         // <b>The one the chair asked for by name.</b> A kneeling repair does not read as felling a tree.
         (BodyAction.Chop,
@@ -117,8 +120,15 @@ internal static class CharacterClips
             // something solid — and reads correctly at this distance.
             new[] { "TreeChopping_Loop", "Melee_Hook", "Fixing_Kneeling" }),
 
+        // <b>A clean loop of the wrong action is worse than a rough loop of the right one.</b>
+        // `Fixing_Kneeling` is a one-shot — kneel, work, stand — so looping it snaps at the wrap, and a
+        // felling swing was tried instead because it loops cleanly. It reads as a man attacking a camp
+        // site: "constructing a camp site uses woodworking animation??". Worse, it made Build and Chop
+        // look identical, which hid a real bug — bodies that never left their Build assignment looked like
+        // they were chopping. An animation is a readout of state and must not lie about which state.
+        // The wrap wants cross-fading, not a different motion.
         (BodyAction.Build,
-            new[] { "Fixing_Kneeling", "Hammering", "Building", "Repair" },
+            new[] { "Fixing_Kneeling", "Hammering_Loop", "Hammering", "Building", "Repair" },
             new[] { "Interact", "PickUp_Table" }),
 
         (BodyAction.Guard,

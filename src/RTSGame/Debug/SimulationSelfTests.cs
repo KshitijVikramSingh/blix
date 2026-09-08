@@ -4,6 +4,7 @@ using RTSGame.Simulation;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Collision;
 using RTSGame.Simulation.Commands;
+using RTSGame.Rendering;
 using RTSGame.Simulation.Economy;
 using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Navigation;
@@ -163,6 +164,14 @@ internal static class SimulationSelfTests
         Check("a guard comes home after a fight", AGuardComesHome());
         Check("seeing a neighbour moves the garrison", ContactMovesTheGarrison());
         Check("an attack ends with its target", AnAttackEndsWithItsTarget());
+        Check("a crowd posted on one tree spreads across the wood", PostedCrowdSpreadsAcrossTheWood());
+        Check("a crowd posted on a building site all get to work", CrowdOnASiteAllGetToWork());
+        Check("nine builders on one project make progress", NineBuildersOnOneProject());
+        Check("a carrier lets builders build", CarriersLetBuildersBuild());
+        Check("a finished project releases its builders", AFinishedProjectReleasesItsBuilders());
+        Check("asked to chop, a body reaches the tree and cuts", AskedToChopTheyReachTheTree());
+        Check("two cutters do not wedge in one trunk", TwoCuttersDoNotWedgeInOneTrunk());
+        Check("three posted on one tree all cut", ThreePostedOnOneTreeAllCut());
         Check("hostile is what diplomacy says, not what ownership says", HostileIsWhatDiplomacySays());
         Check("loot carries it home and militia cannot", LootCarriesItHome());
         Check("a household that goes hungry loses somebody", PrivationSpendsItselfAsEmigration());
@@ -5913,6 +5922,525 @@ internal static class SimulationSelfTests
         Console.WriteLine(
             $"    a stranger's granary={stranger}, an ally's={ally}, a tree={timber}, our own={own}; " +
             $"standing timber is nobody's={unowned}");
+        return passed;
+    }
+
+    /// <summary>
+    /// A crowd told to work one tree becomes a crowd of woodcutters. §172.
+    /// </summary>
+    /// <remarks>
+    /// Reported from the chair: bodies posted on one deposit "aggressively going for one" instead of
+    /// distributing across nearby trees. Nothing in the suite asked, which is why nothing caught it.
+    /// </remarks>
+    private static bool PostedCrowdSpreadsAcrossTheWood()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        world.AddNode(NodeKind.Granary, new Vector2(0f, -12f), capacity: 4000, faction: us);
+
+        // Six trees in a clump, and six villagers told to cut the first of them.
+        var trees = new NodeId[6];
+        for (var i = 0; i < trees.Length; i++)
+        {
+            trees[i] = world.AddNode(
+                NodeKind.Tree, new Vector2(i * 3f, 0f), capacity: (int)Woodland.WoodPerTree);
+            // Standing timber, not a stump: a tree with no wood in it is spent and gets culled, and then
+            // there is nothing to spread across. Cost one debugging pass to notice.
+            world.SeedStock(trees[i], Resource.Wood, (int)Woodland.WoodPerTree);
+        }
+
+        var hands = new AgentId[6];
+        for (var i = 0; i < hands.Length; i++)
+        {
+            hands[i] = world.SpawnAgent(new Vector2(-6f + i * 0.8f, -6f), UnitType.Villager, us);
+        }
+
+        ref readonly var first = ref world.Nodes.Get(trees[0]);
+        // spread: true, because this is the player's gesture — pointing at one tree with a group selected.
+        // The bot's own orders deliberately do not take it; see AssignGroupCommand.Spread.
+        world.QueueAssign(
+            hands,
+            Assignment.Hold(first.Position, dwellSeconds: 0.5f, first.FootprintRadius),
+            spread: true);
+        Tick(world, 30);
+
+        var chosen = new HashSet<int>();
+        foreach (var id in hands)
+        {
+            var source = world.Agents.Get(id).Jobs.Assignment.Source;
+            if (world.Nodes.Contains(source)) chosen.Add(source.Value);
+        }
+
+        // <b>Asserted against the design, not against a number.</b> The first version demanded four distinct
+        // trunks, which was really an assertion that a trunk takes one pair of hands — so raising that to
+        // three from the chair broke a test that was measuring the constant rather than the behaviour. What
+        // matters is that the crowd is divided at all and that no trunk is asked to take more than it can:
+        // at three hands a trunk, six bodies should fill exactly two.
+        var most = 0;
+        foreach (var node in chosen)
+        {
+            var here = 0;
+            foreach (var id in hands)
+            {
+                if (world.Agents.Get(id).Jobs.Assignment.Source.Value == node) here++;
+            }
+
+            most = Math.Max(most, here);
+        }
+
+        var passed = chosen.Count > 1 && most <= 3;
+        Console.WriteLine(
+            $"    six posted on one tree took {chosen.Count} distinct trunk(s), " +
+            $"at most {most} hands on any one (cap 3)");
+        return passed;
+    }
+
+    /// <summary>
+    /// Where nine builders actually are, second by second. §174.
+    /// </summary>
+    /// <remarks>
+    /// <b>A measurement before a change.</b> Reported from the chair with a screenshot: "9 assigned, 2
+    /// working", then "9 assigned, 1 working", with "54 incoming, 0 on site". Reading the code says the
+    /// roles are already split — build if there is material delivered, fetch if there is not, wait if
+    /// somebody else is already fetching what is missing — so the interesting question is not whether the
+    /// split exists but where the time goes. This counts it rather than reasoning about it.
+    /// <para>
+    /// It asserts only the thing that would be a bug in any design: that a project with hands on it makes
+    /// progress. The breakdown it prints is the evidence for what to change next.
+    /// </para>
+    /// </remarks>
+    private static bool NineBuildersOnOneProject()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        var store = world.AddNode(NodeKind.Granary, new Vector2(-18f, 0f), capacity: 4000, faction: us);
+        world.SeedStock(store, Resource.Wood, 600);
+        world.SeedStock(store, Resource.Stone, 600);
+
+        var site = world.AddNode(
+            NodeKind.ForwardDepot, new Vector2(0f, 0f), capacity: 200, faction: us, built: false);
+
+        var hands = new AgentId[9];
+        for (var i = 0; i < hands.Length; i++)
+        {
+            hands[i] = world.SpawnAgent(new Vector2(-6f, -4f + i * 0.9f), UnitType.Villager, us);
+        }
+
+        ref readonly var node = ref world.Nodes.Get(site);
+        world.QueueAssign(hands, Assignment.Hold(node.Position, 0.5f, node.FootprintRadius));
+
+        // Body-seconds in each stage, so the shape of the loss is visible rather than inferred.
+        var working = 0;
+        var carrying = 0;
+        var walkingEmpty = 0;
+        var standingEmpty = 0;
+        var samples = 0;
+        var startWork = world.Nodes.Get(site).BuildWork;
+
+        for (var t = 0; t < 3000; t++)
+        {
+            Tick(world, 1);
+            if (!world.Nodes.Contains(site) || world.Nodes.Get(site).IsBuilt) break;
+            samples++;
+            foreach (var id in hands)
+            {
+                if (!world.Agents.Contains(id)) continue;
+                ref readonly var body = ref world.Agents.Get(id);
+                var moving = body.Velocity.LengthSquared() > 0.02f;
+                if (JobSystem.IsWorking(in body)) working++;
+                else if (body.Jobs.CarriedUnits > 0) carrying++;
+                else if (moving) walkingEmpty++;
+                else standingEmpty++;
+            }
+        }
+
+        var progressed = world.Nodes.Contains(site)
+            ? world.Nodes.Get(site).BuildWork - startWork
+            : 0f;
+        var total = MathF.Max(1f, working + carrying + walkingEmpty + standingEmpty);
+        var passed = progressed > 0f;
+        Console.WriteLine(
+            $"    nine builders over {samples} tick(s): working {working / total:P0}, " +
+            $"carrying {carrying / total:P0}, walking empty {walkingEmpty / total:P0}, " +
+            $"standing empty {standingEmpty / total:P0}; build work +{progressed:F0}");
+        return passed;
+    }
+
+    /// <summary>
+    /// With a carrier supplying the site, builders stay and build. §175.
+    /// </summary>
+    /// <remarks>
+    /// The other half of the nine-builders measurement. That one has no carriers, so builders self-supply
+    /// and the figures are unchanged — which proves the floor but not the feature. This one puts a hauler
+    /// on the route and asks whether the builders stop walking: their carrying share should fall and their
+    /// working share must not.
+    /// <para>
+    /// <b>Asserted as a comparison, not against a constant.</b> A percentage baked in here would be a
+    /// number about this scenario's distances, and the first tuning change would break it for no reason.
+    /// </para>
+    /// </remarks>
+    private static bool CarriersLetBuildersBuild()
+    {
+        static (float Working, float Carrying, float Progress) Run(bool withCarrier)
+        {
+            var world = new SimulationWorld(240f);
+            var us = new FactionId(0);
+            var store = world.AddNode(NodeKind.Granary, new Vector2(-24f, 0f), capacity: 4000, faction: us);
+            world.SeedStock(store, Resource.Wood, 600);
+            world.SeedStock(store, Resource.Stone, 600);
+            var site = world.AddNode(
+                NodeKind.ForwardDepot, new Vector2(0f, 0f), capacity: 200, faction: us, built: false);
+
+            var hands = new AgentId[4];
+            for (var i = 0; i < hands.Length; i++)
+            {
+                hands[i] = world.SpawnAgent(new Vector2(-5f, -2f + i * 0.9f), UnitType.Villager, us);
+            }
+
+            ref readonly var node = ref world.Nodes.Get(site);
+            world.QueueAssign(hands, Assignment.Hold(node.Position, 0.5f, node.FootprintRadius));
+
+            if (withCarrier)
+            {
+                var cart = world.SpawnAgent(new Vector2(-20f, 3f), UnitType.HaulerCart, us);
+                ref readonly var from = ref world.Nodes.Get(store);
+                world.QueueAssign(
+                    new[] { cart },
+                    Assignment.Haul(
+                        store, from.Position, site, node.Position, Resource.Wood,
+                        EconomySystem.HandoverSeconds, from.FootprintRadius, node.FootprintRadius));
+            }
+
+            var working = 0;
+            var carrying = 0;
+            var samples = 0;
+            var start = world.Nodes.Get(site).BuildWork;
+            for (var t = 0; t < 2400; t++)
+            {
+                Tick(world, 1);
+                if (!world.Nodes.Contains(site) || world.Nodes.Get(site).IsBuilt) break;
+                samples++;
+                foreach (var id in hands)
+                {
+                    if (!world.Agents.Contains(id)) continue;
+                    ref readonly var body = ref world.Agents.Get(id);
+                    if (JobSystem.IsWorking(in body)) working++;
+                    else if (body.Jobs.CarriedUnits > 0) carrying++;
+                }
+            }
+
+            var total = MathF.Max(1f, samples * (float)hands.Length);
+            var progress = world.Nodes.Contains(site)
+                ? world.Nodes.Get(site).BuildWork - start
+                : 0f;
+            return (working / total, carrying / total, progress);
+        }
+
+        var alone = Run(withCarrier: false);
+        var supplied = Run(withCarrier: true);
+
+        // Builders should carry less when something else is carrying, and build no less than before.
+        var passed = supplied.Carrying <= alone.Carrying + 0.001f &&
+                     supplied.Working >= alone.Working - 0.05f &&
+                     supplied.Progress > 0f;
+        Console.WriteLine(
+            $"    builders alone: working {alone.Working:P0} carrying {alone.Carrying:P0} " +
+            $"(+{alone.Progress:F0}); with a carrier: working {supplied.Working:P0} " +
+            $"carrying {supplied.Carrying:P0} (+{supplied.Progress:F0})");
+        return passed;
+    }
+
+    /// <summary>
+    /// A builder whose project is finished stops being a builder. §173.
+    /// </summary>
+    /// <remarks>
+    /// Reported from the chair: bodies "just stand next to trees after constructing a camp site even when
+    /// asked to, as if stuck as builders". They were — <c>AssignmentKind.Build</c> is in
+    /// <c>RepeatsForever</c>, so a project completing never released the hands that raised it, and the
+    /// pose showing a builder was reporting the truth about a wrong state.
+    /// </remarks>
+    private static bool AFinishedProjectReleasesItsBuilders()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        var store = world.AddNode(NodeKind.Granary, new Vector2(-10f, 0f), capacity: 4000, faction: us);
+        world.SeedStock(store, Resource.Wood, 600);
+        world.SeedStock(store, Resource.Stone, 600);
+
+        var camp = world.AddNode(
+            NodeKind.ForwardDepot, new Vector2(0f, 0f), capacity: 200, faction: us, built: false);
+
+        var hands = new AgentId[3];
+        for (var i = 0; i < hands.Length; i++)
+        {
+            hands[i] = world.SpawnAgent(new Vector2(-4f, -3f + i * 1.1f), UnitType.Villager, us);
+        }
+
+        ref readonly var site = ref world.Nodes.Get(camp);
+        world.QueueAssign(hands, Assignment.Hold(site.Position, 0.5f, site.FootprintRadius));
+
+        // Long enough to carry the materials out and finish the thing.
+        // Long enough to carry the timber out and finish the thing: 600 labour at three pairs of
+        // hands is most of four minutes of simulated time.
+        Tick(world, 8000);
+
+        var built = world.Nodes.Contains(camp) && world.Nodes.Get(camp).IsBuilt;
+
+        var stillBuilding = 0;
+        foreach (var id in hands)
+        {
+            if (world.Agents.Get(id).Jobs.Assignment.Kind == AssignmentKind.Build) stillBuilding++;
+        }
+
+        var passed = built && stillBuilding == 0;
+        Console.WriteLine(
+            $"    camp built={built}; {stillBuilding} of {hands.Length} still hold a Build assignment " +
+            "after it finished");
+        return passed;
+    }
+
+    /// <summary>
+    /// A body told to chop actually reaches a tree and chops it. §173.
+    /// </summary>
+    /// <remarks>
+    /// Reported from the chair, and the chair's own diagnosis was the right one: bodies asked to cut wood
+    /// "just stand next to trees", not because the order failed but because "they're just not getting close
+    /// enough". So this asserts the whole chain — the order takes, the body arrives, and wood actually
+    /// leaves the trunk. Asserting the assignment alone would have passed while nothing was being cut.
+    /// </remarks>
+    private static bool AskedToChopTheyReachTheTree()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        var store = world.AddNode(NodeKind.Granary, new Vector2(-8f, 0f), capacity: 4000, faction: us);
+        world.SeedStock(store, Resource.Wood, 10);
+
+        var tree = world.AddNode(
+            NodeKind.Tree, new Vector2(6f, 0f), capacity: (int)Woodland.WoodPerTree);
+        world.SeedStock(tree, Resource.Wood, (int)Woodland.WoodPerTree);
+        var standing = world.Nodes.Get(tree).Stock[Resource.Wood];
+
+        var cutter = world.SpawnAgent(new Vector2(-6f, 3f), UnitType.Villager, us);
+        ref readonly var trunk = ref world.Nodes.Get(tree);
+        world.QueueAssign(
+            new[] { cutter }, Assignment.Hold(trunk.Position, 0.5f, trunk.FootprintRadius));
+
+        Tick(world, 8);
+        var ordered = world.Agents.Get(cutter).Jobs.Assignment.Kind == AssignmentKind.Work &&
+                      world.Agents.Get(cutter).Jobs.Assignment.Cargo == Resource.Wood;
+
+        // <b>Is the chopping pose playing on the ticks the wood actually leaves the trunk?</b> Asked tick
+        // by tick rather than at the end, because "it chopped and wood went down" would pass while the two
+        // happened at different moments. Every tick where the trunk loses wood, the renderer's own choice
+        // for that body is read and recorded.
+        var seen = new Dictionary<BodyAction, int>();
+        var cuttingTicks = 0;
+        var before = world.Nodes.Get(tree).Stock[Resource.Wood];
+        for (var t = 0; t < 900; t++)
+        {
+            Tick(world, 1);
+            if (!world.Nodes.Contains(tree)) break;
+            var now = world.Nodes.Get(tree).Stock[Resource.Wood];
+            if (now < before)
+            {
+                cuttingTicks++;
+                var action = BodyActions.For(in world.Agents.Get(cutter), hurt: false, out _);
+                seen[action] = seen.GetValueOrDefault(action) + 1;
+            }
+
+            before = now;
+        }
+
+        var left = world.Nodes.Contains(tree) ? world.Nodes.Get(tree).Stock[Resource.Wood] : 0;
+        var cut = standing - left;
+        var gap = Vector2.Distance(world.Agents.Get(cutter).Position, trunk.Position);
+        var chopping = seen.GetValueOrDefault(BodyAction.Chop);
+
+        // Every tick that took wood out of the tree must have been a tick the body was shown chopping.
+        var passed = ordered && cut > 0 && cuttingTicks > 0 && chopping == cuttingTicks;
+        Console.WriteLine(
+            $"    order took={ordered}; stood {gap:F2} m from a trunk of radius " +
+            $"{trunk.FootprintRadius:F2}; {cut} of {standing} wood cut over {cuttingTicks} tick(s); " +
+            $"poses while cutting: {string.Join(", ", seen.Select(pair => $"{pair.Key}x{pair.Value}"))}");
+        return passed;
+    }
+
+    /// <summary>
+    /// Three bodies posted on one tree all end up cutting something. §173.
+    /// </summary>
+    /// <remarks>
+    /// Reported from the chair: after a build, a group told to work a tree produced "one guy" cutting and
+    /// "the rest just standing". The earlier spread test asked six bodies about six trees and passed, which
+    /// is the easy version of the question — the reported case is several bodies and ONE tree, where the
+    /// spread has to find them somewhere else to be and the crowd has to fit.
+    /// </remarks>
+    private static bool ThreePostedOnOneTreeAllCut()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        var store = world.AddNode(NodeKind.Granary, new Vector2(0f, -14f), capacity: 4000, faction: us);
+        world.SeedStock(store, Resource.Wood, 10);
+
+        // The tree they are pointed at, and two more nearby to spread onto.
+        var trees = new[]
+        {
+            world.AddNode(NodeKind.Tree, new Vector2(0f, 0f), capacity: (int)Woodland.WoodPerTree),
+            world.AddNode(NodeKind.Tree, new Vector2(4f, 1f), capacity: (int)Woodland.WoodPerTree),
+            world.AddNode(NodeKind.Tree, new Vector2(-4f, 1.5f), capacity: (int)Woodland.WoodPerTree),
+        };
+        foreach (var tree in trees) world.SeedStock(tree, Resource.Wood, (int)Woodland.WoodPerTree);
+
+        var hands = new AgentId[3];
+        for (var i = 0; i < hands.Length; i++)
+        {
+            hands[i] = world.SpawnAgent(new Vector2(-3f + i * 1.2f, -6f), UnitType.Villager, us);
+        }
+
+        ref readonly var pointed = ref world.Nodes.Get(trees[0]);
+        world.QueueAssign(
+            hands, Assignment.Hold(pointed.Position, 0.5f, pointed.FootprintRadius), spread: true);
+
+        // Long enough to walk over and settle at a trunk.
+        var everWorked = new HashSet<int>();
+        for (var t = 0; t < 1200; t++)
+        {
+            Tick(world, 1);
+            foreach (var id in hands)
+            {
+                if (!world.Agents.Contains(id)) continue;
+                if (JobSystem.IsWorking(in world.Agents.Get(id))) everWorked.Add(id.Value);
+            }
+        }
+
+        var assigned = 0;
+        var standing = new List<string>();
+        foreach (var id in hands)
+        {
+            ref readonly var body = ref world.Agents.Get(id);
+            var jobs = body.Jobs;
+            if (jobs.Assignment.Kind == AssignmentKind.Work && jobs.Assignment.Cargo == Resource.Wood)
+            {
+                assigned++;
+            }
+
+            if (!everWorked.Contains(id.Value))
+            {
+                standing.Add(
+                    $"#{id.Value} {jobs.Assignment.Kind}/{jobs.Assignment.Cargo} " +
+                    $"toPlace={JobSystem.DistanceToPlace(in body):F2} retries={jobs.Retries} " +
+                    $"settled={jobs.SettledNearby} stuck={body.StuckSeconds:F1}");
+            }
+        }
+
+        var passed = assigned == hands.Length && everWorked.Count == hands.Length;
+        Console.WriteLine(
+            $"    three posted on one tree: {assigned} assigned to wood, {everWorked.Count} ever worked" +
+            (standing.Count > 0 ? $"; idle: {string.Join(" | ", standing)}" : string.Empty));
+        return passed;
+    }
+
+    /// <summary>
+    /// Two cutters converging on one trunk from opposite sides do not wedge in it. §173.
+    /// </summary>
+    /// <remarks>
+    /// Reported from the chair, and precisely: one body was chopping when "another guy went over from the
+    /// other side and got stuck into the trunk and became a red cylinder" — red being the movement layer's
+    /// own colour for a body whose <c>StuckSeconds</c> has run past a third of a second.
+    /// <para>
+    /// Every ingredient of that is a change made in the last hour: a body at its work now holds its ground
+    /// instead of yielding, separation is rate-limited so a wedged pair comes apart slowly, and the
+    /// approach search now steers a newcomer to the far side of a footprint. Any of the three could put a
+    /// second cutter inside a trunk and leave it there, so this asserts the outcome rather than any one
+    /// mechanism: two bodies, one tree, opposite approaches, and neither may end up stuck or inside it.
+    /// </para>
+    /// </remarks>
+    private static bool TwoCuttersDoNotWedgeInOneTrunk()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        var store = world.AddNode(NodeKind.Granary, new Vector2(0f, -14f), capacity: 4000, faction: us);
+        world.SeedStock(store, Resource.Wood, 10);
+
+        // One tree, and nothing else to spread onto: the point is the contention.
+        var tree = world.AddNode(NodeKind.Tree, new Vector2(0f, 0f), capacity: (int)Woodland.WoodPerTree);
+        world.SeedStock(tree, Resource.Wood, (int)Woodland.WoodPerTree);
+        ref readonly var trunk = ref world.Nodes.Get(tree);
+        var centre = trunk.Position;
+        var radius = trunk.FootprintRadius;
+
+        // Opposite sides, so their approaches cross at the trunk.
+        var near = world.SpawnAgent(centre + new Vector2(-5f, 0f), UnitType.Villager, us);
+        var far = world.SpawnAgent(centre + new Vector2(5f, 0.4f), UnitType.Villager, us);
+
+        world.QueueAssign(new[] { near }, Assignment.Hold(centre, 0.5f, radius));
+        Tick(world, 240);
+        // The second one is sent while the first is already at work, which is the reported order of events.
+        world.QueueAssign(new[] { far }, Assignment.Hold(centre, 0.5f, radius));
+
+        var worstStuck = 0f;
+        var deepest = 0f;
+        for (var t = 0; t < 900; t++)
+        {
+            Tick(world, 1);
+            foreach (var id in new[] { near, far })
+            {
+                if (!world.Agents.Contains(id)) continue;
+                ref readonly var body = ref world.Agents.Get(id);
+                worstStuck = MathF.Max(worstStuck, body.StuckSeconds);
+                // How far inside the trunk's own footprint this body has got.
+                var into = radius + body.Radius - Vector2.Distance(body.Position, centre);
+                deepest = MathF.Max(deepest, into);
+            }
+        }
+
+        // A third of a second is where the movement layer starts calling a body stuck and painting it red.
+        var passed = worstStuck < 0.35f && deepest < 0.2f;
+        Console.WriteLine(
+            $"    two cutters on one trunk: worst stuck {worstStuck:F2}s (red at 0.35), " +
+            $"deepest overlap into the trunk {deepest:F2} m");
+        return passed;
+    }
+
+    /// <summary>
+    /// A crowd posted on a building site all get put to work. §172.
+    /// </summary>
+    /// <remarks>
+    /// <b>The regression guard.</b> §171 taught bodies to avoid standing where another body has claimed,
+    /// and a preference that can make the approach search fail is a preference that can starve a site of
+    /// hands — reported from the chair as construction being broken. Many hands on one project is correct
+    /// and must stay correct, so this asks the question the suite never did.
+    /// </remarks>
+    private static bool CrowdOnASiteAllGetToWork()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        var store = world.AddNode(NodeKind.Granary, new Vector2(-14f, 0f), capacity: 4000, faction: us);
+        world.SeedStock(store, Resource.Wood, 400);
+        world.SeedStock(store, Resource.Stone, 400);
+
+        var site = world.AddNode(
+            NodeKind.House, new Vector2(0f, 0f), capacity: 0, faction: us, built: false);
+
+        var builders = new AgentId[5];
+        for (var i = 0; i < builders.Length; i++)
+        {
+            builders[i] = world.SpawnAgent(new Vector2(-4f, -5f + i * 0.9f), UnitType.Villager, us);
+        }
+
+        ref readonly var node = ref world.Nodes.Get(site);
+        world.QueueAssign(
+            builders, Assignment.Hold(node.Position, dwellSeconds: 0.5f, node.FootprintRadius));
+        Tick(world, 30);
+
+        var employed = 0;
+        foreach (var id in builders)
+        {
+            if (world.Agents.Get(id).Jobs.Assignment.Kind == AssignmentKind.Build) employed++;
+        }
+
+        var passed = employed == builders.Length;
+        Console.WriteLine(
+            $"    {employed} of {builders.Length} posted on a building site took the job");
         return passed;
     }
 

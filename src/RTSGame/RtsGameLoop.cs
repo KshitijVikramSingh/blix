@@ -1399,6 +1399,21 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     private readonly bool startOpponent;
 
     /// <summary>Whether every settlement on the map is left to a rule-bot, the player's included.</summary>
+    /// <summary>
+    /// Prints what every selected body is doing, once a second.
+    /// </summary>
+    /// <remarks>
+    /// <b>For settling arguments about what a body is up to.</b> "They just stand next to trees" and "the
+    /// animation glitches" are both reports about state that cannot be read off the screen: a body chopping
+    /// at a tenth of a unit a second looks identical to a body doing nothing, and a pose flickering between
+    /// two actions looks like a rendering fault rather than a state that is genuinely changing. One line a
+    /// second per selected body says which it is — the action, the assignment, whether the jobs layer counts
+    /// it as working, how far it is from its place, and how fast it is moving.
+    /// </remarks>
+    private readonly bool bodyLog;
+
+    private float bodyLogDue;
+
     private readonly bool handsOffEverybody;
 
     /// <summary>Routing as it stood at the last report, so each second is a window rather than a total.</summary>
@@ -1453,7 +1468,8 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         bool handsOffEverybody = false,
         LookSettings.SunMotion? sunMotion = null,
         MapTuning.MapOverlay? overlay = null,
-        bool eroded = false)
+        bool eroded = false,
+        bool bodyLog = false)
     {
         this.performanceRun = performanceRun;
         this.performanceCameraMotion = performanceCameraMotion;
@@ -1462,6 +1478,7 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
         this.startOpponent = startOpponent;
         // Hands off implies there is somebody else to watch: a lone bot settlement is the headless year leg
         // with a camera on it, which --twovillages already answers better.
+        this.bodyLog = bodyLog;
         this.handsOffEverybody = handsOffEverybody;
         if (sunMotion is { } motion) look.Motion = motion;
         if (overlay is { } asked) mapTuning.Overlay = asked;
@@ -2763,7 +2780,11 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         var extent = simulation.Nodes.Contains(node)
             ? simulation.Nodes.Get(node).FootprintRadius
             : 0f;
-        simulation.QueueAssign(selection.Snapshot(), Assignment.Hold(at, PostDwellSeconds, extent));
+        // <b>spread: the player pointed at one thing and meant "work this sort of thing here".</b> Six
+        // villagers on one trunk become six woodcutters; the bot's own orders never take this, because its
+        // intents are reconciled per node and would never be satisfied.
+        simulation.QueueAssign(
+            selection.Snapshot(), Assignment.Hold(at, PostDwellSeconds, extent), spread: true);
         Console.WriteLine(
             $"  {selection.Selected.Count} unit(s) posted at ({at.X:F1}, {at.Y:F1})" +
             (extent > 0f ? $" — working the {simulation.Nodes.Get(node).Kind}" : string.Empty));
@@ -5279,6 +5300,17 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         // empty draw. Invisible people, and nothing in the matrices to suggest why.
         bodies?.Begin();
         WatchForHurt(frameSeconds);
+        if (bodyLog)
+        {
+            ReportActionChanges();
+            bodyLogDue -= frameSeconds;
+            if (bodyLogDue <= 0f)
+            {
+                bodyLogDue = 1f;
+                ReportSelectedBodies();
+            }
+        }
+
         BuildAgentInstances((float)time.Total);
         var agentMs = buildClock.Elapsed.TotalMilliseconds;
         buildClock.Restart();
@@ -7095,67 +7127,78 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
     /// way, binds without a line changing here.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// How long an action holds before a different one may replace it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Anti-flicker, and it is the second time the same fault has been reported.</b> A pose chosen fresh
+    /// every frame follows every twitch of the state behind it: a body jostled at its work crosses the
+    /// walking threshold for single frames, and a construction project that runs out of materials starts
+    /// and stops being worked from one tick to the next. Both read as the animation glitching rather than
+    /// proceeding, because that is what a pose alternating at frame rate looks like.
+    /// <para>
+    /// Fixing each cause separately was the first instinct and would not have held — the next one would
+    /// have been a third report. A quarter of a second is short enough that a genuine change still looks
+    /// immediate and long enough that nothing alternates.
+    /// </para>
+    /// <para>
+    /// <b>Interrupts are exempt</b>: taking a hit and dying must show at once, or the dwell would swallow
+    /// the very things it matters most to see.
+    /// </para>
+    /// </remarks>
+    private const float ActionHoldSeconds = 0.25f;
+
+    private BodyAction[] heldAction = new BodyAction[256];
+    private float[] heldUntil = new float[256];
+
+    /// <summary>Whether this action may cut in before the held one has finished its dwell.</summary>
+    private static bool Interrupts(BodyAction action) =>
+        action is BodyAction.Flinch or BodyAction.Fall;
+
     private AnimationClip? ClipFor(in AgentState agent, out bool locomotion)
     {
         locomotion = false;
         if (bodies is null) return null;
+        var wanted = ActionFor(in agent, out locomotion);
 
-        // <b>Flinching outranks everything, because a body taking a hit is the most urgent thing on
-        // screen.</b> Held for a moment after the health drop, which is view-side state — see hurtUntil.
+        // Hold the previous action until its dwell is up, so nothing alternates at frame rate.
         var id = agent.Id.Value;
-        if (id >= 0 && id < hurtUntil.Length && hurtUntil[id] > 0f)
+        if (id >= 0)
         {
-            return bodies.For(BodyAction.Flinch);
+            if (id >= heldAction.Length)
+            {
+                var grown = Math.Max(id + 1, heldAction.Length * 2);
+                Array.Resize(ref heldAction, grown);
+                Array.Resize(ref heldUntil, grown);
+            }
+
+            if (heldUntil[id] > 0f && !Interrupts(wanted) && wanted != heldAction[id])
+            {
+                wanted = heldAction[id];
+                locomotion = wanted is BodyAction.Walk or BodyAction.Carry;
+            }
+            else if (wanted != heldAction[id] || heldUntil[id] <= 0f)
+            {
+                heldAction[id] = wanted;
+                heldUntil[id] = ActionHoldSeconds;
+            }
+
+            heldUntil[id] = MathF.Max(0f, heldUntil[id] - frameSeconds);
         }
 
-        // Then fighting: a body swinging at something must never be misread as work.
-        if (agent.Jobs.Assignment.Kind == AssignmentKind.Attack && JobSystem.IsWorking(in agent))
-        {
-            return bodies.For(BodyAction.Strike);
-        }
-
-        // Then movement, on the body's own speed rather than on whether it has somewhere to be: a body
-        // held up by a crowd is standing, whatever its orders say. Carrying is its own gait, which is the
-        // single most legible thing in an economy game.
-        if (agent.Velocity.LengthSquared() > WalkingSpeedSquared)
-        {
-            locomotion = true;
-            return bodies.For(agent.Jobs.CarriedUnits > 0 ? BodyAction.Carry : BodyAction.Walk);
-        }
-
-        // Then labour, by what is being worked rather than by one generic pose. The jobs layer's
-        // ActivityKind is deliberately just "working", but the ASSIGNMENT knows its cargo — so felling a
-        // tree, reaping a field and cutting stone are three different things on screen from state the
-        // simulation already had. Reported from the chair: the kneeling repair pose "isn't working with"
-        // wood chopping, and it never could.
-        if (JobSystem.IsWorking(in agent))
-        {
-            return bodies.For(LabourOf(in agent));
-        }
-
-        // A soldier at a post stands like a soldier. Militia and villagers were one silhouette before this,
-        // separated only by tint.
-        if (agent.Jobs.Assignment.Kind == AssignmentKind.Guard || agent.Role == AgentRole.Militia)
-        {
-            return bodies.For(BodyAction.Guard);
-        }
-
-        return bodies.For(BodyAction.Idle);
+        return bodies.For(wanted);
     }
 
-    /// <summary>Which kind of work this body is at, from its assignment's own cargo.</summary>
-    private static BodyAction LabourOf(in AgentState agent)
+    /// <summary>What this body is doing, as far as the screen is concerned.</summary>
+    /// <remarks>
+    /// The decision itself is <see cref="BodyActions.For"/> — static, pure, and therefore testable without
+    /// a window. All this adds is the view's own wounded flag.
+    /// </remarks>
+    private BodyAction ActionFor(in AgentState agent, out bool locomotion)
     {
-        var assignment = agent.Jobs.Assignment;
-        if (assignment.Kind is AssignmentKind.Build or AssignmentKind.Train) return BodyAction.Build;
-
-        return assignment.Cargo switch
-        {
-            Resource.Wood => BodyAction.Chop,
-            Resource.Stone => BodyAction.Quarry,
-            Resource.Grain => BodyAction.Reap,
-            _ => BodyAction.Build,
-        };
+        var id = agent.Id.Value;
+        var hurt = id >= 0 && id < hurtUntil.Length && hurtUntil[id] > 0f;
+        return BodyActions.For(in agent, hurt, WaitingOnMaterials(in agent), out locomotion);
     }
 
     /// <summary>
@@ -7171,6 +7214,100 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
 
     private float[] hurtUntil = new float[256];
     private float[] lastHealth = new float[256];
+
+    /// <summary>
+    /// Whether this body's work cannot proceed for want of materials on the project.
+    /// </summary>
+    /// <remarks>
+    /// The stable half of a state the jobs layer keeps changing its mind about. A builder standing at a
+    /// site that still wants timber, with none in its own hands, is waiting — and it stays waiting until a
+    /// delivery arrives, which is a fact that changes on the scale of a walk rather than of a tick.
+    /// </remarks>
+    private bool WaitingOnMaterials(in AgentState agent)
+    {
+        if (agent.Jobs.Assignment.Kind != AssignmentKind.Build) return false;
+        if (agent.Jobs.CarriedUnits > 0) return false;
+        var project = agent.Jobs.Project;
+        if (!simulation.Nodes.Contains(project)) return false;
+        ref readonly var node = ref simulation.Nodes.Get(project);
+        return node.WantsMaterials;
+    }
+
+    /// <summary>The action each body was last reported at, so a change can be logged as it happens.</summary>
+    private BodyAction[] loggedAction = new BodyAction[256];
+
+    /// <summary>
+    /// Logs the instant a selected body's action changes.
+    /// </summary>
+    /// <remarks>
+    /// <b>A snapshot once a second cannot see a glitch.</b> "Glitching" means a pose alternating faster than
+    /// the eye can separate, and sampling at 1 Hz shows one of the two states and no hint that there are
+    /// two. Logging on change makes the frequency the thing you read: a burst of lines a few milliseconds
+    /// apart IS the glitch, and a state that genuinely changed once prints once.
+    /// </remarks>
+    private void ReportActionChanges()
+    {
+        foreach (var id in selection.Snapshot())
+        {
+            if (!simulation.Agents.Contains(id)) continue;
+            var index = id.Value;
+            if (index < 0) continue;
+            if (index >= loggedAction.Length)
+            {
+                Array.Resize(ref loggedAction, Math.Max(index + 1, loggedAction.Length * 2));
+            }
+
+            ref readonly var agent = ref simulation.Agents.Get(id);
+            var hurtNow = index < hurtUntil.Length && hurtUntil[index] > 0f;
+            // The same overload the draw uses, or the log reports a decision nobody made — it printed
+            // "wanted Build" while the renderer had chosen Idle, because it left the waiting flag out.
+            var action = BodyActions.For(in agent, hurtNow, WaitingOnMaterials(in agent), out _);
+            var shown = index < heldAction.Length ? heldAction[index] : action;
+            if (shown == loggedAction[index]) continue;
+
+            loggedAction[index] = shown;
+            Console.WriteLine(
+                $"  [flip] #{index} -> {shown}" +
+                (action != shown ? $" (wanted {action})" : string.Empty) +
+                $" at {simulation.EpochTicks * SimulationWorld.FixedDeltaSeconds:F2}s" +
+                $" | {agent.Jobs.Assignment.Kind}/{agent.Jobs.Assignment.Cargo}" +
+                $" activity={agent.Jobs.Activity} working={JobSystem.IsWorking(in agent)}" +
+                $" waiting={WaitingOnMaterials(in agent)}" +
+                $" toPlace={JobSystem.DistanceToPlace(in agent):F2} speed={agent.Velocity.Length():F2}");
+        }
+    }
+
+    /// <summary>One line per selected body: what it is doing and why.</summary>
+    private void ReportSelectedBodies()
+    {
+        if (selection.Selected.Count == 0) return;
+        Console.WriteLine($"  [bodies] {simulation.Date}");
+        foreach (var id in selection.Snapshot())
+        {
+            if (!simulation.Agents.Contains(id)) continue;
+            ref readonly var agent = ref simulation.Agents.Get(id);
+            var hurtNow = id.Value >= 0 && id.Value < hurtUntil.Length && hurtUntil[id.Value] > 0f;
+            var action = BodyActions.For(in agent, hurtNow, WaitingOnMaterials(in agent), out _);
+            var clip = bodies?.For(action);
+            var jobs = agent.Jobs;
+            var place = jobs.Place;
+            var gap = Vector2.Distance(agent.Position, place);
+            var held = id.Value < heldAction.Length ? heldAction[id.Value] : action;
+
+            Console.WriteLine(
+                $"    #{id.Value} {agent.Role} {action}" +
+                (held != action ? $" (held {held})" : string.Empty) +
+                $" clip={clip?.Name.Split('|')[^1] ?? "none"}" +
+                $" | {jobs.Assignment.Kind}/{jobs.Assignment.Cargo} leg{jobs.Leg}" +
+                $" activity={jobs.Activity} working={JobSystem.IsWorking(in agent)}" +
+                $" waiting={WaitingOnMaterials(in agent)} interrupt={jobs.Interrupt}" +
+                $" | place=({place.X:F1},{place.Y:F1}) gap={gap:F2} extent={jobs.PlaceExtent:F2}" +
+                $" toPlace={JobSystem.DistanceToPlace(in agent):F2} settled={jobs.SettledNearby}" +
+                $" retries={jobs.Retries}" +
+                $" | speed={agent.Velocity.Length():F2} carry={jobs.CarriedUnits}/{agent.CarryCapacity}" +
+                $" stuck={agent.StuckSeconds:F1}");
+        }
+    }
 
     /// <summary>Notices which bodies lost health since the last frame. Call once per frame.</summary>
     private void WatchForHurt(float deltaSeconds)
@@ -7202,9 +7339,6 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             lastHealth[id] = agent.Health;
         }
     }
-
-    /// <summary>Below this a body is standing, not walking. Squared metres per second.</summary>
-    private const float WalkingSpeedSquared = 0.08f * 0.08f;
 
     /// <summary>
     /// How far a body's gait advances per metre walked, so feet never skate.
@@ -8669,9 +8803,19 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 // Velocity cannot disagree with the direction of travel because it IS the direction of
                 // travel. Facing still decides which way a body stands when it has stopped, since a
                 // stationary body has no velocity to read.
-                var heading = agent.Velocity.LengthSquared() > WalkingSpeedSquared
+                // <b>A body at its work faces its work.</b> §172. Standing bodies took their heading from
+                // Facing — the last direction they were steering — so a villager who walked past a tree to
+                // reach its free side then chopped at thin air with the trunk behind them. Where the
+                // pathing happened to approach from says nothing about where the work is. Reported from the
+                // chair exactly that way: facing has to account for where the thing being worked is
+                // relative to where pathing left the body.
+                var working = JobSystem.IsWorking(in agent);
+                var toWork = agent.Jobs.Place - agent.Position;
+                var heading = agent.Velocity.LengthSquared() > BodyActions.WalkingSpeedSquared
                     ? agent.Velocity
-                    : agent.Facing;
+                    : working && toWork.LengthSquared() > 0.0004f
+                        ? toWork
+                        : agent.Facing;
                 var yaw = heading.LengthSquared() > 0.0001f
                     ? -MathF.Atan2(heading.Y, heading.X)
                     : 0f;

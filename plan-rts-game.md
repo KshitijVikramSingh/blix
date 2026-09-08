@@ -13856,3 +13856,117 @@ Still open, and agreed as its own pass: **depenetration has no mass and no memor
 instantly and symmetrically, which is a coefficient of restitution of one and no inertia — "they look like
 go-karts" — and pushing costs a body nothing, so shoving is always cheaper than pathing. Those are one fault
 seen twice, and they touch the invariants the pen-escape and congestion tests guard.
+
+## 172-175. Everything the chair found, and the pattern in how it was found
+
+A long session of watching the game and fixing what watching revealed. The individual repairs are below,
+but the useful finding is the shape of them: **every diagnosis reached by reasoning was wrong, and every one
+reached by building an instrument or a test was right.** Set out plainly, because it is the most transferable
+thing here.
+
+| reported from the chair | what I reasoned | what it actually was |
+|---|---|---|
+| stuck as builders | `Build` is in `RepeatsForever` | a finished project DOES release its builders |
+| construction broken | claim avoidance starved the approach search | construction was never stalled; my test was too short |
+| nobody can get near a tree | crowd pressure, spacing | claim avoidance, redundant once the spread existed |
+| 9 assigned, 1 working | builders over-fetching | a snapshot; measured utilisation is 82% |
+| construction animation glitching | a one-shot clip looped | my own `waiting` rule overriding working builders |
+
+Five diagnoses, five wrong. The instruments that settled them each took minutes: a `--bodylog` line printing
+`Build (held Idle) | working=True`, a self-test running a project to completion, a body-seconds breakdown.
+
+### Facing: four wrong answers before the right question
+
+The longest thread and worth recording whole, because each fix was correct and none was sufficient.
+
+1. The draw's yaw assumed a model facing `+X` — true of the prop villager it was written for, false of every
+   rigged glTF humanoid. Measured off the rig instead: **on any humanoid, ankle to toe is forward.**
+2. Both feet, because a left toe points out to the left and a right toe out to the right — either alone
+   returns forward plus that foot's splay, and summing cancels it.
+3. The bone vocabulary: this rig calls the toe `ball_l` and the hips `pelvis`, so the measurement found
+   nothing and fell back to "assume +X" **silently**. Both now take synonym lists.
+4. The sign was then flipped in response to the chair, which made it wrong the other way — because the real
+   fault was in a different file: the draw turned bodies to face `Facing`, the steering heading, which in a
+   crowd lags or opposes the direction of travel. Velocity cannot disagree with the direction of travel.
+
+And still wrong, until the observation that ended it: **"yaw 0 looks right for chopping instead of yaw 2"**.
+Per clip. Clips from two libraries are not authored facing the same way, and only root *translation* was
+being discarded. **Where a body is and which way it points both belong to the simulation; a clip may say
+neither.** The root now reverts to its rest transform entirely, the derived offset is right again, and the
+debug dial sits at zero — which is the cleanest evidence available that the derivation is sound rather than
+a lucky constant.
+
+### Eleven actions, and one of them from state that was already there
+
+The clip table grew from five actions to eleven. The most useful was not a new clip but a new reading:
+`ActivityKind` is deliberately just "working", but the **assignment knows its cargo** — so `Work`+`Wood` is
+felling, `Work`+`Grain` reaping, `Work`+`Stone` cutting, `Build` the kneeling pose. "The wood chopping isn't
+working with the kneeling we currently have" was never a clip problem; it was one pose standing in for four
+jobs.
+
+`Carry` rides at the midpoint of the two hand bones **in the pose just drawn**, so the load and the arms
+agree. `Run` is deliberately absent: nothing in the simulation raises a body's speed, so a run clip would
+have no state to key off. `Flinch` is view-side only, to keep a field no rule reads out of the census.
+
+### The crowd, and two mechanisms aiming at one goal
+
+Bodies crowded one face of a building and shoved whoever was already there. Half the suspected cause was
+already right — `TryApproachPoint` has always preferred the near side — and what it never did was ask about
+other bodies. So claim avoidance was added, and it was the wrong layer:
+
+- **Spreading a crowd is a decision about which PLACE each body works**, and that belongs in the jobs layer.
+  `SpreadAcrossKin` sends six bodies posted on one tree to different trunks — three hands a trunk, from the
+  chair, since §6 makes output continuous in hands rather than gated on a slot.
+- Claim avoidance did the same job at the positioning level and could **refuse**. Every body within six
+  metres of a place marked a disc of it unavailable, including bodies stood down — "if I assign anyone to one
+  tree, nobody else can get even close, even if I unassign the original person". Removed.
+- What replaced it cannot refuse: **each body's approach search starts from a different bearing**, spun by
+  its own id through the golden angle. Applied only where several bodies genuinely share one place — a
+  structure — because on a footprint the size of a trunk it sends a body walking through the tree to reach
+  the far side, which the wedge test caught at 0.39 m inside a trunk.
+
+### The spread lied to the planner, and the gate caught it
+
+`gate: 2 of 6 FAILED — faction 1's bot has a barracks and no militia.` The planner reconciles per node
+(`gap = target − (standing + outstanding)`), and the spread silently redirected its hands elsewhere — so the
+node it asked about stayed short, it reissued forever, spent every spare pair of hands, and never had anybody
+left to train. **The spread is now opt-in**: the player's click carries it, because pointing at one tree with
+a group selected means "work this sort of thing here"; the bot's own orders do not. Both go through the same
+command per §132, so the difference has to be carried rather than inferred.
+
+Worth noting the gate caught this and the chair could not — nobody watching a village notices that militia
+stopped appearing.
+
+### Nine builders, measured before changed
+
+"9 assigned, 1 working" with "54 incoming, 0 on site" looked like builders wasting their time fetching. The
+roles were already split — build if material is delivered, fetch if not, wait if somebody else is bringing
+it — so the question was where the time went, and that is measurable: **82% working, 9% carrying, 7% walking
+empty, 2% standing**, project complete. The screenshot was an instantaneous count during a delivery batch.
+Had I trusted it I would have "fixed" a system that was working.
+
+What was then worth doing was §175, and honestly labelled: **builders stand down from fetching when a
+carrier is demonstrably inbound.** With one cart, builders carry two points less and work two points more —
+a legibility change, not a throughput one. A builder who stays at the site looks like a builder, which is the
+readability goal this whole arc began with.
+
+**The floor is the part to defend.** The tempting version is "builders never fetch, haulers always supply",
+and in a settlement with no spare hands that starves a site forever waiting for a hauler who does not exist.
+Standing down on *evidence* — something is carrying timber here, or it is not — cannot do that, and with no
+carriers present the measured figures are unchanged.
+
+### The instruments, which are the durable part
+
+- **`--bodylog`**: one line a second per selected body — action, assignment, whether the jobs layer counts it
+  as working, distance to its place, retries, whether it settled. Plus a `[flip]` line the instant a pose
+  changes, because a snapshot at 1 Hz cannot see a glitch: a burst of lines milliseconds apart IS the glitch.
+- **The action mapping is pure and static** (`BodyActions.For`), so "is the chopping animation playing while
+  wood leaves the tree?" is answerable by a test rather than by looking. It is: every tick the trunk lost
+  wood, the chosen action was `Chop`.
+- **Six tests for questions nobody had asked**: a crowd on a site all get work; a finished project releases
+  its builders; a body asked to chop reaches the tree and cuts; two cutters do not wedge in one trunk; nine
+  builders make progress, with the utilisation breakdown; a carrier lets builders build.
+
+One test broke when a constant changed from the chair, which was instructive: it asserted "at least four
+distinct trunks", which was really asserting that a trunk takes one pair of hands. It now asserts the
+design — the crowd divides, and no trunk exceeds its capacity — so turning the number does not break it.

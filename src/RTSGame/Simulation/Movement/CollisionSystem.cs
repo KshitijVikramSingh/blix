@@ -1,6 +1,7 @@
 using System.Numerics;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Collision;
+using RTSGame.Simulation.Jobs;
 using RTSGame.Simulation.Navigation;
 using RTSGame.Simulation.Spatial;
 using RTSGame.Simulation.Terrain;
@@ -27,6 +28,18 @@ internal sealed class CollisionSystem
     private const float ContactSlop = 0.00035f;
     // How much of a mover/idle contact the yielding body absorbs.
     internal static float YieldShare = 0.85f;
+
+    /// <summary>
+    /// How much of a separation a body <em>at its work</em> absorbs, against the newcomer's share.
+    /// </summary>
+    /// <remarks>
+    /// The near-inverse of <see cref="YieldShare"/>, and deliberately not zero. Zero would make a working
+    /// body infinitely heavy, which sounds right and is not: two bodies working the same place would then
+    /// have no way to settle an overlap between them, and a body wedged against one by terrain would never
+    /// be freed. Fifteen per cent leaves the pair able to resolve while still putting the burden on
+    /// whoever arrived last.
+    /// </remarks>
+    internal static float StandingGroundShare = 0.15f;
     // How far the separation is rotated from the contact normal toward the
     // mover's lateral axis. Fully lateral would let bodies pass through each
     // other head-on; this keeps enough normal component to guarantee separation.
@@ -44,6 +57,30 @@ internal sealed class CollisionSystem
     /// shortest way apart for anything deep enough to see.
     /// </remarks>
     internal static float YieldLateralOverlapLimit = 0.015f;
+
+    /// <summary>
+    /// How fast a pair of bodies may be pushed apart, in metres a second.
+    /// </summary>
+    /// <remarks>
+    /// <b>Bodies had no inertia at all, and this is what that felt like.</b> Reported from the chair:
+    /// "that pushing happens at a coefficient of restitution of 1 and 0 inertia and they look like
+    /// go-karts". It was accurate — five relaxation passes at a factor of 0.8 resolve essentially the whole
+    /// overlap within one tick, so a contact was a teleport rather than a shove, and a body could be moved
+    /// a body's width sideways between two frames.
+    /// <para>
+    /// Capping the rate turns it into a push: an overlap of twenty centimetres now comes apart over three
+    /// ticks instead of one. Chosen a shade above walking pace, so separating is never the fastest thing a
+    /// body does — which is what makes it read as being shoved rather than as being flicked.
+    /// </para>
+    /// <para>
+    /// <b>Agent contacts only.</b> Being extruded from terrain or a building stays immediate: geometry is a
+    /// hard constraint and a body inside a wall is a bug, while another body is a negotiation. Rate-limiting
+    /// the static pass would mean visibly sinking into masonry before coming out.
+    /// </para>
+    /// </remarks>
+    internal static float SeparationSpeedLimit = 2.0f;
+
+    private float[] separated = Array.Empty<float>();
 
     private readonly List<ColliderId> contacts = new();
     private readonly List<int> neighbors = new();
@@ -85,6 +122,11 @@ internal sealed class CollisionSystem
 
         var largestRadius = agents.LargestRadius();
         var resolved = 0;
+        // One budget per body for the whole tick, not per relaxation pass: five passes each allowed the
+        // full rate would be five times the rate.
+        if (separated.Length < mutable.Length) Array.Resize(ref separated, mutable.Length);
+        Array.Clear(separated, 0, mutable.Length);
+        var budget = SeparationSpeedLimit * (float)SimulationWorld.FixedDeltaSeconds;
         for (var pass = 0; pass < RelaxationPasses; pass++)
         {
             index.Rebuild(agents.All);
@@ -146,7 +188,22 @@ internal sealed class CollisionSystem
                             if (Vector2.Dot(normal, side) < 0f) side = -side;
                             normal = Vector2.Normalize(Vector2.Lerp(normal, side, bias));
                         }
-                        agentShare = agent.HasDestination ? 1f - YieldShare : YieldShare;
+                        // <b>Why the body is standing still decides who gives way.</b> §172. The yield
+                        // above assumes a stationary body is merely loitering, and at a share of 0.85 the
+                        // mover barely slows while the still one is shoved almost the whole way — which is
+                        // right for somebody idling in a corridor and wrong for somebody at their work.
+                        // Reported from the chair as bodies "pushing people already at the building around
+                        // to reach it instead of just walking around".
+                        //
+                        // A body at its place with an activity has earned that spot: it is the reason the
+                        // building is being worked at all. So it becomes the heavy one and the newcomer
+                        // absorbs the separation — which, with the approach search now avoiding claimed
+                        // points, means the newcomer goes round instead of through.
+                        var stillOneWorks = agent.HasDestination
+                            ? JobSystem.IsWorking(in other)
+                            : JobSystem.IsWorking(in agent);
+                        var stillShare = stillOneWorks ? StandingGroundShare : YieldShare;
+                        agentShare = agent.HasDestination ? 1f - stillShare : stillShare;
                     }
                     var otherShare = 1f - agentShare;
 
@@ -180,6 +237,22 @@ internal sealed class CollisionSystem
                 if (corrections[i].LengthSquared() <= 0f) continue;
                 ref var agent = ref mutable[i];
                 if (!agent.IsAlive) continue;
+
+                // Spend from this body's separation budget, and stop when it is gone. The remainder is not
+                // lost — the overlap is still there next tick and asks again, which is what makes this a
+                // rate rather than a cap on how far a pair can ever come apart.
+                var remaining = budget - separated[i];
+                if (remaining <= 0f) continue;
+                var wanted = corrections[i].Length();
+                if (wanted > remaining)
+                {
+                    corrections[i] *= remaining / wanted;
+                    separated[i] = budget;
+                }
+                else
+                {
+                    separated[i] += wanted;
+                }
                 // Depenetration must never push a body into static geometry; a
                 // crowd squeezing against a wall would otherwise extrude units
                 // through it. But forfeiting the whole correction is why residual

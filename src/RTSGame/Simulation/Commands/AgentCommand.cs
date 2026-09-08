@@ -18,7 +18,23 @@ internal sealed record MoveGroupCommand(AgentId[] Agents, Vector2 Target) : Agen
 /// therefore how a unit is actually taken off work — telling it to stop merely interrupts it,
 /// and it goes back to the job when the grace runs out, which is the point of §7.
 /// </remarks>
-internal sealed record AssignGroupCommand(AgentId[] Agents, Assignment Assignment) : AgentCommand;
+/// <param name="Spread">
+/// Whether a crowd sent at one work site may be distributed across nearby places like it.
+/// </param>
+/// <remarks>
+/// <b>A courtesy for a human, and poison for the planner.</b> Somebody clicking one tree with six villagers
+/// selected means "cut wood here", so sending them to six trunks is what they meant. The bot means something
+/// narrower: its intents reconcile per node — <c>gap = target − (standing + outstanding)</c> — so silently
+/// redirecting its hands to a different node leaves the node it asked about permanently short. It reissues,
+/// spends every spare pair of hands on the same unsatisfiable intent, and never has anybody left to train.
+/// The gate caught exactly that: "faction 1's bot has a barracks and no militia".
+/// <para>
+/// Hence the flag rather than a rule. Both paths go through the same command, per §132 — the bot plays
+/// through the player's own verbs — so the difference has to be carried, not inferred.
+/// </para>
+/// </remarks>
+internal sealed record AssignGroupCommand(
+    AgentId[] Agents, Assignment Assignment, bool Spread = false) : AgentCommand;
 
 internal sealed record StopGroupCommand(AgentId[] Agents) : AgentCommand;
 

@@ -1209,7 +1209,7 @@ internal sealed class SimulationWorld
     /// the player re-posting anybody.
     /// </para>
     /// </remarks>
-    private Assignment PostedOnAWorkSite(in AgentState agent, Assignment assignment)
+    private Assignment PostedOnAWorkSite(in AgentState agent, Assignment assignment, bool spread)
     {
         if (assignment.Kind != AssignmentKind.Hold || agent.CarryCapacity <= 0) return assignment;
         var at = EconomySystem.NodeAt(Nodes, assignment.Anchor, PlacementCellSize);
@@ -1226,6 +1226,20 @@ internal sealed class SimulationWorld
                 site.FootprintRadius,
                 EconomySystem.HandoverSeconds,
                 EconomySystem.WorkShiftSeconds);
+        }
+
+        // <b>Six people told to cut one tree should become six woodcutters, not a scrum.</b> §172. A trunk
+        // fits one pair of hands; a field takes a few before the returns diminish. Posting a crowd on one
+        // deposit used to give every one of them that same deposit, so they converged, shoved, and cut one
+        // tree at one body's rate while a wood full of trees stood untouched. Reported from the chair as
+        // jobs being broken, and it is the same complaint as the crowding: nobody was told about anybody.
+        //
+        // Construction is deliberately exempt — many hands on one project is correct, and a project needs
+        // whoever it can get.
+        if (spread)
+        {
+            at = SpreadAcrossKin(in agent, at);
+            site = ref Nodes.Get(at);
         }
 
         return site.Kind switch
@@ -1246,6 +1260,89 @@ internal sealed class SimulationWorld
                 EconomySystem.HandoverSeconds),
             _ => assignment,
         };
+    }
+
+    /// <summary>
+    /// How many pairs of hands a work site is worth crowding onto.
+    /// </summary>
+    /// <remarks>
+    /// Judgement, not measurement, and the numbers say what they mean: a trunk is one body's work, a rock
+    /// face takes two, and §6 made a field's output continuous in its hands with diminishing returns — so
+    /// three is where a fourth stops being worth walking for. Anything else gets no cap: a store, a
+    /// barracks and a building site all want whoever turns up.
+    /// </remarks>
+    private static int WorkerCapacity(in EconomyNode node) => node.Kind switch
+    {
+        // <b>Three, from the chair.</b> One was the tidy answer — a trunk is one body's work — and it read
+        // as needlessly precious: "I'd still suppose at least 2-3 can work a single tree". Nothing in the
+        // economy objects, since §6 makes output continuous in hands rather than gated on a slot.
+        NodeKind.Tree => 3,
+        NodeKind.Outcrop => 2,
+        NodeKind.Farm => 3,
+        _ => int.MaxValue,
+    };
+
+    /// <summary>How far a posted body will look for a less crowded place of the same sort.</summary>
+    /// <remarks>
+    /// A click means "work this, and things like it near it" and not "scatter across the map". Roughly a
+    /// cutter's own reach, so the spread stays inside the wood the player pointed at.
+    /// </remarks>
+    private const float SpreadReachMetres = 32f;
+
+    /// <summary>
+    /// The place this body should actually work: the one it was posted on, or the nearest like it with room.
+    /// </summary>
+    /// <remarks>
+    /// <b>Counts bodies ASSIGNED, not bodies arrived.</b> <c>EconomyNode.Hands</c> is the obvious source
+    /// and the wrong one: it counts who is standing at a node, so six bodies walking to the same tree all
+    /// read it as empty and all keep going. What matters is who has already been sent.
+    /// <para>
+    /// Deterministic: nodes are walked in store order and ties go to the lower id, so two runs from the same
+    /// state distribute identically.
+    /// </para>
+    /// </remarks>
+    private NodeId SpreadAcrossKin(in AgentState agent, NodeId posted)
+    {
+        if (!Nodes.Contains(posted)) return posted;
+        ref readonly var chosen = ref Nodes.Get(posted);
+        var capacity = WorkerCapacity(in chosen);
+        if (capacity == int.MaxValue) return posted;
+        if (WorkersSentTo(posted, agent.Id) < capacity) return posted;
+
+        var kind = chosen.Kind;
+        var from = chosen.Position;
+        var best = posted;
+        var bestDistance = float.MaxValue;
+
+        foreach (ref readonly var other in Nodes.All)
+        {
+            if (!other.IsAlive || other.Kind != kind || other.Id == posted) continue;
+            if (other.IsNaturalDeposit && other.Stock.Total <= 0) continue;
+            var distance = Vector2.DistanceSquared(other.Position, from);
+            if (distance > SpreadReachMetres * SpreadReachMetres) continue;
+            if (distance >= bestDistance) continue;
+            if (WorkersSentTo(other.Id, agent.Id) >= WorkerCapacity(in other)) continue;
+            bestDistance = distance;
+            best = other.Id;
+        }
+
+        return best;
+    }
+
+    /// <summary>How many other live bodies have been given this node as their work.</summary>
+    private int WorkersSentTo(NodeId node, AgentId except)
+    {
+        var sent = 0;
+        foreach (ref readonly var other in Agents.All)
+        {
+            if (!other.IsAlive || other.Id == except) continue;
+            var theirs = other.Jobs.Assignment.Kind == AssignmentKind.Build
+                ? other.Jobs.Project
+                : other.Jobs.Assignment.Source;
+            if (theirs == node) sent++;
+        }
+
+        return sent;
     }
 
     /// <summary>
@@ -1567,10 +1664,11 @@ internal sealed class SimulationWorld
     /// is doing; this changes what it is for. The distinction is the jobs model's whole point,
     /// and it is why there is no "manual mode" anywhere in this file to be stranded in.
     /// </remarks>
-    public void QueueAssign(IEnumerable<AgentId> agents, Assignment assignment)
+    public void QueueAssign(
+        IEnumerable<AgentId> agents, Assignment assignment, bool spread = false)
     {
         var snapshot = agents.Distinct().OrderBy(id => id.Value).ToArray();
-        if (snapshot.Length > 0) commands.Enqueue(new AssignGroupCommand(snapshot, assignment));
+        if (snapshot.Length > 0) commands.Enqueue(new AssignGroupCommand(snapshot, assignment, spread));
     }
 
     /// <summary>
@@ -2472,7 +2570,7 @@ internal sealed class SimulationWorld
         {
             if (!Agents.Contains(id)) continue;
             ref var agent = ref Agents.Get(id);
-            var job = PostedOnAWorkSite(in agent, resolved);
+            var job = PostedOnAWorkSite(in agent, resolved, assign.Spread);
             if (job.Kind is AssignmentKind.Work or AssignmentKind.Build or AssignmentKind.Train &&
                 agent.Role != AgentRole.Villager)
             {
@@ -2960,7 +3058,23 @@ internal sealed class SimulationWorld
             return;
         }
 
-        if (TryClaimBuilderLoad(ref agent, projectId)) return;
+        // <b>Let the carriers carry. §175.</b>
+        //
+        // A builder used to fetch its own timber, so nine hands on a camp were nine self-sufficient units
+        // walking nine round trips — and the site's material arrived in batches, so most of them stood
+        // waiting for a delivery while one worked off whatever fraction had landed. Measured, they still
+        // spent 82% of their time working, so this is not a throughput fix and should not be sold as one.
+        // What it buys is legibility, which is the thing that has been wrong all along: a builder who stays
+        // at the site LOOKS like a builder, and timber arriving on somebody's back looks like haulage.
+        //
+        // <b>Only on evidence, never on faith.</b> The condition is that a delivery from something other
+        // than a builder is already inbound — a cart, a board haul, a standing route. If nothing is coming,
+        // the builder supplies itself exactly as before, so a project can never starve waiting for a
+        // hauler that does not exist. That is the floor, and it is why this is safe to try.
+        if (!HaulersAreSupplying(in project)) 
+        {
+            if (TryClaimBuilderLoad(ref agent, projectId)) return;
+        }
 
         // There is demand but no reachable held stock, or every missing unit is already inbound with another
         // body. Stay committed at the site and reconsider after one shift rather than becoming idle or
@@ -3055,6 +3169,36 @@ internal sealed class SimulationWorld
         };
         JobSystem.Retarget(ref agent, assignment, leg: 0);
         return true;
+    }
+
+    /// <summary>
+    /// Whether somebody other than a builder is already bringing this project what it needs.
+    /// </summary>
+    /// <remarks>
+    /// The evidence half of §175. A builder stands down from fetching only when a carrier is demonstrably
+    /// on the job, because the alternative — standing down because a carrier <em>might</em> come — is how a
+    /// site waits forever in a settlement with no spare hands. Counting bodies in flight cannot be wrong
+    /// about that: either something is carrying timber here or it is not.
+    /// </remarks>
+    private bool HaulersAreSupplying(in EconomyNode project)
+    {
+        var site = project.Id;
+        foreach (var resource in Resources.All)
+        {
+            if (project.Wanted(resource) <= 0) continue;
+            foreach (ref readonly var body in Agents.All)
+            {
+                if (!body.IsAlive) continue;
+                // A builder fetching for itself is the thing being replaced, so it is not evidence.
+                if (body.Jobs.Assignment.Kind == AssignmentKind.Build) continue;
+                if (!body.Jobs.Assignment.MovesCargo) continue;
+                if (body.Jobs.Assignment.Sink != site) continue;
+                if (body.Jobs.Assignment.Cargo != resource) continue;
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Material already on its way to one project, in bodies or in their explicit claims.</summary>
@@ -3559,6 +3703,34 @@ internal sealed class SimulationWorld
         var bearing = toward.LengthSquared() > 0.000001f
             ? Vector2.Normalize(toward)
             : Vector2.UnitX;
+
+        // <b>Each body starts looking from a different side. §173.</b>
+        //
+        // Several bodies working one place — a building site, where there is no other place to send them —
+        // all approach from wherever they came from, all start their search at the same bearing, and all
+        // take the same first candidate. They arrive bunched on one face and shove each other for it.
+        // Reported from the chair twice: once as crowding a building, and again as "just standing on the
+        // construction site bunched up".
+        //
+        // The previous attempt at this refused candidates another body had claimed, and a rule that can
+        // REFUSE can starve — it did, and it went. This cannot: it only rotates where the search begins, so
+        // every body still finds the first routable point it can, just from its own side. The golden angle
+        // spreads consecutive ids around the circle instead of clustering them, and the whole thing is a
+        // function of the body's own id, so there is no scan, no order dependence and nothing new to
+        // fingerprint.
+        // <b>Only where several bodies genuinely share one place</b> — a structure being raised, repaired or
+        // upgraded, which is the one work site with no cap on hands and therefore no kin to spread onto.
+        // Applied to a deposit it is actively harmful: a trunk is a metre across, so starting the search on
+        // the far side sends a body walking through the tree to get there, and the wedge test caught it
+        // putting a cutter 0.39 m inside a trunk. Deposits do not need it — SpreadAcrossKin gives each body
+        // its own tree before it ever gets here.
+        if (agent.Jobs.Assignment.Kind is AssignmentKind.Build or AssignmentKind.Train)
+        {
+            var spin = agent.Id.Value * 2.39996323f;
+            bearing = new Vector2(
+                bearing.X * MathF.Cos(spin) - bearing.Y * MathF.Sin(spin),
+                bearing.X * MathF.Sin(spin) + bearing.Y * MathF.Cos(spin));
+        }
         var halfWidth = agent.Jobs.PlaceHalfWidth;
         var standoff = agent.Radius + JobDefaults.TouchSlack * 0.5f;
         var step = NavigationCellSize;
@@ -3566,11 +3738,18 @@ internal sealed class SimulationWorld
         // walled in and retrying politely is the right answer.
         var furthest = standoff + agent.Radius * 2f + 2f;
 
-        // <b>Who else is already at this place, or on their way to it.</b> §171. Gathered once, before the
-        // search, because the search asks about forty candidate points and asking every body about each of
-        // them would put an O(bodies x candidates) scan on a tick.
-        var claimants = GatherClaimants(in agent, place, halfWidth);
-
+        // <b>Claim avoidance used to live here and has been removed. §173.</b>
+        //
+        // The idea was that a body should not walk at a point another body has taken, so a crowd would fan
+        // around a footprint instead of stacking on its near face. It read well and it was the wrong layer:
+        // spreading a crowd is a decision about WHICH PLACE each body works, and that now happens where it
+        // belongs, in SpreadAcrossKin — six bodies posted on one tree take six different trunks.
+        //
+        // Left here as well it did no good and real harm. Every body within six metres of a place marked a
+        // disc of it unavailable, including bodies merely standing nearby and bodies that had been stood
+        // down, so the reported symptom was exact: "if I assign anyone to one tree, nobody else can get even
+        // close to the tree — even if I unassign the original person". Two mechanisms aiming at one goal,
+        // and the redundant one was the one that could refuse.
         for (var outward = standoff; outward <= furthest; outward += step)
         for (var turn = 0; turn < ApproachBearings.Length; turn++)
         {
@@ -3585,78 +3764,11 @@ internal sealed class SimulationWorld
             var candidate = Terrain.ClampPosition(
                 place + direction * (BoundaryAlong(direction, halfWidth) + outward));
             if (!CanRouteTo(candidate, in agent)) continue;
-            // <b>And not on top of somebody who got here first.</b> This is the whole of the reported
-            // fault: without it every body approaching from the same direction chose the same bearing and
-            // the same point, so a crowd converged on one face of a building and then shoved the bodies
-            // already standing there in order to reach a spot that was taken. Skipping claimed points makes
-            // them fan out around the footprint instead — and because the search still starts from the
-            // body's own bearing and turns outward, each one takes the nearest FREE side rather than
-            // marching round a barn for no reason.
-            if (IsClaimed(candidate, claimants, agent.Radius)) continue;
             point = candidate;
             return true;
         }
 
         point = Terrain.ClampPosition(place);
-        return false;
-    }
-
-    /// <summary>
-    /// Where every other body working this place is standing, or has asked to stand.
-    /// </summary>
-    /// <remarks>
-    /// <b>Destinations as well as positions, because a body walking to a slot has already taken it.</b>
-    /// Reading only positions would let two bodies leaving from the same side pick the same point and
-    /// discover the clash on arrival, which is the shoving this exists to stop. A body's requested
-    /// destination is the claim; where it currently stands is only where it happens to be.
-    /// <para>
-    /// Bounded to bodies near the place, so a settlement of three hundred does not get walked per candidate.
-    /// Deterministic because the store is walked in index order and every value read is simulation state.
-    /// </para>
-    /// </remarks>
-    private Vector2[] GatherClaimants(in AgentState self, Vector2 place, float halfWidth)
-    {
-        // Far enough out to cover the whole search ring and no further.
-        var reach = halfWidth + self.Radius * 4f + 4f;
-        var reachSquared = reach * reach;
-        var found = new List<Vector2>(8);
-
-        foreach (ref readonly var other in Agents.All)
-        {
-            if (!other.IsAlive || other.Id.Value == self.Id.Value) continue;
-
-            // Standing here.
-            if (Vector2.DistanceSquared(other.Position, place) <= reachSquared)
-            {
-                found.Add(other.Position);
-            }
-
-            // Or heading here: a claim staked but not yet occupied.
-            var wanted = other.RequestedDestination;
-            if (Vector2.DistanceSquared(wanted, place) <= reachSquared)
-            {
-                found.Add(wanted);
-            }
-        }
-
-        return found.ToArray();
-    }
-
-    /// <summary>Whether a body of this radius standing here would overlap a claim.</summary>
-    /// <remarks>
-    /// Two radii is the honest spacing: bodies that touch are bodies the depenetration layer will start
-    /// pushing apart, and the point of this is to not create that situation in the first place. A shade
-    /// under, so a rank of workers along a wall can stand shoulder to shoulder rather than refusing to.
-    /// </remarks>
-    private static bool IsClaimed(Vector2 candidate, Vector2[] claimants, float radius)
-    {
-        var apart = radius * 1.8f;
-        var apartSquared = apart * apart;
-        foreach (var claim in claimants)
-        {
-            if (Vector2.DistanceSquared(candidate, claim) < apartSquared) return true;
-        }
-
         return false;
     }
 
