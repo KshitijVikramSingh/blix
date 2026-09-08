@@ -48,7 +48,51 @@ def parse_args():
         "--strip-prefix",
         default="mixamorig:",
         help="bone-name prefix to remove; Mixamo prefixes every bone with this")
+    p.add_argument(
+        "--bone-map",
+        default="",
+        help="comma-separated From=To bone renames, applied to the BASE rig so clips authored "
+             "against another naming scheme drive it. See --preset for the ones already worked out.")
+    p.add_argument(
+        "--preset",
+        default="",
+        choices=["", "quaternius-2022-to-base"],
+        help="a worked-out --bone-map. 'quaternius-2022-to-base' renames the 2022 Animated Men rig "
+             "to the naming Quaternius's Universal Animation Library and base characters use.")
+    p.add_argument(
+        "--no-join",
+        action="store_true",
+        help="skip joining skinned meshes into one. Leave this OFF unless you know why: the importer "
+             "takes ONE skin per file and silently ignores the rest, so a modular character exported "
+             "as body + outfit pieces loses every piece but the first.")
     return p.parse_args(argv_after_dashes())
+
+
+# <b>The 2022 rig against the current one.</b> Twenty bones already agree — Hips, Abdomen, Torso, Neck,
+# Head, both Shoulder/UpperArm/LowerArm, both UpperLeg/LowerLeg, both Foot, Body — which is every bone a
+# gait needs at this camera distance. What differs is hands, one extra spine joint and two names:
+#
+#   2022 Animated Men          current base characters / Universal Animation Library
+#   -----------------          ---------------------------------------------------
+#   Bone                       Root
+#   Palm.L/R                   Wrist.L/R
+#   MiddleHand.L/R, Fingers    Index1/Middle1/Ring1/Pinky1 …   (no equivalent; dropped)
+#   Thumb2.L/R                 Thumb2.L/R via Thumb1 chain
+#   PoleTarget.L/R             PT.L/R
+#   (none)                     Chest                            (no equivalent; dropped)
+#
+# Dropped bones simply receive no animation and keep their rest pose. At eighty metres that costs a
+# slightly stiffer torso and fingers nobody can see, which is why mapping is a real option rather than a
+# compromise — but retargeting nothing at all is better, so prefer a body on the current naming.
+PRESETS = {
+    "quaternius-2022-to-base": {
+        "Bone": "Root",
+        "Palm.L": "Wrist.L",
+        "Palm.R": "Wrist.R",
+        "PoleTarget.L": "PT.L",
+        "PoleTarget.R": "PT.R",
+    },
+}
 
 
 def clear_scene():
@@ -88,6 +132,43 @@ def strip_bone_prefix(armature, prefix):
     return renamed
 
 
+def rename_bones(armature, mapping):
+    """Rename bones on the base rig so clips authored against another scheme bind by name."""
+    if not mapping:
+        return 0
+    renamed = 0
+    for bone in armature.data.bones:
+        target = mapping.get(bone.name)
+        if target and target != bone.name:
+            bone.name = target
+            renamed += 1
+    return renamed
+
+
+def join_skinned_meshes(armature):
+    """Collapse every mesh weighted to this armature into ONE object, and therefore one skin.
+
+    src/Blix/GltfImporter.cs takes the first node carrying both a mesh and a skin as primary and collects
+    only the other nodes sharing THAT skin; anything on a second skin is ignored without a word. Modular
+    characters are exactly that shape — body, head, outfit pieces, each its own skinned mesh — so a
+    straight export loses all but one piece. Verified against Quaternius's modular men: four skins in the
+    file, one imported.
+    """
+    meshes = [
+        o for o in bpy.context.scene.objects
+        if o.type == "MESH" and any(m.type == "ARMATURE" and m.object is armature for m in o.modifiers)
+    ]
+    if len(meshes) < 2:
+        return len(meshes)
+
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in meshes:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = meshes[0]
+    bpy.ops.object.join()
+    return len(meshes)
+
+
 def main():
     args = parse_args()
     renames = {}
@@ -97,10 +178,27 @@ def main():
         source, target = pair.split("=", 1)
         renames[source.strip()] = target.strip()
 
+    # <b>Bones and actions are different namespaces.</b> --name-map renames clips, --bone-map renames
+    # bones, and merging the two (which the first draft did) would rename a bone because an action
+    # happened to share its name.
+    bone_renames = dict(PRESETS.get(args.preset, {}))
+    for pair in (x for x in args.bone_map.split(",") if x.strip()):
+        if "=" not in pair:
+            raise SystemExit(f"--bone-map wants From=To, got '{pair}'")
+        source, target = pair.split("=", 1)
+        # Explicit renames win, so a preset can be corrected on the command line.
+        bone_renames[source.strip()] = target.strip()
+
     clear_scene()
     load(args.base)
     base_armature = sole_armature()
     stripped = strip_bone_prefix(base_armature, args.strip_prefix)
+    remapped = rename_bones(base_armature, bone_renames)
+    if remapped:
+        print(f"[merge] renamed {remapped} bone(s) on the base rig to match the clips")
+    if not args.no_join:
+        joined = join_skinned_meshes(base_armature)
+        print(f"[merge] joined {joined} skinned mesh(es) into one — the importer takes one skin per file")
     print(f"[merge] base '{os.path.basename(args.base)}': "
           f"armature '{base_armature.name}', {len(base_armature.data.bones)} bones, "
           f"{stripped} prefix(es) stripped")

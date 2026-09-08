@@ -23,6 +23,39 @@ the `SecondAge` building kit. Deliberate for now: this is here to answer whether
 makes a body's job readable, and a costume cannot answer that. Replace once the clip set
 is settled.
 
+## Where the real animation is coming from
+
+Both **CC0**, both from Quaternius, and between them they cover every action the game asks for:
+
+- **Universal Animation Library** — 120+ clips: locomotion in eight directions, jog, sprint, push, crawl,
+  swim, sit, deaths, combat.
+- **Universal Animation Library 2** — 130+ clips, and the one that matters here: **farming**. `BodyAction.
+  Labour` is the only action currently served by a stand-in, and this is what replaces it.
+
+Take the **root-motion-disabled** export of each. Both ship with and without; the game strips horizontal
+root translation anyway (position belongs to the simulation), so the disabled version simply means the
+renderer is not undoing work the exporter did.
+
+**The rig naming matters, and it is why the body should probably change too.** Both libraries moved to the
+naming scheme of Quaternius's base characters and modular outfits in January 2026. The 2022 Animated Men
+Pack above predates that. Measured against a current modular character, twenty bones already agree — Hips,
+Abdomen, Torso, Neck, Head, both Shoulder/UpperArm/LowerArm, both UpperLeg/LowerLeg, both Foot, Body —
+which is every bone a gait needs at this camera distance. What differs is hands, a `Chest` joint, and two
+names (`Bone`→`Root`, `PoleTarget`→`PT`).
+
+So there are two routes:
+
+1. **A base character on the current naming** (and *Modular Character Outfits — Fantasy*, also CC0, which
+   would fix the modern dress at the same time). Clips bind with no retargeting at all.
+2. **Keep this body** and pass `--preset quaternius-2022-to-base` to `tools/cook-character.sh`. The twenty
+   shared bones animate; hands and `Chest` keep their rest pose, which at eighty metres costs a slightly
+   stiffer torso and fingers nobody can see.
+
+One trap, verified rather than guessed: a **modular character is several skinned meshes**, and
+`GltfImporter` takes one skin per file and ignores the rest without a word. Quaternius's modular men have
+four skins in one file; three would vanish. The merge script joins them by default — do not pass
+`--no-join` unless you have a reason.
+
 ## Everything else
 
 `models/Villager.obj` is the unrigged predecessor. Its own header reads
