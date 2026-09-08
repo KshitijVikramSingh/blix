@@ -512,11 +512,17 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// <b>A capacity, not the asset's bone count.</b> The shader interface has to be declared before any
     /// character file is opened, so coupling the SSBO's size to the skeleton would mean the renderer could
     /// not be built until the art was chosen. The real stride travels to the shader at draw time
-    /// (<c>uSkin.x</c>) and the buffer only has to be big enough — sixty-four covers this rig's thirty-one
-    /// and any humanoid likely to replace it, and a skeleton over it is refused at load with a clear reason
-    /// rather than writing past the end of a buffer.
+    /// (<c>uSkin.x</c>) and the buffer only has to be big enough — and a skeleton over it is refused at load
+    /// with a clear reason rather than writing past the end of a buffer.
+    /// <para>
+    /// <b>Was sixty-four, which a real humanoid immediately exceeded.</b> The Unreal-convention skeleton
+    /// these characters use is sixty-five joints once it has finger chains, so the first properly dressed
+    /// villager was turned away by one bone. A hundred and twenty-eight leaves room for twist and IK bones
+    /// on top of a full hand rig, and costs 2 MB a frame slot at the body cap — which is nothing beside
+    /// being unable to load the asset.
+    /// </para>
     /// </remarks>
-    private const int SkinnedBoneCapacity = 64;
+    private const int SkinnedBoneCapacity = 128;
 
     private static byte[][] BuildCascadePushes()
     {
@@ -2249,7 +2255,12 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         var boneSlot = new DescriptorSetSlot(
             2, 0, ShaderResourceType.StorageBuffer, ShaderStages.Vertex, BlockLayout: boneLayout);
         var skinnedInterface = new ShaderInterface(
-            Slots: shaderInterface.Slots.Append(boneSlot).ToArray(),
+            // Plus the body's albedo at set 0 binding 5, appended after the maps the plain stage declares —
+            // see world_skinned.frag. Bound per primitive, because a character is several materials.
+            Slots: shaderInterface.Slots
+                .Append(boneSlot)
+                .Append(new DescriptorSetSlot(0, 5, ShaderResourceType.SampledImage, ShaderStages.Fragment))
+                .ToArray(),
             PushConstants: shaderInterface.PushConstants);
         var skinnedCasterInterface = new ShaderInterface(
             Slots: new[] { InstanceBuffer.Slot, boneSlot },
@@ -2356,7 +2367,8 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         // it goes through world.frag unchanged — a second lighting path for people would drift from the
         // first inside a session. Only the vertex stage differs, and only by where the position comes from.
         skinnedShader = vk.CreateShaderProgramFromSpv(
-            Spv("world_skinned.vert.spv"), Spv("world.frag.spv"), skinnedInterface, "rts-world-skinned");
+            Spv("world_skinned.vert.spv"), Spv("world_skinned.frag.spv"),
+            skinnedInterface, "rts-world-skinned");
         skinnedPipeline = vk.CreatePipeline(
             new PipelineDescription(
                 skinnedShader,
@@ -2511,7 +2523,7 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             // which the importer would have reduced to one) joined into a single skin, its bones renamed to
             // the deform naming the 53-bone library uses, and the library's forty-five clips carried onto
             // it. The mannequin it replaces is still in art/characters — it is where the clips come from.
-            "villager_universal.glb",
+            "villager_peasant.glb",
             skinnedShader, skinnedPipeline,
             skinnedCasterShader, skinnedCasterPipeline,
             ShadowCascades.Count,
@@ -5266,6 +5278,7 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         // every body the moment after it was added — thirteen villagers added, thirteen thrown away, and an
         // empty draw. Invisible people, and nothing in the matrices to suggest why.
         bodies?.Begin();
+        WatchForHurt(frameSeconds);
         BuildAgentInstances((float)time.Total);
         var agentMs = buildClock.Elapsed.TotalMilliseconds;
         buildClock.Restart();
@@ -7087,28 +7100,107 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         locomotion = false;
         if (bodies is null) return null;
 
-        // Fighting first: a body swinging at something is the one state that must never be misread as work.
+        // <b>Flinching outranks everything, because a body taking a hit is the most urgent thing on
+        // screen.</b> Held for a moment after the health drop, which is view-side state — see hurtUntil.
+        var id = agent.Id.Value;
+        if (id >= 0 && id < hurtUntil.Length && hurtUntil[id] > 0f)
+        {
+            return bodies.For(BodyAction.Flinch);
+        }
+
+        // Then fighting: a body swinging at something must never be misread as work.
         if (agent.Jobs.Assignment.Kind == AssignmentKind.Attack && JobSystem.IsWorking(in agent))
         {
             return bodies.For(BodyAction.Strike);
         }
 
-        // Then walking, on the body's own speed rather than on whether it has somewhere to be: a body held
-        // up by a crowd is standing, whatever its orders say.
+        // Then movement, on the body's own speed rather than on whether it has somewhere to be: a body
+        // held up by a crowd is standing, whatever its orders say. Carrying is its own gait, which is the
+        // single most legible thing in an economy game.
         if (agent.Velocity.LengthSquared() > WalkingSpeedSquared)
         {
             locomotion = true;
-            return bodies.For(BodyAction.Walk);
+            return bodies.For(agent.Jobs.CarriedUnits > 0 ? BodyAction.Carry : BodyAction.Walk);
         }
 
-        // Then labour: at its place, with an activity, uninterrupted — the economy's own definition of a
-        // hand that has arrived, rather than a distance test of this layer's invention.
+        // Then labour, by what is being worked rather than by one generic pose. The jobs layer's
+        // ActivityKind is deliberately just "working", but the ASSIGNMENT knows its cargo — so felling a
+        // tree, reaping a field and cutting stone are three different things on screen from state the
+        // simulation already had. Reported from the chair: the kneeling repair pose "isn't working with"
+        // wood chopping, and it never could.
         if (JobSystem.IsWorking(in agent))
         {
-            return bodies.For(BodyAction.Labour);
+            return bodies.For(LabourOf(in agent));
+        }
+
+        // A soldier at a post stands like a soldier. Militia and villagers were one silhouette before this,
+        // separated only by tint.
+        if (agent.Jobs.Assignment.Kind == AssignmentKind.Guard || agent.Role == AgentRole.Militia)
+        {
+            return bodies.For(BodyAction.Guard);
         }
 
         return bodies.For(BodyAction.Idle);
+    }
+
+    /// <summary>Which kind of work this body is at, from its assignment's own cargo.</summary>
+    private static BodyAction LabourOf(in AgentState agent)
+    {
+        var assignment = agent.Jobs.Assignment;
+        if (assignment.Kind is AssignmentKind.Build or AssignmentKind.Train) return BodyAction.Build;
+
+        return assignment.Cargo switch
+        {
+            Resource.Wood => BodyAction.Chop,
+            Resource.Stone => BodyAction.Quarry,
+            Resource.Grain => BodyAction.Reap,
+            _ => BodyAction.Build,
+        };
+    }
+
+    /// <summary>
+    /// How long a body keeps flinching after it is hurt, and the health it was last seen at.
+    /// </summary>
+    /// <remarks>
+    /// <b>View state, deliberately.</b> A flinch is a fact about the screen and not about the world, so
+    /// putting a "was hurt recently" timer in the simulation would add a field the determinism census and
+    /// every save would have to carry, for something no rule reads. Watching health fall from out here
+    /// costs one float per body and is never fingerprinted.
+    /// </remarks>
+    private const float FlinchSeconds = 0.45f;
+
+    private float[] hurtUntil = new float[256];
+    private float[] lastHealth = new float[256];
+
+    /// <summary>Notices which bodies lost health since the last frame. Call once per frame.</summary>
+    private void WatchForHurt(float deltaSeconds)
+    {
+        foreach (ref readonly var agent in simulation.Agents.All)
+        {
+            var id = agent.Id.Value;
+            if (id < 0) continue;
+            if (id >= hurtUntil.Length)
+            {
+                var grown = Math.Max(id + 1, hurtUntil.Length * 2);
+                Array.Resize(ref hurtUntil, grown);
+                Array.Resize(ref lastHealth, grown);
+            }
+
+            if (hurtUntil[id] > 0f) hurtUntil[id] = MathF.Max(0f, hurtUntil[id] - deltaSeconds);
+            if (!agent.IsAlive)
+            {
+                lastHealth[id] = 0f;
+                continue;
+            }
+
+            // A body that has just appeared has no history, so its first frame is not a wound.
+            if (lastHealth[id] > 0f && agent.Health < lastHealth[id] - 0.01f)
+            {
+                hurtUntil[id] = FlinchSeconds;
+            }
+
+            lastHealth[id] = agent.Health;
+        }
     }
 
     /// <summary>Below this a body is standing, not walking. Squared metres per second.</summary>
@@ -8556,6 +8648,9 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             // thing a player reads at this distance is silhouette and facing, not gait.
             var person = art?.Villager;
             var drawnAsAPerson = person is not null || bodies is not null;
+            // <b>Where a load rides.</b> Above the body by default — which is where a cylinder has to carry
+            // it — and replaced by the hands' own position when a rigged body reports one.
+            var carriedAt = new Vector3(position.X, height + bodyHeight, position.Y);
             // A body's own contact, tight and faint. This is the one that matters most for a scene read
             // close up: a person standing on ground with nothing under their feet reads as hovering
             // however good the sun shadow is, because a sun shadow at midday is somewhere else entirely.
@@ -8568,14 +8663,24 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 // Facing is a direction rather than an angle, which is what the steering layer wants; a
                 // model needs the angle, and the sign is negated because the world's Z runs the other way
                 // from a right-handed yaw.
-                var yaw = agent.Facing.LengthSquared() > 0.0001f
-                    ? -MathF.Atan2(agent.Facing.Y, agent.Facing.X)
+                // <b>Where it is actually going, not where its steering says it is pointed.</b> Reported
+                // from the chair as bodies walking backwards: Facing is the steering layer's own heading and
+                // lags — or opposes — the travel direction while a body is being pushed about in a crowd.
+                // Velocity cannot disagree with the direction of travel because it IS the direction of
+                // travel. Facing still decides which way a body stands when it has stopped, since a
+                // stationary body has no velocity to read.
+                var heading = agent.Velocity.LengthSquared() > WalkingSpeedSquared
+                    ? agent.Velocity
+                    : agent.Facing;
+                var yaw = heading.LengthSquared() > 0.0001f
+                    ? -MathF.Atan2(heading.Y, heading.X)
                     : 0f;
                 // <b>Plus whatever this asset's own forward is.</b> The line above was written for the prop
                 // villager, whose mesh faces +X; a rigged glTF humanoid usually faces along Z instead, and
                 // the difference reads from the chair as bodies walking sideways. SkinnedBodies measures it
                 // off the rig — ankle to toe is forward on any humanoid — so no asset needs a hand-set dial.
-                var skinnedYaw = yaw + (bodies?.FacingOffsetRadians ?? 0f);
+                var skinnedYaw = yaw + (bodies?.FacingOffsetRadians ?? 0f) +
+                                 MathF.Round(bodyFeel.YawQuarters) * MathF.PI * 0.5f;
                 var placement = Matrix4x4.CreateScale(bodyHeight) *
                                 Matrix4x4.CreateRotationY(yaw) *
                                 Matrix4x4.CreateTranslation(position.X, height, position.Y);
@@ -8601,7 +8706,8 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                         tint,
                         clip,
                         GaitOf(in agent, clip, locomotion, frameSeconds),
-                        CascadeMaskAt(position));
+                        CascadeMaskAt(position),
+                        out carriedAt);
                 }
 
                 if (posed || person is null)
@@ -8641,10 +8747,14 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 var loadWidth = bodyScale * 0.46f;
                 var loadHeight = 0.12f + 0.20f * MathF.Min(1f, agent.Jobs.CarriedUnits /
                     MathF.Max(1f, agent.CarryCapacity));
+                // <b>In the hands, not on the head.</b> The load used to be placed a fixed height above the
+                // body's origin, which on a rigged villager sat on top of their skull and stayed there while
+                // the arms moved beneath it. SkinnedBodies reports the midpoint of the two hands in the pose
+                // it just drew, so the sack is where the body is holding it — and a carry cycle's arms and
+                // the thing they are carrying now agree.
                 unitInstances.Add(new InstanceData(
                     Matrix4x4.CreateScale(loadWidth, loadHeight, loadWidth) *
-                    Matrix4x4.CreateTranslation(
-                        position.X, height + bodyHeight + loadHeight * 0.5f, position.Y),
+                    Matrix4x4.CreateTranslation(carriedAt),
                     ColourOf(agent.Jobs.Carrying)));
             }
 

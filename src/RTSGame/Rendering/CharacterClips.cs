@@ -4,26 +4,60 @@ namespace RTSGame.Rendering;
 /// What a body can be doing, as far as the screen is concerned.
 /// </summary>
 /// <remarks>
-/// <b>Five, because at this camera distance there are five readable states and not fifteen.</b> What a
-/// person reads at eighty metres is: moving or not, swinging or standing, fighting or working, upright or
-/// down. The jobs layer knows a great deal more than that — assignment, activity, interrupt, cargo,
-/// cohort — and none of the rest of it survives the trip to the screen, so this deliberately stops here.
-/// Adding a state is a claim that a player could tell it apart, and that claim should be tested from the
-/// chair before it is written down.
+/// <b>One entry per thing a player could tell apart at this camera distance</b>, and not one more. The jobs
+/// layer knows a great deal that does not survive the trip to the screen — which cohort, which interrupt,
+/// how many seconds of dwell remain — and none of that earns a pose.
+/// <para>
+/// It started at five and grew to eleven, one reason each and every one of them reported from the chair
+/// rather than imagined: a kneeling repair pose does not read as felling a tree, a hauler with a coloured
+/// box on their head does not read as carrying, and a soldier standing exactly like a farmer does not read
+/// as a guard.
+/// </para>
+/// <para>
+/// <b>What is deliberately absent is Run.</b> There is no run in the simulation — every body moves at
+/// <c>MaximumSpeed × terrain × laden</c> and nothing raises that — so a run clip would have no state to key
+/// off and would either never play or always play. If fleeing should look different, the simulation needs a
+/// flee speed first, and then this list gains an entry. A pose with no state behind it is decoration.
+/// </para>
 /// </remarks>
 internal enum BodyAction
 {
     /// <summary>Standing about: no assignment, or one it has not reached.</summary>
     Idle,
 
-    /// <summary>Under way. The gait is driven by real speed, so this covers a trudge and a trot both.</summary>
+    /// <summary>Under way, hands empty.</summary>
     Walk,
 
-    /// <summary>Working at its place — reaping, cutting, quarrying, building, hauling into a store.</summary>
-    Labour,
+    /// <summary>
+    /// Under way with a load.
+    /// </summary>
+    /// <remarks>
+    /// <b>The most legible thing a body in this game can be doing.</b> The whole economy is goods moving
+    /// from where they are to where they are used. It also puts §167's laden slowdown in the body rather
+    /// than only in the speed.
+    /// </remarks>
+    Carry,
+
+    /// <summary>Reaping a field.</summary>
+    Reap,
+
+    /// <summary>Felling a tree: standing and swinging, which is exactly what a kneeling pose is not.</summary>
+    Chop,
+
+    /// <summary>Cutting stone.</summary>
+    Quarry,
+
+    /// <summary>Working at a structure — raising it, repairing it, upgrading it.</summary>
+    Build,
+
+    /// <summary>Standing a post as a soldier, which should not look like standing about.</summary>
+    Guard,
 
     /// <summary>Swinging at something that is not its own.</summary>
     Strike,
+
+    /// <summary>Just took a hit. View-side state only — see the health watch in RtsGameLoop.</summary>
+    Flinch,
 
     /// <summary>Down.</summary>
     Fall,
@@ -33,80 +67,81 @@ internal enum BodyAction
 /// Which clip in an asset serves which action, by name, in order of preference.
 /// </summary>
 /// <remarks>
-/// <b>The whole point is that this is data and the game asks for an action, not a clip.</b> Characters
-/// arrive from wherever the art comes from and name their animations however that pipeline names them —
-/// Quaternius ships <c>HumanArmature|Man_Walk</c>, Mixamo ships <c>Walking</c>, a hand-authored rig ships
-/// whatever somebody typed. If the renderer asked for <c>"Man_Walk"</c> by name then every new character
-/// would be a code change, and the first thing anybody would do is add a second literal beside the first.
+/// <b>The game asks for an action and never for a clip.</b> Characters arrive from wherever the art comes
+/// from and name their animations however that pipeline names them — Quaternius's libraries ship
+/// <c>Walk_Loop</c> and <c>TreeChopping_Loop</c>, Mixamo ships <c>Walking</c>, a hand-authored rig ships
+/// whatever somebody typed. Naming a clip in code would make every new character a code change.
 /// <para>
-/// So each action lists the names it will accept, best first, and whatever the file happens to contain gets
-/// bound at load. A body's job never mentions a clip name; it names an action. Dropping in a pack with a
-/// vocabulary nobody anticipated costs one line here.
-/// </para>
-/// <para>
-/// <b>What is bound is printed at load, including what is missing</b> — see the bind report in
-/// <see cref="SkinnedBodies"/>. A character with no work animation is a fact worth reading in the terminal
-/// rather than discovering from the chair as "the villagers look odd when they farm".
+/// Each action lists the names that <em>mean</em> it, then the names that will only stand in for it. Two
+/// lists rather than one, because a marker that fires on everything says nothing: the load report stars
+/// stand-ins only, so <c>Quarry=TreeChopping_Loop*</c> reads as "no pick swing exists and a felling swing
+/// is covering", while <c>Chop=TreeChopping_Loop</c> reads as the real thing.
 /// </para>
 /// </remarks>
 internal static class CharacterClips
 {
     /// <summary>
-    /// Per action: the names that <em>mean</em> that action, then the names that will only stand in for it.
-    /// Both best-first, matched without case and without the exporter's armature prefix
-    /// (<c>HumanArmature|Man_Walk</c> is matched as <c>Man_Walk</c>).
+    /// Accepted names per action: first the ones that mean it, then the ones that stand in for it.
+    /// Matched without case and without the exporter's armature prefix.
     /// </summary>
-    /// <remarks>
-    /// <b>Two lists rather than one, because a marker that fires on everything says nothing.</b> The first
-    /// version ranked all the names together and starred any match past the first — which starred all five
-    /// actions, since no pack happens to use this file's preferred spelling. The distinction worth reporting
-    /// is not "an unusual name" but "there is no clip for this and something else is covering", so the
-    /// stand-ins are their own list and only they are marked.
-    /// </remarks>
     public static readonly (BodyAction Action, string[] Names, string[] StandIns)[] Table =
     {
-        // "Standing" is Quaternius's second idle and reads calmer than Man_Idle's weight shift.
         (BodyAction.Idle,
             new[] { "Idle_Loop", "Idle", "Man_Idle", "Standing", "Man_Standing", "Breathing Idle" },
-            Array.Empty<string>()),
-        // Running is a real gait but not this one, so it is a stand-in: the phase is driven by metres
-        // covered, and a run cycle played at walking distance reads as a mince.
-        // <b>The non-root-motion spelling first, every time.</b> The Universal library ships pairs — a clip
-        // and a <c>_RM</c> twin that travels — and while horizontal root translation is stripped anyway,
-        // binding the travelling one means the renderer spends every frame undoing what the exporter did.
+            new[] { "Idle_No_Loop", "Idle_Neutral" }),
+
+        // The non-root-motion spelling first, every time: these libraries ship pairs, and while root
+        // placement is discarded anyway, binding the travelling twin means undoing the exporter's work
+        // every frame.
         (BodyAction.Walk,
             new[] { "Walk_Loop", "Walk", "Man_Walk", "Walking", "Walk_Formal_Loop" },
-            new[] { "Jog_Fwd_Loop", "Run", "Man_Run", "Sprint_Loop" }),
-        // <b>No pack yet ships a labour clip.</b> Neither the Animated Men Pack nor Quaternius's Universal
-        // Animation Library has a chop, a dig, a reap or a hammer — so a sword slash stands in, because a
-        // downward arc at this distance reads as an axe, a scythe or a pick. The names ahead of it are what
-        // a Mixamo search for the real thing returns, so real content binds ahead of the stand-in the moment
-        // it exists, with no code change.
-        // The farming names lead because the Universal Animation Library 2 is where a real work loop is
-        // coming from, so it binds ahead of everything below the moment it is dropped in.
-        // <c>Fixing_Kneeling</c> is a genuine work animation — somebody kneeling and working at something —
-        // so it is a real clip for this action rather than a stand-in, which is why it sits in this list.
-        (BodyAction.Labour,
-            new[]
-            {
-                "Labour", "Farming", "Work", "Chopping", "Chop", "Mining", "Axe Chop", "Hammering",
-                "Digging", "Fixing_Kneeling", "PickUp_Table", "PickUp",
-            },
-            // A fight animation covering for an axe. Only reached if nothing above exists.
-            new[] { "Push_Loop", "Interact", "Man_SwordSlash", "SwordSlash", "Man_Punch" }),
+            new[] { "Jog_Fwd_Loop", "Run", "Man_Run" }),
+
+        (BodyAction.Carry,
+            new[] { "Walk_Carry_Loop", "Carry_Walk", "Walk_Carry", "Carrying" },
+            // A push reads as shifting something heavy, which is nearer the truth than empty hands.
+            new[] { "Push_Loop", "Walk_Loop", "Walk" }),
+
+        (BodyAction.Reap,
+            new[] { "Farm_Harvest", "Harvest", "Reap", "Scythe", "Farming" },
+            new[] { "Farm_PlantSeed", "Farm_Watering", "Fixing_Kneeling", "Interact" }),
+
+        // <b>The one the chair asked for by name.</b> A kneeling repair does not read as felling a tree.
+        (BodyAction.Chop,
+            new[] { "TreeChopping_Loop", "TreeChopping", "Chopping", "Chop", "Axe Chop" },
+            new[] { "Melee_Hook", "Sword_Regular_A", "Fixing_Kneeling" }),
+
+        (BodyAction.Quarry,
+            new[] { "Mining_Loop", "Mining", "Pickaxe", "Quarry" },
+            // No pack ships a pick swing. A felling swing is the same shape — two hands, overhead, into
+            // something solid — and reads correctly at this distance.
+            new[] { "TreeChopping_Loop", "Melee_Hook", "Fixing_Kneeling" }),
+
+        (BodyAction.Build,
+            new[] { "Fixing_Kneeling", "Hammering", "Building", "Repair" },
+            new[] { "Interact", "PickUp_Table" }),
+
+        (BodyAction.Guard,
+            new[] { "Idle_FoldArms_Loop", "Sword_Idle", "Idle_Sword", "Guard_Idle" },
+            new[] { "Idle_Lantern_Loop", "Idle_Torch_Loop", "Idle_Loop" }),
+
         (BodyAction.Strike,
             new[]
             {
-                "Sword_Attack", "Sword_Slash", "Strike", "Attack", "Man_SwordSlash", "SwordSlash",
-                "Sword And Shield Slash", "Punch_Cross", "Punch_Jab", "Punch_Right", "Punch_Left",
-                "Man_Punch", "Punch",
+                "Sword_Regular_A", "Sword_Attack", "Sword_Slash", "Strike", "Attack",
+                "Man_SwordSlash", "SwordSlash",
             },
-            Array.Empty<string>()),
+            new[] { "Melee_Hook", "Punch_Cross", "Punch_Jab", "Punch_Right", "Man_Punch", "Punch" }),
+
+        (BodyAction.Flinch,
+            new[] { "Hit_Chest", "Hit_Knockback", "HitRecieve", "Flinch" },
+            new[] { "Hit_Head", "Idle_Loop" }),
+
         (BodyAction.Fall,
             new[] { "Death01", "Death", "Man_Death", "Dying", "Falling Back Death" },
-            Array.Empty<string>()),
+            System.Array.Empty<string>()),
     };
 
     /// <summary>How many actions there are, for the arrays indexed by one.</summary>
-    public const int Count = 5;
+    public const int Count = 11;
 }

@@ -68,6 +68,9 @@ internal sealed class SkinnedBodies : IDisposable
     private readonly Matrix4x4 meshNode;
     private readonly Matrix4x4 normalise;
     private readonly Dictionary<string, AnimationClip> clips = new(StringComparer.OrdinalIgnoreCase);
+    private readonly int leftHand;
+    private readonly int rightHand;
+    private readonly int chest;
     private readonly AnimationClip[] byIndex;
     private readonly AnimationClip?[] bound;
     private int count;
@@ -77,6 +80,8 @@ internal sealed class SkinnedBodies : IDisposable
     private sealed record Part(
         Mesh Mesh,
         Vector4 Tint,
+        TextureHandle Albedo,
+        ShaderTextureBinding[] Bindings,
         InstancedBatch Scene,
         InstanceBuffer SceneBuffer,
         InstancedBatch[] Casters,
@@ -174,6 +179,11 @@ internal sealed class SkinnedBodies : IDisposable
             clips[bar >= 0 ? clip.Name[(bar + 1)..] : clip.Name] = clip;
         }
 
+        // Where a load rides, found by vocabulary like every other bone lookup here.
+        leftHand = IndexOf(skeleton, HandLeftNames);
+        rightHand = IndexOf(skeleton, HandRightNames);
+        chest = IndexOf(skeleton, ChestNames);
+
         bound = new AnimationClip?[CharacterClips.Count];
         BindActions();
     }
@@ -259,16 +269,29 @@ internal sealed class SkinnedBodies : IDisposable
     /// gait's vertical motion is in the hips and the spine anyway, which is where it survives.
     /// </para>
     /// <para>
+    /// <b>Orientation as well as position, and that was the whole facing saga.</b> Only the translation was
+    /// discarded at first, so every clip brought its own authored heading with it — and clips from two
+    /// libraries are not authored facing the same way. Reported from the chair with the detail that settled
+    /// it: a yaw of two quarter turns looked right while walking and zero looked right while chopping. No
+    /// single offset can fix a per-clip disagreement, which is why four attempts at one failed. Where a
+    /// body is AND which way it points belong to the simulation; a clip may say neither.
+    /// </para>
+    /// <para>
+    /// The cost is a clip that turns in place, whose turn now goes nowhere. Nothing in this game has one,
+    /// and if something does the turn belongs in the steering layer anyway.
+    /// </para>
+    /// <para>
     /// Static, and used by the measurement as well as the draw, which is the point: a body is measured
     /// through exactly the transform it is drawn through, so the two cannot disagree about where it is.
     /// </para>
     /// </remarks>
-    private static void StripRootMotion(Skeleton skeleton, Pose pose)
+    private static void StripRootMotion(Skeleton skeleton, Pose pose, Pose rest)
     {
         for (var i = 0; i < skeleton.BoneCount; i++)
         {
             if (skeleton.Bones[i].ParentIndex >= 0) continue;
-            pose.Locals[i] = pose.Locals[i] with { Translation = Vector3.Zero };
+            // The root reverts to its rest transform entirely — position, orientation and scale.
+            pose.Locals[i] = rest.Locals[i];
         }
     }
 
@@ -319,7 +342,11 @@ internal sealed class SkinnedBodies : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  bodies: {fileName} unusable, keeping the unrigged villager: {ex.Message}");
+            // <b>The innermost message, not the outermost.</b> An importer that loads images in parallel
+            // throws AggregateException, whose own Message is "One or more errors occurred." and tells you
+            // nothing — which cost a boot to work out. Unwrap to whatever actually failed.
+            Console.WriteLine(
+                $"  bodies: {fileName} unusable, keeping the unrigged villager: {Innermost(ex)}");
             return null;
         }
 
@@ -339,7 +366,7 @@ internal sealed class SkinnedBodies : IDisposable
         var measureClip = PickMeasuringClip(model);
         measureClip?.Sample(0.0, restForMeasure);
         // The same strip the draw applies, or the box describes a body that is never drawn.
-        StripRootMotion(model.Skeleton, restForMeasure);
+        StripRootMotion(model.Skeleton, restForMeasure, model.Skeleton.CreateRestPose());
         var measurePalette = new BonePalette(model.Skeleton.BoneCount);
         model.Skeleton.ComputeBonePalette(restForMeasure, measurePalette);
 
@@ -392,12 +419,18 @@ internal sealed class SkinnedBodies : IDisposable
             // colours", which is exactly what eleven materials all resolving to the same default looks
             // like. glTF carries a base colour per material; that is the answer and the guess is the
             // fallback for a file that has none.
+            // <b>A textured material's tint is white, because the tint multiplies the picture.</b> Tinting
+            // it brown as well would paint mud over the artwork; the name guess and the authored factor are
+            // for materials that have no image of their own.
             var authored = primitive.Material?.BaseColorFactor;
+            var textured = primitive.Material?.BaseColorTexture is not null;
             var tint = tints is not null && tints.TryGetValue(name ?? string.Empty, out var found)
                 ? found
-                : authored is { } colour && colour.W > 0f
-                    ? new Vector4(colour.X, colour.Y, colour.Z, MaterialClassBody)
-                    : DefaultTint(name);
+                : textured
+                    ? new Vector4(1f, 1f, 1f, MaterialClassBody)
+                    : authored is { } colour && colour.W > 0f
+                        ? new Vector4(colour.X, colour.Y, colour.Z, MaterialClassBody)
+                        : DefaultTint(name);
             var sceneBuffer = new InstanceBuffer(device, sceneShader, $"bodies.{name}");
             var casterBuffers = new InstanceBuffer[casterPassCount];
             var casters = new InstancedBatch[casterPassCount];
@@ -410,8 +443,12 @@ internal sealed class SkinnedBodies : IDisposable
 
             var casterLists = new List<InstanceData>[casterPassCount];
             for (var c = 0; c < casterPassCount; c++) casterLists[c] = new List<InstanceData>(MaxBodies);
+            var albedo = UploadAlbedo(device, primitive.Material?.BaseColorTexture, name);
             parts.Add(new Part(
-                mesh, tint,
+                mesh, tint, albedo,
+                // Sized for the five shared maps plus this part's albedo. Pre-allocated so the draw does
+                // not allocate per part per frame; BindingsFor falls back if the caller's count changes.
+                new ShaderTextureBinding[6],
                 new InstancedBatch(mesh, scenePipeline, sceneBuffer), sceneBuffer,
                 casters, casterBuffers,
                 new List<InstanceData>(MaxBodies), casterLists));
@@ -525,8 +562,8 @@ internal sealed class SkinnedBodies : IDisposable
     private static float MeasureStride(GltfModel model, float facingOffset, Matrix4x4 meshNode)
     {
         var skeleton = model.Skeleton;
-        var foot = IndexOf(skeleton, "foot");
-        var hips = IndexOf(skeleton, "hips");
+        var foot = IndexOf(skeleton, FootNames);
+        var hips = IndexOf(skeleton, HipNames);
         if (foot < 0 || hips < 0) return 0f;
 
         AnimationClip? walk = null;
@@ -556,12 +593,13 @@ internal sealed class SkinnedBodies : IDisposable
         var least = float.MaxValue;
         var most = float.MinValue;
 
+        var restForStride = skeleton.CreateRestPose();
         const int Samples = 24;
         for (var i = 0; i < Samples; i++)
         {
-            pose.CopyFrom(skeleton.CreateRestPose());
+            pose.CopyFrom(restForStride);
             walk.Sample(walk.Duration * i / (Samples - 1.0), pose);
-            StripRootMotion(skeleton, pose);
+            StripRootMotion(skeleton, pose, restForStride);
             skeleton.ComputeBonePalette(pose, palette);
             if (!Matrix4x4.Invert(skeleton.Bones[foot].InverseBindPose, out var footBind)) return 0f;
             if (!Matrix4x4.Invert(skeleton.Bones[hips].InverseBindPose, out var hipsBind)) return 0f;
@@ -585,45 +623,168 @@ internal sealed class SkinnedBodies : IDisposable
         return swing > 0f ? swing * 2f : 0f;
     }
 
-    private static int IndexOf(Skeleton skeleton, string contains)
+    /// <summary>
+    /// The first bone whose name contains any of these, in the order given.
+    /// </summary>
+    /// <remarks>
+    /// <b>A vocabulary, not a literal, for the same reason <see cref="CharacterClips"/> is.</b> Every rig
+    /// family names the same joint differently — hips are <c>Hips</c>, <c>DEF-hips</c> or <c>pelvis</c>;
+    /// the toe is <c>toe</c> or, in the Unreal convention, <c>ball</c> — and a single spelling means every
+    /// new character family silently loses a measurement. Both of these did exactly that on the first
+    /// Unreal-skeleton asset: facing fell back to "assume +X" and the stride to a guessed constant, and the
+    /// only reason it was caught is that both say so out loud when they fail.
+    /// </remarks>
+    private static int IndexOf(Skeleton skeleton, params string[] anyOf)
     {
-        for (var i = 0; i < skeleton.BoneCount; i++)
+        foreach (var wanted in anyOf)
         {
-            var name = skeleton.Bones[i].Name ?? string.Empty;
-            if (name.IndexOf(contains, StringComparison.OrdinalIgnoreCase) >= 0) return i;
+            for (var i = 0; i < skeleton.BoneCount; i++)
+            {
+                var name = skeleton.Bones[i].Name ?? string.Empty;
+                if (name.IndexOf(wanted, StringComparison.OrdinalIgnoreCase) >= 0) return i;
+            }
         }
 
         return -1;
     }
 
-    /// <summary>Which way this rig faces, from the ankle-to-toe direction of either foot.</summary>
+    private static bool ContainsAny(string name, string[] anyOf)
+    {
+        foreach (var wanted in anyOf)
+        {
+            if (name.IndexOf(wanted, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Names the toe-end joint goes by. Unreal calls it the ball of the foot.</summary>
+    private static readonly string[] ToeNames = { "toe", "ball" };
+
+    /// <summary>Names the ankle goes by.</summary>
+    private static readonly string[] FootNames = { "foot", "ankle" };
+
+    /// <summary>Names the root of the legs goes by. Unreal calls it the pelvis.</summary>
+    private static readonly string[] HipNames = { "hips", "pelvis" };
+
+    /// <summary>Names a left hand goes by.</summary>
+    private static readonly string[] HandLeftNames = { "hand_l", "Wrist.L", "Palm.L", "DEF-hand.L" };
+
+    /// <summary>Names a right hand goes by.</summary>
+    private static readonly string[] HandRightNames = { "hand_r", "Wrist.R", "Palm.R", "DEF-hand.R" };
+
+    /// <summary>Names the upper chest goes by, for a load with only one hand to hang it from.</summary>
+    private static readonly string[] ChestNames = { "spine_03", "Chest", "Torso", "DEF-spine.003" };
+
+    /// <summary>
+    /// Which way this rig faces, from the ankle-to-toe direction of <em>both</em> feet.
+    /// </summary>
+    /// <remarks>
+    /// <b>Both feet, because one foot is splayed.</b> A left toe points slightly out to the left and a
+    /// right toe slightly out to the right — that is how feet are — so measuring either one alone returns
+    /// forward plus that foot's splay angle. Reported from the chair as facing being "slightly broken"
+    /// after the ninety-degree error was fixed: the big error was gone and the splay was left. Summing the
+    /// two vectors cancels it, because the splay is equal and opposite by construction.
+    /// </remarks>
     private static (float Radians, string How) MeasureFacing(Skeleton skeleton)
     {
+        var ahead = Vector2.Zero;
+        var used = 0;
+        var how = string.Empty;
+
         for (var i = 0; i < skeleton.BoneCount; i++)
         {
             var name = skeleton.Bones[i].Name ?? string.Empty;
-            if (name.IndexOf("toe", StringComparison.OrdinalIgnoreCase) < 0) continue;
+            if (!ContainsAny(name, ToeNames)) continue;
 
             var parent = skeleton.Bones[i].ParentIndex;
             if (parent < 0) continue;
             var parentName = skeleton.Bones[parent].Name ?? string.Empty;
-            if (parentName.IndexOf("foot", StringComparison.OrdinalIgnoreCase) < 0) continue;
+            if (!ContainsAny(parentName, FootNames)) continue;
 
             if (!Matrix4x4.Invert(skeleton.Bones[i].InverseBindPose, out var toe)) continue;
             if (!Matrix4x4.Invert(skeleton.Bones[parent].InverseBindPose, out var foot)) continue;
 
-            var ahead = new Vector2(
+            var step = new Vector2(
                 toe.Translation.X - foot.Translation.X,
                 toe.Translation.Z - foot.Translation.Z);
-            if (ahead.LengthSquared() < 1e-8f) continue;
+            if (step.LengthSquared() < 1e-8f) continue;
 
-            // The draw computes yaw as -atan2(facing.z, facing.x) for a model whose forward is +X. This
-            // rig's own forward, expressed the same way, is what has to be cancelled out.
-            var mine = -MathF.Atan2(ahead.Y, ahead.X);
-            return (-mine, $"from {parentName} → {name}");
+            // Normalised before summing, so a longer foot does not outvote the other one.
+            ahead += Vector2.Normalize(step);
+            used++;
+            if (used == 1) how = $"from {parentName} → {name}";
         }
 
-        return (0f, "— no toe bone; assuming the model already faces +X");
+        if (used == 0 || ahead.LengthSquared() < 1e-8f)
+        {
+            return (0f, "— no toe bones; assuming the model already faces +X");
+        }
+
+        // The draw computes yaw as -atan2(facing.z, facing.x) for a model whose forward is +X. This rig's
+        // own forward, expressed the same way, is what has to be cancelled out.
+        // <b>The derivation was right; a different bug made it look wrong.</b> The draw computes yaw as
+        // -atan2(z, x) for a model whose forward is +X, so this rig's own forward expressed the same way is
+        // what has to be cancelled out. That is all this is.
+        //
+        // It was reported wrong from the chair twice and I flipped the sign in response, which made it
+        // wrong in the other direction — because the actual fault was elsewhere: the draw was turning
+        // bodies to face `Facing`, the steering layer's heading, which in a crowd lags or opposes the
+        // direction of travel. Once the heading came from velocity, this reading was correct as first
+        // written, and the chair's yaw dial settled at zero. A symptom chased in the wrong file costs two
+        // changes: the wrong one, and undoing it.
+        var mine = -MathF.Atan2(ahead.Y, ahead.X);
+        return (-mine, $"{how} and {used - 1} more (splay cancelled)");
+    }
+
+    /// <summary>
+    /// This material's base-colour image on the GPU, or a plain white one if it has none.
+    /// </summary>
+    /// <remarks>
+    /// <b>White rather than nothing, because the binding is not optional.</b> The skinned stage always
+    /// samples <c>uBodyAlbedo</c>, so a material with no image still needs something there — and white is
+    /// the identity for a multiply, which leaves such a material shaded by its tint exactly as it was
+    /// before textures existed.
+    /// </remarks>
+    private static TextureHandle UploadAlbedo(
+        VulkanGraphicsDevice device, GltfTexture? texture, string? name)
+    {
+        if (texture?.MipBytes is { Count: > 0 } mips)
+        {
+            return device.CreateTexture2D(
+                new TextureDescription(
+                    texture.Width, texture.Height, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
+                mips[0],
+                $"bodies.{name}.albedo");
+        }
+
+        var white = new byte[4 * 4 * 4];
+        Array.Fill(white, (byte)255);
+        return device.CreateTexture2D(
+            new TextureDescription(4, 4, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
+            white,
+            $"bodies.{name}.albedo.white");
+    }
+
+    /// <summary>Every underlying failure of an exception, flattened to one readable line.</summary>
+    private static string Innermost(Exception ex)
+    {
+        if (ex is AggregateException aggregate)
+        {
+            var flat = aggregate.Flatten();
+            return string.Join(" | ", flat.InnerExceptions.Select(Innermost));
+        }
+
+        // <b>Where, as well as what.</b> The first frame of the trace is worth more than the message when
+        // the message turns out to be a run of NUL bytes, which is how this one arrived.
+        var where = ex.StackTrace?.Split('\n').FirstOrDefault()?.Trim() ?? "no stack";
+        var message = new string((ex.Message ?? string.Empty)
+            .Where(c => !char.IsControl(c) && c != '\0').ToArray());
+        if (message.Length == 0) message = "(the message was empty or unprintable)";
+
+        return ex.InnerException is { } inner
+            ? $"{ex.GetType().Name}: {message} [{where}] <- {Innermost(inner)}"
+            : $"{ex.GetType().Name}: {message} [{where}]";
     }
 
     private static IEnumerable<Vector3> Corners(Bounds3 bounds)
@@ -709,9 +870,11 @@ internal sealed class SkinnedBodies : IDisposable
         Vector4? tint,
         AnimationClip clip,
         double atSeconds,
-        int casterMask = int.MaxValue)
+        int casterMask,
+        out Vector3 carrySocket)
     {
         ArgumentNullException.ThrowIfNull(clip);
+        carrySocket = placement.Translation;
         if (count >= MaxBodies) return false;
 
         // <b>Reset, sample, palette — and the reset is not optional.</b> A clip writes only the bones it has
@@ -721,12 +884,25 @@ internal sealed class SkinnedBodies : IDisposable
         // has no leg tracks and the body sampled before it was mid-stride.
         pose.CopyFrom(restPose);
         clip.Sample(atSeconds, pose);
-        StripRootMotion(skeleton, pose);
+        StripRootMotion(skeleton, pose, restPose);
         skeleton.ComputeBonePalette(pose, bonePalette);
         bonePalette.Matrices.AsSpan().CopyTo(
             paletteScratch.AsSpan(count * skeleton.BoneCount, skeleton.BoneCount));
 
         var model = meshNode * normalise * placement;
+
+        // <b>Where a load rides: between the hands, in the pose the body is actually in.</b> A carried sack
+        // was drawn a fixed height above the body's origin, which put it on the villager's head and left it
+        // there while the arms moved underneath. The palette knows where the hands are this frame, so the
+        // midpoint of the two is the right place and it moves with them.
+        if (leftHand >= 0 && rightHand >= 0)
+        {
+            carrySocket = Vector3.Transform((BoneAt(leftHand) + BoneAt(rightHand)) * 0.5f, model);
+        }
+        else if (chest >= 0)
+        {
+            carrySocket = Vector3.Transform(BoneAt(chest), model);
+        }
         foreach (var part in parts)
         {
             var colour = tint ?? part.Tint;
@@ -761,6 +937,12 @@ internal sealed class SkinnedBodies : IDisposable
     /// <paramref name="casterPushes"/> is per cascade and must already hold this frame's light matrices.
     /// </para>
     /// </remarks>
+    private Vector3 BoneAt(int bone)
+    {
+        if (!Matrix4x4.Invert(skeleton.Bones[bone].InverseBindPose, out var bind)) return Vector3.Zero;
+        return Vector3.Transform(bind.Translation, bonePalette.Matrices[bone]);
+    }
+
     public void Stage(ReadOnlySpan<byte> scenePush, IReadOnlyList<byte[]> casterPushes)
     {
         staged = count;
@@ -784,6 +966,26 @@ internal sealed class SkinnedBodies : IDisposable
 
     /// <summary>How many bodies were handed to the batches this frame, read by the draws.</summary>
     private int staged;
+
+    /// <summary>
+    /// The caller's shared maps, plus this part's own albedo appended.
+    /// </summary>
+    /// <remarks>
+    /// Rebuilt into a buffer the part owns rather than allocated per frame: the shared list is the graph's
+    /// depth textures and cannot be cached, but the array holding them can be.
+    /// </remarks>
+    private static ShaderTextureBinding[] BindingsFor(
+        Part part, IReadOnlyList<ShaderTextureBinding>? shared)
+    {
+        var count = shared?.Count ?? 0;
+        var into = part.Bindings.Length == count + 1
+            ? part.Bindings
+            : new ShaderTextureBinding[count + 1];
+
+        for (var i = 0; i < count; i++) into[i] = shared![i];
+        into[count] = new ShaderTextureBinding("uBodyAlbedo", part.Albedo, Slot: 5);
+        return into;
+    }
 
     /// <summary>Records this cascade's depth-only draw for every primitive.</summary>
     public void DrawShadow(RenderPassBuilder pass, int cascade)
@@ -809,7 +1011,10 @@ internal sealed class SkinnedBodies : IDisposable
             Console.WriteLine($"  bodies: {staged} posed, {parts.Length} instanced draw(s) per pass");
         }
         if (staged == 0) return;
-        foreach (var part in parts) part.Scene.End(pass, textures, palette.Handle);
+        foreach (var part in parts)
+        {
+            part.Scene.End(pass, BindingsFor(part, textures), palette.Handle);
+        }
     }
 
     public void Dispose()

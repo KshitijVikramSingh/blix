@@ -13746,3 +13746,113 @@ Four bugs came out of the first real Blender runs, none of which reading the scr
 - **`Action.fcurves` no longer exists** in Blender 5.x — actions are slotted, and the curves live under
   layers → strips → channelbags. Both spellings are handled, because the failure mode of picking one is a
   pipeline that works only on the machine it was written on.
+
+## 171. A villager who looks like one, and four things the chair found that measurement could not
+
+§170 got a rigged body on screen. This is what it took to make it read, and almost all of it came from
+somebody watching rather than from anything a test could assert.
+
+### The asset, assembled rather than found
+
+There is no such thing as a ready-made villager in these packs, and the reason is structural: the outfit
+pack ships **outfits**. `Male_Peasant` is arms, body, feet and legs, with no head — reported from the chair
+as "they don't have heads though", and the file genuinely has none, because the head belongs to the base
+character an outfit is worn over. So a villager is three files: a **base body** for the head and skin, an
+**outfit** over it, and an **animation library** to drive both. All CC0, all Quaternius, all on the same
+sixty-five-joint Unreal-convention skeleton — which is what makes them combinable at all.
+
+That last part matters more than it sounds. There are **four** rigs in circulation across these packs and
+they do not interoperate: the 2022 `HumanArmature` (31 joints), the base-character `Root` naming (62), the
+Rigify `DEF-` deform rig (53), and this Unreal one (65). A bone-name map across generations is what §170
+tried and what looked like "scary, weird broken animations".
+
+`tools/character_merge.py` grew four capabilities to assemble it, each from a real failure:
+
+- **`--wear`**: import a file and re-bind its skinned meshes to the base rig, discarding its own skeleton.
+  This is not §170's rejected retarget — nothing is renamed and no rest pose is assumed away, because it is
+  literally the same skeleton and the vertex groups already name its bones.
+- **`--head-only`**: trim the base body to the vertices weighted to head and neck. The free tier ships
+  "superhero" proportions only, and clothing cut for an ordinary build stretched over it reads exactly as
+  what it is — "the superhero proportions is definitely happening". Keep only the head and the outfit
+  becomes the entire silhouette, so the base body's build stops being visible.
+- **`--drop`**: leave out meshes by name. Eyeballs with a brown iris texture, rendered opaque at eighty
+  metres, are two dark discs — reported as villagers "wearing eyeglasses".
+- **stripping unused maps**: normal, roughness and occlusion. The game samples base colour and nothing else,
+  so ten images including four 4096×4096 maps meant roughly four hundred megabytes decoded before the first
+  frame — and the load **failed** doing it. 55 MB to 16 MB, and the failure went away.
+
+### The pipeline reported success it had not achieved
+
+The merge printed "wrote 43 clips" while the file had **no `animations` key at all**. Actions imported from
+another file arrive attached to that file's armature, and deleting it leaves them with a slot that no longer
+resolves — so they were flattened, counted, reported and silently not written. They are laid onto the rig as
+NLA tracks now, but the durable fix is that `verify_export` **reads the output back**: skins, clip count and
+interpolation, and it refuses to claim success if any of them is wrong. A pipeline that reports what it
+meant to write is a pipeline that lies.
+
+### Facing: four wrong answers, and why none of them could have been right
+
+The single longest thread. Bodies faced the wrong way, and it was fixed four times before it was understood.
+
+- The draw's yaw assumed a model whose forward is `+X` — true of the prop villager it was written for, false
+  of every rigged glTF humanoid. Measured off the rig instead: **on any humanoid, ankle to toe is forward**.
+- Both feet, because one foot is splayed: a left toe points out to the left and a right toe out to the
+  right, so either alone returns forward plus that foot's splay. Summing cancels it.
+- **The bone-name vocabulary**: this rig calls the toe `ball_l` and the hips `pelvis`, so the measurement
+  silently found nothing and fell back to "assume +X". Both now take synonym lists, like the clip table.
+- Then the sign was flipped in response to the chair, which made it wrong the other way, because the real
+  fault was in a different file entirely: the draw turned bodies to face **`Facing`**, the steering layer's
+  heading, which in a crowd lags or opposes the direction of travel. Velocity cannot disagree with the
+  direction of travel because it *is* the direction of travel.
+- And still not right, until the observation that settled it: **"yaw 0 looks right for chopping instead of
+  yaw 2"**. Per-clip. Clips from two libraries are not authored facing the same way, and only root
+  *translation* was being discarded — so every clip brought its own heading with it. No single offset can
+  fix a per-clip disagreement, which is why four attempts at one failed.
+
+The rule that came out: **where a body is and which way it points both belong to the simulation; a clip may
+say neither.** The root bone reverts to its rest transform entirely. The derived offset is right again and
+the chair's yaw dial sits at zero, which is the cleanest evidence available that the remaining derivation is
+sound rather than a lucky constant. The dial stays, in the debugger with the look dials, for the next asset
+whose rest pose is not axis-aligned — a number nobody can settle by measurement should be visibly a question.
+
+### Eleven actions, from state the simulation already had
+
+The clip table went from five actions to eleven, one reason each and every one reported rather than imagined.
+The most useful was not a new clip but a new **reading** of existing state: `ActivityKind` is deliberately
+just "working", but the **assignment knows its cargo** — so `Work`+`Wood` is felling, `Work`+`Grain` is
+reaping, `Work`+`Stone` is cutting, and `Build`/`Train` is the kneeling pose. "The wood chopping isn't
+working with kneeling" was never a clip problem: it was one pose standing in for four different jobs.
+
+`Carry` earns its place twice over: the economy is goods moving, and a hauler used to be a person with a
+coloured box balanced on their head. The load now rides at **the midpoint of the two hand bones in the pose
+just drawn**, so the carry cycle and the thing being carried finally agree.
+
+**Run is deliberately absent.** There is no run in the simulation — every body moves at
+`MaximumSpeed × terrain × laden` — so a run clip would have no state to key off and would either never play
+or always play. If fleeing should look different, the simulation needs a flee speed first. A pose with no
+state behind it is decoration.
+
+`Flinch` is view-side only: a "recently hurt" timer in the simulation would be a field the determinism
+census and every save had to carry for something no rule reads.
+
+### Crowding: the near side was already right, and nobody was looking at anybody else
+
+Reported precisely: bodies "crowd one side of any object", "pushing people already at the building around to
+reach it instead of just walking around and surrounding it".
+
+Half of the suspected cause was already implemented. `TryApproachPoint` starts from the body's own bearing
+and turns outward, taking the first routable point — so it has always preferred the **near** side. What it
+never did was ask about **other bodies**, so every body approaching from the same direction chose the same
+bearing and the same point, converged on one face, and then shoved whoever was standing there.
+
+So the change is one test in an existing search: before accepting a candidate, skip it if it would overlap a
+claim. A claim is another body's **requested destination** as well as its position — reading positions alone
+would let two bodies leaving from the same side pick the same point and discover the clash on arrival, which
+is precisely the shoving being fixed. Claimants are gathered once per walk request and bounded to bodies
+near the place; nothing is added to the determinism census, because every value read is already simulation
+state and the store is walked in index order.
+
+Still open, and agreed as its own pass: **depenetration has no mass and no memory.** Overlap is resolved
+instantly and symmetrically, which is a coefficient of restitution of one and no inertia — "they look like
+go-karts" — and pushing costs a body nothing, so shoving is always cheaper than pathing. Those are one fault
+seen twice, and they touch the invariants the pen-escape and congestion tests guard.

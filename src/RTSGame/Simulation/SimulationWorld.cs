@@ -3566,6 +3566,11 @@ internal sealed class SimulationWorld
         // walled in and retrying politely is the right answer.
         var furthest = standoff + agent.Radius * 2f + 2f;
 
+        // <b>Who else is already at this place, or on their way to it.</b> §171. Gathered once, before the
+        // search, because the search asks about forty candidate points and asking every body about each of
+        // them would put an O(bodies x candidates) scan on a tick.
+        var claimants = GatherClaimants(in agent, place, halfWidth);
+
         for (var outward = standoff; outward <= furthest; outward += step)
         for (var turn = 0; turn < ApproachBearings.Length; turn++)
         {
@@ -3580,11 +3585,78 @@ internal sealed class SimulationWorld
             var candidate = Terrain.ClampPosition(
                 place + direction * (BoundaryAlong(direction, halfWidth) + outward));
             if (!CanRouteTo(candidate, in agent)) continue;
+            // <b>And not on top of somebody who got here first.</b> This is the whole of the reported
+            // fault: without it every body approaching from the same direction chose the same bearing and
+            // the same point, so a crowd converged on one face of a building and then shoved the bodies
+            // already standing there in order to reach a spot that was taken. Skipping claimed points makes
+            // them fan out around the footprint instead — and because the search still starts from the
+            // body's own bearing and turns outward, each one takes the nearest FREE side rather than
+            // marching round a barn for no reason.
+            if (IsClaimed(candidate, claimants, agent.Radius)) continue;
             point = candidate;
             return true;
         }
 
         point = Terrain.ClampPosition(place);
+        return false;
+    }
+
+    /// <summary>
+    /// Where every other body working this place is standing, or has asked to stand.
+    /// </summary>
+    /// <remarks>
+    /// <b>Destinations as well as positions, because a body walking to a slot has already taken it.</b>
+    /// Reading only positions would let two bodies leaving from the same side pick the same point and
+    /// discover the clash on arrival, which is the shoving this exists to stop. A body's requested
+    /// destination is the claim; where it currently stands is only where it happens to be.
+    /// <para>
+    /// Bounded to bodies near the place, so a settlement of three hundred does not get walked per candidate.
+    /// Deterministic because the store is walked in index order and every value read is simulation state.
+    /// </para>
+    /// </remarks>
+    private Vector2[] GatherClaimants(in AgentState self, Vector2 place, float halfWidth)
+    {
+        // Far enough out to cover the whole search ring and no further.
+        var reach = halfWidth + self.Radius * 4f + 4f;
+        var reachSquared = reach * reach;
+        var found = new List<Vector2>(8);
+
+        foreach (ref readonly var other in Agents.All)
+        {
+            if (!other.IsAlive || other.Id.Value == self.Id.Value) continue;
+
+            // Standing here.
+            if (Vector2.DistanceSquared(other.Position, place) <= reachSquared)
+            {
+                found.Add(other.Position);
+            }
+
+            // Or heading here: a claim staked but not yet occupied.
+            var wanted = other.RequestedDestination;
+            if (Vector2.DistanceSquared(wanted, place) <= reachSquared)
+            {
+                found.Add(wanted);
+            }
+        }
+
+        return found.ToArray();
+    }
+
+    /// <summary>Whether a body of this radius standing here would overlap a claim.</summary>
+    /// <remarks>
+    /// Two radii is the honest spacing: bodies that touch are bodies the depenetration layer will start
+    /// pushing apart, and the point of this is to not create that situation in the first place. A shade
+    /// under, so a rank of workers along a wall can stand shoulder to shoulder rather than refusing to.
+    /// </remarks>
+    private static bool IsClaimed(Vector2 candidate, Vector2[] claimants, float radius)
+    {
+        var apart = radius * 1.8f;
+        var apartSquared = apart * apart;
+        foreach (var claim in claimants)
+        {
+            if (Vector2.DistanceSquared(candidate, claim) < apartSquared) return true;
+        }
+
         return false;
     }
 

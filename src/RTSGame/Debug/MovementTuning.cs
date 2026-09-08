@@ -49,6 +49,26 @@ internal sealed class ClockSettings
 
 internal sealed class BodyFeelSettings
 {
+    /// <summary>
+    /// Extra quarter turns applied to every rigged body, on a slider.
+    /// </summary>
+    /// <remarks>
+    /// <b>A dial because it could not be derived, and I tried three times.</b> Which way a character faces
+    /// in its own space is a fact about the asset: ankle-to-toe gives the answer to within a splay angle,
+    /// and both signs of that reading were reported wrong from the chair — the last as bodies walking away
+    /// from where they were going. A number nobody can settle by measurement should be visibly a question
+    /// rather than quietly indistinguishable from an answer, which is the rule the look dials already
+    /// follow. Turn it while a villager walks; the value that works goes in the asset's notes.
+    /// <para>
+    /// <b>It sits at zero, and that is the point of having had it.</b> The measurement was right all along —
+    /// what was wrong was the draw turning bodies to face the steering heading rather than their velocity.
+    /// Once that was fixed the dial settled back to nothing, which is the cleanest evidence available that
+    /// the remaining derivation is sound. It stays for the next asset whose rest pose is not axis-aligned.
+    /// </para>
+    /// </remarks>
+    [Tune(0.0, 3.0, Label = "body yaw (quarter turns)", Group = "bodies")]
+    public float YawQuarters;
+
     [Tune(0.5, 12.0, Label = "top speed (m/s)")]
     public float MaximumSpeed = AgentDefaults.MaximumSpeed;
 

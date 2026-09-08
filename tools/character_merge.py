@@ -57,6 +57,33 @@ def parse_args():
         default="mixamorig:",
         help="bone-name prefix to remove; Mixamo prefixes every bone with this")
     p.add_argument(
+        "--wear",
+        default="",
+        help="comma-separated character files whose MESHES are kept and re-bound to the base rig — "
+             "outfits, hairstyles, beards. This is how a modular character is assembled: a base body "
+             "supplies the head and the skin, and each outfit piece is skinned to the same skeleton. "
+             "Unlike --clips, whose files contribute animations and whose meshes are discarded.")
+    p.add_argument(
+        "--keep-all-maps",
+        action="store_true",
+        help="keep normal, roughness and occlusion textures. Off by default: the game samples base colour "
+             "and nothing else, so the rest is tens of megabytes decoded at load and discarded — and "
+             "decoding four 4K maps it will never read is what made the first assembled villager fail to "
+             "load at all.")
+    p.add_argument(
+        "--drop",
+        default="",
+        help="comma-separated mesh or material names to leave out. For detail nobody can see at this "
+             "camera distance and which therefore only adds noise — eyeballs read as spectacles at eighty "
+             "metres, because two dark discs is all that survives the resolution.")
+    p.add_argument(
+        "--head-only",
+        action="store_true",
+        help="trim the BASE character to its head, keeping vertices weighted to the head and neck. For a "
+             "clothed modular character: the outfit is the whole silhouette and the base supplies only the "
+             "face, so the base body's own proportions stop mattering — which is how a broad 'superhero' "
+             "base can wear clothing cut for an ordinary one without bulging through it.")
+    p.add_argument(
         "--bone-map",
         default="",
         help="comma-separated From=To bone renames, applied to the BASE rig so clips authored "
@@ -194,6 +221,39 @@ def strip_bone_prefix(armature, prefix):
     return renamed
 
 
+# What the game's fragment stage actually reads: base colour. Everything else in a PBR material is
+# decoded at load and thrown away.
+UNUSED_INPUTS = ("Normal", "Roughness", "Metallic", "Specular", "Specular IOR Level", "IOR",
+                 "Alpha", "Emission Color", "Emission Strength", "Coat Weight", "Sheen Weight")
+
+
+def strip_unused_maps():
+    """Disconnect every texture the renderer will not sample, so the exporter omits it.
+
+    <b>Not an optimisation — a fix.</b> An assembled villager carried ten images, four of them 4096x4096
+    normal and occlusion maps. A 4K RGBA decode is sixty-four megabytes, and the importer decoded all of
+    them before the first frame; the load failed inside the image decoder with an unprintable message.
+    The game's skinned stage samples base colour and nothing else, so every one of those maps was work
+    done to be discarded.
+    """
+    unlinked = 0
+    for material in bpy.data.materials:
+        if not material.use_nodes or material.node_tree is None:
+            continue
+        for node in material.node_tree.nodes:
+            if node.type != "BSDF_PRINCIPLED":
+                continue
+            for name in UNUSED_INPUTS:
+                socket = node.inputs.get(name)
+                if socket is None:
+                    continue
+                for link in list(socket.links):
+                    material.node_tree.links.remove(link)
+                    unlinked += 1
+
+    return unlinked
+
+
 def flatten_interpolation():
     """Force every keyframe to LINEAR, because that is the only mode the importer reads.
 
@@ -238,6 +298,88 @@ def action_fcurves(action):
                 yield from getattr(bag, "fcurves", ())
 
 
+def stack_on_armature(armature):
+    """Give the rig an NLA track per action, which is what makes the exporter write them out.
+
+    <b>Found by reading the file back, not by reading the log.</b> The exporter's ACTIONS mode writes the
+    actions it can associate with the object being exported. Actions imported from another file arrive
+    attached to THAT file's armature, and deleting it leaves them with a slot that no longer resolves — so
+    forty-three clips were flattened, counted, reported, and silently not written. The output had no
+    `animations` key at all while the log said 43.
+
+    An NLA track per action is the documented way to hand the exporter a list of clips on one rig, and
+    NLA_TRACKS mode names each animation after its track. Belt and braces: verify_export below reads the
+    result back rather than trusting this.
+    """
+    if armature.animation_data is None:
+        armature.animation_data_create()
+
+    # A leftover active action would be exported a second time under its own name.
+    armature.animation_data.action = None
+    for track in list(armature.animation_data.nla_tracks):
+        armature.animation_data.nla_tracks.remove(track)
+
+    laid = 0
+    for action in sorted(bpy.data.actions, key=lambda a: a.name):
+        track = armature.animation_data.nla_tracks.new()
+        track.name = action.name
+        start = int(action.frame_range[0]) if hasattr(action, "frame_range") else 0
+        strip = track.strips.new(action.name, start, action)
+        strip.name = action.name
+        # Muted tracks are skipped by the exporter.
+        track.mute = False
+        laid += 1
+
+    return laid
+
+
+def verify_export(path, expected):
+    """Read the written .glb back and say what is actually in it.
+
+    The whole reason this exists: a pipeline that reports what it *meant* to write is a pipeline that
+    lies. Every number below comes from the file.
+    """
+    import json as _json
+    import struct as _struct
+
+    with open(path, "rb") as handle:
+        data = handle.read()
+
+    offset, doc = 12, None
+    while offset < len(data):
+        length, kind = _struct.unpack_from("<II", data, offset)
+        if kind == 0x4E4F534A:
+            doc = _json.loads(data[offset + 8:offset + 8 + length].decode("utf-8"))
+            break
+        offset += 8 + length + ((4 - length % 4) % 4 if length % 4 else 0)
+
+    if doc is None:
+        raise SystemExit(f"{path}: no JSON chunk — the export did not produce a glTF")
+
+    animations = doc.get("animations", [])
+    skins = doc.get("skins", [])
+    modes = set()
+    for animation in animations:
+        for sampler in animation.get("samplers", []):
+            modes.add(sampler.get("interpolation", "LINEAR"))
+
+    print(f"[merge] VERIFIED in the file: {len(skins)} skin(s), {len(animations)} animation(s), "
+          f"interpolation {sorted(modes) or ['none']}")
+
+    problems = []
+    if len(skins) != 1:
+        problems.append(f"{len(skins)} skins; the importer reads one and ignores the rest")
+    if not animations:
+        problems.append("no animations were written")
+    elif len(animations) < expected:
+        problems.append(f"only {len(animations)} of {expected} clips were written")
+    if modes - {"LINEAR"}:
+        problems.append(f"interpolation {sorted(modes - {'LINEAR'})}; the importer accepts LINEAR only")
+
+    if problems:
+        raise SystemExit("[merge] EXPORT IS NOT USABLE: " + "; ".join(problems))
+
+
 def rename_bones(armature, mapping):
     """Rename bones on the base rig so clips authored against another scheme bind by name."""
     if not mapping:
@@ -249,6 +391,126 @@ def rename_bones(armature, mapping):
             bone.name = target
             renamed += 1
     return renamed
+
+
+# Bones whose vertices are the head. Everything else on the base body is covered by clothing.
+HEAD_BONES = ("head", "neck")
+
+
+def trim_to_head(armature):
+    """Delete the base body's vertices below the neck, keeping the face.
+
+    <b>Why this is the fix for a proportion mismatch rather than a hack.</b> A modular character's outfit
+    covers arms, body, legs and feet; the only thing the base supplies that the clothing does not is the
+    head. Keep just that and the base body's own build stops being visible at all — which matters because
+    the free tier of these base characters ships "superhero" proportions only, and clothing cut for an
+    ordinary build stretched over it reads exactly as what it is. Reported from the chair before this
+    existed: "the superhero proportions is definitely happening".
+    """
+    import bmesh
+
+    removed = 0
+    for obj in list(bpy.context.scene.objects):
+        if obj.type != "MESH" or obj.parent is not armature:
+            continue
+
+        # Which of this mesh's groups are head groups, by the rig's own naming.
+        head_groups = {
+            group.index for group in obj.vertex_groups
+            if any(w in group.name.lower() for w in HEAD_BONES)
+        }
+        if not head_groups:
+            # A mesh with no head weights at all is not the body — hair, eyes, a hat. Left alone.
+            continue
+
+        mesh = bmesh.new()
+        mesh.from_mesh(obj.data)
+        layer = mesh.verts.layers.deform.active
+        if layer is None:
+            mesh.free()
+            continue
+
+        doomed = []
+        for vert in mesh.verts:
+            weights = vert[layer]
+            if not weights:
+                continue
+            # Dominant group decides, so a vertex straddling the collar goes with whichever owns it.
+            best = max(weights.items(), key=lambda pair: pair[1])[0]
+            if best not in head_groups:
+                doomed.append(vert)
+
+        if doomed:
+            bmesh.ops.delete(mesh, geom=doomed, context="VERTS")
+            removed += len(doomed)
+            mesh.to_mesh(obj.data)
+        mesh.free()
+        obj.data.update()
+
+    return removed
+
+
+def drop_meshes(spec):
+    """Remove meshes whose name or material matches any of these, before the join."""
+    wanted = [x.strip().lower() for x in spec.split(",") if x.strip()]
+    if not wanted:
+        return 0
+
+    removed = 0
+    for obj in list(bpy.context.scene.objects):
+        if obj.type != "MESH":
+            continue
+        names = [obj.name.lower()]
+        names += [slot.material.name.lower() for slot in obj.material_slots if slot.material]
+        if any(w in n for w in wanted for n in names):
+            bpy.data.objects.remove(obj, do_unlink=True)
+            removed += 1
+
+    return removed
+
+
+def wear_onto(armature, path):
+    """Import a file and re-bind its skinned meshes to this rig, discarding its own skeleton.
+
+    <b>This is what a modular character actually is.</b> Quaternius's outfit pack ships clothing and nothing
+    else — Male_Peasant is arms, body, feet and legs, with no head, because the head belongs to the base
+    character it is worn over. Found the hard way: villagers with no heads, and the file genuinely has none.
+
+    Both files carry the same skeleton (same names, same rest pose, same generation), so re-binding is
+    honest here: the vertex groups already name the base rig's bones, and pointing the armature modifier at
+    it is all that is needed. This is emphatically NOT the bone-rename retarget the warning above rejects —
+    nothing is renamed and no rest pose is assumed away.
+    """
+    before = {o.name for o in bpy.context.scene.objects}
+    load(path)
+    fresh = [o for o in bpy.context.scene.objects if o.name not in before]
+
+    kept = 0
+    for obj in fresh:
+        if obj.type != "MESH":
+            continue
+        rebound = False
+        for modifier in obj.modifiers:
+            if modifier.type == "ARMATURE":
+                modifier.object = armature
+                rebound = True
+        if not rebound:
+            # An unskinned piece (a prop, a stray sphere) is not clothing; leave it out rather than
+            # freezing it to the body in whatever pose the file happened to be saved in.
+            continue
+
+        matrix = obj.matrix_world.copy()
+        obj.parent = armature
+        obj.matrix_world = matrix
+        kept += 1
+
+    # The worn file's own skeleton and anything else it brought.
+    for obj in fresh:
+        if obj.type == "MESH" and obj.parent is armature:
+            continue
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+    return kept
 
 
 def join_skinned_meshes(armature):
@@ -316,6 +578,18 @@ def main():
             raise SystemExit(
                 "bones were renamed but no --clips were given, which would export a character whose own "
                 "animations address bones that no longer exist. Supply the clips the rename is for.")
+    if args.head_only:
+        trimmed = trim_to_head(base_armature)
+        print(f"[merge] trimmed the base to its head: {trimmed} vertices removed below the neck")
+
+    for piece in (x.strip() for x in args.wear.split(",") if x.strip()):
+        worn = wear_onto(base_armature, piece)
+        print(f"[merge] wearing '{os.path.basename(piece)}': {worn} mesh(es) re-bound to the base rig")
+
+    dropped = drop_meshes(args.drop)
+    if dropped:
+        print(f"[merge] dropped {dropped} mesh(es) as asked")
+
     if not args.no_join:
         joined = join_skinned_meshes(base_armature)
         print(f"[merge] joined {joined} skinned mesh(es) into one — the importer takes one skin per file")
@@ -372,8 +646,15 @@ def main():
     if not kept and args.clips:
         raise SystemExit(f"no animations found under '{args.clips}'")
 
+    if not args.keep_all_maps:
+        unlinked = strip_unused_maps()
+        print(f"[merge] unlinked {unlinked} texture(s) the game does not sample (normal/roughness/AO)")
+
     flattened = flatten_interpolation()
     print(f"[merge] set {flattened} keyframe(s) to LINEAR — the only mode the importer reads")
+
+    tracks = stack_on_armature(base_armature)
+    print(f"[merge] laid {tracks} action(s) onto the rig as NLA tracks")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     # export_animation_mode NLA_TRACKS is what writes every action as its own glTF
@@ -382,7 +663,9 @@ def main():
         filepath=args.out,
         export_format="GLB",
         export_animations=True,
-        export_animation_mode="ACTIONS",
+        # NLA_TRACKS, because stack_on_armature has laid one track per clip and this mode writes one
+        # animation per track. ACTIONS mode silently wrote none for actions imported from another file.
+        export_animation_mode="NLA_TRACKS",
         export_skins=True,
         export_apply=False,          # see the note at the top: do NOT bake transforms
         export_yup=True,
@@ -397,7 +680,8 @@ def main():
         export_force_sampling=True,
         export_sampling_interpolation_fallback="LINEAR",
     )
-    print(f"[merge] wrote {args.out} with {len(kept)} clip(s): {', '.join(kept)}")
+    print(f"[merge] wrote {args.out}, intending {len(kept)} clip(s)")
+    verify_export(args.out, len(kept))
     print("[merge] verify with: dotnet run --project src/Blix.Tools.Cook -- inspect " + args.out)
 
 

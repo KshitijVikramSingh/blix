@@ -43,6 +43,7 @@
     <GlslShader Include="Shaders\shadow_caster.vert" />
     <!-- The skinned pair: bodies with a rig. Same fragment stages as their unskinned twins. -->
     <GlslShader Include="Shaders\world_skinned.vert" />
+    <GlslShader Include="Shaders\world_skinned.frag" />
     <GlslShader Include="Shaders\shadow_caster_skinned.vert" />
     <GlslShader Include="Shaders\shadow_caster.frag" />
     <GlslShader Include="Shaders\contact.vert" />
@@ -65,6 +66,8 @@
     <GlslInclude Include="Shaders\lean.glsl" />
     <GlslInclude Include="Shaders\veil.glsl" />
     <GlslInclude Include="Shaders\world_push.glsl" />
+    <GlslInclude Include="Shaders\world_varyings.glsl" />
+    <GlslInclude Include="Shaders\world_shade.glsl" />
   </ItemGroup>
 
   <Target Name="CompileSpirV"
