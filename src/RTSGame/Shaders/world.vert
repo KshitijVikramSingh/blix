@@ -22,60 +22,8 @@ layout(set = 3, binding = 0, std430) readonly buffer Instances {
     Instance instances[];
 };
 
-layout(push_constant) uniform Push {
-    mat4 uViewProjection;
-    vec4 uCamPos;
-    vec4 uSunDir;
-    mat4 uSunShadowVP;
-    vec4 uFog;      // x = start (m), y = end (m), z = strength
-    vec4 uShadow;   // x = texel as a fraction of the map, y = map size (m), z = penumbra, w = offset
-    vec4 uLight;    // x = sun intensity, y = ambient scale, z = terminator wrap
-    // Declared here although the vertex stage never reads it. A push-constant block is one layout shared by
-    // every stage of a pipeline, so a member added to the fragment shader alone leaves the two disagreeing
-    // about how big the block is — and the mismatch surfaces as a draw-time payload-length error rather than
-    // as a compile error, which is a long way from the line that caused it.
-    vec4 uHaze;     // x = desaturation with distance, y = how much haze glows toward the sun
-    // Declared but unread here, for the reason above: one block, one layout, every stage.
-    vec4 uSunTint;
-    vec4 uSkyAmbient;
-    vec4 uGroundAmbient;
-    vec4 uHazeAway;
-    vec4 uHazeToward;
-    // x = how far a plant leans at a metre up, y = the clock in simulated seconds, z = how fast the gusts
-    // come, w = the wind's bearing in radians. Read here and nowhere else, which is the first thing in this
-    // block the vertex stage owns rather than tolerates — and the bearing is shared with the smoke, so a
-    // plume and the trees it drifts past agree about which way the wind is going.
-    vec4 uWind;
-    // Declared but unread here: one block, one layout, every stage.
-    vec4 uHearth;
-    vec4 uHearths[12];
-    // <b>The other two cascades, appended rather than inserted.</b> The block's tail is a variable-length
-    // array of hearth lights, so anything new goes after it: putting the matrices in the middle would move
-    // every offset below them in RtsGameLoop for no gain. Cascade 0 is uSunShadowVP above, which keeps its
-    // name and its place — see the note on CascadeBlockOffset.
-    mat4 uCascade1VP;
-    mat4 uCascade2VP;
-    // xyz = each cascade's box width in metres; xyz = one texel as a fraction of its own map. Both per
-    // cascade, because the bias is measured in texels and the three maps are neither the same width nor the
-    // same resolution. uCascadeSide.w turns the debug tint on.
-    vec4 uCascadeSide;
-    vec4 uCascadeTexel;
-    // xyz = how far along the view each cascade reaches, in metres. This is what picks the cascade; the boxes
-    // only get to veto. See the note in RtsGameLoop on why containment alone does not work.
-    vec4 uCascadeSplit;
-    // xyz = the camera's unit forward, the axis those distances are measured along.
-    vec4 uCameraAhead;
-    // Declared and unread here, like uWind in the fragment stage: one block, one layout, every stage. See
-    // world.frag for what the four components are.
-    vec4 uScouted;
-    vec4 uVeil;
-    vec4 uVeilAir;
-    vec4 uVeilDeep;
-    // x = how much sky water hands back at a grazing angle, y = glint gain, z = how opaque deep water gets,
-    // w = how far up the shore the film reaches, in wadeable depths. All four are dials in the look panel —
-    // see LookSettings, and see §148 for why they stopped being constants.
-    vec4 uWater;
-};
+// The push block, shared with world.frag and the skinned pair — Shaders/world_push.glsl.
+#include "world_push.glsl"
 
 layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec4 vTint;

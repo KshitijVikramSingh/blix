@@ -460,6 +460,23 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     // one of them: fourteen thousand blocks, each with a bilinear surface and height sample.
     // That is 18 ms of a 16 ms frame spent redrawing a field that had not moved.
     private InstancedBatch unitBatch = null!;
+
+    /// <summary>The people, rigged. Null when there is no character asset — the prop villager stands in.</summary>
+    private SkinnedBodies? bodies;
+
+    private ShaderProgramHandle skinnedShader;
+    private PipelineHandle skinnedPipeline;
+    private ShaderProgramHandle skinnedCasterShader;
+    private PipelineHandle skinnedCasterPipeline;
+
+    /// <summary>
+    /// The skinned caster's own cascade payloads: a light matrix and the bone stride.
+    /// </summary>
+    /// <remarks>
+    /// Separate arrays from the leaning caster's, because the second sixteen bytes mean different things to
+    /// the two pipelines — wind there, stride here. Same size, so nothing else about the cascade loop changes.
+    /// </remarks>
+    private readonly byte[][] skinnedCascadePush = new byte[ShadowCascades.Count][];
     private VulkanGraphicsDevice vk = null!;
     private ShaderProgramHandle worldShader;
     private PipelineHandle worldPipeline;
@@ -487,6 +504,19 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
 
     /// <summary>A cascade's light view-projection, then the wind. See shadow_caster.vert.</summary>
     private const int CascadePushSize = 64 + 16;
+
+    /// <summary>
+    /// The most bones one skinned body may have, which is what the palette buffer is sized for.
+    /// </summary>
+    /// <remarks>
+    /// <b>A capacity, not the asset's bone count.</b> The shader interface has to be declared before any
+    /// character file is opened, so coupling the SSBO's size to the skeleton would mean the renderer could
+    /// not be built until the art was chosen. The real stride travels to the shader at draw time
+    /// (<c>uSkin.x</c>) and the buffer only has to be big enough — sixty-four covers this rig's thirty-one
+    /// and any humanoid likely to replace it, and a skeleton over it is refused at load with a clear reason
+    /// rather than writing past the end of a buffer.
+    /// </remarks>
+    private const int SkinnedBoneCapacity = 64;
 
     private static byte[][] BuildCascadePushes()
     {
@@ -724,7 +754,14 @@ internal sealed class RtsGameLoop : IGameLoop, IInputHandler, IDebuggable, IDisp
     /// the split distances, the camera's own axis, the fog of war's grid span and the two layer densities, the
     /// cloud the veil is drawn as, how that cloud is lit and pulled about, and the deep bank's own four.
     /// </summary>
-    private const int CascadeBlockSize = 64 * 2 + 16 * 9;
+    private const int CascadeBlockSize = 64 * 2 + 16 * 10;
+
+    /// <summary>
+    /// Where the skinned stride sits: the last sixteen bytes of the world push, appended after everything
+    /// else for the reason the cascade block was. x is how many bone matrices one body owns, which is how
+    /// <c>world_skinned.vert</c> finds a body's slice of the shared palette. Zero while nothing is skinned.
+    /// </summary>
+    private const int SkinStrideOffset = CascadeBlockOffset + 64 * 2 + 16 * 9;
 
     private readonly byte[] worldPush = new byte[CascadeBlockOffset + CascadeBlockSize];
     private readonly byte[] skyPush = new byte[128];     // invViewProj, camPos, sunDir, zenith, horizon
@@ -2199,6 +2236,29 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 // leans the same geometry — see shadow_caster.vert.
                 new PushConstantRange(ShaderStages.Vertex, 0, CascadePushSize),
             });
+        // <b>The skinned pair's interfaces: the same slots plus a bone palette at set 2.</b> Set 0 is the
+        // world's textures and set 3 is the instance buffer, so set 2 is the one the engine leaves free —
+        // which is what lets a body carry a palette without any of the other draws learning about it.
+        var boneLayout = new UniformBlockLayout(
+            TotalSize: SkinnedBodies.MaxBodies * SkinnedBoneCapacity * 64,
+            Members: new[]
+            {
+                new UniformBlockMember(
+                    "bones", 0, SkinnedBodies.MaxBodies * SkinnedBoneCapacity * 64, ElementStride: 64),
+            });
+        var boneSlot = new DescriptorSetSlot(
+            2, 0, ShaderResourceType.StorageBuffer, ShaderStages.Vertex, BlockLayout: boneLayout);
+        var skinnedInterface = new ShaderInterface(
+            Slots: shaderInterface.Slots.Append(boneSlot).ToArray(),
+            PushConstants: shaderInterface.PushConstants);
+        var skinnedCasterInterface = new ShaderInterface(
+            Slots: new[] { InstanceBuffer.Slot, boneSlot },
+            PushConstants: new[]
+            {
+                // A light matrix and the bone stride, which is the same byte count as the leaning caster's
+                // matrix-and-wind — see the note in shadow_caster_skinned.vert on why that matters.
+                new PushConstantRange(ShaderStages.Vertex, 0, CascadePushSize),
+            });
         var skyInterface = new ShaderInterface(
             Slots: Array.Empty<DescriptorSetSlot>(),
             PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 128) });
@@ -2230,7 +2290,7 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         {
             cascadePasses[c] = graph.GraphicsPass($"sun-cascade-{c}")
                 .Depth(cascadeTargets[c], LoadOp.Clear, StoreOp.Store)
-                .Shader(casterInterface)
+                .Shader(casterInterface, skinnedCasterInterface)
                 .Handle;
         }
         // <b>The pipelines' sample count comes from this pass's colour target</b> — the graph reads it off the
@@ -2245,7 +2305,7 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             .Read(cascadeTargets[0])
             .Read(cascadeTargets[1])
             .Read(cascadeTargets[2])
-            .Shader(skyInterface, shaderInterface, smokeInterface, contactInterface)
+            .Shader(skyInterface, shaderInterface, skinnedInterface, smokeInterface, contactInterface)
             .Handle;
         graph.Compile();
 
@@ -2291,6 +2351,36 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 Array.Empty<BlendState>(),
                 RenderTarget: graph.GetPassSurface(cascadePasses[0])),
             "rts-caster");
+        // <b>The skinned pair, sharing both fragment stages with their unskinned twins.</b> A body is lit,
+        // fogged, shadowed and veiled by exactly the rules everything else in the settlement obeys, because
+        // it goes through world.frag unchanged — a second lighting path for people would drift from the
+        // first inside a session. Only the vertex stage differs, and only by where the position comes from.
+        skinnedShader = vk.CreateShaderProgramFromSpv(
+            Spv("world_skinned.vert.spv"), Spv("world.frag.spv"), skinnedInterface, "rts-world-skinned");
+        skinnedPipeline = vk.CreatePipeline(
+            new PipelineDescription(
+                skinnedShader,
+                VertexPosition3NormalTextureSkin4Tangent.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualWrite,
+                RasterizerState.BackFaceCulling,
+                new[] { BlendState.Disabled },
+                RenderTarget: graph.GetPassSurface(scenePassHandle)),
+            "rts-world-skinned");
+        skinnedCasterShader = vk.CreateShaderProgramFromSpv(
+            Spv("shadow_caster_skinned.vert.spv"), Spv("shadow_caster.frag.spv"),
+            skinnedCasterInterface, "rts-caster-skinned");
+        skinnedCasterPipeline = vk.CreatePipeline(
+            new PipelineDescription(
+                skinnedCasterShader,
+                VertexPosition3NormalTextureSkin4Tangent.Layout,
+                PrimitiveTopology.Triangles,
+                // No culling, for the reason the unskinned caster gives.
+                DepthState.LessEqualWrite,
+                RasterizerState.NoCulling,
+                Array.Empty<BlendState>(),
+                RenderTarget: graph.GetPassSurface(cascadePasses[0])),
+            "rts-caster-skinned");
         contactShader = vk.CreateShaderProgramFromSpv(
             Spv("contact.vert.spv"), Spv("contact.frag.spv"), contactInterface, "rts-contact");
         selectionDecalShader = vk.CreateShaderProgramFromSpv(
@@ -2408,6 +2498,23 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             vk, worldShader, worldPipeline, casterShader, casterPipeline, ShadowCascades.Count,
             distantShadowProxies: shadowProxies,
             cheapTrees: cheapTrees);
+        for (var c = 0; c < skinnedCascadePush.Length; c++) skinnedCascadePush[c] = new byte[CascadePushSize];
+        // <b>A rigged body, if the pack has one.</b> Height matched to the prop villager it replaces rather
+        // than to the asset's own proportions: 1.45 m is what the locomotion layer was calibrated against,
+        // and a body that walks at a different scale from the one the radii were tuned for would make every
+        // crowd figure incomparable to every previous one.
+        bodies = SkinnedBodies.Load(
+            vk,
+            Path.Combine(AppContext.BaseDirectory, "Assets", "models"),
+            "villager_animated.glb",
+            skinnedShader, skinnedPipeline,
+            skinnedCasterShader, skinnedCasterPipeline,
+            ShadowCascades.Count,
+            // <b>Unit height, because the placement matrix already carries the metres.</b> Normalising to
+            // 1.45 m here and then letting the placement scale by body height again made a 2.1 m villager —
+            // the same double-scale the prop path avoids by normalising to a unit cube and nothing more.
+            metresTall: 1f,
+            boneCapacity: SkinnedBoneCapacity);
         // <b>What the buildings measured, because two bugs came out of assuming it.</b> A fitted model's
         // bounding box is its roof and its height is whatever its proportions gave it — so anything hung on
         // a building (a lit window, a lantern, a chimney) has to be placed against numbers from the asset
@@ -4968,6 +5075,10 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 144, 16), in cascadeTexels);
         MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 160, 16), in cascadeSplits);
         MemoryMarshal.Write(worldPush.AsSpan(CascadeBlockOffset + 176, 16), in cameraAhead);
+        // How many bones one body owns, which is how world_skinned.vert finds a body's slice of the shared
+        // palette. Zero when nothing is rigged, and read by nothing else.
+        var skinStride = new Vector4(bodies?.BonesPerBody ?? 0, 0f, 0f, 0f);
+        MemoryMarshal.Write(worldPush.AsSpan(SkinStrideOffset, 16), in skinStride);
         // <b>One over the grid's span, and the shader adds the map's extent.</b> Two lengths, and they are not
         // interchangeable: scouted.Cells is a ceiling plus one, so the grid spans more ground than the map does.
         // The divisor is the span; the offset that centres it is the extent. I wrote the warning about this and
@@ -5145,6 +5256,11 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         BuildTerrainInstances();
         var terrainMs = buildClock.Elapsed.TotalMilliseconds - nodeMilliseconds;
         buildClock.Restart();
+        // <b>Before the bodies are added, which is not where the other batches are begun.</b> unitBatch and
+        // friends are begun further down and fed from lists this fills, so putting this beside them cleared
+        // every body the moment after it was added — thirteen villagers added, thirteen thrown away, and an
+        // empty draw. Invisible people, and nothing in the matrices to suggest why.
+        bodies?.Begin();
         BuildAgentInstances((float)time.Total);
         var agentMs = buildClock.Elapsed.TotalMilliseconds;
         buildClock.Restart();
@@ -5178,6 +5294,21 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             canopyCasters[c].SetInstances(CollectionsMarshal.AsSpan(canopyCasterInstances[c]));
         }
         art?.StageCascades(worldPush, cascadePush);
+        // The frame's poses, once, after the last body was added. Then each cascade's own payload: the same
+        // light matrix the leaning caster gets, with the bone stride where its wind would be.
+        if (bodies is not null)
+        {
+            // The cascade payloads first, because staging hands them to the caster batches: the same light
+            // matrix the leaning caster gets, with the bone stride where its wind would be.
+            var stride = new Vector4(bodies.BonesPerBody, 0f, 0f, 0f);
+            for (var c = 0; c < ShadowCascades.Count; c++)
+            {
+                cascadePush[c].AsSpan(0, 64).CopyTo(skinnedCascadePush[c]);
+                MemoryMarshal.Write(skinnedCascadePush[c].AsSpan(64, 16), in stride);
+            }
+
+            bodies.Stage(worldPush, skinnedCascadePush);
+        }
         var stageMs = buildClock.Elapsed.TotalMilliseconds;
         buildClock.Restart();
 
@@ -5197,6 +5328,9 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 unitCasters[cascade].End(scope);
                 canopyCasters[cascade].End(scope);
                 art?.DrawShadow(scope, cascade);
+                // <b>A posed body has to cast the shadow of the pose it is in.</b> Casting the bind pose
+                // would put a standing silhouette under a walking villager, which reads as a second body.
+                bodies?.DrawShadow(scope, cascade);
             });
         }
 
@@ -5255,6 +5389,8 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             unitBatch.End(scope, shadowBinding);
             canopyBatch.End(scope, shadowBinding);
             art?.DrawScene(scope, shadowBinding);
+            // The people, lit by world.frag exactly as everything above it is — same textures, same push.
+            bodies?.DrawScene(scope, shadowBinding);
             // After every opaque thing and before the annotations: smoke blends over a finished frame, and
             // an overlay is a mark on the picture rather than something in the world for smoke to drift in
             // front of.
@@ -6926,6 +7062,96 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         else model.AddUnlit(placement);
     }
 
+    /// <summary>
+    /// Which clip a body is in, and how far through it. §168.
+    /// </summary>
+    /// <remarks>
+    /// <b>A table, because the readable states are few and the sim already knows all of them.</b> At this
+    /// camera distance what a person reads is: moving or not, swinging or standing, fighting or working. Four
+    /// binary reads, not ten states — so this maps the jobs layer's own vocabulary onto five clips and stops.
+    /// The same shape as the bot's rule table for the same reason: a mapping you can read down the page is
+    /// one you can argue with.
+    /// <para>
+    /// It names <see cref="BodyAction"/>s and never a clip, so which animation serves which action is data —
+    /// see <see cref="CharacterClips"/>. A character from a different pipeline, naming its clips a different
+    /// way, binds without a line changing here.
+    /// </para>
+    /// </remarks>
+    private AnimationClip? ClipFor(in AgentState agent, out bool locomotion)
+    {
+        locomotion = false;
+        if (bodies is null) return null;
+
+        // Fighting first: a body swinging at something is the one state that must never be misread as work.
+        if (agent.Jobs.Assignment.Kind == AssignmentKind.Attack && JobSystem.IsWorking(in agent))
+        {
+            return bodies.For(BodyAction.Strike);
+        }
+
+        // Then walking, on the body's own speed rather than on whether it has somewhere to be: a body held
+        // up by a crowd is standing, whatever its orders say.
+        if (agent.Velocity.LengthSquared() > WalkingSpeedSquared)
+        {
+            locomotion = true;
+            return bodies.For(BodyAction.Walk);
+        }
+
+        // Then labour: at its place, with an activity, uninterrupted — the economy's own definition of a
+        // hand that has arrived, rather than a distance test of this layer's invention.
+        if (JobSystem.IsWorking(in agent))
+        {
+            return bodies.For(BodyAction.Labour);
+        }
+
+        return bodies.For(BodyAction.Idle);
+    }
+
+    /// <summary>Below this a body is standing, not walking. Squared metres per second.</summary>
+    private const float WalkingSpeedSquared = 0.08f * 0.08f;
+
+    /// <summary>
+    /// How far a body's gait advances per metre walked, so feet never skate.
+    /// </summary>
+    /// <remarks>
+    /// <b>Driven by distance, not by the clock, and that is the whole point of it.</b> A clock-driven walk
+    /// cycle plays at one rate whatever the body is doing, so a villager slowed by a crowd or by a full load
+    /// keeps striding at full pace and slides — which is the complaint that started this: people who look
+    /// like they are floating. Advancing the phase by metres covered means a laden body visibly trudges,
+    /// §167's speed penalty becomes something you can see, and a body stopped dead stops moving its legs.
+    /// <para>
+    /// One stride of this clip covers about a metre and a half at the pace it was authored for; the number is
+    /// a look dial, not a measurement, and it is the one to turn if the walk reads fast or mincing.
+    /// </para>
+    /// </remarks>
+    private const float GaitMetresPerCycle = 1.5f;
+
+    /// <summary>Per-body gait phase in seconds, indexed by agent id. View state; never fingerprinted.</summary>
+    private float[] gaitPhase = new float[256];
+
+    /// <summary>Advances one body's gait and returns where in its clip to sample.</summary>
+    private double GaitOf(in AgentState agent, AnimationClip clip, bool locomotion, float deltaSeconds)
+    {
+        var id = agent.Id.Value;
+        if (id < 0) return 0.0;
+        if (id >= gaitPhase.Length) Array.Resize(ref gaitPhase, Math.Max(id + 1, gaitPhase.Length * 2));
+
+        if (locomotion)
+        {
+            var metres = agent.Velocity.Length() * deltaSeconds;
+            gaitPhase[id] += (float)(metres / GaitMetresPerCycle * clip.Duration);
+        }
+        else
+        {
+            gaitPhase[id] += deltaSeconds;
+        }
+
+        var duration = (float)MathF.Max(0.0001f, (float)clip.Duration);
+        // Offset by id so a crowd does not breathe in unison, which reads as a rank of clones.
+        var offset = (id * 0.37f) % duration;
+        gaitPhase[id] %= duration;
+        return (gaitPhase[id] + offset) % duration;
+    }
+
     private void AddCascaded(PropModel model, Matrix4x4 placement)
     {
         model.Add(placement, CascadeMaskAt(new Vector2(placement.M41, placement.M43)));
@@ -8318,12 +8544,15 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             // has no rig, so a villager slides — and still a large improvement on a drum, because the
             // thing a player reads at this distance is silhouette and facing, not gait.
             var person = art?.Villager;
-            var drawnAsAPerson = person is not null;
+            var drawnAsAPerson = person is not null || bodies is not null;
             // A body's own contact, tight and faint. This is the one that matters most for a scene read
             // close up: a person standing on ground with nothing under their feet reads as hovering
             // however good the sun shadow is, because a sun shadow at midday is somewhere else entirely.
             AddContactShadow(position, agent.Radius * 1.5f, 0.42f);
-            if (person is not null)
+            // Either kind of body wants the same placement, so the rigged path does not need the prop to
+            // exist — deleting Villager.obj is still how you go back to cylinders, and now deleting the glb
+            // is how you go back to the prop.
+            if (person is not null || bodies is not null)
             {
                 // Facing is a direction rather than an angle, which is what the steering layer wants; a
                 // model needs the angle, and the sign is negated because the world's Z runs the other way
@@ -8339,7 +8568,32 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 // findable at a glance, which is the thing the greybox did for free by being one colour.
                 // Hostile bodies in a hostile colour, which is the one thing about a body that has to be
                 // readable before anything else on the screen is.
-                if (agent.Faction.Value != 0) AddCascaded(person, placement, RaiderColor);
+                // <b>Rigged if there is a rig, the prop if not.</b> §168. The tint rules below are unchanged:
+                // a hostile body in a hostile colour is the one thing about a person that has to read before
+                // anything else on screen, and that is true of a posed body exactly as it was of a static one.
+                var clip = ClipFor(in agent, out var locomotion);
+                var posed = false;
+                if (bodies is not null && clip is not null)
+                {
+                    var tint = agent.Faction.Value != 0
+                        ? RaiderColor
+                        : agent.Role == AgentRole.Militia ? MilitiaColor : (Vector4?)null;
+                    posed = bodies.Add(
+                        placement,
+                        tint,
+                        clip,
+                        GaitOf(in agent, clip, locomotion, frameSeconds),
+                        CascadeMaskAt(position));
+                }
+
+                if (posed || person is null)
+                {
+                    // Nothing more to do: the skinned batch carries this body into the scene pass and every
+                    // cascade its box reaches, from the one Add above. `person is null` lands here too —
+                    // the palette was full or there is no prop to fall back to, and the cylinder below is
+                    // what remains.
+                }
+                else if (agent.Faction.Value != 0) AddCascaded(person, placement, RaiderColor);
                 else if (agent.Role == AgentRole.Militia) AddCascaded(person, placement, MilitiaColor);
                 // <b>No tint on a body either, and the reason is consistency rather than taste.</b> A selected
                 // villager was repainted the old orange while nothing else was, and a hovered one went dark
@@ -9270,6 +9524,7 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         // The graph owns render passes and offscreen images that are not in the device's auto-freed
         // tables, and Dispose runs after WaitIdle, which is the only safe place to free them.
         art?.Dispose();
+        bodies?.Dispose();
         fullscreen?.Dispose();
         graph?.Dispose();
     }

@@ -13522,18 +13522,140 @@ mouths. Against a 67-day winter costing 1,005 grain that is 10.2 trips and **181
 cover 67 days of winter.** Villager looting cannot be a livelihood. It is opportunism, and the 168 m figure
 says exactly how local it has to be.
 
-**Raiders close it, and nobody designed them to.** `UnitType.Raider` already carries 40, moves at 2.05, and
-has `Appetite: 0f` — it does not eat. Eight of them at 272 m are away 15.5 days, bring 320, eat nothing:
-**net 320, three trips, 49 game-days of walking against 67 days of winter.** That closes with room to
-spare, and it closes for the reason §167 claimed rather than by a tuning pass — *who you send is how much
-you take*, and the roster already had the body.
+**What closes it is a body with a big pannier and no stomach.** Take `UnitType.Raider`'s numbers as a
+worked example rather than as a unit — carry 40, speed 2.05, `Appetite: 0f`. Eight of those at 272 m are
+away 15.5 days, bring 320 and eat nothing: **net 320, three trips, 49 game-days of walking against 67 days
+of winter.** That closes with room to spare, and it closes without a tuning pass.
 
-Which is the strongest evidence the interface answer was right. The identical click is a losing errand with
-villagers and a winter strategy with raiders, and a player expresses the difference entirely by selection.
-No share, no modifier, no number.
+So the sensitivity is worth naming, because it is what the roster will be choosing between: **appetite
+dominates at range, and capacity dominates near home.** A party that eats is paying for the walk twice, so
+the further the target the more the upkeep matters; close in, the trip is short enough that only the size of
+the pannier does. A raiding body is therefore not "a villager with a sword" — it is a body that is cheap to
+have away from home.
 
-**The debt it exposes:** `UnitType.Raider` exists only as *the thing that attacks you* — `RaidDirector` and
-the fight benchmarks spawn it, and there is no way for a player or a plan to field one. So the verb is built
-and the body that makes it a strategy is unobtainable. That is the roster's first concrete owed item, and it
-is a better place to start §7 than any balance dial: **the first unit the roster needs is the one that makes
-an existing verb worth using.**
+Which is the evidence that §167's interface answer was right rather than merely tidy. The identical click is
+a losing errand with one body and a winter strategy with another, and a player expresses the difference
+entirely by selection. No share, no modifier, no number.
+
+**Correction, and it matters because it was written down as a direction.** `UnitType.Raider` is not a roster
+entry and was never meant to be one — it is the fixture body `RaidDirector` and the fight benchmarks spawn
+at the settlement, and I read it as a unit because its numbers happened to fit. "Start the roster by making
+raiders fieldable" was therefore advice about a placeholder. The measurement is unaffected: villager looting
+still breaks even at 168 m and still cannot carry a winter. What it licenses is narrower — **the economics
+of a raiding body are known before the roster designs one**, which is a constraint to design against, not a
+unit to ship.
+
+## 168. Rigged bodies, and two bugs in the seam between accumulating and drawing
+
+Reported from the chair, and precisely: "A pose people floating around and standing on spots for a while is
+getting increasingly meaningless to read." Three complaints in one sentence, and they are not one problem —
+the A-pose is an asset, the floating is a missing gait, and standing on spots is work having no visible
+action. Only the first is content.
+
+**The engine was never the gap.** The whole skeletal stack was already here: `GltfImporter` reading skins
+and inverse-bind matrices, `Skeleton`, `Pose`, `BonePalette`, `AnimationClip`, blended and additive clips,
+`AnimationHost`, `SkinnedGameObject` — and two demos already rendering skinned characters, one of them with
+a bone-palette SSBO and a skinned shadow pipeline. What the settlement had was `Villager.obj`, whose own
+header reads `# Blender v2.76 OBJ File: 'Animated Human.blend'`. **The rig existed in the source and the
+export format discarded it.** The consequence was even written down at the load site: "this is the one
+asset with no rig, so a villager slides rather than walks."
+
+The float was checked before being believed: feet sit at the pivot (y −0.006 of a 5.26-unit mesh), so
+nothing was hovering. A body sliding at 1.79 m/s with motionless legs simply reads as hovering.
+
+### The decision that collapsed
+
+The choice offered was prove-readability-first (a draw per body, bake later) against building instanced
+skinning up front. It was answered, and then it dissolved: **the palette can hold every body's bones end to
+end, and a body finds its slice at `gl_InstanceIndex * bonesPerBody`.** Nothing per-body is bound or
+pushed, so the draw stays one draw per primitive for the whole crowd. There was no throwaway path to write
+and no bake needed — indexing a palette by instance costs nothing over indexing it by zero.
+
+`MaterialBindings` exposes no dynamic offsets, which is what made this the obvious shape rather than a
+clever one: per-body palettes would have meant a material per body.
+
+### What went in
+
+- **`world_skinned.vert` and `shadow_caster_skinned.vert`**, sharing both *fragment* stages with their
+  unskinned twins. A body is lit, fogged, shadowed and veiled by exactly the rules everything else obeys,
+  because a second lighting path for people would drift from the first inside a session. Posed bodies cast
+  posed shadows: the bind pose would put a standing silhouette under a walking villager, which reads as a
+  second body and is worse than no shadow.
+- **The push block extracted to `world_push.glsl`.** Twenty-seven members that four stages must agree on
+  byte-for-byte, previously duplicated between `world.vert` and `world.frag`; the skinned pair would have
+  made four copies of a fault that surfaces as a draw-time payload-length error far from its cause. The
+  member sequence was diffed against the original before anything was built on it.
+- **One generic parameter on `InstancedBatch.End`** — a caller-supplied extra material. The primitive is
+  handed an opaque handle and binds it, exactly as it already takes an opaque pipeline and opaque push
+  bytes. It is never told what a bone palette is, so §-the-layering-rule holds: geometry only.
+- **The gait is driven by distance, not by the clock.** This is the actual answer to the float: phase
+  advances by metres covered, so a body slowed by a crowd or by a full load trudges instead of striding on
+  the spot — §167's laden penalty becomes something you can see — and a body stopped dead stops moving its
+  legs.
+
+### The two bugs, which were the same bug
+
+Bodies were invisible. Every value that could be probed was **correct**: model matrix at the right world
+position with the right scale, palette identity-ish, push offsets right, descriptors bound at the right
+sets, vertex layout matching the shader attribute for attribute. The data was right up to the moment it was
+thrown away.
+
+- **`Begin()` ran after the adds**, clearing all thirteen bodies every frame. It had been placed beside
+  `unitBatch.Begin`, on the assumption that batch is begun before the agent loop — it is not; the loop fills
+  plain lists and the batch is begun afterwards and fed from them. Worse, the ordering was "checked" against
+  line numbers read before those very edits, which is evidence that deserves no confidence at all.
+- **`SetInstances` ran inside the pass callback**, and a pass callback does not run when it is registered.
+  The graph records passes as closures and executes them later, so the batch read lists the next frame's
+  `Begin` had already cleared. The log order gave it away: the draw probe printed *before* the add probe.
+
+That second one is why `PropModel` has a separate `Stage()` and why `unitBatch` calls `SetInstances` in the
+build phase — `SetInstances` copies into the batch's own staging, so the callback need only record. **That
+split is an invariant of this renderer, and it was read as incidental structure.** Staging and drawing are
+now separate here too, and the "bodies reached a draw" line survives as a permanent instrument, because an
+empty skinned draw is invisible and looks identical to a rendering fault.
+
+### Then the animation was wrong, and that was mine too
+
+- **"Idle starts walking in place with legs weirdly flailing."** One `Pose` is shared by every body and a
+  clip writes only the bones it has tracks for, so each body inherited whatever the last one left in the
+  bones its own clip does not touch — an idle villager wearing a walker's legs. The required sequence is
+  **reset, sample, palette**, and VulkanLit's comment says so in as many words. The reset was skipped.
+- **The sway was root motion.** A walk clip authored to travel carries the character forward in its own
+  translation tracks, which is right in an animation package and wrong here: position is the simulation's
+  and only the simulation's. Horizontal translation on root bones is zeroed; vertical stays, because that
+  is the gait's own bob and flattening it makes the walk a shuffle.
+
+### Actions are data, because the content is somebody else's
+
+The renderer asks for a `BodyAction` — Idle, Walk, Labour, Strike, Fall — and never for a clip name.
+`CharacterClips.Table` lists the names each action accepts, so Quaternius's `Man_Walk`, Mixamo's `Walking`
+and a hand-authored `Walk` all bind without a line of C# changing. Five actions and not fifteen: at this
+distance what reads is moving or not, swinging or standing, fighting or working, upright or down, and adding
+a sixth is a claim that a player could tell it apart.
+
+What bound is printed at load, and **the marker had to be fixed before it was worth having.** The first
+version starred any name matched past the first choice — which starred all five, since no pack uses this
+file's preferred spelling, and a marker that fires on everything says nothing. Stand-ins are their own list
+now, so the report reads `Labour=Man_SwordSlash*` and nothing else is flagged: that is the one action for
+which no clip exists in either Quaternius pack, and a downward sword arc is covering for an axe.
+
+Measured: 31 bones, 5 primitives, 11 clips, 13 posed bodies, 5 instanced draws per pass, no validation
+errors.
+
+### The pipeline, and what is not proved
+
+Mixamo exports FBX, one file per animation; the importer takes glTF with one skin and every clip on it. So
+the pipeline has two jobs — convert and merge — and Blender headless is the only tool that does both, which
+is also what retargeting a CC0 library authored on another skeleton would need. `tools/cook-character.sh`
+plus `tools/character_merge.py` import each clip file, keep one armature, carry every action across, strip
+Mixamo's `mixamorig:` bone prefix, and write one GLB; they deliberately do not apply transforms, which would
+move the skinning frame the importer depends on.
+
+**Blender is not installed and the Blender half has not been run.** Recorded as unproved rather than
+described as working. The glTF half is proved: the asset imports, binds, poses and draws.
+
+One licence note, stated once because the repository is public: **Mixamo is not CC0.** Adobe's terms allow
+royalty-free use in a project but not redistributing the animation data on its own, and committing either
+the FBX or the merged GLB is arguably that. Every other asset here is CC0 with a `CREDITS.md` line.
+Quaternius's Universal Animation Library is the clean alternative — CC0, 120+ clips, locomotion included —
+on a different skeleton, which is the retargeting the pipeline already needs Blender for.

@@ -104,7 +104,20 @@ public sealed class InstancedBatch
     // Records the instanced draw. `textures` are frame-global samplers the pipeline's
     // shader declares (e.g. a shadow map) — forwarded verbatim, mirroring
     // ParticleBatch.Draw; the batch stays agnostic to what they mean. Null = none.
-    public void End(RenderPassBuilder pass, IReadOnlyList<ShaderTextureBinding>? textures = null)
+    /// <summary>Records the draw. <paramref name="extra"/> binds a caller-owned material alongside it.</summary>
+    /// <remarks>
+    /// <b>What <paramref name="extra"/> is for, and why it does not make this batch less generic.</b> An
+    /// instanced draw has two material slots: the instance buffer's own (set 3) and one more the engine
+    /// leaves to the caller. Skinned bodies need that second one for a bone palette — but the batch is not
+    /// told that, and must not be. It receives an opaque handle and binds it, exactly as it already receives
+    /// an opaque pipeline and opaque push bytes without knowing they mean lighting and fog. The rule this
+    /// primitive keeps is that geometry is all it knows; a caller bringing its own buffer is that rule
+    /// working, not an exception to it.
+    /// </remarks>
+    public void End(
+        RenderPassBuilder pass,
+        IReadOnlyList<ShaderTextureBinding>? textures = null,
+        MaterialHandle? extra = null)
     {
         ArgumentNullException.ThrowIfNull(pass);
         if (!inBatch)
@@ -124,7 +137,8 @@ public sealed class InstancedBatch
             Array.Empty<ShaderUniform>(),
             textures ?? Array.Empty<ShaderTextureBinding>(),
             perDrawMaterial: buffer.Material,
-            pushConstants: pushConstants);
+            pushConstants: pushConstants,
+            material: extra);
         pushHandedOff = true;
     }
 }
