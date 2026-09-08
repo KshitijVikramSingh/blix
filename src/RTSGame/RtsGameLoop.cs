@@ -2506,7 +2506,12 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         bodies = SkinnedBodies.Load(
             vk,
             Path.Combine(AppContext.BaseDirectory, "Assets", "models"),
-            "villager_animated.glb",
+            // <b>The Universal base character, on the Universal rig.</b> Chosen over the Animated Men body
+            // for one reason that outlasts this session: its skeleton is the Rigify deform rig Quaternius's
+            // animation libraries are authored against, so their clips — including the farming loop that is
+            // the only real content gap — drop onto it with no retargeting at all. It also arrives as one
+            // skin and one mesh, which is what the importer wants, and in two primitives rather than five.
+            "villager_universal.glb",
             skinnedShader, skinnedPipeline,
             skinnedCasterShader, skinnedCasterPipeline,
             ShadowCascades.Count,

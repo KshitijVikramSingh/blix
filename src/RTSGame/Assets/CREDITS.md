@@ -5,56 +5,47 @@ as good practice). Sourced via https://poly.pizza .
 
 ## Characters
 
-- `models/villager_animated.glb` — animated man, **Quaternius** ("Animated Men Pack").
-  https://quaternius.com/ · https://poly.pizza/bundle/Animated-Men-Pack-DAC9SDgMQT
-- `models/villager_animated_b.glb` — a second body from the same pack, same armature.
+- `models/villager_universal.glb` — **Animated Base Character**, *Quaternius*, **CC0**.
+  https://quaternius.com/ · https://poly.pizza/m/cwYvO5UauX
 
-One skin, 31 joints (`HumanArmature`), and eleven clips: `Man_Idle`, `Man_Walk`,
-`Man_Run`, `Man_Death`, `Man_Punch`, `Man_SwordSlash`, `Man_Clapping`, `Man_Jump`,
-`Man_RunningJump`, `Man_Sitting`, `Man_Standing`.
+One skin, one mesh, two primitives, 8,546 vertices, 53 bones, **45 clips**. 1.83 authored units, normalised
+to unit height and scaled by the placement matrix.
 
-**No labour clip exists in this pack**, and none exists in Quaternius's Universal
-Animation Library either (which is CC0 and 120+ clips, but targets a different
-universal rig we have no retargeter for). `Man_SwordSlash` stands in as the work
-swing: at this camera distance a downward arc reads as an axe, a scythe or a pick.
+**Chosen for its skeleton, not its looks.** The rig is the Rigify deform skeleton — `DEF-hips`,
+`DEF-spine.001..003`, `DEF-upper_arm.L`, `DEF-thigh.L`, `DEF-toe.L` — which is what Quaternius means by "a
+universal humanoid rig, ready for retargeting", and it is what the **Universal Animation Library** and
+**Universal Animation Library 2** are authored against. So those libraries (both CC0; UAL2 is where the
+farming loop lives) drop onto this body with **no retargeting at all**, and neither needs the join step
+below because this file already has one skin.
 
-**The dress is modern** — shirt, trousers, a tie on one of them — which does not match
-the `SecondAge` building kit. Deliberate for now: this is here to answer whether motion
-makes a body's job readable, and a costume cannot answer that. Replace once the clip set
-is settled.
+Every on-screen action binds to a real clip, with nothing standing in:
 
-## Where the real animation is coming from
+    Idle=Idle_Loop  Walk=Walk_Loop  Labour=Fixing_Kneeling  Strike=Sword_Attack  Fall=Death01
 
-Both **CC0**, both from Quaternius, and between them they cover every action the game asks for:
+`Fixing_Kneeling` is a genuine work animation — kneeling and working at something — so it is a real clip for
+`BodyAction.Labour` rather than a stand-in. UAL2's farming clips are listed ahead of it in
+`RTSGame/Rendering/CharacterClips.cs`, so they take over the moment they are dropped in.
 
-- **Universal Animation Library** — 120+ clips: locomotion in eight directions, jog, sprint, push, crawl,
-  swim, sit, deaths, combat.
-- **Universal Animation Library 2** — 130+ clips, and the one that matters here: **farming**. `BodyAction.
-  Labour` is the only action currently served by a stand-in, and this is what replaces it.
+**It is a grey mannequin**, and that is the remaining honest gap: the body reads as a body and not yet as a
+villager. Dress is a separate axis from motion — *Modular Character Outfits — Fantasy* is CC0 and built for
+these base characters — and it was left for later deliberately, because a costume cannot answer whether
+motion makes a job readable.
 
-Take the **root-motion-disabled** export of each. Both ship with and without; the game strips horizontal
-root translation anyway (position belongs to the simulation), so the disabled version simply means the
-renderer is not undoing work the exporter did.
+**A note on `_RM`.** The library ships clips in pairs, one travelling and one not. Prefer the plain
+spelling: horizontal root translation is stripped anyway (position belongs to the simulation), so binding
+the travelling twin means the renderer undoes the exporter's work every frame.
 
-**The rig naming matters, and it is why the body should probably change too.** Both libraries moved to the
-naming scheme of Quaternius's base characters and modular outfits in January 2026. The 2022 Animated Men
-Pack above predates that. Measured against a current modular character, twenty bones already agree — Hips,
-Abdomen, Torso, Neck, Head, both Shoulder/UpperArm/LowerArm, both UpperLeg/LowerLeg, both Foot, Body —
-which is every bone a gait needs at this camera distance. What differs is hands, a `Chest` joint, and two
-names (`Bone`→`Root`, `PoleTarget`→`PT`).
+### Superseded
 
-So there are two routes:
+The 2022 **Animated Men Pack** was the first rigged body here and has been removed — git history holds it.
+Two things it taught, both kept:
 
-1. **A base character on the current naming** (and *Modular Character Outfits — Fantasy*, also CC0, which
-   would fix the modern dress at the same time). Clips bind with no retargeting at all.
-2. **Keep this body** and pass `--preset quaternius-2022-to-base` to `tools/cook-character.sh`. The twenty
-   shared bones animate; hands and `Chest` keep their rest pose, which at eighty metres costs a slightly
-   stiffer torso and fingers nobody can see.
-
-One trap, verified rather than guessed: a **modular character is several skinned meshes**, and
-`GltfImporter` takes one skin per file and ignores the rest without a word. Quaternius's modular men have
-four skins in one file; three would vanish. The merge script joins them by default — do not pass
-`--no-join` unless you have a reason.
+- Its rig predates January 2026's naming change, and measuring the two against each other gave the twenty
+  bones that already agree (hips, abdomen, torso, neck, head, both arms, both legs, both feet) — every bone
+  a gait needs at this distance. That is what `--preset quaternius-2022-to-base` in
+  `tools/character_merge.py` encodes, and it still applies to any 2022-era Quaternius pack.
+- It had no work clip at all, which is what forced `CharacterClips` to distinguish a real clip from a
+  stand-in, and therefore what made the load report worth reading.
 
 ## Everything else
 

@@ -67,33 +67,42 @@ internal static class CharacterClips
     {
         // "Standing" is Quaternius's second idle and reads calmer than Man_Idle's weight shift.
         (BodyAction.Idle,
-            new[] { "Idle", "Man_Idle", "Standing", "Man_Standing", "Breathing Idle" },
+            new[] { "Idle_Loop", "Idle", "Man_Idle", "Standing", "Man_Standing", "Breathing Idle" },
             Array.Empty<string>()),
         // Running is a real gait but not this one, so it is a stand-in: the phase is driven by metres
         // covered, and a run cycle played at walking distance reads as a mince.
+        // <b>The non-root-motion spelling first, every time.</b> The Universal library ships pairs — a clip
+        // and a <c>_RM</c> twin that travels — and while horizontal root translation is stripped anyway,
+        // binding the travelling one means the renderer spends every frame undoing what the exporter did.
         (BodyAction.Walk,
-            new[] { "Walk", "Man_Walk", "Walking" },
-            new[] { "Run", "Man_Run" }),
+            new[] { "Walk_Loop", "Walk", "Man_Walk", "Walking", "Walk_Formal_Loop" },
+            new[] { "Jog_Fwd_Loop", "Run", "Man_Run", "Sprint_Loop" }),
         // <b>No pack yet ships a labour clip.</b> Neither the Animated Men Pack nor Quaternius's Universal
         // Animation Library has a chop, a dig, a reap or a hammer — so a sword slash stands in, because a
         // downward arc at this distance reads as an axe, a scythe or a pick. The names ahead of it are what
         // a Mixamo search for the real thing returns, so real content binds ahead of the stand-in the moment
         // it exists, with no code change.
+        // The farming names lead because the Universal Animation Library 2 is where a real work loop is
+        // coming from, so it binds ahead of everything below the moment it is dropped in.
+        // <c>Fixing_Kneeling</c> is a genuine work animation — somebody kneeling and working at something —
+        // so it is a real clip for this action rather than a stand-in, which is why it sits in this list.
         (BodyAction.Labour,
-            new[] { "Labour", "Work", "Chopping", "Chop", "Mining", "Axe Chop", "Hammering", "Digging" },
-            // Nothing in either Quaternius pack works at anything, so a fight animation stands in until
-            // real content arrives. This is the one action currently served by a stand-in, and the load
-            // report says so — which is the whole reason the two lists are separate.
-            new[] { "Man_SwordSlash", "SwordSlash", "Man_Punch" }),
+            new[]
+            {
+                "Labour", "Farming", "Work", "Chopping", "Chop", "Mining", "Axe Chop", "Hammering",
+                "Digging", "Fixing_Kneeling", "PickUp_Table", "PickUp",
+            },
+            // A fight animation covering for an axe. Only reached if nothing above exists.
+            new[] { "Push_Loop", "Interact", "Man_SwordSlash", "SwordSlash", "Man_Punch" }),
         (BodyAction.Strike,
             new[]
             {
-                "Strike", "Attack", "Man_SwordSlash", "SwordSlash", "Sword And Shield Slash",
-                "Man_Punch", "Punch",
+                "Sword_Attack", "Strike", "Attack", "Man_SwordSlash", "SwordSlash",
+                "Sword And Shield Slash", "Punch_Cross", "Punch_Jab", "Man_Punch", "Punch",
             },
             Array.Empty<string>()),
         (BodyAction.Fall,
-            new[] { "Death", "Man_Death", "Dying", "Falling Back Death" },
+            new[] { "Death01", "Death", "Man_Death", "Dying", "Falling Back Death" },
             Array.Empty<string>()),
     };
 
