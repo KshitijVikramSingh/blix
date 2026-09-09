@@ -5766,10 +5766,24 @@ internal static class SimulationSelfTests
 
         var raider = world.SpawnAgent(new Vector2(0.5f, 0f), UnitType.Raider, new FactionId(1));
         world.Agents.Get(raider).Directed = true;
-        Tick(world, 900);
-        var wentOut = hands.Count(id =>
-            world.Agents.Contains(id) &&
-            Vector2.Distance(world.Agents.Get(id).Position, cropAt) > 6f);
+
+        // <b>Ever went out, not "is out now".</b> This was a single sample after the fact, and it reported
+        // "0 left it" for two different working fixes — because a body that is correctly released goes back
+        // to its field and may be standing there at the moment of the snapshot. A commitment is an event, so
+        // it has to be watched for, not looked for afterwards. Third time in this arc that my own instrument
+        // was the limiting factor.
+        var everWentOut = new HashSet<int>();
+        for (var t = 0; t < 900; t++)
+        {
+            Tick(world, 1);
+            foreach (var id in hands)
+            {
+                if (!world.Agents.Contains(id)) continue;
+                if (Vector2.Distance(world.Agents.Get(id).Position, cropAt) > 6f) everWentOut.Add(id.Value);
+            }
+        }
+
+        var wentOut = everWentOut.Count;
 
         // Removed rather than fought, so this is about standing down and not about combat.
         if (world.Agents.Contains(raider)) world.DespawnAgents(new[] { raider });

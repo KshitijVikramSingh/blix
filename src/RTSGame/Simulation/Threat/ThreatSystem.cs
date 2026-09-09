@@ -517,6 +517,12 @@ internal sealed class ThreatSystem
             //
             // Note what this is *not*: it does not touch the assignment. The villager goes back to the
             // same field afterwards, and the units it was carrying are still in the ledger the whole time.
+            //
+            // <b>That sentence was false for two years of sections and is true as of §187.</b> It is the
+            // second place in the codebase to claim a villager returns to its field — the other is the
+            // call site of Defend — and neither was tested; AGuardComesHome checked the claim only for a
+            // guard. What actually happened is in SimulationWorld.StandDown: villagers were never handed
+            // back, and the stop that was meant to end the commitment re-armed it a tick later.
             if (stand && body.Jobs.CarriedUnits > 0 && stow(body.Id, at))
             {
                 // Decided again next tick rather than held, so that the instant its hands are empty it

@@ -14677,3 +14677,77 @@ option.
 My recommendation is provenance: the second option spends a player-facing behaviour to save a save-format
 field, and "an order from a person holds, an order from the defence expires" is a true and explainable rule
 rather than a mechanism artefact.
+
+## 187. Neither option: the fix was two ownership errors in five lines
+
+§186 handed the chair a design fork — provenance, or every assignment behaving like a Guard — and asked
+which. The chair asked to discuss the second, **and discussing it settled the question by killing both.**
+
+### What option 2 actually costs, measured rather than argued
+
+Two lines wired it: drop `ServeInterrupt`'s early return for a non-Guard assignment. Then the suite answered:
+
+```
+FAIL  a standing assignment is parked by an order and given back on request   stayedPut=False
+FAIL  an order holds until overridden and is never a trap                     heldPosition=False
+```
+
+So §143's behaviour is not a comment to be traded away — **it is a named, tested contract**, twice. And the
+names say what the contract is *for*: an order is *given back **on request***, and is *never a trap*. An
+order holds until something asks for the body back.
+
+Which reframes the bug entirely. Nothing was wrong with the contract. **The defence took a body and never
+asked for it back**, and the function whose whole job is to ask is `StandDown`.
+
+### And `StandDown` was wrong twice
+
+§143 says "at peace nothing calls it at all, because §134's proof has nothing to decide then". Not so:
+`ThreatSystem.Update` has a peace branch that walks every body and calls `halt` — which *is* `StandDown`. It
+fires. It just did not work, for two reasons in five lines:
+
+1. **It only handed back guards.** `if (Kind == Guard) ReturnToAssignment(...)`. A villager committed by §30
+   was left interrupted for good.
+2. **It began with a queued stop.** `QueueStop` lands on the *next* tick, goes through the command loop, and
+   calls `JobSystem.Interrupt` — **re-arming the interrupt the line below had just cleared.** So the function
+   undid itself for every body it touched, and the guard escaped only because `ServeInterrupt`'s separate
+   Guard rule rescued it. §143 built belt and braces, and the braces hid that the belt was cut.
+
+The fix is `StandDown` handing back *any* body, with the stop removed rather than reordered:
+`ReturnToAssignment` clears `WalkIssued`, so the jobs layer issues a walk to the body's own place next tick
+and **replaces** the march instead of stopping and starting again. A released body is going somewhere; it
+does not need to stand still first.
+
+**Nothing about a player's order changes.** `StandDown` is only ever called by the threat system, so it *is*
+the request the contract names. Both contract tests still pass.
+
+### Verified
+
+```
+6/6 took the field, 4 left it for a raider at the granary;
+forty seconds after the danger went, 4/4 are back at the field and 0 are still under an interrupt
+```
+
+All six survived, where two died before — a body that mills about in a fight it never joins is a body that
+gets killed. Gate all 6 green, and the raid leg's held villagers fell from **272-280 s to 198 s** of a
+360-second run.
+
+### My instrument was the limiting factor three times in one section
+
+Worth recording, because it nearly buried the answer twice:
+
+1. The field at 26 m, outside `ThreatMetres` (12 m) — nobody could see the raider, so nothing committed.
+2. A lone villager — §30 weighs whether the group could hold the thing, and one declines.
+3. **`wentOut` sampled once, after the fact.** This reported "0 left it" for *two working fixes*, because a
+   body that is correctly released goes back to its field and is standing there at the moment of the
+   snapshot. A commitment is an event and has to be watched for, not looked for afterwards.
+
+Each of those looked like a finding. The test now prints `INCONCLUSIVE` when no commitment happened, so a
+fixture that failed without exercising the path can never again be mistaken for the fault.
+
+### Still open
+
+All four raid-leg villagers sit at **exactly 198 s**, which smells like one shared stretch rather than four
+independent ones. Under a raid every forty-five seconds there is almost always a hostile, so the peace branch
+rarely runs and the commitment is legitimately continuous — but whether §30 should hold *villagers* on
+defence for three minutes of a six-minute run is a question about who fights, not about the lifecycle, and it
+belongs with §7's roster. The lifecycle bug is fixed; that is a different one.

@@ -944,24 +944,44 @@ internal sealed class SimulationWorld
         Colliders.SetEnabled(agent.Colliders.Interaction, present);
     }
 
-    /// <summary>The danger has passed: drop the walk, and let the jobs layer have the body back.</summary>
+    /// <summary>The danger has passed: let the jobs layer have the body back.</summary>
     /// <remarks>
-    /// <b>"Let the jobs layer have the body back" was what this said and not what it did.</b> §143: a stop
-    /// halts the walk and leaves the interrupt standing, and an Order interrupt never expires — so a
-    /// defender stayed wherever the fight ended. It went unnoticed because militia had no standing
-    /// assignment to go back to, so there was nothing for the bug to be visibly stopping. Now that
-    /// <see cref="AssignmentKind.Guard"/> exists, it is the difference between a garrison and a scattering.
+    /// <b>"Let the jobs layer have the body back" was what this said and twice not what it did.</b>
+    /// <para>
+    /// §143 found the first half: a stop halts the walk and leaves the interrupt standing, and an Order
+    /// interrupt never expires, so a defender stayed wherever the fight ended. That was patched by handing
+    /// guards back here, and by a second rule in <c>ServeInterrupt</c> that releases a Guard through its
+    /// interrupt grace. Belt and braces — and the braces hid that the belt was cut.
+    /// </para>
+    /// <para>
+    /// §187 found the rest, and it is two ownership errors in five lines. <b>First, only a guard was handed
+    /// back</b>, so a villager committed by §30 was left interrupted for good; the raid leg had four of them
+    /// held on <c>Work</c> for 272-280 seconds of a 360-second run, standing one to nine metres from their
+    /// own fields, and nothing was looking. <b>Second, and worse, this began with a queued stop</b> —
+    /// <c>QueueStop</c> lands on the NEXT tick, goes through the command loop, and calls
+    /// <c>JobSystem.Interrupt</c>, which re-arms the very interrupt the line below had just cleared. So this
+    /// function undid itself for every body it touched, and the guard escaped only because the other rule
+    /// rescued it independently.
+    /// </para>
+    /// <para>
+    /// The stop is gone rather than reordered. Its job was to drop the march, and
+    /// <see cref="JobSystem.ReturnToAssignment"/> clears <c>WalkIssued</c>, so the jobs layer issues a walk
+    /// to the body's own place on the next tick and <em>replaces</em> the march instead of stopping and then
+    /// starting again. A body that has been released is going somewhere; it does not need to stand still
+    /// first.
+    /// </para>
+    /// <para>
+    /// <b>What this deliberately does not change:</b> "an order holds until overridden", which is a tested
+    /// contract — <c>a standing assignment is parked by an order and given back on request</c> and
+    /// <c>an order holds until overridden and is never a trap</c>. Both still pass, because this is only
+    /// ever called by the threat system: it <em>is</em> the request, and the defence is the thing overriding
+    /// its own order. A player's order is untouched.
+    /// </para>
     /// </remarks>
     private void StandDown(AgentId body)
     {
-        QueueStop(new[] { body });
         if (!Agents.Contains(body)) return;
-        ref var agent = ref Agents.Get(body);
-        // Releases a guard at once rather than waiting for its interrupt grace, which is worth a line only
-        // because it is the tick the alarm actually ended. It is not what makes a guard come home — see the
-        // note in ServeInterrupt: this is not called at peace at all, because §134's proof has nothing to
-        // decide then, and the rule that brings a guard back has to hold without it.
-        if (agent.Jobs.Assignment.Kind == AssignmentKind.Guard) JobSystem.ReturnToAssignment(ref agent);
+        JobSystem.ReturnToAssignment(ref Agents.Get(body));
     }
 
     /// <summary>Go at a body and keep going at it, which is what the chase order already does.</summary>
