@@ -829,30 +829,53 @@ internal sealed class EconomySystem
                 continue;
             }
 
+            // <b>A field is worked in strokes too.</b> §207, and it is §204's finding one system over: the
+            // grain a reaper freed accrued into `field.Pending`, a counter belonging to the FIELD and shared
+            // by every hand on it, so the tick a whole unit came out was the field's business and no reaper
+            // could be said to have cut it. Same fix as the trunk: the body carries the stroke and the
+            // fraction, and grain leaves the crop on somebody's scythe-sweep.
+            //
+            // All three phases gated, not only the reaping one. The arithmetic is identical either way —
+            // `+deltaSeconds` every tick is `+StrokeSeconds` every stroke — and the pose is the same
+            // reaping pose in all three, so leaving prepare and maintain ungated would run the animation
+            // free during them and drive it during reaping, which is worse than consistent.
+            //
+            // `ReapWork`, `PrepareWork` and `MaintainWork` stay on the FIELD, because how much of this crop
+            // has been cut is a fact about the crop. It is the pending fraction that had no business there.
+            body.ActCharge += deltaSeconds;
+            if (body.ActCharge < StrokeSeconds) continue;
+            body.ActCharge -= StrokeSeconds;
+
             switch (phase)
             {
                 case CropPhase.Prepare:
                     field.PrepareWork = MathF.Min(
-                        CropCycle.PrepareLabour, field.PrepareWork + deltaSeconds);
+                        CropCycle.PrepareLabour, field.PrepareWork + StrokeSeconds);
                     break;
                 case CropPhase.Maintain:
                     field.MaintainWork = MathF.Min(
-                        CropCycle.MaintainLabour, field.MaintainWork + deltaSeconds);
+                        CropCycle.MaintainLabour, field.MaintainWork + StrokeSeconds);
                     break;
                 case CropPhase.Reap:
                     var target = CropCycle.ReapTargetOf(in field);
                     var before = field.ReapWork;
-                    field.ReapWork = MathF.Min(target, field.ReapWork + deltaSeconds);
-                    var earned = field.Pending.Accrue(
-                        Resource.Grain,
-                        (field.ReapWork - before) * EconomyRates.ReapedPerSecond(in field));
+                    var heldBefore = body.WorkPending;
+                    field.ReapWork = MathF.Min(target, field.ReapWork + StrokeSeconds);
+                    body.WorkPending +=
+                        (field.ReapWork - before) * EconomyRates.ReapedPerSecond(in field);
+                    var earned = (int)body.WorkPending;
+                    body.WorkPending -= earned;
                     // <b>The same conversion as the deposit below, on the reaping side.</b> §163: a hand
                     // holding wood that reaps a field would have had its wood re-labelled as grain, because
                     // a body's cargo is one resource and one count. Handed back to the field rather than
                     // dropped, so the crop is still there for whoever comes with empty hands.
                     if (earned > 0 && body.Jobs.CarriedUnits > 0 && body.Jobs.Carrying != Resource.Grain)
                     {
+                        // The stroke is undone entirely, fraction included — otherwise a hand holding wood
+                        // would bank the reaping it was not allowed to keep and collect it later as grain,
+                        // which is §163's re-labelling wearing a delay.
                         field.ReapWork = before;
+                        body.WorkPending = heldBefore;
                         earned = 0;
                     }
 

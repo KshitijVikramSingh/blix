@@ -15855,3 +15855,48 @@ where it mattered.
 
 Fixed by mirroring the binding's order, with the binding named as the authority. And the load report is the
 check: **an act reporting `free` while its bound clip has a name is this fault returning.**
+
+## 207. And a field is worked in strokes too
+
+§204's finding, one system over. The grain a reaper freed accrued into `field.Pending` — a counter belonging
+to the **field**, shared by every hand on it — so the tick a whole unit came out was the field's business and
+no reaper could be said to have cut it. Same fix as the trunk: the body carries the stroke and the fraction,
+and grain leaves the crop on somebody's scythe-sweep.
+
+**All three crop phases gated, not only the reaping one.** The arithmetic is identical either way —
+`+deltaSeconds` every tick is `+StrokeSeconds` every stroke — and the pose is the same reaping pose through
+prepare, maintain and reap, so leaving two of them ungated would run the animation free during those and
+drive it during the third. Worse than consistent.
+
+**What stayed on the field, and why.** `PrepareWork`, `MaintainWork` and `ReapWork` are all still the field's:
+*how much of this crop has been cut* is a fact about the crop, not about whoever cut it. It was only ever the
+pending fraction that had no business there. Getting that line right is the difference between moving a
+counter and moving the wrong counter.
+
+**One thing the change had to be careful about.** §163's rule is that a hand holding wood may not have its
+cargo re-labelled as grain, so the existing code undid `ReapWork` when a reaper's hands held something else.
+With a per-body fraction that undo has to include the fraction — otherwise a hand holding wood would *bank*
+the reaping it was not allowed to keep and collect it later as grain, which is §163's fault wearing a delay.
+
+```
+a year of settlement:        270 grain against a nominal 270, 47 wood
+a year on generated terrain: 270 grain against a nominal 270, 45 wood
+```
+
+Identical to §205's run and to the run before it. Three economy changes in a row — labour's reach, the
+trunk's stroke, the field's stroke — and the nominal has not moved once. Which is the outcome to want: each
+was a structural contradiction rather than a rate, and closing a contradiction should cost nothing.
+
+With that, every act a body performs has a moment it owns, and §201's fourth proposal is done:
+
+| act | moment | impact frame |
+|---|---|---|
+| Strike | `ThreatSystem.SwingSeconds` | 60% |
+| Chop | `EconomySystem.StrokeSeconds` | 15% |
+| Quarry | `EconomySystem.StrokeSeconds` | 15% (stand-in clip) |
+| Reap | `EconomySystem.StrokeSeconds` | 53% |
+| Build | `EconomySystem.StrokeSeconds` | 87% |
+
+Building is the one whose moment is still nominal: a hammer-blow drives the pose, but construction consumes
+material through `BuilderHandover` and the structural project rather than through a stroke, so the blow does
+not yet *do* anything. It is the same shape as the trunk and the field a third time, and it is the next one.
