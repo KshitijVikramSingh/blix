@@ -2682,7 +2682,7 @@ internal static class SimulationSelfTests
         var fault = DeterminismCheck.Diverges(first, second, 45);
         if (fault is not null)
         {
-            Console.WriteLine($"    {fault}");
+            Console.WriteLine($"    DIVERGED — {fault}");
             return false;
         }
 
@@ -2693,10 +2693,25 @@ internal static class SimulationSelfTests
         for (var i = 0; i < 500; i++)
         {
             ref var body = ref first.Agents.Get(new AgentId(i));
-            if (!float.IsFinite(body.Position.X) || !float.IsFinite(body.Position.Y)) return false;
+            if (float.IsFinite(body.Position.X) && float.IsFinite(body.Position.Y)) continue;
+            Console.WriteLine($"    NOT FINITE — body {i} is at ({body.Position.X}, {body.Position.Y})");
+            return false;
         }
 
-        return first.Timings.Format(first.Agents.Count, first.TickNumber).Contains("500 agents");
+        // <b>Three claims, and each has to say which one it was.</b> §189: this line used to assert the
+        // timings string contained "500 agents", and returning a bare false made a renamed LABEL report as
+        // "500-agent stress scenario stays deterministic — FAIL". Relabelling the count to "slots" (§187,
+        // because it counts allocated slots and read 30 unchanged through a war that killed eleven people)
+        // failed a determinism test, and cost a stash-and-bisect to find. A test that cannot say which of
+        // its claims broke sends you looking in the wrong subsystem.
+        var reported = first.Timings.Format(first.Agents.Count, first.TickNumber);
+        if (!reported.Contains("500 slots"))
+        {
+            Console.WriteLine($"    COUNT NOT REPORTED — timings said: {reported.Split(" | tick")[0]}");
+            return false;
+        }
+
+        return true;
     }
 
     private static bool DenseCrowdSeparates()

@@ -190,7 +190,19 @@ internal sealed class StallCensus
 
             // <b>How long it has held a job without doing any of it.</b> An unassigned body is not being
             // kept from anything, and a body at its work resets the clock.
-            if (!agent.Jobs.HasAssignment || JobSystem.IsWorking(in agent))
+            //
+            // <b>And a body fighting is not being kept from anything either.</b> First live run of this
+            // reported "#6 122s on Attack at 1 m from its place" three times over — bodies locked in combat
+            // beside their target, which is exactly what an Attack assignment is for. They score as kept
+            // from work because a fight runs as an interrupt, so IsWorking is false throughout. Counting
+            // that is crying wolf, which is the one thing an instrument in this codebase may not do.
+            //
+            // So this measures LABOUR withheld, and the military verbs are excluded because for them the
+            // interrupt IS the job. A guard away from its post is still counted: standing somewhere else is
+            // not what a post is, and §143 spent a section on exactly that.
+            if (!agent.Jobs.HasAssignment ||
+                agent.Jobs.Assignment.Kind == AssignmentKind.Attack ||
+                JobSystem.IsWorking(in agent))
             {
                 keptFromWorkSince[index] = elapsedSeconds;
             }

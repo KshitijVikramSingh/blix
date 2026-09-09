@@ -14751,3 +14751,201 @@ independent ones. Under a raid every forty-five seconds there is almost always a
 rarely runs and the commitment is legitimately continuous — but whether §30 should hold *villagers* on
 defence for three minutes of a six-minute run is a question about who fights, not about the lifecycle, and it
 belongs with §7's roster. The lifecycle bug is fixed; that is a different one.
+
+## 188. Combat gets its own harness, and the complaint becomes a table
+
+Reported from the chair after driving a two-bot map by hand: *"attacking/combat needs a separate
+test/harness from village at this point — I ordered the attacks but they would just go there and stand,
+won't attack enemies efficiently, will get stuck in stagger loops"*.
+
+Right, and §7 has had this deferred for a while. The harness already half existed: `--fightbench` (§40) runs
+one mechanism per scenario on open ground with no economy, for exactly the reason given there — the raid leg
+"is a good gate for *did something break* and useless for *is this better*". What it did **not** have is the
+path the chair was actually driving. All three of its scenarios exercise the *defence*: bodies that see a
+hostile and commit themselves through §30. An `AssignmentKind.Attack` arrives the other way, through
+`QueueAttack`, which is the door a player's right-click goes through, and it had no coverage at all.
+
+### The complaint, one column each
+
+`an ordered assault` sends N militia at one of theirs from twenty metres — far enough that the walk is real,
+near enough that nothing is a chase — and each of the three complaints is a column, because a complaint that
+is not a number gets argued about instead of fixed:
+
+- **"go there and stand"** → `to 1st blow`, seconds from the order to any harm at all.
+- **"not efficiently"** → `contact%` and `landed/N`, the same duty-cycle and concentration numbers the ring
+  reports, so the ordered path and the volunteered one are directly comparable.
+- **"stagger loops"** → two independent readings. `gaps>1s` counts, per body that has already landed once,
+  how many times it then went over a second without landing again. `reversals/body` counts sign changes in
+  its distance to the target after first contact — approach, retreat, approach. Two, because they can
+  disagree, and a stagger visible in only one is a different mechanism from one visible in both.
+
+### What it says
+
+```
+    N | to 1st blow | killed in | contact% | landed/N | gaps>1s | reversals/body
+     1 |      13.4 s |    28.4 s |      53% |    1/1   |       0 |            0.0
+     3 |      13.4 s |    18.4 s |      27% |    3/3   |       0 |            0.0
+     8 |      13.1 s |    17.3 s |      24% |    5/8   |       0 |            0.0
+  target free to move:
+     2 |       6.3 s |    60.0 s |      14% |    2/2   |       1 |            2.5
+     8 |       6.3 s |    63.7 s |      10% |    4/8   |       1 |            1.0
+```
+
+Three findings, and the first two were invisible before:
+
+1. **"Go there and stand" does not reproduce on open ground.** First blow lands at ~13 s from an order at
+   20 m, and militia walk at 1.79 m/s, so 20 m is 11.2 s — the order engages within two seconds of arriving.
+   Whatever the chair saw needs something the open field does not have: terrain, a structure target, or a
+   target out of reach.
+2. **Concentration is bad, and this is the real inefficiency.** Contact falls as the group grows — 53% at
+   one, 24% at eight — and eight militia kill barely faster than three (17.3 s against 18.4 s). Only five of
+   eight ever land a blow. Sending more is close to free of benefit.
+3. **The stagger is a property of a MOVING target, which is why open-ground testing never found it.** A
+   target that stands still produces zero reversals at every N. A target that walks away produces 1.0-2.5
+   reversals per body, drops contact to a tenth, and stretches the kill from 17 s to **64 s** — three and a
+   half times longer. Eight bodies, one target, a minute to kill it.
+
+### And it found a wrong number that had been printed since §40
+
+`landed/N` in the ring read **`5/4`, `5/6`, `5/12`** — a share larger than the group it is a share of,
+printed for four sections and never questioned. `ThreatSystem.LandedThisTick` is every blow *anybody*
+landed, the victim's included, and the victim fights back. Filtered to our own bodies the column reads
+`4/4, 4/6, 4/8, 4/12` — **the front holds four, whatever you send**, which is a true and much more useful
+statement than the one it replaces.
+
+Two fixture faults caught on the way, both by the same tell — a number that did not move when it should
+have:
+
+- the mobile arm printed figures **identical to the static arm to the tenth of a second**, because a
+  `Directed` body makes no decisions of its own: leaving its speed alone does not make it run, it stands
+  there at full pace. It needs somewhere to be going.
+- `blows` counts ticks in which any of ours landed rather than blows, so it sat at ~450 regardless of N.
+  Left in as a contact-tick proxy and labelled honestly rather than trusted as a rate.
+
+### Where this goes
+
+The three numbers say the combat arc's first questions are not the ones I would have guessed. Not "does an
+order engage" — it does. **It is that a fight against anything that moves is four times more expensive than
+against anything that does not, and that reinforcement is nearly worthless past four bodies.** Both are
+§7's business and both now have a fixture that will say whether a change helped.
+
+## 189. Combat's harness, swept: three grounds, three postures, and what it actually says
+
+The chair's asks, in the order they arrived: combat needs its own harness; they don't attack nearby
+attackers and back away instead; buildings are not attacked correctly; test fleeing and charging enemies,
+all of offence and defence, with spread accounted for; and **run every one of them on flat ground and on
+relief and dense maps, "to see how aggression/defence plays when geography, geometry, other
+non-participating units and buildings are around"**.
+
+`--fightbench` already had the right shape from §40 — one mechanism per scenario, no economy, seconds to
+run — and its three cases all measure the *defence*, bodies committing themselves through §30. Everything
+below is the other path: `QueueAttack`, the door a player's right-click goes through, which had no coverage.
+
+The ground axis is `Flat` (an empty plain, where every combat constant was measured), `Rough` (30 m of
+relief with the country painted and woodland scattered) and `Village` (Rough plus one of our working
+settlements — buildings to path around, and a dozen bodies with jobs of their own). The original three stay
+flat on purpose: terrain is the confound they exist to exclude.
+
+### An ordered assault
+
+```
+ground  | N | target   | force   | spread | to 1st | killed  | contact | landed | rev/body | apart
+Flat    | 4 | Still    | Militia |   20 m | 13.1 s |  16.9 s |     23% |   4/4  |      0.0 |  1.3 m
+Flat    | 4 | Fleeing  | Militia |   20 m |  6.3 s |  81.8 s |     12% |   4/4  |      2.5 | 16.6 m
+Flat    | 4 | Charging | Militia |   20 m |  6.3 s |  35.6 s |     25% |   4/4  |      0.5 | 16.6 m
+Rough   | 4 | Still    | Militia |   20 m | 12.3 s |  19.0 s |     35% |   3/4  |      0.7 |  1.6 m
+Rough   | 4 | Fleeing  | Militia |   20 m |  6.3 s |  78.8 s |     10% |   4/4  |      0.2 | 17.1 m
+Village | 4 | Still    | Militia |   20 m | 15.8 s |  20.3 s |     90% |   2/4  |      0.0 |  5.2 m
+Village | 4 | Fleeing  | Militia |   20 m |  6.6 s |  67.8 s |     20% |   2/4  |      4.0 | 19.6 m
+Village | 4 | Charging | Militia |   20 m |  6.6 s |  26.6 s |     53% |   2/4  |      4.0 | 19.6 m
+Village | 4 | Charging | Mixed   |   20 m |  6.5 s |  42.3 s |     57% |   1/4  |     10.0 | 20.1 m
+Flat    | 8 | Charging | Militia |    4 m |  1.5 s |  15.0 s |     42% |   4/8  |      0.2 |  3.4 m
+Flat    | 8 | Charging | Militia |   20 m |  6.3 s |  32.1 s |     19% |   4/8  |      0.2 | 14.8 m
+Village | 8 | Charging | Militia |    4 m |  0.0 s |   9.4 s |     85% |   3/8  |      0.7 |  6.7 m
+Village | 8 | Charging | Militia |   20 m |  6.6 s |  47.6 s |     62% |   3/8  |      8.7 | 17.0 m
+```
+
+Five things, and none of them was the thing I expected:
+
+1. **"Go there and stand" does not reproduce anywhere**, on any ground. First blow lands 6-16 s after an
+   order given 20 m out, and militia walk at 1.79 m/s. The order engages.
+2. **A fleeing target is the single worst case: 17 s becomes 68-82 s.** Four to five times, on every ground.
+   Nothing else in the matrix costs that much.
+3. **Spread at the moment of the order dominates everything else.** Eight sent from 4 m apart kill in 15.0 s;
+   the same eight from 20 m apart take 32.1 s. In the village it is 9.4 s against 47.6 s — **five times**.
+   And `apart at contact` says why: chasing anything strings the force from 1.3 m to 17 m, so it arrives
+   piecemeal and `contact%` collapses. **This is the crowding answer the chair asked for, and it says
+   tighter is better by a factor of two to five.**
+4. **Geometry halves participation.** `landed/N` is 4/4 on flat and 2/4 in a village at every posture: with
+   buildings, trees and other people's bodies in the way, half the force never lands a blow at all. And the
+   stagger goes with it — `rev/body` is 0-2.5 flat and 4.0-10.0 in a village. **The chair was right that the
+   flat field was hiding this.**
+5. **Villagers mixed in are the worst force**: 1 of 4 landing, `rev/body` 10.0, the worst stagger measured.
+   But `drifted` is **0 in every single row** — a villager pulled off its field does not run home mid-fight,
+   which is the §187 check passing.
+
+### A nearer enemy — the reported bug, and it is real
+
+Ours ordered at a target 80 m away, with a hostile standing 2.5 m from them that nobody ordered anything
+about:
+
+```
+ground  | N | blows on near | to 1st | blows on the ordered one | closed on the near one by
+Flat    | 4 |             1 |  2.0 s |                       45 |                  -74.9 m
+Rough   | 4 |             4 |  1.9 s |                       45 |                  -74.7 m
+Village | 4 |            45 |  7.8 s |                       45 |                    4.6 m
+```
+
+**On open ground they land one blow on the man in their faces and then walk seventy-five metres away from
+him.** That is the chair's "they don't attack nearby attackers and instead move back", and the sign of
+`closed on the near one by` is the whole finding. In a village they engage it properly — 45 blows — which is
+consistent with (4): the geometry that costs them elsewhere is what keeps them in contact here.
+
+### A structure — not reproduced, and a palisade turns out to be indefensible
+
+```
+ground  | N | defenders | to 1st hit | condition lost | working ticks | interrupted%
+Flat    | 4 |         0 |      9.7 s |    100 of 100  |           321 |           0%
+Flat    | 4 |         3 |      9.9 s |    100 of 100  |           681 |           0%
+Village | 4 |         3 |      9.4 s |    100 of 100  |           542 |           0%
+```
+
+Four militia flatten a palisade in under ten seconds on every ground, and **three defenders standing in the
+way cost them essentially nothing** — same first hit, same total destruction. So "they won't attack
+buildings correctly" is **not reproduced by this harness**, and my hypothesis for it is disproved outright:
+`interrupted%` is zero, so nothing is stopping the attackers through `BreakStructures`' `IsWorking` gate.
+What the arm found instead is that a wall is not defensible, which is a roster and rates question for §7.
+
+### Four fixture faults, all caught by the same tell
+
+Every one of them was a number that did not move when it should have, or moved when it could not:
+
+1. `landed/N` read **`5/4`, `5/6`, `5/12`** in the *pre-existing* ring — a share larger than its own group,
+   printed since §40 and never questioned. `LandedThisTick` is every blow *anybody* landed and the victim
+   fights back. Filtered, the column reads `4/4, 4/6, 4/12`: **the front holds four whatever you send**,
+   which is a better statement than the one it replaces.
+2. The mobile arm printed figures **identical to the static arm to the tenth of a second**, because a
+   `Directed` body makes no decisions of its own — leaving its speed alone does not make it run.
+3. The `Village` wall reported **`never scratched, 0 of 100`**, which reads as a damning finding about
+   attacking structures and was my fixture spawning the palisade at the settlement's own centre, inside its
+   granary and houses. Moved 60 m out: 100 of 100 in 8.8 s.
+4. The defended arm printed **identically to the undefended one, twice** — first because I marked the
+   keepers `Directed` so they defended nothing, then because I stood them behind the wall where our bodies
+   never had to walk through them.
+
+And one in the suite: `FiveHundredAgentScenarioIsDeterministic` ends with
+`Timings.Format(...).Contains("500 agents")` and returns a bare `false`. §187 relabelled that count to
+`slots` — because it counts allocated slots and read "30 agents" unchanged through a war that killed eleven
+people — and a **determinism test failed because a word changed**, which cost a stash-and-bisect to
+attribute. Each of its three claims now names itself when it fails.
+
+### Where the combat arc starts
+
+Not with "does an order engage" — it does. The measured order of business is:
+
+1. **Fleeing.** Four to five times the cost of anything else, on every ground.
+2. **Spread at the order.** Two to five times, and free to change — nobody has to be made better at
+   fighting, they have to arrive together.
+3. **Ignoring the enemy in front of you.** One blow, then seventy-five metres in the wrong direction.
+4. **Geometry halving participation**, which is the one that only shows on a real map and the reason the
+   chair's instinct to insist on it was right.

@@ -58,7 +58,11 @@ internal sealed class SimulationTimings
         var values = Enum.GetValues<SimulationPhase>()
             .Select(phase => $"{Label(phase)} {counters[(int)phase].AverageMilliseconds:F3} ms")
             .ToArray();
-        return $"timings | {agentCount} agents | tick {tickNumber} | {string.Join(" | ", values)}";
+        // <b>Slots, not people, and the label now says so.</b> §187: this read "30 agents" unchanged
+        // through a war that took faction 1 from seventeen people to six, because the caller passes
+        // Agents.Count — the allocated slots, dead ones included — and "agents" reads as population. The
+        // number is left alone so every perf figure in the plan stays comparable; only the word is fixed.
+        return $"timings | {agentCount} slots | tick {tickNumber} | {string.Join(" | ", values)}";
     }
 
     private static string Label(SimulationPhase phase) => phase switch
