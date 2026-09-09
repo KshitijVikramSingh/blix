@@ -15146,3 +15146,95 @@ dead" — and it is the right shape for a building and the wrong one for a body 
 the jobs assignment as the standing commitment underneath — the way a defence's commitment does — while an
 attack on a *structure* stays a place to stand? That would make one mechanism serve both and is why the
 fixes for the defence's pursuit did not reach a player's order.
+
+## 194. An attack that arrived thirty centimetres out of range, and a cause still not found
+
+The chair settled §193's question: **ordered attacks should chase the target.** Before building that, one
+arithmetic check paid off, and then three attempts at the mechanism did not.
+
+### The arrival test was outside weapon reach
+
+`JobDefaults.AtPlaceDistance(radius, extent) = max(radius × PlaceRadiusShare, extent + radius + TouchSlack)`,
+and `PlaceRadiusShare = 3`. For an attack on a *body* the extent is zero, so:
+
+```
+at its place at   max(0.37 × 3, 0.37 + 0.25) = 1.110 m
+harm reaches      (0.37 + 0.37) × 1.1       = 0.814 m
+```
+
+**An ordered attacker walked to thirty centimetres outside its own weapon, decided it had arrived, and
+stood there.** It could not land a blow by design. The blows it did land on a standing target came from
+bodies jostling each other through the last thirty centimetres by accident — which is exactly why contact
+was 23% and why sending *more* attackers lowered it, since they crowd each other rather than close.
+
+Fixed: an attack on a body arrives at `ThreatSystem.HarmReach`, the third caller of the one definition §192
+established. This is a correctness fix and is kept as one — **but it changed nothing measurable**, and that
+has to be said plainly rather than dressed up: Still 16.9 → 16.9 s, Charging 35.6 → 34.1 s, Fleeing
+81.8 → 78.0 s. All noise.
+
+### Three knobs, together, still nothing
+
+The Chase case's comment is the standing warning here — a stop distance and a stale goal each hid the other,
+so "single changes judged one at a time found nothing for a whole session". So all three were put in at once
+and swept:
+
+```
+lead | re-aim | killed in | contact% | landed/N | rev/body      (arrival already fixed)
+0.00 |   1.00 |    77.8 s |       7% |    4/4   |      1.8
+0.20 |   1.00 |    78.0 s |       7% |    4/4   |      1.8
+0.00 |   0.25 |    78.3 s |       8% |    4/4   |      1.8
+0.20 |   0.25 |    78.3 s |       8% |    4/4   |      1.8
+0.20 |   0.10 |    78.4 s |       8% |    4/4   |      1.8
+```
+
+**Flat to within six tenths of a second across the grid.** Aim, cadence and arrival distance are not what
+costs an ordered assault sixty seconds against a fleeing target.
+
+### What the numbers do say, and what I am not going to guess again
+
+Contact is 7-8% of a 78-second fight. Four militia deal 12 a second against 45 health, so the kill needs
+3.75 s of contact and gets it — 7% of 78 s is 5.5 s. **The arithmetic closes.** So the body is reaching
+contact and losing it almost immediately, over and over, rather than never arriving.
+
+That is three hypotheses on one mechanism — aim, cadence, arrival — every one a correct reading of real code
+that predicted the symptom, and every one flat. Together with §192's two, it is five in this arc. The
+pattern is clear enough to name as a rule: **when three readings of the code in a row fail to move a number,
+stop reading the code.** The next step is to instrument one attacker tick by tick through a fleeing
+assault — what it is doing, what its destination is, whether it is dwelling, halted, repathing or walking —
+and let the run say which. Every fault in this session that was actually found was found that way, and every
+one I guessed at was wrong.
+
+**So the chair's answer stands as the design and is not yet built.** Making an ordered attack enter
+`AgentLocomotionState.Chase` is still the right shape — the defence's pursuit works and a player's does not,
+and one mechanism serving both is worth more than three patches to the one that does not. But it wants
+building on evidence about where the 92% of non-contact time actually goes, not on a fourth guess, and it
+carries a known hazard worth writing down first: an ordered attack that chases through `QueueChase` takes an
+`InterruptKind.Order`, and §187 established that such an interrupt never expires off a `Guard` assignment.
+Whoever takes the body has to hand it back when the quarry dies, or the zombie of §186 returns wearing a
+sword.
+
+### And the part that is deliberately not code yet
+
+The chair's fuller framing, recorded because it changes what "fix the nearby-enemy behaviour" even means:
+
+> within line of sight, unless and under a set of rules that vary by unit type and current stance, we decide
+> what "ignoring" an enemy "in front of you" even means, and after a target is eliminated, what else is
+> targeted, if anything, when
+
+Three things there, none of which the codebase can express yet:
+
+- **Line of sight** exists as `CanSee` for the fog and for faction knowledge (§131), and nothing in combat
+  consults it.
+- **Unit type** exists (`UnitType`), and no combat rule varies by it — militia and villagers differ only in
+  strength, health and carry capacity.
+- **Stance does not exist at all**, and that is a documented decision: §143 wrote "no stance enum, no new
+  interrupt, no new command", expressing a stance as *which anchor and radius the plan picks*. If rules are
+  to vary by stance, that decision is the one being revisited, and it should be revisited on purpose rather
+  than by accident.
+
+**Reacquisition** — what a body attacks once its target is dead — is currently `Assignment.None` and stand
+where the fight ended. That is §193's "an attack is over when what it was aimed at cannot be found", which
+was deliberate as the atomic verb, and the question is what composes on top of it.
+
+None of that is a bug to be fixed. It is vocabulary the game does not have, and it is the right thing to
+settle before the nearby-enemy measurement means anything.

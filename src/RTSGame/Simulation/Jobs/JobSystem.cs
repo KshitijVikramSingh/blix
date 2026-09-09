@@ -143,6 +143,29 @@ internal static class JobSystem
 
     private static bool IsAtPlace(in AgentState agent)
     {
+        // <b>An attack arrives at weapon reach, not at "a few radii".</b> §194. The general test is
+        // max(radius x 3, extent + radius + slack), which for a body target is 1.110 m — and harm reaches
+        // 0.814 m, so an ordered attacker walked to thirty centimetres outside its own weapon, decided it
+        // had arrived, and stood there. It could never land a blow by design; the blows it did land on a
+        // standing target came from bodies jostling each other through the last thirty centimetres by
+        // accident, which is exactly why contact was 23% and why sending MORE attackers lowered it.
+        //
+        // It is also why §193's sweep of aim and re-aim cadence was flat across the whole grid: the body
+        // was not failing to arrive, it was arriving somewhere too far away, and no amount of better aim
+        // fixes a destination that is out of range.
+        //
+        // Reads ThreatSystem.HarmReach so there is one definition of touching — §192 split that once
+        // already, between the harm rule and an instrument, and this is the third caller.
+        if (agent.Jobs.Assignment.Kind == AssignmentKind.Attack && agent.Jobs.PlaceExtent <= 0f)
+        {
+            var quarry = agent.Jobs.Assignment.Quarry;
+            if (quarry.IsValid)
+            {
+                var reach = Threat.ThreatSystem.HarmReach(agent.Radius, agent.Radius);
+                return Vector2.DistanceSquared(agent.Position, agent.Jobs.Place) <= Square(reach);
+            }
+        }
+
         if (agent.Jobs.PlaceExtent <= 0f)
         {
             // A bare point on the ground. A few of the body's own radii, as it always was.
