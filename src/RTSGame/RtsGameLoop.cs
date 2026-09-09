@@ -5304,12 +5304,30 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         if (bodyLog)
         {
             ReportActionChanges();
+            // <b>The same census the gate's hands-off leg runs, pointed at the game as played.</b> §183.
+            // The gate's version says nothing is stranded there — 171 spells, worst 5.4 s, every spell over
+            // two seconds followed by work, zero still stalled at the end — while red cylinders were
+            // reported from the chair four times. So either the fault is not a stall or the gate's village
+            // is not the game's, and there is no way to tell those apart without the same numbers from the
+            // run where the fault appears.
+            //
+            // Sampled per frame rather than per tick, which caps the resolution of a spell's length at one
+            // frame. Against a threshold of a third of a second that is ten-odd samples per spell, and the
+            // shortest thing this needs to resolve is a spell, not a tick.
+            stalls.Sample(simulation, frameSeconds);
             bodyLogDue -= frameSeconds;
             if (bodyLogDue <= 0f)
             {
                 bodyLogDue = 1f;
                 ReportStuckBodies();
                 ReportSelectedBodies();
+            }
+
+            stallCensusDue -= frameSeconds;
+            if (stallCensusDue <= 0f)
+            {
+                stallCensusDue = StallCensusInterval;
+                Console.WriteLine(stalls.Describe("as played, so far"));
             }
         }
 
@@ -7277,6 +7295,20 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
 
     /// <summary>The action each body was last reported at, so a change can be logged as it happens.</summary>
     private BodyAction[] loggedAction = new BodyAction[256];
+
+    /// <summary>
+    /// How long a spell of not getting anywhere lasts, over the run as played. §183.
+    /// </summary>
+    /// <remarks>
+    /// Not fingerprinted, not saved, never read by a rule — an instrument, like the flinch timer beside it.
+    /// It exists because the stall population the chair reported has only ever been watched: the per-frame
+    /// stuck lines say which bodies are red right now, and no accumulated figure said whether any of them
+    /// ever got where it was going.
+    /// </remarks>
+    private readonly StallCensus stalls = new();
+
+    private const float StallCensusInterval = 30f;
+    private float stallCensusDue = StallCensusInterval;
 
     /// <summary>
     /// Logs the instant a selected body's action changes.

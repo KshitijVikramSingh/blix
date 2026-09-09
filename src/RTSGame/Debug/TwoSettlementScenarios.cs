@@ -153,6 +153,11 @@ internal static class TwoSettlementScenarios
         var openingGrain = new[] { StockOf(world, 0, Resource.Grain), StockOf(world, 1, Resource.Grain) };
         var faults = new List<string>();
         var carried = new Dictionary<int, (Resource, int)>();
+        // <b>The run whose situation matches what was reported from the chair, finally measured.</b> §183.
+        // Red cylinders were reported four times and fixed at three times, and this leg — two bot-driven
+        // settlements with nobody steering — printed no stall figure at all while the pen self-tests carried
+        // a full census. Watching is not measuring.
+        var stalls = new StallCensus();
         var totalTicks = (int)(years * WorldCalendar.YearSeconds * TicksPerSecond);
         var reported = world.Date.Season;
         Console.WriteLine(
@@ -166,6 +171,7 @@ internal static class TwoSettlementScenarios
             driver?.Update(world);
             other?.Update(world);
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            stalls.Sample(world, (float)SimulationWorld.FixedDeltaSeconds);
 
             // Conservation across BOTH, every tick, exactly as the one-village year leg does it. A unit of
             // grain moving from one faction's books to the other's would net to zero here and has to be
@@ -292,6 +298,9 @@ internal static class TwoSettlementScenarios
             // is untestable, and this scenario is where "why" gets asked.
             Console.WriteLine(ran.Describe());
         }
+
+        stalls.Close(world);
+        Console.WriteLine(stalls.Describe($"{years:0.##} year(s), nobody steering"));
 
         foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");
         if (faults.Count == 0)

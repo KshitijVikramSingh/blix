@@ -198,9 +198,14 @@ internal static class SettlementScenarios
         var longestRaider = 0f;
         var raiderAge = new Dictionary<int, float>();
         var reported = 0;
+        // <b>The highest-pressure crowd the gate has, so the stall census gets a second population.</b>
+        // §183. A settlement under raid puts militia committing, villagers fleeing and raiders converging
+        // through the same gaps, which is nearer the reported conditions than a placid year is.
+        var stalls = new StallCensus();
         for (var tick = 1; tick <= totalTicks; tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+            stalls.Sample(world, (float)SimulationWorld.FixedDeltaSeconds);
             raids.Update(world, (float)SimulationWorld.FixedDeltaSeconds);
             ledger.Observe(world, (float)SimulationWorld.FixedDeltaSeconds);
 
@@ -324,6 +329,9 @@ internal static class SettlementScenarios
         // raiders stand about in it reads as a healthy population. That is how this check missed a wipe.
         var left = CountSettlers(world);
         if (left == 0) faults.Add($"the settlement was wiped out — {settlers} people, none left");
+
+        stalls.Close(world);
+        Console.WriteLine(stalls.Describe($"{minutes:F0} min under raid"));
 
         foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");
         return faults.Count > 0 ? 1 : 0;

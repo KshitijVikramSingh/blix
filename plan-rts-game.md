@@ -14323,3 +14323,72 @@ Before any stall can be ratcheted it has to be *defined once*:
 The ratchet has to come last. Recording a figure measured against thirteen different definitions of the
 thing being recorded is how §178 spent three attempts on one bug — and recording it against a threshold
 picked by a self-test would be the same mistake with better spelling.
+
+## 183. The stall measured at last, and duration turns out to anti-predict failure
+
+Phase C's first step, and it does not end where §180 expected. `StallCensus` is one instrument, shared, that
+follows every spell of a body not getting anywhere and asks the only question that matters about it:
+**did that body go on to do any work.** Recovery is read from `AgentJobs.LegsCompleted`, which rises when a
+body reaches a place and finishes what it went there for — a spell merely *ending* only says the body
+started moving again, which the old red-cylinder reporting scored as a success.
+
+It reads `StallReporting.StalledSeconds` and not the simulation's own figure, per §182.
+
+### The instrument was wrong twice, and both times before its numbers were believed
+
+1. **A grace window shorter than a work leg.** The first cut gave each spell twenty seconds to be followed by
+   a completed leg. `EconomySystem.WorkShiftSeconds` is **forty-five**. So every body that stalled at the
+   start of a shift scored unproductive by construction, and the first reading said 63 of 171 spells were
+   productive with `Work x41, Build x64` going nowhere. With the deadline removed — a spell stays open until
+   the body finishes a leg or the run stops — the same run reads **148 of 171**. The first numbers were
+   measuring the window.
+2. **An answer of exactly zero.** The raid leg came back `0 of 600 spells followed by work`, which is either
+   a catastrophe or a broken instrument. Neither: the census now reports legs completed by anybody, and the
+   raid leg manages **7 in six minutes against the placid leg's 212 in nine** — twenty times fewer per
+   second. There is almost no work in that scenario to be followed by, so the census cannot say anything
+   about stalls there. *A suspicious number is a question about the instrument, not a finding.*
+
+Fifth and sixth instruments in this arc to be wrong. The difference from the first four is that these were
+caught before a conclusion was drawn off them — the grace window by checking it against a constant it had
+to clear, the zero by refusing to believe a round number.
+
+### What the hands-off village actually does
+
+```
+171 spell(s) over 540s across 28 body(s); 148 were followed by work, 23 were not
+lengths (w=went on to work, n=did not): <=0.5s 85w/18n  <=1s 26w/2n  <=2s 26w/3n  <=4s 8w/0n  <=8s 3w/0n
+longest spell 5.4s, longest still followed by work 5.4s, still stalled at the end 0
+```
+
+**Duration does not predict failure. It anti-predicts it.** Every spell longer than two seconds was followed
+by work — eleven of them, none unproductive. The unproductive spells are all under 1.6 s. The longest spell
+in the run, 5.4 s, went on to work. And nothing was still stalled when the clock stopped.
+
+### So the ratchet is cancelled too, and so is the stopwatch
+
+Three things follow, and they undo most of §180's phase C:
+
+- **There is no stranded line, and `StrandedSeconds` has no referent.** §182 already had to admit 1.25 s was
+  not it; the distribution says no value is. A body being stuck for N seconds is not a fault at any N here —
+  past two seconds it is *more* likely to go on and work, not less.
+- **§180's throw cannot be triggered by a stopwatch.** "Blocked should not happen, crash when it does" was
+  the right instinct and the trigger cannot be elapsed stall time. Whatever `Blocked` is, it is not this.
+- **The ratchet would ratchet a healthy number.** Zero stranded, worst case 5.4 s with recovery. Recording
+  that and forbidding it to rise would guard a run that has no fault in it, and would not have caught a
+  single one of the four red-cylinder reports.
+
+Which lands on the thing that was true in §119 and is still true: **the gate's village is not the game's.**
+The fault has only ever been seen in the run nobody has ever measured. So the census now runs there too —
+in the live loop under `--bodylog`, printing every thirty seconds, sampled per frame (which caps a spell's
+length at one frame's resolution, ten-odd samples per spell against a third-of-a-second threshold).
+
+**Phase C's real first step was never the ratchet; it was reproduction.** Nothing can be ratcheted or thrown
+until the same numbers come back from a run where the fault appears.
+
+### Flagged in passing, not chased
+
+The raid leg completes **7 legs in six minutes**. It asserts that the settlement is not wiped out and that
+the books balance, and it has never asserted that the settlement keeps *functioning* — so an economy frozen
+solid by raid pressure passes it. Some of that is by design (people shelter, militia commit) and some of
+the figure is dead bodies taking their counters with them, but twenty times fewer legs per second than a
+placid year is worth somebody looking at on purpose.

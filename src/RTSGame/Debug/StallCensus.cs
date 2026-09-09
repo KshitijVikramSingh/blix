@@ -1,0 +1,321 @@
+using System.Numerics;
+using RTSGame.Simulation;
+using RTSGame.Simulation.Agents;
+using RTSGame.Simulation.Jobs;
+
+namespace RTSGame.Debug;
+
+/// <summary>
+/// Counts, over a whole run, how long bodies spend unable to move — and whether they recover.
+/// </summary>
+/// <remarks>
+/// <b>Built because the population under discussion had never been measured, only watched.</b> §183. Red
+/// cylinders were reported from the chair four times across §170–182 and the fix was attempted three times,
+/// twice from the wrong end. The pen self-tests carry a rich census of exactly this — <c>ever-red</c>,
+/// <c>longest-red</c>, <c>peak-internal-stuck</c>, a per-body line naming position, speed, waypoints and
+/// repaths — and the hands-off two-village leg, which is the run whose situation matches what was actually
+/// reported, prints none of it. Grepping that leg's output for stall figures returns zero lines.
+/// <para>
+/// <b>The question it exists to answer.</b> §182 named two thresholds and then had to admit the longer one
+/// is not a stranded line: the pen legs report <c>arrived=30/30</c> with <c>longest-red=4.37s</c>, so bodies
+/// stall for three and a half times 1.25 s and still get where they were going. Before anything can be
+/// ratcheted, and long before §180's throw, somebody has to find where — or whether — the line between
+/// <em>recovers</em> and <em>never arrives</em> actually falls. That is a distribution, not a constant.
+/// </para>
+/// <para>
+/// <b>Recovery is measured by work done, not by the stall ending.</b> A stall ending only says the body
+/// started moving; it does not say it got anywhere. <see cref="AgentJobs.LegsCompleted"/> does: it rises
+/// when a body reaches a place and finishes what it went there for. So each episode is followed for a grace
+/// window afterwards and asked whether that counter moved. An episode that ends and is followed by a
+/// completed leg was traffic. One that ends and is followed by nothing, repeatedly, is a body going nowhere
+/// however often it twitches — which is a state the old "did it stop being red" test would have scored as a
+/// success.
+/// </para>
+/// <para>
+/// It reads the world and never writes it, and it uses <see cref="StallReporting.StalledSeconds"/> rather
+/// than the simulation's own figure, deliberately: an instrument that reads its threshold from the thing it
+/// measures cannot be used to compare two versions of that thing. §182.
+/// </para>
+/// </remarks>
+internal sealed class StallCensus
+{
+    /// <summary>One continuous spell of a body not getting anywhere.</summary>
+    /// <param name="Body">Which body, so a bad one can be followed into the other logs.</param>
+    /// <param name="Seconds">How long the spell lasted.</param>
+    /// <param name="PeakStuckSeconds">
+    /// The highest stall time reached. Larger than <paramref name="Seconds"/> is normal and not a bug: stall
+    /// time decays at twice real time when a body moves, so a spell can end with time still on the clock.
+    /// </param>
+    /// <param name="ContactAtPeak">
+    /// Whether anything was touching the body at its worst moment. <b>The distinction that decides the
+    /// fix</b> and the one I kept conflating: contact means bodies cannot get past each other and wants a
+    /// separation fix, no contact means the body cannot reach where it is going and wants a routing fix.
+    /// </param>
+    /// <param name="Assignment">What it had been told to do.</param>
+    /// <param name="WentOnToWork">
+    /// Whether it completed a leg within the grace window after the spell ended — the difference between a
+    /// body held up and a body going nowhere.
+    /// </param>
+    public readonly record struct Episode(
+        int Body,
+        float Seconds,
+        float PeakStuckSeconds,
+        bool ContactAtPeak,
+        AssignmentKind Assignment,
+        bool WentOnToWork);
+
+    /// <summary>
+    /// How near the end of a run a spell has to be before "it never worked again" means nothing.
+    /// </summary>
+    /// <remarks>
+    /// <b>There is no grace window in the verdict, and that is the second thing this instrument got wrong.</b>
+    /// The first cut gave each spell twenty seconds to be followed by a completed leg. But
+    /// <c>EconomySystem.WorkShiftSeconds</c> is <b>forty-five</b> — a single reaping shift is more than twice
+    /// the window — so every body that stalled at the start of a shift scored unproductive by construction.
+    /// The instrument reported <c>Work x41</c> and <c>Build x64</c> unproductive, and those numbers were
+    /// measuring the window rather than the settlement. Fifth instrument in this arc to be wrong; the first
+    /// one caught before its number was believed.
+    /// <para>
+    /// So productivity is asked without a deadline: did this body complete a leg at <em>any</em> point after
+    /// the spell, before the run ended. The only residue is a spell so late in the run that nothing had time
+    /// to follow it, and this figure exists solely to report how many of those there were rather than to
+    /// decide anything. Set past the longest leg plus a walk across a village.
+    /// </para>
+    /// </remarks>
+    public const float TailSeconds = 120f;
+
+    private readonly List<Episode> episodes = new();
+    private readonly HashSet<int> everStalled = new();
+
+    private float[] startedAt = Array.Empty<float>();
+    private float[] peak = Array.Empty<float>();
+    private bool[] contactAtPeak = Array.Empty<bool>();
+    private AssignmentKind[] doing = Array.Empty<AssignmentKind>();
+
+    // Spells whose grace window has not run out yet, so productivity is still undecided.
+    private readonly List<int> pendingBody = new();
+    private readonly List<Episode> pendingEpisode = new();
+    private readonly List<float> pendingEndedAt = new();
+    private readonly List<int> pendingLegs = new();
+
+    private float elapsedSeconds;
+
+    /// <summary>Bodies that were stalled at least once.</summary>
+    public int BodiesEverStalled => everStalled.Count;
+
+    /// <summary>Every completed spell, productivity resolved.</summary>
+    public IReadOnlyList<Episode> Episodes => episodes;
+
+    /// <summary>The worst stall time any body reached.</summary>
+    public float PeakStuckSeconds { get; private set; }
+
+    /// <summary>Bodies still stalled when the run ended, which is the only unambiguous stranding.</summary>
+    public int StalledAtTheEnd { get; private set; }
+
+    /// <summary>Unproductive spells that ended too near the end of the run to be judged.</summary>
+    public int UnjudgedInTheTail { get; private set; }
+
+    /// <summary>
+    /// Legs completed by everybody, over the run — so "nothing was followed by work" can be read.
+    /// </summary>
+    /// <remarks>
+    /// <b>An answer of exactly zero is a question about the instrument, not a finding.</b> The raid leg came
+    /// back with 0 of 600 spells followed by work, which either means every stalled body in a raid is going
+    /// nowhere or means nothing in that scenario completes legs at all. Those need telling apart before
+    /// either is believed, and the total is what tells them apart: work happening elsewhere while no stalled
+    /// body joins in is a real finding, and no work anywhere is a fact about the scenario.
+    /// </remarks>
+    public int LegsCompletedByAnybody { get; private set; }
+
+    /// <summary>Call once per tick, after the world has stepped.</summary>
+    public void Sample(SimulationWorld world, float deltaSeconds)
+    {
+        elapsedSeconds += deltaSeconds;
+        Grow(world.Agents.Count);
+
+        foreach (ref readonly var agent in world.Agents.All)
+        {
+            var index = agent.Id.Value;
+            if (index < 0 || index >= startedAt.Length) continue;
+            if (!agent.IsAlive)
+            {
+                startedAt[index] = 0f;
+                continue;
+            }
+
+            PeakStuckSeconds = MathF.Max(PeakStuckSeconds, agent.StuckSeconds);
+            var stalled = agent.StuckSeconds > StallReporting.StalledSeconds;
+
+            if (stalled)
+            {
+                if (startedAt[index] <= 0f)
+                {
+                    startedAt[index] = elapsedSeconds;
+                    peak[index] = 0f;
+                }
+
+                everStalled.Add(index);
+                if (agent.StuckSeconds >= peak[index])
+                {
+                    peak[index] = agent.StuckSeconds;
+                    contactAtPeak[index] = agent.HadAgentContactThisTick;
+                    doing[index] = agent.Jobs.Assignment.Kind;
+                }
+
+                continue;
+            }
+
+            if (startedAt[index] <= 0f) continue;
+
+            // The spell is over. Productivity is not yet known, so it waits out its grace window.
+            pendingBody.Add(index);
+            pendingEpisode.Add(new Episode(
+                index,
+                elapsedSeconds - startedAt[index],
+                peak[index],
+                contactAtPeak[index],
+                doing[index],
+                WentOnToWork: false));
+            pendingEndedAt.Add(elapsedSeconds);
+            pendingLegs.Add(agent.Jobs.LegsCompleted);
+            startedAt[index] = 0f;
+        }
+
+        ResolvePending(world, force: false);
+    }
+
+    /// <summary>Call once when the run ends, to close out whatever was still open.</summary>
+    public void Close(SimulationWorld world)
+    {
+        Grow(world.Agents.Count);
+
+        // <b>A body still stalled when the clock stops is the only stranding this can be sure of.</b>
+        // Everything else recovered by definition, because its spell ended.
+        foreach (ref readonly var agent in world.Agents.All)
+        {
+            var index = agent.Id.Value;
+            if (!agent.IsAlive || index < 0 || index >= startedAt.Length) continue;
+            if (startedAt[index] <= 0f) continue;
+
+            StalledAtTheEnd++;
+            episodes.Add(new Episode(
+                index,
+                elapsedSeconds - startedAt[index],
+                peak[index],
+                contactAtPeak[index],
+                doing[index],
+                WentOnToWork: false));
+            startedAt[index] = 0f;
+        }
+
+        ResolvePending(world, force: true);
+
+        var legs = 0;
+        foreach (ref readonly var agent in world.Agents.All)
+        {
+            if (agent.IsAlive) legs += agent.Jobs.LegsCompleted;
+        }
+
+        LegsCompletedByAnybody = legs;
+    }
+
+    private void ResolvePending(SimulationWorld world, bool force)
+    {
+        for (var i = pendingBody.Count - 1; i >= 0; i--)
+        {
+            var index = pendingBody[i];
+            var id = new AgentId(index);
+            var gone = !world.Agents.Contains(id) || !world.Agents.Get(id).IsAlive;
+            var worked = !gone && world.Agents.Get(id).Jobs.LegsCompleted > pendingLegs[i];
+            // No deadline: a spell stays open until the body finishes a leg or the run stops. Waiting is
+            // free, and a window shorter than a work shift is what made the first reading meaningless.
+            if (!force && !worked) continue;
+
+            if (!worked && elapsedSeconds - pendingEndedAt[i] < TailSeconds) UnjudgedInTheTail++;
+            episodes.Add(pendingEpisode[i] with { WentOnToWork = worked });
+            pendingBody.RemoveAt(i);
+            pendingEpisode.RemoveAt(i);
+            pendingEndedAt.RemoveAt(i);
+            pendingLegs.RemoveAt(i);
+        }
+    }
+
+    private void Grow(int count)
+    {
+        if (startedAt.Length >= count) return;
+        var size = Math.Max(count, Math.Max(64, startedAt.Length * 2));
+        Array.Resize(ref startedAt, size);
+        Array.Resize(ref peak, size);
+        Array.Resize(ref contactAtPeak, size);
+        Array.Resize(ref doing, size);
+    }
+
+    /// <summary>
+    /// The distribution, which is the whole point: one number could not have answered the question.
+    /// </summary>
+    /// <remarks>
+    /// Printed as a histogram of spell lengths split by whether the body went on to do any work, because the
+    /// thing being looked for is a <em>gap</em> — a length past which spells stop being followed by work
+    /// would be the stranded line §182 could not find. A continuous distribution with no gap is also an
+    /// answer, and a more interesting one: it would mean stranding is not a distinct state and §180's throw
+    /// needs a different trigger than a stopwatch.
+    /// </remarks>
+    public string Describe(string label)
+    {
+        if (episodes.Count == 0)
+        {
+            return $"  [stalls] {label}: nobody stalled past " +
+                   $"{StallReporting.StalledSeconds:F2}s in {elapsedSeconds:F0}s";
+        }
+
+        var bands = new[] { 0.5f, 1f, 2f, 4f, 8f, 16f, 32f, float.PositiveInfinity };
+        var productive = new int[bands.Length];
+        var barren = new int[bands.Length];
+        foreach (var episode in episodes)
+        {
+            var band = 0;
+            while (band < bands.Length - 1 && episode.Seconds > bands[band]) band++;
+            if (episode.WentOnToWork) productive[band]++;
+            else barren[band]++;
+        }
+
+        var rows = new List<string>();
+        for (var band = 0; band < bands.Length; band++)
+        {
+            if (productive[band] == 0 && barren[band] == 0) continue;
+            var upper = float.IsPositiveInfinity(bands[band]) ? "+" : $"{bands[band]:0.#}s";
+            rows.Add($"<={upper} {productive[band]}w/{barren[band]}n");
+        }
+
+        var touching = episodes.Count(e => e.ContactAtPeak);
+        var worked = episodes.Count(e => e.WentOnToWork);
+        var longest = episodes.Max(e => e.Seconds);
+        var longestProductive = episodes.Where(e => e.WentOnToWork).Select(e => e.Seconds)
+            .DefaultIfEmpty(0f).Max();
+
+        // <b>A body with nothing to do cannot finish a leg, so it would score as unproductive forever.</b>
+        // First reading of this instrument said 108 of 171 spells were followed by no work, which looks
+        // alarming until you ask what those bodies had been told to do: an idle villager twitching for a
+        // third of a second has no leg to complete and is not evidence of anything. So the unproductive
+        // spells are split by assignment, and only the ones under orders are a finding.
+        var idle = episodes.Count(e => !e.WentOnToWork && e.Assignment == AssignmentKind.None);
+        var barrenUnderOrders = episodes
+            .Where(e => !e.WentOnToWork && e.Assignment != AssignmentKind.None)
+            .GroupBy(e => e.Assignment)
+            .OrderByDescending(group => group.Count())
+            .Select(group => $"{group.Key} x{group.Count()} (worst {group.Max(e => e.Seconds):F1}s)")
+            .ToArray();
+
+        return $"  [stalls] {label}: {episodes.Count} spell(s) over {elapsedSeconds:F0}s across " +
+               $"{BodiesEverStalled} body(s); {worked} were followed by work, {episodes.Count - worked} " +
+               $"were not — of which {idle} had no assignment to work at; " +
+               $"{touching} had something touching them at their worst" +
+               $"\n    lengths (w=went on to work, n=did not): {string.Join("  ", rows)}" +
+               $"\n    unproductive while under orders: " +
+               (barrenUnderOrders.Length == 0 ? "none" : string.Join(", ", barrenUnderOrders)) +
+               $"\n    longest spell {longest:F1}s, longest still followed by work {longestProductive:F1}s, " +
+               $"peak stall clock {PeakStuckSeconds:F1}s, still stalled at the end {StalledAtTheEnd}, " +
+               $"unjudged in the last {TailSeconds:F0}s {UnjudgedInTheTail}, " +
+               $"legs completed by anybody {LegsCompletedByAnybody}";
+    }
+}
