@@ -14127,3 +14127,44 @@ Comparable to the cohorts arc, and survivable only because the gate and the self
    cargo. Either the phase carries which work it is, or the pose keeps reading the assignment.
 3. **How much does the go-kart feel matter?** Measured, it cost double the stall rate. Under the phase
    design it is free — which is the argument for doing the phase work first rather than paying twice.
+
+## 180. The decisions, and the order they have to happen in
+
+The three questions of §179, answered from the chair:
+
+1. **`Blocked` is not a state, it is a bug.** "Blocked should not happen, might as well crash and throw when
+   that happens so we can debug." So the phase is `Travelling | Arrived | Working | Idle` and a body that
+   cannot progress is an assertion failure, not a colour.
+2. **Working is per activity.** The phase carries which work it is.
+3. **Feel is later.** The go-kart work stays reverted until the structure can carry it for free.
+
+### Why the throw cannot be unconditional yet, and what to do instead
+
+A body that cannot progress happens sixteen per cent of the time as measured in §178. Throwing on it today
+makes the game unplayable on boot, and the thing has to run to be debugged. This codebase has already solved
+that shape once: §-the terrain criteria carry `KnownShortfalls`, a count that **may fall and may not rise**.
+
+So the blocked body gets the same ratchet. The gate and the self-tests fail on a blocked body beyond the
+known count; the live game logs it loudly with the diagnostics §178 added; the count only ever comes down;
+and when it reaches zero the throw becomes unconditional and the ratchet is deleted. That delivers "crash so
+we can debug" as a destination rather than as a wall.
+
+### Per-activity revisits a decision that was deliberately made
+
+`ActivityKind` is documented as "One kind, on purpose" — an activity is *be at this place for this long*, so
+loading, harvesting and repairing are one shape with a rate attached. That was and remains right **for the
+jobs layer**. What it left unserved is the screen: the pose has been inferring which work is happening from
+`Assignment.Cargo`, and that inference caused both reported animation faults — a kneeling repair standing in
+for felling a tree, and idle militia reaping because `default(Resource)` is grain.
+
+So the activity carries its kind now. The jobs layer keeps treating them identically — one shape, one rate —
+and nothing has to infer what a body is doing from what its assignment happens to be carrying.
+
+### The order
+
+- **A. Activity carries its kind.** `ActivityKind` gains the work kinds; the pose reads the activity instead
+  of guessing from cargo. Kills the inference that caused two bugs. Small, and independently useful.
+- **B. One body phase**, computed once a tick and fingerprinted, subsuming the ten predicates of §179.
+- **C. The blocked ratchet**, and then driving it to zero — which is where the two remaining stall
+  populations get fixed, separated by whether anything is touching the body.
+- **D. Feel**, once `Blocked` cannot happen and priority can be read off the phase for free.
