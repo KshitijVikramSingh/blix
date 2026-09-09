@@ -910,8 +910,41 @@ internal sealed class EconomySystem
     /// stock has become the building and is never refunded.
     /// </para>
     /// </remarks>
+    /// <summary>Work offered to each site by a builder's stroke this tick. Scratch, cleared per tick.</summary>
+    private readonly Dictionary<int, float> struck = new();
+
     private void Raise(NodeStore nodes, AgentStore agents, float deltaSeconds)
     {
+        // <b>The hammer-blow, and the third time this shape has turned up.</b> §208. Construction advanced
+        // by `site.Hands * deltaSeconds` — driven by the COUNT of hands, so no individual builder appeared
+        // in it at all. The trunk at least had bodies calling in; a wall had only a headcount, which is one
+        // step further from an act with an owner.
+        //
+        // So the builders offer their work first, a stroke at a time, and the node pass below spends what
+        // was offered instead of multiplying a headcount by a tick. Every threshold, every material
+        // conversion and every shift-ending rule is untouched — the only change is where the work comes
+        // from. In expectation `Hands x deltaSeconds` is the sum of the strokes, which is why the year legs
+        // do not move; what changes is that a blow now does something.
+        struck.Clear();
+        var raising = agents.MutableSpan();
+        for (var i = 0; i < raising.Length; i++)
+        {
+            ref var hand = ref raising[i];
+            if (!hand.IsAlive || hand.Sheltered) continue;
+            if (hand.Jobs.Assignment.Kind is not (AssignmentKind.Build or AssignmentKind.Train)) continue;
+            if (hand.Jobs.IsInterrupted) continue;
+            if (!JobSystem.IsWorking(in hand)) continue;
+
+            var site = hand.Jobs.Project;
+            if (!nodes.Contains(site)) continue;
+            if (!IsStandingAt(in nodes.Get(site), in hand)) continue;
+
+            hand.ActCharge += deltaSeconds;
+            if (hand.ActCharge < StrokeSeconds) continue;
+            hand.ActCharge -= StrokeSeconds;
+            struck[site.Value] = struck.GetValueOrDefault(site.Value) + StrokeSeconds;
+        }
+
         var consumed = Consumed;
         foreach (var id in nodes.SettlementNodes)
         {
@@ -934,7 +967,7 @@ internal sealed class EconomySystem
 
             var attempted = MathF.Min(
                 labour,
-                StructuralProjects.WorkFor(in site) + site.Hands * deltaSeconds);
+                StructuralProjects.WorkFor(in site) + struck.GetValueOrDefault(site.Id.Value));
             var advanced = MathF.Min(attempted, materialLimit);
 
             // Cross whole-unit thresholds as the work crosses them. At completion take the exact recipe,

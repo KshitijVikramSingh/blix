@@ -15900,3 +15900,47 @@ With that, every act a body performs has a moment it owns, and §201's fourth pr
 Building is the one whose moment is still nominal: a hammer-blow drives the pose, but construction consumes
 material through `BuilderHandover` and the structural project rather than through a stroke, so the blow does
 not yet *do* anything. It is the same shape as the trunk and the field a third time, and it is the next one.
+
+## 208. The hammer-blow, and the same shape a fourth time
+
+Building's moment was the one still nominal after §207: the pose was driven by a stroke, and the stroke did
+nothing, because construction advanced by **`site.Hands * deltaSeconds`** — a *headcount* times a tick. The
+trunk at least had bodies calling in and the field had hands on it; a wall had only a number, which is one
+step further from an act with an owner than either.
+
+So the builders offer their work first, a stroke at a time, into a per-site scratch total; the raising pass
+then spends what was offered instead of multiplying a headcount by a tick. **Every threshold, every material
+conversion and every shift-ending rule is untouched** — the only change is where the work comes from. In
+expectation `Hands × deltaSeconds` *is* the sum of the strokes, which is why nothing moves:
+
+```
+nine builders over 2592 tick(s): working 83%, carrying 8%, walking empty 9%; build work +600
+a year of settlement:            270 grain against a nominal 270, 47 wood
+a year on generated terrain:     270 grain against a nominal 270, 45 wood
+```
+
+`build work +600` is the same figure the pass produced before. **Four economy changes now, and the nominal
+has not moved once.**
+
+### The shape, stated once for all four
+
+| | the event belonged to | which meant |
+|---|---|---|
+| harm | the overlap of two capsules, per tick | no moment to draw, and every question became a threshold |
+| felling | a counter on the **trunk** | the trunk decided when wood came off |
+| reaping | a counter on the **field** | the field decided when grain came off |
+| construction | a **headcount** times a tick | nobody decided anything; the number did |
+
+Every one of them predates the rigs, and every one made sense when a body was a cylinder with no animation
+to be out of step with. What they have in common is not proximity — that was only the first case — it is
+that **the event had no owner**, and an event with no owner cannot be drawn, cannot be attributed, and turns
+every question about it into a question about a constant.
+
+The chair's phrasing was "the contact modal", and the modal turned out to be wider than contact.
+
+### What is left of §201
+
+Two, and they are the same question from two sides: **one surround mechanism** (slots on a ring sized by the
+act's reach and packed by `ContactArc`, which would give `WorkerCapacity`'s `Tree => 3` a derivation instead
+of a table) and **crowded arrival as a slot question** rather than a 2.96 m licence to act from. Both are now
+better founded than when §201 wrote them down, because every act has a reach to size a ring by.
