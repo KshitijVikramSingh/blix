@@ -15473,3 +15473,46 @@ wind-up filling the rest of the cycle. `impactFraction` should be **measured off
 speed through the strike clip — the way `MeasureStride` and `MeasureFacing` already recover a stride and a
 forward, rather than guessed at. Guessing it is worse than leaving the clip free-running, because a
 deliberate-looking sync that is off by four tenths of a second reads as a bug rather than as noise.
+
+## 199. The strike and the blow become one event
+
+§198's other half, and it is only possible because harm now has a moment.
+
+`GaitOf` has three clocks, and which one a body is on is the whole of it: a **walk** runs on distance so feet
+do not scuff (§168), a **strike** runs on the swing, and everything else runs on wall time with a per-body
+offset so a crowd does not breathe in unison.
+
+```
+t = ((SwingCharge / SwingSeconds) + ImpactFraction) × duration   (mod duration)
+```
+
+At full charge the term reduces to `ImpactFraction × duration` — the impact frame, arriving exactly when the
+harm does. The rest of the cycle fills itself with the previous blow's follow-through and the next one's
+wind-up, which is what a sequence of blows looks like.
+
+### The impact frame is measured, not chosen
+
+**A guessed impact would have been worse than no sync at all.** The impact is not at the clip's start or its
+end, and a deliberate-looking alignment that is four tenths of a second out reads as a bug, where a
+free-running clip reads as noise. So it comes off the rig, exactly as `MeasureFacing` recovers a forward and
+`MeasureStride` a stride: **a swing's impact is its peak hand speed**, which is what makes it a swing rather
+than a gesture.
+
+```
+bodies: strike impact measured 60% through the swing clip
+```
+
+Sixty per cent of `Sword_Regular_A` — wind-up, impact, follow-through — and it will follow the asset if the
+asset changes. Zero when no strike clip or no hand bone can be found, and the caller then leaves the clip
+free-running rather than aligning it to a fiction.
+
+Sampled in raw bone space on purpose, and this is the one measurement in `SkinnedBodies` for which that is
+correct: the answer is a *fraction of the clip*, and a scale that multiplies every sample equally cannot
+change which sample is largest. Worth saying out loud, because three separate bugs in that file came from
+measuring through a different transform from the one that draws.
+
+### And `ClipFor` now reports which action it drew
+
+The phase needs to know it is a strike, and only `ClipFor` knows which action survived the hold. Deriving it
+again at the call site would be a second answer to a question already settled there — the exact fault §181
+spent a section removing from the two log reporters — so it is reported out instead.

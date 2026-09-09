@@ -136,6 +136,24 @@ internal sealed class SkinnedBodies : IDisposable
     /// </remarks>
     public float StridePerCycle { get; private init; }
 
+    /// <summary>
+    /// Where in the strike clip the blow actually lands, as a fraction of its duration.
+    /// </summary>
+    /// <remarks>
+    /// <b>Measured, because guessing it would be worse than not syncing at all.</b> §199. §198 gave harm a
+    /// moment — a swing that charges and lands — so the strike clip can finally be aligned to it. But the
+    /// impact is not at the clip's start or its end; it is somewhere in the middle, and a sync that puts the
+    /// picture four tenths of a second away from the harm reads as a bug, whereas a free-running clip reads
+    /// as noise. A deliberate-looking error is worse than an obvious one.
+    /// <para>
+    /// So it comes off the rig, the way <see cref="FacingOffsetRadians"/> and
+    /// <see cref="StridePerCycle"/> already do: the hand's speed through the swing peaks at the moment of
+    /// the blow, which is what a swing <em>is</em>. Zero when no strike clip or no hand bone can be found,
+    /// and the caller then leaves the clip free-running rather than aligning it to a fiction.
+    /// </para>
+    /// </remarks>
+    public float ImpactFraction { get; private init; }
+
     /// <summary>How many bone matrices one body owns — the stride the skinned shaders index by.</summary>
     public int BonesPerBody => skeleton.BoneCount;
 
@@ -485,12 +503,19 @@ internal sealed class SkinnedBodies : IDisposable
                 ? $"  bodies: walk stride measured {stride:F2} m per cycle at {metresTall:F2} m tall"
                 : "  bodies: no walk stride measurable; the caller's constant stands in");
 
+        var impact = MeasureImpact(model);
+        Console.WriteLine(
+            impact > 0f
+                ? $"  bodies: strike impact measured {impact * 100f:F0}% through the swing clip"
+                : "  bodies: no strike impact measurable; the strike clip runs free");
+
         return new SkinnedBodies(
             device, parts.ToArray(), palette, model.Skeleton,
             model.MeshNodeTransform, normalise, model.Animations)
         {
             FacingOffsetRadians = facing,
             StridePerCycle = stride,
+            ImpactFraction = impact,
         };
     }
 
@@ -568,6 +593,76 @@ internal sealed class SkinnedBodies : IDisposable
     }
 
     /// <summary>How far a foot swings fore-and-aft relative to the hips over one walk cycle.</summary>
+    /// <summary>
+    /// Where the blow lands in the strike clip: the moment the hand is moving fastest.
+    /// </summary>
+    /// <remarks>
+    /// A swing's impact is its peak hand speed — that is what makes it a swing rather than a gesture — so
+    /// this samples the clip, differences the hand's position, and returns the fraction at which the
+    /// difference is largest. Sampled in raw bone space on purpose: the answer is a <em>fraction of the
+    /// clip</em>, and a scale that multiplies every sample equally cannot move which sample is the largest.
+    /// That is the one measurement in this file for which the mesh-node transform genuinely does not
+    /// matter, and it is worth saying so given three separate bugs here came from measuring through the
+    /// wrong transform.
+    /// </remarks>
+    private static float MeasureImpact(GltfModel model)
+    {
+        var skeleton = model.Skeleton;
+        var hand = IndexOf(skeleton, HandRightNames);
+        if (hand < 0) hand = IndexOf(skeleton, HandLeftNames);
+        if (hand < 0) return 0f;
+
+        AnimationClip? strike = null;
+        foreach (var (action, names, _) in CharacterClips.Table)
+        {
+            if (action != BodyAction.Strike) continue;
+            foreach (var wanted in names)
+            {
+                foreach (var clip in model.Animations)
+                {
+                    var bar = clip.Name.LastIndexOf('|');
+                    var bare = bar >= 0 ? clip.Name[(bar + 1)..] : clip.Name;
+                    if (bare.Equals(wanted, StringComparison.OrdinalIgnoreCase)) strike = clip;
+                    if (strike is not null) break;
+                }
+
+                if (strike is not null) break;
+            }
+
+            if (strike is not null) break;
+        }
+
+        if (strike is null || strike.Duration <= 0.0) return 0f;
+        if (!Matrix4x4.Invert(skeleton.Bones[hand].InverseBindPose, out var handBind)) return 0f;
+
+        var rest = skeleton.CreateRestPose();
+        var pose = skeleton.CreateRestPose();
+        var palette = new BonePalette(skeleton.BoneCount);
+
+        const int Samples = 48;
+        var at = new Vector3[Samples];
+        for (var i = 0; i < Samples; i++)
+        {
+            pose.CopyFrom(rest);
+            strike.Sample(strike.Duration * i / (Samples - 1.0), pose);
+            StripRootMotion(skeleton, pose, rest);
+            skeleton.ComputeBonePalette(pose, palette);
+            at[i] = Vector3.Transform(handBind.Translation, palette.Matrices[hand]);
+        }
+
+        var fastest = 0f;
+        var where = 0;
+        for (var i = 1; i < Samples; i++)
+        {
+            var moved = Vector3.Distance(at[i], at[i - 1]);
+            if (moved <= fastest) continue;
+            fastest = moved;
+            where = i;
+        }
+
+        return fastest <= 0f ? 0f : where / (Samples - 1f);
+    }
+
     private static float MeasureStride(GltfModel model, float facingOffset, Matrix4x4 meshNode)
     {
         var skeleton = model.Skeleton;

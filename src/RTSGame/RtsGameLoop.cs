@@ -7194,9 +7194,19 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
     private static bool Interrupts(BodyAction action) =>
         action is BodyAction.Flinch or BodyAction.Fall;
 
-    private AnimationClip? ClipFor(in AgentState agent, out bool locomotion)
+    /// <summary>
+    /// The clip to draw for this body, and — via <paramref name="drawn"/> — which action it is.
+    /// </summary>
+    /// <remarks>
+    /// The action is reported out because §199 needs it: a strike's phase comes from the body's own swing
+    /// rather than from wall time, and only this method knows which action survived the hold. Deriving it
+    /// again at the call site would be a second answer to a question already settled here, which is the
+    /// fault §181 spent a section removing from the two log reporters.
+    /// </remarks>
+    private AnimationClip? ClipFor(in AgentState agent, out bool locomotion, out BodyAction drawn)
     {
         locomotion = false;
+        drawn = BodyAction.Idle;
         if (bodies is null) return null;
         var wanted = ActionFor(in agent, out locomotion);
 
@@ -7225,6 +7235,7 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             heldUntil[id] = MathF.Max(0f, heldUntil[id] - frameSeconds);
         }
 
+        drawn = wanted;
         return bodies.For(wanted);
     }
 
@@ -7541,11 +7552,36 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
     private float[] gaitPhase = new float[256];
 
     /// <summary>Advances one body's gait and returns where in its clip to sample.</summary>
-    private double GaitOf(in AgentState agent, AnimationClip clip, bool locomotion, float deltaSeconds)
+    /// <remarks>
+    /// Three clocks, and which one a body is on is the whole of this method. A walk runs on <b>distance</b>,
+    /// so feet do not scuff. A strike runs on <b>the swing</b>, so the blow and the picture are the same
+    /// event. Everything else runs on wall time with a per-body offset, so a crowd does not breathe in
+    /// unison.
+    /// </remarks>
+    private double GaitOf(
+        in AgentState agent, AnimationClip clip, bool locomotion, float deltaSeconds,
+        BodyAction action = BodyAction.Idle)
     {
         var id = agent.Id.Value;
         if (id < 0) return 0.0;
         if (id >= gaitPhase.Length) Array.Resize(ref gaitPhase, Math.Max(id + 1, gaitPhase.Length * 2));
+
+        // <b>A strike is on the swing's own clock.</b> §199. §198 gave harm a moment, so the clip can be
+        // placed rather than left to run: the phase comes from how far through its swing the body is, and
+        // the measured impact frame is subtracted so that the frame where the hand moves fastest arrives
+        // exactly when the harm does. The previous blow's follow-through and the next one's wind-up fill
+        // the rest of the cycle, which is what a sequence of blows looks like.
+        //
+        // Only when the impact was actually measurable off the rig — see SkinnedBodies.ImpactFraction. If
+        // it was not, the clip runs free, because a deliberate-looking sync that is off by four tenths of a
+        // second reads as a bug where a free-running clip reads as noise.
+        if (action == BodyAction.Strike && bodies is { ImpactFraction: > 0f } rig)
+        {
+            var period = MathF.Max(0.0001f, Simulation.Threat.ThreatSystem.SwingSeconds);
+            var through = Math.Clamp(agent.SwingCharge / period, 0f, 1f);
+            var span = MathF.Max(0.0001f, (float)clip.Duration);
+            return ((through + rig.ImpactFraction) % 1f) * span;
+        }
 
         if (locomotion)
         {
@@ -9026,7 +9062,7 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 // <b>Rigged if there is a rig, the prop if not.</b> §168. The tint rules below are unchanged:
                 // a hostile body in a hostile colour is the one thing about a person that has to read before
                 // anything else on screen, and that is true of a posed body exactly as it was of a static one.
-                var clip = ClipFor(in agent, out var locomotion);
+                var clip = ClipFor(in agent, out var locomotion, out var drawnAction);
                 var posed = false;
                 if (bodies is not null && clip is not null)
                 {
@@ -9039,7 +9075,7 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                         Matrix4x4.CreateTranslation(position.X, height, position.Y),
                         tint,
                         clip,
-                        GaitOf(in agent, clip, locomotion, frameSeconds),
+                        GaitOf(in agent, clip, locomotion, frameSeconds, drawnAction),
                         CascadeMaskAt(position),
                         out carriedAt);
                 }
