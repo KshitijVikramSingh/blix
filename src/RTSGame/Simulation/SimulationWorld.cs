@@ -2456,6 +2456,7 @@ internal sealed class SimulationWorld
             ChargeThreat);
         // The errand outlives the reason for it, so it is advanced whatever the defence decided this tick.
         AdvanceStowing();
+        DriveOrderedAttacks();
         BreakStructures(deltaSeconds);
         Timings.Record(SimulationPhase.Threat, Stopwatch.GetTimestamp() - phaseStart);
 
@@ -3993,6 +3994,80 @@ internal sealed class SimulationWorld
     /// it should.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// An ordered attack on a body chases it, rather than walking to where it was.
+    /// </summary>
+    /// <remarks>
+    /// <b>Settled by the chair, and then evidenced by §195's trace.</b> An <see cref="AssignmentKind.Attack"/>
+    /// re-aims its anchor only on <em>handover</em>, and handover requires arrival — so an attacker walked
+    /// twenty metres to where the quarry had been, arrived, dwelled, re-aimed, and set off after a target
+    /// that had moved another twenty metres. The trace shows it: <c>gap=20.84 toPlace=0.81</c>, arriving
+    /// correctly at a fifteen-second-old snapshot, over and over, for seventy-eight seconds.
+    /// <para>
+    /// The defence's own pursuit has never had this problem because it re-aims six times a second
+    /// <em>whether or not it has arrived</em>, which is the whole difference between chasing a body and
+    /// walking to a place. So this puts an ordered attack on the same mechanism instead of adding a third:
+    /// one <c>QueueChase</c>, through the same door §30's commitment uses and the same door a player's own
+    /// chase order uses.
+    /// </para>
+    /// <para>
+    /// <b>Issued once, not per tick.</b> The condition is "not already chasing this quarry", so a body
+    /// settles into the chase and the command is not re-sent — which matters because every command is an
+    /// interrupt, and re-sending would refresh the interrupt grace forever.
+    /// </para>
+    /// <para>
+    /// <b>And it hands the body back, which is the hazard §187 left behind.</b> A chase is an
+    /// <see cref="InterruptKind.Order"/>, and such an interrupt never expires off a
+    /// <see cref="AssignmentKind.Guard"/> — so an attacker whose quarry dies would sit interrupted for
+    /// good, holding an assignment it can never finish. That is §186's zombie with a sword. When the quarry
+    /// is gone the interrupt is released here, and the jobs layer's own <c>AttackerHandover</c> then ends
+    /// the assignment on its next pass, exactly as it does for a structure.
+    /// </para>
+    /// <para>
+    /// Structures are untouched: an attack on a wall <em>is</em> a place to stand, and the whole fault here
+    /// was treating a body as one.
+    /// </para>
+    /// </remarks>
+    private void DriveOrderedAttacks()
+    {
+        var bodies = Agents.MutableSpan();
+        for (var i = 0; i < bodies.Length; i++)
+        {
+            ref var body = ref bodies[i];
+            if (!body.IsAlive || body.Sheltered) continue;
+            if (body.Jobs.Assignment.Kind != AssignmentKind.Attack) continue;
+
+            // A structure target keeps the jobs layer's own walk: a wall does not move.
+            var quarry = body.Jobs.Assignment.Quarry;
+            if (Nodes.Contains(body.Jobs.Assignment.Source)) continue;
+
+            if (!QuarryStands(in body.Jobs.Assignment))
+            {
+                // <b>Ended here, not handed back and left to the jobs layer.</b> The first cut only
+                // released the interrupt and trusted <c>AttackerHandover</c> to finish the assignment on
+                // arrival — and the gate caught it within one run: "let go when it died = False". Handover
+                // fires on leg COMPLETION, and a chase has by then carried the body tens of metres from the
+                // stale place its assignment still names, so it cannot arrive to be released. Before the
+                // chase existed the body was always standing on that place, which is why the old path
+                // worked and why this is a hazard the chase created.
+                //
+                // Same predicate and same outcome as AttackerHandover's own first branch, deliberately:
+                // §166's rule is that an attack is over when what it was aimed at cannot be found, and two
+                // spellings of that rule is exactly the fault this codebase keeps paying for.
+                JobSystem.Assign(ref body, Assignment.None);
+                continue;
+            }
+
+            if (body.LocomotionState == AgentLocomotionState.Chase &&
+                body.BehaviorTarget.Value == quarry.Value)
+            {
+                continue;
+            }
+
+            QueueChase(new[] { body.Id }, quarry);
+        }
+    }
+
     private void BreakStructures(float deltaSeconds)
     {
         var bodies = Agents.MutableSpan();

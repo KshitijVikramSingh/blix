@@ -15284,3 +15284,64 @@ that moves, "a place" is a fifteen-second-old snapshot.
 `SwingSeconds` should also be renamed or removed on the way through: it gates no swing (harm is continuous
 on contact), it is a dwell, and calling it a swing is what let a whole section be spent tuning it as though
 it were a rate of re-aiming.
+
+## 196. Ordered attacks chase, and the gate caught the hazard within one run
+
+Built on §195's evidence and the chair's decision. `DriveOrderedAttacks` puts a body holding an
+`AssignmentKind.Attack` on a live *body* quarry into `AgentLocomotionState.Chase` through one `QueueChase` —
+the same door §30's commitment uses and the same door a player's own chase order uses. Structures are
+untouched: an attack on a wall *is* a place to stand, and the whole fault was treating a body as one.
+
+Issued once rather than per tick — the condition is "not already chasing this quarry" — because every
+command is an interrupt and re-sending would refresh the interrupt grace forever.
+
+### What it bought
+
+| ground | posture | before | after |
+|---|---|---|---|
+| Rough | Fleeing | 78.4 s, 10% contact | **29.2 s, 51%** |
+| Village | Fleeing | 80.7 s, 30% | **55.1 s, 57%** |
+| Flat | Fleeing | 78.0 s, 12% | 63.5 s, 13% |
+| Flat | Charging | 34.1 s, 21% | **24.0 s, 44%** |
+| Rough | Charging | 33.1 s, 22% | **27.8 s, 54%** |
+| all | Still | 16.9-20.3 s | unchanged |
+
+Contact roughly doubles or better nearly everywhere, and the Still rows do not move — which is right, since
+a standing target was never the problem.
+
+**Flat/Fleeing stays high for a reason that is not a fault.** Both sides are militia at 1.70 m/s, so that row
+is a *parity chase*, and §192's chase table already says parity is never caught. It ends at 63.5 s only
+because the quarry runs out of map. An enemy of equal speed running away in a straight line across open
+ground **should** be uncatchable; that is a roster question about speeds, not a mechanism fault.
+
+### The gate caught the hazard, exactly where §194 said it would
+
+§194 recorded the hazard before building: a chase is an `InterruptKind.Order`, and §187 established such an
+interrupt never expires off a `Guard`, so an attacker whose quarry dies could sit interrupted for good —
+§186's zombie with a sword. The first cut handled it by releasing the interrupt and trusting
+`AttackerHandover` to finish the assignment.
+
+**One gate run said `let go when it died = False`.** Handover fires on leg *completion*, and a chase has by
+then carried the body tens of metres from the stale place its assignment still names, so it can never arrive
+to be released. Before the chase existed the body was always standing on that place — which is why the old
+path worked and why this is a hazard the chase itself created.
+
+Fixed by ending the assignment where the condition is already known, using `QuarryStands` — the same
+predicate `AttackerHandover` uses, because §166's rule is that an attack is over when what it was aimed at
+cannot be found, and two spellings of that rule is the fault this codebase keeps paying for.
+
+Worth noting what the sequence demonstrates: **the hazard was written down before the code, the code hit it
+anyway, and a test written for a different section (§166's atomic verb) caught it in one run.** That is the
+gate doing exactly the job it exists for, and it is the reason the zombie did not reach the chair this time.
+
+### Still open in the combat arc
+
+- **Spread at the order** — 2-5x, untouched, and the chase may have changed its shape: bodies now converge
+  on a moving point rather than a fixed one, so §189's numbers want re-measuring before anything is tuned.
+- **Ignoring the enemy in front of you** — not a bug until §194's vocabulary question is settled: line of
+  sight (exists, unconsulted by combat), unit type (exists, no combat rule varies by it) and stance (does
+  not exist; §143 chose that deliberately).
+- **Reacquisition** — what a body attacks once its target dies. Currently `Assignment.None`, which is §193's
+  atomic verb behaving as designed; what composes on top is the open half.
+- **`SwingSeconds`** should be renamed or removed. It gates no swing, it is a dwell, and its name is what
+  let a whole section be spent tuning it as though it were a rate of re-aiming.
