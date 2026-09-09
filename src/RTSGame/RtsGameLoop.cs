@@ -9095,14 +9095,14 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             var crowdYielding = agent.IsVisiblyYielding;
             var unitColor = crowdYielding
                 ? QueuedUnitColor
-                : agent.StuckSeconds > AgentDefaults.StalledSeconds ? StuckUnitColor
+                : agent.StuckSeconds > AgentDefaults.WedgedSeconds ? StuckUnitColor
                 : stateDebug ? StateColor(agent.LocomotionState)
                 : UnitColor;
             // The cylinder still draws whenever it is carrying information the model cannot: a body
             // yielding under crowd pressure, a body failing to make progress, or the state overlay. Those
             // are the colours the whole locomotion layer is judged by and they must not be lost to an art
             // pass. Otherwise the person stands in for it.
-            var saysSomething = crowdYielding || agent.StuckSeconds > AgentDefaults.StalledSeconds ||
+            var saysSomething = crowdYielding || agent.StuckSeconds > AgentDefaults.WedgedSeconds ||
                                 stateDebug;
             if (!drawnAsAPerson || saysSomething)
             {

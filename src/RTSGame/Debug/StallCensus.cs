@@ -86,6 +86,7 @@ internal sealed class StallCensus
 
     private readonly List<Episode> episodes = new();
     private readonly HashSet<int> everStalled = new();
+    private readonly HashSet<int> everWedged = new();
 
     private float[] startedAt = Array.Empty<float>();
     private float[] peak = Array.Empty<float>();
@@ -124,6 +125,18 @@ internal sealed class StallCensus
 
     /// <summary>Bodies that were stalled at least once.</summary>
     public int BodiesEverStalled => everStalled.Count;
+
+    /// <summary>
+    /// Bodies that ever crossed <see cref="AgentDefaults.WedgedSeconds"/> — the ones drawn red.
+    /// </summary>
+    /// <remarks>
+    /// <b>The acceptance test for §190, and the ratchet §180 asked for.</b> The paint threshold is now set
+    /// past the longest stall that was ever followed by work in any measured run, so a body drawn red is a
+    /// body that did not recover. That makes this a count of real faults rather than of traffic — which is
+    /// what a ratchet needs and what 0.35 s could never provide, because at 0.35 s the figure was every
+    /// body in the settlement several times a minute.
+    /// </remarks>
+    public int BodiesEverWedged => everWedged.Count;
 
     /// <summary>Every completed spell, productivity resolved.</summary>
     public IReadOnlyList<Episode> Episodes => episodes;
@@ -230,6 +243,7 @@ internal sealed class StallCensus
                 }
 
                 everStalled.Add(index);
+                if (agent.StuckSeconds > AgentDefaults.WedgedSeconds) everWedged.Add(index);
                 if (agent.StuckSeconds >= peak[index])
                 {
                     peak[index] = agent.StuckSeconds;
@@ -440,7 +454,9 @@ internal sealed class StallCensus
                $"\n    unproductive while under orders: " +
                (barrenUnderOrders.Length == 0 ? "none" : string.Join(", ", barrenUnderOrders)) +
                $"\n    longest spell {longest:F1}s, longest still followed by work {longestProductive:F1}s, " +
-               $"peak stall clock {PeakStuckSeconds:F1}s, still stalled at the end {StalledAtTheEnd}, " +
+               $"peak stall clock {PeakStuckSeconds:F1}s, " +
+               $"DRAWN RED (past {AgentDefaults.WedgedSeconds:F0}s) {BodiesEverWedged} body(s), " +
+               $"still stalled at the end {StalledAtTheEnd}, " +
                $"unjudged in the last {TailSeconds:F0}s {UnjudgedInTheTail}, " +
                $"activities finished (churn, not work) {ActivitiesFinished}";
     }

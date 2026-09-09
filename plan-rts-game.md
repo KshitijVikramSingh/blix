@@ -14949,3 +14949,97 @@ Not with "does an order engage" — it does. The measured order of business is:
 3. **Ignoring the enemy in front of you.** One blow, then seventy-five metres in the wrong direction.
 4. **Geometry halving participation**, which is the one that only shows on a real map and the reason the
    chair's instinct to insist on it was right.
+
+## 190. The paint threshold, derived — and §180's ratchet finally has something to hang on
+
+§185 left where the overlay's red line sits as the chair's call. Deriving it from the measurements settles
+it without a preference being needed.
+
+Across every run instrumented — a placid village, the game as played, a bot-driven map, a settlement under
+raid — **the longest stall that was ever followed by the body going on to work is 5.4 s.** Above that,
+nothing recovered anywhere. The raid leg is the decisive case because it is the only one with a barren tail:
+
+```
+lengths: <=0.5s 29w/130n  <=2s 20w/98n  <=4s 6w/37n  <=8s 0w/1n  <=16s 0w/1n
+longest spell 15.7s, longest still followed by work 2.7s
+```
+
+So `AgentDefaults.WedgedSeconds = 6f`: the smallest figure with no observed false positive. It is
+**seventeen times** the 0.35 s it replaces, which is the size of the fault — and 0.35 s is right where it
+belongs, gating a repath, which is the §182 split doing its job.
+
+### The three thresholds, now all named and one of them measured
+
+| | value | purpose |
+|---|---|---|
+| `AgentDefaults.StalledSeconds` | 0.35 s | what the simulation means; gates a repath, works |
+| `StallReporting.StalledSeconds` | 0.35 s, pinned | what a measurement means; must not follow the above |
+| `AgentDefaults.WedgedSeconds` | **6 s** | worth a colour: this body will not recover |
+
+Anything asserting about what the overlay draws follows the third. Three self-tests moved.
+
+### Verified, and the ratchet the chair asked for
+
+`StallCensus` now counts bodies that ever cross it, which is the acceptance test:
+
+| leg | drawn red past 6 s |
+|---|---|
+| a bot runs a settlement, 9 min | **0** |
+| two bots and nobody steering, 9 min | **0** |
+| a settlement under raid | **1** |
+
+Zero false positives across eighteen minutes of settlement, and one genuine non-recoverer under raid. **Red
+means something now**, which is what makes §180's answer — *"blocked should not happen, might as well crash
+so we can debug"* — reachable at last. §183 had to report that no stopwatch could carry it; at 0.35 s the
+count was every body in the settlement several times a minute. At six seconds zero is a meetable criterion,
+and the two placid legs now **fail** if any body crosses it.
+
+Asserted on those two and not on the raid leg, deliberately: a raid is chaotic — §40 measured one
+configuration producing 4.4 or 2.4 kills across seeds — so a count of one there is not a number to forbid
+rising. It is reported instead.
+
+## 191. The palisade: my premise was wrong, my fix was worse, and the real answer is arithmetic
+
+§189 measured that three defenders standing in the way of four attackers cost them nothing, and I proposed
+a mechanism: `ThreatSystem.NearestThreatSeen` builds its "worth protecting" list from **goods only** —
+stock in a store, stock on a cart, stock on a raider's back — and its own comment says why ("what would
+leave with a raider"). A palisade holds no stock, so §166 made buildings attackable and never told the
+defence they were worth defending.
+
+The reading of the code is correct. **The conclusion drawn from it was not**, and the A/B said so:
+
+| | harm taken by the assault | of ours fell |
+|---|---|---|
+| as shipped | **115** | **2 of 4** |
+| with damaged structures added to `guarded` | 81 | 0 |
+
+**The defence was already responding**, and my change made it measurably worse — it pulled defenders toward
+a *place* instead of the bodies in front of them, which is the same "guard a position, not the enemy"
+pathology §143 spent a section on. Thirty-four harm and two kills, given away by a fix. Reverted.
+
+Worth naming what nearly happened: the premise was a real reading of real code, the measurement it predicted
+was in the right direction, and it was still wrong. **A mechanism that explains the symptom is not evidence
+that changing it helps.** Only the A/B is, and this is the second time in two sections that running it both
+ways reversed a verdict.
+
+### What the numbers actually say
+
+| structure | condition | timber | 4 militia strip it in |
+|---|---|---|---|
+| PalisadeWall | 100 | 2 sacks | **8.3 s** |
+| ForwardDepot | 200 | 4 sacks | 16.7 s |
+| StoneWall | 250 | upgrade | 20.8 s |
+| House | 250 | 6 sacks | 20.8 s |
+| Barracks | 500 | 10 sacks | 41.7 s |
+| Granary | 600 | — | 50.0 s |
+
+Militia are `Strength 3, Health 45`, so four deal 12 a second and are worth 180 health between them.
+
+**A palisade is worth 2.2 militia.** A wall is less durable than the men attacking it, and that is the whole
+of it — not a defence that will not come, but a wall that is thinner than a soldier. The defence killed two
+of the four assailants in the nine seconds it bought, which is a wall working exactly as a speed bump and
+not working at all as a wall.
+
+So §191 is a **rates decision and not a mechanism one**, and it is the chair's: what should two sacks of
+timber be worth in seconds of holding? The ratio is now measured rather than argued, and the harness will
+say whether a change to it helped.

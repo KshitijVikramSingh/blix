@@ -1145,7 +1145,7 @@ internal static class SimulationSelfTests
             foreach (var id in ids)
             {
                 ref var agent = ref world.Agents.Get(id);
-                var visiblyRed = agent.StuckSeconds > AgentDefaults.StalledSeconds &&
+                var visiblyRed = agent.StuckSeconds > AgentDefaults.WedgedSeconds &&
                                    agent.CrowdPressureSeconds <= 0f;
                 if (visiblyRed && redStarts[id.Value] < 0) redStarts[id.Value] = tick;
                 if (!visiblyRed && redStarts[id.Value] >= 0)
@@ -1218,7 +1218,7 @@ internal static class SimulationSelfTests
             {
                 ref var agent = ref world.Agents.Get(id);
                 if (!world.IsAgentGeometryValid(id)) invalidGeometrySamples++;
-                var visiblyRed = agent.StuckSeconds > AgentDefaults.StalledSeconds &&
+                var visiblyRed = agent.StuckSeconds > AgentDefaults.WedgedSeconds &&
                                    agent.CrowdPressureSeconds <= 0f;
                 if (visiblyRed && redStarts[id.Value] < 0) redStarts[id.Value] = tick;
                 if (!visiblyRed && redStarts[id.Value] >= 0)
@@ -2540,7 +2540,7 @@ internal static class SimulationSelfTests
                     }
                         if (agent.HasDestination) moving++;
                     maximumStuckSeconds = MathF.Max(maximumStuckSeconds, agent.StuckSeconds);
-                    var visiblyRed = agent.StuckSeconds > AgentDefaults.StalledSeconds &&
+                    var visiblyRed = agent.StuckSeconds > AgentDefaults.WedgedSeconds &&
                                            agent.CrowdPressureSeconds <= 0f;
                     if (visiblyRed)
                     {

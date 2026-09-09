@@ -254,6 +254,41 @@ internal static class AgentDefaults
     public const float StrandedSeconds = 1.25f;
 
     /// <summary>
+    /// Stall time past which a body is worth telling the player about, because it will not recover.
+    /// </summary>
+    /// <remarks>
+    /// <b>The third of the three, and the only one that was ever measured.</b> §190. §182 split one number
+    /// into two — what the simulation means by stalled (<see cref="StalledSeconds"/>, which gates a repath
+    /// and demonstrably works at 0.35 s) and what a measurement means (<c>StallReporting.StalledSeconds</c>,
+    /// pinned so an instrument cannot follow the thing it measures). This is the third purpose that was
+    /// hiding inside the first: <em>is this worth a colour</em>.
+    /// <para>
+    /// It was 0.35 s, the repath figure, and that is why red cylinders were reported from the chair four
+    /// times across §170-184 and fixed three times when there was nothing to fix. The measured distributions
+    /// are unambiguous: in a hands-off village 278 of 278 stalls resolved into work, in the game as played
+    /// 519 of 519, with a median stall of 0.70 s. **Painting at 0.35 s marks ordinary traffic as broken.**
+    /// </para>
+    /// <para>
+    /// <b>Six seconds, and it is derived rather than chosen.</b> Across every run measured — a placid
+    /// village, the game as played, a bot-driven map and a settlement under raid — the longest spell that
+    /// was <em>ever</em> followed by the body going on to do work is <b>5.4 s</b>. Above that, nothing
+    /// recovered anywhere: the raid leg's own distribution reads <c>&lt;=8s 0w/1n, &lt;=16s 0w/1n</c>, and
+    /// its longest productive spell is 2.7 s. So six seconds is the smallest figure with no observed false
+    /// positive, and it is seventeen times the value it replaces — which is the size of the fault.
+    /// </para>
+    /// <para>
+    /// <b>Red now means "did not recover", which is the same predicate §180's throw wants.</b> That was the
+    /// open half of the chair's answer — "blocked should not happen, might as well crash" — and §183 had to
+    /// report that no stopwatch value could carry it. This one can, because it is the first threshold with a
+    /// measured boundary under it rather than a constant somebody typed.
+    /// </para>
+    /// <para>
+    /// Anything asserting about what the overlay draws must follow THIS, not <see cref="StalledSeconds"/>.
+    /// </para>
+    /// </remarks>
+    public const float WedgedSeconds = 6f;
+
+    /// <summary>
     /// Smallest centre distance two bodies may sit at and still count as separated, allowing a
     /// small tolerance for a single tick's contact.
     /// </summary>

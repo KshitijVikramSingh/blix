@@ -101,7 +101,7 @@ internal static class FightBenchmarks
         Console.WriteLine("  a structure: N ordered at a hostile palisade, undefended and defended");
         Console.WriteLine(
             "    ground  |  N | defenders | to 1st hit | condition lost | " +
-            "ticks anybody was working | interrupted%");
+            "ticks anybody was working | interrupted% | what the defence did");
         foreach (var ground in grounds)
         foreach (var defenders in new[] { 0, 3 })
         {
@@ -574,6 +574,11 @@ internal static class FightBenchmarks
 
         world.QueueAttack(mob, AgentId.None, wall);
 
+        // <b>What the DEFENDERS did, which is the actual question.</b> Every other column here measures the
+        // assault, so "the wall fell anyway" could not distinguish a defence that lost from a defence that
+        // never turned up — and §191 has just changed which of those it is. Harm taken by our attackers is
+        // the shortest honest answer: zero means nobody came.
+        var oursHealth = mob.Sum(id => world.Agents.Get(id).Health);
         var firstHit = -1f;
         var workingTicks = 0;
         var interruptedTicks = 0;
@@ -602,11 +607,15 @@ internal static class FightBenchmarks
         }
 
         var lost = world.Nodes.Contains(wall) ? before - world.Nodes.Get(wall).Condition : before;
+        var oursLeft = mob.Sum(id =>
+            world.Agents.Contains(id) && world.Agents.Get(id).IsAlive ? world.Agents.Get(id).Health : 0f);
+        var fell = mob.Count(id => !world.Agents.Contains(id) || !world.Agents.Get(id).IsAlive);
         Console.WriteLine(
             $"    {ground,-7} | {count,2} | {defenders,9} | " +
             $"{(firstHit > 0f ? $"{firstHit,7:F1} s" : "  never"),10} | " +
             $"{lost,8:F0} of {before,-4:F0} | {workingTicks,25} | " +
-            $"{(samples == 0 ? 0f : 100f * interruptedTicks / samples),11:F0}%");
+            $"{(samples == 0 ? 0f : 100f * interruptedTicks / samples),11:F0}% | " +
+            $"{oursHealth - oursLeft,10:F0} harm taken, {fell} of ours fell");
     }
 
     /// <summary>

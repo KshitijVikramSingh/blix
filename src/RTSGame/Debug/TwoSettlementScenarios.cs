@@ -303,6 +303,25 @@ internal static class TwoSettlementScenarios
         Console.WriteLine(stalls.Describe($"{years:0.##} year(s), nobody steering"));
         Console.WriteLine(stalls.DescribeKeptFromWork());
 
+        // <b>The ratchet §180 asked for, and the first threshold it could be hung on.</b> §190: the chair's
+        // answer to "should Blocked be a state" was "no, it should not happen, might as well crash so we
+        // can debug" — and §183 had to report that no stopwatch value could carry that, because at 0.35 s
+        // every body in the settlement went red several times a minute. At six seconds, derived from the
+        // longest stall ever followed by work in any measured run, a red body is a body that did not
+        // recover. So zero is a meetable criterion, and this asserts it.
+        //
+        // <b>Asserted here and not on the raid leg</b>, deliberately: a raid is chaotic — §40 measured the
+        // same configuration producing 4.4 or 2.4 raiders killed on different seeds — so a count of one
+        // there is not a number to forbid rising. These two legs are placid and deterministic, and both
+        // report zero over nine minutes.
+        if (stalls.BodiesEverWedged > 0)
+        {
+            faults.Add(
+                $"{stalls.BodiesEverWedged} body(s) stalled past {Simulation.Agents.AgentDefaults.WedgedSeconds:F0}s and " +
+                "were drawn red — a body past that threshold has never recovered in any measured run, so " +
+                "this is a stall and not traffic");
+        }
+
         foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");
         if (faults.Count == 0)
         {
