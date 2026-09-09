@@ -98,7 +98,28 @@ internal static class BodyActions
             return BodyAction.Strike;
         }
 
-        if (JobSystem.IsWorking(in agent)) return Labour(in agent);
+        // A soldier at its post before anything reads as labour: a militia standing a Guard is "working" by
+        // the jobs layer's definition — it has an activity and it is at its place — and that is the right
+        // definition for the jobs layer and the wrong one to hang a pose off.
+        if (agent.Jobs.Assignment.Kind == AssignmentKind.Guard || agent.Role == AgentRole.Militia)
+        {
+            return agent.Velocity.LengthSquared() > WalkingSpeedSquared
+                ? Walking(in agent, out locomotion)
+                : BodyAction.Guard;
+        }
+
+        // <b>And only a body whose assignment is actually work.</b> §179. Labour reads the assignment's
+        // cargo to tell felling from reaping from cutting — and `default(Resource)` is Grain, so ANY working
+        // body whose assignment never set a cargo reaped. Reported from the chair as idle militia playing
+        // the farming animation, which is exactly what a guard post plus a default enum produces.
+        //
+        // Fourth sighting of the same trap: default(AgentId) is agent zero, default(FactionId) is the
+        // player, default(NodeId) was a real node, and now default(Resource) is grain. **The rule stands:
+        // in this codebase `default` of an identifier or an enum is a real thing, never an absence.**
+        if (JobSystem.IsWorking(in agent) && IsWorkAssignment(agent.Jobs.Assignment.Kind))
+        {
+            return Labour(in agent);
+        }
 
         // <b>Waiting is only waiting when there is nothing being done.</b> This test used to sit ABOVE the
         // working one, on the reasoning that "can this project be worked at all" is the stable fact and the
@@ -111,18 +132,25 @@ internal static class BodyActions
         // activity gets a settled pose instead of one that flickers as the jobs layer cycles its legs.
         if (waiting && agent.Velocity.LengthSquared() <= WalkingSpeedSquared) return BodyAction.Idle;
 
-        if (agent.Velocity.LengthSquared() > WalkingSpeedSquared)
-        {
-            locomotion = true;
-            return agent.Jobs.CarriedUnits > 0 ? BodyAction.Carry : BodyAction.Walk;
-        }
-
-        if (agent.Jobs.Assignment.Kind == AssignmentKind.Guard || agent.Role == AgentRole.Militia)
-        {
-            return BodyAction.Guard;
-        }
+        if (agent.Velocity.LengthSquared() > WalkingSpeedSquared) return Walking(in agent, out locomotion);
 
         return BodyAction.Idle;
+    }
+
+    /// <summary>Whether an assignment of this kind is labour that a pose can be read from.</summary>
+    /// <remarks>
+    /// Only these three set a cargo or a project, which is what <see cref="Labour"/> reads. Every other
+    /// kind — a guard, a hold, a shuttle, a raid — leaves the cargo at its default, and that default is a
+    /// real resource rather than a blank.
+    /// </remarks>
+    private static bool IsWorkAssignment(AssignmentKind kind) =>
+        kind is AssignmentKind.Work or AssignmentKind.Build or AssignmentKind.Train;
+
+    /// <summary>Under way, laden or not.</summary>
+    private static BodyAction Walking(in AgentState agent, out bool locomotion)
+    {
+        locomotion = true;
+        return agent.Jobs.CarriedUnits > 0 ? BodyAction.Carry : BodyAction.Walk;
     }
 
     /// <summary>

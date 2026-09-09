@@ -169,6 +169,7 @@ internal static class SimulationSelfTests
         Check("nine builders on one project make progress", NineBuildersOnOneProject());
         Check("a carrier lets builders build", CarriersLetBuildersBuild());
         Check("a waiting builder's pose does not flicker", ABuilderWaitingDoesNotFlicker());
+        Check("a guard is not shown farming", AGuardIsNotShownFarming());
         Check("a finished project releases its builders", AFinishedProjectReleasesItsBuilders());
         Check("asked to chop, a body reaches the tree and cuts", AskedToChopTheyReachTheTree());
         Check("two cutters do not wedge in one trunk", TwoCuttersDoNotWedgeInOneTrunk());
@@ -6064,6 +6065,49 @@ internal static class SimulationSelfTests
             $"    nine builders over {samples} tick(s): working {working / total:P0}, " +
             $"carrying {carrying / total:P0}, walking empty {walkingEmpty / total:P0}, " +
             $"standing empty {standingEmpty / total:P0}; build work +{progressed:F0}");
+        return passed;
+    }
+
+    /// <summary>
+    /// A militia standing its post is not shown farming. §179.
+    /// </summary>
+    /// <remarks>
+    /// Reported from the chair: "weirdly idle militia start playing the farming/building animation". The
+    /// cause is the sentinel trap for the fourth time — <c>Labour</c> reads the assignment's cargo to tell
+    /// felling from reaping, and <c>default(Resource)</c> is <c>Grain</c>, so any body the jobs layer counts
+    /// as working with no cargo set reaped. A guard post is exactly that.
+    /// </remarks>
+    private static bool AGuardIsNotShownFarming()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        var store = world.AddNode(NodeKind.Granary, new Vector2(0f, 0f), capacity: 4000, faction: us);
+        world.SeedStock(store, Resource.Grain, 500);
+
+        var soldier = world.SpawnAgent(new Vector2(6f, 0f), UnitType.Villager, us);
+        world.Agents.Get(soldier).Role = AgentRole.Militia;
+        world.Agents.Get(soldier).Strength = UnitType.Militia.Strength;
+
+        ref readonly var post = ref world.Nodes.Get(store);
+        world.QueueAssign(
+            new[] { soldier },
+            Assignment.Guard(post.Position, post.FootprintRadius, dwellSeconds: 4f));
+
+        var seen = new HashSet<BodyAction>();
+        for (var t = 0; t < 900; t++)
+        {
+            Tick(world, 1);
+            if (!world.Agents.Contains(soldier)) break;
+            seen.Add(BodyActions.For(in world.Agents.Get(soldier), hurt: false, out _));
+        }
+
+        // Guarding and walking there are both fine. Reaping, felling, quarrying and building are not.
+        var farming = seen.Contains(BodyAction.Reap) || seen.Contains(BodyAction.Chop) ||
+                      seen.Contains(BodyAction.Quarry) || seen.Contains(BodyAction.Build);
+        var guarded = seen.Contains(BodyAction.Guard);
+        var passed = guarded && !farming;
+        Console.WriteLine(
+            $"    a militia on a guard post showed: {string.Join(", ", seen.Select(a => a.ToString()))}");
         return passed;
     }
 

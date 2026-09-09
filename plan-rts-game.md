@@ -14047,3 +14047,83 @@ matched success:
 
 An instrument's output was being taken at face value exactly the way my own reasoning was, and both needed
 the same suspicion.
+
+## 179. An audit, before deciding whether to patch or to rebuild
+
+The chair called it: "there's so many leaky things around this I'd just step back, see what's happening,
+see what we want to keep as designers, rip the code out and do some of it again — patching up this leaky
+structure might take more time than it's worth". This is the audit, written before any decision, so the
+decision has something to stand on.
+
+### The last leak found before stopping
+
+Idle militia played the farming animation. `BodyActions.Labour` tells felling from reaping by reading the
+assignment's cargo — and **`default(Resource)` is `Grain`**. A militia standing a guard post has an activity
+and is at its place, so the jobs layer counts it as working; its assignment never set a cargo; it reaped.
+
+Fourth sighting of one trap: `default(AgentId)` is agent zero, `default(FactionId)` is the player,
+`default(NodeId)` was a real node, `default(Resource)` is grain. **The rule, now earned: in this codebase
+`default` of an identifier or an enum is a real thing and never an absence.** Fixed by asking the
+assignment's KIND before reading its cargo, and tested.
+
+### What is actually there, counted
+
+- **Ten distinct predicates** answer variants of "where is this body and is it doing its job", across sixty
+  call sites: `IsWorking` (17 uses), `SettledNearby` (11), `DistanceToPlace` (7), `WaitingOnMaterials` (6),
+  `IsAtPlace` (5), `AtItsProject` (4), `ProjectHasBuildFront` (3), `AsksAboutItsPlace` (3),
+  `HaulersAreSupplying` (2), `IsAtItsPlace` (2).
+- **`AgentState` carries 73 public fields.** A body is a bag of flags and every consumer reconstructs "what
+  is it doing" from a different subset.
+- **`StuckSeconds` is read in ten files** — an overlay colour, the congestion field, four benchmark
+  harnesses, and until today collision behaviour.
+
+### The thesis
+
+**Every leak this session was one concept represented in two places, or two concepts represented as one.**
+That is a structural diagnosis, not a run of bad luck.
+
+*Two representations of one concept.* Five ways to ask "am I there". Claim-avoidance and `SpreadAcrossKin`
+both spreading crowds, and the redundant one able to refuse. A contact test of my own beside
+`JobSystem.IsWorking`. Historically `LakeDepth`/`Standing`, `WidthAt`/`WidthOf`, `LevelAt`/`LevelField`.
+
+*One representation of two concepts.* `StuckSeconds` meaning "no progress" and read as wedged, unreachable
+AND arrived. `Facing` meaning "steering heading" and read as "which way to draw". `IsWorking` meaning "the
+jobs layer has an activity open" and read as "is labouring". `default(Resource)` meaning both unset and
+grain.
+
+*Frame mismatches* — four, every one "measured through a different transform than I drew through".
+
+### What is worth keeping
+
+- **The three-layer jobs model** (assignment / activity / interrupt). Sound, and not the site of a single
+  fault today. It is also why the bot can play through the player's verbs.
+- **The determinism census and the conservation ledger.** They earn their cost every session.
+- **The gate.** It caught the militia-training regression that no amount of watching would have.
+- **The economy's reservation arithmetic** (`owed = wanted − incoming`). It was already right and was nearly
+  "fixed" on the strength of a screenshot.
+- `SpreadAcrossKin`, the action table as data, the character pipeline, and the instruments below.
+
+### What is worth ripping out: one body phase, owned by the simulation
+
+`Travelling | Arrived | Working | Blocked | Idle` — computed once a tick, fingerprinted, read by everybody.
+It subsumes `IsWorking`, `IsAtPlace`, `IsAtItsPlace`, `AtItsProject`, `SettledNearby`-as-arrival and
+`StuckSeconds`-as-state, and it dissolves classes of fault rather than instances:
+
+- **Pose flicker becomes impossible by construction**: a phase changes on events, not per tick.
+- **The overlay stops lying**: `Blocked` is a state, not an inference from a velocity residual.
+- **Collision gets a principled priority**: `Blocked` yields to nobody, `Working` holds its ground,
+  `Travelling` gives way — which is the go-kart feel built so it CANNOT stall a body, rather than patched
+  afterwards and reverted.
+- **The frame mismatches go**: the view reads a phase instead of re-deriving geometry.
+
+Cost: `JobSystem`, the movement update, `CollisionSystem`, `BodyActions`, the overlay and the census.
+Comparable to the cohorts arc, and survivable only because the gate and the self-tests exist.
+
+### The three questions that are the designer's, not mine
+
+1. **Is `Blocked` a first-class game state?** If a player is meant to notice a stuck body and fix it, that is
+   a design decision with interface consequences, not a renderer input.
+2. **Is "working" one phase or per-activity?** Reaping and felling are different poses today, read off
+   cargo. Either the phase carries which work it is, or the pose keeps reading the assignment.
+3. **How much does the go-kart feel matter?** Measured, it cost double the stall rate. Under the phase
+   design it is free — which is the argument for doing the phase work first rather than paying twice.
