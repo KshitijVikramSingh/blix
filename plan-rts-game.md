@@ -14302,10 +14302,24 @@ Three consequences worth keeping:
 Before any stall can be ratcheted it has to be *defined once*:
 
 - One home for both thresholds, named for what they mean rather than for the colour they produce —
-  `StalledSeconds` (not moving, may yet recover) and `StrandedSeconds` (will not arrive without help).
+  `StalledSeconds` (not moving, may yet recover) and `StrandedSeconds` (stuck badly enough to assert about).
+
+  **And `StrandedSeconds` is not the stranded line.** I wrote it up as "long enough that the body will not
+  arrive without help" and the next gate log said otherwise: the pen tests report `arrived=30/30` on both
+  seeds with `longest-red=4.37s` and `peak-internal-stuck=4.52s`. Bodies sit stalled for three and a half
+  times 1.25 s and still get where they were going. That figure was picked by five self-tests and has never
+  been measured against anything, so nothing may be ratcheted against it.
 - Every one of the thirteen sites points at it, the simulation's included.
-- Then the ratchet: a stranded-body census over the hands-off two-village leg, recorded, may fall and may
-  not rise — and an unconditional throw when it reaches zero, which is what §180's answer asked for.
+- **Then an instrument, before any ratchet.** The pen tests already carry the census this needs —
+  `ever-red`, `longest-red`, `peak-internal-stuck`, `arrived=n/30`, and a per-body line naming position,
+  speed, waypoints and repaths. The hands-off two-village leg, which is the one whose situation matches what
+  the chair actually reported, prints **none of it**: grepping that leg's output for stall figures returns
+  zero lines. So the population under discussion has never been measured — only watched.
+- Point the existing census at the settlement legs, read the distribution, and pick the stranded line off
+  it: the separation wanted is between a body that recovers and one that never arrives, and `arrived=n/n`
+  is the only field that distinguishes them.
+- Only then the ratchet, and the unconditional throw when it reaches zero, which is what §180 asked for.
 
 The ratchet has to come last. Recording a figure measured against thirteen different definitions of the
-thing being recorded is how §178 spent three attempts on one bug.
+thing being recorded is how §178 spent three attempts on one bug — and recording it against a threshold
+picked by a self-test would be the same mistake with better spelling.

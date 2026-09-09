@@ -233,18 +233,22 @@ internal static class AgentDefaults
     public const float StalledSeconds = 0.35f;
 
     /// <summary>
-    /// How long a body must be stalled before it is taken to be unable to arrive without help.
+    /// The longer stall threshold: the figure the self-tests have always used for a badly stuck body.
     /// </summary>
     /// <remarks>
-    /// The threshold the self-tests actually want, and the one §180's ratchet will be recorded against: a
-    /// body past this is not in traffic, it is wedged or it is routing to somewhere it cannot reach. Distinct
-    /// from <see cref="StalledSeconds"/> by nearly four times, and the distinction is the whole point —
-    /// they share one field, and which of the two a call site meant used to be encoded in nothing but the
-    /// float it happened to compare against.
+    /// <b>Named for what it is, not for what I first assumed it was.</b> Consolidating §182's thirteen
+    /// literals, this was written up as "long enough that the body will not arrive without help" — which the
+    /// very next gate log contradicts. The pen tests report <c>arrived=30/30</c> on both seeds with
+    /// <c>longest-red=4.37s</c> and <c>peak-internal-stuck=4.52s</c>: bodies sit stalled for three and a half
+    /// times this figure and still get where they were going. So this is not a stranded-forever line, and no
+    /// ratchet may be recorded against it until somebody measures where that line actually is.
     /// <para>
-    /// One place writes this value directly rather than accruing to it: a body that has run out of ways to
-    /// get past something is promoted straight to stranded, because the information is already known and
-    /// waiting another second to admit it only delays the recovery.
+    /// What it honestly is: the threshold five self-tests picked for "stuck badly enough to be worth
+    /// asserting about", and one the simulation promotes a body straight to when it has run out of ways past
+    /// an obstacle — because that information is already known and waiting to accrue only delays recovery.
+    /// It has never been measured against anything. Distinct from <see cref="StalledSeconds"/> by nearly
+    /// four times, and the distinction is the point: they share one field, and which of the two a call site
+    /// meant used to be encoded in nothing but the float it happened to compare against.
     /// </para>
     /// </remarks>
     public const float StrandedSeconds = 1.25f;
