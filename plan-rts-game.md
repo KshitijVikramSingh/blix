@@ -15397,3 +15397,79 @@ it is the next item on its own merits.
 The shape of it is in `apart at contact`: 3.4 m when sent tight, 15-17 m when sent spread. The force arrives
 piecemeal, and `contact%` follows exactly — 83% against 34%. Nobody has to be made better at fighting; they
 have to arrive together, which is a cohort question (§107) rather than a combat one.
+
+## 198. Harm stops being a proximity modal
+
+From the chair, and it reframes the whole arc:
+
+> the things happen when contact modal has bitten us enough times recently, and it's structurally older than
+> rigs/animations, it made sense then, makes no sense now
+
+Exactly right. Harm was `Strength × deltaSeconds` for every tick two capsules overlapped — which made sense
+when a body *was* a capsule and there was nothing to synchronise with. **Nearly every fault in the combat arc
+is downstream of it:**
+
+- a chase that parked **three and a half centimetres** outside the reach and could never land a blow (§192);
+- an arrival test at 1.11 m against a harm reach of 0.814 m, thirty centimetres of nothing (§194);
+- `landed/N` reading **5 of 4** for four sections, because "landed" meant *in contact and admitted* rather
+  than *hit something* (§189);
+- and no animation could sync to a drain, which is where the chair came in.
+
+All four are the same shape: **harm as a function of distance means every question about it is a question
+about a threshold, and thresholds disagree.**
+
+### A blow with a moment
+
+`AgentState.SwingCharge` accumulates while a body is in reach; at `ThreatSystem.SwingSeconds` the blow
+**lands**, and harm arrives in one lump of `Strength × SwingSeconds`. So:
+
+- **reach is asked once, at the instant of the landing**, rather than every tick of an overlap;
+- a landing is an *event*, so `LandedThisTick` is a true blow count and not a proximity report;
+- the damage rate is untouched — three a second is three a second, dealt in one-second lumps — so no
+  balance moved when the model did;
+- and the strike animation has a clock to share.
+
+**A swing not seen through is lost.** Step out of reach mid-swing and it misses, which is the property that
+makes dodging mean anything and is not expressible at all while harm is a drain.
+
+`SwingSeconds` is on `ThreatSystem` and is *not* `Assignment.AttackDwellSeconds`. They are on different
+layers — one is the rate of blows, the other is how long the jobs layer needs a body to stand somewhere —
+and they happen to both be a second, which is exactly the coincidence that makes a shared name dangerous.
+§197 renamed the second one for having caused precisely that confusion.
+
+### The two things the gate caught, and both were the gate working
+
+1. **`ThreatSystem.swung` is not in the determinism ledger.** The census demanded the new scratch set be
+   fingerprinted or argued away, and told me which of the four answers to give. Registered as `Derived`.
+   `AgentState.SwingCharge` needed nothing: the body's own state goes to the fingerprint and to disk through
+   a reflection-built schema, so it entered the census and invalidated older saves by itself.
+2. **"only as many can fight a body as fit around it" read `one second took 0.0 health`.** The window was
+   exactly one swing long, so it could not contain a completed blow — a catastrophic-looking number produced
+   by a measurement, not by the game. Widened to four seconds and the cap binds as before: 3.0 health
+   against a ceiling of 24.
+
+### And one consequence I chose, which the chair should weigh
+
+The ring now takes **3.0 health over four seconds** where the old model gave about 4.4. The difference is
+the lost-swing rule biting in a scrum: bodies in a crowd jostle each other out of reach, lose their
+wind-up, and start again. **A crowded fight is now less lethal than an orderly one.**
+
+That is arguably right — a scrum *is* chaotic, and it gives §189's "the front holds four" a reason rather
+than just a cap. It is also a real change to what numbers buy, and the alternative is one line: decay the
+charge instead of dropping it, so a moment's jostle costs a fraction of a swing rather than all of it. The
+harness will price either.
+
+### Still owed on the chair's ask
+
+The animation half. `GaitOf` should take the strike clip's phase from `SwingCharge` rather than free-running,
+and the alignment wants the clip's **impact frame** so the blow and the picture coincide:
+
+```
+t = ((SwingCharge / SwingSeconds) + impactFraction) × duration   (mod duration)
+```
+
+which puts the impact exactly at the landing, with the previous blow's follow-through and the next
+wind-up filling the rest of the cycle. `impactFraction` should be **measured off the rig** — peak hand
+speed through the strike clip — the way `MeasureStride` and `MeasureFacing` already recover a stride and a
+forward, rather than guessed at. Guessing it is worse than leaving the clip free-running, because a
+deliberate-looking sync that is off by four tenths of a second reads as a bug rather than as noise.

@@ -32,6 +32,30 @@ internal sealed class ThreatSystem
     internal static float ReachShare = 1.1f;
 
     /// <summary>
+    /// How long one blow takes, from starting the swing to landing it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not <c>Assignment.AttackDwellSeconds</c>, and the two must not be confused.</b> §198. That one is
+    /// a <em>dwell</em> — how long the jobs layer needs a body to stand at what it is hitting before its leg
+    /// counts as done — and it is the constant that spent §193 being swept as though it were a rate of
+    /// blows. This is the rate of blows. They are on different layers and happen to be a second apart each,
+    /// which is exactly the coincidence that makes a shared name dangerous.
+    /// <para>
+    /// One second because it leaves the damage rate untouched: harm per blow is
+    /// <c>Strength x SwingSeconds</c>, so a militia at strength three deals three a second whether it is
+    /// dealt continuously or in one-second lumps, and no balance moves when the model does.
+    /// </para>
+    /// </remarks>
+    internal static float SwingSeconds = 1f;
+
+    /// <summary>Bodies whose swing has already been advanced this tick.</summary>
+    /// <remarks>
+    /// A body in reach of two enemies must not swing twice as fast for it. The outer loop is over
+    /// defenders, so without this an attacker standing between two of them would charge once per defender.
+    /// </remarks>
+    private readonly HashSet<int> swung = new();
+
+    /// <summary>
     /// How near two bodies must be for a blow to land. <b>The only definition of it.</b>
     /// </summary>
     /// <remarks>
@@ -211,6 +235,7 @@ internal sealed class ThreatSystem
         Crowded = 0;
         Contacts = 0;
         landed.Clear();
+        swung.Clear();
         UnderAttack = 0;
         Attacking = 0;
         for (var j = 0; j < bodies.Length; j++)
@@ -253,15 +278,36 @@ internal sealed class ThreatSystem
                 if (width > room) continue;
                 room -= width;
                 struck++;
+
+                // <b>A blow, not a drain.</b> §198: the swing charges while the body is in reach and lands
+                // when it is full, and the harm arrives in one lump at that instant. Reach was checked
+                // above, on this tick, so a body that has stepped out since starting its swing simply is
+                // not here to land it.
+                if (!swung.Add(index)) continue;
+                ref var swinging = ref bodies[index];
+                swinging.SwingCharge += deltaSeconds;
+                if (swinging.SwingCharge < SwingSeconds) continue;
+
+                swinging.SwingCharge -= SwingSeconds;
+                var harm = attacker.Strength * SwingSeconds;
                 landed.Add(attacker.Id);
-                bodies[j].Health -= attacker.Strength * deltaSeconds;
-                Dealt += attacker.Strength * deltaSeconds;
+                bodies[j].Health -= harm;
+                Dealt += harm;
             }
 
             Crowded += engaged.Count - struck;
             Contacts += struck;
             Attacking += struck;
             if (struck > 0) UnderAttack++;
+        }
+
+        // <b>A swing not seen through is lost.</b> §198: any body that was not in reach of something this
+        // tick drops whatever it had wound up, so a blow has to be held through to land it. This is the
+        // half that makes stepping away mean something, and it cannot exist at all while harm is a drain.
+        for (var i = 0; i < bodies.Length; i++)
+        {
+            if (swung.Contains(i)) continue;
+            bodies[i].SwingCharge = 0f;
         }
 
         for (var i = 0; i < bodies.Length; i++)

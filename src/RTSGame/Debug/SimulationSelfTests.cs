@@ -7226,15 +7226,21 @@ internal static class SimulationSelfTests
 
         // One second of it, applied a tick at a time.
         var reached = 0;
-        for (var tick = 0; tick < 30; tick++)
+        // <b>Four seconds, not one, because a blow now takes a whole second.</b> §198 made harm a discrete
+        // swing rather than a per-tick drain, and this window used to be exactly one swing long — so the
+        // measurement came back "one second took 0.0 health", which reads as a catastrophe and was a window
+        // that could not contain a completed blow. The claim being tested is about the CAP, and a cap needs
+        // several blows to bind against.
+        const float Window = 4f;
+        for (var tick = 0; tick < (int)(Window / SimulationWorld.FixedDeltaSeconds); tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
             reached = Math.Max(reached, world.Threat.Crowded);
         }
 
         var taken = health - world.Agents.Get(victim).Health;
-        var byTheSix = fit * UnitType.Villager.Strength;
-        var byTheTwelve = mob.Count * UnitType.Villager.Strength;
+        var byTheSix = fit * UnitType.Villager.Strength * Window;
+        var byTheTwelve = mob.Count * UnitType.Villager.Strength * Window;
 
         // <b>A ceiling, not an equality, and that distinction is the assertion.</b> The arithmetic says six
         // villagers do six a second; the twelve are also shoving each other, so several drift out of reach
@@ -7252,7 +7258,7 @@ internal static class SimulationSelfTests
         var passed = front && shutOut && fit == 6;
         Console.WriteLine(
             $"    12 villagers on one raider: {fit} fit by geometry, {reached} shut out at once; " +
-            $"one second took {taken:F1} health, at or under the {byTheSix:F0} the six that fit could do " +
+            $"{Window:F0} s took {taken:F1} health, at or under the {byTheSix:F0} the six that fit could do " +
             $"and well under the {byTheTwelve:F0} all twelve would have");
         return passed;
     }

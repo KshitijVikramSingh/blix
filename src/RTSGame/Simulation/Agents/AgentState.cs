@@ -99,6 +99,35 @@ internal struct AgentState
     public bool Standing;
 
     /// <summary>
+    /// How far into its current swing this body is, in seconds. Zero when it is not swinging.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because "harm happens when two bodies are near each other" is a proximity modal, and it is older
+    /// than the rigs.</b> §198. It made sense when a body was a cylinder: harm was
+    /// <c>Strength x deltaSeconds</c> for every tick two capsules overlapped, and there was nothing to
+    /// synchronise it with. Nearly every fault in the combat arc is downstream of it — a chase that parked
+    /// three and a half centimetres outside the reach and could never land a blow (§192), an arrival test at
+    /// 1.11 m against a reach of 0.814 m (§194), and <c>landed/N</c> reading 5 of 4 for four sections
+    /// because "landed" meant *in contact and admitted* rather than *hit something* (§189).
+    /// <para>
+    /// A blow with a duration dissolves all three. Reach is asked <em>once</em>, at the instant the blow
+    /// lands, instead of every tick of an overlap; a landing is an event, so it can be counted and drawn;
+    /// and the strike animation has a clock to share rather than a drain to approximate.
+    /// </para>
+    /// <para>
+    /// <b>Lost on losing contact, not banked.</b> A swing has to be seen through, so stepping out of reach
+    /// mid-swing means it misses — which is the property that makes dodging mean anything and is not
+    /// expressible at all while harm is continuous.
+    /// </para>
+    /// <para>
+    /// Fingerprinted and saved without being asked: <c>AgentState</c> goes to disk as raw bytes behind a
+    /// layout signature built by reflection, so this field enters the census and invalidates older saves on
+    /// its own. See <c>WorldSave.BodyLayoutSignature</c>.
+    /// </para>
+    /// </remarks>
+    public float SwingCharge;
+
+    /// <summary>
     /// The place this body has committed to defend, while <see cref="Standing"/> holds.
     /// </summary>
     /// <remarks>

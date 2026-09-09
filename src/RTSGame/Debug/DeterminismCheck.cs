@@ -170,6 +170,10 @@ internal static class DeterminismCheck
             "scratch for one body's already-covered alarms, cleared at the head of its own decision.",
         ["ThreatSystem.fellWithFaction"] =
             "who died this tick, mirrored from fallen with the faction kept, and read within the tick.",
+        ["ThreatSystem.swung"] =
+            "who has already advanced their swing this tick, cleared at the head of the harm pass. It " +
+            "exists because the pass is per DEFENDER: without it a body standing between two enemies " +
+            "would charge its swing once for each of them and hit twice as fast for being outnumbered.",
         ["ThreatSystem.engaged"] =
             "scratch for one body's assailants, cleared and refilled inside the harm pass.",
         ["ThreatSystem.hostiles"] =
