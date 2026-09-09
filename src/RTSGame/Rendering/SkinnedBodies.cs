@@ -65,6 +65,14 @@ internal sealed class SkinnedBodies : IDisposable
     private readonly BonePalette bonePalette;
     private readonly Pose pose;
     private readonly Pose restPose;
+    private readonly Pose blendPose;
+
+    /// <summary>How long the tail of a clip is faded into its own head.</summary>
+    /// <remarks>
+    /// Short enough that the motion is not softened, long enough that the join is not a jump. A quarter of
+    /// a second is about the shortest a human eye reads as a movement rather than a cut.
+    /// </remarks>
+    private const float WrapBlendSeconds = 0.22f;
     private readonly Matrix4x4 meshNode;
     private readonly Matrix4x4 normalise;
     private readonly Dictionary<string, AnimationClip> clips = new(StringComparer.OrdinalIgnoreCase);
@@ -170,6 +178,7 @@ internal sealed class SkinnedBodies : IDisposable
         bonePalette = new BonePalette(skeleton.BoneCount);
         pose = skeleton.CreateRestPose();
         restPose = skeleton.CreateRestPose();
+        blendPose = skeleton.CreateRestPose();
         paletteScratch = new Matrix4x4[MaxBodies * skeleton.BoneCount];
         palettePayload = new byte[MaxBodies * skeleton.BoneCount * 64];
         foreach (var clip in animations)
@@ -884,6 +893,32 @@ internal sealed class SkinnedBodies : IDisposable
         // has no leg tracks and the body sampled before it was mid-stride.
         pose.CopyFrom(restPose);
         clip.Sample(atSeconds, pose);
+
+        // <b>Cross-fade the wrap, because most clips are not loops. §176.</b>
+        //
+        // A continuous action needs a pose every frame for minutes, and the library's clips are mostly
+        // one-shots — `Fixing_Kneeling` kneels, works and stands. Repeat that and the last frame snaps back
+        // to the first every cycle, which is what "glitching mid construction" is and what no amount of
+        // stabilising WHICH action is chosen can fix. Reported four times; the first three fixes were all
+        // about the choice and none of them touched the playback.
+        //
+        // So the tail of a clip is blended into its own head. The blend is short enough not to soften the
+        // motion and long enough to hide the join, and it costs one extra sample on the frames where it
+        // applies. A clip whose ends already agree — anything named _Loop — is unaffected, because blending
+        // a pose with itself is that pose.
+        var duration = (float)clip.Duration;
+        if (duration > WrapBlendSeconds * 2f)
+        {
+            var intoTail = duration - (float)atSeconds;
+            if (intoTail < WrapBlendSeconds)
+            {
+                blendPose.CopyFrom(restPose);
+                clip.Sample(WrapBlendSeconds - intoTail, blendPose);
+                // Fully the tail at the start of the fade, fully the head by the wrap itself.
+                PoseBlend.Lerp(pose, blendPose, 1f - intoTail / WrapBlendSeconds, pose);
+            }
+        }
+
         StripRootMotion(skeleton, pose, restPose);
         skeleton.ComputeBonePalette(pose, bonePalette);
         bonePalette.Matrices.AsSpan().CopyTo(

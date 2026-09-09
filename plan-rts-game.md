@@ -13970,3 +13970,80 @@ carriers present the measured figures are unchanged.
 One test broke when a constant changed from the chair, which was instructive: it asserted "at least four
 distinct trunks", which was really asserting that a trunk takes one pair of hands. It now asserts the
 design — the crowd divides, and no trunk exceeds its capacity — so turning the number does not break it.
+
+## 176-178. Three symptoms, an A/B, and a red body that was doing its job
+
+Continuing to watch the two villages run themselves. Three reports, and the shape of the session repeats:
+the fix came from measuring, and twice the measurement said my earlier fix was the problem.
+
+### The construction glitch was the clip, not the choice
+
+Reported four times. The first three fixes were all about **which** action gets chosen — the flicker test
+proved that stable at six changes in fifty seconds — and none of them touched **playback**. The library's
+clips are mostly one-shots: `Fixing_Kneeling` kneels, works and stands. Repeat that for the minutes a
+building takes and the last frame snaps back to the first, every cycle.
+
+A clip's tail is now cross-faded into its own head over 0.22 s using `PoseBlend`. Anything genuinely looping
+is unaffected, since blending a pose with itself is that pose. **The lesson is that "the animation is
+glitching" has two entirely separate causes** — the choice flapping and the playback wrapping — and three
+rounds went into the first because it was the one I had already been wrong about.
+
+### Bodies whipping round on arrival
+
+A walking body faces its velocity; a body at its work faces the work. Approach a trunk from the far side and
+those differ by half a turn, and the swap was instantaneous — so the frame a body stopped, it spun. Both
+headings were right; the cut between them was not. Bodies now turn at a finite rate, on a dial beside the
+yaw one, because how fast a person looks like they turn is not a fact anybody can derive.
+
+### The red cylinders: an A/B that said I had been fixing the wrong layer
+
+Three collision changes had gone in for the chair's "restitution of 1 and no inertia, they look like
+go-karts" — a rate limit, standing rights for a working body, then right of way for a stalled one. The
+cylinders persisted, so instead of a fourth patch: revert the collision work and count reds on the same map
+and seed.
+
+| build | samples with a red body | stuck reports per sample | worst stall |
+|---|---|---|---|
+| with the collision changes | 34.5% | 0.50 | 2.75 s |
+| reverted | 25.0% | 0.23 | 4.07 s |
+| reverted + the arrival fix below | **16.0%** | **0.12** | 2.80 s |
+
+Two things fell out of that. **The cylinders predate the collision work entirely** — the baseline has red
+bodies and a four-second stall — so three fixes had gone into a layer that was not the cause. And **the
+collision changes doubled the stall rate**, buying a feel improvement nobody can measure at a cost that is
+plainly visible. They are reverted. If that feel is wanted, it has to be built so it cannot stall a body:
+right of way decided before the shares are chosen, with the red rate as its gate.
+
+### And the real cause was a body doing its job
+
+`StuckSeconds` accrues while a body **wants to move and is not moving**, and the wanting is read off the
+steering's preferred velocity — which never reaches zero, because there is always a last handful of
+centimetres a body would like and cannot have. So a villager standing correctly at a trunk accrued stuck
+time until the overlay painted it red. **A quarter of every stuck report in a hands-off village was a body
+working properly.**
+
+Arrival now stops the accrual, through `JobSystem.IsAtItsPlace` — a wrapper on the existing private
+predicate rather than a second one, because two notions of "is it there" is the near-synonym fault that has
+cost this codebase days. It halves the red rate against the baseline and takes the worst stall from 4.07 s
+to 2.80 s.
+
+**A red body that is not stuck is the overlay lying**, and it had been lying for as long as the overlay has
+existed. What is left is two genuine populations, split about evenly in the log: `contact=True` bodies that
+cannot get past each other, and `contact=False` bodies that cannot reach where they are going. A crowd
+problem and a routing problem, and the next move is to count them apart before touching either.
+
+### The instruments needed fixing three times, all the same way
+
+Worth recording because it is the failure underneath the session. Every one was a check whose pattern also
+matched success:
+
+- `strings` on a .NET binary cannot see UTF-16 literals — read as "the build is stale", which it was not.
+- `grep "Error(s)"` matches `0 Error(s)` — read as "the build failed", which it had not.
+- `tail -1` on a grep took the PASS line over the data line — the measurement was there and thrown away.
+- The stuck log read a threshold from the collision layer, so it could not be used to compare two versions
+  of the collision layer. Decoupled.
+- The body log only reported **selected** bodies, so in a hands-off run it stayed silent while the overlay
+  counted reds. The bodies that go wrong are the ones nobody is holding; they report themselves now.
+
+An instrument's output was being taken at face value exactly the way my own reasoning was, and both needed
+the same suspicion.

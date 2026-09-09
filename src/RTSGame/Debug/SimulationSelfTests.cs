@@ -168,6 +168,7 @@ internal static class SimulationSelfTests
         Check("a crowd posted on a building site all get to work", CrowdOnASiteAllGetToWork());
         Check("nine builders on one project make progress", NineBuildersOnOneProject());
         Check("a carrier lets builders build", CarriersLetBuildersBuild());
+        Check("a waiting builder's pose does not flicker", ABuilderWaitingDoesNotFlicker());
         Check("a finished project releases its builders", AFinishedProjectReleasesItsBuilders());
         Check("asked to chop, a body reaches the tree and cuts", AskedToChopTheyReachTheTree());
         Check("two cutters do not wedge in one trunk", TwoCuttersDoNotWedgeInOneTrunk());
@@ -6063,6 +6064,87 @@ internal static class SimulationSelfTests
             $"    nine builders over {samples} tick(s): working {working / total:P0}, " +
             $"carrying {carrying / total:P0}, walking empty {walkingEmpty / total:P0}, " +
             $"standing empty {standingEmpty / total:P0}; build work +{progressed:F0}");
+        return passed;
+    }
+
+    /// <summary>
+    /// A builder's pose does not flicker while its project waits for materials. §176.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reported three times and patched twice from the wrong end</b>, which is what a missing test looks
+    /// like. "The construction animation glitches instead of proceeding", then "starts glitching if
+    /// resources run out midway", then "still there". Each time the pose was being derived from whether the
+    /// jobs layer had an activity open — and a builder hunting for timber opens and abandons one as it
+    /// cycles legs, several times a second.
+    /// <para>
+    /// This asserts the property rather than any one cause: over half a minute of a project that keeps
+    /// running out of timber, a body's displayed action may change a handful of times as deliveries land,
+    /// and not hundreds. Any future fix that reads a flapping signal fails here regardless of which signal
+    /// it picks.
+    /// </para>
+    /// </remarks>
+    private static bool ABuilderWaitingDoesNotFlicker()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        // Deliberately mean: a distant store holding barely a load at a time, so the site is starved
+        // repeatedly and the leg-cycling this exists to survive happens over and over.
+        var store = world.AddNode(NodeKind.Granary, new Vector2(-45f, 0f), capacity: 4000, faction: us);
+        world.SeedStock(store, Resource.Wood, 40);
+
+        var site = world.AddNode(
+            NodeKind.ForwardDepot, new Vector2(0f, 0f), capacity: 200, faction: us, built: false);
+
+        var hands = new AgentId[4];
+        for (var i = 0; i < hands.Length; i++)
+        {
+            hands[i] = world.SpawnAgent(new Vector2(-4f, -2f + i * 0.9f), UnitType.Villager, us);
+        }
+
+        ref readonly var node = ref world.Nodes.Get(site);
+        world.QueueAssign(hands, Assignment.Hold(node.Position, 0.5f, node.FootprintRadius));
+
+        var last = new Dictionary<int, BodyAction>();
+        var changes = new Dictionary<int, int>();
+        var worst = 0;
+
+        for (var t = 0; t < 1500; t++)
+        {
+            Tick(world, 1);
+            foreach (var id in hands)
+            {
+                if (!world.Agents.Contains(id)) continue;
+                ref readonly var body = ref world.Agents.Get(id);
+                var action = BodyActions.For(
+                    in body,
+                    hurt: false,
+                    waiting: false,
+                    BodyActions.ForBuilder(
+                        in body,
+                        world.Nodes.Contains(body.Jobs.Project) &&
+                        Vector2.DistanceSquared(
+                            body.Position, world.Nodes.Get(body.Jobs.Project).Position) <=
+                        MathF.Pow(
+                            world.Nodes.Get(body.Jobs.Project).FootprintRadius + body.Radius * 2f + 1f, 2f),
+                        world.ProjectCanBeWorked(body.Jobs.Project)),
+                    out _);
+
+                if (last.TryGetValue(id.Value, out var was) && was != action)
+                {
+                    changes[id.Value] = changes.GetValueOrDefault(id.Value) + 1;
+                    worst = Math.Max(worst, changes[id.Value]);
+                }
+
+                last[id.Value] = action;
+            }
+        }
+
+        // Fifty seconds of a starved site. A change per delivery cycle is expected; per-tick alternation is
+        // the fault, and would run to hundreds.
+        var passed = worst <= 40;
+        Console.WriteLine(
+            $"    over 1500 ticks of a starved site, the busiest builder changed pose {worst} time(s) " +
+            "(alternating would be hundreds)");
         return passed;
     }
 

@@ -124,6 +124,23 @@ internal static class JobSystem
     /// once a crowd has taken the exact point the honest answer for everybody behind them is
     /// that they are here.
     /// </remarks>
+    /// <summary>
+    /// Whether this body has reached the place its assignment sent it to.
+    /// </summary>
+    /// <remarks>
+    /// <b>Exposed so the movement layer can stop calling an arrived body stuck.</b> Stuck time accrues
+    /// while a body wants to move and is not moving — and a body standing at its work still has a residual
+    /// preferred velocity for the last few centimetres it cannot have, so it accrued stuck time forever and
+    /// the overlay painted it red. A quarter of the stuck reports in a hands-off village were bodies that
+    /// had simply arrived.
+    /// <para>
+    /// A wrapper rather than a second predicate, deliberately: two notions of "is it there" is the exact
+    /// near-synonym fault that has cost this codebase days, and arrival is already defined once, here.
+    /// </para>
+    /// </remarks>
+    public static bool IsAtItsPlace(in AgentState agent) =>
+        agent.Jobs.HasAssignment && agent.Jobs.Activity != ActivityKind.None && IsAtPlace(in agent);
+
     private static bool IsAtPlace(in AgentState agent)
     {
         if (agent.Jobs.PlaceExtent <= 0f)

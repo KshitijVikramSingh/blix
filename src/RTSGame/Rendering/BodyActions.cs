@@ -55,10 +55,43 @@ internal static class BodyActions
     /// and what a person waiting for a delivery looks like.
     /// </para>
     /// </remarks>
-    public static BodyAction For(in AgentState agent, bool hurt, bool waiting, out bool locomotion)
+    /// <summary>
+    /// What a builder standing at its site is doing, or null if this body is not one.
+    /// </summary>
+    /// <remarks>
+    /// <b>Read from the project, never from the activity.</b> A builder's activity opens and abandons as the
+    /// jobs layer cycles its legs hunting for timber, so any pose derived from <c>IsWorking</c> alternates
+    /// at several hertz — which is what "the animation glitching during resource wait" is, reported three
+    /// times and patched twice from the wrong end. Both facts used here are slow: whether this body is
+    /// assigned to build, and whether the project has material delivered to work on. A delivery changes the
+    /// second one; nothing changes it per tick.
+    /// </remarks>
+    public static BodyAction? ForBuilder(in AgentState agent, bool atSite, bool canBeWorked)
+    {
+        if (agent.Jobs.Assignment.Kind is not (AssignmentKind.Build or AssignmentKind.Train)) return null;
+
+        // <b>At the site, not standing still.</b> Gating on velocity was the same mistake one layer along:
+        // a body at a work site is jostled constantly, so velocity crosses the walking threshold for single
+        // frames and the pose flipped between this decision and the general one. Whether a body is at the
+        // thing it is building is geometry, and geometry does not flap.
+        if (!atSite) return null;
+        return canBeWorked ? BodyAction.Build : BodyAction.Idle;
+    }
+
+    public static BodyAction For(in AgentState agent, bool hurt, bool waiting, out bool locomotion) =>
+        For(in agent, hurt, waiting, builder: null, out locomotion);
+
+    /// <summary>
+    /// As above, with <paramref name="builder"/> pre-decided from the project for a body at a build site.
+    /// </summary>
+    public static BodyAction For(
+        in AgentState agent, bool hurt, bool waiting, BodyAction? builder, out bool locomotion)
     {
         locomotion = false;
         if (hurt) return BodyAction.Flinch;
+
+        // A builder standing at its site: decided from the project, above the activity that cannot settle.
+        if (builder is { } settled) return settled;
 
         if (agent.Jobs.Assignment.Kind == AssignmentKind.Attack && JobSystem.IsWorking(in agent))
         {

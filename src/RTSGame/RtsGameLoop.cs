@@ -19,6 +19,7 @@ using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Collision;
 using RTSGame.Simulation.Economy;
 using RTSGame.Simulation.Jobs;
+using RTSGame.Simulation.Movement;
 using RTSGame.Simulation.Spatial;
 using RTSGame.Simulation.Terrain;
 
@@ -5307,6 +5308,7 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             if (bodyLogDue <= 0f)
             {
                 bodyLogDue = 1f;
+                ReportStuckBodies();
                 ReportSelectedBodies();
             }
         }
@@ -7198,7 +7200,10 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
     {
         var id = agent.Id.Value;
         var hurt = id >= 0 && id < hurtUntil.Length && hurtUntil[id] > 0f;
-        return BodyActions.For(in agent, hurt, WaitingOnMaterials(in agent), out locomotion);
+        var builder = BodyActions.ForBuilder(
+            in agent, AtItsProject(in agent), simulation.ProjectCanBeWorked(agent.Jobs.Project));
+        return BodyActions.For(
+            in agent, hurt, WaitingOnMaterials(in agent), builder, out locomotion);
     }
 
     /// <summary>
@@ -7214,6 +7219,25 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
 
     private float[] hurtUntil = new float[256];
     private float[] lastHealth = new float[256];
+
+    /// <summary>
+    /// Whether this body is standing at the thing it is building.
+    /// </summary>
+    /// <remarks>
+    /// Geometry rather than state, deliberately: a builder walking to a store for timber is not at its
+    /// project and should read as walking, and a builder beside the half-built wall is at it whether or not
+    /// the jobs layer has an activity open this tick. The distance is to the PROJECT, not to
+    /// <c>Jobs.Place</c> — on the fetching leg the place is the store, and a body standing at a granary is
+    /// not building anything.
+    /// </remarks>
+    private bool AtItsProject(in AgentState agent)
+    {
+        var project = agent.Jobs.Project;
+        if (!simulation.Nodes.Contains(project)) return false;
+        ref readonly var node = ref simulation.Nodes.Get(project);
+        var reach = node.FootprintRadius + agent.Radius * 2f + 1f;
+        return Vector2.DistanceSquared(agent.Position, node.Position) <= reach * reach;
+    }
 
     /// <summary>
     /// Whether this body's work cannot proceed for want of materials on the project.
@@ -7261,7 +7285,14 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             var hurtNow = index < hurtUntil.Length && hurtUntil[index] > 0f;
             // The same overload the draw uses, or the log reports a decision nobody made — it printed
             // "wanted Build" while the renderer had chosen Idle, because it left the waiting flag out.
-            var action = BodyActions.For(in agent, hurtNow, WaitingOnMaterials(in agent), out _);
+            var action = BodyActions.For(
+                in agent,
+                hurtNow,
+                WaitingOnMaterials(in agent),
+                BodyActions.ForBuilder(
+                        in agent, AtItsProject(in agent),
+                        simulation.ProjectCanBeWorked(agent.Jobs.Project)),
+                out _);
             var shown = index < heldAction.Length ? heldAction[index] : action;
             if (shown == loggedAction[index]) continue;
 
@@ -7277,6 +7308,53 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         }
     }
 
+    /// <summary>
+    /// How long a body must be making no progress before the log calls it stuck.
+    /// </summary>
+    /// <remarks>
+    /// The same figure the movement overlay uses to paint a body red, held here rather than read from the
+    /// collision layer: an instrument that depends on a constant belonging to the thing it measures cannot
+    /// be used to compare two versions of that thing, which is exactly what it was needed for.
+    /// </remarks>
+    private const float RedStuckSeconds = 0.35f;
+
+    /// <summary>
+    /// Reports any body the movement layer has given up on, whether or not it is selected.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because the bodies that go wrong are the ones nobody is holding.</b> The per-selection log is
+    /// useless in a hands-off run: both villages are bot-driven, nothing is selected, and the log stays
+    /// silent while the overlay counts red bodies. So the ones actually in trouble report themselves.
+    /// <para>
+    /// And it prints the distinction that decides the fix, which I had been conflating: <c>StuckSeconds</c>
+    /// is lack of PROGRESS, not overlap. A body can be red with nothing touching it — an unreachable
+    /// destination, a blocked path, an oscillation — and that wants a routing fix, while a body red because
+    /// it is wedged wants a separation fix. <c>contact</c> and <c>toPlace</c> and <c>retries</c> separate
+    /// them at a glance.
+    /// </para>
+    /// </remarks>
+    private void ReportStuckBodies()
+    {
+        var reported = 0;
+        foreach (ref readonly var agent in simulation.Agents.All)
+        {
+            if (!agent.IsAlive || agent.StuckSeconds <= RedStuckSeconds) continue;
+            if (reported++ >= 4) break;
+
+            var jobs = agent.Jobs;
+            Console.WriteLine(
+                $"  [stuck] #{agent.Id.Value} {agent.Role} f{agent.Faction.Value} " +
+                $"stuck={agent.StuckSeconds:F2}s contact={agent.HadAgentContactThisTick} " +
+                $"| {jobs.Assignment.Kind}/{jobs.Assignment.Cargo} leg{jobs.Leg} " +
+                $"activity={jobs.Activity} interrupt={jobs.Interrupt} " +
+                $"| at=({agent.Position.X:F1},{agent.Position.Y:F1}) " +
+                $"want=({agent.RequestedDestination.X:F1},{agent.RequestedDestination.Y:F1}) " +
+                $"hasDest={agent.HasDestination} toPlace={JobSystem.DistanceToPlace(in agent):F2} " +
+                $"retries={jobs.Retries} settled={jobs.SettledNearby} " +
+                $"speed={agent.Velocity.Length():F2} yielding={agent.IsVisiblyYielding}");
+        }
+    }
+
     /// <summary>One line per selected body: what it is doing and why.</summary>
     private void ReportSelectedBodies()
     {
@@ -7287,7 +7365,14 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             if (!simulation.Agents.Contains(id)) continue;
             ref readonly var agent = ref simulation.Agents.Get(id);
             var hurtNow = id.Value >= 0 && id.Value < hurtUntil.Length && hurtUntil[id.Value] > 0f;
-            var action = BodyActions.For(in agent, hurtNow, WaitingOnMaterials(in agent), out _);
+            var action = BodyActions.For(
+                in agent,
+                hurtNow,
+                WaitingOnMaterials(in agent),
+                BodyActions.ForBuilder(
+                        in agent, AtItsProject(in agent),
+                        simulation.ProjectCanBeWorked(agent.Jobs.Project)),
+                out _);
             var clip = bodies?.For(action);
             var jobs = agent.Jobs;
             var place = jobs.Place;
@@ -7356,6 +7441,42 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
     /// </para>
     /// </remarks>
     private const float GaitMetresPerCycle = 1.5f;
+
+    /// <summary>The heading each body is drawn at, turned towards its target rather than snapped to it.</summary>
+    /// <remarks>
+    /// <b>View state, and the reason a body stops whipping round on arrival.</b> A walking body faces its
+    /// velocity and a working body faces its work, and approaching a trunk from the far side puts half a
+    /// turn between those two answers — so the frame it stopped, it spun. Turning at a finite rate makes
+    /// the disagreement into a movement instead of a cut, and costs one float per body that no rule reads.
+    /// </remarks>
+    private float[] drawnYaw = new float[256];
+    private bool[] hasDrawnYaw = new bool[256];
+
+    /// <summary>Moves this body's drawn heading towards <paramref name="target"/> at the turn rate.</summary>
+    private float TurnedTowards(int id, float target)
+    {
+        if (id < 0) return target;
+        if (id >= drawnYaw.Length)
+        {
+            var grown = Math.Max(id + 1, drawnYaw.Length * 2);
+            Array.Resize(ref drawnYaw, grown);
+            Array.Resize(ref hasDrawnYaw, grown);
+        }
+
+        // A body seen for the first time faces where it should, rather than turning from an invented angle.
+        if (!hasDrawnYaw[id])
+        {
+            hasDrawnYaw[id] = true;
+            drawnYaw[id] = target;
+            return target;
+        }
+
+        // Shortest way round, so a turn through north does not go the long way.
+        var delta = MathF.IEEERemainder(target - drawnYaw[id], MathF.Tau);
+        var step = bodyFeel.TurnDegreesPerSecond * MathF.PI / 180f * frameSeconds;
+        drawnYaw[id] += MathF.Abs(delta) <= step ? delta : MathF.Sign(delta) * step;
+        return drawnYaw[id];
+    }
 
     /// <summary>Per-body gait phase in seconds, indexed by agent id. View state; never fingerprinted.</summary>
     private float[] gaitPhase = new float[256];
@@ -8823,8 +8944,10 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 // villager, whose mesh faces +X; a rigged glTF humanoid usually faces along Z instead, and
                 // the difference reads from the chair as bodies walking sideways. SkinnedBodies measures it
                 // off the rig — ankle to toe is forward on any humanoid — so no asset needs a hand-set dial.
-                var skinnedYaw = yaw + (bodies?.FacingOffsetRadians ?? 0f) +
-                                 MathF.Round(bodyFeel.YawQuarters) * MathF.PI * 0.5f;
+                var skinnedYaw = TurnedTowards(
+                    agent.Id.Value,
+                    yaw + (bodies?.FacingOffsetRadians ?? 0f) +
+                    MathF.Round(bodyFeel.YawQuarters) * MathF.PI * 0.5f);
                 var placement = Matrix4x4.CreateScale(bodyHeight) *
                                 Matrix4x4.CreateRotationY(yaw) *
                                 Matrix4x4.CreateTranslation(position.X, height, position.Y);

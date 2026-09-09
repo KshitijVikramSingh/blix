@@ -69,6 +69,25 @@ internal sealed class BodyFeelSettings
     [Tune(0.0, 3.0, Label = "body yaw (quarter turns)", Group = "bodies")]
     public float YawQuarters;
 
+    /// <summary>
+    /// How fast a drawn body may turn to face where it is going or what it is working.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because the two headings disagree and swapping between them was instant.</b> A body walking faces
+    /// its velocity; a body at its work faces the work. Approach a tree from the far side and those differ
+    /// by up to half a turn, so the moment it stopped it snapped round — reported from the chair as bodies
+    /// "weirdly and violently whipping around" as they arrive. Both headings were right; the cut between
+    /// them was not.
+    /// <para>
+    /// A dial rather than a constant, on the same rule as the rest of this panel: how fast a person looks
+    /// like they turn is not a fact anybody can derive. Five hundred degrees a second is a brisk
+    /// half-turn in under a fifth of a second — quick enough not to read as sluggish, slow enough to be a
+    /// turn rather than a cut.
+    /// </para>
+    /// </remarks>
+    [Tune(90.0, 2000.0, Label = "turn rate (deg/s)", Group = "bodies")]
+    public float TurnDegreesPerSecond = 500f;
+
     [Tune(0.5, 12.0, Label = "top speed (m/s)")]
     public float MaximumSpeed = AgentDefaults.MaximumSpeed;
 

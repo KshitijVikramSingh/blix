@@ -3082,6 +3082,21 @@ internal sealed class SimulationWorld
         RetargetBuilderToProject(ref agent, projectId);
     }
 
+    /// <summary>
+    /// Whether this project has material delivered that labour could be spent on right now.
+    /// </summary>
+    /// <remarks>
+    /// <b>Exposed for the view, because it is the stable half of a state the jobs layer keeps flapping.</b>
+    /// A builder's activity opens and closes as it cycles legs looking for timber, so a pose read off
+    /// "is it working this tick" alternates several times a second — reported from the chair three separate
+    /// times as the construction animation glitching. Whether there is anything to build with changes on the
+    /// scale of a delivery, which is what a pose needs.
+    /// </remarks>
+    public bool ProjectCanBeWorked(NodeId project) =>
+        Nodes.Contains(project) &&
+        Nodes.Get(project).HasStructuralProject &&
+        ProjectHasBuildFront(in Nodes.Get(project));
+
     /// <summary>Whether delivered material permits at least another fraction of a labour-second.</summary>
     private static bool ProjectHasBuildFront(in EconomyNode project)
     {
@@ -5672,7 +5687,17 @@ internal sealed class SimulationWorld
                 continue;
             }
 
-            if (wantsMovement && barelyMoving)
+            // <b>A body that has arrived is not stuck. §178.</b>
+            //
+            // Stuck time accrues while a body wants to move and does not move, and the wanting is read off
+            // the steering's preferred velocity — which does not go to zero when a body reaches its work,
+            // because there is always a last handful of centimetres it would like and cannot have. So a
+            // villager standing correctly at a trunk accrued stuck time until the overlay painted it red,
+            // and a quarter of every stuck report in a hands-off village was a body doing its job.
+            //
+            // Measured rather than assumed: reverting the collision changes made this population no smaller,
+            // which is what said the fault was here and not there.
+            if (wantsMovement && barelyMoving && !JobSystem.IsAtItsPlace(in agent))
             {
                 agent.StuckSeconds += deltaSeconds;
             }
