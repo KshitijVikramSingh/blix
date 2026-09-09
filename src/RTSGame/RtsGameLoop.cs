@@ -5328,6 +5328,7 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             {
                 stallCensusDue = StallCensusInterval;
                 Console.WriteLine(stalls.Describe("as played, so far"));
+                Console.WriteLine(stalls.DescribeKeptFromWork());
             }
         }
 
@@ -7403,6 +7404,16 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 $"act={jobs.Activity}" +
                 (JobSystem.IsWorking(in agent) ? " underway" : " en route") +
                 $" interrupt={jobs.Interrupt} " +
+                // <b>The fields that separate the candidates.</b> §186: three villagers spent a whole run
+                // under an Order interrupt inside the enemy's village, and the log could not say which of
+                // three things had ordered them there — the threat system marching them, a stow errand
+                // re-issuing a move every time it lost its destination, or the bot. Each leaves a different
+                // trace, and none of those traces was printed. What a body is carrying, whether it is on a
+                // putting-down errand and where to, and what its own locomotion thinks it is doing.
+                $"| carry={jobs.CarriedUnits}/{agent.CarryCapacity} of {jobs.Carrying} " +
+                $"stowing={agent.PuttingDown}" +
+                (agent.PuttingDown ? $"->{agent.StowInto.Value}" : string.Empty) +
+                $" locomotion={agent.LocomotionState} " +
                 $"| at=({agent.Position.X:F1},{agent.Position.Y:F1}) " +
                 $"want=({agent.RequestedDestination.X:F1},{agent.RequestedDestination.Y:F1}) " +
                 $"hasDest={agent.HasDestination} toPlace={JobSystem.DistanceToPlace(in agent):F2} " +

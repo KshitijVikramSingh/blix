@@ -99,6 +99,21 @@ internal sealed class StallCensus
     private int[] legsSeen = Array.Empty<int>();
     private int[] legsTotal = Array.Empty<int>();
 
+    // <b>A second question the first one structurally cannot see.</b> §186: three villagers spent a
+    // thirty-four-minute run holding a reaping job while standing in the enemy's village, and the stall
+    // census reported 519 of 519 spells healthy — correctly, because StuckSeconds only accrues while a body
+    // WANTS to move and is not moving. A body shuffling about under an order wants to move and does move.
+    // So "not getting anywhere" and "not doing its job" are different questions, and only the second one
+    // finds a body that is content to be somewhere useless.
+    //
+    // They live in one class because they are one sweep over one definition of working. They are reported
+    // separately because a run can be perfect on one and terrible on the other, which is what happened.
+    private float[] keptFromWorkSince = Array.Empty<float>();
+    private float[] worstKeptFromWork = Array.Empty<float>();
+    private AssignmentKind[] keptFrom = Array.Empty<AssignmentKind>();
+    private InterruptKind[] keptBy = Array.Empty<InterruptKind>();
+    private float[] keptAtDistance = Array.Empty<float>();
+
     // Spells whose grace window has not run out yet, so productivity is still undecided.
     private readonly List<int> pendingBody = new();
     private readonly List<Episode> pendingEpisode = new();
@@ -172,6 +187,24 @@ internal sealed class StallCensus
             var raw = agent.Jobs.LegsCompleted;
             if (raw > legsSeen[index]) legsTotal[index] += raw - legsSeen[index];
             legsSeen[index] = raw;
+
+            // <b>How long it has held a job without doing any of it.</b> An unassigned body is not being
+            // kept from anything, and a body at its work resets the clock.
+            if (!agent.Jobs.HasAssignment || JobSystem.IsWorking(in agent))
+            {
+                keptFromWorkSince[index] = elapsedSeconds;
+            }
+            else
+            {
+                var away = elapsedSeconds - keptFromWorkSince[index];
+                if (away > worstKeptFromWork[index])
+                {
+                    worstKeptFromWork[index] = away;
+                    keptFrom[index] = agent.Jobs.Assignment.Kind;
+                    keptBy[index] = agent.Jobs.Interrupt;
+                    keptAtDistance[index] = JobSystem.DistanceToPlace(in agent);
+                }
+            }
 
             PeakStuckSeconds = MathF.Max(PeakStuckSeconds, agent.StuckSeconds);
             var stalled = agent.StuckSeconds > StallReporting.StalledSeconds;
@@ -290,6 +323,45 @@ internal sealed class StallCensus
         Array.Resize(ref doing, size);
         Array.Resize(ref legsSeen, size);
         Array.Resize(ref legsTotal, size);
+        Array.Resize(ref keptFromWorkSince, size);
+        Array.Resize(ref worstKeptFromWork, size);
+        Array.Resize(ref keptFrom, size);
+        Array.Resize(ref keptBy, size);
+        Array.Resize(ref keptAtDistance, size);
+        for (var i = 0; i < size; i++)
+        {
+            if (keptFromWorkSince[i] == 0f && worstKeptFromWork[i] == 0f)
+            {
+                keptFromWorkSince[i] = elapsedSeconds;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The bodies that held a job longest without doing any of it, worst first.
+    /// </summary>
+    /// <remarks>
+    /// <b>The zombie report.</b> §186. Walking to a distant field is legitimately a minute, so this is a
+    /// tail and not a threshold: what matters is a body whose stretch is out of all proportion to the
+    /// others'. Each one names what it was assigned to, what interrupt was holding it, and how far it was
+    /// standing from the place it was supposed to be — which together say whether it was ordered away,
+    /// could not get there, or simply never tried.
+    /// </remarks>
+    public string DescribeKeptFromWork(int worst = 4)
+    {
+        var ranked = Enumerable.Range(0, worstKeptFromWork.Length)
+            .Where(i => worstKeptFromWork[i] > 0f)
+            .OrderByDescending(i => worstKeptFromWork[i])
+            .Take(worst)
+            .Select(i =>
+                $"#{i} {worstKeptFromWork[i]:F0}s on {keptFrom[i]}" +
+                (keptBy[i] == InterruptKind.None ? string.Empty : $" under {keptBy[i]}") +
+                $" at {keptAtDistance[i]:F0} m from its place")
+            .ToArray();
+
+        return ranked.Length == 0
+            ? "  [kept from work] nobody held a job without working at it"
+            : "  [kept from work] worst: " + string.Join("; ", ranked);
     }
 
     /// <summary>

@@ -301,6 +301,7 @@ internal static class TwoSettlementScenarios
 
         stalls.Close(world);
         Console.WriteLine(stalls.Describe($"{years:0.##} year(s), nobody steering"));
+        Console.WriteLine(stalls.DescribeKeptFromWork());
 
         foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");
         if (faults.Count == 0)

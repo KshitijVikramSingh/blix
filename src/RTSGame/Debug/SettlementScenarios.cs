@@ -332,6 +332,7 @@ internal static class SettlementScenarios
 
         stalls.Close(world);
         Console.WriteLine(stalls.Describe($"{minutes:F0} min under raid"));
+        Console.WriteLine(stalls.DescribeKeptFromWork());
 
         foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");
         return faults.Count > 0 ? 1 : 0;

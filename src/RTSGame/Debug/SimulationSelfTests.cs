@@ -162,6 +162,7 @@ internal static class SimulationSelfTests
         Check("a village is not founded in a forest", AVillageIsNotFoundedInAForest());
         Check("the bot budgets what a wall really costs", TheBotKnowsWhatAWallCosts());
         Check("a guard comes home after a fight", AGuardComesHome());
+        Check("a villager comes home after a fight", AVillagerComesHome());
         Check("seeing a neighbour moves the garrison", ContactMovesTheGarrison());
         Check("an attack ends with its target", AnAttackEndsWithItsTarget());
         Check("a crowd posted on one tree spreads across the wood", PostedCrowdSpreadsAcrossTheWood());
@@ -5705,6 +5706,105 @@ internal static class SimulationSelfTests
     /// indistinguishable from a defender doing what it was told. This fails without the release in StandDown
     /// — an Order interrupt never expires, so the body would sit on the ground it stopped on forever.
     /// </remarks>
+    /// <summary>
+    /// A villager committed to a fight goes back to its field. §186.
+    /// </summary>
+    /// <remarks>
+    /// <b>The claim is written in the code and was never checked.</b> The call site of
+    /// <c>ThreatSystem.Defend</c> says the march goes through QueueMove, "the same door a player's order
+    /// goes through — so the assignment is suspended and never rewritten, and <em>a villager who fights
+    /// goes back to its field afterwards</em>". <see cref="AGuardComesHome"/> checks that sentence for a
+    /// guard. Nothing checked it for a villager, which is the case the sentence is about.
+    /// <para>
+    /// <b>Several hands, not one, and that is what the first attempt got wrong.</b> §30 weighs whether the
+    /// people who can see a threat could hold it, so a lone villager against a raider declines and runs —
+    /// the first version of this test spawned one, watched it never leave its field, and "failed" for a
+    /// reason that had nothing to do with the bug. A crowd that can hold the thing is what commits, and a
+    /// commitment is what this is about.
+    /// </para>
+    /// <para>
+    /// Why it cannot come home on its own: a march is an <c>InterruptKind.Order</c>, and
+    /// <c>ServeInterrupt</c> returns early for those <b>forever</b> unless the assignment is a
+    /// <see cref="AssignmentKind.Guard"/>. <c>StandDown</c> is the one thing that hands a body back, and it
+    /// tests for Guard too. §143 keyed that release on the assignment rather than on who gave the order,
+    /// deliberately — and this is the case the choice does not cover.
+    /// </para>
+    /// <para>
+    /// Found in the gate rather than by eye in the end: the raid leg's own census reports four villagers
+    /// held on <c>Work</c> under an <c>Order</c> for 272-280 seconds of a 360-second run, standing one to
+    /// nine metres from their fields.
+    /// </para>
+    /// </remarks>
+    private static bool AVillagerComesHome()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        var granary = world.AddNode(NodeKind.Granary, Vector2.Zero, capacity: 4000, faction: us);
+        world.SeedStock(granary, Resource.Grain, 400);
+
+        // <b>Inside ThreatSystem.ThreatMetres of the granary, which is 12 m.</b> The second attempt at
+        // this test put the field at 26 m and watched nobody leave: the threat is simply not visible from
+        // there, so §30 has nothing to weigh and the fixture measured its own geometry. Far enough that
+        // "came back" is a different place from "never left", near enough that there is a decision to make.
+        var field = world.AddNode(NodeKind.Farm, new Vector2(12f, 0f), capacity: 400, faction: us);
+        // Copied out of the store rather than held by reference, because the checks below are lambdas and a
+        // ref local cannot cross into one.
+        var cropAt = world.Nodes.Get(field).Position;
+        var cropExtent = world.Nodes.Get(field).FootprintRadius;
+
+        var hands = new AgentId[6];
+        for (var i = 0; i < hands.Length; i++)
+        {
+            hands[i] = world.SpawnAgent(
+                new Vector2(12f, -2f + i * 0.8f), UnitType.Villager, us);
+        }
+
+        world.QueueAssign(hands, Assignment.Hold(cropAt, 0.5f, cropExtent));
+        Tick(world, 120);
+        var atWork = hands.Count(id =>
+            world.Agents.Get(id).Jobs.Assignment.Kind == AssignmentKind.Work);
+
+        var raider = world.SpawnAgent(new Vector2(0.5f, 0f), UnitType.Raider, new FactionId(1));
+        world.Agents.Get(raider).Directed = true;
+        Tick(world, 900);
+        var wentOut = hands.Count(id =>
+            world.Agents.Contains(id) &&
+            Vector2.Distance(world.Agents.Get(id).Position, cropAt) > 6f);
+
+        // Removed rather than fought, so this is about standing down and not about combat.
+        if (world.Agents.Contains(raider)) world.DespawnAgents(new[] { raider });
+        Tick(world, 2400);
+
+        var living = hands.Where(world.Agents.Contains).ToArray();
+        var home = living.Count(id =>
+            Vector2.Distance(world.Agents.Get(id).Position, cropAt) < 6f);
+        var held = living.Count(id => world.Agents.Get(id).Jobs.IsInterrupted);
+
+        // <b>Two failure modes, kept apart on purpose.</b> A fight is chaotic — a different body dies
+        // first and everything after it changes — so this fixture can fail either because the bug is
+        // present or because nobody was committed and it tested nothing. The first two attempts at this
+        // test failed the second way (a field outside ThreatMetres, then a lone villager that declined),
+        // and both looked like a finding. So the line says which it was.
+        var exercised = atWork > 0 && wentOut > 0;
+        if (!exercised)
+        {
+            Console.WriteLine(
+                $"    INCONCLUSIVE — {atWork}/{hands.Length} took the field and {wentOut} left it, so no " +
+                "commitment happened and the return path was never exercised. Check the field against " +
+                $"ThreatSystem.ThreatMetres ({Simulation.Threat.ThreatSystem.ThreatMetres:F0} m).");
+            return false;
+        }
+
+        // Whoever went out has to come back, and nobody may still be under an order forty seconds after
+        // the danger left the world.
+        var passed = held == 0 && home == living.Length;
+        Console.WriteLine(
+            $"    {atWork}/{hands.Length} took the field, {wentOut} left it for a raider at the granary; " +
+            $"forty seconds after the danger went, {home}/{living.Length} are back at the field and " +
+            $"{held} are still under an interrupt");
+        return passed;
+    }
+
     private static bool AGuardComesHome()
     {
         var world = new SimulationWorld(240f);

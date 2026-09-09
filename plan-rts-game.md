@@ -14533,3 +14533,147 @@ the paint takes, or §182's fault returns from the other side.
 - **§180's throw.** Still owed, and §183 established the trigger cannot be a stopwatch. If the paint moves
   to a value nothing ever reaches, then the throw and the paint want the same number, and the ratchet §180
   asked for becomes reachable after all — for the first time against a threshold that means something.
+
+## 186. The zombie villagers, reconstructed — and there was no fight
+
+Reported from the chair at the end of a thirty-four-minute hands-off run: *"I think we have zombie villagers
+after the fight"*, then *"reconstruct it from the logs, maybe there was no fight"*. The second half is
+right, and the log carries enough to say what did happen — up to one point where it runs out, which is the
+useful part of the answer.
+
+### There was no fight
+
+- **No raid fired.** Zero raid lines in the whole run.
+- **Nobody died.** The agent count went *up*: 30 → 32 → 33. Faction 1 held 17 people from start to finish.
+
+### Who the zombies are
+
+Of 433 stuck reports, 280 carry `interrupt=Order` — in a run where nobody issued an order. All 280 belong
+to exactly three bodies:
+
+```
+106  #31 Villager f0 Order
+100  #30 Villager f0 Order
+ 74  #32 Villager f0 Order
+```
+
+Ids 30, 31 and 32 in a run that started with 30 bodies, so **these are faction 0's three newborns**. Every
+line of theirs, for the whole run:
+
+```
+#30 Villager f0 | Work/Grain leg0 act=Reaping interrupt=Order
+   at=(93.7,-46.2) want=(93.8,-53.0) hasDest=True toPlace=154.35 retries=0 settled=False speed=0.79
+```
+
+The geometry settles it. Faction 0 founded at **(145, 100)**; faction 1 at **(100, −65)**. The zombies sit
+at **~(95, −45)** — twenty metres inside the enemy's village — and √(50² + 145²) ≈ 153 m is exactly the
+`toPlace` they report. **Three of our villagers walked a hundred and fifty metres into the neighbour's
+village and milled about in it for half an hour, while holding a job to reap a field back home.**
+
+### Why they cannot come home, which is settled
+
+`retries=0` throughout: the jobs layer never failed to route them, because it was never asked — it was
+suspended the entire time. The mechanism is §143's, read the other way round:
+
+- a march is a `QueueMove`, which goes through the command layer, which calls `JobSystem.Interrupt` →
+  `InterruptKind.Order`;
+- `ServeInterrupt` returns early for an `Order` **forever**, unless the assignment is a
+  `AssignmentKind.Guard`. Theirs is `Work`;
+- `StandDown` is the one thing that hands a body back, and it too tests for `Guard`;
+- and `UnderOrders` is `HasDestination || not idle`, which is true every tick for a body shuffling about, so
+  the interrupt grace never even begins to run down.
+
+§143 wrote that rule deliberately in terms of the assignment rather than of who gave the order. This is the
+case that choice does not cover: **the escape hatch has exactly one door, and villagers do not have a key.**
+
+Worse, the claim is written down. The call site of `ThreatSystem.Defend` says the march goes through the
+same door a player's order does, "so the assignment is suspended and never rewritten, and *a villager who
+fights goes back to its field afterwards*". `AGuardComesHome` checks that sentence for a guard. **Nothing
+checked it for a villager, which is the case the sentence is about.**
+
+### What is NOT settled, and the failed reproduction
+
+**What ordered them there is unknown.** Three things issue commands and therefore Order interrupts, and
+the log prints nothing that separates them: the threat system marching bodies (`MarchAgainstThreat`), a
+stow errand re-issuing a move every time it loses its destination (`AdvanceStowing`, which does exactly
+that whenever `!HasDestination`), and the bot.
+
+I wrote a self-test to reproduce it — a villager on a field, a raider at the granary — and **it failed for
+the wrong reason**: `wentOut=False`, `came back to 0.0 m`, `interrupt=None`. The villager was never committed
+at all, so the fixture never exercised the return path and proved nothing about it. Parked rather than kept:
+a test that fails for a reason other than the bug is worse than no test, because the next person to see it
+go green will think something was fixed. This is the §183 lesson arriving one level up — *a round number is
+a question about the instrument*, and so is a red one.
+
+So the stuck line now prints what would have separated them: cargo, whether the body is on a putting-down
+errand and to which store, and its own locomotion state.
+
+### The instrument that could not have seen this, and its replacement
+
+The stall census called that run perfect — **519 of 519 spells followed by work, nothing stranded** — and it
+was right. `StuckSeconds` accrues only while a body *wants* to move and is not moving, and a body shuffling
+about under an order wants to move and does move. **A zombie is invisible to it by construction.**
+
+So "not getting anywhere" and "not doing its job" are two questions, and only the second finds a body
+content to be somewhere useless. `StallCensus` now tracks both in one sweep: the longest stretch each body
+holds an assignment without working, with what it was assigned to, what interrupt held it, and how far it
+stood from its place. First run of it on the headless two-village leg found a different tail:
+
+```
+[kept from work] worst: #12 247s on Work at 1 m from its place; #6 99s on Work at 1 m from its place
+```
+
+**One metre from its place, holding a reaping job, not working, for four minutes** — and no interrupt at
+all, so a second and unrelated kind of zombie from the ordered-away one. Whether that is a body legitimately
+mid-round-trip or an arrival threshold it cannot quite clear is the next thing to find out, and it is a
+question the same instrument can now answer.
+
+### §186 continued: reproduced in the gate, and the fix is a decision
+
+The instrument found it without the chair. The **raid leg** — already in the default gate — reports:
+
+```
+[kept from work] worst: #5 280s on Work under Order at 6 m from its place;
+                        #6 273s on Work under Order at 5 m; #10 273s at 1 m; #7 272s at 9 m
+```
+
+Four villagers held under an `Order` for **272–280 seconds of a 360-second run**, standing one to nine
+metres from their own fields. So this was in the gate the whole time and nothing was looking at it. It also
+means my §183 retraction was too generous to that leg: a settlement raided every forty-five seconds *should*
+lose most of its labour, and separately **four of its hands are frozen by a bug**, and the second is not
+excused by the first.
+
+`AVillagerComesHome` now reproduces it headless, and took three attempts to make honest:
+
+1. field at 26 m — nobody left, because that is outside `ThreatSystem.ThreatMetres` (12 m) and nothing could
+   see the raider. Failed for the wrong reason.
+2. six hands instead of one — still nothing, same geometry fault.
+3. field at 12 m — **2 of 6 commit, 2 die, and forty seconds after the danger leaves the world all four
+   survivors are still under an interrupt with only two of them back at the field.**
+
+The test now separates those two failure modes and prints `INCONCLUSIVE` when no commitment happened, because
+a fixture that fails without exercising the path looks exactly like a finding — twice, here.
+
+### The choice, which is §143's decision to revisit
+
+The behaviour wanted is already written down: *"a villager who fights goes back to its field afterwards."*
+The mechanism is not, and neither option is free:
+
+- **Provenance.** `InterruptKind` gains a defence-issued kind that expires by grace, while a player's
+  `Order` still holds. §143 rejected provenance for putting it "into a layer that has done without it" — and
+  this is the case that choice does not cover. Cost: commands are records the save format writes, so
+  carrying the source through the command layer touches the save.
+- **Every assignment behaves like a Guard.** Drop the early return, so an order always eventually yields to
+  the standing assignment, and a player who wants a body to stay somewhere gives it a `Hold` rather than a
+  move order. Cost: it changes what a player's right-click means — §143's "a body sent somewhere reaches it
+  and stays posted" stops being true.
+
+**`StandDown` cannot be the fix, and §143 already measured why:** §134's bounded-peace proof skips every
+body with no hostile in range, so when a raider dies or vanishes nothing revisits the bodies it had
+committed. The release has to come from the jobs layer, which runs for every body every tick — and the jobs
+layer can only tell these two orders apart if something tells it. Which is the whole argument for the first
+option.
+
+My recommendation is provenance: the second option spends a player-facing behaviour to save a save-format
+field, and "an order from a person holds, an order from the defence expires" is a true and explainable rule
+rather than a mechanism artefact.
