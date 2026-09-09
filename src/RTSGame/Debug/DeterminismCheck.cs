@@ -170,6 +170,10 @@ internal static class DeterminismCheck
             "scratch for one body's already-covered alarms, cleared at the head of its own decision.",
         ["ThreatSystem.fellWithFaction"] =
             "who died this tick, mirrored from fallen with the faction kept, and read within the tick.",
+        ["ThreatSystem.inReach"] =
+            "who had an enemy within reach this tick, cleared at the head of the harm pass. The population " +
+            "the lost-swing rule applies to, so that a body merely working is never mistaken for one that " +
+            "failed to land a blow.",
         ["ThreatSystem.swung"] =
             "who has already advanced their swing this tick, cleared at the head of the harm pass. It " +
             "exists because the pass is per DEFENDER: without it a body standing between two enemies " +

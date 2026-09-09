@@ -7578,7 +7578,7 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         if (action == BodyAction.Strike && bodies is { ImpactFraction: > 0f } rig)
         {
             var period = MathF.Max(0.0001f, Simulation.Threat.ThreatSystem.SwingSeconds);
-            var through = Math.Clamp(agent.SwingCharge / period, 0f, 1f);
+            var through = Math.Clamp(agent.ActCharge / period, 0f, 1f);
             var span = MathF.Max(0.0001f, (float)clip.Duration);
             return ((through + rig.ImpactFraction) % 1f) * span;
         }

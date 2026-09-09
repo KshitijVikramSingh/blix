@@ -48,6 +48,14 @@ internal sealed class ThreatSystem
     /// </remarks>
     internal static float SwingSeconds = 1f;
 
+    /// <summary>Bodies with an enemy inside reach this tick, whether or not they were admitted.</summary>
+    /// <remarks>
+    /// The population the lost-swing rule is about. Distinct from <see cref="swung"/>, which is the ones
+    /// that were admitted through the contact arc and charged — a body squeezed out of a crowded front was
+    /// in the fight and did not land, which is exactly what losing a wind-up should mean.
+    /// </remarks>
+    private readonly HashSet<int> inReach = new();
+
     /// <summary>Bodies whose swing has already been advanced this tick.</summary>
     /// <remarks>
     /// A body in reach of two enemies must not swing twice as fast for it. The outer loop is over
@@ -236,6 +244,7 @@ internal sealed class ThreatSystem
         Contacts = 0;
         landed.Clear();
         swung.Clear();
+        inReach.Clear();
         UnderAttack = 0;
         Attacking = 0;
         for (var j = 0; j < bodies.Length; j++)
@@ -259,6 +268,7 @@ internal sealed class ThreatSystem
                 var reach = HarmReach(attacker.Radius, defender.Radius);
                 var gap = Vector2.Distance(attacker.Position, defender.Position);
                 if (gap > reach) continue;
+                inReach.Add(i);
                 engaged.Add((gap, attacker.Id.Value, i));
             }
 
@@ -285,10 +295,10 @@ internal sealed class ThreatSystem
                 // not here to land it.
                 if (!swung.Add(index)) continue;
                 ref var swinging = ref bodies[index];
-                swinging.SwingCharge += deltaSeconds;
-                if (swinging.SwingCharge < SwingSeconds) continue;
+                swinging.ActCharge += deltaSeconds;
+                if (swinging.ActCharge < SwingSeconds) continue;
 
-                swinging.SwingCharge -= SwingSeconds;
+                swinging.ActCharge -= SwingSeconds;
                 var harm = attacker.Strength * SwingSeconds;
                 landed.Add(attacker.Id);
                 bodies[j].Health -= harm;
@@ -301,13 +311,17 @@ internal sealed class ThreatSystem
             if (struck > 0) UnderAttack++;
         }
 
-        // <b>A swing not seen through is lost.</b> §198: any body that was not in reach of something this
-        // tick drops whatever it had wound up, so a blow has to be held through to land it. This is the
-        // half that makes stepping away mean something, and it cannot exist at all while harm is a drain.
-        for (var i = 0; i < bodies.Length; i++)
+        // <b>A swing not seen through is lost — but only a swing.</b> §198 dropped the charge of every body
+        // that had not swung this tick, which was right while the field was combat's alone. §205 gave the
+        // same field to work, so that loop would have zeroed a cutter's stroke on every tick of the game
+        // and no tree would ever have come down. Caught before it shipped, and the fix is to reset the
+        // bodies this pass actually has something to say about: **you were in a fight and did not land, so
+        // you lose your wind-up.** A body with no enemy within reach was never swinging and is left alone
+        // to get on with its work.
+        foreach (var i in inReach)
         {
             if (swung.Contains(i)) continue;
-            bodies[i].SwingCharge = 0f;
+            bodies[i].ActCharge = 0f;
         }
 
         for (var i = 0; i < bodies.Length; i++)

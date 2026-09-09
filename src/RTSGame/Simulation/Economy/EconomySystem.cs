@@ -144,6 +144,23 @@ internal sealed class EconomySystem
     /// </remarks>
     internal static float WorkReachShare => JobDefaults.CrowdedTouchShare;
 
+    /// <summary>
+    /// How long one stroke of work takes — an axe-fall, a scythe-sweep, a hammer-blow.
+    /// </summary>
+    /// <remarks>
+    /// <b>A stroke is not a unit.</b> §205. Wood comes off a trunk at roughly a tenth of a unit a second,
+    /// so a whole unit is about ten axe-falls — which is why the popping of a unit was never a plausible
+    /// moment for an animation to land on, and why moving the accrual to the body is only half the job. The
+    /// stroke is the event with an owner; the unit is ten of them.
+    /// <para>
+    /// One second, matching <c>ThreatSystem.SwingSeconds</c>, and for the same reason: the clip is scaled to
+    /// it, so the figure is the cadence a body works at and not a property of any asset. Shared across the
+    /// working acts rather than split four ways, because nothing measured yet says a scythe and a hammer
+    /// differ — and inventing four numbers would be four things to be wrong about.
+    /// </para>
+    /// </remarks>
+    internal static float StrokeSeconds = 1f;
+
     /// <summary>Share of a store's capacity above which it will give stock away.</summary>
     internal static float HighWater = 0.75f;
 
@@ -975,7 +992,19 @@ internal sealed class EconomySystem
             return;
         }
 
-        var whole = deposit.Pending.Accrue(resource, Deposits.TakePerSecond(resource) * deltaSeconds);
+        // <b>The body's stroke, and the body's own accrual.</b> §205. This used to add
+        // `rate x deltaSeconds` into `deposit.Pending` — a counter belonging to the trunk, shared by every
+        // cutter at it — so the tick a unit came out was the trunk's business and no cutter could be said
+        // to have taken it. Now the body charges a stroke, and on the fall of the axe it frees
+        // `rate x StrokeSeconds` into its OWN pending. Same rate, same yield in expectation; an owner.
+        body.ActCharge += deltaSeconds;
+        if (body.ActCharge < StrokeSeconds) return;
+        body.ActCharge -= StrokeSeconds;
+
+        var freed = Deposits.TakePerSecond(resource) * StrokeSeconds;
+        body.WorkPending += freed;
+        var whole = (int)body.WorkPending;
+        body.WorkPending -= whole;
         if (whole > 0)
         {
             var taken = Math.Min(whole, Math.Min(room, deposit.Stock[resource]));

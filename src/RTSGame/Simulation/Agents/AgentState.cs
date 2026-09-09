@@ -99,9 +99,13 @@ internal struct AgentState
     public bool Standing;
 
     /// <summary>
-    /// How far into its current swing this body is, in seconds. Zero when it is not swinging.
+    /// How far into its current blow or stroke this body is, in seconds. Zero between acts.
     /// </summary>
     /// <remarks>
+    /// <b>One field for whatever act the body is performing</b> — a blow if it is fighting, a stroke if it
+    /// is working. A body does neither at once, so two fields would be two names for one clock, which is the
+    /// fault this codebase keeps paying for. Renamed from <c>SwingCharge</c> in §205 when work joined.
+    /// <para>
     /// <b>Because "harm happens when two bodies are near each other" is a proximity modal, and it is older
     /// than the rigs.</b> §198. It made sense when a body was a cylinder: harm was
     /// <c>Strength x deltaSeconds</c> for every tick two capsules overlapped, and there was nothing to
@@ -124,8 +128,25 @@ internal struct AgentState
     /// layout signature built by reflection, so this field enters the census and invalidates older saves on
     /// its own. See <c>WorldSave.BodyLayoutSignature</c>.
     /// </para>
+    /// </para>
     /// </remarks>
-    public float SwingCharge;
+    public float ActCharge;
+
+    /// <summary>
+    /// Fractions of a unit this body has freed but not yet taken, in its current act.
+    /// </summary>
+    /// <remarks>
+    /// <b>The body's own, which is the whole of §204.</b> The accrual used to live on the node — a trunk
+    /// carried one shared counter, several cutters fed it at several times the rate, and it popped whole
+    /// units out on its own schedule to whichever body happened to call in on that tick. So the moment wood
+    /// left a trunk belonged to the trunk, and no cutter's animation could be synchronised with it because
+    /// it was not that cutter's event. §174's test asserting the chop pose plays whenever wood leaves passes
+    /// for that reason and no other: the pose is continuous, so every popping tick is a posing tick.
+    /// <para>
+    /// Per body, a stroke is an event with an owner. Wood leaves the trunk on somebody's axe-fall.
+    /// </para>
+    /// </remarks>
+    public float WorkPending;
 
     /// <summary>
     /// The place this body has committed to defend, while <see cref="Standing"/> holds.

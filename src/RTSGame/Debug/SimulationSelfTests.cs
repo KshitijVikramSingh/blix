@@ -6679,6 +6679,7 @@ internal static class SimulationSelfTests
         // for that body is read and recorded.
         var seen = new Dictionary<BodyAction, int>();
         var cuttingTicks = 0;
+        var offStroke = 0;
         var before = world.Nodes.Get(tree).Stock[Resource.Wood];
         for (var t = 0; t < 900; t++)
         {
@@ -6690,6 +6691,19 @@ internal static class SimulationSelfTests
                 cuttingTicks++;
                 var action = BodyActions.For(in world.Agents.Get(cutter), hurt: false, out _);
                 seen[action] = seen.GetValueOrDefault(action) + 1;
+
+                // <b>And wood leaves on the axe-fall, which is the claim this test could not make before.</b>
+                // §205. Asserting only that the chop POSE is playing was tautological: the pose is
+                // continuous while a body works, so any tick wood came off was necessarily a posing tick —
+                // and it came off on the TRUNK's schedule, out of a counter shared by every cutter, so no
+                // body's animation could have been the cause of it. Now the accrual is the body's own and a
+                // stroke frees it, so a wood-losing tick must be a tick that body's stroke landed: its
+                // charge has just wrapped and is under one tick's worth. That is false under the old model
+                // for every value it could have taken.
+                if (world.Agents.Get(cutter).ActCharge > (float)SimulationWorld.FixedDeltaSeconds * 1.5f)
+                {
+                    offStroke++;
+                }
             }
 
             before = now;
@@ -6701,11 +6715,12 @@ internal static class SimulationSelfTests
         var chopping = seen.GetValueOrDefault(BodyAction.Chop);
 
         // Every tick that took wood out of the tree must have been a tick the body was shown chopping.
-        var passed = ordered && cut > 0 && cuttingTicks > 0 && chopping == cuttingTicks;
+        var passed = ordered && cut > 0 && cuttingTicks > 0 && chopping == cuttingTicks && offStroke == 0;
         Console.WriteLine(
             $"    order took={ordered}; stood {gap:F2} m from a trunk of radius " +
             $"{trunk.FootprintRadius:F2}; {cut} of {standing} wood cut over {cuttingTicks} tick(s); " +
-            $"poses while cutting: {string.Join(", ", seen.Select(pair => $"{pair.Key}x{pair.Value}"))}");
+            $"poses while cutting: {string.Join(", ", seen.Select(pair => $"{pair.Key}x{pair.Value}"))}; " +
+            $"wood off the stroke on {offStroke} of {cuttingTicks} tick(s)");
         return passed;
     }
 

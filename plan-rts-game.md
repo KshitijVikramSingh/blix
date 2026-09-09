@@ -15770,3 +15770,52 @@ Three consequences worth having in view first:
 
 Sequenced after (1) — done in §202 — and it is the last of the four that touches the economy, so it wants
 the years and a chair present rather than an unattended run.
+
+## 205. A stroke with an owner, and the test that finally asserts something
+
+§204's proposal, built. Two halves, and the second one was nearly a disaster.
+
+### The accrual moves from the trunk to the cutter
+
+`Cut` accrued `rate × deltaSeconds` into `deposit.Pending` — a counter belonging to the *trunk*, fed by every
+cutter at it. Now the body charges a **stroke** and, on the fall of the axe, frees `rate × StrokeSeconds`
+into its own pending. Same rate, same yield in expectation; an owner.
+
+**A stroke is not a unit.** Wood comes off at roughly a tenth of a unit a second, so a whole unit is about
+ten axe-falls — which is why the popping of a unit was never a plausible moment for an animation to land on,
+and why moving the accrual was only half the job. `EconomySystem.StrokeSeconds = 1f`, matching
+`ThreatSystem.SwingSeconds` and for the same reason: the clip is scaled to it, so the figure is the cadence a
+body works at rather than a property of any asset. One number across the working acts, not four, because
+nothing measured says a scythe and a hammer differ and four numbers would be four things to be wrong about.
+
+`SwingCharge` is `ActCharge`: one field for whatever act a body is performing, a blow or a stroke. A body
+does neither at once, so two fields would have been two names for one clock.
+
+### Which nearly stopped the game dead
+
+§198's lost-swing rule dropped the charge of **every body that had not swung this tick**. That was right
+while the field was combat's alone. Sharing it with work meant that loop would have zeroed a cutter's stroke
+on every tick of the game, and **no tree would ever have come down again.**
+
+Caught before it shipped, by asking what else touched the field rather than by running into it — and the fix
+is to reset the population this pass actually has something to say about. `inReach` is now tracked beside
+`swung`: *you were in a fight and did not land, so you lose your wind-up.* A body with no enemy within reach
+was never swinging and is left to get on with its work. A body squeezed out of a crowded front still loses
+its wind-up, which is what §198 wanted and is now stated precisely rather than by omission.
+
+### §174's test stops being tautological
+
+The old assertion was that the chop pose plays on every wood-losing tick. It passed, and would have passed
+for ever, for a reason that was not the one it looked like: **the pose is continuous while a body works**, so
+any tick wood came off was necessarily a posing tick — and the wood came off on the trunk's schedule anyway,
+out of a counter shared by every cutter, so no body's animation could have caused it.
+
+It now also asserts that a wood-losing tick is a tick **that body's stroke landed** — its charge has just
+wrapped and is under one tick's worth:
+
+```
+2 of 90 wood cut over 2 tick(s); poses while cutting: Chopx2; wood off the stroke on 0 of 2 tick(s)
+```
+
+Zero off-stroke. That claim is false under the old model for every value the charge could have taken, which
+is what makes it worth having.
