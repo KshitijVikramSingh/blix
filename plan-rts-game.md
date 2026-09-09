@@ -15718,3 +15718,55 @@ reaches zero, §180's unconditional throw replaces it.
 
 **One real stall per hour and a half of hands-off war** is therefore the honest residual, and it is the
 number to drive down — not a fault to be argued about.
+
+## 204. The moment already exists for work — it just belongs to the tree, not the cutter
+
+§201's fourth proposal was "every act gets a moment", and labour now has a reach to land one within. Looking
+for where to put it found that **the moment is already there, on the wrong object.**
+
+`Cut` does not drain a trunk continuously. It accrues into `deposit.Pending` and takes wood only when a
+*whole unit* comes out:
+
+```csharp
+var whole = deposit.Pending.Accrue(resource, Deposits.TakePerSecond(resource) * deltaSeconds);
+if (whole > 0) { ...taken goes onto the body... }
+```
+
+And `Pending` is a field on `EconomyNode`. **So the moment wood leaves a trunk belongs to the trunk.** Three
+cutters at one tree accrue into one shared counter at three times the rate; it pops a unit out on its own
+schedule, and whichever body happened to call `Cut` on that tick receives it.
+
+### Which means the chop animation and the wood could never have been the same event
+
+The chair's original question — *"can you check if the chopping animation is playing while wood leaves the
+tree?"* — was answered in §174 by writing a test that asserts the two coincide on every wood-losing tick.
+That test passes, and it always will, for a reason that is not the one it looks like: **a cutter is in the
+chopping pose continuously, so any tick the node pops a unit is necessarily a tick the pose is playing.**
+Correlation by construction. There is no axe-fall to miss.
+
+That is the same shape as §198's finding about harm, one layer over: an event that belongs to a proximity or
+a rate rather than to an actor cannot be synchronised with that actor's animation, because it is not that
+actor's event.
+
+### What (4) therefore costs, stated before anybody starts
+
+Giving work a moment means **moving the accrual from the node to the body**: each cutter carries its own
+stroke, and a stroke takes wood off the trunk. Then the pose, the moment and the yield are one thing, and
+`ImpactFraction` generalises from the sword to the axe, the scythe and the hammer exactly as §199 did — each
+measured off its own clip.
+
+Three consequences worth having in view first:
+
+1. **It is a core-economy change.** Yield granularity moves from one shared counter per node to one per
+   pair of hands. Totals should be unchanged in expectation — `TakePerSecond` becomes a per-body rate and N
+   bodies still deliver N times it — but it is lumpier, and §202 is the precedent for how to find out: run
+   it with the years and read `270 grain against a nominal 270`.
+2. **`WorkerCapacity`'s table becomes derivable**, which is §201's third proposal arriving for free. A tree
+   takes three hands because three strokes fit around it at the act's reach — not because a switch says
+   `Tree => 3`.
+3. **§174's test stops being tautological.** With a per-body stroke it would assert something real: that
+   *this* body's axe-fall is the tick *this* wood came off. It should be tightened at the same time, or it
+   will keep passing for the old reason.
+
+Sequenced after (1) — done in §202 — and it is the last of the four that touches the economy, so it wants
+the years and a chair present rather than an unattended run.
