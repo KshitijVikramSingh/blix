@@ -1290,6 +1290,19 @@ internal sealed class SimulationWorld
     /// face takes two, and §6 made a field's output continuous in its hands with diminishing returns — so
     /// three is where a fourth stops being worth walking for. Anything else gets no cap: a store, a
     /// barracks and a building site all want whoever turns up.
+    /// <para>
+    /// <b>An economic cap, not a geometric one, and it has been mistaken for one.</b> §209 proposed deriving
+    /// these from how many bodies fit on a ring at the act's reach, and computed the answer before building
+    /// it: <b>6.7 at a trunk, 12.3 at an outcrop, 22.2 at a farm</b>. Six or seven fit at a tree, not three
+    /// — and the discrepancy is no constant either, being a half, a sixth and a seventh. Elbow room is not
+    /// what this is about. It is about how many hands a site is <em>worth</em>, which is a judgement, and
+    /// the line above has always said so.
+    /// </para>
+    /// <para>
+    /// It gates <see cref="SpreadAcrossKin"/> and nothing else, so what it decides is how a click
+    /// distributes hands across nearby sites — not production, which §6 makes continuous in hands. Raising
+    /// it would concentrate more bodies on the one the player pointed at and spill fewer to its neighbours.
+    /// </para>
     /// </remarks>
     private static int WorkerCapacity(in EconomyNode node) => node.Kind switch
     {

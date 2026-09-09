@@ -15969,11 +15969,25 @@ diminishing returns, and the pressure that makes `SpreadAcrossKin` send the four
 and that is an economic question. The ring answers **where a body stands**, which is geometric. §201
 conflated them because both come out as a number per site.
 
-Building the derivation would have roughly doubled the hands at a tree, sextupled them at an outcrop and
-septupled them at a farm: a very large unintended change to the wood and stone economies, arriving inside a
-refactor that was billed as removing a contradiction. **Four economy changes in this arc moved the nominal by
-nothing, precisely because each closed a contradiction rather than turning a knob. This would have turned a
-knob while claiming not to.**
+Building the derivation would have taken the cap from 3 to 7 at a tree, 2 to 12 at an outcrop and 3 to 22 at
+a farm, inside a refactor billed as removing a contradiction. **Four economy changes in this arc moved the
+nominal by nothing, precisely because each closed a contradiction rather than turning a knob. This would have
+turned a knob while claiming not to.**
+
+**Corrected within the hour**, because the first draft of this section said that would be "a very large
+change to the wood and stone economies" and that overstates it. `WorkerCapacity` is read in exactly two
+places, both inside `SpreadAcrossKin`, so what it gates is **how a player's click distributes hands across
+nearby sites of the same kind** — not production, which §6 makes continuous in hands with diminishing
+returns. So the effect would be on *distribution*: more bodies concentrated on the trunk the player pointed
+at, fewer spilling to its neighbours, a given tree stripped faster, and a farm's extra hands earning less
+each. Real, and worth a decision; not proportional to the multiplier, and not what "changed the economy"
+implies.
+
+The provenance is also on the record and worth repeating here, because it is the reason §201 went wrong:
+**`Tree => 3` came from the chair** — *"I'd still suppose at least 2-3 can work a single tree"* — and
+`Outcrop => 2` and `Farm => 3` are mine. The doc comment above the table already says **"Judgement, not
+measurement"** in as many words. §201 did not contradict a measured fact; it forgot that the code had
+already said these were invented, and went looking for a derivation that was never claimed to exist.
 
 ### What the surround unification can still do
 
