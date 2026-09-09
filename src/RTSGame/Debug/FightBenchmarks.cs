@@ -61,7 +61,7 @@ internal static class FightBenchmarks
         // relief and dense maps — "to see how aggression/defence plays when geography, geometry, other
         // non-participating units and buildings are around". That last axis is the one most likely to
         // explain what §188 could not reproduce on an empty plain.
-        var grounds = new[] { Ground.Flat, Ground.Rough, Ground.Village };
+        var grounds = new[] { ScenarioGround.Flat, ScenarioGround.Rough, ScenarioGround.Village };
 
         Console.WriteLine();
         Console.WriteLine("  an ordered assault: N of ours TOLD to attack one of theirs, which fights back");
@@ -113,7 +113,7 @@ internal static class FightBenchmarks
         // <b>One attacker, traced, because guessing has been tried three times.</b> §195.
         Console.WriteLine();
         Console.WriteLine("  one attacker traced through a fleeing assault (state changes only)");
-        Assault(4, TargetPosture.Fleeing, Force.Militia, spreadMetres: 20f, Ground.Flat, trace: true);
+        Assault(4, TargetPosture.Fleeing, Force.Militia, spreadMetres: 20f, ScenarioGround.Flat, trace: true);
 
         Console.WriteLine();
         Console.WriteLine("  a nearer enemy: ours ordered at a distant target with a hostile in their faces");
@@ -181,90 +181,6 @@ internal static class FightBenchmarks
         return 0;
     }
 
-    /// <summary>Which ground a fight is being measured on.</summary>
-    /// <remarks>
-    /// <b>Asked for from the chair, and it is the axis most likely to explain what open ground could not.</b>
-    /// §189: §188 measured every case on a flat empty field and could not reproduce "they go there and
-    /// stand" at all — first blow landed within two seconds of arriving. A fight has geometry in it, and a
-    /// flat void has none: no slope to charge up, no trunk to path around, nobody else's body in the way.
-    /// <para>
-    /// The original three scenarios (ring, chase, cordon) stay flat on purpose — §40 built them to isolate
-    /// one mechanism each, and terrain is exactly the confound they exist to exclude. The ordered-attack
-    /// scenarios run on all three grounds, because the complaint they encode is about a real map.
-    /// </para>
-    /// </remarks>
-    private enum Ground
-    {
-        /// <summary>An empty plain, which is where every combat constant was measured.</summary>
-        Flat,
-
-        /// <summary>Thirty metres of relief with the country painted on it, and woodland scattered.</summary>
-        Rough,
-
-        /// <summary>Rough, plus one of our working settlements: buildings, trees and busy bystanders.</summary>
-        Village,
-    }
-
-    /// <summary>
-    /// Builds the ground a fight will be measured on, and says where on it there is room to fight.
-    /// </summary>
-    /// <remarks>
-    /// The centre comes from <c>SettlementScenarios.ChooseSite</c> rather than being picked, because that is
-    /// the routine the game itself uses to find ground level enough to stand a settlement on — so a fight
-    /// placed there is on ground somebody would plausibly be fighting over, and not in a river.
-    /// </remarks>
-    private static SimulationWorld BuildGround(Ground ground, float extent, out Vector2 centre)
-    {
-        if (ground == Ground.Flat)
-        {
-            centre = Vector2.Zero;
-            return new SimulationWorld(extent);
-        }
-
-        // <b>Quiet during setup.</b> Founding a settlement prints its country, its site reasoning and five
-        // lines of economy survey, and the ground axis calls it nine times — which buried the table this
-        // harness exists to print under two hundred lines of scenery. The setup's own reporting is right
-        // where it lives; it is simply not what is being measured here.
-        var spoke = Console.Out;
-        Console.SetOut(TextWriter.Null);
-        try
-        {
-            return BuildGroundQuietly(ground, extent, out centre);
-        }
-        finally
-        {
-            Console.SetOut(spoke);
-        }
-    }
-
-    private static SimulationWorld BuildGroundQuietly(Ground ground, float extent, out Vector2 centre)
-    {
-        var world = new SimulationWorld(extent);
-        world.Terrain.SetRegion(Region.Downland);
-        var layout = MapLayout.Composed(Archetype.SplitValley, extent, 0x5EED1234u, 30f);
-        ReliefPlan.FromLayout(layout, extent, 0x5EED1234u).Apply(world.Terrain);
-        SettlementScenarios.PaintCountry(world);
-        world.RebuildTerrainNavigation();
-        centre = SettlementScenarios.ChooseSite(world, extent);
-
-        if (ground == Ground.Village)
-        {
-            // <b>Somebody else's day going on around the fight.</b> A settlement brings buildings to path
-            // around, woodland scattered over the whole map, and a dozen bodies with jobs of their own that
-            // the fight has to happen through. That is the "other non participating units/buildings" the
-            // chair asked for, and it is one call because the settlement definition is shared.
-            SettlementScenarios.Populate(
-                world, farms: 4, woodcutters: 3, quarriers: 1, carts: 2, wagons: 1,
-                centre: centre, faction: Ours);
-            for (var t = 0; t < 30 * TicksPerSecond; t++)
-            {
-                world.Tick((float)SimulationWorld.FixedDeltaSeconds);
-            }
-        }
-
-        return world;
-    }
-
     /// <summary>What the thing being attacked is doing about it.</summary>
     /// <remarks>
     /// <b>The axis that mattered most.</b> §188 measured a still target and a moving one and the difference
@@ -324,10 +240,10 @@ internal static class FightBenchmarks
     /// </para>
     /// </remarks>
     private static void Assault(
-        int count, TargetPosture posture, Force force, float spreadMetres, Ground ground,
+        int count, TargetPosture posture, Force force, float spreadMetres, ScenarioGround ground,
         bool terse = false, bool trace = false)
     {
-        var world = BuildGround(ground, 240f, out var centre);
+        var world = Grounds.Build(ground, 240f, out var centre);
         var victim = world.SpawnAgent(centre, UnitType.Militia, Theirs);
         ref var quarry = ref world.Agents.Get(victim);
         // Directed so it does not run the civilian defence and make its own decisions — see
@@ -523,7 +439,7 @@ internal static class FightBenchmarks
     private static void AssaultPair(float lead, float swing)
     {
         Console.Write($"    {lead,4:F2} | {swing,6:F2} | ");
-        Assault(4, TargetPosture.Fleeing, Force.Militia, spreadMetres: 20f, Ground.Flat, terse: true);
+        Assault(4, TargetPosture.Fleeing, Force.Militia, spreadMetres: 20f, ScenarioGround.Flat, terse: true);
     }
 
     /// <summary>Mean distance between every pair of our bodies, which is the spread.</summary>
@@ -556,9 +472,9 @@ internal static class FightBenchmarks
     /// our bodies ended the run <em>further</em> from the enemy in their faces than they started.
     /// </para>
     /// </remarks>
-    private static void NearerEnemy(int count, Ground ground)
+    private static void NearerEnemy(int count, ScenarioGround ground)
     {
-        var world = BuildGround(ground, 260f, out var centre);
+        var world = Grounds.Build(ground, 260f, out var centre);
 
         // The ordered target, a long way off so the walk cannot be mistaken for engaging.
         var far = world.SpawnAgent(centre + new Vector2(80f, 0f), UnitType.Militia, Theirs);
@@ -639,9 +555,9 @@ internal static class FightBenchmarks
     /// two move together, that is the mechanism.
     /// </para>
     /// </remarks>
-    private static void StructureAssault(int count, int defenders, Ground ground)
+    private static void StructureAssault(int count, int defenders, ScenarioGround ground)
     {
-        var world = BuildGround(ground, 240f, out var site);
+        var world = Grounds.Build(ground, 240f, out var site);
         // <b>Off the settlement, not on it.</b> First run of this put the wall at the site centre — which
         // on the Village ground is exactly where Populate has already stood a granary and houses — so the
         // palisade was spawned inside other buildings and nobody could reach it. It reported "never

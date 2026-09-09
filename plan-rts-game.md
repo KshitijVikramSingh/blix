@@ -15573,3 +15573,80 @@ together helps; arriving together is not what a group move actually delivers ove
 So the chair's fallback is not spent. What the numbers point at, for whenever this is next picked up, is that
 the group disperses during the approach rather than starting dispersed — which is a question about formation
 tightness under travel (§107's slots) and not about combat at all.
+
+## 201. What "reach" and "surround" mean, counted — and the case for one of each
+
+From the chair, and it generalises §198:
+
+> clean up and refine what "reach"/"surround" something means, and contact/action on animation etc across
+> working, kneeling, finding slots around construction/worksite/enemy/target
+
+Inventoried by computing the values rather than by grepping the names, because §179 was written the other way
+round and reported the opposite of the truth.
+
+### Reach: six distances, all meaning "near enough to act"
+
+| | value for a villager | what it gates |
+|---|---|---|
+| `SeparationThreshold(v)` | 0.730 m | two bodies count as apart |
+| `ThreatSystem.HarmReach(v,v)` | **0.814 m** | a blow lands |
+| `AtPlaceDistance(v, 0)` | **1.110 m** | the jobs layer says you have arrived at a point |
+| wall reach, `r + TouchSlack + RasterReach` | 1.120 m | reaching a building's box |
+| `AtPlaceDistance(v, 1.5)` | 2.120 m | arrival at a 1.5 m building |
+| `CrowdedPlaceDistance(v, 0)` | **2.960 m** | arrival once a crowd has taken the place |
+
+Three things fall straight out:
+
+1. **A blow reaches 0.814 m and arrival is 1.110 m.** §194 found that as a one-off; it is one row of a
+   pattern. **Arrival and efficacy are separate quantities and nobody reconciled them.**
+2. **Crowded arrival is 2.960 m — three and a half times the harm reach.** Under crowd pressure "I am here"
+   and "I can act" diverge by two metres, and nothing anywhere notices.
+3. **Work has no efficacy distance at all.** `WorkSites` gates production on `IsWorking` and nothing else, so
+   a reaper counts as reaping from wherever the jobs layer last called it arrived — up to 2.96 m in a crowd.
+   Harm has a reach; labour does not.
+
+Beside those sit the *involvement* ranges, which are a different question and are fine being different:
+`ThreatMetres` 12 m (a hostile is "here"), `ElsewhereSquared` 8 m (this is a different fight),
+`SpreadReachMetres` 32 m (kin work sites worth spreading to), `RallySeconds` 8 s (who could reach in time).
+
+### Surround: four mechanisms for "where do I stand"
+
+- **`ContactArc(target, attacker)`** — the angular width one attacker occupies on the ring around a body,
+  `2·asin(r/(R+r))`. Derived from geometry, and the reason "the front holds four".
+- **`TryApproachPoint`'s bearing spin** — a golden-angle scatter of the approach bearing, applied to
+  `Build`/`Train` only, so builders do not all walk at the same face.
+- **`SlotPlan`** — formation slots for a group move, with a `FormationRadius`.
+- **`SpreadAcrossKin` + `WorkerCapacity`** — which *site* to go to, capped per node kind (Tree 3, Outcrop 2,
+  Farm 3).
+
+Four answers to overlapping questions, and only the first is derived from the geometry of the thing being
+surrounded. The second is a scatter, the third is a formation, the fourth is a headcount.
+
+### Acts and their moments
+
+§198–199 gave harm a moment: a swing that charges, lands, and shares its clock with an impact frame measured
+off the rig. **Work has no moment.** Chopping, reaping and building all drain continuously while `IsWorking`,
+so their poses are decorative rather than causal — and the chair's original question, *"is the chopping
+animation playing while wood leaves the tree?"*, was answered by writing a **test** that the two coincide
+rather than by making them the same event. A test that two clocks agree is the second-best answer; one clock
+is the first.
+
+### The proposal, for the chair to settle
+
+1. **One reach per act, derived, and arrival means being within it.** `HarmReach` is the shape: a function of
+   the bodies and the thing, not a constant. A `Reach(act, body, target)` would give felling, reaping,
+   building and striking each a real distance, and `IsAtPlace` would ask *that* rather than a generic few
+   radii — which collapses rows 2-6 of the table above into one number per act and deletes §194's whole
+   class of bug.
+2. **Crowded arrival stops being a distance.** It exists because a crowd takes the exact spot; the honest
+   answer is a *slot* near enough to act from, not a licence to act from three metres. That makes it a
+   surround question, which is where it belongs.
+3. **One surround: slots on a ring** sized by the act's reach and packed by `ContactArc`. That subsumes the
+   bearing spin, generalises the fight's packing to worksites, and gives `WorkerCapacity`'s per-kind
+   headcounts a derivation instead of a table — a tree takes three hands because three fit at its reach.
+4. **Every act gets a moment**, and its animation's impact frame is measured off the rig as §199 does for the
+   sword. An axe-fall takes wood out of the trunk; a hammer-blow puts timber into a wall.
+
+Sequencing matters and (1) is the one that pays immediately, because it is where the measured contradictions
+are. (4) is the one the chair asked for first and it depends on (1): an act cannot have a moment until it has
+a reach to land within.
