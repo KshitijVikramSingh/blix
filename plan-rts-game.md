@@ -15650,3 +15650,71 @@ is the first.
 Sequencing matters and (1) is the one that pays immediately, because it is where the measured contradictions
 are. (4) is the one the chair asked for first and it depends on (1): an act cannot have a moment until it has
 a reach to land within.
+
+## 202. Labour gets a reach, and it turns out the economy never needed the slack
+
+§201's third finding, acted on because it was the sharpest: **work had no efficacy distance.**
+
+`EconomySystem` already contained one — `IsStandingAt(node, agent)`, a real labour reach of
+`radius × 3 + TouchSlack` = **1.36 m** measured from the node's box. It was asked in **exactly one place**:
+the pass that *counts hands* at a node. The pass that actually *produces* asked `IsWorking` instead, the
+jobs layer's arrival test, which under crowd pressure calls a body arrived at up to **2.96 m**.
+
+So a node's reported workforce and its real producers were decided by two different distances. A body could
+produce without being counted, or be counted without producing. One predicate now, asked by both.
+
+### It cost the harvest nothing, and that is the finding
+
+This is an economy change, so it ran with the years — the legs memory says never to skip before touching
+rates, jobs, hauling or construction:
+
+```
+a year of settlement:            270 grain against a nominal 270
+a year on generated terrain:     270 grain against a nominal 270
+```
+
+**Exactly nominal on both grounds.** Tightening the producing distance from 2.96 m to 1.36 m removed
+nothing, which says the crowded allowance was almost never load-bearing in practice — bodies were already
+standing within reach and the extra two metres was slack nobody used. (Wood at 45-47 against a nominal 120
+is §70's known unsolved shortfall, unchanged.)
+
+That is the useful kind of null result: the contradiction was real, and closing it was free.
+
+## 203. My ratchet was a count, and §183 had already said not to do that
+
+The year gate then failed on **my own criterion**, and the numbers beside it were self-contradictory:
+
+```
+longest spell 5.4s ... peak stall clock 11.5s, DRAWN RED (past 6s) 1 body(s)
+```
+
+A clock of 11.5 s takes eleven seconds of continuous accrual, so a 5.4 s longest spell cannot be true of the
+same population. **The instrument, again.** Over a year-long war between two bots, bodies *die* — and
+`StallCensus` zeroed a spell on death without ever recording it, so the bodies that stalled worst were
+exactly the bodies whose evidence was thrown away. Fourth instrument in this arc to answer a question
+adjacent to the one its name implied. Now recorded, and reported: `spells cut short by death 2`.
+
+With that fixed the figures agree, and they vindicate §190:
+
+```
+664 spells over 5401s across 34 bodies; 596 followed by work
+<=4s 27w/7n   <=8s 3w/1n   <=16s 0w/1n
+longest spell 10.9s, longest still followed by work 5.4s, DRAWN RED 1
+```
+
+**`longest still followed by work` is still exactly 5.4 s — over a run nine times longer than the one the
+threshold was derived from.** Nothing above it recovered in a full simulated year. So `WedgedSeconds = 6` is
+not an artefact of a nine-minute sample, and the one red body is a genuine stall.
+
+### And the criterion itself was the wrong shape
+
+The ratchet forbade *any* body crossing the line. That reads 0 over nine minutes and 1 over a year, so it
+**failed the long leg for being long**. §183 wrote that trap down in as many words — "distinct-bodies-ever is
+monotone in run length, which makes it a bad ratchet" — and §190 built the count anyway.
+
+It is a **rate** now: `WedgedPerHour`, recorded at 1.00 against a measured 0.67 for the year leg and 0.00 for
+the short ones. Length-independent, which is what a ratchet needs. May fall, may not rise; and when it
+reaches zero, §180's unconditional throw replaces it.
+
+**One real stall per hour and a half of hands-off war** is therefore the honest residual, and it is the
+number to drive down — not a fault to be argued about.

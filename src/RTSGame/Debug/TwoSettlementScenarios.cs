@@ -314,12 +314,22 @@ internal static class TwoSettlementScenarios
         // same configuration producing 4.4 or 2.4 raiders killed on different seeds — so a count of one
         // there is not a number to forbid rising. These two legs are placid and deterministic, and both
         // report zero over nine minutes.
-        if (stalls.BodiesEverWedged > 0)
+        // <b>A rate, because a count is not a ratchet.</b> §203: the criterion was "no body may cross",
+        // which read 0 across two nine-minute legs and 1 across a year — so it failed the long leg for
+        // being long. §183 spotted that trap ("distinct-bodies-ever is monotone in run length, which makes
+        // it a bad ratchet") and §190 built the count anyway.
+        //
+        // 1.0 an hour is the measured figure with a little headroom: a year leg reports 0.67, the short
+        // legs report 0.00. **May fall, may not rise** — and when it reaches zero the throw §180 asked for
+        // becomes unconditional and this goes away.
+        const float KnownWedgedPerHour = 1.0f;
+        if (stalls.WedgedPerHour > KnownWedgedPerHour)
         {
             faults.Add(
-                $"{stalls.BodiesEverWedged} body(s) stalled past {Simulation.Agents.AgentDefaults.WedgedSeconds:F0}s and " +
-                "were drawn red — a body past that threshold has never recovered in any measured run, so " +
-                "this is a stall and not traffic");
+                $"{stalls.BodiesEverWedged} body(s) stalled past " +
+                $"{Simulation.Agents.AgentDefaults.WedgedSeconds:F0}s = {stalls.WedgedPerHour:F2} an hour, " +
+                $"against a recorded {KnownWedgedPerHour:F2} — a body past that threshold has never " +
+                "recovered in any measured run, so this is a stall and not traffic");
         }
 
         foreach (var fault in faults) Console.WriteLine($"  FAULT: {fault}");

@@ -776,6 +776,20 @@ internal sealed class EconomySystem
             // Working means being there. A body still walking to the site is not breaking any ground
             // and not cutting any wood.
             if (!JobSystem.IsWorking(in body)) continue;
+
+            // <b>And being there means being within reach of it, which is not the same question.</b> §202.
+            // IsWorking is the JOBS layer's arrival test, and arrival is generous on purpose: once a crowd
+            // has taken the exact spot, CrowdedPlaceDistance calls everybody behind them arrived at up to
+            // 2.96 m, because a workplace is a place for several pairs of hands rather than a spot for one
+            // body. That is right for deciding whether to keep walking and wrong for deciding whether wood
+            // comes off a trunk.
+            //
+            // <b>IsStandingAt already existed and was asked in exactly one place</b> — the pass that COUNTS
+            // hands at a node — while this pass, the one that actually produces, never asked it. So a
+            // node's reported workforce and its real producers were decided by two different distances, and
+            // a body could produce without being counted or be counted without producing. One predicate for
+            // "is this body working this site", asked by both.
+            if (!IsStandingAt(in nodes.Get(siteId), in body)) continue;
             // Both deposits take the same branch: a shift at a deposit is labour against a stock, and which
             // stock it is comes off the node. Left as a Tree-only test, a quarrier stood at its rock all year
             // and fell through to the crop code, which returned it as "not a farm" — no error, no work, and a

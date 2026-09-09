@@ -138,6 +138,22 @@ internal sealed class StallCensus
     /// </remarks>
     public int BodiesEverWedged => everWedged.Count;
 
+    /// <summary>
+    /// Bodies drawn red per simulated hour — the ratchet figure, because a count is not one.
+    /// </summary>
+    /// <remarks>
+    /// <b>§183 noticed this trap and §190 walked into it anyway.</b> A count of distinct bodies that ever
+    /// crossed a threshold rises with run length by construction, so forbidding it to rise forbids running
+    /// for longer — and that is exactly what happened: zero across two nine-minute legs, one across a
+    /// year, and a criterion of "no body may cross" failed the long leg for being long.
+    /// <para>
+    /// A rate is length-independent and is what a ratchet actually wants. Per hour rather than per second
+    /// because the figure is small and rare: 1 body in the 1.5 simulated hours of a year leg is 0.67 an
+    /// hour, and 0 over nine minutes is 0.
+    /// </para>
+    /// </remarks>
+    public float WedgedPerHour => elapsedSeconds <= 0f ? 0f : everWedged.Count * 3600f / elapsedSeconds;
+
     /// <summary>Every completed spell, productivity resolved.</summary>
     public IReadOnlyList<Episode> Episodes => episodes;
 
@@ -149,6 +165,9 @@ internal sealed class StallCensus
 
     /// <summary>Unproductive spells that ended too near the end of the run to be judged.</summary>
     public int UnjudgedInTheTail { get; private set; }
+
+    /// <summary>Spells that ended because the body died, reported so a war's figures can be read.</summary>
+    public int DiedMidSpell { get; private set; }
 
     /// <summary>
     /// Activities finished by everybody over the run. <b>A churn rate, not a measure of production.</b>
@@ -190,6 +209,25 @@ internal sealed class StallCensus
             if (index < 0 || index >= startedAt.Length) continue;
             if (!agent.IsAlive)
             {
+                // <b>A spell ended by death is still a spell.</b> §203: this used to drop it, and over a
+                // year-long war between two bots that is most of the long ones — the run reported "longest
+                // spell 5.4s" beside "peak stall clock 11.5s", which cannot both be true of the same
+                // population, because a clock of 11.5 s takes eleven seconds of continuous accrual. The
+                // contradiction was the instrument, not the game: the bodies that stalled worst were the
+                // bodies that then died, and their evidence went with them. Fourth instrument in this arc
+                // to answer a question adjacent to the one its name implied.
+                if (startedAt[index] > 0f)
+                {
+                    DiedMidSpell++;
+                    episodes.Add(new Episode(
+                        index,
+                        elapsedSeconds - startedAt[index],
+                        peak[index],
+                        contactAtPeak[index],
+                        keptFrom[index],
+                        WentOnToWork: false));
+                }
+
                 startedAt[index] = 0f;
                 // So a reused id starts counting from scratch rather than from the dead body's tally.
                 legsSeen[index] = 0;
@@ -455,9 +493,11 @@ internal sealed class StallCensus
                (barrenUnderOrders.Length == 0 ? "none" : string.Join(", ", barrenUnderOrders)) +
                $"\n    longest spell {longest:F1}s, longest still followed by work {longestProductive:F1}s, " +
                $"peak stall clock {PeakStuckSeconds:F1}s, " +
-               $"DRAWN RED (past {AgentDefaults.WedgedSeconds:F0}s) {BodiesEverWedged} body(s), " +
+               $"DRAWN RED (past {AgentDefaults.WedgedSeconds:F0}s) {BodiesEverWedged} body(s) " +
+               $"= {WedgedPerHour:F2}/h, " +
                $"still stalled at the end {StalledAtTheEnd}, " +
                $"unjudged in the last {TailSeconds:F0}s {UnjudgedInTheTail}, " +
+               $"spells cut short by death {DiedMidSpell}, " +
                $"activities finished (churn, not work) {ActivitiesFinished}";
     }
 }
