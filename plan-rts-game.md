@@ -15238,3 +15238,49 @@ was deliberate as the atomic verb, and the question is what composes on top of i
 
 None of that is a bug to be fixed. It is vocabulary the game does not have, and it is the right thing to
 settle before the nearby-enemy measurement means anything.
+
+## 195. The trace, and an attacker arriving where its target stood fifteen seconds ago
+
+§194 ended by saying that three readings of the code in a row had failed to move a number, so the code had
+stopped being worth reading. One attacker, traced through a fleeing assault, logged on change:
+
+```
+t 14.03s  working=True  gap=20.84  toPlace=0.81    arrived at its place; the quarry is 20.84 m away
+t 15.07s  dwell=1.00    gap=23.25  toPlace=23.48   re-aimed, 23 m to walk
+t 30.43s  working=True  gap=26.66  toPlace=0.77    arrived again; the quarry is now 26.66 m away
+t 47.83s  working=True  gap=28.38  toPlace=0.78
+t 66.23s  working=True  gap=9.70   toPlace=0.76
+t 73.40s  inreach=True  gap=0.80   toPlace=0.80    caught it, at last
+```
+
+**`gap` — the distance to the quarry — is twenty to twenty-nine metres, while `toPlace` is eighty
+centimetres.** The attacker is not failing to arrive. It arrives repeatedly, and every time it arrives it is
+standing where the quarry was **fifteen seconds earlier**.
+
+The cycle: aim at the quarry's current position, walk twenty-odd metres to it (fifteen seconds), arrive,
+dwell, re-aim — by which point the quarry has moved another twenty metres. It only lands a blow at t=73 s
+when the quarry's own path brings it back. Contact is 7% and every percent of it is an accident of geometry.
+
+### Which explains all three failures at once
+
+- **The aim lead was 0.20 s of correction on a fifteen-second lag.** Nothing.
+- **`SwingSeconds` is the DWELL, not the re-aim interval.** The re-aim happens on *handover*, and handover
+  requires arrival — so cutting the dwell from 1.0 s to 0.1 s shaves nine tenths off a fifteen-second cycle.
+  Invisible, exactly as measured. **I spent a section tuning a constant that is not in the loop I was trying
+  to shorten.**
+- **The arrival distance was thirty centimetres of a twenty-metre error.** Real, and irrelevant here.
+
+Every one of the three was a true statement about the code, and all three were rounding errors on the actual
+fault. That is the clearest illustration this arc has produced of why a mechanism that explains a symptom is
+not evidence about the size of it — and the trace took one run.
+
+### And it settles the design question with evidence
+
+The chair's answer — *ordered attacks should chase the target* — is not merely a preference now. The defence's
+pursuit re-aims six times a second **whether or not it has arrived**, which is what makes it a chase; an
+ordered attack re-aims only on arrival, which makes its target a place rather than a body. Against anything
+that moves, "a place" is a fifteen-second-old snapshot.
+
+`SwingSeconds` should also be renamed or removed on the way through: it gates no swing (harm is continuous
+on contact), it is a dwell, and calling it a swing is what let a whole section be spent tuning it as though
+it were a rate of re-aiming.

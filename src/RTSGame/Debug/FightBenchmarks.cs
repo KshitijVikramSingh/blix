@@ -110,6 +110,11 @@ internal static class FightBenchmarks
         AgentDefaults.ChaseLeadSeconds = wasLead2;
         Assignment.SwingSeconds = wasSwing;
 
+        // <b>One attacker, traced, because guessing has been tried three times.</b> §195.
+        Console.WriteLine();
+        Console.WriteLine("  one attacker traced through a fleeing assault (state changes only)");
+        Assault(4, TargetPosture.Fleeing, Force.Militia, spreadMetres: 20f, Ground.Flat, trace: true);
+
         Console.WriteLine();
         Console.WriteLine("  a nearer enemy: ours ordered at a distant target with a hostile in their faces");
         Console.WriteLine(
@@ -320,7 +325,7 @@ internal static class FightBenchmarks
     /// </remarks>
     private static void Assault(
         int count, TargetPosture posture, Force force, float spreadMetres, Ground ground,
-        bool terse = false)
+        bool terse = false, bool trace = false)
     {
         var world = BuildGround(ground, 240f, out var centre);
         var victim = world.SpawnAgent(centre, UnitType.Militia, Theirs);
@@ -382,10 +387,41 @@ internal static class FightBenchmarks
         var wasClosing = new Dictionary<int, bool>();
         var reversals = new Dictionary<int, int>();
 
+        // <b>One body, logged on change.</b> §195. Three readings of the code in a row failed to move this
+        // number, so the code has stopped being worth reading: what is wanted is what one attacker is
+        // actually doing for the 92% of a fleeing fight it spends not in contact. Logged on CHANGE rather
+        // than per tick, for the reason §176 found when the pose was glitching — a snapshot cannot see a
+        // cycle, and a burst of lines a few milliseconds apart IS the cycle.
+        var watched = mob[0];
+        var lastTrace = string.Empty;
+        var traceLines = 0;
+
         var limit = 120 * TicksPerSecond;
         for (var tick = 1; tick <= limit; tick++)
         {
             world.Tick((float)SimulationWorld.FixedDeltaSeconds);
+
+            if (trace && traceLines < 40 && world.Agents.Contains(watched) &&
+                world.Agents.Contains(victim))
+            {
+                ref readonly var me = ref world.Agents.Get(watched);
+                var gap = Vector2.Distance(me.Position, world.Agents.Get(victim).Position);
+                var reach = Simulation.Threat.ThreatSystem.HarmReach(me.Radius, me.Radius);
+                var now =
+                    $"{me.LocomotionState}/{me.Jobs.Activity}/{me.Jobs.Interrupt}" +
+                    $"/dest={me.HasDestination}/working={JobSystem.IsWorking(in me)}" +
+                    $"/inreach={gap <= reach}";
+                if (now != lastTrace)
+                {
+                    Console.WriteLine(
+                        $"      t{tick / (float)TicksPerSecond,6:F2}s  {now}" +
+                        $"  gap={gap:F2} toPlace={JobSystem.DistanceToPlace(in me):F2}" +
+                        $"  dwell={me.Jobs.DwellRemaining:F2} leg={me.Jobs.Leg} speed={me.Velocity.Length():F2}");
+                    lastTrace = now;
+                    traceLines++;
+                }
+            }
+
             if (!world.Agents.Contains(victim) || !world.Agents.Get(victim).IsAlive)
             {
                 killedAt = tick / (float)TicksPerSecond;
