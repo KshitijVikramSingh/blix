@@ -15043,3 +15043,106 @@ not working at all as a wall.
 So §191 is a **rates decision and not a mechanism one**, and it is the chair's: what should two sacks of
 timber be worth in seconds of holding? The ratio is now measured rather than argued, and the harness will
 say whether a change to it helped.
+
+## 192. Fleeing, and the pursuit that parked three centimetres out of reach
+
+Combat arc, item one. The chair's call to fix mechanics before touching the defence rates is right, and
+starting here found the fault sitting in plain sight in §189's own table.
+
+### The instrument was lying by ninety-seven points
+
+The chase table read `97% inside reach` for a pursuit that never once landed a blow. Both halves were true,
+because there were **two reaches**:
+
+```csharp
+var reach = MathF.Max(
+    (rV + rV) * ReachShare,                         // 0.814 m — the harm rule
+    AgentDefaults.ChaseStopMetres + ContactSlack);  // 1.10 m
+```
+
+It took the *larger*. A quarry sitting at 0.85–0.95 m is inside the instrument's reach and outside the
+game's, so the same run was 97% engaged and 0% effective. Two notions of touching the same body — §182's
+fault, this time between an instrument and the mechanic it measures. `ThreatSystem.HarmReach` is the one
+definition now and the benchmark calls it. The column reads **0%**.
+
+**And `ChaseStopMetres` was dead.** The Chase case passes `stopDistance: 0f` outright, so nothing had read
+that constant for two sections — while the benchmark still built "inside reach" out of it, and a sweep still
+tuned it. That sweep printed four identical rows: `0.00 m, 92%, 21.7 s`, four times. **Four identical rows
+is what a disconnected knob looks like**, and it stood for two sections. Deleted; a sweep of a value nothing
+reads is worse than no sweep, because it looks like coverage.
+
+### The fault, found in the ratio rather than the code
+
+| quarry pace | gap at end | gap ÷ quarry speed |
+|---|---|---|
+| 1.43 m/s | 0.85 m | 0.594 s |
+| 1.61 m/s | 0.95 m | 0.590 s |
+| 1.79 m/s | 1.20 m | 0.670 s |
+
+**Not a distance — a constant 0.6 seconds of quarry travel.** A latency. The chase aimed at
+`target.Position`, which is where the quarry *was* by the time the body arrived, and harm reaches 0.814 m,
+so a pursuer 0.85 m behind is outside its own weapon **by three and a half centimetres** and can never land
+a blow. That is why a fleeing target costs four to five times a standing one, and why anything at eight
+tenths pace was effectively invulnerable.
+
+`ChaseLeadSeconds = 0.20f`: aim at `Position + Velocity × lead`.
+
+| quarry pace | before | after |
+|---|---|---|
+| 1.61 m/s (0.9×) | never, 0% in reach, 0.95 m | **caught 23.3 s**, 86%, 0.00 m |
+| 1.43 m/s (0.8×) | never, 0% in reach, 0.85 m | **caught 22.2 s**, 90%, 0.00 m |
+| 1.25 m/s (0.7×) | 21.7 s | 23.1 s |
+| 1.07 m/s (0.6×) | 21.5 s | 24.1 s |
+
+Two previously invulnerable cases become catchable, at about ten per cent on the easy ones. The sweep sets
+the value: **nothing is caught at zero lead, and 0.20 s through 0.70 s are identical**, so the smallest that
+works is the one to take — a longer lead aims at empty ground ahead of a slow quarry and costs those cases.
+Parity (1.79 m/s) is still never caught, which is correct.
+
+### Two hypotheses killed by identical output
+
+Before the ratio was noticed, two readings of the code predicted the symptom and both were wrong:
+
+1. **Avoidance keeps the hunter off its quarry.** `HoldsGroundAgainst` already makes the solver take sides,
+   but it needs one body stationary and in a chase both move — so the reciprocal solve dutifully keeps
+   hunter and quarry apart. Dropping the hunter's constraint against its quarry: **byte-identical table.**
+2. **Key it on `HasQuarry`.** That flag is set in exactly one place, inside §30's commitment, so a chase
+   issued any other way never has it — the benchmark's own `QueueChase` included. Also byte-identical, and
+   the reason the first attempt looked like it had failed twice.
+
+Both reverted. A mechanism that explains the symptom is not evidence that changing it helps — third and
+fourth sighting of that in three sections.
+
+## 193. The ordered attack does not chase, and no amount of aiming fixes it
+
+The same fault is in `AttackerHandover` — it re-aims `Anchor` to the quarry's *current* position — and worse,
+it only re-aims on handover, after a dwell of `SwingSeconds = 1 s`. (Which gates no swing: harm is dealt
+continuously on contact by `ThreatSystem`, so that constant is a re-aim period wearing a combat name.)
+
+On the Chase case's own precedent — four measurements proving a stop distance and a stale goal each hid the
+other, so "single changes judged one at a time found nothing for a whole session" — both were swept
+together:
+
+```
+lead | re-aim | killed in | contact% | landed/N | rev/body
+0.00 |   1.00 |    81.8 s |      12% |    4/4   |      2.5
+0.20 |   1.00 |    78.2 s |       8% |    4/4   |      1.8
+0.00 |   0.25 |    82.2 s |      13% |    3/4   |      3.0
+0.20 |   0.25 |    83.8 s |      14% |    4/4   |      2.8
+0.20 |   0.10 |    78.1 s |       8% |    4/4   |      1.8
+```
+
+**Neither knob helps, alone or together** — 78 to 84 s across the whole grid, which is noise. Disproved, and
+the knob is kept because it is genuinely connected (the rows differ) and consistent with the chase, where it
+works; it simply does not matter here.
+
+So the remaining question is not how an ordered attack walks to points. **It is that an ordered attack walks
+to points at all.** A defence's pursuit enters `AgentLocomotionState.Chase`, which now leads its target and
+re-aims six times a second; an ordered attack holds a jobs assignment and treats its target as a place to
+stand, re-aimed once a second. §166 chose that deliberately — an attack is "be at this thing until it is
+dead" — and it is the right shape for a building and the wrong one for a body that runs.
+
+**The design question, and it is the chair's:** should an ordered attack on a *body* enter the chase, keeping
+the jobs assignment as the standing commitment underneath — the way a defence's commitment does — while an
+attack on a *structure* stays a place to stand? That would make one mechanism serve both and is why the
+fixes for the defence's pursuit did not reach a player's order.

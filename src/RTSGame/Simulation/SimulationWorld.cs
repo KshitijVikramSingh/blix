@@ -3964,7 +3964,13 @@ internal sealed class SimulationWorld
         if (order.Quarry.IsValid && Agents.Contains(order.Quarry) && Agents.Get(order.Quarry).IsAlive)
         {
             ref readonly var quarry = ref Agents.Get(order.Quarry);
-            order = order with { Anchor = quarry.Position, FarAnchor = quarry.Position };
+            // <b>Where it will be, exactly as the Chase case aims.</b> §193: this re-aimed at the quarry's
+            // current position, which is the same fault §192 found in the chase — and an ordered attack has
+            // it worse, because it only re-aims on handover, after a whole second of dwell. Against a
+            // quarry at 1.43 m/s that is a metre and a half of stale goal per cycle, and it is why a
+            // fleeing target costs an ordered assault 82 s against a standing one's 17 s.
+            var aimAt = quarry.Position + quarry.Velocity * AgentDefaults.ChaseLeadSeconds;
+            order = order with { Anchor = aimAt, FarAnchor = aimAt };
         }
 
         JobSystem.Retarget(ref agent, order, leg: 0);
@@ -4784,9 +4790,15 @@ internal sealed class SimulationWorld
             return;
         }
 
+        // <b>Where it will be, not where it is.</b> §192: aiming at the quarry's current position leaves a
+        // pursuer permanently 0.6 s of quarry travel behind — 0.85 m at eight tenths pace, against a harm
+        // reach of 0.814 m, so it can never land a blow. Leading by a fraction of a second spends the
+        // pursuer's speed advantage on closing instead of on catching up. Only when chasing: a body
+        // fleeing wants distance from where its pursuer is now.
+        var aimAt = target.Position + target.Velocity * AgentDefaults.ChaseLeadSeconds;
         var requested = flee
             ? Terrain.ClampPosition(agent.Position - direction * 6f, agent.Radius + BodyFootprint.NavigationMargin)
-            : Terrain.ClampPosition(target.Position - direction * stopDistance, agent.Radius + BodyFootprint.NavigationMargin);
+            : Terrain.ClampPosition(aimAt - direction * stopDistance, agent.Radius + BodyFootprint.NavigationMargin);
         // <b>How stale the goal may get before it is re-asked, and a chase cannot afford what a follow
         // can.</b> Half a metre of slack is right for following somebody about; in a chase it is half a
         // metre of permanent lag, because the body walks to where the quarry was, arrives, halts, and waits

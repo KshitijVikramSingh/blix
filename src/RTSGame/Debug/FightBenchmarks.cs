@@ -87,6 +87,29 @@ internal static class FightBenchmarks
             Assault(8, TargetPosture.Charging, Force.Militia, spread, ground);
         }
 
+        // <b>Both knobs at once, on the Chase case's precedent.</b> §193: that comment records four
+        // measurements proving a stop distance and a stale goal each hid the other, so "single changes
+        // judged one at a time found nothing for a whole session". An ordered attack has the same pair —
+        // where it aims, and how long it waits before re-aiming — so they are swept together first to see
+        // whether anything is there at all, and separated afterwards.
+        Console.WriteLine();
+        Console.WriteLine("  an ordered assault on a FLEEING target, swept on aim and re-aim cadence");
+        Console.WriteLine("    lead | re-aim | killed in | contact% | landed/N | rev/body");
+        var wasLead2 = AgentDefaults.ChaseLeadSeconds;
+        var wasSwing = Assignment.SwingSeconds;
+        foreach (var (lead, swing) in new[]
+                 {
+                     (0.00f, 1.00f), (0.20f, 1.00f), (0.00f, 0.25f), (0.20f, 0.25f), (0.20f, 0.10f),
+                 })
+        {
+            AgentDefaults.ChaseLeadSeconds = lead;
+            Assignment.SwingSeconds = swing;
+            AssaultPair(lead, swing);
+        }
+
+        AgentDefaults.ChaseLeadSeconds = wasLead2;
+        Assignment.SwingSeconds = wasSwing;
+
         Console.WriteLine();
         Console.WriteLine("  a nearer enemy: ours ordered at a distant target with a hostile in their faces");
         Console.WriteLine(
@@ -117,18 +140,29 @@ internal static class FightBenchmarks
             Chase(share);
         }
 
+        // <b>A sweep of a knob that is actually read, unlike the one this replaces.</b> §192: the old
+        // stop-distance sweep set a constant the Chase case had stopped consulting, and printed four
+        // identical rows for two sections. This one is checked the same way — if the rows do not differ,
+        // the knob is not connected and the sweep is decoration.
         Console.WriteLine();
-        Console.WriteLine("  a chase, swept on the stop distance the chase behaviour asks for");
+        Console.WriteLine("  a chase, swept on how far ahead of the quarry it aims");
         Console.WriteLine(
-            "    stop at | effective gap | inside reach% | caught a 0.7x quarry in");
-        var wasStop = AgentDefaults.ChaseStopMetres;
-        foreach (var stop in new[] { 0.95f, 0.60f, 0.30f, 0.0f })
+            "    lead | effective gap | inside reach% | caught a 0.9x quarry in");
+        var wasLead = AgentDefaults.ChaseLeadSeconds;
+        foreach (var lead in new[] { 0.00f, 0.20f, 0.35f, 0.50f, 0.70f })
         {
-            AgentDefaults.ChaseStopMetres = stop;
-            Chase(0.70f, label: $"{stop:F2} m");
+            AgentDefaults.ChaseLeadSeconds = lead;
+            Chase(0.90f, label: $"{lead:F2} s");
         }
 
-        AgentDefaults.ChaseStopMetres = wasStop;
+        AgentDefaults.ChaseLeadSeconds = wasLead;
+
+        // <b>The stop-distance sweep is gone, because it was sweeping nothing.</b> §192: the Chase case
+        // passes stopDistance: 0f outright, so setting AgentDefaults.ChaseStopMetres changed no behaviour
+        // whatever — and the table said so plainly, four rows reading "0.00 m, 92%, 21.7 s" identically.
+        // Four identical rows is what a disconnected knob looks like, and it stood for two sections. The
+        // constant is deleted; a sweep of a value nothing reads is worse than no sweep, because it looks
+        // like coverage.
 
         Console.WriteLine();
         Console.WriteLine("  a cordon: one body crossing a ring of N enemies stood in the way");
@@ -285,7 +319,8 @@ internal static class FightBenchmarks
     /// </para>
     /// </remarks>
     private static void Assault(
-        int count, TargetPosture posture, Force force, float spreadMetres, Ground ground)
+        int count, TargetPosture posture, Force force, float spreadMetres, Ground ground,
+        bool terse = false)
     {
         var world = BuildGround(ground, 240f, out var centre);
         var victim = world.SpawnAgent(centre, UnitType.Militia, Theirs);
@@ -414,6 +449,15 @@ internal static class FightBenchmarks
         var perBody = landed.Count == 0 ? 0f : reversals.Values.Sum() / (float)landed.Count;
         var done = world.Agents.Contains(victim) ? health - world.Agents.Get(victim).Health : health;
 
+        if (terse)
+        {
+            Console.WriteLine(
+                $"{(killedAt > 0f ? $"{killedAt,6:F1} s" : " never"),9} | " +
+                $"{100f * contactTicks / (elapsed * TicksPerSecond),7:F0}% | {landed.Count,4}/{count,-3} | " +
+                $"{perBody,8:F1}");
+            return;
+        }
+
         Console.WriteLine(
             $"    {ground,-7} | {count,2} | {posture,-8} | {force,-7} | {spreadMetres,4:F0} m | " +
             $"{(firstBlow > 0f ? $"{firstBlow,8:F1} s" : "   never"),11} | " +
@@ -422,6 +466,13 @@ internal static class FightBenchmarks
             $"{longGaps,7} | {perBody,8:F1} | {drifted,7} | " +
             $"{(apartAtContact >= 0f ? $"{apartAtContact,10:F1} m" : "         -"),12}" +
             (killedAt > 0f ? string.Empty : $"  ({done:F0} of {health:F0} done)"));
+    }
+
+    /// <summary>One row of the aim/cadence sweep, four militia on a fleeing target on flat ground.</summary>
+    private static void AssaultPair(float lead, float swing)
+    {
+        Console.Write($"    {lead,4:F2} | {swing,6:F2} | ");
+        Assault(4, TargetPosture.Fleeing, Force.Militia, spreadMetres: 20f, Ground.Flat, terse: true);
     }
 
     /// <summary>Mean distance between every pair of our bodies, which is the spread.</summary>
@@ -713,10 +764,13 @@ internal static class FightBenchmarks
         world.QueueMove(new[] { quarry }, new Vector2(100f, 0f));
         world.QueueChase(new[] { hunter }, quarry);
 
-        var reach = MathF.Max(
-            (UnitType.Villager.Radius + UnitType.Villager.Radius) *
-            Simulation.Threat.ThreatSystem.ReachShare,
-            AgentDefaults.ChaseStopMetres + Simulation.Threat.ThreatSystem.ContactSlack);
+        // <b>The rule's own reach, not a generous one.</b> §192: this took MathF.Max of the harm rule
+        // (0.81 m for two villagers) and ChaseStopMetres + ContactSlack (1.10 m), so it reported a body
+        // "inside reach" 35% further out than a blow can travel — which is how the table came to read
+        // "97% inside reach" for a pursuit that never landed a blow. A quarry sitting at 0.85-0.95 m is
+        // inside the instrument's reach and outside the game's.
+        var reach = Simulation.Threat.ThreatSystem.HarmReach(
+            UnitType.Villager.Radius, UnitType.Villager.Radius);
         var inReach = 0;
         var startGap = 1.2f;
         var caught = -1f;

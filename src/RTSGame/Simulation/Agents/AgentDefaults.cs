@@ -66,17 +66,18 @@ internal static class AgentDefaults
     public const float MaximumSpeed = 1.79f;
 
     /// <summary>
-    /// How close a chasing body settles behind the body it is chasing, in metres.
+    /// <b>Deleted.</b> The chase does not use a stop distance any more — see the note in
+    /// <c>SimulationWorld</c>'s Chase case, which passes <c>stopDistance: 0f</c> because a stop distance and
+    /// a stale goal each held a pursuer off by as much again and neither could be found by changing one at
+    /// a time.
     /// </summary>
     /// <remarks>
-    /// Named because something else has to agree with it. It is a following distance — near enough to be
-    /// on somebody's heels without shouldering them along — and for a chase that means to <em>fight</em>
-    /// it is also the closest a defender will ever get. See <c>ThreatSystem.Update</c>: harm reached 0.81 m
-    /// while a chase settled at 0.95, so every defender in the game halted a hand's breadth outside
-    /// striking distance and stayed there. Twenty-four raiders walked home with six hundred grain and not
-    /// one of them was ever hurt enough to notice.
+    /// §192. It lived on for two sections after nothing read it, and it was not harmless: <c>--fightbench</c>
+    /// still built its "inside reach" figure out of it, so the instrument measured a body against a constant
+    /// the game had stopped consulting — and the sweep that tuned it produced four identical rows, which is
+    /// what a disconnected knob looks like. Reach now comes from
+    /// <see cref="RTSGame.Simulation.Threat.ThreatSystem.HarmReach"/>, which is the rule itself.
     /// </remarks>
-    public static float ChaseStopMetres = 0.95f;
 
     /// <summary>How hard a body picks up speed, in metres per second squared.</summary>
     /// <remarks>
@@ -300,6 +301,38 @@ internal static class AgentDefaults
     /// </remarks>
     public static float SeparationThreshold(float radius, float otherRadius) =>
         radius + otherRadius - 0.01f;
+
+    /// <summary>
+    /// How far ahead of a fleeing quarry a chase aims, in seconds of the quarry's own travel.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because a chase that aims where the quarry IS arrives where the quarry WAS.</b> §192. Measured on
+    /// <c>--fightbench</c>, and the shape of the numbers is the whole diagnosis: a pursuer settles 0.85 m
+    /// behind a quarry at eight tenths of its pace, 0.95 m at nine tenths and 1.20 m at parity — which is
+    /// not a distance at all but a constant <b>0.59-0.67 seconds of quarry travel</b>. A latency, not a
+    /// standoff.
+    /// <para>
+    /// Two other explanations were tested first and both changed the table by <em>nothing</em>, which is
+    /// how they were dismissed: that the chase stopped short (it passes <c>stopDistance: 0f</c>) and that
+    /// the avoidance solver kept the two apart (dropping the hunter's constraint against its quarry was
+    /// byte-identical). Only the lag survives, and it survives because it is visible in the ratio rather
+    /// than argued from the code.
+    /// </para>
+    /// <para>
+    /// It matters because harm reaches 0.814 m for two villagers, so a body 0.85 m behind is outside its
+    /// own weapon by three and a half centimetres and <b>can never land a blow</b> — which is why a quarry
+    /// at eight tenths pace is effectively invulnerable, and why a fleeing target costs four to five times
+    /// what a standing one does.
+    /// </para>
+    /// </remarks>
+    /// <remarks>
+    /// <b>0.20 s, and the sweep is why.</b> Nothing at all is caught at zero lead; everything from 0.20 s
+    /// to 0.70 s catches a nine-tenths-pace quarry in an identical 23.3 s, so the figure above the
+    /// threshold does not matter — and a longer lead costs the easy cases, because aiming well ahead of a
+    /// barely-moving quarry is aiming at empty ground. Measured at 0.35 s, a six-tenths-pace quarry took
+    /// 23.9 s against 21.5 s before the change; the smallest lead that works gives that back.
+    /// </remarks>
+    public static float ChaseLeadSeconds = 0.20f;
 
     /// <summary>The separation bar for two bodies of the same radius.</summary>
     public static float SeparationThreshold(float radius) => SeparationThreshold(radius, radius);

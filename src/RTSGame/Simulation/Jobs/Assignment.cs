@@ -464,7 +464,14 @@ internal readonly record struct Assignment(
     /// down. One second is a swing: long enough to be arrival, short enough that a quarry which moves is
     /// followed rather than lost.
     /// </remarks>
-    private const float SwingSeconds = 1f;
+    /// <remarks>
+    /// <b>Nothing swings on it.</b> §193: harm is dealt continuously on contact by <c>ThreatSystem</c>, so
+    /// this is not a rate of blows at all — it is how long an attacker stands before re-aiming at its
+    /// target, and it is named for a swing it does not gate. A second of it against a quarry walking at
+    /// 1.43 m/s is a metre and a half of stale goal every cycle, which the Chase case solved by re-aiming
+    /// every 0.22 s. Made settable so <c>--fightbench</c> can sweep it rather than argue about it.
+    /// </remarks>
+    internal static float SwingSeconds = 1f;
 
     /// <summary>Sends a carrier to empty somebody else's store. See <see cref="AssignmentKind.Loot"/>.</summary>
     public static Assignment Loot(NodeId theirs, Vector2 at, float extent, float handoverSeconds) =>

@@ -32,6 +32,24 @@ internal sealed class ThreatSystem
     internal static float ReachShare = 1.1f;
 
     /// <summary>
+    /// How near two bodies must be for a blow to land. <b>The only definition of it.</b>
+    /// </summary>
+    /// <remarks>
+    /// §192. This was computed inline in <see cref="Update"/> and reproduced — differently — in
+    /// <c>--fightbench</c>, which took <c>MathF.Max</c> of it and <c>ChaseStopMetres + ContactSlack</c>.
+    /// The second is 1.10 m against this one's 0.81 m for two villagers, so the instrument called a body
+    /// "inside reach" thirty-five per cent further out than a blow can actually travel — and the chase table
+    /// duly read <c>97% inside reach</c> for a pursuit that never once landed a blow, because the quarry sat
+    /// at 0.85-0.95 m: inside the instrument's reach and outside the game's.
+    /// <para>
+    /// Two notions of touching the same body, which is the fault §182 was written about, this time between
+    /// an instrument and the mechanic it measures. One function now, and the instrument calls it.
+    /// </para>
+    /// </remarks>
+    public static float HarmReach(float attackerRadius, float defenderRadius) =>
+        (attackerRadius + defenderRadius) * ReachShare;
+
+    /// <summary>
     /// Retired: reach is a body's own business again.
     /// </summary>
     /// <remarks>
@@ -213,7 +231,7 @@ internal sealed class ThreatSystem
                     continue;
                 }
 
-                var reach = (attacker.Radius + defender.Radius) * ReachShare;
+                var reach = HarmReach(attacker.Radius, defender.Radius);
                 var gap = Vector2.Distance(attacker.Position, defender.Position);
                 if (gap > reach) continue;
                 engaged.Add((gap, attacker.Id.Value, i));
