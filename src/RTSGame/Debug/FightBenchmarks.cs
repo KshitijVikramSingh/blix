@@ -94,21 +94,21 @@ internal static class FightBenchmarks
         // whether anything is there at all, and separated afterwards.
         Console.WriteLine();
         Console.WriteLine("  an ordered assault on a FLEEING target, swept on aim and re-aim cadence");
-        Console.WriteLine("    lead | re-aim | killed in | contact% | landed/N | rev/body");
+        Console.WriteLine("    lead | dwell | killed in | contact% | landed/N | rev/body");
         var wasLead2 = AgentDefaults.ChaseLeadSeconds;
-        var wasSwing = Assignment.SwingSeconds;
+        var wasSwing = Assignment.AttackDwellSeconds;
         foreach (var (lead, swing) in new[]
                  {
                      (0.00f, 1.00f), (0.20f, 1.00f), (0.00f, 0.25f), (0.20f, 0.25f), (0.20f, 0.10f),
                  })
         {
             AgentDefaults.ChaseLeadSeconds = lead;
-            Assignment.SwingSeconds = swing;
+            Assignment.AttackDwellSeconds = swing;
             AssaultPair(lead, swing);
         }
 
         AgentDefaults.ChaseLeadSeconds = wasLead2;
-        Assignment.SwingSeconds = wasSwing;
+        Assignment.AttackDwellSeconds = wasSwing;
 
         // <b>One attacker, traced, because guessing has been tried three times.</b> §195.
         Console.WriteLine();
@@ -396,6 +396,14 @@ internal static class FightBenchmarks
         var lastTrace = string.Empty;
         var traceLines = 0;
 
+        // <b>Abandoned WHILE the target lived, which is a different question from the one this column
+        // used to answer.</b> §197: it was sampled after the run and read 0 everywhere, which was the
+        // honest answer while an Attack assignment lingered until handover. §196 made the attack end the
+        // moment its quarry dies — correctly — and the column immediately read 8 of 8, because every body
+        // had stopped holding an Attack the instant the fight was won. A metric that fires on the fix is
+        // worse than no metric, so this watches during the fight instead of counting survivors after it.
+        var abandoned = new HashSet<int>();
+
         var limit = 120 * TicksPerSecond;
         for (var tick = 1; tick <= limit; tick++)
         {
@@ -429,6 +437,15 @@ internal static class FightBenchmarks
             }
 
             if (world.Threat.Contacts > 0) contactTicks++;
+
+            foreach (var id in mob)
+            {
+                if (!world.Agents.Contains(id) || !world.Agents.Get(id).IsAlive) continue;
+                if (world.Agents.Get(id).Jobs.Assignment.Kind != AssignmentKind.Attack)
+                {
+                    abandoned.Add(id.Value);
+                }
+            }
 
             foreach (var who in world.Threat.LandedThisTick)
             {
@@ -478,9 +495,7 @@ internal static class FightBenchmarks
             }
         }
 
-        var drifted = mob.Count(id =>
-            world.Agents.Contains(id) && world.Agents.Get(id).IsAlive &&
-            world.Agents.Get(id).Jobs.Assignment.Kind != AssignmentKind.Attack);
+        var drifted = abandoned.Count;
         var elapsed = killedAt > 0f ? killedAt : limit / (float)TicksPerSecond;
         var perBody = landed.Count == 0 ? 0f : reversals.Values.Sum() / (float)landed.Count;
         var done = world.Agents.Contains(victim) ? health - world.Agents.Get(victim).Health : health;

@@ -450,28 +450,34 @@ internal readonly record struct Assignment(
         Vector2 at,
         float extent) =>
         new(
-            AssignmentKind.Attack, at, at, SwingSeconds, structure, NodeId.None,
+            AssignmentKind.Attack, at, at, AttackDwellSeconds, structure, NodeId.None,
             PlaceExtent: extent, Quarry: quarry);
 
     /// <summary>
-    /// How long a body stays put between re-aiming at its target.
+    /// How long an attacker must stand at what it is hitting before its leg counts as done.
     /// </summary>
     /// <remarks>
+    /// <b>Renamed from <c>SwingSeconds</c>, because nothing swings on it.</b> §197. Harm is dealt
+    /// continuously on contact by <c>ThreatSystem</c>, so this was never a rate of blows — it is a dwell,
+    /// and the name cost a whole section: §193 swept it as though it were how often an attacker re-aims,
+    /// found nothing, and only §195's trace showed why. The re-aim happens on <em>handover</em>, which
+    /// requires arrival, so shortening this shaves nine tenths of a second off a fifteen-second cycle. I
+    /// spent a section tuning a constant that was not in the loop I was trying to shorten, and the name is
+    /// most of the reason.
+    /// <para>
     /// <b>Not zero, and zero was the first answer.</b> §166: a leg with no dwell finishes on the tick it
     /// begins, so an attacker spent every tick being re-aimed and none of them <em>standing</em> at what it
     /// was hitting — and the damage rule, which asks the jobs layer whether the body has arrived, saw a body
-    /// permanently in transit. A soldier chewed a palisade at a fraction of its strength and never brought it
-    /// down. One second is a swing: long enough to be arrival, short enough that a quarry which moves is
-    /// followed rather than lost.
+    /// permanently in transit. A soldier chewed a palisade at a fraction of its strength and never brought
+    /// it down. One second is long enough to count as arrival.
+    /// </para>
+    /// <para>
+    /// It no longer has to be "short enough that a quarry which moves is followed rather than lost", which
+    /// is what the original note claimed of it: §196 gave an ordered attack on a body a real chase, so
+    /// following a mover is the chase's business and this is purely about standing at a wall.
+    /// </para>
     /// </remarks>
-    /// <remarks>
-    /// <b>Nothing swings on it.</b> §193: harm is dealt continuously on contact by <c>ThreatSystem</c>, so
-    /// this is not a rate of blows at all — it is how long an attacker stands before re-aiming at its
-    /// target, and it is named for a swing it does not gate. A second of it against a quarry walking at
-    /// 1.43 m/s is a metre and a half of stale goal every cycle, which the Chase case solved by re-aiming
-    /// every 0.22 s. Made settable so <c>--fightbench</c> can sweep it rather than argue about it.
-    /// </remarks>
-    internal static float SwingSeconds = 1f;
+    internal static float AttackDwellSeconds = 1f;
 
     /// <summary>Sends a carrier to empty somebody else's store. See <see cref="AssignmentKind.Loot"/>.</summary>
     public static Assignment Loot(NodeId theirs, Vector2 at, float extent, float handoverSeconds) =>

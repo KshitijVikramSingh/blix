@@ -15345,3 +15345,55 @@ gate doing exactly the job it exists for, and it is the reason the zombie did no
   atomic verb behaving as designed; what composes on top is the open half.
 - **`SwingSeconds`** should be renamed or removed. It gates no swing, it is a dwell, and its name is what
   let a whole section be spent tuning it as though it were a rate of re-aiming.
+
+## 197. Two names corrected, and spread survives the chase
+
+Housekeeping the previous sections earned, plus the re-measurement §196 said was owed.
+
+### `SwingSeconds` is `AttackDwellSeconds`
+
+It gates no swing. Harm is dealt continuously on contact by `ThreatSystem`, so it was never a rate of blows;
+it is how long an attacker must stand at what it is hitting for its leg to count as done. **The name cost a
+whole section**: §193 swept it as though it were how often an attacker re-aims, found nothing, and only
+§195's trace showed why — the re-aim happens on *handover*, which requires arrival, so shortening this shaves
+nine tenths of a second off a fifteen-second cycle. A constant tuned for a loop it is not in.
+
+Its original note also claimed it had to be "short enough that a quarry which moves is followed rather than
+lost". That is no longer its job at all: §196 gave an ordered attack on a body a real chase, so following a
+mover is the chase's business and this is purely about standing at a wall.
+
+### The `drifted` column had started measuring the fix
+
+`drifted` counts bodies that abandon the attack, and it read **0 everywhere** through §189-195 — the honest
+answer while an Attack assignment lingered until handover. §196 made the attack end the instant its quarry
+dies, correctly, and the column immediately read **8 of 8**: every body had stopped holding an Attack the
+moment the fight was won.
+
+**A metric that fires on the fix is worse than no metric.** It now watches during the fight rather than
+counting survivors after it, and reads 0 again — which is the finding worth having, because it means nobody
+abandons the attack while the target lives, **villagers pulled off their fields included**. §187's hand-back
+holds and the chase did not disturb it.
+
+That is the third instrument in this arc to be corrected rather than the game (after the reach that was 35%
+generous and the leg counter that was churn), and all three failed the same way: **they answered a question
+adjacent to the one their name implied.**
+
+### Spread survives the chase, at 2.2 to 3.2x
+
+§196 noted that the chase might change spread's shape, since eight bodies now converge on a moving point
+rather than a fixed one. Re-measured:
+
+| ground | eight from 4 m apart | eight from 20 m apart | ratio |
+|---|---|---|---|
+| Flat | 9.2 s, 83% contact | 20.3 s, 34% | **2.2x** |
+| Rough | 9.5 s, 67% | 27.3 s, 54% | **2.9x** |
+| Village | 7.6 s, 88% | 24.2 s, 38% | **3.2x** |
+
+Both ends are faster than before the chase — flat was 15.0 s and 32.1 s — but **the ratio is unchanged**.
+Sending a force from twenty metres apart still costs two to three times sending the same force from four
+metres apart, on every ground. So spread is a real and separate mechanism, not a symptom of the pursuit, and
+it is the next item on its own merits.
+
+The shape of it is in `apart at contact`: 3.4 m when sent tight, 15-17 m when sent spread. The force arrives
+piecemeal, and `contact%` follows exactly — 83% against 34%. Nobody has to be made better at fighting; they
+have to arrive together, which is a cohort question (§107) rather than a combat one.
