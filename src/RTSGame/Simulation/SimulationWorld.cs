@@ -1304,14 +1304,20 @@ internal sealed class SimulationWorld
     /// it would concentrate more bodies on the one the player pointed at and spill fewer to its neighbours.
     /// </para>
     /// </remarks>
-    private static int WorkerCapacity(in EconomyNode node) => node.Kind switch
+    internal static int WorkerCapacity(in EconomyNode node) => node.Kind switch
     {
-        // <b>Three, from the chair.</b> One was the tidy answer — a trunk is one body's work — and it read
-        // as needlessly precious: "I'd still suppose at least 2-3 can work a single tree". Nothing in the
-        // economy objects, since §6 makes output continuous in hands rather than gated on a slot.
-        NodeKind.Tree => 3,
-        NodeKind.Outcrop => 2,
-        NodeKind.Farm => 3,
+        // <b>Five each, from the chair, once the numbers were shown to be judgement.</b> §210. Three came
+        // from the chair too — "I'd still suppose at least 2-3 can work a single tree" — against a tidy
+        // one; two and three were mine and never rested on anything. Asked where they came from, the honest
+        // answer was that they were made up, and the answer to that was five.
+        //
+        // Nothing in the economy objects, since §6 makes output continuous in hands rather than gated on a
+        // slot, and five is still inside what physically fits at every one of them: 6.7 bodies reach a
+        // trunk, 12.3 an outcrop, 22.2 a farm. So a click concentrating five is a click asking for five
+        // hands, not a click asking for a crowd that cannot stand there.
+        NodeKind.Tree => 5,
+        NodeKind.Outcrop => 5,
+        NodeKind.Farm => 5,
         _ => int.MaxValue,
     };
 

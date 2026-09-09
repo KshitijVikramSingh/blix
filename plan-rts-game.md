@@ -16000,3 +16000,64 @@ bearing spin a derivation and would let crowded arrival become "take a free slot
 
 `WorkerCapacity` stays a table, and should be labelled as the economic cap it is rather than left looking
 like a geometric one — which is how it came to be mistaken for one.
+
+## 210. Five each, and the last two items re-argued with what is now known
+
+The chair, asked where the worker capacities came from: *"because I remember making them up xD"* — and the
+code agrees, in as many words. `Tree => 3` is quoted to the chair (*"I'd still suppose at least 2-3 can work
+a single tree"*); `Outcrop => 2` and `Farm => 3` were mine; and the summary line above the table has always
+opened **"Judgement, not measurement"**. §201 did not contradict a measured fact. It forgot that the code had
+already said these were invented and went looking for a derivation nobody had claimed.
+
+**Five each**, from the chair. Still inside what physically fits at every one of them — 6.7 at a trunk, 12.3
+at an outcrop, 22.2 at a farm — so a click asking for five hands is asking for five hands and not for a crowd
+that cannot stand there. Years unmoved: `270 grain against a nominal 270` on both grounds.
+
+### And it broke the same test the same way, in the test that was rewritten for it
+
+`a crowd posted on one tree spreads across the wood` failed with
+`at most 5 hands on any one (cap 3)`. **It printed and asserted a hardcoded 3** — in the test whose own
+comment explains that it had been rewritten once because "raising that to three from the chair broke a test
+that was measuring the constant rather than the behaviour". The rewrite fixed the *trunk count* and left the
+*cap* spelled out.
+
+Both ends now come off `WorkerCapacity`: the crowd is `cap × 2`, so spreading is forced whatever the cap is,
+and the assertion reads the cap rather than repeating it. `10 posted on one tree took 2 distinct trunk(s), at
+most 5 hands on any one (cap 5)`. **A fixture that hardcodes the number it checks breaks on every honest
+change and passes every dishonest one.**
+
+### The last two items, re-argued
+
+§201 proposed (2) crowded arrival stops being a distance, and (3) one surround mechanism. Three things have
+been learned since, and each one changes the argument:
+
+**First: the caps are below the geometric capacity, so slots can never be a capacity mechanism.** Five
+against 6.7, 12.3 and 22.2 — the economic cap always bites first. Whatever a ring of slots is for, it is not
+for limiting how many bodies come. It is for giving each of the five its own place to stand, which is the
+thing that actually goes wrong: they converge on one point and jostle.
+
+**Second: the crowded distance is not a licence, it is earned.** `SettledNearby` is set only after a body has
+tried and failed — `place is Crowded`, or `Open` with `Retries >= CrowdedAttempts`. So the 2.96 m is not
+handed out; it is what a body falls back to having failed to reach its place. §201 called that a mistake to
+be removed, which was the §209 error again in miniature: **treating a considered fallback as an oversight.**
+
+**Third: §202 already took production off it.** Labour now needs `IsStandingAt` (1.36 m), so the crowded
+distance affects *arrival* alone — whether the jobs layer stops walking. Removing or changing it is far less
+consequential than it would have been two sections ago, and far less necessary.
+
+So the honest shape of the remaining work is neither of §201's two items. It is one:
+
+> **Insert slots between the two tiers that already exist.** A body walks to its own slot on a ring at the
+> act's reach; failing that, it falls back to the crowded distance exactly as it does now. The exact point
+> stops being contended, so most bodies never reach the fallback — and the fallback stays for the case it was
+> built for, which is a slot that terrain or a crowd has made unreachable.
+
+That subsumes `TryApproachPoint`'s golden-angle bearing spin, which is a scatter *approximating* slots
+without knowing how many bodies there are or where the others went. And it leaves `SlotPlan` alone: a
+formation slot for a group on the march is a different question from a working place at a site, and §200's
+form-up already showed the two want different answers.
+
+**What it would not fix**, and worth saying before anybody hopes: §197 measured the spread penalty at
+2.0-3.2x and traced it to a force *dispersing during the approach*, which the chair confirmed gets worse on
+real maps. Slots at the destination do not help a force that arrives strung out over fifteen metres. That is
+travel, not arrival, and it stays §107's.

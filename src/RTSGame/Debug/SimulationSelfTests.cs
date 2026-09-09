@@ -6071,8 +6071,17 @@ internal static class SimulationSelfTests
         var us = new FactionId(0);
         world.AddNode(NodeKind.Granary, new Vector2(0f, -12f), capacity: 4000, faction: us);
 
-        // Six trees in a clump, and six villagers told to cut the first of them.
-        var trees = new NodeId[6];
+        // <b>Sized off the cap, so the test scales with the judgement instead of breaking on it.</b> §210:
+        // a fixed six hands against a fixed "at most 3" broke the moment the chair moved the cap to five,
+        // and a crowd that does not exceed the cap does not have to spread at all — so the fixture has to
+        // ask for the cap before it decides how many bodies make a crowd. Twice the cap: enough that
+        // spreading is forced whatever the cap is, and enough trees to spread onto.
+        var capacity = SimulationWorld.WorkerCapacity(
+            in world.Nodes.Get(world.AddNode(
+                NodeKind.Tree, new Vector2(-30f, -30f), capacity: (int)Woodland.WoodPerTree)));
+        var crowd = capacity * 2;
+
+        var trees = new NodeId[crowd];
         for (var i = 0; i < trees.Length; i++)
         {
             trees[i] = world.AddNode(
@@ -6082,7 +6091,7 @@ internal static class SimulationSelfTests
             world.SeedStock(trees[i], Resource.Wood, (int)Woodland.WoodPerTree);
         }
 
-        var hands = new AgentId[6];
+        var hands = new AgentId[crowd];
         for (var i = 0; i < hands.Length; i++)
         {
             hands[i] = world.SpawnAgent(new Vector2(-6f + i * 0.8f, -6f), UnitType.Villager, us);
@@ -6121,10 +6130,18 @@ internal static class SimulationSelfTests
             most = Math.Max(most, here);
         }
 
-        var passed = chosen.Count > 1 && most <= 3;
+        // <b>The cap is read, not written down here.</b> §210: this printed "(cap 3)" and asserted
+        // `most <= 3` with the three spelled out — so raising the chair's judgement to five failed a test
+        // that was measuring the constant AGAIN, in the very test whose comment above explains that it was
+        // rewritten once for exactly that. A test that hardcodes the number it is checking against will
+        // break on every honest change to it and pass on every dishonest one.
+        var cap = SimulationWorld.WorkerCapacity(in world.Nodes.Get(new NodeId(chosen.First())));
+        var enough = hands.Length > cap;
+        var passed = (!enough || chosen.Count > 1) && most <= cap;
         Console.WriteLine(
-            $"    six posted on one tree took {chosen.Count} distinct trunk(s), " +
-            $"at most {most} hands on any one (cap 3)");
+            $"    {hands.Length} posted on one tree took {chosen.Count} distinct trunk(s), " +
+            $"at most {most} hands on any one (cap {cap}" +
+            (enough ? ")" : ", which the crowd does not exceed, so spreading is not required)"));
         return passed;
     }
 
