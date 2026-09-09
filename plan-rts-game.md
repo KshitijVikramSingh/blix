@@ -15516,3 +15516,60 @@ measuring through a different transform from the one that draws.
 The phase needs to know it is a strike, and only `ClipFor` knows which action survived the hold. Deriving it
 again at the call site would be a second answer to a question already settled there — the exact fault §181
 spent a section removing from the two log reporters — so it is reported out instead.
+
+## 200. The order forms up, and it lines up — partly
+
+The chair's call: *"I'd start with the order forming up through the group, if nothing just to save on compute,
+if that doesn't line up then we'll consider the alternative."* Both halves of the rationale hold, and the
+measured answer is a partial yes, which is worth stating as such rather than rounding up.
+
+`QueueAttack` now issues one `MoveGroupCommand` alongside the assignment when the target is beyond
+`ThreatSystem.ThreatMetres`, and `DriveOrderedAttacks` withholds each body's own chase until it is inside
+that range. **Travel as a group, engage as individuals.**
+
+The compute argument stands on its own: one group move settles reachability once for the whole order and
+shares a flow field, where N individual chases each ask their own question — §102 measured twenty bodies
+each discovering the same unreachable clearing, eighteen seconds, nobody moving.
+
+`ThreatMetres` rather than a new constant, because it is already the range at which this game considers a
+hostile to be *here*.
+
+### What it bought, and what it did not
+
+Eight bodies sent from twenty metres apart — the spread case:
+
+| ground | before | after | apart at contact |
+|---|---|---|---|
+| Flat | 20.3 s, 34% | 20.2 s, 37% | 15.4 → **13.1 m** |
+| Rough | 27.3 s, 54% | **21.8 s**, 46% | 16.1 → 14.2 m |
+| Village | 24.2 s, 38% | **22.0 s**, 49% | 17.4 → **11.7 m** |
+
+And the spread penalty itself, tight against spread:
+
+| ground | before | after |
+|---|---|---|
+| Flat | 2.2x | 2.1x |
+| Rough | 2.9x | **2.0x** |
+| Village | 3.2x | **2.7x** |
+
+So: **twenty per cent off Rough, nine off Village, nothing on Flat**, and the force does arrive tighter
+everywhere. The gains land where terrain is in the way, which is exactly where a shared flow field should
+help and is a point in the mechanism's favour rather than a coincidence.
+
+Two costs, both real and both the expected shape of forming up:
+
+- **First blow arrives later.** Village at twenty metres went from 6.7 s to 16.9 s, because nobody rushes in
+  ahead of the others any more. Total time still improved, so the trade is worth taking — but it is a trade,
+  and it will read on screen as a slower start.
+- **The already-tight cases are about half a second slower** (9.2 → 9.7, 9.5 → 10.9, 7.6 → 8.2). Sending a
+  force that is already together through a group move buys nothing and costs the formation a moment.
+
+### It does not solve spread, and the alternative stays live
+
+A penalty of 2.0 to 2.7x is smaller than 2.2 to 3.2x and is not gone. The residual is visible in the same
+row: arriving 12-14 m apart still gives 37-49% contact against 72-89% when arriving 2 m apart. **Arriving
+together helps; arriving together is not what a group move actually delivers over twenty metres of ground.**
+
+So the chair's fallback is not spent. What the numbers point at, for whenever this is next picked up, is that
+the group disperses during the approach rather than starting dispersed — which is a question about formation
+tightness under travel (§107's slots) and not about combat at all.

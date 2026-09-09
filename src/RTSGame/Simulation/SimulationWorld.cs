@@ -1742,7 +1742,44 @@ internal sealed class SimulationWorld
             return;
         }
 
-        QueueAssign(agents, Assignment.Attack(quarry, structure, at, extent));
+        var ordered = agents as ICollection<AgentId> ?? agents.ToArray();
+        QueueAssign(ordered, Assignment.Attack(quarry, structure, at, extent));
+
+        // <b>Travel as a group, engage as individuals.</b> §200, and the chair's call: start by forming the
+        // order up through the group, "if nothing just to save on compute". Both halves land.
+        //
+        // Compute: one MoveGroupCommand settles reachability once for the whole order and shares a flow
+        // field, where N individual chases each ask their own question — §102 measured twenty bodies each
+        // discovering the same unreachable clearing at eighteen seconds and nobody moving.
+        //
+        // And it is the spread finding acted on: §197 measured eight bodies sent from twenty metres apart
+        // taking two to three times as long as the same eight sent from four, on every ground, with
+        // `apart at contact` at 15-17 m against 3.4 m. They were not fighting worse; they were arriving
+        // piecemeal. A group move is exactly the machinery that makes a force arrive together, and it
+        // already exists.
+        //
+        // Only for the approach. Inside ThreatMetres — the range at which this game already considers a
+        // hostile to be *here* — DriveOrderedAttacks hands each body its own chase, because a fight is not
+        // a formation and §196's pursuit is what closes the last few metres.
+        if (FurtherThanEngagement(ordered, at)) QueueMove(ordered, at);
+    }
+
+    /// <summary>Whether an order's target is far enough off to be worth walking to as a group.</summary>
+    /// <remarks>
+    /// Measured from the nearest member rather than the centroid, for §102's reason: a centroid is an
+    /// average and averages land in rivers and barn walls. If anybody is already in the fight, the whole
+    /// order is in the fight.
+    /// </remarks>
+    private bool FurtherThanEngagement(IEnumerable<AgentId> agents, Vector2 target)
+    {
+        var reach = RTSGame.Simulation.Threat.ThreatSystem.ThreatMetres;
+        foreach (var id in agents)
+        {
+            if (!Agents.Contains(id)) continue;
+            if (Vector2.DistanceSquared(Agents.Get(id).Position, target) <= reach * reach) return false;
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -4060,6 +4097,16 @@ internal sealed class SimulationWorld
 
             if (body.LocomotionState == AgentLocomotionState.Chase &&
                 body.BehaviorTarget.Value == quarry.Value)
+            {
+                continue;
+            }
+
+            // <b>Not yet: it is still walking there with the others.</b> §200. Handing a body its own chase
+            // the instant it is ordered dissolves the group before it has formed, and the group is what
+            // makes a force arrive together — §197 priced arriving piecemeal at two to three times the
+            // fight. Inside ThreatMetres the approach is over and the pursuit takes it from there.
+            var reach = RTSGame.Simulation.Threat.ThreatSystem.ThreatMetres;
+            if (Vector2.DistanceSquared(body.Position, Agents.Get(quarry).Position) > reach * reach)
             {
                 continue;
             }
