@@ -15944,3 +15944,45 @@ Two, and they are the same question from two sides: **one surround mechanism** (
 act's reach and packed by `ContactArc`, which would give `WorkerCapacity`'s `Tree => 3` a derivation instead
 of a table) and **crowded arrival as a slot question** rather than a 2.96 m licence to act from. Both are now
 better founded than when §201 wrote them down, because every act has a reach to size a ring by.
+
+## 209. `WorkerCapacity` is not geometric, and §201 was wrong to say it was
+
+§201's third proposal read: *"one surround: slots on a ring sized by the act's reach and packed by
+`ContactArc` — which gives `WorkerCapacity`'s per-kind headcounts a derivation instead of a table: a tree
+takes three hands because three fit at its reach."*
+
+Computed before building it, and it is false. Bodies are 0.37 m in radius, so the number that fits on the
+inner ring around a site is `π / asin(r / (halfExtent + r))`:
+
+| | fits at the ring | `WorkerCapacity` says |
+|---|---|---|
+| Tree (half-extent 0.45 m) | **6.7** | 3 |
+| Outcrop (1.10 m) | **12.3** | 2 |
+| Farm (2.25 m) | **22.2** | 3 |
+
+**Six or seven fit at a trunk, not three.** And the discrepancy is not a constant that could be called a
+crowding allowance: a tree's cap is half the geometric figure, an outcrop's a sixth, a farm's a seventh. The
+table is not geometry with a fudge factor; it is not geometry at all.
+
+Which makes sense once stated: `WorkerCapacity` answers **how many hands a site is worth employing** —
+diminishing returns, and the pressure that makes `SpreadAcrossKin` send the fourth cutter to the next tree —
+and that is an economic question. The ring answers **where a body stands**, which is geometric. §201
+conflated them because both come out as a number per site.
+
+Building the derivation would have roughly doubled the hands at a tree, sextupled them at an outcrop and
+septupled them at a farm: a very large unintended change to the wood and stone economies, arriving inside a
+refactor that was billed as removing a contradiction. **Four economy changes in this arc moved the nominal by
+nothing, precisely because each closed a contradiction rather than turning a knob. This would have turned a
+knob while claiming not to.**
+
+### What the surround unification can still do
+
+The half that survives is the half that was always the real problem: **where to stand.** §201 counted four
+mechanisms for it — `ContactArc`'s angular packing, `TryApproachPoint`'s golden-angle bearing spin, `SlotPlan`
+formation slots, and `SpreadAcrossKin`'s per-site headcount — and only the first is derived from the geometry
+of the thing being surrounded. A ring of slots at the act's reach, packed by `ContactArc`, would give the
+bearing spin a derivation and would let crowded arrival become "take a free slot" rather than "act from
+2.96 m", which is §201's second proposal and is the one with a measured contradiction behind it.
+
+`WorkerCapacity` stays a table, and should be labelled as the economic cap it is rather than left looking
+like a geometric one — which is how it came to be mistaken for one.
