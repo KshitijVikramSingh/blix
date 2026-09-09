@@ -15819,3 +15819,39 @@ wrapped and is under one tick's worth:
 
 Zero off-stroke. That claim is false under the old model for every value the charge could have taken, which
 is what makes it worth having.
+
+## 206. Every act that hits something lands on its own frame
+
+§199 gave the sword a measured impact frame because harm had just been given a moment. §205 gave work a
+stroke, so the axe, the pick, the scythe and the hammer each have a moment to land on too — and each has its
+own clip with its own impact somewhere in the middle of it.
+
+```
+bodies: impact measured — Strike=60%, Chop=15%, Quarry=15%, Reap=53%, Build=87%
+```
+
+**Fifteen per cent to eighty-seven.** One number would have been the sword's applied to a scythe: using 60%
+for the axe would have put the picture forty-five per cent of a cycle away from the wood coming off. That
+spread is the argument for measuring each rather than choosing one, and it is the same argument §199 made
+against guessing the sword's.
+
+`GaitOf` now places any act with a measured impact, on the period belonging to that act's own layer — a blow
+every `ThreatSystem.SwingSeconds`, a stroke every `EconomySystem.StrokeSeconds`. Two clocks, deliberately
+not folded into one constant: §197 renamed a constant for exactly that mistake.
+
+### And the first run found a two-resolutions bug
+
+The measurement searched only each act's `names` list. The **binding** searches `names` and then `standIns`.
+So the first run reported:
+
+```
+Strike=60%, Chop=15%, Quarry=free, Reap=53%, Build=87%
+```
+
+`Quarry=free` beside a bound clip of `TreeChopping_Loop*`. No asset ships a pick swing, so quarrying draws a
+felling swing as a stand-in — and measuring only the names found nothing, which left **the one act certain to
+be using a stand-in as the one act running free.** Two resolutions of the same question, disagreeing exactly
+where it mattered.
+
+Fixed by mirroring the binding's order, with the binding named as the authority. And the load report is the
+check: **an act reporting `free` while its bound clip has a name is this fault returning.**

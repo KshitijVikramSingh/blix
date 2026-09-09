@@ -154,6 +154,27 @@ internal sealed class SkinnedBodies : IDisposable
     /// </remarks>
     public float ImpactFraction { get; private init; }
 
+    /// <summary>Where the blow lands in each act's clip, indexed by <see cref="BodyAction"/>.</summary>
+    /// <remarks>
+    /// <b>§206: the same measurement, for every act that hits something.</b> §199 recovered it for the
+    /// sword because harm had just been given a moment; §205 gave work a stroke, so an axe, a scythe and a
+    /// hammer each have a moment to land on too — and each has its own clip with its own impact somewhere
+    /// in the middle of it. One number would have been the sword's, applied to a scythe.
+    /// <para>
+    /// Zero for anything with no measurable impact, and the caller then leaves that clip free-running
+    /// rather than aligning it to a fiction. Same rule as §199 and for the same reason: an alignment that
+    /// looks deliberate and is wrong reads as a bug where a free clip reads as noise.
+    /// </para>
+    /// </remarks>
+    private float[] impactByAction = Array.Empty<float>();
+
+    /// <summary>Where the blow lands in this act's clip, or zero if it was not measurable.</summary>
+    public float ImpactOf(BodyAction action)
+    {
+        var index = (int)action;
+        return index >= 0 && index < impactByAction.Length ? impactByAction[index] : 0f;
+    }
+
     /// <summary>How many bone matrices one body owns — the stride the skinned shaders index by.</summary>
     public int BonesPerBody => skeleton.BoneCount;
 
@@ -503,11 +524,23 @@ internal sealed class SkinnedBodies : IDisposable
                 ? $"  bodies: walk stride measured {stride:F2} m per cycle at {metresTall:F2} m tall"
                 : "  bodies: no walk stride measurable; the caller's constant stands in");
 
-        var impact = MeasureImpact(model);
-        Console.WriteLine(
-            impact > 0f
-                ? $"  bodies: strike impact measured {impact * 100f:F0}% through the swing clip"
-                : "  bodies: no strike impact measurable; the strike clip runs free");
+        // <b>Every act that hits something.</b> §206. Walking, standing and dying have no impact to find,
+        // and asking for one would return whichever frame the feet happened to move fastest on.
+        var hitting = new[]
+        {
+            BodyAction.Strike, BodyAction.Chop, BodyAction.Quarry, BodyAction.Reap, BodyAction.Build,
+        };
+        var impacts = new float[CharacterClips.Count];
+        var report = new List<string>();
+        foreach (var act in hitting)
+        {
+            var found = MeasureImpact(model, act);
+            impacts[(int)act] = found;
+            report.Add(found > 0f ? $"{act}={found * 100f:F0}%" : $"{act}=free");
+        }
+
+        var impact = impacts[(int)BodyAction.Strike];
+        Console.WriteLine($"  bodies: impact measured — {string.Join(", ", report)}");
 
         return new SkinnedBodies(
             device, parts.ToArray(), palette, model.Skeleton,
@@ -516,6 +549,7 @@ internal sealed class SkinnedBodies : IDisposable
             FacingOffsetRadians = facing,
             StridePerCycle = stride,
             ImpactFraction = impact,
+            impactByAction = impacts,
         };
     }
 
@@ -605,18 +639,28 @@ internal sealed class SkinnedBodies : IDisposable
     /// matter, and it is worth saying so given three separate bugs here came from measuring through the
     /// wrong transform.
     /// </remarks>
-    private static float MeasureImpact(GltfModel model)
+    private static float MeasureImpact(GltfModel model, BodyAction which)
     {
         var skeleton = model.Skeleton;
         var hand = IndexOf(skeleton, HandRightNames);
         if (hand < 0) hand = IndexOf(skeleton, HandLeftNames);
         if (hand < 0) return 0f;
 
+        // <b>Names then stand-ins, because that is the order the BINDING uses.</b> §206: this searched only
+        // the names, and the first run showed what that costs — `Quarry=free` beside a bound clip of
+        // `TreeChopping_Loop*`. No asset ships a pick swing, so Quarry draws a felling swing as a stand-in;
+        // measuring only the names found no clip and reported the impact unmeasurable, so the one act
+        // certain to be using a stand-in was the one act left running free. **Two resolutions of the same
+        // question, and they disagreed exactly where it mattered.**
+        //
+        // The binding above is the authority and this mirrors its order deliberately. If it ever gains a
+        // third tier, this has to follow, and the load report is what would say so: an act reporting `free`
+        // while its bound clip is named is this fault returning.
         AnimationClip? strike = null;
-        foreach (var (action, names, _) in CharacterClips.Table)
+        foreach (var (action, names, standIns) in CharacterClips.Table)
         {
-            if (action != BodyAction.Strike) continue;
-            foreach (var wanted in names)
+            if (action != which) continue;
+            foreach (var wanted in names.Concat(standIns))
             {
                 foreach (var clip in model.Animations)
                 {

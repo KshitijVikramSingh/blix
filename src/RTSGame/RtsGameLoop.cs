@@ -7548,6 +7548,22 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         return drawnYaw[id];
     }
 
+    /// <summary>
+    /// How long one act of this kind takes, or null if it is not an act that lands on something.
+    /// </summary>
+    /// <remarks>
+    /// The two clocks are deliberately separate: a blow's cadence belongs to the threat system and a
+    /// stroke's to the economy, and folding them into one constant would be a third name for a thing that
+    /// is already two — §197 renamed a constant for exactly that mistake.
+    /// </remarks>
+    private static float? ImpactPeriodOf(BodyAction action) => action switch
+    {
+        BodyAction.Strike => Simulation.Threat.ThreatSystem.SwingSeconds,
+        BodyAction.Chop or BodyAction.Quarry or BodyAction.Reap or BodyAction.Build =>
+            Simulation.Economy.EconomySystem.StrokeSeconds,
+        _ => null,
+    };
+
     /// <summary>Per-body gait phase in seconds, indexed by agent id. View state; never fingerprinted.</summary>
     private float[] gaitPhase = new float[256];
 
@@ -7566,21 +7582,24 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         if (id < 0) return 0.0;
         if (id >= gaitPhase.Length) Array.Resize(ref gaitPhase, Math.Max(id + 1, gaitPhase.Length * 2));
 
-        // <b>A strike is on the swing's own clock.</b> §199. §198 gave harm a moment, so the clip can be
-        // placed rather than left to run: the phase comes from how far through its swing the body is, and
-        // the measured impact frame is subtracted so that the frame where the hand moves fastest arrives
-        // exactly when the harm does. The previous blow's follow-through and the next one's wind-up fill
-        // the rest of the cycle, which is what a sequence of blows looks like.
+        // <b>An act is on its own clock.</b> §199 for the sword, §206 for the axe, the pick, the scythe and
+        // the hammer. §198 and §205 gave blows and strokes a moment, so the clip can be *placed* rather than
+        // left to run: the phase comes from how far through its act the body is, and the measured impact
+        // frame is added so the frame where the hand moves fastest arrives exactly when the wood comes off
+        // or the harm lands. The previous act's follow-through and the next one's wind-up fill the rest of
+        // the cycle, which is what a sequence of blows looks like.
         //
-        // Only when the impact was actually measurable off the rig — see SkinnedBodies.ImpactFraction. If
-        // it was not, the clip runs free, because a deliberate-looking sync that is off by four tenths of a
-        // second reads as a bug where a free-running clip reads as noise.
-        if (action == BodyAction.Strike && bodies is { ImpactFraction: > 0f } rig)
+        // Only when the impact was actually measurable off THAT act's clip. If it was not, the clip runs
+        // free, because a deliberate-looking sync that is off by four tenths of a second reads as a bug
+        // where a free-running clip reads as noise.
+        //
+        // Two periods, because the two acts are on different clocks and neither is the other's business:
+        // a blow every ThreatSystem.SwingSeconds, a stroke every EconomySystem.StrokeSeconds.
+        if (bodies is { } rig && ImpactPeriodOf(action) is { } period && rig.ImpactOf(action) > 0f)
         {
-            var period = MathF.Max(0.0001f, Simulation.Threat.ThreatSystem.SwingSeconds);
-            var through = Math.Clamp(agent.ActCharge / period, 0f, 1f);
+            var through = Math.Clamp(agent.ActCharge / MathF.Max(0.0001f, period), 0f, 1f);
             var span = MathF.Max(0.0001f, (float)clip.Duration);
-            return ((through + rig.ImpactFraction) % 1f) * span;
+            return ((through + rig.ImpactOf(action)) % 1f) * span;
         }
 
         if (locomotion)
