@@ -154,16 +154,71 @@ internal enum AssignmentKind
 
 /// <summary>What a unit is doing at this instant, in service of its assignment.</summary>
 /// <remarks>
-/// One kind, on purpose. An activity is <em>be at this place for this long</em>, which covers
-/// walking there and standing there without the two being separate states — so a unit shoved
-/// off its post mid-dwell walks back and finishes the dwell, and none of that needs a
-/// transition. Loading, harvesting and repairing are all the same shape with a rate attached,
-/// which is what Session 6 attaches.
+/// <b>One shape, on purpose — but now it says which work it is.</b> The shape is unchanged and is still
+/// the point: an activity is <em>be at this place for this long</em>, which covers walking there and
+/// standing there without the two being separate states, so a unit shoved off its post mid-dwell walks
+/// back and finishes the dwell and none of that needs a transition. Loading, harvesting and repairing take
+/// identical code paths through <see cref="JobSystem"/> — the same place, the same dwell, the same handover
+/// — and every one of them is entered and left by the same two functions.
+/// <para>
+/// What changed in §180 is that the kind is <em>named</em> rather than being the single word
+/// <c>Working</c>. For a long time it was not, on the reasoning that a distinction nothing consumed was a
+/// distinction not worth having. Something consumes it now: the screen. A body's pose was being inferred
+/// from <c>Assignment.Cargo</c>, and that inference produced both animation faults reported from the chair
+/// — a kneeling repair standing in for felling a tree, and idle militia reaping, because
+/// <c>default(Resource)</c> is grain and a guard post never sets a cargo. <b>The fix is not a better
+/// inference; it is that the thing being inferred should have been recorded.</b>
+/// </para>
+/// <para>
+/// So the naming happens once, in <see cref="JobSystem.NameActivity"/>, at the instant an activity begins,
+/// out of the assignment that is beginning it — where the assignment kind is checked <em>first</em> and a
+/// cargo is only ever read on the branch that requires one. That ordering is the whole of why this cannot
+/// reproduce the bug it replaces.
+/// </para>
+/// <para>
+/// <b>Compare on <c>None</c>, never on a member.</b> Every rule in the simulation wants to know whether a
+/// body has an activity at all, and none of them want to know which — that is the screen's business. A
+/// test against a particular kind is how these members would start to mean "is this body working", which
+/// is <see cref="JobSystem.IsWorking"/>'s job and is defined once. The rename from <c>Working</c> was
+/// chosen partly to make the compiler find every existing comparison.
+/// </para>
 /// </remarks>
 internal enum ActivityKind
 {
+    /// <summary>Not doing anything in service of an assignment: between legs, or unassigned.</summary>
     None,
-    Working,
+
+    /// <summary>
+    /// Being at a place for a while, with nothing more particular to say about it.
+    /// </summary>
+    /// <remarks>
+    /// A garrison, a post, a villager at a barracks waiting to be trained, either end of a bare shuttle.
+    /// <b>Not a residual catch-all</b> — those are genuinely all the same act, and the difference between
+    /// a guard looking alert and a villager standing about is a fact about the body's role rather than
+    /// about what it is doing.
+    /// </remarks>
+    Standing,
+
+    /// <summary>Bringing in a harvest.</summary>
+    Reaping,
+
+    /// <summary>Felling a tree.</summary>
+    Felling,
+
+    /// <summary>Cutting stone.</summary>
+    Quarrying,
+
+    /// <summary>Working at a structure: raising it, repairing it, upgrading it.</summary>
+    Building,
+
+    /// <summary>Taking stock onto the body, at whichever end of the trip that happens.</summary>
+    Loading,
+
+    /// <summary>Putting stock down.</summary>
+    Unloading,
+
+    /// <summary>Swinging at something that is not its own.</summary>
+    Striking,
 }
 
 /// <summary>Why a unit's assignment is currently suspended.</summary>

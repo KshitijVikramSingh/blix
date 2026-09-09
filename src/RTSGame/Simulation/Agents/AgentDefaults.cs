@@ -206,6 +206,50 @@ internal static class AgentDefaults
     public const float ProgressShareOfStep = 0.0133f;
 
     /// <summary>
+    /// How long a body must fail to make <see cref="ProgressShareOfStep"/> before it counts as stalled.
+    /// </summary>
+    /// <remarks>
+    /// <b>One number that was thirteen.</b> §182. This threshold and <see cref="StrandedSeconds"/> below
+    /// were the only two stuck-time figures in the codebase with no name — every other one
+    /// (<c>ApertureAbandonSeconds</c>, <c>RouteReconsiderStallSeconds</c>, <c>CongestionRecoveryStallSeconds</c>)
+    /// had one, because each of those drives a behaviour and somebody had to write a comment about it. These
+    /// two drove <em>reporting</em>, so nine call sites compared the raw float inline, two different classes
+    /// each declared a private <c>RedStuckSeconds = 0.35f</c> without knowing about the other, and every one
+    /// of the nine carried a comment promising it matched "exactly as the renderer draws it" — a promise kept
+    /// by hand, and not even anchored, since the renderer's own copy was one of the nine.
+    /// <para>
+    /// It had already stopped being purely a reporting figure: one of the bare literals sat in
+    /// <c>SimulationWorld</c>'s repath decision, so a number nobody owned was gating a simulation branch.
+    /// That is the whole argument for naming it here, in the simulation, rather than wherever the overlay
+    /// lives.
+    /// </para>
+    /// <para>
+    /// <b>Stalled is not stranded.</b> A body at this threshold is in traffic and will very likely be moving
+    /// again next tick; it is worth colouring and worth repathing for, and it is not a fault. Do not gate a
+    /// test on it — three self-tests did, which is why §178 spent three attempts changing one threshold and
+    /// measuring against another.
+    /// </para>
+    /// </remarks>
+    public const float StalledSeconds = 0.35f;
+
+    /// <summary>
+    /// How long a body must be stalled before it is taken to be unable to arrive without help.
+    /// </summary>
+    /// <remarks>
+    /// The threshold the self-tests actually want, and the one §180's ratchet will be recorded against: a
+    /// body past this is not in traffic, it is wedged or it is routing to somewhere it cannot reach. Distinct
+    /// from <see cref="StalledSeconds"/> by nearly four times, and the distinction is the whole point —
+    /// they share one field, and which of the two a call site meant used to be encoded in nothing but the
+    /// float it happened to compare against.
+    /// <para>
+    /// One place writes this value directly rather than accruing to it: a body that has run out of ways to
+    /// get past something is promoted straight to stranded, because the information is already known and
+    /// waiting another second to admit it only delays the recovery.
+    /// </para>
+    /// </remarks>
+    public const float StrandedSeconds = 1.25f;
+
+    /// <summary>
     /// Smallest centre distance two bodies may sit at and still count as separated, allowing a
     /// small tolerance for a single tick's contact.
     /// </summary>

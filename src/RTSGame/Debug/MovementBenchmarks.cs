@@ -138,7 +138,7 @@ internal static class MovementBenchmarks
                 foreach (ref readonly var agent in world.Agents.All)
                 {
                     if (!agent.IsAlive || !agent.HasDestination) continue;
-                    if (agent.StuckSeconds > 0.35f)
+                    if (agent.StuckSeconds > StallReporting.StalledSeconds)
                     {
                         redTicks++;
                         redRunTicks[agent.Id.Value]++;

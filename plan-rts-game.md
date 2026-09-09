@@ -14168,3 +14168,144 @@ and nothing has to infer what a body is doing from what its assignment happens t
 - **C. The blocked ratchet**, and then driving it to zero — which is where the two remaining stall
   populations get fixed, separated by whether anything is touching the body.
 - **D. Feel**, once `Blocked` cannot happen and priority can be read off the phase for free.
+
+## 181. The audit was wrong about the size of it, and right about the shape
+
+Phase A of §180 is done: `ActivityKind` names the act, `JobSystem.NameActivity` names it once out of the
+assignment that is beginning it, and the pose reads it. The invariant is tested by enumerating the
+vocabulary rather than by checking the four sightings — ten assignment kinds, both legs, and three claims:
+no leg is nameless, no kind borrows another's act, and the one kind entitled to a harvest names the right
+one per resource. `10 kind(s) x 2 leg(s): nameless [], borrowed [], mismatched []`.
+
+Then, before building phase B, I recounted §179's headline finding. **It does not survive the recount, and
+the way it fails is the same way three of my instruments failed earlier in this arc.**
+
+### What the count actually counted
+
+§179 said "ten distinct predicates answering *where is this body* across sixty call sites". Classifying every
+one of those sites instead of counting matches:
+
+| | matches | definition | writes | debug strings | real reads |
+|---|---|---|---|---|---|
+| `IsWorking` | 15 | 1 | – | 2 | 10 |
+| `SettledNearby` | 11 | 1 field | 3 | 3 | 3 |
+| `DistanceToPlace` | 7 | 1 | – | 4 | 2 |
+| `WaitingOnMaterials` | 6 | 1 | – | 2 | 3 |
+| `ProjectCanBeWorked` | 5 | 1 | – | – | 4 |
+| `AtItsProject` | 4 | 1 | – | – | 3 |
+| the other four | 10 | 4 | – | 1 | 5 |
+
+`IsWorking` is one predicate, defined once, read from ten places — which is what a well-factored predicate
+looks like, not evidence of rot. `SettledNearby` is not a rival predicate at all: it is an *input* to
+`IsAtPlace`, written only by the jobs layer, and eight of its eleven sites are that plus telemetry.
+`DistanceToPlace` is a measurement, and four of its seven sites are log format strings. **A third of the
+sixty call sites were `Console.WriteLine`.**
+
+So this is the fourth instrument in this arc whose pattern also matched the innocent case — after `strings`
+on a .NET binary, `grep "Error(s)"` against `0 Error(s)`, and `tail -1` taking the PASS line over the data
+line. The lesson is getting expensive enough to state plainly: **a count is not a measurement until you have
+looked at what it counted.** I wrote a whole audit on `grep | wc -l`.
+
+### What the leak really was
+
+Once the debug strings are set aside, one duplication is left, and it is not in the simulation:
+
+`RtsGameLoop` decided a body's pose in **three places**. `ActionFor` assembles four arguments — the hurt
+flag, the waiting flag, the builder override, the agent — and `ReportActionChanges` and
+`ReportSelectedBodies` each assembled the same four independently, then reached into `heldAction` separately
+to find what was actually shown. Three copies of one decision, and the copies had already come apart once:
+the log printed "wanted Build" while the renderer had chosen Idle, because one of them left the waiting flag
+out. The fix at the time was to make the third copy match, which is why there were three.
+
+That is the whole of it, and it is exactly the fault that made this arc so slow to debug: **every time I
+asked the instrument what was on screen, I was asking a different function than the one drawing it.** Four
+of the wrong diagnoses in §170–178 were reasoned from `--bodylog` output.
+
+So the fix is three lines, not a rewrite. One `ShownAction(index, wanted)` for what is on screen, both
+reporters call `ActionFor`, and the counts fall out on their own: `WaitingOnMaterials` 6→4,
+`ProjectCanBeWorked` 5→3, `AtItsProject` 4→2, each now with exactly one real caller.
+
+### So phase B is cancelled, and phase C is not
+
+The proposed body phase — a fingerprinted `Travelling | Arrived | Working` computed once a tick and read
+everywhere — was designed to collapse ten predicates that turn out to be one predicate, one input, one
+measurement, and three view helpers with a single caller each. **It would have added a field to the
+determinism census and the save format to solve a problem made of `wc -l`.** Dropped.
+
+What the chair actually saw is still real, and it was never the predicates: it was the pose inferring the
+act from a defaulted cargo (fixed in phase A), the instrument disagreeing with the renderer (fixed above),
+and bodies that cannot get where they are going (phase C, unfixed). The last of those is the only one left
+and it is the one worth the ratchet.
+
+## 182. What the audit should have found: one number, two names, thirteen literals
+
+§179 hunted duplication by grepping predicate *names*, which is why it found six well-factored functions and
+a pile of `Console.WriteLine`. Grepping instead for the **number** finds the thing it was looking for.
+
+"How long a body must fail to move before we call it stuck" is written out as `0.35f` in **nine places**:
+
+- named `RedStuckSeconds` in `RtsGameLoop` — and named `RedStuckSeconds` again, separately, in
+  `MovementTuning`. **The same name, the same value, two classes, neither aware of the other.**
+- a bare literal in `SimulationWorld.cs:5548`, which is the load-bearing one: it gates a *simulation*
+  decision, not a colour.
+- bare literals in the overlay colour, the overlay label, `MovementBenchmarks`, and three self-tests, every
+  one of them commented "exactly as the renderer draws it" — a promise kept by hand nine times.
+
+And "how long before a body is never going to arrive" is `1.25f` in **six places**: one write in the
+simulation and five bare comparisons in the self-tests.
+
+So: one concept, two names, thirteen literals — and a second concept beside it that is genuinely different
+(*not moving now* against *not going to arrive*) sharing the same field and distinguished only by which
+float a given call site happens to compare against.
+
+**This is the near-synonym fault in its purest form yet**, and worth noting how it hid: the concept has no
+function. There was nothing named "IsStuck" to grep for, because every site compares the raw float inline.
+An audit that looks for duplicated *names* is blind to a concept that never got one. §179 ran exactly that
+audit and reported the opposite of the truth: it declared ten predicates rotten (they were fine) and missed
+thirteen copies of a threshold (they are not).
+
+### Correction, found while fixing it: two concepts, not one
+
+Consolidating the thirteen sites onto one constant was wrong, and the argument against it was already
+written down in `RtsGameLoop` beside one of the copies: **an instrument that reads its threshold from the
+thing it measures cannot be used to compare two versions of that thing.** Every paired A/B run in §178
+depended on that. Point the stuck log at the simulation's `StalledSeconds` and a tuning change moves the
+ruler along with the object.
+
+So the thirteen sites are two concepts sharing one number:
+
+- `AgentDefaults.StalledSeconds` — what the **simulation** means by stalled. It gates a repath and it decides
+  the overlay's colour, and the three self-tests that assert about the overlay follow it.
+- `StallReporting.StalledSeconds` — what a **measurement** means. Pinned to the literal on purpose, used by
+  the stuck log, the live crowd metrics, the headless benchmark and the crowd pass conditions, and never to
+  be defined in terms of the other however equal they look today.
+
+The thirteen copies were still a fault, and the split says why more sharply than the count did: nobody could
+tell which of the two a bare `0.35f` meant, so three tests asserting about the renderer and three
+instruments measuring the simulation were indistinguishable at the call site. **One name would have hidden
+the same problem from the other side** — which is worth noticing, because I was one edit away from doing
+exactly that in the name of removing duplication. The near-synonym rule cuts both ways: two things with one
+name is as bad as one thing with two.
+
+`StrandedSeconds` needs no such split — nothing measures against it that is not the simulation.
+
+Three consequences worth keeping:
+
+1. **A concept with no name cannot be found by searching for names.** Search for the value.
+2. Every "exactly as the renderer draws it" comment is an unenforced promise. Nine of them here, and the
+   renderer's own copy is one of the nine — so the promise is not even anchored to anything.
+3. This is why §178's red-cylinder work took three attempts. I changed one threshold and measured against
+   another.
+
+### Phase C, restated
+
+Before any stall can be ratcheted it has to be *defined once*:
+
+- One home for both thresholds, named for what they mean rather than for the colour they produce —
+  `StalledSeconds` (not moving, may yet recover) and `StrandedSeconds` (will not arrive without help).
+- Every one of the thirteen sites points at it, the simulation's included.
+- Then the ratchet: a stranded-body census over the hands-off two-village leg, recorded, may fall and may
+  not rise — and an unconditional throw when it reaches zero, which is what §180's answer asked for.
+
+The ratchet has to come last. Recording a figure measured against thirteen different definitions of the
+thing being recorded is how §178 spent three attempts on one bug.

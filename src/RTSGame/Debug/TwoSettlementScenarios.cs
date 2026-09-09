@@ -382,7 +382,7 @@ internal static class TwoSettlementScenarios
                 if (!body.IsAlive || body.Faction.Value != faction) continue;
                 if (body.Jobs.Assignment.Kind == AssignmentKind.None) continue;
                 assigned++;
-                if (body.Jobs.Activity == ActivityKind.Working) working++;
+                if (body.Jobs.Activity != ActivityKind.None) working++;
                 if (body.Jobs.IsInterrupted) interrupted++;
             }
 

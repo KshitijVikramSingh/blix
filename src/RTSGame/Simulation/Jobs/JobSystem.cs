@@ -386,9 +386,98 @@ internal static class JobSystem
         !UnderOrders(agent) &&
         !IsAtPlace(agent);
 
+    /// <summary>
+    /// Which act an assignment's leg is, named once at the moment the activity begins.
+    /// </summary>
+    /// <remarks>
+    /// <b>The assignment kind is checked first and a cargo is read on one branch only.</b> That ordering is
+    /// not stylistic — it is the reason this cannot reproduce the fault it replaces. The pose used to reach
+    /// for <c>Assignment.Cargo</c> whatever the assignment was, and <c>default(Resource)</c> is
+    /// <see cref="Resource.Grain"/>, so every body with an activity and no cargo reaped: militia standing a
+    /// guard played the farming animation. Here, only <see cref="AssignmentKind.Work"/> consults the cargo,
+    /// and <see cref="Assignment.Work"/> takes its output as a required argument rather than leaving a field
+    /// at its default. <b>There is no branch on which an unset value can be mistaken for a set one.</b>
+    /// <para>
+    /// The leg matters as much as the kind, and this is where the old inference lost the most. A two-ended
+    /// assignment is a different act at each end — leg zero of a <see cref="AssignmentKind.Work"/> is
+    /// breaking ground and leg one is putting the load down; leg zero of a
+    /// <see cref="AssignmentKind.Build"/> is collecting timber and leg one is raising the wall. Read off the
+    /// assignment alone, a builder standing in a granary was building.
+    /// </para>
+    /// <para>
+    /// Public because a self-test asks it directly. That is the point of naming the act in the simulation:
+    /// "is the chopping animation playing while wood leaves the tree" becomes a question with an answer that
+    /// does not require a window.
+    /// </para>
+    /// </remarks>
+    public static ActivityKind NameActivity(in Assignment assignment, int leg)
+    {
+        // Whether this leg is the far end. Single-ended assignments are always at their one place.
+        var far = assignment.HasTwoEnds && leg % 2 != 0;
+
+        switch (assignment.Kind)
+        {
+            case AssignmentKind.None:
+                return ActivityKind.None;
+
+            // A post is a post. Which of the three it is belongs to the assignment, and the body's role is
+            // what tells a soldier's alertness from a villager's loitering — not this.
+            case AssignmentKind.Hold:
+            case AssignmentKind.Guard:
+            case AssignmentKind.Shuttle:
+                return ActivityKind.Standing;
+
+            case AssignmentKind.Attack:
+                return ActivityKind.Striking;
+
+            // Cargo moved between two stores: it goes on at one end and comes off at the other, and a raid
+            // is the same act with somebody else's granary at the near end.
+            case AssignmentKind.Haul:
+            case AssignmentKind.Carry:
+            case AssignmentKind.Loot:
+                return far ? ActivityKind.Unloading : ActivityKind.Loading;
+
+            // The producer's loop. The near leg is the work and the far leg is the delivery, which is the
+            // distinction reading the assignment alone could not make.
+            case AssignmentKind.Work:
+                if (far) return ActivityKind.Unloading;
+                return assignment.Cargo switch
+                {
+                    Resource.Wood => ActivityKind.Felling,
+                    Resource.Stone => ActivityKind.Quarrying,
+                    Resource.Grain => ActivityKind.Reaping,
+                    // No fourth resource exists; if one arrives it should be named here rather than
+                    // silently reaped. Standing is the honest answer for an act with no name yet.
+                    _ => ActivityKind.Standing,
+                };
+
+            // Leg zero fetches the material, leg one puts it into the structure.
+            case AssignmentKind.Build:
+                return far ? ActivityKind.Building : ActivityKind.Loading;
+
+            // Leg zero fetches the equipment; leg one is waiting at the barracks to be converted, which is
+            // standing about and not labour.
+            case AssignmentKind.Train:
+                return far ? ActivityKind.Standing : ActivityKind.Loading;
+
+            default:
+                return ActivityKind.Standing;
+        }
+    }
+
     private static void BeginActivity(ref AgentJobs jobs)
     {
-        jobs.Activity = ActivityKind.Working;
+        jobs.Activity = NameActivity(in jobs.Assignment, jobs.Leg);
+        // <b>An assigned body's activity is never nameless.</b> Reached only if a new assignment kind is
+        // added without giving its legs names, in which case the body would re-begin the same activity
+        // every tick and never finish a leg — a stall with no error, which is the shape §179 was written
+        // about. §180 says such a thing should crash rather than be rendered.
+        if (jobs.Activity == ActivityKind.None)
+        {
+            throw new InvalidOperationException(
+                $"{jobs.Assignment.Kind} leg {jobs.Leg} has no named activity — see JobSystem.NameActivity.");
+        }
+
         jobs.Place = jobs.Assignment.PlaceOfLeg(jobs.Leg);
         jobs.PlaceExtent = jobs.Assignment.ExtentOfLeg(jobs.Leg);
         jobs.DwellRemaining = jobs.Assignment.DwellOfLeg(jobs.Leg);

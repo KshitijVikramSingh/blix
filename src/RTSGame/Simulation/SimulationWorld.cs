@@ -5545,7 +5545,7 @@ internal sealed class SimulationWorld
             if (agent.RepathCooldown <= 0f &&
                 agent.Path.IsValid &&
                 (Terrain.Revision > 0 || Placement.Revision > 0) &&
-                (agent.StuckSeconds >= 0.35f ||
+                (agent.StuckSeconds >= AgentDefaults.StalledSeconds ||
                  agent.SteeringStepRejectedThisTick ||
                  agent.PreferredStepRejectedThisTick))
             {
@@ -5763,7 +5763,7 @@ internal sealed class SimulationWorld
                     {
                         // Sideways shuffling and collision orbits can contain
                         // motion without making any progress along the route.
-                        agent.StuckSeconds = MathF.Max(agent.StuckSeconds, 1.25f);
+                        agent.StuckSeconds = MathF.Max(agent.StuckSeconds, AgentDefaults.StrandedSeconds);
                     }
                     agent.ProgressSampleSeconds = 0f;
                     agent.ProgressSampleWaypointIndex = agent.WaypointIndex;

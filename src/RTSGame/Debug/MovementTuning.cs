@@ -190,13 +190,44 @@ internal sealed class BodyFeelSettings
 /// <remarks>
 /// The same quantities the headless benchmark reports, computed live, so a slider can be
 /// judged against them rather than against an impression. `red` is
-/// <c>StuckSeconds &gt; 0.35</c>, exactly as the renderer draws it, and `pile` is the
+/// <c>StuckSeconds</c> past <see cref="StallReporting.StalledSeconds"/> — the instrument's own
+/// threshold, not the renderer's, so a tuning change cannot move the ruler — and `pile` is the
 /// largest cluster of red bodies within 1.2 m — thirty units spread over four exits and
 /// ten wedged in one corner are the same headcount and very different pictures.
 /// </remarks>
+/// <summary>
+/// The stall threshold an instrument uses, held apart from the one the simulation uses.
+/// </summary>
+/// <remarks>
+/// <b>Deliberately not <see cref="AgentDefaults.StalledSeconds"/>, and this is the correction to §182.</b>
+/// That section found "how long before a body counts as stuck" written out thirteen times and concluded
+/// there was one concept with thirteen copies. Consolidating them turned up an argument already written
+/// down in <c>RtsGameLoop</c> and worth more than the tidiness: <em>an instrument that reads its threshold
+/// from the thing it measures cannot be used to compare two versions of that thing.</em> Every paired A/B
+/// run in §178 depended on that — change the simulation's notion of stalled and a shared constant would
+/// move the ruler along with the object.
+/// <para>
+/// So there are two concepts sharing one number. <see cref="AgentDefaults.StalledSeconds"/> is what the
+/// simulation means, and it drives a repath and the overlay's colour; anything asserting about the overlay
+/// must follow it. This is what a measurement means, it is pinned to a literal on purpose, and it must
+/// never be defined in terms of the other one however equal they look today.
+/// </para>
+/// <para>
+/// The thirteen copies were still a fault: nobody could tell which of the two concepts a given bare
+/// <c>0.35f</c> meant, so three self-tests asserting about the renderer and three instruments measuring the
+/// simulation were indistinguishable at the call site. Two names fix that; one name would have hidden it
+/// again from the other side.
+/// </para>
+/// </remarks>
+internal static class StallReporting
+{
+    /// <summary>Stall time past which an instrument counts a body as not getting anywhere.</summary>
+    public const float StalledSeconds = 0.35f;
+}
+
 internal sealed class CrowdMetrics
 {
-    private const float RedStuckSeconds = 0.35f;
+    private const float RedStuckSeconds = StallReporting.StalledSeconds;
     private const float PileConnectRadius = 1.2f;
 
     private readonly List<System.Numerics.Vector2> red = new();

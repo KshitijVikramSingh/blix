@@ -390,7 +390,11 @@ internal static class SettlementScenarios
 
     private static void Report(SimulationWorld world, string when, List<string> faults)
     {
-        var stuck = 0;
+        // <b>Not StuckSeconds.</b> §182. This counts bodies standing where the router forbids anybody to
+        // stand, which is a geometry fault; StuckSeconds counts bodies that are not getting anywhere, which
+        // is a movement one. A body can trespass while walking happily along, and can be stalled on
+        // perfectly legal ground. Calling both "stuck" is the fault this session keeps paying for.
+        var trespassing = 0;
         var embedded = 0;
         var cutters = 0;
         var cuttersWithATree = 0;
@@ -403,7 +407,7 @@ internal static class SettlementScenarios
                 world.Navigation.Contains(navCell) &&
                 !world.Navigation.IsWalkable(navCell, agent.NavigationRadius))
             {
-                stuck++;
+                trespassing++;
                 // Named, not counted. "One body is stuck" is where this started and it is not enough to
                 // find it with: which body, what it was told to do, what is on top of it, and how far the
                 // nearest ground it could legally stand on is.
@@ -432,7 +436,7 @@ internal static class SettlementScenarios
                 }
 
                 Console.WriteLine(
-                    $"    stuck: body {agent.Id.Value} at ({agent.Position.X:F1}, {agent.Position.Y:F1}), " +
+                    $"    trespass: body {agent.Id.Value} at ({agent.Position.X:F1}, {agent.Position.Y:F1}), " +
                     $"radius {agent.NavigationRadius:F2}, doing {agent.Jobs.Assignment.Kind}, " +
                     $"surface {world.Terrain.Surface(navCell)}, nearest trunk {nearestTree:F2} m, " +
                     $"nearest legal ground {(float.IsPositiveInfinity(out_) ? "none within 20 m" : $"{out_:F1} m")}");
@@ -457,9 +461,14 @@ internal static class SettlementScenarios
         }
 
         Console.WriteLine(
-            $"  {when}: {stuck} standing on unwalkable ground, {embedded} overlapping something solid, " +
+            $"  {when}: {trespassing} standing on unwalkable ground, {embedded} overlapping something " +
+            $"solid, " +
             $"{cuttersWithATree}/{cutters} workers with a tree in reach");
-        if (stuck > 0) faults.Add($"{when}: {stuck} bodies on ground the router forbids");
+        if (trespassing > 0)
+        {
+            faults.Add($"{when}: {trespassing} bodies on ground the router forbids");
+        }
+
         if (embedded > 0) faults.Add($"{when}: {embedded} bodies inside something solid");
     }
 

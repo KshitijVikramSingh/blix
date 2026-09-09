@@ -170,6 +170,7 @@ internal static class SimulationSelfTests
         Check("a carrier lets builders build", CarriersLetBuildersBuild());
         Check("a waiting builder's pose does not flicker", ABuilderWaitingDoesNotFlicker());
         Check("a guard is not shown farming", AGuardIsNotShownFarming());
+        Check("every assignment leg names an act, and only its own", EveryLegNamesItsOwnAct());
         Check("a finished project releases its builders", AFinishedProjectReleasesItsBuilders());
         Check("asked to chop, a body reaches the tree and cuts", AskedToChopTheyReachTheTree());
         Check("two cutters do not wedge in one trunk", TwoCuttersDoNotWedgeInOneTrunk());
@@ -1142,7 +1143,7 @@ internal static class SimulationSelfTests
             foreach (var id in ids)
             {
                 ref var agent = ref world.Agents.Get(id);
-                var visiblyRed = agent.StuckSeconds > 0.35f &&
+                var visiblyRed = agent.StuckSeconds > AgentDefaults.StalledSeconds &&
                                    agent.CrowdPressureSeconds <= 0f;
                 if (visiblyRed && redStarts[id.Value] < 0) redStarts[id.Value] = tick;
                 if (!visiblyRed && redStarts[id.Value] >= 0)
@@ -1215,7 +1216,7 @@ internal static class SimulationSelfTests
             {
                 ref var agent = ref world.Agents.Get(id);
                 if (!world.IsAgentGeometryValid(id)) invalidGeometrySamples++;
-                var visiblyRed = agent.StuckSeconds > 0.35f &&
+                var visiblyRed = agent.StuckSeconds > AgentDefaults.StalledSeconds &&
                                    agent.CrowdPressureSeconds <= 0f;
                 if (visiblyRed && redStarts[id.Value] < 0) redStarts[id.Value] = tick;
                 if (!visiblyRed && redStarts[id.Value] >= 0)
@@ -2000,7 +2001,7 @@ internal static class SimulationSelfTests
 
         const float crossedWallThreshold = 1.50f;
         var crossed = ids.Count(id => world.Agents.Get(id).Position.X > crossedWallThreshold);
-        var permanentlyStuck = ids.Count(id => world.Agents.Get(id).StuckSeconds >= 1.25f);
+        var permanentlyStuck = ids.Count(id => world.Agents.Get(id).StuckSeconds >= AgentDefaults.StrandedSeconds);
         var passed = crossed == ids.Count && permanentlyStuck == 0 && geometryStayedValid;
         if (!passed) Console.WriteLine($"    gate crossed={crossed}/{ids.Count}, stuck={permanentlyStuck}, geometry-valid={geometryStayedValid} ({firstInvalidGeometry}), replans={world.CongestionRepathCount}, " +
                                        $"left=[{string.Join(',', ids.Where(id => world.Agents.Get(id).Position.X <= crossedWallThreshold).Select(id =>
@@ -2361,7 +2362,7 @@ internal static class SimulationSelfTests
         Tick(world, 600);
         var unresolved = ids.Count(id =>
             world.Agents.Get(id).HasDestination ||
-            world.Agents.Get(id).StuckSeconds >= 1.25f);
+            world.Agents.Get(id).StuckSeconds >= AgentDefaults.StrandedSeconds);
         var passed = crossed.Count == ids.Count && lowerExit >= 5 && upperExit >= 5 && unresolved == 0;
         if (!passed) Console.WriteLine($"    two-exit crossed={crossed.Count}/{ids.Count}, lower={lowerExit}, upper={upperExit}, unresolved={unresolved}");
         return passed;
@@ -2445,7 +2446,7 @@ internal static class SimulationSelfTests
             nearestDistances[second] = MathF.Min(nearestDistances[second], distance);
         }
         var unresolved = ids.Count(id => world.Agents.Get(id).HasDestination ||
-                                         world.Agents.Get(id).StuckSeconds >= 1.25f);
+                                         world.Agents.Get(id).StuckSeconds >= AgentDefaults.StrandedSeconds);
         var compact = ids.All(id => Vector2.Distance(
             world.Agents.Get(id).Position,
             new Vector2(-4f, 0f)) <= 10.0f);
@@ -2537,7 +2538,7 @@ internal static class SimulationSelfTests
                     }
                         if (agent.HasDestination) moving++;
                     maximumStuckSeconds = MathF.Max(maximumStuckSeconds, agent.StuckSeconds);
-                    var visiblyRed = agent.StuckSeconds > 0.35f &&
+                    var visiblyRed = agent.StuckSeconds > AgentDefaults.StalledSeconds &&
                                            agent.CrowdPressureSeconds <= 0f;
                     if (visiblyRed)
                     {
@@ -2593,7 +2594,7 @@ internal static class SimulationSelfTests
 
             var finalStuck = scenario.Agents.Count(id =>
                 world.Agents.Get(id).HasDestination ||
-                world.Agents.Get(id).StuckSeconds >= 1.25f);
+                world.Agents.Get(id).StuckSeconds >= AgentDefaults.StrandedSeconds);
             foreach (var id in scenario.Agents)
             {
                 if (redStarts[id.Value] < 0) continue;
@@ -2640,7 +2641,7 @@ internal static class SimulationSelfTests
                 foreach (var id in scenario.Agents)
                 {
                     ref var agent = ref world.Agents.Get(id);
-                    if (!agent.HasDestination && agent.StuckSeconds < 1.25f) continue;
+                    if (!agent.HasDestination && agent.StuckSeconds < AgentDefaults.StrandedSeconds) continue;
                     Console.WriteLine(
                         $"      unresolved {id.Value}: pos=({agent.Position.X:F2},{agent.Position.Y:F2}) " +
                         $"dest=({agent.Destination.X:F2},{agent.Destination.Y:F2}) " +
@@ -6069,13 +6070,100 @@ internal static class SimulationSelfTests
     }
 
     /// <summary>
+    /// Every assignment leg names an act, and no assignment names an act belonging to another. §180.
+    /// </summary>
+    /// <remarks>
+    /// <b>The guard against the whole class of bug, rather than against the four sightings of it.</b> Every
+    /// animation fault reported from the chair in this arc came from one place: the screen working out what
+    /// a body was doing by reading a field the body's assignment had never set. The fix was to have the
+    /// simulation name the act, and the thing worth testing is not that the current names are right — a
+    /// reader can see that — but that <b>a new assignment kind cannot be added without naming its legs</b>,
+    /// and that no kind can borrow another's act.
+    /// <para>
+    /// So this enumerates the enum. Every kind, both legs, and three claims: an assigned body's act is
+    /// never nameless; the three harvesting acts belong to <see cref="AssignmentKind.Work"/> alone; and
+    /// building and striking belong to their own verbs. Add a twelfth assignment kind and forget to name
+    /// it, and this fails at the name rather than in the animation six sessions later.
+    /// </para>
+    /// <para>
+    /// It needs no world, no bodies and no ticks, which is the point of having put the naming in a pure
+    /// function: the invariant is about the vocabulary and not about any particular settlement.
+    /// </para>
+    /// </remarks>
+    private static bool EveryLegNamesItsOwnAct()
+    {
+        var here = new Vector2(4f, 0f);
+        var there = new Vector2(-4f, 0f);
+        var nameless = new List<string>();
+        var borrowed = new List<string>();
+
+        foreach (var kind in Enum.GetValues<AssignmentKind>())
+        {
+            if (kind == AssignmentKind.None) continue;
+
+            for (var leg = 0; leg < 2; leg++)
+            {
+                // Built by hand rather than through the factories, because the claim is about the KIND and
+                // a factory would only exercise the kinds that happen to have one. Cargo is left at its
+                // default on purpose: that default is grain, and it is exactly what must not leak out of
+                // the one branch entitled to read it.
+                var assignment = new Assignment(kind, here, there, 4f);
+                var act = JobSystem.NameActivity(in assignment, leg);
+                var label = $"{kind}/{leg}={act}";
+
+                if (act == ActivityKind.None) nameless.Add(label);
+
+                var harvesting = act is ActivityKind.Reaping or ActivityKind.Felling or
+                    ActivityKind.Quarrying;
+                if (harvesting && kind != AssignmentKind.Work) borrowed.Add(label);
+                if (act == ActivityKind.Building && kind != AssignmentKind.Build) borrowed.Add(label);
+                if (act == ActivityKind.Striking && kind != AssignmentKind.Attack) borrowed.Add(label);
+            }
+        }
+
+        // And the one kind entitled to a harvest names the right one for each resource it can be given.
+        var mismatched = new List<string>();
+        var expected = new (Resource Cargo, ActivityKind Act)[]
+        {
+            (Resource.Grain, ActivityKind.Reaping),
+            (Resource.Wood, ActivityKind.Felling),
+            (Resource.Stone, ActivityKind.Quarrying),
+        };
+        foreach (var (cargo, act) in expected)
+        {
+            var work = Assignment.Work(NodeId.None, here, 1f, cargo, 4f, 2f);
+            var named = JobSystem.NameActivity(in work, 0);
+            if (named != act) mismatched.Add($"{cargo}→{named} not {act}");
+            // And the far leg of the same job is the delivery, which is the distinction reading the
+            // assignment alone could never make: a reaper walking grain to a granary is not reaping.
+            if (JobSystem.NameActivity(in work, 1) != ActivityKind.Unloading)
+            {
+                mismatched.Add($"{cargo} far leg is not a delivery");
+            }
+        }
+
+        var passed = nameless.Count == 0 && borrowed.Count == 0 && mismatched.Count == 0;
+        Console.WriteLine(
+            $"    {Enum.GetValues<AssignmentKind>().Length - 1} kind(s) x 2 leg(s): " +
+            $"nameless [{string.Join(", ", nameless)}], borrowed [{string.Join(", ", borrowed)}], " +
+            $"mismatched [{string.Join(", ", mismatched)}]");
+        return passed;
+    }
+
+    /// <summary>
     /// A militia standing its post is not shown farming. §179.
     /// </summary>
     /// <remarks>
     /// Reported from the chair: "weirdly idle militia start playing the farming/building animation". The
-    /// cause is the sentinel trap for the fourth time — <c>Labour</c> reads the assignment's cargo to tell
-    /// felling from reaping, and <c>default(Resource)</c> is <c>Grain</c>, so any body the jobs layer counts
+    /// cause was the sentinel trap for the fourth time — the pose read the assignment's cargo to tell
+    /// felling from reaping, and <c>default(Resource)</c> is <c>Grain</c>, so any body the jobs layer counted
     /// as working with no cargo set reaped. A guard post is exactly that.
+    /// <para>
+    /// Kept after §180 removed the inference, and it is worth keeping for a different reason now: it is the
+    /// end-to-end version of <see cref="EveryLegNamesItsOwnAct"/>. That one asserts the vocabulary is
+    /// sound; this one puts a real soldier on a real post for fifteen minutes and reads what the renderer
+    /// would actually have drawn.
+    /// </para>
     /// </remarks>
     private static bool AGuardIsNotShownFarming()
     {
@@ -6520,7 +6608,7 @@ internal static class SimulationSelfTests
         }
 
         // A third of a second is where the movement layer starts calling a body stuck and painting it red.
-        var passed = worstStuck < 0.35f && deepest < 0.2f;
+        var passed = worstStuck < StallReporting.StalledSeconds && deepest < 0.2f;
         Console.WriteLine(
             $"    two cutters on one trunk: worst stuck {worstStuck:F2}s (red at 0.35), " +
             $"deepest overlap into the trunk {deepest:F2} m");

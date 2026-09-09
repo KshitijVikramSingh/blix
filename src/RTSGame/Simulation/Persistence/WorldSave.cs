@@ -45,7 +45,9 @@ internal static class WorldSave
     /// <summary>
     /// Bumped whenever the byte layout changes in a way an older save cannot satisfy.
     /// </summary>
-    private const int Version = 9;
+    // 10: ActivityKind gained named work kinds (§180), so the byte an older save wrote for "working"
+    //     no longer says which act was underway.
+    private const int Version = 10;
 
     /// <summary>
     /// Kinds of order that can be sitting in the queue when a save is taken.

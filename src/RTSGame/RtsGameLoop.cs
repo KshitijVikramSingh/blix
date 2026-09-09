@@ -7153,6 +7153,24 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
     private BodyAction[] heldAction = new BodyAction[256];
     private float[] heldUntil = new float[256];
 
+    /// <summary>
+    /// What is actually on screen for this body, as against what was last wanted for it.
+    /// </summary>
+    /// <remarks>
+    /// <b>The reporters must print the drawn pose, not a second opinion about it.</b> §181. Both log
+    /// reporters used to assemble <see cref="BodyActions.For"/>'s four arguments themselves and then reach
+    /// into <see cref="heldAction"/> separately — three copies of one decision, which is the only real
+    /// duplication the §179 audit found once its count was redone honestly. It had already bitten once: the
+    /// log printed "wanted Build" while the renderer had chosen Idle, because one copy left the waiting flag
+    /// out. The fix then was to make the third copy match. The fix now is that there is one copy.
+    /// <para>
+    /// <paramref name="wanted"/> is the fallback for a body the hold has never seen, which is a body whose
+    /// first frame has not been drawn yet.
+    /// </para>
+    /// </remarks>
+    private BodyAction ShownAction(int index, BodyAction wanted) =>
+        index >= 0 && index < heldAction.Length ? heldAction[index] : wanted;
+
     /// <summary>Whether this action may cut in before the held one has finished its dwell.</summary>
     private static bool Interrupts(BodyAction action) =>
         action is BodyAction.Flinch or BodyAction.Fall;
@@ -7282,24 +7300,17 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             }
 
             ref readonly var agent = ref simulation.Agents.Get(id);
-            var hurtNow = index < hurtUntil.Length && hurtUntil[index] > 0f;
-            // The same overload the draw uses, or the log reports a decision nobody made — it printed
-            // "wanted Build" while the renderer had chosen Idle, because it left the waiting flag out.
-            var action = BodyActions.For(
-                in agent,
-                hurtNow,
-                WaitingOnMaterials(in agent),
-                BodyActions.ForBuilder(
-                        in agent, AtItsProject(in agent),
-                        simulation.ProjectCanBeWorked(agent.Jobs.Project)),
-                out _);
-            var shown = index < heldAction.Length ? heldAction[index] : action;
+            // The one decision the draw makes, not a rebuilt copy of it — and then what the hold is
+            // actually showing, which is the pair worth printing: a wanted pose that keeps losing to the
+            // hold is a different fault from a pose that genuinely alternates.
+            var wanted = ActionFor(in agent, out _);
+            var shown = ShownAction(index, wanted);
             if (shown == loggedAction[index]) continue;
 
             loggedAction[index] = shown;
             Console.WriteLine(
                 $"  [flip] #{index} -> {shown}" +
-                (action != shown ? $" (wanted {action})" : string.Empty) +
+                (wanted != shown ? $" (wanted {wanted})" : string.Empty) +
                 $" at {simulation.EpochTicks * SimulationWorld.FixedDeltaSeconds:F2}s" +
                 $" | {agent.Jobs.Assignment.Kind}/{agent.Jobs.Assignment.Cargo}" +
                 $" activity={agent.Jobs.Activity} working={JobSystem.IsWorking(in agent)}" +
@@ -7312,11 +7323,16 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
     /// How long a body must be making no progress before the log calls it stuck.
     /// </summary>
     /// <remarks>
-    /// The same figure the movement overlay uses to paint a body red, held here rather than read from the
-    /// collision layer: an instrument that depends on a constant belonging to the thing it measures cannot
-    /// be used to compare two versions of that thing, which is exactly what it was needed for.
+    /// The same figure the movement overlay uses to paint a body red, held apart from it rather than read
+    /// from the collision layer: an instrument that depends on a constant belonging to the thing it measures
+    /// cannot be used to compare two versions of that thing, which is exactly what it was needed for.
+    /// <para>
+    /// §182 briefly pointed this at the simulation's own <c>StalledSeconds</c> while consolidating thirteen
+    /// copies of the number, which would have quietly broken every paired A/B run. It points at the pinned
+    /// instrument constant instead, which is where the argument above always belonged.
+    /// </para>
     /// </remarks>
-    private const float RedStuckSeconds = 0.35f;
+    private const float RedStuckSeconds = StallReporting.StalledSeconds;
 
     /// <summary>
     /// Reports any body the movement layer has given up on, whether or not it is selected.
@@ -7364,20 +7380,12 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         {
             if (!simulation.Agents.Contains(id)) continue;
             ref readonly var agent = ref simulation.Agents.Get(id);
-            var hurtNow = id.Value >= 0 && id.Value < hurtUntil.Length && hurtUntil[id.Value] > 0f;
-            var action = BodyActions.For(
-                in agent,
-                hurtNow,
-                WaitingOnMaterials(in agent),
-                BodyActions.ForBuilder(
-                        in agent, AtItsProject(in agent),
-                        simulation.ProjectCanBeWorked(agent.Jobs.Project)),
-                out _);
+            var action = ActionFor(in agent, out _);
             var clip = bodies?.For(action);
             var jobs = agent.Jobs;
             var place = jobs.Place;
             var gap = Vector2.Distance(agent.Position, place);
-            var held = id.Value < heldAction.Length ? heldAction[id.Value] : action;
+            var held = ShownAction(id.Value, action);
 
             Console.WriteLine(
                 $"    #{id.Value} {agent.Role} {action}" +
@@ -9028,14 +9036,15 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             var crowdYielding = agent.IsVisiblyYielding;
             var unitColor = crowdYielding
                 ? QueuedUnitColor
-                : agent.StuckSeconds > 0.35f ? StuckUnitColor
+                : agent.StuckSeconds > AgentDefaults.StalledSeconds ? StuckUnitColor
                 : stateDebug ? StateColor(agent.LocomotionState)
                 : UnitColor;
             // The cylinder still draws whenever it is carrying information the model cannot: a body
             // yielding under crowd pressure, a body failing to make progress, or the state overlay. Those
             // are the colours the whole locomotion layer is judged by and they must not be lost to an art
             // pass. Otherwise the person stands in for it.
-            var saysSomething = crowdYielding || agent.StuckSeconds > 0.35f || stateDebug;
+            var saysSomething = crowdYielding || agent.StuckSeconds > AgentDefaults.StalledSeconds ||
+                                stateDebug;
             if (!drawnAsAPerson || saysSomething)
             {
                 unitInstances.Add(new InstanceData(unitModel, unitColor));
