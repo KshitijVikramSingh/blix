@@ -169,6 +169,7 @@ internal static class SimulationSelfTests
         Check("nine builders on one project make progress", NineBuildersOnOneProject());
         Check("a carrier lets builders build", CarriersLetBuildersBuild());
         Check("a waiting builder's pose does not flicker", ABuilderWaitingDoesNotFlicker());
+        Check("a working body does not whip around", AWorkingBodyDoesNotWhipAround());
         Check("a guard is not shown farming", AGuardIsNotShownFarming());
         Check("every assignment leg names an act, and only its own", EveryLegNamesItsOwnAct());
         Check("a finished project releases its builders", AFinishedProjectReleasesItsBuilders());
@@ -6196,6 +6197,106 @@ internal static class SimulationSelfTests
         var passed = guarded && !farming;
         Console.WriteLine(
             $"    a militia on a guard post showed: {string.Join(", ", seen.Select(a => a.ToString()))}");
+        return passed;
+    }
+
+    /// <summary>
+    /// A body at its work holds a steady heading instead of spinning. §184.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reported from the chair as bodies that "whip around like motorbikes while bent over playing the
+    /// building animation".</b> Third sighting of one fault: the heading tested velocity before the act, and
+    /// the bar for velocity is eight centimetres a second — so a body standing correctly at a build site,
+    /// shoved a few millimetres a frame by depenetration and its neighbours, handed a fresh random direction
+    /// to the turn slew every frame and chased it at five hundred degrees a second.
+    /// <para>
+    /// The pose had the identical fault and the identical fix (§176), and it took a test to stop coming
+    /// back. This is that test for the facing: nine hands crowded onto one site, and the claim is about the
+    /// <em>rate</em> — a body at its work turns slowly, because the direction to the thing it is working
+    /// barely changes while it stands there.
+    /// </para>
+    /// <para>
+    /// The threshold is measured rather than chosen. It is deliberately loose enough that only a spin fails
+    /// it: a body legitimately re-facing after being shoved a body's width sideways must pass.
+    /// </para>
+    /// </remarks>
+    private static bool AWorkingBodyDoesNotWhipAround()
+    {
+        var world = new SimulationWorld(240f);
+        var us = new FactionId(0);
+        var store = world.AddNode(NodeKind.Granary, new Vector2(-30f, 0f), capacity: 4000, faction: us);
+        world.SeedStock(store, Resource.Wood, 4000);
+
+        var site = world.AddNode(
+            NodeKind.ForwardDepot, new Vector2(0f, 0f), capacity: 400, faction: us, built: false);
+
+        // <b>Crowded on purpose.</b> The fault is driven by bodies shoving each other, so a lone builder
+        // would pass a broken build: nine hands on one footprint is what the chair was watching.
+        var hands = new AgentId[9];
+        for (var i = 0; i < hands.Length; i++)
+        {
+            hands[i] = world.SpawnAgent(
+                new Vector2(-5f + i % 3, -3f + i / 3 * 0.9f), UnitType.Villager, us);
+        }
+
+        ref readonly var node = ref world.Nodes.Get(site);
+        world.QueueAssign(hands, Assignment.Hold(node.Position, 0.5f, node.FootprintRadius));
+
+        var previous = new Dictionary<int, float>();
+        var worstRate = 0f;
+        var worstBody = -1;
+        var samples = 0;
+        var totalRate = 0f;
+        const float step = (float)SimulationWorld.FixedDeltaSeconds;
+
+        for (var t = 0; t < 2400; t++)
+        {
+            Tick(world, 1);
+            foreach (var id in hands)
+            {
+                if (!world.Agents.Contains(id)) continue;
+                ref readonly var body = ref world.Agents.Get(id);
+
+                // Only while it is at its work, which is the state the fault appears in. A body still
+                // walking there turns as fast as it likes and should.
+                if (!JobSystem.IsWorking(in body))
+                {
+                    previous.Remove(id.Value);
+                    continue;
+                }
+
+                var heading = BodyActions.HeadingOf(in body);
+                if (heading.LengthSquared() <= 0.0001f) continue;
+                var angle = MathF.Atan2(heading.Y, heading.X);
+                if (previous.TryGetValue(id.Value, out var was))
+                {
+                    // Signed shortest way round, so a heading crossing the back of the circle is a small
+                    // change and not a full turn.
+                    var delta = MathF.Abs(MathF.IEEERemainder(angle - was, MathF.Tau)) / step;
+                    var degrees = delta * 180f / MathF.PI;
+                    totalRate += degrees;
+                    samples++;
+                    if (degrees > worstRate)
+                    {
+                        worstRate = degrees;
+                        worstBody = id.Value;
+                    }
+                }
+
+                previous[id.Value] = angle;
+            }
+        }
+
+        // <b>Measured, not chosen.</b> A spin drives this into the hundreds and beyond — the slew itself
+        // runs at five hundred degrees a second and the target was changing faster than that. A body at its
+        // work re-facing after a shove is tens.
+        const float whipping = 200f;
+        var mean = samples == 0 ? 0f : totalRate / samples;
+        var passed = samples > 0 && worstRate < whipping;
+        Console.WriteLine(
+            $"    nine hands on one site over {samples} working sample(s): heading turned " +
+            $"{mean:F1} deg/s on average, worst {worstRate:F0} deg/s (body {worstBody}) " +
+            $"against a whipping bar of {whipping:F0}");
         return passed;
     }
 

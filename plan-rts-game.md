@@ -14385,10 +14385,151 @@ length at one frame's resolution, ten-odd samples per spell against a third-of-a
 **Phase C's real first step was never the ratchet; it was reproduction.** Nothing can be ratcheted or thrown
 until the same numbers come back from a run where the fault appears.
 
-### Flagged in passing, not chased
+### Retracted: the raid leg was fine and my counter was not
 
-The raid leg completes **7 legs in six minutes**. It asserts that the settlement is not wiped out and that
-the books balance, and it has never asserted that the settlement keeps *functioning* — so an economy frozen
-solid by raid pressure passes it. Some of that is by design (people shelter, militia commit) and some of
-the figure is dead bodies taking their counters with them, but twenty times fewer legs per second than a
-placid year is worth somebody looking at on purpose.
+I wrote here that the raid leg "completes 7 legs in six minutes" and "has never asserted that the settlement
+keeps functioning — so an economy frozen solid by raid pressure passes it". **Both halves were wrong**, and
+the counter behind them needed three corrections before it said anything true. §184 has the detail; the
+short version:
+
+- **The counter is churn, not work.** It reached 8,599 over nine minutes across 28 bodies — one activity per
+  body every 1.8 seconds, impossible against a 45-second work shift. An activity is *any* leg, and a
+  guard's half-second dwell finishes one, so a settlement of posted militia churns thousands while producing
+  nothing. Renamed `ActivitiesFinished` and explicitly not comparable between runs with different
+  assignment mixes.
+- **The raid leg does report the disruption, in better units than mine.** Grain 4,150 → 3,102 and population
+  19 → 11 over six minutes of eight raids, and the leg prints *"2690 labour-seconds withheld — about 349
+  grain of work not done"* and *"19 ever left their work for a fight"*. It does not assert the settlement
+  keeps functioning because a settlement raided every forty-five seconds, losing 42% of its people, should
+  not keep functioning.
+
+So there was no finding. What there was: **a number I did not understand, compared across two runs it was
+never comparable between, and then written up as somebody else's bug.** The rule from §181 applies to my own
+instruments and I applied it late — the honest reading of an unfamiliar counter is to find what the scenario
+already reports in units that mean something.
+
+## 184. The motorbike: one fault, third sighting, and the first one with a test
+
+Reported from the chair while the hands-off run was on screen: bodies *"get into the working state and
+animation as soon as they reach the building site, then they whip around like motorbikes while bent over
+playing the building animation"*.
+
+Entering the pose on arrival is correct — they have arrived, and §180's per-activity naming is what makes
+`Building` mean the build leg rather than a guess. **The whipping was the heading, and it was the same
+ordering fault as the pose, one layer over.** The render loop chose it as:
+
+```
+heading = velocity > 0.08 m/s ? velocity : working ? toWork : Facing
+```
+
+`IsWorking` is only ever true of a body *at* its place. An arrived body's velocity is not a direction of
+travel — it is depenetration and neighbours shoving it a few millimetres a frame, in a fresh random
+direction each time, and eight centimetres a second is a very low bar to clear. So the slew was handed a new
+target every frame and chased it at its full five hundred degrees a second.
+
+§176 fixed exactly this in the pose, by exactly this reordering, and wrote down why it is safe. The facing
+was never reordered. **The general rule, now that it has cost three sightings: anything read off a body at
+its work must consult the act before the velocity.**
+
+### Measured, because "whips around" can be a number
+
+`HeadingOf` is now a pure function in `BodyActions`, next to `For`, for the same reason `For` was pulled out
+of the loop: it lived inline in the renderer, so the only instrument for it was an eye, and it was wrong
+three times running. Nine hands crowded onto one build site, 12,325 working samples, heading rate measured
+per tick:
+
+| | mean | worst |
+|---|---|---|
+| velocity first (as shipped) | 12.7 °/s | **5,284 °/s** |
+| act first | 1.2 °/s | 35 °/s |
+
+Five thousand degrees a second is **fourteen and a half full turns per second** — faster than the slew's own
+limit, because the target was moving faster than the slew. That is the motorbike, and it is now a failing
+number rather than a thing to squint at.
+
+The bar is set at 200 °/s: loose enough that a body legitimately re-facing after a shove passes, and the
+broken arm misses it by a factor of twenty-six. **The A/B was run both ways** — a test that passes before
+the fix is worth nothing, and after §181 this arc has no credit left for unverified instruments.
+
+### What this says about the three-sightings pattern
+
+Pose, facing, and — §182 — the stall thresholds. Each was a body's state being re-derived somewhere the
+simulation could not see it, each was found by eye from the chair, and each took more than one attempt.
+The two that now have pure functions and tests (`For`, `HeadingOf`) cannot come back. The lesson is not
+about ordering: **it is that anything the eye is the only instrument for will be got wrong repeatedly**, and
+the fix is a function with no window in it.
+
+### §184's coda: one small counter, three corrections
+
+The productivity half of `StallCensus` needed fixing three times, and the sequence is worth keeping because
+each fault hid the next:
+
+1. **A grace window of 20 s against a 45 s work shift** — every body stalling at the start of a shift scored
+   unproductive by construction. Removed the deadline entirely.
+2. **The raw counter resets on reassignment.** `JobSystem.Assign` replaces the whole `AgentJobs` struct, so
+   `LegsCompleted` returns to zero every time a body is given a new job — and comparing raw values across a
+   spell therefore scored a body that finished its leg and moved on as having done nothing. The census now
+   accumulates its own monotonic per-body total. Productive spells went 148 → 157 of 171.
+3. **The total is churn, not work.** Only visible once it was believable enough to sanity-check: 8,599
+   activities over 540 s across 28 bodies is one per body every 1.8 s, and a 45 s work shift makes that
+   impossible. Guard dwells are half a second and count.
+
+The core findings never depended on it and are unchanged: **nothing is stranded** — measured independently,
+as bodies still stalled when the clock stops — and **every spell over two seconds is followed by work**. But
+three faults in one column, in the same session that wrote §181 about exactly this, is the argument for the
+rule rather than against it: *the first thing to do with a number is check it against something it cannot
+disagree with.* A leg count could be checked against a shift length in one line, and that is what found
+fault three.
+
+## 185. Open, and next: the red cylinder is a false alarm, and the paint needs its own threshold
+
+Confirmed from the chair as the thing to take up next. Stated here with the measurements so the discussion
+starts from numbers.
+
+### The evidence
+
+Two runs, one headless and one as played, both with nobody steering:
+
+| | spells | followed by work | longest | still stalled at the end |
+|---|---|---|---|---|
+| two villages, headless, 540 s, 28 bodies | 171 | 157 | 5.4 s | **0** |
+| as played, 780 s, 30 bodies | 278 | **278** | 2.1 s | **0** |
+
+And the live stuck lines, 75 of them over thirteen minutes: median stall **0.70 s**, p90 1.85 s, max 4.33 s,
+and **84% with nothing touching them**.
+
+The overlay paints a body red the moment `StuckSeconds` passes `AgentDefaults.StalledSeconds` = **0.35 s**.
+The median stall is twice that, and in the run as played *every single spell resolved into work*. So the
+red is firing on ordinary traffic. Four reports of "they become red cylinders" across §170–184, three
+attempted fixes, one measured A/B that showed my collision changes made it worse — and **there was never a
+stall to fix.** The `contact=False` dominance says it from the other side: these are bodies briefly not
+progressing while they route, and the repath that fires at the same 0.35 s is the thing that clears them.
+**The mechanism works. The paint lies about it.**
+
+### Why this is a third purpose and not a fourth near-synonym
+
+§182 split one number into two on the grounds that an instrument must not read its threshold from the thing
+it measures. This is a third purpose, and the test for whether it earns its own name is whether the three
+would ever want to move independently:
+
+- **the repath gate** wants to reconsider *early* — it is cheap, it demonstrably works, and 0.35 s is right;
+- **the instrument** wants a pinned ruler so two versions of the simulation stay comparable;
+- **the paint** wants "worth a player's attention", which the distribution puts somewhere **north of 2 s**.
+
+Those three answers are 0.35, 0.35-forever, and >2 — so yes, three names. What must not happen is a fourth
+name for the same purpose; the three self-tests that assert about the overlay have to follow whichever value
+the paint takes, or §182's fault returns from the other side.
+
+### What is not yet decided, and is the chair's call
+
+- **Where the paint threshold sits.** The distribution offers two natural readings: past the observed
+  maximum of an as-played run (2.1 s), or past the headless maximum (5.4 s). The first shows genuine trouble
+  sooner and will still fire occasionally on a healthy village; the second effectively means "only when
+  something is actually wrong".
+- **Whether red is the right signal at all.** A body that recovers in 0.7 s does not need a colour; a body
+  that has not moved in ten seconds arguably needs more than one. The measured distribution has no upper
+  tail at all, which is an argument that the interesting display is not "is this body stuck" but "has this
+  body been stuck *longer than any body normally is*".
+- **§180's throw.** Still owed, and §183 established the trigger cannot be a stopwatch. If the paint moves
+  to a value nothing ever reaches, then the throw and the paint want the same number, and the ratchet §180
+  asked for becomes reachable after all — for the first time against a threshold that means something.

@@ -152,7 +152,17 @@ internal enum AssignmentKind
     Loot,
 }
 
-/// <summary>What a unit is doing at this instant, in service of its assignment.</summary>
+/// <summary>
+/// What a unit's current leg is for — which is its act once it has arrived, and its errand until then.
+/// </summary>
+/// <remarks>
+/// <b>Named when the leg begins, not when the body arrives</b>, so this is the leg's purpose and only
+/// becomes the act underway once <see cref="JobSystem.IsWorking"/> is true. §183 caught a log line reading
+/// <c>activity=Building</c> beside <c>toPlace=18.18</c> — a body eighteen metres from its site, printed as
+/// though it were building. Nothing was wrong with the pose, which gates on arrival; what was wrong was a
+/// field whose name promised the instant and whose value describes the leg. Anything reading this for what a
+/// body is doing right now must pair it with arrival, exactly as <c>BodyActions</c> does.
+/// </remarks>
 /// <remarks>
 /// <b>One shape, on purpose — but now it says which work it is.</b> The shape is unchanged and is still
 /// the point: an activity is <em>be at this place for this long</em>, which covers walking there and

@@ -7345,7 +7345,8 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 (wanted != shown ? $" (wanted {wanted})" : string.Empty) +
                 $" at {simulation.EpochTicks * SimulationWorld.FixedDeltaSeconds:F2}s" +
                 $" | {agent.Jobs.Assignment.Kind}/{agent.Jobs.Assignment.Cargo}" +
-                $" activity={agent.Jobs.Activity} working={JobSystem.IsWorking(in agent)}" +
+                $" act={agent.Jobs.Activity}" +
+                (JobSystem.IsWorking(in agent) ? " underway" : " en route") +
                 $" waiting={WaitingOnMaterials(in agent)}" +
                 $" toPlace={JobSystem.DistanceToPlace(in agent):F2} speed={agent.Velocity.Length():F2}");
         }
@@ -7393,8 +7394,15 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             Console.WriteLine(
                 $"  [stuck] #{agent.Id.Value} {agent.Role} f{agent.Faction.Value} " +
                 $"stuck={agent.StuckSeconds:F2}s contact={agent.HadAgentContactThisTick} " +
+                // <b>Named at the leg's start, so it is the leg's purpose and not the act underway.</b>
+                // §183: a stuck line read "activity=Building" with "toPlace=18.18" — a body eighteen metres
+                // from its site, printed as though it were building. The pose is unaffected, because that
+                // gates on arrival, but a log line that invites the misreading is the same near-synonym
+                // fault this session has paid for four times. So the line says which of the two it is.
                 $"| {jobs.Assignment.Kind}/{jobs.Assignment.Cargo} leg{jobs.Leg} " +
-                $"activity={jobs.Activity} interrupt={jobs.Interrupt} " +
+                $"act={jobs.Activity}" +
+                (JobSystem.IsWorking(in agent) ? " underway" : " en route") +
+                $" interrupt={jobs.Interrupt} " +
                 $"| at=({agent.Position.X:F1},{agent.Position.Y:F1}) " +
                 $"want=({agent.RequestedDestination.X:F1},{agent.RequestedDestination.Y:F1}) " +
                 $"hasDest={agent.HasDestination} toPlace={JobSystem.DistanceToPlace(in agent):F2} " +
@@ -7424,7 +7432,7 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 (held != action ? $" (held {held})" : string.Empty) +
                 $" clip={clip?.Name.Split('|')[^1] ?? "none"}" +
                 $" | {jobs.Assignment.Kind}/{jobs.Assignment.Cargo} leg{jobs.Leg}" +
-                $" activity={jobs.Activity} working={JobSystem.IsWorking(in agent)}" +
+                $" act={jobs.Activity}{(JobSystem.IsWorking(in agent) ? " underway" : " en route")}" +
                 $" waiting={WaitingOnMaterials(in agent)} interrupt={jobs.Interrupt}" +
                 $" | place=({place.X:F1},{place.Y:F1}) gap={gap:F2} extent={jobs.PlaceExtent:F2}" +
                 $" toPlace={JobSystem.DistanceToPlace(in agent):F2} settled={jobs.SettledNearby}" +
@@ -8970,13 +8978,21 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 // pathing happened to approach from says nothing about where the work is. Reported from the
                 // chair exactly that way: facing has to account for where the thing being worked is
                 // relative to where pathing left the body.
-                var working = JobSystem.IsWorking(in agent);
-                var toWork = agent.Jobs.Place - agent.Position;
-                var heading = agent.Velocity.LengthSquared() > BodyActions.WalkingSpeedSquared
-                    ? agent.Velocity
-                    : working && toWork.LengthSquared() > 0.0004f
-                        ? toWork
-                        : agent.Facing;
+                //
+                // <b>And the act is tested BEFORE the velocity, which is the third sighting of one fault.</b>
+                // §184. Reported from the chair: bodies that "whip around like motorbikes while bent over
+                // playing the building animation". The order above used to put velocity first, and the bar
+                // for velocity is eight centimetres a second — so a body standing correctly at a build site,
+                // shoved a few millimetres a frame by depenetration and its neighbours, handed a fresh random
+                // direction to the slew every frame and chased it at five hundred degrees a second.
+                //
+                // This is exactly the fault the pose had, fixed in §176 with exactly this reordering, and the
+                // comment there says why it is safe: IsWorking is only ever true of a body already AT its
+                // place, so testing it first cannot steal a frame from something genuinely walking there.
+                // The general rule, now that it has cost three sightings: <b>anything read off a body at its
+                // work must consult the act before the velocity, because an arrived body's velocity is not a
+                // direction of travel — it is noise about a fixed point.</b>
+                var heading = BodyActions.HeadingOf(in agent);
                 var yaw = heading.LengthSquared() > 0.0001f
                     ? -MathF.Atan2(heading.Y, heading.X)
                     : 0f;

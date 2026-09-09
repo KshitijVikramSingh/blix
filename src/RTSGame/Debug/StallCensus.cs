@@ -92,6 +92,13 @@ internal sealed class StallCensus
     private bool[] contactAtPeak = Array.Empty<bool>();
     private AssignmentKind[] doing = Array.Empty<AssignmentKind>();
 
+    // <b>LegsCompleted resets to zero on every reassignment</b>, because JobSystem.Assign replaces the whole
+    // AgentJobs struct. So the raw counter cannot be compared across a spell: a body that finished its leg
+    // and was then given a new job reads as having done nothing. These two accumulate a monotonic total the
+    // census owns — the last raw reading, and the sum of every rise in it — which survives reassignment.
+    private int[] legsSeen = Array.Empty<int>();
+    private int[] legsTotal = Array.Empty<int>();
+
     // Spells whose grace window has not run out yet, so productivity is still undecided.
     private readonly List<int> pendingBody = new();
     private readonly List<Episode> pendingEpisode = new();
@@ -116,7 +123,7 @@ internal sealed class StallCensus
     public int UnjudgedInTheTail { get; private set; }
 
     /// <summary>
-    /// Legs completed by everybody, over the run — so "nothing was followed by work" can be read.
+    /// Activities finished by everybody over the run. <b>A churn rate, not a measure of production.</b>
     /// </summary>
     /// <remarks>
     /// <b>An answer of exactly zero is a question about the instrument, not a finding.</b> The raid leg came
@@ -124,8 +131,24 @@ internal sealed class StallCensus
     /// nowhere or means nothing in that scenario completes legs at all. Those need telling apart before
     /// either is believed, and the total is what tells them apart: work happening elsewhere while no stalled
     /// body joins in is a real finding, and no work anywhere is a fact about the scenario.
+    /// <para>
+    /// <b>Updated every sample, not only at the close</b> — which it was, for one run. The live game prints
+    /// this figure every thirty seconds and never closes, so it read a flat zero beside "41 of 41 spells
+    /// were followed by work": a self-contradiction, since productivity IS this counter rising. Caught by
+    /// the contradiction rather than by the zero, and worth the note because the fix for the raid leg's zero
+    /// was the thing that introduced it.
+    /// </para>
+    /// <para>
+    /// <b>And then it had to be renamed, because it is not work.</b> Third correction to one small counter.
+    /// It reached 8,599 over nine minutes across 28 bodies — one activity per body every 1.8 seconds, which
+    /// is flatly impossible against a 45-second work shift. The reason is that an activity is *any* leg:
+    /// a guard's half-second dwell finishes one, and a settlement full of posted militia churns them by the
+    /// thousand while producing nothing. So this counts <em>activities entered and left</em> and must never
+    /// be compared between runs with different assignment mixes. For production, read what the scenario
+    /// itself reports — the raid leg prints "labour-seconds withheld" and grain, which are the honest units.
+    /// </para>
     /// </remarks>
-    public int LegsCompletedByAnybody { get; private set; }
+    public int ActivitiesFinished { get; private set; }
 
     /// <summary>Call once per tick, after the world has stepped.</summary>
     public void Sample(SimulationWorld world, float deltaSeconds)
@@ -140,8 +163,15 @@ internal sealed class StallCensus
             if (!agent.IsAlive)
             {
                 startedAt[index] = 0f;
+                // So a reused id starts counting from scratch rather than from the dead body's tally.
+                legsSeen[index] = 0;
                 continue;
             }
+
+            // Before anything else, so a leg finished on this very tick is visible to the resolution below.
+            var raw = agent.Jobs.LegsCompleted;
+            if (raw > legsSeen[index]) legsTotal[index] += raw - legsSeen[index];
+            legsSeen[index] = raw;
 
             PeakStuckSeconds = MathF.Max(PeakStuckSeconds, agent.StuckSeconds);
             var stalled = agent.StuckSeconds > StallReporting.StalledSeconds;
@@ -177,11 +207,12 @@ internal sealed class StallCensus
                 doing[index],
                 WentOnToWork: false));
             pendingEndedAt.Add(elapsedSeconds);
-            pendingLegs.Add(agent.Jobs.LegsCompleted);
+            pendingLegs.Add(legsTotal[index]);
             startedAt[index] = 0f;
         }
 
         ResolvePending(world, force: false);
+        CountLegs(world);
     }
 
     /// <summary>Call once when the run ends, to close out whatever was still open.</summary>
@@ -209,14 +240,23 @@ internal sealed class StallCensus
         }
 
         ResolvePending(world, force: true);
+        CountLegs(world);
+    }
 
+    /// <summary>
+    /// Legs finished by everybody now alive, which only ever rises while nobody dies.
+    /// </summary>
+    /// <remarks>
+    /// Summed from the census's own monotonic per-body totals rather than from the live counters, for two
+    /// reasons that both bit: <c>LegsCompleted</c> resets on reassignment, and a body that dies takes its
+    /// counter with it. Read off the live values this figure went <em>down</em>, which would read as work
+    /// being undone.
+    /// </remarks>
+    private void CountLegs(SimulationWorld world)
+    {
         var legs = 0;
-        foreach (ref readonly var agent in world.Agents.All)
-        {
-            if (agent.IsAlive) legs += agent.Jobs.LegsCompleted;
-        }
-
-        LegsCompletedByAnybody = legs;
+        for (var i = 0; i < legsTotal.Length; i++) legs += legsTotal[i];
+        ActivitiesFinished = legs;
     }
 
     private void ResolvePending(SimulationWorld world, bool force)
@@ -226,7 +266,7 @@ internal sealed class StallCensus
             var index = pendingBody[i];
             var id = new AgentId(index);
             var gone = !world.Agents.Contains(id) || !world.Agents.Get(id).IsAlive;
-            var worked = !gone && world.Agents.Get(id).Jobs.LegsCompleted > pendingLegs[i];
+            var worked = !gone && index < legsTotal.Length && legsTotal[index] > pendingLegs[i];
             // No deadline: a spell stays open until the body finishes a leg or the run stops. Waiting is
             // free, and a window shorter than a work shift is what made the first reading meaningless.
             if (!force && !worked) continue;
@@ -248,6 +288,8 @@ internal sealed class StallCensus
         Array.Resize(ref peak, size);
         Array.Resize(ref contactAtPeak, size);
         Array.Resize(ref doing, size);
+        Array.Resize(ref legsSeen, size);
+        Array.Resize(ref legsTotal, size);
     }
 
     /// <summary>
@@ -316,6 +358,6 @@ internal sealed class StallCensus
                $"\n    longest spell {longest:F1}s, longest still followed by work {longestProductive:F1}s, " +
                $"peak stall clock {PeakStuckSeconds:F1}s, still stalled at the end {StalledAtTheEnd}, " +
                $"unjudged in the last {TailSeconds:F0}s {UnjudgedInTheTail}, " +
-               $"legs completed by anybody {LegsCompletedByAnybody}";
+               $"activities finished (churn, not work) {ActivitiesFinished}";
     }
 }

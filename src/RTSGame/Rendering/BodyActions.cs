@@ -1,3 +1,4 @@
+using System.Numerics;
 using RTSGame.Simulation.Agents;
 using RTSGame.Simulation.Jobs;
 
@@ -130,6 +131,48 @@ internal static class BodyActions
         agent.Role == AgentRole.Militia || agent.Jobs.Assignment.Kind == AssignmentKind.Guard
             ? BodyAction.Guard
             : BodyAction.Idle;
+
+    /// <summary>
+    /// Which way this body should be looking, in world space.
+    /// </summary>
+    /// <remarks>
+    /// <b>Extracted so "they whip around like motorbikes" can be a number.</b> §184. This lived inline in
+    /// the render loop, where the only way to judge it was to watch — and it was wrong there for three
+    /// sightings running, each found by eye and each costing a session. A heading is a function of a body's
+    /// state, so a self-test can stand nine builders at a wall and measure how many degrees a second they
+    /// swing, which is the difference between believing the facing and knowing it.
+    /// <para>
+    /// <b>The act before the velocity.</b> The bar for "moving" is eight centimetres a second, and a body
+    /// standing correctly at its work is shoved past that constantly by depenetration and by its
+    /// neighbours — so with velocity tested first, an arrived body handed a fresh random direction to the
+    /// slew every frame. <c>IsWorking</c> is only ever true of a body already at its place, so testing it
+    /// first cannot steal a frame from something genuinely walking there.
+    /// </para>
+    /// <para>
+    /// Three fallbacks, each for a case the one above it cannot answer: a body at its work faces its work
+    /// (§172 — a villager who walked past a tree to reach its free side otherwise chopped at thin air with
+    /// the trunk behind them); a body under way faces where it is actually going, which cannot disagree with
+    /// its direction of travel because it <em>is</em> its direction of travel (§168 — bodies walked backwards
+    /// when this read the steering layer's own heading, which lags or opposes travel in a crowd); and a body
+    /// that has stopped keeps the last heading the steering gave it, because there is nothing else to read.
+    /// </para>
+    /// </remarks>
+    public static Vector2 HeadingOf(in AgentState agent)
+    {
+        var toWork = agent.Jobs.Place - agent.Position;
+        if (JobSystem.IsWorking(in agent) && toWork.LengthSquared() > AtWorkSquared) return toWork;
+        if (agent.Velocity.LengthSquared() > WalkingSpeedSquared) return agent.Velocity;
+        return agent.Facing;
+    }
+
+    /// <summary>
+    /// How near a body has to be standing on its place before "face the work" has no direction left.
+    /// </summary>
+    /// <remarks>
+    /// Two centimetres, squared. Below it the vector toward the work is shorter than the noise in the
+    /// body's own position, so its direction is meaningless and the steering heading is the honest answer.
+    /// </remarks>
+    private const float AtWorkSquared = 0.0004f;
 
     /// <summary>Under way, laden or not.</summary>
     private static BodyAction Walking(in AgentState agent, out bool locomotion)
