@@ -34,7 +34,8 @@ public sealed class LabModel : IDisposable
         int IndexCount,
         Vector3 BaseColour,
         float Metallic,
-        float Roughness);
+        float Roughness,
+        TextureHandle Albedo);
 
     /// <summary>A node of the authored hierarchy, drawable or not.</summary>
     public readonly record struct Node(
@@ -49,6 +50,9 @@ public sealed class LabModel : IDisposable
         Vector3 BoundsMax);
 
     private VulkanGraphicsDevice device = null!;
+    private readonly List<TextureHandle> ownedTextures = new();
+    private readonly Dictionary<GltfTexture, TextureHandle> uploaded = new();
+    private TextureHandle white;
     private readonly List<Part> parts = new();
     private readonly List<Node> nodes = new();
 
@@ -77,6 +81,14 @@ public sealed class LabModel : IDisposable
     public static LabModel Load(VulkanGraphicsDevice vk, string path)
     {
         var model = new LabModel { device = vk, SourcePath = path };
+
+        // A material without a base-colour texture still samples one, so the shader needs no
+        // branch: glTF defines the factor as multiplying the texture, and white is the identity.
+        model.white = vk.CreateTexture2D(
+            new TextureDescription(1, 1, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
+            new byte[] { 255, 255, 255, 255 }, "lab.white");
+        model.ownedTextures.Add(model.white);
+
         var imported = new GltfStaticImporter().ImportNodes(
             new AssetImportContext(AssetId.Parse("lab"), path));
 
@@ -128,7 +140,8 @@ public sealed class LabModel : IDisposable
                         : new Vector3(
                             material.BaseColorFactor.X, material.BaseColorFactor.Y, material.BaseColorFactor.Z),
                     Metallic: material?.MetallicFactor ?? 0f,
-                    Roughness: material?.RoughnessFactor ?? 0.7f));
+                    Roughness: material?.RoughnessFactor ?? 0.7f,
+                    Albedo: model.UploadAlbedo(vk, material?.BaseColorTexture)));
             }
 
             var hasMesh = node.Primitives.Length > 0;
@@ -155,6 +168,26 @@ public sealed class LabModel : IDisposable
         }
 
         return model;
+    }
+
+    // Uploads a material's base-colour texture once, however many primitives share it.
+    private TextureHandle UploadAlbedo(VulkanGraphicsDevice vk, GltfTexture? texture)
+    {
+        if (texture is null) return white;
+        if (uploaded.TryGetValue(texture, out var existing)) return existing;
+
+        // Top mip only. A lab wants the picture, not the streaming pipeline — the cooked
+        // .blixtex path and progressive upload live in VulkanSponza, which earned them.
+        var mip0 = texture.MipBytes is { Count: > 0 } mips ? mips[0] : null;
+        if (mip0 is null) return white;
+
+        var handle = vk.CreateTexture2D(
+            new TextureDescription(texture.Width, texture.Height, texture.Format, SamplerDescription.LinearRepeat),
+            mip0,
+            $"lab.albedo.{texture.Name}");
+        uploaded[texture] = handle;
+        ownedTextures.Add(handle);
+        return handle;
     }
 
     // World-space bounds of one primitive. Walks positions rather than trusting an authored
@@ -186,6 +219,9 @@ public sealed class LabModel : IDisposable
             device.DestroyIndexBuffer(part.Indices);
         }
 
+        foreach (var texture in ownedTextures) device.DestroyTexture(texture);
+        ownedTextures.Clear();
+        uploaded.Clear();
         parts.Clear();
         nodes.Clear();
     }

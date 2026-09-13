@@ -84,7 +84,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private float sunYaw = 0.5f;
     private float sunPitch = 0.9f;
     private bool showTrail = true;
-    private bool showPrimitives = true;
 
     // Short, because this is a gizmo and not a motion study. Six seconds was the first
     // guess and reads as the arc refusing to leave; a trail that outlives the gesture that
@@ -186,8 +185,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         if (model is not null) DrawModelGizmos(debug);
 
-        if (showPrimitives) DrawPrimitiveVocabulary(debug);
-
         if (showTrail)
         {
             // Where the sun has been while it was being dragged.
@@ -205,9 +202,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     {
         if (model is null) return;
 
-        ImGui.Separator();
         ImGui.TextDisabled($"{model.Nodes.Count} nodes · {model.Parts.Count} meshes");
-
         if (ImGui.BeginChild("nodes", new Vector2(0, 150), ImGuiChildFlags.Borders))
         {
             for (var i = 0; i < model.Nodes.Count; i++)
@@ -324,50 +319,9 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private static float ScaleOf(Matrix4x4 m) =>
         new Vector3(m.M11, m.M12, m.M13).Length();
 
-    // Every debug primitive the channel offers, drawn at once.
-    //
-    // Five of these — Plane, Capsule, Cone, MeshWireframe, Normals — were exposed by the
-    // API and silently skipped by the renderer for their whole lives, so calling them
-    // succeeded and drew nothing. This is the standing check that they still arrive: if a
-    // primitive stops rendering, it is visible here rather than discovered by someone
-    // trying to debug a collider with it.
-    //
-    // The capsule is the one that matters most for what comes next. It is drawn where a
-    // character's collider would stand, because "what shape did collision actually test?"
-    // is the question a motion bug always turns into.
-    private void DrawPrimitiveVocabulary(DebugContext debug)
-    {
-        var here = new Vector3(-5.5f, 0f, 0f);
-        var white = new GraphicsColor(0.9f, 0.9f, 0.95f, 1f);
-        var warm = new GraphicsColor(1f, 0.6f, 0.35f, 1f);
-        var cool = new GraphicsColor(0.4f, 0.8f, 1f, 1f);
-
-        using (debug.Scope("vocabulary"))
-        {
-            debug.Draw.Capsule("capsule", here + new Vector3(0f, 0.4f, 0f), here + new Vector3(0f, 1.4f, 0f), 0.4f, cool);
-            debug.Draw.Plane("plane", here + new Vector3(-2f, 0.9f, 0f), new Vector3(0.3f, 1f, 0.2f), 1.6f, white);
-            debug.Draw.Cone("cone", here + new Vector3(2f, 1.8f, 0f), -Vector3.UnitY, 1.5f, 0.45f, warm);
-            debug.Draw.Sphere("sphere", here + new Vector3(2f, 0.5f, -2f), 0.45f, white);
-            debug.Draw.Aabb("aabb", here + new Vector3(-2f, 0f, -2f), here + new Vector3(-1.2f, 0.8f, -1.2f), warm);
-            debug.Draw.Cross("cross", here + new Vector3(0f, 0.05f, -2f), 0.5f, cool);
-            debug.Draw.Ray("ray", here + new Vector3(0f, 2.2f, 0f), Vector3.UnitX, 1.5f, warm);
-
-            // A triangle's edges and its vertex normals — the two that answer "what geometry
-            // was actually tested?" when a sweep disagrees with what is on screen.
-            var tri = new[]
-            {
-                here + new Vector3(3.6f, 0.05f, 1.2f),
-                here + new Vector3(4.8f, 0.05f, 1.2f),
-                here + new Vector3(4.2f, 0.05f, 2.4f),
-            };
-            debug.Draw.MeshWireframe("triangle", tri, new[] { 0, 1, 1, 2, 2, 0 }, white);
-            debug.Draw.Normals("triangle/normals", tri, new[] { Vector3.UnitY, Vector3.UnitY, Vector3.UnitY }, 0.6f, cool);
-        }
-    }
-
     public void DrawUi()
     {
-        ImGui.SetNextWindowSize(new Vector2(320, 260), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new Vector2(340, 440), ImGuiCond.FirstUseEver);
         ImGui.SetNextWindowPos(new Vector2(20, 20), ImGuiCond.FirstUseEver);
         if (!ImGui.Begin("lab"))
         {
@@ -375,37 +329,54 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             return;
         }
 
-        ImGui.TextDisabled("shaders + scene live in Blix.Labs.Toolchain");
-        ImGui.Separator();
+        // Grouped rather than one flat list of knobs. The panel grew a control at a time and had
+        // become a wall — which is the same complaint about legibility that got the gizmos
+        // depth-tested, one layer up.
+        if (model is not null) ImGui.TextDisabled(Path.GetFileName(model.SourcePath));
+        else ImGui.TextDisabled("no model — pass --model <path.glb>");
 
-        var exposure = renderer.Exposure;
-        if (ImGui.SliderFloat("exposure", ref exposure, 0.1f, 4f)) renderer.Exposure = exposure;
-
-        var mode = (int)renderer.TonemapMode;
-        if (ImGui.Combo("tonemap", ref mode, "ACES\0AgX\0Reinhard\0Neutral\0")) renderer.TonemapMode = mode;
-
-        ImGui.SliderFloat("sun yaw", ref sunYaw, -MathF.PI, MathF.PI);
-        ImGui.SliderFloat("sun pitch", ref sunPitch, 0.15f, 1.5f);
-
-        var ambient = scene.AmbientStrength;
-        if (ImGui.SliderFloat("ambient", ref ambient, 0f, 0.4f)) scene.AmbientStrength = ambient;
-
-        // Worth flipping rather than believing: with it off the grid and the capsule draw straight
-        // through the boxes, which is what every gizmo in Blix did until now.
-        ImGui.Checkbox("depth-test gizmos", ref depthTestGizmos);
-        if (model is not null)
+        if (ImGui.CollapsingHeader("image", ImGuiTreeNodeFlags.DefaultOpen))
         {
-            ImGui.Checkbox("node pivots", ref showPivots);
-            ImGui.SameLine();
-            ImGui.Checkbox("bounds", ref showBounds);
-            if (showPivots) ImGui.Checkbox("include transform-only nodes", ref showAllPivots);
+            var exposure = renderer.Exposure;
+            if (ImGui.SliderFloat("exposure", ref exposure, 0.1f, 4f)) renderer.Exposure = exposure;
 
+            var mode = (int)renderer.TonemapMode;
+            if (ImGui.Combo("tonemap", ref mode, "ACES\0AgX\0Reinhard\0Neutral\0"))
+            {
+                renderer.TonemapMode = mode;
+            }
+        }
+
+        if (ImGui.CollapsingHeader("sun", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            ImGui.SliderFloat("yaw", ref sunYaw, -MathF.PI, MathF.PI);
+            ImGui.SliderFloat("pitch", ref sunPitch, 0.15f, 1.5f);
+
+            var ambient = scene.AmbientStrength;
+            if (ImGui.SliderFloat("ambient", ref ambient, 0f, 0.4f)) scene.AmbientStrength = ambient;
+
+            ImGui.Checkbox("trail", ref showTrail);
+            if (showTrail) ImGui.SliderFloat("trail seconds", ref trailSeconds, 0.25f, 8f);
+        }
+
+        if (ImGui.CollapsingHeader("gizmos", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            ImGui.Checkbox("depth-tested", ref depthTestGizmos);
+            if (model is not null)
+            {
+                ImGui.Checkbox("node pivots", ref showPivots);
+                ImGui.SameLine();
+                ImGui.Checkbox("bounds", ref showBounds);
+                if (showPivots) ImGui.Checkbox("transform-only nodes too", ref showAllPivots);
+            }
+        }
+
+        if (model is not null && ImGui.CollapsingHeader("nodes", ImGuiTreeNodeFlags.DefaultOpen))
+        {
             DrawNodeList();
         }
 
-        ImGui.Checkbox("primitive vocabulary", ref showPrimitives);
-        ImGui.Checkbox("sun trail", ref showTrail);
-        if (showTrail) ImGui.SliderFloat("trail seconds", ref trailSeconds, 0.25f, 8f);
+        ImGui.Separator();
         ImGui.TextDisabled($"drag to orbit · wheel to zoom · {frames} frames");
         ImGui.End();
     }

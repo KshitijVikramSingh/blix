@@ -17,6 +17,26 @@ layout(set = 0, binding = 0) uniform Frame {
 
 layout(set = 1, binding = 0) uniform sampler2D uSunShadowMap;
 
+// Per-material albedo. The lab drew base-colour FACTORS only until now, so an asset's
+// textures were imported, held in memory and never sampled — the tank rendered as flat
+// green paint with its markings and panel lines missing, which looks plausible enough to
+// not notice.
+// <b>No albedo sampler yet, and the reason is an engine gap rather than a lab decision.</b>
+// A per-part base-colour texture has two routes and neither works today:
+//
+//   set 2 via a MaterialHandle — the engine's per-material set. Passing a material AND an
+//     inline texture list together is a combination nothing in the tree exercises
+//     (VulkanHello uses a material with no inline textures, TankArena inline textures with
+//     no material), and the draw dies with "statically uses descriptor set 2, but all sets
+//     0 to 2 are not compatible" and a SIGSEGV with no managed exception.
+//
+//   set 1 binding 1 alongside the shadow map — reflection sees it and the layout carries
+//     it, but the inline path never writes that descriptor: "uAlbedo is being used in draw
+//     but has never been updated via vkUpdateDescriptorSets".
+//
+// So a second sampled texture in one draw is the gap. LabModel already uploads the
+// textures and holds the handles; this is one line once the binding path takes them.
+
 layout(push_constant) uniform Push {
     mat4 uModel;
     vec4 uBaseColour;
@@ -25,6 +45,7 @@ layout(push_constant) uniform Push {
 
 layout(location = 0) in vec3 vWorld;
 layout(location = 1) in vec3 vNormal;
+layout(location = 2) in vec2 vUv;
 
 layout(location = 0) out vec4 outColour;
 

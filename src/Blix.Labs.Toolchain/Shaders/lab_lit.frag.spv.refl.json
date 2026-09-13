@@ -70,6 +70,11 @@
             "type" : "vec3",
             "name" : "vWorld",
             "location" : 0
+        },
+        {
+            "type" : "vec2",
+            "name" : "vUv",
+            "location" : 2
         }
     ],
     "outputs" : [

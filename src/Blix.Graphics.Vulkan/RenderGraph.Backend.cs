@@ -307,7 +307,16 @@ public sealed partial class RenderGraph : IDisposable
         // tiler can keep it in tile memory (it's resolved before store).
         var usage = msaa
             ? ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.TransientAttachmentBit
-            : ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.SampledBit;
+            // TransferSrcBit so a graph colour target can be READ BACK. CreateRenderSurface's
+            // attachments got this when capture was added; the graph's did not, and the lab's scene
+            // target is a graph resource — so every capture taken since has been an invalid
+            // vkCmdCopyImageToBuffer that MoltenVK happened to tolerate. It produced correct-looking
+            // pictures, which is exactly why running without the validation layers is not verification.
+            //
+            // Not added to the TRANSIENT branch above: a transient attachment never leaves tile
+            // memory, and asking to copy from one is a contradiction rather than an oversight.
+            : ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.SampledBit
+              | ImageUsageFlags.TransferSrcBit;
         var (image, memory, view) = device.AllocateAttachmentImage(
             width, height, format, usage, ImageAspectFlags.ColorBit,
             $"graph.{resource.Name}", SampleCount(resource.Samples));

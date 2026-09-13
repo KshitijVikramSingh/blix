@@ -288,8 +288,9 @@ public sealed class LabRenderer : IDisposable
     {
         if (model is null) return;
 
-        foreach (var part in model.Parts)
+        for (var index = 0; index < model.Parts.Count; index++)
         {
+            var part = model.Parts[index];
             var node = model.Nodes[part.NodeIndex];
             var push = casterOnly ? casterPushScratch : pushScratch;
             PackMatrix(node.WorldTransform * modelTransform, push);
@@ -304,14 +305,35 @@ public sealed class LabRenderer : IDisposable
                 floats[21] = part.Roughness;
             }
 
-            pass.DrawIndexed(
-                vertexBuffer: part.Vertices,
-                indexBuffer: part.Indices,
-                pipeline: pipeline,
-                indexCount: part.IndexCount,
-                uniforms: uniforms,
-                textures: textures,
-                pushConstants: push);
+            // <b>A fresh binding array per draw.</b> Push payloads are copied at record time;
+            // texture lists are still retained by reference, so a shared array would give every
+            // draw the last part's albedo — the same aliasing that stacked seven boxes, wearing a
+            // different hat. Eleven small allocations a frame is not worth being clever about.
+            // A fresh binding array per draw: push payloads are copied at record time, texture
+            // lists are still retained by reference, so a shared array would give every draw the
+            // last part's albedo — the aliasing that stacked seven boxes, wearing a different hat.
+            if (casterOnly)
+            {
+                pass.DrawIndexed(
+                    vertexBuffer: part.Vertices,
+                    indexBuffer: part.Indices,
+                    pipeline: pipeline,
+                    indexCount: part.IndexCount,
+                    uniforms: uniforms,
+                    textures: textures,
+                    pushConstants: push);
+            }
+            else
+            {
+                pass.DrawIndexed(
+                    vertexBuffer: part.Vertices,
+                    indexBuffer: part.Indices,
+                    pipeline: pipeline,
+                    indexCount: part.IndexCount,
+                    uniforms: uniforms,
+                    textures: textures,
+                    pushConstants: push);
+            }
         }
     }
 

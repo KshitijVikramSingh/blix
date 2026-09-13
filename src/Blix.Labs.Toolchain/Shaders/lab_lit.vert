@@ -2,6 +2,7 @@
 
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aTexCoord;
 
 layout(set = 0, binding = 0) uniform Frame {
     mat4 uViewProjection;
@@ -19,6 +20,7 @@ layout(push_constant) uniform Push {
 
 layout(location = 0) out vec3 vWorld;
 layout(location = 1) out vec3 vNormal;
+layout(location = 2) out vec2 vUv;
 
 void main()
 {
@@ -30,5 +32,6 @@ void main()
     // these normals.
     vNormal = normalize(mat3(uModel) * aNormal);
 
+    vUv = aTexCoord;
     gl_Position = uViewProjection * world;
 }

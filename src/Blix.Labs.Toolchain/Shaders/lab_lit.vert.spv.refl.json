@@ -27,7 +27,7 @@
                 }
             ]
         },
-        "_51" : {
+        "_57" : {
             "name" : "gl_PerVertex",
             "members" : [
                 {
@@ -60,7 +60,7 @@
                 }
             ]
         },
-        "_54" : {
+        "_60" : {
             "name" : "Frame",
             "members" : [
                 {
@@ -103,6 +103,11 @@
             "type" : "vec3",
             "name" : "aNormal",
             "location" : 1
+        },
+        {
+            "type" : "vec2",
+            "name" : "aTexCoord",
+            "location" : 2
         }
     ],
     "outputs" : [
@@ -115,11 +120,16 @@
             "type" : "vec3",
             "name" : "vNormal",
             "location" : 1
+        },
+        {
+            "type" : "vec2",
+            "name" : "vUv",
+            "location" : 2
         }
     ],
     "ubos" : [
         {
-            "type" : "_54",
+            "type" : "_60",
             "name" : "Frame",
             "block_size" : 176,
             "set" : 0,
