@@ -27,8 +27,8 @@ Blix.Demos.Bulwark             ← 3D game: tower defense (picking + multi-front
                                   skinned-mesh instancing, sun-shadow + HDR graph)
 Blix.Demos.Chassis             ← application-chassis spec (no diagnostics, own ImGui panel,
                                   host-owned --frames; 25-line csproj, no shaders)
-Blix.Labs.Toolchain            ← LAB library: lit scene + render graph + shaders,
-                                  reflected binding (shipped as library content)
+Blix.Labs.Toolchain            ← LAB library: lit scene + render graph + shaders + glTF
+                                  node/pivot model, reflected binding (library content)
    ↑        ↑
 Viewer  Probe  Capture        ← three executables over one lab; none declares a shader
                                   nor contains render code. Probe opens no window;
@@ -166,6 +166,14 @@ belongs to whoever first needs a capture every frame. `Blix.Graphics.Images.PngW
 encodes the result, hand-rolled with stored-deflate blocks so no encoder dependency is
 added — the files are larger than real deflate would make them, and they are screenshots,
 not assets.
+
+**Picking through a view has one caller**: `Blix.Labs.Toolchain.Viewer` turns a click into a
+ray with `ViewPicking.RayThrough` and tests it against node bounds. Note what that requires
+— the view must be declared with a LOGICAL rectangle matching the coordinates a pointer
+arrives in. The whole-surface shorthand `debug.Draw.Declare(name, vp)` fills both rectangles
+from `RenderFrameContext`, which is physical pixels, so a view declared that way and then
+picked through is off by the backing scale on a Retina display. Take the logical rect from
+`IRenderHost.LogicalSize`.
 
 **What capture cannot do yet.** Debug geometry can be aimed at any surface now — the line
 drawer bakes a pipeline per render target, where it used to have exactly one against the

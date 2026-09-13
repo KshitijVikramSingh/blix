@@ -209,10 +209,40 @@ and their reflection sidecars are compiled once and arrive through content propa
 the mechanism `Blix.Render` already used for `SpriteBatch`, now carrying a whole
 pipeline.
 
-**The viewer** is a lit scene with the chassis conventions: ground and seven boxes at
-varied metallic/roughness, one sun with a 2048² shadow map, HDR target, tonemapped
-present — plus its own ImGui panel, orbit input with UI capture, host-owned `--frames`,
-and a named view carrying a grid, a sun arrow and the sun's trail.
+**The viewer** renders a lit scene — one sun with a 2048² shadow map, HDR target,
+tonemapped present — with the chassis conventions: its own ImGui panel, orbit input with
+UI capture, host-owned `--frames`, and a named view carrying a grid, a sun arrow and the
+sun's trail.
+
+Pass `--model <path.glb>` and it becomes an **asset viewer**:
+
+```sh
+tools/run-lab.sh --model src/Blix.Demos.Runner/Assets/models/Rogue.glb
+```
+
+It keeps the **authored node hierarchy** rather than fusing the mesh, because a fused mesh
+renders identically and answers none of the questions an asset raises — where a part's
+pivot is, what the author thinks forward is, why a turret rotates about a point inside the
+hull. Each node's composed world transform is a walk up its parent chain, and that composed
+translation *is* the rig pivot a game drives.
+
+`blix-cook inspect` has printed those numbers for a long time, and printing them is where
+asset work had to stop. The measured-pivot fit has been done by hand at least three times
+in this project — TankArena's tank rig, the CC0 sourcing workflow, the RTS villager — each
+time by turning knobs in an overlay until the model sat right. An axis triad at a node's
+composed translation is that claim, drawn, and it hides behind the hull like a thing in the
+world rather than floating in front of it.
+
+Click a part to select it: `Blix.ViewPicking` turns the pointer into a ray through the
+named view, tested against the node bounds the viewer already draws, so what gets picked is
+exactly what is outlined. The panel shows the selected node's parent, composed pivot and
+decomposed local TRS.
+
+Materials sample each glTF's base-colour texture, deduped per image, with a white 1×1
+stand-in where a material has none — glTF defines the factor as multiplying the texture, so
+white is the identity. Worth knowing when reading a render: `tank.glb` has **no** textures
+(material factors only), `Rogue.glb` has one palette image across twelve parts. The load
+line reports both counts.
 
 **The capture tool** renders the lab and writes what it rendered to a PNG. It captures
 the **HDR scene target**, not the swapchain — so the lab's render path needed no change,
@@ -238,7 +268,8 @@ are earned in TankArena and VulkanSponza; a lab that grew them by default would 
 claiming to be a renderer.
 
 Proves: several executables over one lab · reflected binding off the GPU · the shared
-build targets (`BlixShaderMode=Library` + `BlixShaderReflect`) · the chassis.
+build targets (`BlixShaderMode=Library` + `BlixShaderReflect`) · the chassis · glTF import,
+node hierarchy and pivots · picking through a named view · depth-tested gizmos · capture.
 Owns: camera feel, the panel's controls, what the scene contains.
 
 ### Chassis — application-chassis reference
