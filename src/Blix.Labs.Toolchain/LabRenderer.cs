@@ -73,6 +73,12 @@ public sealed class LabRenderer : IDisposable
     // exactly as the obvious code does. Keeping the pool would have left a local remedy
     // standing in for an engine contract, and the next renderer would have had to
     // rediscover it.
+    // <b>Every draw on the lit pipeline must bind every texture its shader declares.</b> The lab's
+    // own ground and boxes went through the same pipeline passing only the shadow map, so binding 1
+    // was left unwritten and validation reported uAlbedo "used in draw but never updated" — which
+    // reads like a model-loading bug and is not one. White is the identity for a base-colour factor.
+    private TextureHandle whiteTexture;
+
     private readonly byte[] pushScratch = new byte[PushBytes];
     private readonly byte[] casterPushScratch = new byte[CasterPushBytes];
 
@@ -167,6 +173,10 @@ public sealed class LabRenderer : IDisposable
             new DepthState(Enabled: true, WriteEnabled: true, DepthCompare.LessEqual),
             RasterizerState.NoCulling,
             BlendState.Disabled), "lab.present");
+
+        whiteTexture = vk.CreateTexture2D(
+            new TextureDescription(1, 1, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
+            new byte[] { 255, 255, 255, 255 }, "lab.white");
 
         var (cv, ci) = LabGeometry.Cube();
         cubeVertices = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(cv), "lab.cube.vb");
@@ -305,13 +315,11 @@ public sealed class LabRenderer : IDisposable
                 floats[21] = part.Roughness;
             }
 
-            // <b>A fresh binding array per draw.</b> Push payloads are copied at record time;
-            // texture lists are still retained by reference, so a shared array would give every
-            // draw the last part's albedo — the same aliasing that stacked seven boxes, wearing a
-            // different hat. Eleven small allocations a frame is not worth being clever about.
-            // A fresh binding array per draw: push payloads are copied at record time, texture
-            // lists are still retained by reference, so a shared array would give every draw the
-            // last part's albedo — the aliasing that stacked seven boxes, wearing a different hat.
+            // The caster samples nothing — its shader declares no textures at all, and it is
+            // handed an empty list. The lit draw gets a FRESH array per part: push payloads are
+            // copied at record time, texture lists are still retained by reference, so a shared
+            // array would give every draw the last part's albedo — the aliasing that stacked
+            // seven boxes, wearing a different hat.
             if (casterOnly)
             {
                 pass.DrawIndexed(
@@ -331,7 +339,11 @@ public sealed class LabRenderer : IDisposable
                     pipeline: pipeline,
                     indexCount: part.IndexCount,
                     uniforms: uniforms,
-                    textures: textures,
+                    textures: new[]
+                    {
+                        textures[0],
+                        new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1),
+                    },
                     pushConstants: push);
             }
         }
@@ -356,13 +368,16 @@ public sealed class LabRenderer : IDisposable
     {
         var push = casterOnly ? casterPushScratch : pushScratch;
         PackPush(item, push);
+        var bindings = casterOnly
+            ? textures
+            : new[] { textures[0], new ShaderTextureBinding("uAlbedo", whiteTexture, Slot: 1) };
         pass.DrawIndexed(
             vertexBuffer: item.IsGround ? groundVertices : cubeVertices,
             indexBuffer: item.IsGround ? groundIndices : cubeIndices,
             pipeline: pipeline,
             indexCount: item.IsGround ? groundIndexCount : cubeIndexCount,
             uniforms: uniforms,
-            textures: textures,
+            textures: bindings,
             pushConstants: push);
     }
 
@@ -414,5 +429,6 @@ public sealed class LabRenderer : IDisposable
         device.DestroyIndexBuffer(cubeIndices);
         device.DestroyVertexBuffer(groundVertices);
         device.DestroyIndexBuffer(groundIndices);
+        device.DestroyTexture(whiteTexture);
     }
 }

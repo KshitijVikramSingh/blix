@@ -15,27 +15,23 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4 uSunColour;
 };
 
-layout(set = 1, binding = 0) uniform sampler2D uSunShadowMap;
 
-// Per-material albedo. The lab drew base-colour FACTORS only until now, so an asset's
-// textures were imported, held in memory and never sampled — the tank rendered as flat
-// green paint with its markings and panel lines missing, which looks plausible enough to
-// not notice.
-// <b>No albedo sampler yet, and the reason is an engine gap rather than a lab decision.</b>
-// A per-part base-colour texture has two routes and neither works today:
+
+// Per-pass shadow map and per-part albedo, both in set 1.
 //
-//   set 2 via a MaterialHandle — the engine's per-material set. Passing a material AND an
-//     inline texture list together is a combination nothing in the tree exercises
-//     (VulkanHello uses a material with no inline textures, TankArena inline textures with
-//     no material), and the draw dies with "statically uses descriptor set 2, but all sets
-//     0 to 2 are not compatible" and a SIGSEGV with no managed exception.
+// <b>Set 1 rather than set 2, and that distinction cost an hour.</b> Set 2 is the engine's
+// per-MATERIAL set, bound only through a MaterialHandle; a ShaderTextureBinding goes down the
+// inline per-draw path, which fills sets 0 and 1. Declaring uAlbedo at set 2 and passing it
+// inline left the pipeline statically using a set nothing bound — a SIGSEGV with no managed
+// exception, named in one line by the validation layers and by nothing else.
 //
-//   set 1 binding 1 alongside the shadow map — reflection sees it and the layout carries
-//     it, but the inline path never writes that descriptor: "uAlbedo is being used in draw
-//     but has never been updated via vkUpdateDescriptorSets".
-//
-// So a second sampled texture in one draw is the gap. LabModel already uploads the
-// textures and holds the handles; this is one line once the binding path takes them.
+// The second failure looked exactly like an engine gap and was mine too: after moving to set 1
+// binding 1, validation reported uAlbedo "used in draw but never updated". Reflection had it,
+// the layout had it, the model draws passed it — but the lab's own GROUND goes through this
+// same pipeline and was still passing only the shadow map. Every draw on a pipeline must bind
+// every texture its shader declares, including the ones it does not care about.
+layout(set = 1, binding = 0) uniform sampler2D uSunShadowMap;
+layout(set = 1, binding = 1) uniform sampler2D uAlbedo;
 
 layout(push_constant) uniform Push {
     mat4 uModel;
@@ -65,7 +61,7 @@ void main()
 
     float metallic = clamp(uMaterial.x, 0.0, 1.0);
     float roughness = clamp(uMaterial.y, 0.04, 1.0);
-    vec3 albedo = uBaseColour.rgb;
+    vec3 albedo = uBaseColour.rgb * texture(uAlbedo, vUv).rgb;
 
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     vec3 direct = blix_cookTorranceBrdf(N, V, L, albedo, F0, metallic, roughness)
