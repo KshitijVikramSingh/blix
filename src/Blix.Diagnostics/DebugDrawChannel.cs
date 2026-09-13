@@ -64,6 +64,17 @@ public sealed class DebugDrawChannel
     /// view Blix always had. This is shorthand, not a default: the name is still given, the declaration
     /// still happens, and drawing outside a scope still throws.
     /// </remarks>
+    /// <remarks>
+    /// <b>Both rectangles are the framebuffer's, which is only right when they agree.</b>
+    /// <see cref="RenderFrameContext"/> is PHYSICAL pixels — 2x logical on a Retina display — and a
+    /// pointer arrives in logical ones. So a view declared this way and then picked through is off by
+    /// the backing scale, which is the exact bug a view carrying both rectangles exists to prevent.
+    /// <para>
+    /// Fine for drawing, where only the matrix matters. An application that PICKS through a view should
+    /// declare it with the overload below, passing <see cref="IRenderHost.LogicalSize"/> for the logical
+    /// rectangle — the host is the only thing that knows the scale.
+    /// </para>
+    /// </remarks>
     public ViewDeclaration Declare(string name, Matrix4x4 viewProjection) =>
         context.State.Views.Declare(
             name, viewProjection, RenderSurfaceHandle.Default, context.Frame.Width, context.Frame.Height);

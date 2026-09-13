@@ -67,6 +67,12 @@ public sealed class LabModel : IDisposable
 
     public string SourcePath { get; private set; } = string.Empty;
 
+    /// <summary>How many distinct base-colour textures were uploaded. Zero means every part is untextured.</summary>
+    public int TextureCount => uploaded.Count;
+
+    /// <summary>Parts whose material carries a real base-colour texture rather than the white stand-in.</summary>
+    public int TexturedPartCount { get; private set; }
+
     /// <summary>Largest bounds dimension, for framing a camera on an asset of unknown scale.</summary>
     public float LongestExtent
     {
@@ -142,6 +148,8 @@ public sealed class LabModel : IDisposable
                     Metallic: material?.MetallicFactor ?? 0f,
                     Roughness: material?.RoughnessFactor ?? 0.7f,
                     Albedo: model.UploadAlbedo(vk, material?.BaseColorTexture)));
+
+                if (material?.BaseColorTexture is not null) model.TexturedPartCount++;
             }
 
             var hasMesh = node.Primitives.Length > 0;

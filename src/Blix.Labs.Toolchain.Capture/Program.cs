@@ -110,7 +110,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         modelTransform = Matrix4x4.CreateScale(scale)
                          * Matrix4x4.CreateTranslation(0f, -model.BoundsMin.Y * scale, 0f);
         Console.WriteLine(
-            $"model: {Path.GetFileName(modelPath)} — {model.Nodes.Count} node(s), {model.Parts.Count} part(s)");
+            $"model: {Path.GetFileName(modelPath)} — {model.Nodes.Count} node(s), {model.Parts.Count} part(s), " +
+            $"{model.TexturedPartCount} textured ({model.TextureCount} image(s))");
     }
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)

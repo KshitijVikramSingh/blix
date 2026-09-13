@@ -2,6 +2,7 @@ using System.Numerics;
 using Blix;
 using Blix.Core;
 using Blix.Diagnostics;
+using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Labs.Toolchain;
@@ -79,6 +80,19 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private float distance = 11f;
     private bool dragging;
 
+    // <b>A click is a press that did not become a drag.</b> Left-drag orbits, so selecting on the
+    // press would fight the camera and selecting on every release would fire at the end of every
+    // orbit. The pointer's travel since the press decides which gesture it was — and the press
+    // already decides who owns it, which GestureOwnership settled one layer down.
+    private Vector2 pressPosition;
+    private float pressTravel;
+    private Vector2 pointer;
+
+    // The view the scene was drawn through, kept so a pointer can be turned into a ray through it.
+    // A ViewDeclaration is a camera and a rectangle with a name, which is exactly what picking needs
+    // and exactly what Camera3D.ScreenPointToRay cannot be handed.
+    private ViewDeclaration? mainView;
+
     private Matrix4x4 viewProjection = Matrix4x4.Identity;
     private Vector3 cameraPosition;
     private float sunYaw = 0.5f;
@@ -98,6 +112,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // The window's real aspect, captured where the runtime reports it.
     private float aspect = 16f / 9f;
 
+    // Kept because the host is the only thing that knows the backing scale, and a view that will be
+    // PICKED through needs its logical rectangle to match the coordinates a pointer arrives in.
+    private IRenderHost? host;
+
     // Mirrors DebugState.DepthTestDrawing so the panel can flip it. Applied in Debug(), which is
     // the only place with a DebugContext to hand.
     private bool depthTestGizmos = true;
@@ -108,6 +126,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
+        this.host = host;
         var vk = (VulkanGraphicsDevice)graphicsDevice;
 
         // Shaders arrive from the lab library's content propagation — this executable
@@ -136,6 +155,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         Console.WriteLine(
             $"model: {Path.GetFileName(modelPath)} — {model.Nodes.Count} node(s), {model.Parts.Count} part(s), " +
+            $"{model.TexturedPartCount} textured ({model.TextureCount} image(s)), " +
             $"bounds {model.BoundsMin.X:0.00},{model.BoundsMin.Y:0.00},{model.BoundsMin.Z:0.00} .. " +
             $"{model.BoundsMax.X:0.00},{model.BoundsMax.Y:0.00},{model.BoundsMax.Z:0.00}, " +
             $"scaled x{scale:0.000}");
@@ -175,7 +195,18 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         debug.Values.Value("sun", scene.SunDirection);
         debug.Stats.Gauge("objects", scene.Objects.Count);
 
-        using var view = debug.Draw.In("main", viewProjection);
+        // Declared with BOTH rectangles rather than through the whole-surface shorthand: that one
+        // fills logical and physical from RenderFrameContext, which is physical pixels, so on a 2x
+        // display every pick would land at half the intended place.
+        var (logicalW, logicalH) = host?.LogicalSize ?? (debug.Frame.Width, debug.Frame.Height);
+        var declaration = debug.Draw.Declare(
+            "main",
+            viewProjection,
+            RenderSurfaceHandle.Default,
+            new Rect(0f, 0f, logicalW, logicalH),
+            new Rect(0f, 0f, debug.Frame.Width, debug.Frame.Height));
+        mainView = declaration;
+        using var view = debug.Draw.In(declaration);
         debug.Draw.Grid("floor", new Vector3(0f, 0.02f, 0f), 24f, 24, new GraphicsColor(0.2f, 0.24f, 0.3f, 1f));
 
         // The sun, drawn where it is actually pointing — an arrow that is wrong is the
@@ -383,19 +414,68 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
     public void OnMouseDown(MouseButton button)
     {
-        if (button == MouseButton.Left) dragging = true;
+        if (button != MouseButton.Left) return;
+        dragging = true;
+        pressPosition = pointer;
+        pressTravel = 0f;
     }
 
     public void OnMouseUp(MouseButton button)
     {
-        if (button == MouseButton.Left) dragging = false;
+        if (button != MouseButton.Left) return;
+        dragging = false;
+
+        // Four logical pixels of slop, because a click always moves a little.
+        if (pressTravel <= 4f) PickAt(pressPosition);
     }
 
     public void OnMouseMove(float x, float y, float deltaX, float deltaY)
     {
+        pointer = new Vector2(x, y);
         if (!dragging) return;
+
+        pressTravel += MathF.Abs(deltaX) + MathF.Abs(deltaY);
         yaw -= deltaX * 0.008f;
         pitch = Math.Clamp(pitch + deltaY * 0.006f, 0.08f, 1.45f);
+    }
+
+    /// <summary>
+    /// Selects the nearest node whose world bounds the pointer's ray enters.
+    /// </summary>
+    /// <remarks>
+    /// <b>The first caller ViewPicking has ever had.</b> It was built and tested with the view arc and
+    /// nothing used it — which is its own kind of unverified, however many assertions cover the maths.
+    /// <para>
+    /// Bounds rather than triangles, deliberately. A node's AABB is what the lab already computes and
+    /// draws, so what gets picked is exactly what is outlined; picking against geometry the viewer does
+    /// not show would select things for reasons the picture cannot explain. Triangle-accurate picking is
+    /// a different question, and one no consumer has asked.
+    /// </para>
+    /// </remarks>
+    private void PickAt(Vector2 position)
+    {
+        if (model is null || mainView is not { } view) return;
+        if (ViewPicking.RayThrough(view, position) is not { } ray) return;
+
+        var best = -1;
+        var nearest = float.MaxValue;
+        for (var i = 0; i < model.Nodes.Count; i++)
+        {
+            var node = model.Nodes[i];
+            if (node.PrimitiveCount == 0) continue;
+
+            var lo = Vector3.Transform(node.BoundsMin, modelTransform);
+            var hi = Vector3.Transform(node.BoundsMax, modelTransform);
+            var bounds = new Bounds3(Vector3.Min(lo, hi), Vector3.Max(lo, hi));
+
+            if (Intersection.Raycast(ray, bounds) is not { } hit) continue;
+            if (hit.Time >= nearest) continue;
+            nearest = hit.Time;
+            best = i;
+        }
+
+        // Clicking empty space clears, which is what every viewport does and what a reader expects.
+        selectedNode = best;
     }
 
     public void OnMouseWheel(float offsetX, float offsetY)
