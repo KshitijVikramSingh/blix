@@ -553,7 +553,11 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
                 new RenderPassDescription(
                     Target: view.Target,
                     ClearColors: Array.Empty<GraphicsColor?>(),
-                    ClearDepth: false),
+                    ClearDepth: false,
+                    // Debug geometry annotates a picture; it must never erase one. On the swapchain the
+                    // empty clear list already selects the overlay pass; on an off-screen target this is
+                    // what asks for the same thing.
+                    LoadExisting: true),
                 pass => lineDrawer.Submit(pass, viewProj, first, count, view.Target));
         }
     }

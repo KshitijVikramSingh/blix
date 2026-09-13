@@ -34,6 +34,11 @@ public sealed partial class VulkanGraphicsDevice
         public SampleCountFlags Samples = SampleCountFlags.Count1Bit;
         // Per-surface render pass + framebuffer.
         public Silk.NET.Vulkan.RenderPass RenderPass;
+
+        // LoadOp.Load form, when the owner provides one. Zero means "this surface can only
+        // be cleared" — which was true of every surface until a debug view tried to draw
+        // over a scene target and wiped it instead.
+        public Silk.NET.Vulkan.RenderPass RenderPassLoad;
         public Framebuffer Framebuffer;
         public Format ColorFormat;
         // External entries (set by RegisterExternalRenderSurface) shadow
@@ -180,6 +185,7 @@ public sealed partial class VulkanGraphicsDevice
         Framebuffer framebuffer,
         uint width, uint height,
         bool hasDepth,
+        Silk.NET.Vulkan.RenderPass renderPassLoad = default,
         SampleCountFlags samples = SampleCountFlags.Count1Bit,
         int colorAttachmentCount = 1)
     {
@@ -189,6 +195,7 @@ public sealed partial class VulkanGraphicsDevice
             Width = width,
             Height = height,
             RenderPass = renderPass,
+            RenderPassLoad = renderPassLoad,
             Framebuffer = framebuffer,
             HasDepth = hasDepth,
             Samples = samples,

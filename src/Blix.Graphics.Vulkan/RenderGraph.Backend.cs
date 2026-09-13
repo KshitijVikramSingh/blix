@@ -58,6 +58,7 @@ public sealed partial class RenderGraph : IDisposable
                 width: bpass.Width,
                 height: bpass.Height,
                 hasDepth: bpass.HasDepth,
+                renderPassLoad: bpass.RenderPassLoad,
                 samples: passSamples,
                 // How many colour attachments this pass's render pass has. A graph pass can
                 // have none — a depth-only shadow caster — and anything routing a
@@ -508,11 +509,16 @@ public sealed partial class RenderGraph : IDisposable
         var height = firstResource.Height;
 
         var renderPass = CreateGraphicsPassRenderPass(pass);
+        var renderPassLoad = CreateGraphicsPassRenderPass(pass, loadVariant: true);
+
+        // One framebuffer serves both: Vulkan render-pass compatibility turns on attachment
+        // formats, counts and sample counts, and a load op is none of those.
         var framebuffer = CreatePassFramebuffer(pass, renderPass, width, height);
 
         return new GraphBackendPass
         {
             RenderPass = renderPass,
+            RenderPassLoad = renderPassLoad,
             Framebuffer = framebuffer,
             Width = width,
             Height = height,
@@ -531,7 +537,24 @@ public sealed partial class RenderGraph : IDisposable
         };
     }
 
-    private unsafe Silk.NET.Vulkan.RenderPass CreateGraphicsPassRenderPass(GraphicsPassEntry pass)
+    /// <summary>
+    /// The render pass for a graphics pass, optionally in its LOAD form.
+    /// </summary>
+    /// <remarks>
+    /// <b>A second variant exists so something can draw OVER a graph target.</b> A graph pass declares its
+    /// own load ops, which is right for the pass itself — but anything routed at the same surface from
+    /// outside the graph (the runtime's debug-line pass, aimed at a view whose Target is this surface) got
+    /// this pass and therefore its CLEAR. Debug geometry drawn into a scene target landed on a freshly
+    /// wiped image: the capture that found it shows a grid and a capsule over nothing at all.
+    /// <para>
+    /// The load variant differs in exactly two ways — every attachment loads instead of clearing, and the
+    /// colour attachments start in SHADER_READ_ONLY_OPTIMAL, which is where this pass's own FinalLayout
+    /// left them. Same formats, same counts, same subpass, so it stays render-pass compatible with the
+    /// pipelines and the framebuffer built for the clearing form.
+    /// </para>
+    /// </remarks>
+    private unsafe Silk.NET.Vulkan.RenderPass CreateGraphicsPassRenderPass(
+        GraphicsPassEntry pass, bool loadVariant = false)
     {
         var device = Device!;
         var colorCount = pass.ColorTargets.Count;
@@ -552,13 +575,15 @@ public sealed partial class RenderGraph : IDisposable
             {
                 Format = resource.Format,
                 Samples = SampleCount(samples),
-                LoadOp = MapLoadOp(target.Load),
+                LoadOp = loadVariant ? AttachmentLoadOp.Load : MapLoadOp(target.Load),
                 // MSAA colour is resolved (not stored/sampled), so DontCare on
                 // store; non-MSAA stores for downstream sampling.
                 StoreOp = msaa ? AttachmentStoreOp.DontCare : MapStoreOp(target.Store),
                 StencilLoadOp = AttachmentLoadOp.DontCare,
                 StencilStoreOp = AttachmentStoreOp.DontCare,
-                InitialLayout = ImageLayout.Undefined,
+                InitialLayout = loadVariant && !msaa
+                    ? ImageLayout.ShaderReadOnlyOptimal
+                    : ImageLayout.Undefined,
                 // Non-MSAA → ShaderReadOnly for downstream Reads. MSAA stays a
                 // colour attachment (only the resolve target is sampled).
                 FinalLayout = msaa ? ImageLayout.ColorAttachmentOptimal : ImageLayout.ShaderReadOnlyOptimal,
@@ -669,7 +694,7 @@ public sealed partial class RenderGraph : IDisposable
         Silk.NET.Vulkan.RenderPass rp;
         VulkanGraphicsDevice.ThrowIfNotSuccess(
             device.Vk.CreateRenderPass(device.Device, in ci, null, &rp),
-            $"vkCreateRenderPass(graph.{pass.Name})");
+            $"vkCreateRenderPass(graph.{pass.Name}{(loadVariant ? ".load" : string.Empty)})");
         return rp;
     }
 
@@ -853,6 +878,11 @@ internal sealed class GraphBackendResource
 internal sealed class GraphBackendPass
 {
     public Silk.NET.Vulkan.RenderPass RenderPass;
+
+    // The same pass with every attachment loading instead of clearing, for anything routed
+    // at this surface from outside the graph that means to draw OVER what is there.
+    public Silk.NET.Vulkan.RenderPass RenderPassLoad;
+
     public Framebuffer Framebuffer;
     public uint Width;
     public uint Height;

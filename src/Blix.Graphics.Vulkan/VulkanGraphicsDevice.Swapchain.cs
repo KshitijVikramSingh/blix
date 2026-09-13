@@ -621,10 +621,17 @@ public sealed partial class VulkanGraphicsDevice
             Extent2D extentToUse;
             if (customSurface is { } surf)
             {
-                renderPassToUse = surf.RenderPass;
+                // <b>An empty clear list means "draw over what is there", on any surface.</b> This used to
+                // read `hasClear = true` unconditionally, with a comment saying custom surfaces have no
+                // Load variant — so a pass aimed at an off-screen target always cleared it, and debug
+                // geometry drawn into a scene target landed on a wiped image. Graph-owned surfaces now
+                // supply a load form; one that does not still clears, which is the old behaviour and the
+                // honest fallback.
+                var wantsLoad = pass.Description.LoadExisting && surf.RenderPassLoad.Handle != 0;
+                renderPassToUse = wantsLoad ? surf.RenderPassLoad : surf.RenderPass;
                 framebufferToUse = surf.Framebuffer;
                 extentToUse = new Extent2D(surf.Width, surf.Height);
-                hasClear = true;
+                if (!wantsLoad) hasClear = true;
             }
             else
             {
