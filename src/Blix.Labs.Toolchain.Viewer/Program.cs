@@ -43,7 +43,7 @@ public static class Program
     }
 }
 
-internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHandler
+internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHandler, IDisposable
 {
     private readonly LabRenderer renderer = new();
     private readonly LabScene scene = LabScene.Default();
@@ -58,7 +58,19 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private float sunYaw = 0.5f;
     private float sunPitch = 0.9f;
     private bool showTrail = true;
+
+    // Short, because this is a gizmo and not a motion study. Six seconds was the first
+    // guess and reads as the arc refusing to leave; a trail that outlives the gesture that
+    // drew it stops being an annotation and becomes clutter. Exposed as a dial rather than
+    // re-guessed, since a lab is the place to find out what the right number feels like.
+    private float trailSeconds = 1.5f;
     private int frames;
+
+    // <b>One aspect, shared.</b> Debug() runs BEFORE OnRender in the frame, so a debug view
+    // built from a hardcoded 16:9 drew its grid through a different projection than the
+    // scene used — the grid and the ground quad are both 24 m across and did not line up.
+    // The window's real aspect, captured where the runtime reports it.
+    private float aspect = 16f / 9f;
 
     public string DebugName => "lab";
 
@@ -82,8 +94,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         cameraPosition = eye;
         var view = Matrix4x4.CreateLookAt(eye, new Vector3(0f, 1f, 0f), Vector3.UnitY);
-        var projection = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, 16f / 9f, 0.1f, 120f);
-        viewProjection = view * projection;
+        viewProjection = view * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
         scene.SetSunDirection(new Vector3(
             MathF.Cos(sunPitch) * MathF.Sin(sunYaw),
@@ -94,7 +105,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
         frames++;
-        var aspect = frame.Height > 0 ? frame.Width / (float)frame.Height : 16f / 9f;
+        if (frame.Height > 0) aspect = frame.Width / (float)frame.Height;
         var view = Matrix4x4.CreateLookAt(cameraPosition, new Vector3(0f, 1f, 0f), Vector3.UnitY);
         viewProjection = view * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
@@ -118,7 +129,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         if (showTrail)
         {
             // Where the sun has been while it was being dragged.
-            debug.Draw.Trail("sun/path", sunFrom, new GraphicsColor(1f, 0.75f, 0.3f, 1f), seconds: 6f);
+            debug.Draw.Trail("sun/path", sunFrom, new GraphicsColor(1f, 0.75f, 0.3f, 1f), trailSeconds);
         }
     }
 
@@ -148,6 +159,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         if (ImGui.SliderFloat("ambient", ref ambient, 0f, 0.4f)) scene.AmbientStrength = ambient;
 
         ImGui.Checkbox("sun trail", ref showTrail);
+        if (showTrail) ImGui.SliderFloat("trail seconds", ref trailSeconds, 0.25f, 8f);
         ImGui.TextDisabled($"drag to orbit · wheel to zoom · {frames} frames");
         ImGui.End();
     }
@@ -174,5 +186,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         distance = Math.Clamp(distance - offsetY * 0.8f, 3.5f, 40f);
     }
 
-    public void OnUnload() => renderer.Dispose();
+    // <b>Dispose, not OnUnload.</b> OnUnload fires from the window's Closing event, which can
+    // land mid-frame before the final submit — tearing down GPU resources there is a crash,
+    // and Window.Dispose says so in as many words. The runtime disposes the loop after
+    // WaitIdle and before the device goes, which is the only safe window. TankArena and
+    // Bulwark both take this route; this one had to crash first to join them.
+    public void Dispose() => renderer.Dispose();
 }

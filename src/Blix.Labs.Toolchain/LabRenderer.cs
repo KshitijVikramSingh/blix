@@ -52,13 +52,24 @@ public sealed class LabRenderer : IDisposable
     private int cubeIndexCount;
     private int groundIndexCount;
 
-    private readonly byte[] pushScratch = new byte[PushBytes];
+    // <b>One buffer per draw, not one buffer reused.</b> A pass body RECORDS; the GPU work
+    // happens later, at Execute. A push payload handed over as a shared array is therefore
+    // read after every draw has written it, so all of them get the last one's — which on
+    // screen is seven boxes stacked in one place and six apparently missing. Caught from
+    // the chair in a screenshot, and it is the same deferred-recording aliasing that the
+    // debug line drawer hit one arc earlier.
+    //
+    // Pooled and reused across frames rather than allocated per draw: the aliasing is
+    // between draws WITHIN a frame, and the pool is reset once per frame.
+    private readonly List<byte[]> litPushPool = new();
+    private readonly List<byte[]> casterPushPool = new();
+    private int litPushUsed;
+    private int casterPushUsed;
 
     // The caster only needs the model matrix, and the reflected interface says so — 64
     // bytes against the lit pass's 96. Pushing the larger block at it is rejected by the
     // device with the sizes named, which is the binding model earning its keep: a
     // hand-declared interface would have shrugged and corrupted the tail.
-    private readonly byte[] casterPushScratch = new byte[64];
 
     /// <summary>Exposure applied before tonemapping.</summary>
     public float Exposure { get; set; } = 1.0f;
@@ -163,6 +174,8 @@ public sealed class LabRenderer : IDisposable
         RenderCommandList commandList, LabScene scene, Matrix4x4 viewProjection, Vector3 cameraPosition)
     {
         var sunViewProjection = scene.SunViewProjection();
+        litPushUsed = 0;
+        casterPushUsed = 0;
 
         // Pass 1 — the sun's depth. No colour attachment at all, which is the thing the
         // raw surface path could not express.
@@ -229,8 +242,8 @@ public sealed class LabRenderer : IDisposable
         ShaderTextureBinding[] textures,
         bool casterOnly = false)
     {
-        PackPush(item);
-        if (casterOnly) Array.Copy(pushScratch, casterPushScratch, casterPushScratch.Length);
+        var push = Rent(casterOnly);
+        PackPush(item, push);
         pass.DrawIndexed(
             vertexBuffer: item.IsGround ? groundVertices : cubeVertices,
             indexBuffer: item.IsGround ? groundIndices : cubeIndices,
@@ -238,20 +251,30 @@ public sealed class LabRenderer : IDisposable
             indexCount: item.IsGround ? groundIndexCount : cubeIndexCount,
             uniforms: uniforms,
             textures: textures,
-            pushConstants: casterOnly ? casterPushScratch : pushScratch);
+            pushConstants: push);
     }
 
     // mat4 model, vec4 base colour, vec4 (metallic, roughness, _, _) — 96 bytes, inside the
     // 128-byte floor every Vulkan implementation guarantees, which is why there is no
     // per-object descriptor set in this lab at all.
-    private void PackPush(in LabObject item)
+    private byte[] Rent(bool casterOnly)
     {
-        var floats = MemoryMarshal.Cast<byte, float>(pushScratch.AsSpan());
+        var pool = casterOnly ? casterPushPool : litPushPool;
+        var used = casterOnly ? casterPushUsed++ : litPushUsed++;
+        var size = casterOnly ? 64 : PushBytes;
+        while (pool.Count <= used) pool.Add(new byte[size]);
+        return pool[used];
+    }
+
+    private static void PackPush(in LabObject item, byte[] target)
+    {
+        var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
         var m = item.Model;
         floats[0] = m.M11; floats[1] = m.M12; floats[2] = m.M13; floats[3] = m.M14;
         floats[4] = m.M21; floats[5] = m.M22; floats[6] = m.M23; floats[7] = m.M24;
         floats[8] = m.M31; floats[9] = m.M32; floats[10] = m.M33; floats[11] = m.M34;
         floats[12] = m.M41; floats[13] = m.M42; floats[14] = m.M43; floats[15] = m.M44;
+        if (floats.Length < 24) return;   // the caster's 64-byte block is the model matrix only
         floats[16] = item.BaseColour.X; floats[17] = item.BaseColour.Y; floats[18] = item.BaseColour.Z; floats[19] = 1f;
         floats[20] = item.Metallic; floats[21] = item.Roughness; floats[22] = 0f; floats[23] = 0f;
     }
