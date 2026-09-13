@@ -33,6 +33,7 @@ public static class Program
     public static int Main(string[] args)
     {
         var output = ArgValue(args, "--out") ?? "capture.png";
+        var modelPath = ArgValue(args, "--model");
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — lab capture",
@@ -44,7 +45,7 @@ public static class Program
         // supplies a default for when nobody said.
         if (options.ExitAfterFrames <= 0) options = options with { ExitAfterFrames = 8 };
 
-        var loop = new CaptureLoop(output, options.ExitAfterFrames);
+        var loop = new CaptureLoop(output, options.ExitAfterFrames, modelPath);
         using (var window = new Window(loop, options))
         {
             window.Run();
@@ -74,7 +75,7 @@ public static class Program
 internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 {
     private readonly LabRenderer renderer = new();
-    private readonly LabScene scene = LabScene.Default();
+    private LabScene scene = LabScene.Default();
     private readonly string outputPath;
     private readonly int captureOnFrame;
 
@@ -82,8 +83,13 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private int frames;
     private Matrix4x4 viewProjection = Matrix4x4.Identity;
 
-    public CaptureLoop(string outputPath, int captureOnFrame)
+    private readonly string? modelPath;
+    private LabModel? model;
+    private Matrix4x4 modelTransform = Matrix4x4.Identity;
+
+    public CaptureLoop(string outputPath, int captureOnFrame, string? modelPath = null)
     {
+        this.modelPath = modelPath;
         this.outputPath = outputPath;
         this.captureOnFrame = Math.Max(1, captureOnFrame - 1);
     }
@@ -95,16 +101,28 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     {
         device = (VulkanGraphicsDevice)graphicsDevice;
         renderer.Load(device, Path.Combine(AppContext.BaseDirectory, "Shaders"));
+
+        if (modelPath is null || !File.Exists(modelPath)) return;
+        model = LabModel.Load(device, modelPath);
+        scene = LabScene.GroundOnly();
+        var extent = model.LongestExtent;
+        var scale = extent > 0.001f ? 3f / extent : 1f;
+        modelTransform = Matrix4x4.CreateScale(scale)
+                         * Matrix4x4.CreateTranslation(0f, -model.BoundsMin.Y * scale, 0f);
+        Console.WriteLine(
+            $"model: {Path.GetFileName(modelPath)} — {model.Nodes.Count} node(s), {model.Parts.Count} part(s)");
     }
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
         var aspect = frame.Height > 0 ? frame.Width / (float)frame.Height : 16f / 9f;
-        var eye = new Vector3(6.4f, 4.8f, 7.6f);
-        var view = Matrix4x4.CreateLookAt(eye, new Vector3(0f, 1f, 0f), Vector3.UnitY);
+        // Pulled in when there is a model, so it fills the frame rather than sitting in it.
+        var eye = model is null ? new Vector3(6.4f, 4.8f, 7.6f) : new Vector3(3.4f, 2.4f, 4.2f);
+        var target = model is null ? new Vector3(0f, 1f, 0f) : new Vector3(0f, 0.7f, 0f);
+        var view = Matrix4x4.CreateLookAt(eye, target, Vector3.UnitY);
         viewProjection = view * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
-        renderer.Render(commandList, scene, viewProjection, eye);
+        renderer.Render(commandList, scene, viewProjection, eye, model, modelTransform);
 
         // Captured after the frame this call records has been executed — so the read
         // happens on the NEXT OnRender, when the target holds a finished picture rather
@@ -145,10 +163,43 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         // A character's collider, standing on the ground where one would. The primitive the
         // whole vocabulary exists for, and the one that drew nothing at all until recently.
-        debug.Draw.Capsule(
-            "collider",
-            new Vector3(0f, 0.45f, 0f), new Vector3(0f, 1.55f, 0f), 0.45f,
-            new GraphicsColor(0.4f, 1f, 0.6f, 1f));
+        if (model is null)
+        {
+            debug.Draw.Capsule(
+                "collider",
+                new Vector3(0f, 0.45f, 0f), new Vector3(0f, 1.55f, 0f), 0.45f,
+                new GraphicsColor(0.4f, 1f, 0.6f, 1f));
+            return;
+        }
+
+        // One axis triad per node, at its composed-world pivot. The claim blix-cook inspect
+        // prints, drawn where it can be checked.
+        // A tenth of the model's on-screen size: small enough that 96 of them stay readable, large
+        // enough to see which way a node's axes point, which is the whole question.
+        var size = MathF.Max(0.08f, model.LongestExtent * modelTransform.M11 * 0.1f);
+        foreach (var node in model.Nodes)
+        {
+            var world = node.WorldTransform * modelTransform;
+            var origin = new Vector3(world.M41, world.M42, world.M43);
+            // Mesh-bearing nodes only. The tank has 96 nodes and 11 meshes — the other 85 are
+            // track links and wheel pivots, and a triad on each is noise rather than information.
+            if (node.PrimitiveCount == 0) continue;
+            var length = size;
+            debug.Draw.Line($"{node.Name}/x", origin,
+                origin + (Vector3.Normalize(new Vector3(world.M11, world.M12, world.M13)) * length),
+                new GraphicsColor(0.95f, 0.3f, 0.3f, 1f));
+            debug.Draw.Line($"{node.Name}/y", origin,
+                origin + (Vector3.Normalize(new Vector3(world.M21, world.M22, world.M23)) * length),
+                new GraphicsColor(0.3f, 0.95f, 0.4f, 1f));
+            debug.Draw.Line($"{node.Name}/z", origin,
+                origin + (Vector3.Normalize(new Vector3(world.M31, world.M32, world.M33)) * length),
+                new GraphicsColor(0.4f, 0.55f, 0.95f, 1f));
+        }
+
+        var lo = Vector3.Transform(model.BoundsMin, modelTransform);
+        var hi = Vector3.Transform(model.BoundsMax, modelTransform);
+        debug.Draw.Aabb("bounds", Vector3.Min(lo, hi), Vector3.Max(lo, hi),
+            new GraphicsColor(0.9f, 0.85f, 0.4f, 1f));
     }
 
     private void Capture()
@@ -199,5 +250,9 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         return (byte)Math.Clamp((int)MathF.Round(encoded * 255f), 0, 255);
     }
 
-    public void Dispose() => renderer.Dispose();
+    public void Dispose()
+    {
+        model?.Dispose();
+        renderer.Dispose();
+    }
 }

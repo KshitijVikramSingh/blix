@@ -48,6 +48,26 @@ public sealed class LabScene
 
     public void Add(in LabObject item) => objects.Add(item);
 
+    /// <summary>
+    /// Just the ground, for when the subject is an imported model.
+    /// </summary>
+    /// <remarks>
+    /// A ring of boxes is a good lighting subject and a terrible backdrop: the first capture of the tank
+    /// had it half-hidden behind one, with its pivot triads lost among seven unrelated silhouettes. What a
+    /// model viewer needs behind the model is a floor and nothing else.
+    /// </remarks>
+    public static LabScene GroundOnly()
+    {
+        var scene = new LabScene();
+        scene.Add(new LabObject(
+            Matrix4x4.Identity,
+            new Vector3(0.22f, 0.23f, 0.26f),
+            Metallic: 0f,
+            Roughness: 0.9f,
+            IsGround: true));
+        return scene;
+    }
+
     /// <summary>The default lab: a ground plane and a ring of boxes at varied roughness.</summary>
     public static LabScene Default()
     {

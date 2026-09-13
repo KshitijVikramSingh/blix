@@ -196,8 +196,15 @@ public sealed class LabRenderer : IDisposable
     public TextureHandle ShadowDepth => graph.GetDepthTexture(shadowTarget);
 
     public void Render(
-        RenderCommandList commandList, LabScene scene, Matrix4x4 viewProjection, Vector3 cameraPosition)
+        RenderCommandList commandList,
+        LabScene scene,
+        Matrix4x4 viewProjection,
+        Vector3 cameraPosition,
+        LabModel? model = null,
+        Matrix4x4 modelTransform = default)
     {
+        if (modelTransform == default) modelTransform = Matrix4x4.Identity;
+
         var sunViewProjection = scene.SunViewProjection();
 
         // Pass 1 — the sun's depth. No colour attachment at all, which is the thing the
@@ -215,6 +222,10 @@ public sealed class LabRenderer : IDisposable
                 if (item.IsGround) continue;
                 DrawObject(scope, item, shadowPipeline, uniforms, Array.Empty<ShaderTextureBinding>(), casterOnly: true);
             }
+
+            DrawModelParts(
+                scope, model, modelTransform, shadowPipeline, uniforms,
+                Array.Empty<ShaderTextureBinding>(), casterOnly: true);
         });
 
         // Pass 2 — light it into HDR, sampling the depth the caster pass just wrote.
@@ -235,6 +246,8 @@ public sealed class LabRenderer : IDisposable
             {
                 DrawObject(scope, item, litPipeline, uniforms, textures);
             }
+
+            DrawModelParts(scope, model, modelTransform, litPipeline, uniforms, textures, casterOnly: false);
         });
 
         graph.Execute(commandList);
@@ -259,6 +272,56 @@ public sealed class LabRenderer : IDisposable
                 },
                 pushConstants: null,
                 uniforms: present));
+    }
+
+    // Each node's primitives, placed by that node's COMPOSED world transform — the same walk up
+    // the parent chain blix-cook inspect does. Drawn per part rather than fused, because a fused
+    // mesh cannot answer where any part's pivot is, which is the question an asset raises.
+    private void DrawModelParts(
+        RenderPassBuilder pass,
+        LabModel? model,
+        Matrix4x4 modelTransform,
+        PipelineHandle pipeline,
+        ShaderUniform[] uniforms,
+        ShaderTextureBinding[] textures,
+        bool casterOnly)
+    {
+        if (model is null) return;
+
+        foreach (var part in model.Parts)
+        {
+            var node = model.Nodes[part.NodeIndex];
+            var push = casterOnly ? casterPushScratch : pushScratch;
+            PackMatrix(node.WorldTransform * modelTransform, push);
+            if (!casterOnly)
+            {
+                var floats = MemoryMarshal.Cast<byte, float>(push.AsSpan());
+                floats[16] = part.BaseColour.X;
+                floats[17] = part.BaseColour.Y;
+                floats[18] = part.BaseColour.Z;
+                floats[19] = 1f;
+                floats[20] = part.Metallic;
+                floats[21] = part.Roughness;
+            }
+
+            pass.DrawIndexed(
+                vertexBuffer: part.Vertices,
+                indexBuffer: part.Indices,
+                pipeline: pipeline,
+                indexCount: part.IndexCount,
+                uniforms: uniforms,
+                textures: textures,
+                pushConstants: push);
+        }
+    }
+
+    private static void PackMatrix(Matrix4x4 m, byte[] target)
+    {
+        var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
+        floats[0] = m.M11; floats[1] = m.M12; floats[2] = m.M13; floats[3] = m.M14;
+        floats[4] = m.M21; floats[5] = m.M22; floats[6] = m.M23; floats[7] = m.M24;
+        floats[8] = m.M31; floats[9] = m.M32; floats[10] = m.M33; floats[11] = m.M34;
+        floats[12] = m.M41; floats[13] = m.M42; floats[14] = m.M43; floats[15] = m.M44;
     }
 
     private void DrawObject(

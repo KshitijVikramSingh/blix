@@ -1,4 +1,6 @@
 using Blix.Graphics.Vulkan;
+using System.Numerics;
+using Blix.Assets;
 using Blix.Labs.Toolchain;
 
 namespace Blix.Labs.Toolchain.Probe;
@@ -23,6 +25,13 @@ public static class Program
 {
     public static int Main(string[] args)
     {
+        // --model <path> reports what an import produced, with no device anywhere in sight. A glTF
+        // is a build artifact too, and everything below is readable without a GPU.
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == "--model") return InspectModel(args[i + 1]);
+        }
+
         var shaderDirectory = Path.Combine(AppContext.BaseDirectory, "Shaders");
         if (!Directory.Exists(shaderDirectory))
         {
@@ -111,6 +120,50 @@ public static class Program
 
         if (failures == 0) return 0;
         Console.Error.WriteLine($"{failures} problem(s).");
+        return 1;
+    }
+
+    // <b>What blix-cook inspect does not say.</b> That tool prints the node tree, the composed
+    // pivots and the assembled bounds, which is most of what an asset raises — but not its clips,
+    // not its skeleton, and not whether the numbers are finite. A skeleton whose rest pose does not
+    // build, or a clip with no usable length, surfaces later as a character folding inside out.
+    private static int InspectModel(string path)
+    {
+        if (!File.Exists(path))
+        {
+            Console.Error.WriteLine($"No model at {path}.");
+            return 2;
+        }
+
+        var problems = 0;
+        var imported = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("probe"), path));
+
+        Console.WriteLine($"{Path.GetFileName(path)}");
+        Console.WriteLine(
+            $"  {imported.Primitives.Length} primitive(s), " +
+            $"{imported.Skeleton.BoneCount} bone(s), {imported.Animations.Length} clip(s)");
+        Console.WriteLine(
+            imported.MeshNodeTransform.IsIdentity
+                ? "  mesh-node transform: identity"
+                : "  mesh-node transform: NOT identity — the asset orients itself at a parent node, " +
+                  "so uModel must compose with it");
+
+        foreach (var clip in imported.Animations.OrderBy(c => c.Name, StringComparer.Ordinal))
+        {
+            var translation = clip.Tracks.Count(t => t.Translation is not null);
+            var rotation = clip.Tracks.Count(t => t.Rotation is not null);
+            var scale = clip.Tracks.Count(t => t.Scale is not null);
+            Console.WriteLine(
+                $"    {clip.Name,-28} {clip.Duration,6:0.00}s  {clip.Tracks.Length,3} track(s)  " +
+                $"T{translation} R{rotation} S{scale}");
+
+            if (clip.Duration > 0 && double.IsFinite(clip.Duration)) continue;
+            Console.Error.WriteLine($"      clip duration is {clip.Duration} — not a usable length.");
+            problems++;
+        }
+
+        if (problems == 0) return 0;
+        Console.Error.WriteLine($"{problems} problem(s).");
         return 1;
     }
 }
