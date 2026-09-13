@@ -2672,6 +2672,44 @@ static ShaderInterface MinimalShader() => new(new[]
     }
 
     t.ExpectClose("AQ.12 but the bone's world transform is where the joint is", worlds[1].M42, 1f);
+
+    // ── Stripping is the other half of taking a delta ────────────────────────
+    // A caller that reads RootDelta and ALSO leaves the root animated applies the travel
+    // twice: the clip moves the mesh and the transform moves it again, so a walk runs at
+    // double speed and snaps back once per loop. Strip reverts every root to rest, which
+    // is what makes "the clip says how far, the game says where" a coherent division.
+    player.ScrubTo(0.5);
+    t.ExpectClose("AQ.13 the clip's root has travelled by mid-clip",
+        player.Pose.Locals[0].Translation.X, 1f);
+
+    RootMotion.Strip(skeleton, player.Pose, player.RestPose);
+    t.ExpectClose("AQ.13 and stripping puts it back at rest", player.Pose.Locals[0].Translation.X, 0f);
+
+    // Non-root bones are untouched — stripping is about the root, not about resetting a pose.
+    t.ExpectClose("AQ.13 leaving every non-root bone alone",
+        player.Pose.Locals[1].Translation.Y, skeleton.CreateRestPose().Locals[1].Translation.Y);
+
+    // ── Finished is the boundary in the DIRECTION OF TRAVEL ──────────────────
+    // Negative Rate is a supported way to play a clip, so a one-shot run backwards ends at
+    // t=0 as surely as a forward one ends at Duration. This used to clamp to zero and return
+    // true forever, so a lifecycle driven by the return value hung on a clip that had
+    // visibly stopped — invisible because nothing in the tree played a one-shot backwards.
+    var once = new ClipPlayer(skeleton, travel) { Loop = false };
+    once.ScrubTo(0.9);
+    t.ExpectTrue("AQ.14 a one-shot forward run reports finished at the end", !once.Advance(0.2));
+    t.ExpectClose("AQ.14 and lands on the end", (float)once.Time, 1f);
+
+    var backwards = new ClipPlayer(skeleton, travel) { Loop = false, Rate = -1f };
+    backwards.ScrubTo(0.1);
+    t.ExpectTrue("AQ.14 a one-shot reverse run reports finished at the START", !backwards.Advance(0.2));
+    t.ExpectClose("AQ.14 and lands on zero, not on the end", (float)backwards.Time, 0f);
+    t.ExpectTrue("AQ.14 with Finished set either way", backwards.Finished && once.Finished);
+
+    // A reverse step that does NOT reach the start is still running.
+    var partway = new ClipPlayer(skeleton, travel) { Loop = false, Rate = -1f };
+    partway.ScrubTo(0.8);
+    t.ExpectTrue("AQ.14 and a reverse step short of the start keeps going", partway.Advance(0.2));
+    t.ExpectClose("AQ.14 travelling backwards as it goes", partway.RootDelta.Translation.X, -0.4f);
 }
 
 t.PrintSummary();

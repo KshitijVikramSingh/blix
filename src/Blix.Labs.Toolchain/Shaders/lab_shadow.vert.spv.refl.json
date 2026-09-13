@@ -72,6 +72,11 @@
             "type" : "vec3",
             "name" : "aNormal",
             "location" : 1
+        },
+        {
+            "type" : "vec2",
+            "name" : "aTexCoord",
+            "location" : 2
         }
     ],
     "ubos" : [

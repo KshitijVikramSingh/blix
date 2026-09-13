@@ -113,6 +113,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         window.Render += OnRender;
         window.Resize += OnResize;
         window.FramebufferResize += OnFramebufferResize;
+        window.FocusChanged += OnFocusChanged;
         window.Closing += OnClosing;
     }
 
@@ -328,6 +329,32 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     // also drove the game — every keystroke arriving at both. Nothing had noticed because the only UI
     // that existed was the diagnostics overlay, which has almost no text fields.
     private bool UiWantsKeyboard => imguiRenderer is { } r && uiFrameBuilt && r.WantCaptureKeyboard;
+
+    /// <summary>Forgets every in-flight press when the window loses focus.</summary>
+    /// <remarks>
+    /// <b>The releases are never coming.</b> Cmd-Tab away with a button or key down and the platform
+    /// delivers the up event to whoever has focus now, not to us — so an application holding state on
+    /// that press keeps holding it: a marquee that follows the cursor forever, a key the game believes
+    /// is still down. Exactly the stranded-press bug <see cref="GestureOwnership"/> was built for, from
+    /// the one direction it could not see.
+    /// <para>
+    /// <c>GestureOwnership.Clear</c> existed for this from the day it was written and nothing called it,
+    /// because nothing hooked focus. A remedy with no caller is a remedy that has never run.
+    /// </para>
+    /// <para>
+    /// The application is NOT handed synthetic releases. A release means "the gesture completed here",
+    /// and a window losing focus is the opposite of that — inventing one would fire whatever a release
+    /// means (a shot loosed, a menu opened) for a gesture the user abandoned. Forgetting the press is
+    /// the honest cancel; an application that needs to know a drag was abandoned can ask the host
+    /// whether it still has focus.
+    /// </para>
+    /// </remarks>
+    private void OnFocusChanged(bool focused)
+    {
+        if (focused) return;
+        keysHeld.Clear();
+        buttonsHeld.Clear();
+    }
 
     private void OnMouseDown(IMouse mouse, SilkMouseButton button)
     {

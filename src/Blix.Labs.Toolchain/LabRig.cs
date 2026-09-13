@@ -67,26 +67,44 @@ public sealed class LabRig : IDisposable
 
     public int VertexCount { get; private set; }
 
-    /// <summary>Per bone: does any vertex carry a non-zero weight for it?</summary>
+    /// <summary>Per bone: does some vertex carry a non-zero weight for it? Literally, with no promotion.</summary>
     /// <remarks>
     /// <b>A finding from looking at the first skeleton the lab drew.</b> The Rogue has 41 bones and the
     /// overlay was unreadable — a star of lines radiating from the feet — which looked like a bug and
-    /// was not: twenty of those bones are IK handles and roll controls (<c>kneeIK.l</c>,
+    /// was not: most of those bones are IK handles and roll controls (<c>kneeIK.l</c>,
     /// <c>control-heel-roll.r</c>, <c>handIK.l</c>) parented straight to the root, skinning nothing.
     /// They are in the file because an animator posed through them, and they are in the palette because
     /// the exporter had no reason to drop them.
     /// <para>
-    /// Deform bones are the ones a mesh actually follows, so they are the ones a skeleton overlay is
-    /// about. Splitting them out is the difference between a picture of a rig and a picture of its
-    /// rigging — and it costs one pass over the weights at load.
+    /// This is the census: the bones the mesh is actually attached to. It is <em>not</em> what the
+    /// overlay filters on — see <see cref="DeformHierarchy"/>, and see why they differ.
     /// </para>
     /// </remarks>
-    public IReadOnlyList<bool> DeformBones => deformBones;
+    public IReadOnlyList<bool> WeightedBones => weightedBones;
 
-    /// <summary>How many bones any vertex weights. The rest are controls the mesh never sees.</summary>
-    public int DeformBoneCount { get; private set; }
+    /// <summary>How many bones some vertex weights. The rest are controls the mesh never sees.</summary>
+    public int WeightedBoneCount { get; private set; }
 
-    private bool[] deformBones = Array.Empty<bool>();
+    /// <summary>Weighted bones <em>plus every ancestor that carries one</em> — what it takes to DRAW the chain.</summary>
+    /// <remarks>
+    /// <b>A superset of <see cref="WeightedBones"/>, and the distinction is not pedantry.</b> A joint that
+    /// no vertex weights can still sit in the middle of a chain that several do — the Rogue's <c>root</c>
+    /// is exactly that, weighted by nothing and the parent of everything. Drawing only the weighted set
+    /// leaves such a chain as floating segments, which reads as a broken skeleton.
+    /// <para>
+    /// They were one property once, and the name said "does any vertex weight this" while the value had
+    /// silently been promoted up the ancestry. A count reported from it would have meant "bones needed to
+    /// draw the deformation ancestry" while claiming to mean "bones the mesh follows" — a number that is
+    /// right, labelled with a question it does not answer. Two names, because they are two facts.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<bool> DeformHierarchy => deformHierarchy;
+
+    /// <summary>How many bones the overlay must draw to show every weighted chain unbroken.</summary>
+    public int DeformHierarchyCount { get; private set; }
+
+    private bool[] weightedBones = Array.Empty<bool>();
+    private bool[] deformHierarchy = Array.Empty<bool>();
 
     public float LongestExtent
     {
@@ -117,8 +135,10 @@ public sealed class LabRig : IDisposable
         rig.MeshNodeTransform = imported.MeshNodeTransform;
         rig.Clips = imported.Animations.OrderBy(c => c.Name, StringComparer.Ordinal).ToArray();
         rig.palettePayload = new byte[imported.Skeleton.BoneCount * 64];
-        rig.deformBones = FindDeformBones(imported.Skeleton, imported.Primitives);
-        rig.DeformBoneCount = rig.deformBones.Count(b => b);
+        rig.weightedBones = FindWeightedBones(imported.Skeleton, imported.Primitives);
+        rig.WeightedBoneCount = rig.weightedBones.Count(b => b);
+        rig.deformHierarchy = PromoteToHierarchy(imported.Skeleton, rig.weightedBones);
+        rig.DeformHierarchyCount = rig.deformHierarchy.Count(b => b);
 
         var white = vk.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
@@ -262,7 +282,7 @@ public sealed class LabRig : IDisposable
         return handle;
     }
 
-    /// <summary>Which bones the mesh actually follows, read off the vertex weights. No device needed.</summary>
+    /// <summary>Which bones some vertex actually weights, read off the vertex data. No device needed.</summary>
     /// <remarks>
     /// <b>Static and deviceless on purpose</b> — the probe answers the same question with no GPU in
     /// sight, and a rig's bone census is a fact about the FILE. Duplicating the weight walk so the
@@ -273,8 +293,12 @@ public sealed class LabRig : IDisposable
     /// to have: the same file could arrive without tangents one day, and a hard-coded offset would
     /// then read weights out of the middle of a texcoord and report a plausible, wrong answer.
     /// </para>
+    /// <para>
+    /// Returns the LITERAL set. <see cref="PromoteToHierarchy"/> is the separate step that widens it to
+    /// something drawable, and it is separate precisely so a caller has to choose which one it meant.
+    /// </para>
     /// </remarks>
-    public static bool[] FindDeformBones(Skeleton skeleton, IReadOnlyList<GltfPrimitive> primitives)
+    public static bool[] FindWeightedBones(Skeleton skeleton, IReadOnlyList<GltfPrimitive> primitives)
     {
         ArgumentNullException.ThrowIfNull(skeleton);
         ArgumentNullException.ThrowIfNull(primitives);
@@ -301,17 +325,35 @@ public sealed class LabRig : IDisposable
             }
         }
 
-        // A deform bone's ANCESTORS deform too, even where no vertex names them: a chain drawn
-        // without the joints that carry it is a set of floating segments, which is a worse picture
-        // than the cluttered one. The hierarchy-order invariant makes this one backwards pass.
-        for (var i = deform.Length - 1; i >= 0; i--)
+        return deform;
+    }
+
+    /// <summary>Widens a weighted set to include every ancestor that carries one.</summary>
+    /// <remarks>
+    /// A chain drawn without the joints that carry it is a set of floating segments, which is a worse
+    /// picture than the cluttered one. The hierarchy-order invariant — a parent always precedes its
+    /// child — makes this one backwards pass with no recursion and no visited set.
+    /// <para>
+    /// Does not mutate its argument: the literal census and the drawable set are both wanted, by
+    /// different callers, from the same load.
+    /// </para>
+    /// </remarks>
+    public static bool[] PromoteToHierarchy(Skeleton skeleton, IReadOnlyList<bool> weighted)
+    {
+        ArgumentNullException.ThrowIfNull(skeleton);
+        ArgumentNullException.ThrowIfNull(weighted);
+
+        var hierarchy = new bool[skeleton.BoneCount];
+        for (var i = 0; i < hierarchy.Length && i < weighted.Count; i++) hierarchy[i] = weighted[i];
+
+        for (var i = hierarchy.Length - 1; i >= 0; i--)
         {
-            if (!deform[i]) continue;
+            if (!hierarchy[i]) continue;
             var parent = skeleton.Bones[i].ParentIndex;
-            if (parent >= 0) deform[parent] = true;
+            if (parent >= 0) hierarchy[parent] = true;
         }
 
-        return deform;
+        return hierarchy;
     }
 
     private static int Attribute(VertexLayout layout, int location)

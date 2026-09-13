@@ -69,7 +69,9 @@ public static class LabSkeletonView
     /// what turns "this looks a bit off" into "this bone is 30 degrees out and the rest are fine".
     /// </param>
     /// <param name="include">
-    /// Optional per-bone filter — <c>LabRig.DeformBones</c> is the one that matters. A rig's IK handles
+    /// Optional per-bone filter. <c>LabRig.DeformHierarchy</c> is the one to pass, NOT
+    /// <c>LabRig.WeightedBones</c>: a joint no vertex weights can still carry a chain that several do,
+    /// and filtering on the literal census leaves those chains as floating segments. A rig's IK handles
     /// and roll controls skin nothing and hang off the root, so drawing all of them turns a skeleton
     /// into a starburst at the character's feet. Null draws everything, which is the honest default
     /// when nobody has said which bones the question is about.

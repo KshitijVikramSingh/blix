@@ -277,11 +277,14 @@ Two things the first drawn skeleton taught, both of which look like bugs and are
   it is exactly zero. A skeleton drawn from palette translations collapses into a knot at
   the origin. The joint is at the hierarchy walk's `world` term on its own —
   `LabRig.ComputeBoneWorlds`.
-- **Half a rig is not skinned.** The Rogue has 41 bones and **21 of them deform**; the other
-  20 are IK handles and roll controls (`kneeIK.l`, `control-heel-roll.r`, `handIK.l`)
-  parented straight to the root, which is why drawing all of them makes a starburst at the
-  character's feet. `LabRig.FindDeformBones` reads the vertex weights — the only place in
-  the file the difference is recorded — and the overlay defaults to deform bones only.
+- **Half a rig is not skinned, and "half" is two different numbers.** The Rogue has 41 bones.
+  **20 are weighted** — some vertex names them. **21 must be drawn**, because `root` is
+  weighted by nothing and is the parent of everything, and a chain drawn without the joints
+  that carry it is a set of floating segments. `LabRig.WeightedBones` is the census and
+  `LabRig.DeformHierarchy` is what the overlay filters on; they were one property once, whose
+  name asked about weights while its value had been promoted up the ancestry. The remaining 20
+  are IK handles and roll controls (`kneeIK.l`, `control-heel-roll.r`, `handIK.l`) parented
+  straight to the root, which is why drawing all of them makes a starburst at the feet.
 
 **Play a clip.** Transport (space plays, ←/→ step a thirtieth of a second, a rate slider
 that runs backwards, a scrub that pauses), and a filter box because seventy-six clips is
@@ -316,6 +319,14 @@ line at even spacing is right, a line that stutters once per cycle is the loop w
 handled by subtraction, and a line that drifts sideways is a delta taken in the wrong
 frame.
 
+**Driving means the clip stops moving the body and the transform starts.** `RootMotion.Strip`
+reverts the root to rest; without it a travelling clip moves the mesh *and* the transform, so
+the body runs at double speed and snaps back once per cycle. The lab's toggle is the contrast:
+off shows a clip as authored (a dodge lurches back at every loop), on shows the same clip
+driving a body in a straight line. That is also why `Strip` is an engine call and not a lab
+helper — taking a delta and leaving it in the pose is the mistake, and the two halves belong
+next to each other.
+
 Worth knowing before reaching for it: of the Rogue's 76 clips, **four travel** — the
 dodges. Walk and run are authored in place, and the game owns locomotion.
 
@@ -327,7 +338,17 @@ curve is an offline choice rather than baked in.
 ```sh
 tools/run-lab-capture.sh --frames 10 --out shot.png
 tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --time 0.35 --xray --out walk.png
+tools/run-lab-capture.sh --rig .../Rogue.glb --clip Dodge_Forward --advance 2.0 --drive-root --out travel.png
 ```
+
+`--advance <seconds>` runs the clock a fixed number of fixed 17 ms steps — no wall time
+anywhere, so the run stays reproducible — and draws the integrated root path with a tick every
+sixth sample. It exists for the one acceptance criterion a still frame cannot carry: a
+travelling clip's delta must integrate to a **straight line at even spacing** across the loop
+seam, which is a shape rather than a number. 17 ms rather than a sixtieth on purpose: the
+Rogue's clips are authored at 30 fps, so 1/60 divides most of them exactly and every wrap would
+land on a seam — the instrument would draw a clean line whatever the code did. The camera frames
+across the travel, never down it, because a path seen end-on is a point.
 
 A clip and a time make a capture **reproducible**: "Walking_A at 0.35 s looked like this"
 can be re-rendered anywhere and diffed, where "the walk looked wrong" cannot. Nothing in

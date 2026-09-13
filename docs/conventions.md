@@ -55,6 +55,15 @@ behaviour here, that test should fail first.
   to the end of the cycle and on from its start rather than subtracting, which
   is the one place every implementation of this is wrong. Applying it — rotating
   it into world, driving a body with it — stays the caller's decision.
+- **Taking a delta obliges you to strip it.** A clip that walks its root already
+  moves the mesh. A caller that also drives its object transform by the delta
+  applies the travel twice: double speed, and a snap back once per loop.
+  `RootMotion.Strip` reverts every parentless bone to rest, and the pairing is
+  the whole division — the clip says how far, the game says where.
+- **A one-shot clip finishes at the boundary in its direction of travel.**
+  `Rate` may be negative, so a non-looping clip played backwards ends at `t = 0`
+  as surely as a forward one ends at `Duration`. "Finished" is not "reached the
+  chronological end".
 
 **Enforced by:** [`blix.md` §Transform3D](blix.md) (incl. *Deliberate limits*) ·
 `Blix.Test.Graphics` Sections **AH** (compose / reparent / cycle), **AJ**

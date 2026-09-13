@@ -104,6 +104,40 @@ public readonly record struct RootMotion(Vector3 Translation, Quaternion Rotatio
         clip.Duration <= 0.0 ? None : Between(clip, rootBone, rest, 0.0, clip.Duration);
 
     /// <summary>
+    /// Reverts every root bone in <paramref name="pose"/> to its rest transform — the other half of taking a delta.
+    /// </summary>
+    /// <remarks>
+    /// <b>Taking the travel and leaving it in the pose applies it twice.</b> A clip that walks its root
+    /// forward already moves the mesh; a caller that also drives its object transform by the delta gets a
+    /// body travelling at double speed and snapping back once per loop. Whoever consumes a delta owes the
+    /// pose this call.
+    /// <para>
+    /// Every parentless bone, not just the first — glTF permits a multi-root skin, and stripping one root
+    /// of several leaves the others still travelling.
+    /// </para>
+    /// <para>
+    /// The cost is a clip that turns in place, whose turn now goes nowhere; the turn belongs in the
+    /// steering layer. <c>RTSGame.SkinnedBodies</c> carries a private copy of exactly this, written before
+    /// there was anywhere to put it, and should fold in the next time that game is touched under its own
+    /// gate — a mechanical swap is still a change to a simulation that verifies in years, not seconds.
+    /// </para>
+    /// </remarks>
+    public static void Strip(Skeleton skeleton, Pose pose, Pose rest)
+    {
+        ArgumentNullException.ThrowIfNull(skeleton);
+        ArgumentNullException.ThrowIfNull(pose);
+        ArgumentNullException.ThrowIfNull(rest);
+
+        for (var i = 0; i < skeleton.BoneCount; i++)
+        {
+            if (skeleton.Bones[i].ParentIndex >= 0) continue;
+            // Position, orientation and scale: a root that kept its animated rotation would still
+            // turn the whole body, which is travel by another name.
+            pose.Locals[i] = rest.Locals[i];
+        }
+    }
+
+    /// <summary>
     /// The first bone with no parent — the default root a clip's travel is read from.
     /// </summary>
     /// <remarks>

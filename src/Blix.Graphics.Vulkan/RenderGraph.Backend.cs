@@ -177,11 +177,21 @@ public sealed partial class RenderGraph : IDisposable
             case GraphResourceKind.ColorTarget:
             {
                 var format = VulkanGraphicsDevice.MapTextureFormat(declared.Format!.Value);
+                // <b>Through the same helper the first allocation uses, and the sample count too.</b>
+                // This branch used to restate the usage flags and had drifted: no TransferSrcBit, so a
+                // graph colour target stopped being a legal copy source the moment the window was
+                // resized, and every capture after a resize was an invalid vkCmdCopyImageToBuffer. It
+                // also ignored declared.Samples, silently turning an MSAA target single-sampled against
+                // a render pass that still expected multisample.
+                //
+                // The fix is not to copy the missing flag across — it is to stop there being two places
+                // that decide. Restating a decision is how the second copy comes to disagree.
                 var (img, mem, view) = device.AllocateAttachmentImage(
                     width, height, format,
-                    ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.SampledBit,
+                    ColorTargetUsage(declared.Samples > 1),
                     ImageAspectFlags.ColorBit,
-                    $"graph.{declared.Name}");
+                    $"graph.{declared.Name}",
+                    SampleCount(declared.Samples));
                 entry.Image = img;
                 entry.Memory = mem;
                 entry.WholeImageView = view;
@@ -297,28 +307,35 @@ public sealed partial class RenderGraph : IDisposable
         };
     }
 
+    /// <summary>The usage flags a graph colour target needs. ONE place, because two drifted.</summary>
+    /// <remarks>
+    /// MSAA colour is render-and-resolve only — never sampled, so no SampledBit and no sampleable
+    /// handle. TransientAttachment lets a tiler keep it in tile memory, since it is resolved before
+    /// store.
+    /// <para>
+    /// TransferSrcBit on the non-MSAA form so a graph colour target can be READ BACK.
+    /// CreateRenderSurface's attachments got this when capture was added; the graph's did not, and the
+    /// lab's scene target is a graph resource — so every capture taken before that fix was an invalid
+    /// vkCmdCopyImageToBuffer that MoltenVK happened to tolerate. It produced correct-looking pictures,
+    /// which is exactly why running without the validation layers is not verification.
+    /// </para>
+    /// <para>
+    /// Deliberately NOT on the transient form: a transient attachment never leaves tile memory, and
+    /// asking to copy from one is a contradiction rather than an oversight.
+    /// </para>
+    /// </remarks>
+    private static ImageUsageFlags ColorTargetUsage(bool msaa) => msaa
+        ? ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.TransientAttachmentBit
+        : ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.SampledBit
+          | ImageUsageFlags.TransferSrcBit;
+
     private unsafe void AllocateColorTarget(GraphResourceEntry resource, uint width, uint height)
     {
         var device = Device!;
         var format = VulkanGraphicsDevice.MapTextureFormat(resource.Format!.Value);
         var msaa = resource.Samples > 1;
-        // MSAA colour is render-and-resolve only — never sampled, so no
-        // SampledBit and no sampleable handle. Add TransientAttachment so a
-        // tiler can keep it in tile memory (it's resolved before store).
-        var usage = msaa
-            ? ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.TransientAttachmentBit
-            // TransferSrcBit so a graph colour target can be READ BACK. CreateRenderSurface's
-            // attachments got this when capture was added; the graph's did not, and the lab's scene
-            // target is a graph resource — so every capture taken since has been an invalid
-            // vkCmdCopyImageToBuffer that MoltenVK happened to tolerate. It produced correct-looking
-            // pictures, which is exactly why running without the validation layers is not verification.
-            //
-            // Not added to the TRANSIENT branch above: a transient attachment never leaves tile
-            // memory, and asking to copy from one is a contradiction rather than an oversight.
-            : ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.SampledBit
-              | ImageUsageFlags.TransferSrcBit;
         var (image, memory, view) = device.AllocateAttachmentImage(
-            width, height, format, usage, ImageAspectFlags.ColorBit,
+            width, height, format, ColorTargetUsage(msaa), ImageAspectFlags.ColorBit,
             $"graph.{resource.Name}", SampleCount(resource.Samples));
 
         TextureHandle? handle = null;

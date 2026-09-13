@@ -51,6 +51,17 @@ public static class Program
         // collapsed rig. The bones were right and the picture was lying.
         var xray = args.Contains("--xray");
 
+        // <b>--advance turns "does this motion look right" into an artifact.</b> A capture normally
+        // samples one pose and never runs the clock, which is what makes it reproducible. This runs
+        // the clock a FIXED number of FIXED steps — no wall time anywhere — so it stays reproducible
+        // while showing what a clip does over several loops.
+        //
+        // It exists for the one acceptance criterion a still frame cannot carry: a travelling clip's
+        // delta must integrate to a straight line at even spacing across the loop seam. That is a
+        // shape, not a number, and the only way to check a shape is to look at one.
+        var advance = double.TryParse(ArgValue(args, "--advance"), out var secs) ? secs : 0.0;
+        var driveRoot = args.Contains("--drive-root");
+
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — lab capture",
@@ -62,7 +73,8 @@ public static class Program
         // supplies a default for when nobody said.
         if (options.ExitAfterFrames <= 0) options = options with { ExitAfterFrames = 8 };
 
-        var loop = new CaptureLoop(output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray);
+        var loop = new CaptureLoop(
+            output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray, advance, driveRoot);
         using (var window = new Window(loop, options))
         {
             window.Run();
@@ -108,6 +120,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly string? clipName;
     private readonly double clipTime;
     private readonly bool xray;
+    private readonly double advance;
+    private readonly bool driveRoot;
+    private readonly List<Vector3> rootPath = new();
+    private Vector3 rootTravel;
+    private float rigDrawnHeight = 3f;
     private LabRig? rig;
     private ClipPlayer? player;
     private BonePalette? palette;
@@ -121,9 +138,13 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         string? rigPath = null,
         string? clipName = null,
         double clipTime = 0.0,
-        bool xray = false)
+        bool xray = false,
+        double advance = 0.0,
+        bool driveRoot = false)
     {
         this.xray = xray;
+        this.advance = advance;
+        this.driveRoot = driveRoot;
         this.modelPath = modelPath;
         this.rigPath = rigPath;
         this.clipName = clipName;
@@ -175,19 +196,54 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         }
 
         player.ScrubTo(clipTime);
+
+        var extent = rig.LongestExtent;
+        var scale = extent > 0.001f ? 3f / extent : 1f;
+        var rigBase = Matrix4x4.CreateScale(scale)
+                      * Matrix4x4.CreateTranslation(0f, -rig.BoundsMin.Y * scale, 0f);
+        rigTransform = rigBase;
+        rigDrawnHeight = MathF.Max(0.5f, (rig.BoundsMax.Y - rig.BoundsMin.Y) * scale);
+
+        // <b>17 ms, and deliberately not a sixtieth.</b> A step that divides the clip length puts
+        // every wrap exactly on a seam, where the piecewise travel walk has nothing to do — the line
+        // comes out clean whatever the code does. The Rogue's clips are authored at 30 fps, so 1/60
+        // divides most of them exactly (a 0.40 s dodge is 24 frames of it) and this instrument would
+        // have been blind to the bug it exists for. Off-rate, so every wrap lands mid-step.
+        //
+        // Same trick, same reason, as the probe's duration/7.37.
+        const double Step = 0.017;
+        var steps = advance > 0.0 ? (int)Math.Round(advance / Step) : 0;
+        for (var i = 0; i < steps; i++)
+        {
+            player.Advance(Step);
+            rootTravel += Vector3.TransformNormal(player.RootDelta.Translation, rig.MeshNodeTransform);
+            rootPath.Add(Vector3.Transform(rootTravel, rigBase));
+        }
+
+        // Driving means the clip stops moving the body and the transform starts; leaving the root
+        // animated as well moves a travelling clip twice. Same pairing the viewer's toggle makes.
+        if (driveRoot)
+        {
+            RootMotion.Strip(rig.Skeleton, player.Pose, player.RestPose);
+            rigTransform = Matrix4x4.CreateTranslation(rootTravel) * rigBase;
+        }
+
         palette = new BonePalette(rig.Skeleton.BoneCount);
         rig.Skeleton.ComputeBonePalette(player.Pose, palette);
         boneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
         LabRig.ComputeBoneWorlds(rig.Skeleton, player.Pose, boneWorlds);
 
-        var extent = rig.LongestExtent;
-        var scale = extent > 0.001f ? 3f / extent : 1f;
-        rigTransform = Matrix4x4.CreateScale(scale)
-                       * Matrix4x4.CreateTranslation(0f, -rig.BoundsMin.Y * scale, 0f);
-
         Console.WriteLine(
             $"rig: {Path.GetFileName(rigPath)} — {rig.Skeleton.BoneCount} bone(s), {rig.Clips.Count} clip(s), " +
             $"clip '{player.Clip?.Name ?? "(rest)"}' at {player.Time:0.000}s of {player.Duration:0.00}s");
+        if (steps > 0)
+        {
+            Console.WriteLine(
+                $"  advanced {steps} x {Step:0.0000}s = {steps * Step:0.000}s " +
+                $"({(player.Duration > 0 ? steps * Step / player.Duration : 0):0.00} cycles); " +
+                $"root travelled {rootTravel.Length():0.0000} m in rig space, " +
+                $"{rootTravel.Length() * scale:0.0000} m as drawn");
+        }
     }
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
@@ -202,6 +258,32 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         var target = rig is not null
             ? new Vector3(0f, 1.4f, 0f)
             : subject ? new Vector3(0f, 0.7f, 0f) : new Vector3(0f, 1f, 0f);
+
+        // <b>A travelling body needs a camera that knows where it went.</b> Framed on the character,
+        // two seconds of root motion walks straight out of shot and the artifact becomes a picture of
+        // an ear. Centre on the midpoint of the path and back off by its length, so the whole line and
+        // the body at the end of it are both in frame — which is what makes "straight, evenly spaced"
+        // something a reader can check rather than something the caption asserts.
+        if (rootPath.Count >= 2)
+        {
+            var lo = rootPath[0];
+            var hi = rootPath[^1];
+            var centre = (lo + hi) * 0.5f;
+            // The BODY's height, not only the path's length: a 1.7 m walk beside a 3 m character
+            // framed on the walk alone puts the camera inside the character's knee. Whichever is
+            // larger, with room around it.
+            var reach = (MathF.Max(Vector3.Distance(lo, hi), rigDrawnHeight) * 1.6f) + 2f;
+            target = centre + new Vector3(0f, rigDrawnHeight * 0.35f, 0f);
+
+            // Offset ACROSS the travel, not along it: an eye placed down the line of motion sees the
+            // path end-on as a single point, which is the one view that cannot show its spacing.
+            var along = hi - lo;
+            along.Y = 0f;
+            var across = along.LengthSquared() > 1e-6f
+                ? Vector3.Normalize(new Vector3(-along.Z, 0f, along.X))
+                : new Vector3(0.6f, 0f, 0.8f);
+            eye = target + (across * reach) + new Vector3(0f, reach * 0.45f, 0f);
+        }
         var view = Matrix4x4.CreateLookAt(eye, target, Vector3.UnitY);
         viewProjection = view * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
@@ -263,7 +345,23 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                 LabSkeletonView.Options.Default,
                 selectedBone: -1,
                 restWorlds: null,
-                include: rig.DeformBones);
+                include: rig.DeformHierarchy);
+
+            // The path, as a polyline. A root-motion bug has a SHAPE: straight with even spacing is
+            // right, a stutter once per cycle is the loop wrap handled by subtraction, and a sideways
+            // drift is a delta taken in the wrong frame. None of those is visible in a number.
+            if (rootPath.Count >= 2)
+            {
+                debug.Draw.Polyline("root/path", rootPath, new GraphicsColor(0.3f, 0.9f, 0.6f, 1f));
+                foreach (var (at, i) in rootPath.Select((v, i) => (v, i)))
+                {
+                    // A tick per sample, so EVEN SPACING is checkable and not merely asserted — a
+                    // clean line drawn at uneven speed looks identical without them.
+                    if (i % 6 != 0) continue;
+                    debug.Draw.Cross($"root/tick{i}", at, 0.03f, new GraphicsColor(1f, 0.9f, 0.4f, 1f));
+                }
+            }
+
             return;
         }
 

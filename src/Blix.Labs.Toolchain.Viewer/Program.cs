@@ -310,7 +310,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             if (ReferenceEquals(rig.Clips[i], rig.Clip(name))) return i;
         }
 
-        Console.Error.WriteLine($"No clip named '{name}'; starting on {rig.Clips[0].Name}.");
+        // A rig with no clips at all is a legitimate asset — a skin posed only by a game — and the
+        // fallback message read rig.Clips[0] to name what it was falling back TO, which on that rig
+        // is an IndexOutOfRange thrown while reporting a miss. The error path was the crash.
+        Console.Error.WriteLine(rig.Clips.Count > 0
+            ? $"No clip named '{name}'; starting on {rig.Clips[0].Name}."
+            : $"No clip named '{name}', and this rig has none; holding the rest pose.");
         return 0;
     }
 
@@ -393,21 +398,32 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
                 break;
         }
 
-        rig.Skeleton.ComputeBonePalette(posed, palette);
-        LabRig.ComputeBoneWorlds(rig.Skeleton, posed, boneWorlds);
-
         // Root travel comes from A only. A blend of two clips that travel at different speeds has no
         // single correct delta — the honest answer is a decision (take the dominant clip's, scale
         // both by weight, take the faster) and a lab should not invent one on a consumer's behalf.
         rootTravel += Vector3.TransformNormal(playerA.RootDelta.Translation, rig.MeshNodeTransform);
         rootTurnDegrees += Degrees(playerA.RootDelta.Rotation);
 
+        // <b>Driving means the clip stops moving the body and the transform starts.</b> Leaving the
+        // root animated AND applying the delta moves a travelling clip twice and snaps it back once
+        // per cycle. Stripping is what a game does with root motion, and the toggle is the lab's
+        // whole point: off shows the clip as authored (a dodge lurches back at every loop), on shows
+        // the same clip driving a body in a straight line.
+        if (driveRoot) RootMotion.Strip(rig.Skeleton, posed, playerA.RestPose);
+
+        rig.Skeleton.ComputeBonePalette(posed, palette);
+        LabRig.ComputeBoneWorlds(rig.Skeleton, posed, boneWorlds);
+
+        // <b>Scaled ONCE.</b> rootTravel is already in post-MeshNodeTransform space and rigBase
+        // already carries the normalising scale, so a `* rigScale` here squared it — the Rogue
+        // normalises by 1.372, so the body ran 1.88x too far and the trail agreed with it, which is
+        // why two wrong things looked like one right one.
         rigTransform = driveRoot
-            ? Matrix4x4.CreateTranslation(rootTravel * rigScale) * rigBase
+            ? Matrix4x4.CreateTranslation(rootTravel) * rigBase
             : rigBase;
 
         // Sampled in the space the trail is drawn in, so the line is where the body would be.
-        var where = Vector3.Transform(rootTravel * rigScale, rigBase);
+        var where = Vector3.Transform(rootTravel, rigBase);
         if (rootPath.Count == 0 || Vector3.DistanceSquared(rootPath[^1], where) > 1e-6f)
         {
             rootPath.Add(where);
@@ -507,7 +523,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
                 },
                 selectedBone,
                 showRestGhost ? restWorlds : null,
-                deformBonesOnly ? rig.DeformBones : null);
+                deformBonesOnly ? rig.DeformHierarchy : null);
         }
 
         if (!showRootTrail) return;
@@ -532,9 +548,11 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     {
         if (rig is null || playerA is null || playerB is null) return;
 
+        // Both numbers, because they answer different questions: how much of the rig the mesh is
+        // attached to, and how much of it has to be drawn to show those chains unbroken.
         ImGui.TextDisabled(
-            $"{rig.Skeleton.BoneCount} bones ({rig.DeformBoneCount} deform) · " +
-            $"{rig.Clips.Count} clips · {rig.Parts.Count} prims");
+            $"{rig.Skeleton.BoneCount} bones ({rig.WeightedBoneCount} weighted, " +
+            $"{rig.DeformHierarchyCount} drawn) · {rig.Clips.Count} clips · {rig.Parts.Count} prims");
 
         var mode = (int)poseMode;
         if (ImGui.Combo("compose", ref mode, "single\0blend A→B\0additive B on A\0"))
@@ -688,7 +706,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
                 // A control bone is dimmed rather than hidden: it is still in the palette and still
                 // animated, so a reader looking for "why is nothing moving" needs to be able to find
                 // it — just not to have it shouting alongside the bones the mesh follows.
-                var deform = rig.DeformBones[i];
+                var deform = rig.WeightedBones[i];
                 var label = new string(' ', indent * 2) + bone.Name + (deform ? string.Empty : "  ·");
                 if (!deform) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.55f, 0.55f, 0.6f, 1f));
                 if (ImGui.Selectable($"{label}##{i}", selectedBone == i)) selectedBone = i;
@@ -1045,7 +1063,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         var place = rig.MeshNodeTransform * rigTransform;
         var span = LabSkeletonView.Span(
-            rig.Skeleton, boneWorlds, place, deformBonesOnly ? rig.DeformBones : null);
+            rig.Skeleton, boneWorlds, place, deformBonesOnly ? rig.DeformHierarchy : null);
 
         // Twice the joint cross's own arm, so a click needs to be close but not surgical — the same
         // slack the four-pixel click/drag threshold grants the gesture one layer up.
@@ -1055,7 +1073,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         var nearest = float.MaxValue;
         for (var i = 0; i < rig.Skeleton.BoneCount; i++)
         {
-            if (deformBonesOnly && !rig.DeformBones[i]) continue;
+            if (deformBonesOnly && !rig.DeformHierarchy[i]) continue;
 
             var world = boneWorlds[i] * place;
             var at = new Vector3(world.M41, world.M42, world.M43);

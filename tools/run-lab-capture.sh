@@ -13,6 +13,9 @@
 # samples once and never runs the clock, and --xray drops depth testing on gizmos so a
 # skeleton inside an opaque mesh is visible at all.
 #     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --time 0.35 --xray --out walk.png
+# --advance <s> runs a fixed number of fixed steps (still no wall clock) and draws the
+# integrated root path; --drive-root strips the root and moves the body by the delta.
+#     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Dodge_Forward --advance 2.0 --drive-root
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

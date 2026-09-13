@@ -135,6 +135,10 @@ public sealed class ClipPlayer
         }
 
         var step = delta * Rate;
+
+        // The root's rest transform is what an unanimated channel falls back to, so every travel
+        // measurement below needs it. Hoisted once rather than fetched in each branch.
+        var rest = RestPose.Locals[RootBone];
         if (duration <= 0.0)
         {
             // A single-keyframe "pose" clip. There is nowhere to advance to; holding it is the
@@ -147,24 +151,33 @@ public sealed class ClipPlayer
 
         if (!Loop)
         {
+            // <b>"Finished" means the terminal boundary IN THE DIRECTION OF TRAVEL, not the
+            // chronological end.</b> A negative Rate is a supported way to play a clip, so a
+            // one-shot run backwards ends at t=0 as surely as a forward one ends at Duration —
+            // and a caller watching the return value to switch clips has to be told either way.
+            //
+            // This used to set Finished only at the end: reverse clamped to zero, returned true
+            // forever, and a lifecycle driven by it hung on a clip that had visibly stopped. The
+            // asymmetry was invisible because nothing in the tree played a one-shot backwards yet.
             var target = Time + step;
-            if (target >= duration)
+            var forward = step > 0.0;
+            var boundary = forward ? duration : 0.0;
+
+            if (forward ? target >= duration : target <= 0.0)
             {
-                RootDelta = RootMotion.Between(clip, RootBone, RestPose.Locals[RootBone], Time, duration);
-                Time = duration;
+                RootDelta = RootMotion.Between(clip, RootBone, rest, Time, boundary);
+                Time = boundary;
                 Finished = true;
                 Resample();
                 return false;
             }
 
-            if (target <= 0.0) target = 0.0;
-            RootDelta = RootMotion.Between(clip, RootBone, RestPose.Locals[RootBone], Time, target);
+            RootDelta = RootMotion.Between(clip, RootBone, rest, Time, target);
             Time = target;
             Resample();
             return true;
         }
 
-        var rest = RestPose.Locals[RootBone];
         var motion = RootMotion.None;
         var cursor = Time;
         var remaining = step;

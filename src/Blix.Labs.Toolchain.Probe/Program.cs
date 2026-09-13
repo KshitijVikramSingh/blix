@@ -331,18 +331,27 @@ public static class Program
         var worlds = new System.Numerics.Matrix4x4[skeleton.BoneCount];
         LabRig.ComputeBoneWorlds(skeleton, rest, worlds);
 
-        // <b>How many of those bones the mesh actually follows.</b> A rig ships the handles its
-        // animator posed through, and they are indistinguishable from deform bones in the skeleton,
-        // in the palette and in every clip — the weights are the only place the difference is
-        // recorded. Worth a line because it is the number that explains why a 41-bone skeleton drawn
-        // honestly looks like a starburst.
-        var deform = LabRig.FindDeformBones(skeleton, imported.Primitives);
+        // <b>How many of those bones the mesh actually follows, and how many it takes to draw them.</b>
+        // A rig ships the handles its animator posed through, and they are indistinguishable from
+        // deform bones in the skeleton, in the palette and in every clip — the weights are the only
+        // place the difference is recorded.
+        //
+        // Two numbers, because they are two facts and one name for both is how a report comes to lie.
+        // Weighted is the census: what the mesh is attached to. The hierarchy adds the ancestors that
+        // carry those chains — the Rogue's `root` is weighted by nothing and is the parent of
+        // everything — and is what an overlay must draw to avoid floating segments.
+        var weighted = LabRig.FindWeightedBones(skeleton, imported.Primitives);
+        var deform = LabRig.PromoteToHierarchy(skeleton, weighted);
+        var weightedCount = weighted.Count(b => b);
         var deformCount = deform.Count(b => b);
         Console.WriteLine(
-            $"  deform bones: {deformCount}/{skeleton.BoneCount}" +
-            (deformCount == skeleton.BoneCount
+            $"  weighted bones: {weightedCount}/{skeleton.BoneCount}" +
+            (weightedCount == skeleton.BoneCount
                 ? " (every bone skins something)"
-                : $" — {skeleton.BoneCount - deformCount} control/IK bone(s) the mesh never follows"));
+                : $" — {skeleton.BoneCount - weightedCount} bone(s) no vertex weights") +
+            (deformCount == weightedCount
+                ? string.Empty
+                : $"; {deformCount} to draw the chains unbroken"));
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);
         for (var i = 0; i < skeleton.BoneCount; i++)
@@ -361,7 +370,8 @@ public static class Program
                 var at = new Vector3(worlds[i].M41, worlds[i].M42, worlds[i].M43);
                 Console.WriteLine(
                     $"    {i,3} {skeleton.Bones[i].Name,-24} parent {skeleton.Bones[i].ParentIndex,3}  " +
-                    $"{at.X,8:0.000} {at.Y,8:0.000} {at.Z,8:0.000}  {(deform[i] ? "deform" : "control")}");
+                    $"{at.X,8:0.000} {at.Y,8:0.000} {at.Z,8:0.000}  " +
+                    $"{(weighted[i] ? "weighted" : deform[i] ? "carrier " : "control ")}");
             }
         }
 

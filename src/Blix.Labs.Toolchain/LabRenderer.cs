@@ -206,9 +206,12 @@ public sealed class LabRenderer : IDisposable
             Array.Empty<BlendState>(),
             RenderTarget: graph.GetPassSurface(shadowPass)), "lab.skinned.shadow");
 
+        // FullscreenPass.Layout, not a vertex format: lab_present.vert builds its triangle from
+        // gl_VertexIndex and declares no inputs at all, so any attribute here is a promise the shader
+        // does not keep — and the validation layers said so on every run.
         presentPipeline = vk.CreatePipeline(new PipelineDescription(
             presentProgram,
-            VertexPosition3Texture.Layout,
+            FullscreenPass.Layout,
             PrimitiveTopology.Triangles,
             // Writes depth, always passes. The blit has nothing to depth-test against; it is
             // carrying the scene's depth onto the swapchain so that whatever draws next — the

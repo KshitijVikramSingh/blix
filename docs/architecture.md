@@ -175,14 +175,22 @@ from `RenderFrameContext`, which is physical pixels, so a view declared that way
 picked through is off by the backing scale on a Retina display. Take the logical rect from
 `IRenderHost.LogicalSize`.
 
-**What capture cannot do yet.** Debug geometry can be aimed at any surface now — the line
+**Capture draws over the scene now.** Debug geometry can be aimed at any surface — the line
 drawer bakes a pipeline per render target, where it used to have exactly one against the
-default pass, making debug drawing silently swapchain-only. But an off-screen surface has
-no `LoadOp.Load` render pass variant, so a pass aimed at one **clears it**. Debug lines
-drawn into a scene target therefore land on a freshly cleared image rather than over the
-scene. `RenderGraph` already models load ops explicitly on `.Target(handle, LoadOp, StoreOp)`;
-what is missing is a way for an externally-routed `commandList.Pass` to ask for the Load
-form of a graph-owned surface.
+default pass, making debug drawing silently swapchain-only. An off-screen surface used to
+have no `LoadOp.Load` render pass variant either, so a pass aimed at one **cleared it** and
+debug lines landed on a freshly cleared image rather than over the scene. That is closed:
+every graphics pass now bakes a load-form render pass alongside its declared form
+(`BackendPass.RenderPassLoad`), a synthetic render surface carries it, and
+`RenderPassDescription.LoadExisting` is how an externally-routed `commandList.Pass` asks
+for it. The toolchain lab's capture is the consumer — its skeleton overlay is drawn into
+the scene target and comes back in the PNG.
+
+**What capture still cannot do.** Read back a graph colour target at a size the graph has
+never allocated: the read path copies the image as it stands, so a capture is whatever the
+swapchain extent was. And nothing yet captures a *sequence* — one file per frame with a
+fixed timestep — which is what turning "does this motion look right" into a diffable
+artifact would need.
 
 ## Host contracts
 
