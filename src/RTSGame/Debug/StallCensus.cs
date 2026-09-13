@@ -115,6 +115,52 @@ internal sealed class StallCensus
     private InterruptKind[] keptBy = Array.Empty<InterruptKind>();
     private float[] keptAtDistance = Array.Empty<float>();
 
+    // <b>Heading turn rate, for every body and not just the ones at a build site.</b> §212: the chair
+    // reported motorbikes again while `a working body does not whip around` passed at 1.4 deg/s average and
+    // 37 worst — so whatever is spinning is not a body working a construction project, which is the only
+    // population that test covers. Measured here because this is the one pass that already walks everybody
+    // every tick, and split by what the body is doing, because "working", "travelling" and "idle" take
+    // three different branches of HeadingOf and only one of them was ever fixed.
+    private float[] lastHeading = Array.Empty<float>();
+    private bool[] hasHeading = Array.Empty<bool>();
+    private float[] drawnYaw = Array.Empty<float>();
+    private float[] spinSeconds = Array.Empty<float>();
+
+    /// <summary>The yaw slew the renderer uses, mirrored so the census draws what the screen draws.</summary>
+    private const float TurnDegreesPerSecond = 500f;
+
+    /// <summary>Seconds the worst body spent turning at the slew ceiling, over the whole run.</summary>
+    public float WorstSpinSeconds { get; private set; }
+
+    /// <summary>Which body that was.</summary>
+    public int WorstSpinBody { get; private set; } = -1;
+
+    /// <summary>Body-seconds spent at the slew ceiling, across the whole population, by what they were at.</summary>
+    private Vector2[] lastFacing = Array.Empty<Vector2>();
+    private Vector2[] lastVelocity = Array.Empty<Vector2>();
+    private bool[] hadStep = Array.Empty<bool>();
+
+    /// <summary>Frames on which a body's own Facing pointed more than 120 degrees from where it just did.</summary>
+    private long facingReversals;
+
+    /// <summary>The same for velocity, both frames above walking pace.</summary>
+    private long velocityReversals;
+
+    private Rendering.BodyActions.HeadingSource[] lastSource =
+        Array.Empty<Rendering.BodyActions.HeadingSource>();
+
+    private bool[] hadSource = Array.Empty<bool>();
+
+    /// <summary>Frames on which the heading changed which fallback it came from.</summary>
+    private long sourceFlips;
+
+    /// <summary>The same, split by which pair it flipped between: from * 3 + to.</summary>
+    private readonly long[] flipsByPair = new long[16];
+
+    private float spinWorking;
+    private float spinTravelling;
+    private float spinStanding;
+
     // Spells whose grace window has not run out yet, so productivity is still undecided.
     private readonly List<int> pendingBody = new();
     private readonly List<Episode> pendingEpisode = new();
@@ -168,6 +214,18 @@ internal sealed class StallCensus
 
     /// <summary>Spells that ended because the body died, reported so a war's figures can be read.</summary>
     public int DiedMidSpell { get; private set; }
+
+    /// <summary>Worst heading turn rate seen, in degrees a second, per what the body was doing.</summary>
+    public float WorstTurnWorking { get; private set; }
+
+    /// <summary>As above, for a body under way.</summary>
+    public float WorstTurnTravelling { get; private set; }
+
+    /// <summary>As above, for a body doing neither.</summary>
+    public float WorstTurnStanding { get; private set; }
+
+    /// <summary>Which body turned fastest, and what it was doing.</summary>
+    public string WorstTurnBody { get; private set; } = "none";
 
     /// <summary>
     /// Activities finished by everybody over the run. <b>A churn rate, not a measure of production.</b>
@@ -267,6 +325,99 @@ internal sealed class StallCensus
                     keptBy[index] = agent.Jobs.Interrupt;
                     keptAtDistance[index] = JobSystem.DistanceToPlace(in agent);
                 }
+            }
+
+            // <b>The two sources under the heading, measured on their own.</b> §212. Three fixes to how the
+            // view CHOOSES between Facing and Velocity moved the spin by one body-second in three hundred
+            // and thirty-eight. A chooser cannot calm inputs that are themselves violent, so the question is
+            // no longer which one the view picks but whether either is steady enough to draw.
+            if (hadStep[index])
+            {
+                if (agent.Facing.LengthSquared() > 0.0001f && lastFacing[index].LengthSquared() > 0.0001f &&
+                    Vector2.Dot(Vector2.Normalize(agent.Facing), Vector2.Normalize(lastFacing[index])) < -0.5f)
+                {
+                    facingReversals++;
+                }
+
+                var fast = agent.Velocity.LengthSquared() > Rendering.BodyActions.WalkingSpeedSquared;
+                var wasFast = lastVelocity[index].LengthSquared() > Rendering.BodyActions.WalkingSpeedSquared;
+                if (fast && wasFast &&
+                    Vector2.Dot(Vector2.Normalize(agent.Velocity), Vector2.Normalize(lastVelocity[index])) < -0.5f)
+                {
+                    velocityReversals++;
+                }
+            }
+
+            lastFacing[index] = agent.Facing;
+            lastVelocity[index] = agent.Velocity;
+            hadStep[index] = true;
+
+            // The renderer's own choice of heading, asked of the simulation state it is drawn from.
+            var heading = Rendering.BodyActions.HeadingOf(in agent, out var source);
+            if (hadSource[index] && source != lastSource[index])
+            {
+                sourceFlips++;
+                var pair = (int)lastSource[index] * 4 + (int)source;
+                flipsByPair[pair]++;
+            }
+
+            lastSource[index] = source;
+            hadSource[index] = true;
+
+            if (heading.LengthSquared() > 0.0001f)
+            {
+                var angle = -MathF.Atan2(heading.Y, heading.X);
+                if (hasHeading[index] && deltaSeconds > 0f)
+                {
+                    // <b>The DRAWN yaw, slewed exactly as the screen slews it.</b> §212: measuring the raw
+                    // target said 5,380 deg/s in every category, which is a one-frame reversal and tells you
+                    // the input is violent — but not whether the body on screen is spinning, because the
+                    // slew caps what the eye sees. Sharing BodyActions.TurnedToward means this census is
+                    // measuring the thing the chair is objecting to, headlessly.
+                    var stepped = Rendering.BodyActions.TurnedToward(
+                        drawnYaw[index], angle, TurnDegreesPerSecond, deltaSeconds);
+                    var moved = MathF.Abs(MathF.IEEERemainder(stepped - drawnYaw[index], MathF.Tau));
+                    drawnYaw[index] = stepped;
+                    var rate = moved / deltaSeconds * 180f / MathF.PI;
+                    var working = JobSystem.IsWorking(in agent);
+                    var moving = agent.Velocity.LengthSquared() >
+                                 Rendering.BodyActions.WalkingSpeedSquared;
+
+                    // <b>Split by what the body was doing, because the fix only touches one of them.</b>
+                    // §212: the first A/B of the working branch moved the worst body's total by nothing at
+                    // all — to a tenth of a second, over nine minutes — which is what a measure that cannot
+                    // see the change looks like. A total that mixes three populations cannot say which one
+                    // it is made of.
+                    if (rate >= TurnDegreesPerSecond * 0.9f)
+                    {
+                        spinSeconds[index] += deltaSeconds;
+                        if (working) spinWorking += deltaSeconds;
+                        else if (moving) spinTravelling += deltaSeconds;
+                        else spinStanding += deltaSeconds;
+                    }
+
+                    if (spinSeconds[index] > WorstSpinSeconds)
+                    {
+                        WorstSpinSeconds = spinSeconds[index];
+                        WorstSpinBody = index;
+                    }
+
+                    var worst = working ? WorstTurnWorking
+                        : moving ? WorstTurnTravelling
+                        : WorstTurnStanding;
+                    if (rate > worst)
+                    {
+                        if (working) WorstTurnWorking = rate;
+                        else if (moving) WorstTurnTravelling = rate;
+                        else WorstTurnStanding = rate;
+                        var doing = working ? "working" : moving ? "travelling" : "standing";
+                        WorstTurnBody =
+                            $"#{index} {agent.Role} {doing} {agent.Jobs.Assignment.Kind}/{agent.Jobs.Activity}";
+                    }
+                }
+
+                lastHeading[index] = angle;
+                hasHeading[index] = true;
             }
 
             PeakStuckSeconds = MathF.Max(PeakStuckSeconds, agent.StuckSeconds);
@@ -392,6 +543,15 @@ internal sealed class StallCensus
         Array.Resize(ref keptFrom, size);
         Array.Resize(ref keptBy, size);
         Array.Resize(ref keptAtDistance, size);
+        Array.Resize(ref lastHeading, size);
+        Array.Resize(ref hasHeading, size);
+        Array.Resize(ref drawnYaw, size);
+        Array.Resize(ref lastFacing, size);
+        Array.Resize(ref lastVelocity, size);
+        Array.Resize(ref hadStep, size);
+        Array.Resize(ref lastSource, size);
+        Array.Resize(ref hadSource, size);
+        Array.Resize(ref spinSeconds, size);
         for (var i = 0; i < size; i++)
         {
             if (keptFromWorkSince[i] == 0f && worstKeptFromWork[i] == 0f)
@@ -498,6 +658,15 @@ internal sealed class StallCensus
                $"still stalled at the end {StalledAtTheEnd}, " +
                $"unjudged in the last {TailSeconds:F0}s {UnjudgedInTheTail}, " +
                $"spells cut short by death {DiedMidSpell}, " +
+               $"\n    DRAWN spin: worst body {WorstSpinSeconds:F1} s of {elapsedSeconds:F0} s (#{WorstSpinBody}); " +
+               $"population body-seconds working {spinWorking:F0}, travelling {spinTravelling:F0}, " +
+               $"standing {spinStanding:F0}; sim reversals: facing {facingReversals}, " +
+               $"velocity {velocityReversals}; source flips {sourceFlips} " +
+               $"(work<->ontop {flipsByPair[0 * 4 + 2] + flipsByPair[2 * 4 + 0]}, " +
+               $"work<->STOPPED-WORKING {flipsByPair[0 * 4 + 3] + flipsByPair[3 * 4 + 0]}, " +
+               $"ontop<->stopped {flipsByPair[2 * 4 + 3] + flipsByPair[3 * 4 + 2]}, " +
+               $"velocity<->facing {flipsByPair[1 * 4 + 3] + flipsByPair[3 * 4 + 1]}, " +
+               $"work<->velocity {flipsByPair[0 * 4 + 1] + flipsByPair[1 * 4 + 0]}), " +
                $"activities finished (churn, not work) {ActivitiesFinished}";
     }
 }

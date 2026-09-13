@@ -157,20 +157,84 @@ internal static class BodyActions
     /// that has stopped keeps the last heading the steering gave it, because there is nothing else to read.
     /// </para>
     /// </remarks>
-    public static Vector2 HeadingOf(in AgentState agent)
+    public static Vector2 HeadingOf(in AgentState agent) => HeadingOf(in agent, out _);
+
+    /// <summary>Which of the three fallbacks answered. For instruments only.</summary>
+    /// <remarks>
+    /// <b>Reported because the flipping was never inside a branch.</b> §212. Facing reversed end-for-end
+    /// zero times in nine minutes and velocity twice, across the whole population — so the violence in the
+    /// heading is not in either source. What is left is the choice between them: two steady targets far
+    /// apart, alternating frame to frame, which reads exactly like one violent target.
+    /// </remarks>
+    public enum HeadingSource
+    {
+        Work,
+        Velocity,
+
+        /// <summary>Working, but standing too near the place for it to give a direction.</summary>
+        OnTopOfWork,
+
+        /// <summary>Not working and not moving.</summary>
+        Facing,
+    }
+
+    public static Vector2 HeadingOf(in AgentState agent, out HeadingSource source)
     {
         var toWork = agent.Jobs.Place - agent.Position;
-        if (JobSystem.IsWorking(in agent) && toWork.LengthSquared() > AtWorkSquared) return toWork;
-        if (agent.Velocity.LengthSquared() > WalkingSpeedSquared) return agent.Velocity;
+        // <b>A body at its work never reads its velocity.</b> §212. §184 put the act above the velocity,
+        // which was right and not enough: when the vector to the work is short the old code fell THROUGH to
+        // the velocity, and a working body's velocity is the one thing §184 itself established to be noise.
+        // So a body jostled about on top of its own place took its heading from the jostling.
+        // <b>Arrival, not IsWorking.</b> §212. See JobSystem.HasReachedItsPlace: the extra terms in
+        // IsWorking churn several times a second, and a heading built on them swings between two targets
+        // that are each perfectly steady on their own. Facing reversed end-for-end zero times in nine
+        // minutes and velocity twice — the violence was never in either source, only in the choosing.
+        if (JobSystem.HasReachedItsPlace(in agent))
+        {
+            source = toWork.LengthSquared() > AtWorkSquared
+                ? HeadingSource.Work
+                : HeadingSource.OnTopOfWork;
+            return source == HeadingSource.Work ? toWork : agent.Facing;
+        }
+
+        if (agent.Velocity.LengthSquared() > WalkingSpeedSquared)
+        {
+            source = HeadingSource.Velocity;
+            return agent.Velocity;
+        }
+
+        source = HeadingSource.Facing;
         return agent.Facing;
+    }
+
+    /// <summary>
+    /// One step of the turn a body is drawn making, toward <paramref name="target"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Pure, so the spin can be measured without a window.</b> §212. Whether bodies look like motorbikes
+    /// is a fact about the DRAWN yaw, which lived only in the render loop — so every attempt to answer it
+    /// needed a headed run, a pair of eyes and a thirty-second wait, and two fixes were judged on runs that
+    /// died early. The same move that made `HeadingOf` testable makes this testable: the loop keeps the
+    /// per-body memory, and the arithmetic lives here where a headless census can call it with the same
+    /// numbers the screen gets.
+    /// </remarks>
+    public static float TurnedToward(float drawn, float target, float degreesPerSecond, float deltaSeconds)
+    {
+        var step = degreesPerSecond * MathF.PI / 180f * deltaSeconds;
+        var delta = MathF.IEEERemainder(target - drawn, MathF.Tau);
+        return drawn + (MathF.Abs(delta) <= step ? delta : MathF.Sign(delta) * step);
     }
 
     /// <summary>
     /// How near a body has to be standing on its place before "face the work" has no direction left.
     /// </summary>
     /// <remarks>
-    /// Two centimetres, squared. Below it the vector toward the work is shorter than the noise in the
-    /// body's own position, so its direction is meaningless and the steering heading is the honest answer.
+    /// <b>Two centimetres, and the value does not matter.</b> §212. This was raised to thirty-five
+    /// centimetres on the theory that the motorbike was a body jostling back and forth across the point it
+    /// faced, flipping the vector end for end. Measured, the branch fires <b>six times in nine minutes</b>
+    /// against 6,473 for the one above it, and both settings produced the same spin to within one
+    /// body-second in three hundred and thirty-eight. Bodies do not hover on top of their place; they stand
+    /// off it. Left small, and left here only because the degenerate case is real even if it is rare.
     /// </remarks>
     private const float AtWorkSquared = 0.0004f;
 

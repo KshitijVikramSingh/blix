@@ -16061,3 +16061,111 @@ form-up already showed the two want different answers.
 2.0-3.2x and traced it to a force *dispersing during the approach*, which the chair confirmed gets worse on
 real maps. Slots at the destination do not help a force that arrives strung out over fifteen metres. That is
 travel, not arrival, and it stays §107's.
+
+## §212 — The motorbike was never in the heading; it was in the choosing
+
+"Motorbikes are back." Three fixes, each plausible, each measured, each worth nothing:
+
+| attempt | where | result |
+|---|---|---|
+| `HeadingHoldSeconds = 0.25` | render loop | **worse** — 4.5 s spinning per 30 s against 2.7 s |
+| hold gated on arrival | render loop | **worse** — same window, same direction |
+| `AtWorkSquared` 2 cm → 35 cm | `HeadingOf` | **nothing** — 130 → 131 body-seconds |
+
+The first two were reverted after measuring. The third survived long enough to get a
+paragraph of confident documentation before measurement said it fires six times in nine
+minutes.
+
+### The instrument had to be built twice before it told the truth
+
+Whether bodies look like motorbikes is a fact about the **drawn** yaw, which lived only in
+the render loop — so every attempt to answer it needed a window, a pair of eyes and a
+thirty-second wait, and two of the three fixes above were judged on headed runs that died
+early. `BodyActions.TurnedToward` is the same move that made `HeadingOf` testable: the loop
+keeps the per-body memory, the arithmetic moves to a pure function, and a headless census
+calls it with the numbers the screen gets.
+
+Even then the first two versions of the measure were wrong in the familiar way — worst
+single frame saturates at the slew ceiling and says 500 for everything, longest unbroken run
+resets on one calm frame. What finally worked is dull: **total seconds spent at the ceiling**,
+split by what the body was doing.
+
+### What it found
+
+The self-test `AWorkingBodyDoesNotWhipAround` passes at 1.4 °/s average, worst 37 °/s. The
+same code in a settlement: 5,381 °/s working, 5,385 travelling, 5,343 standing. A half turn
+in one frame at thirty frames a second is 5,400. The test was not lying; it was standing
+nine builders at a wall, and the wall is not where this happens.
+
+So the target reverses end for end. The obvious suspects, measured over nine minutes and the
+whole population:
+
+- `agent.Facing` reversals: **0**
+- `agent.Velocity` reversals: **2**
+
+Neither source is violent. What is violent is the **choice between them** — 7,685 frames on
+which the heading came from a different branch than the frame before, 6,473 of them between
+"face your work" and "keep your steering heading". Two targets, each perfectly steady, far
+apart, alternating.
+
+And the count is not arbitrary: 6,473 is almost exactly twice the 3,463 activities that
+opened and closed without finishing anything. Every churned activity is one exit and one
+re-entry. **The motorbike is the jobs-layer churn, rendered.**
+
+### The fix is a decomposition, not a new idea
+
+`IsWorking` is `HasAssignment && Activity != None && !IsInterrupted && IsAtPlace`. The last
+term is geometry and changes slowly. The middle two churn. The heading only ever needed the
+geometry, so `JobSystem.HasReachedItsPlace` exposes the layer the other two predicates are
+already built from — arrival still defined exactly once, nothing restated. This is the same
+principle `BodyActions.ForBuilder` was given in §172 ("read from the project, never from the
+activity"), which had been sitting one function above the bug the whole time, with a comment
+saying it was a deliberate exception scoped to Build.
+
+| | before | after |
+|---|---|---|
+| worst body at the turn ceiling | 20.4 s of 540 | **6.4 s** |
+| working body-seconds at ceiling | 130 | **21** |
+| standing | 120 | **16** |
+| travelling | 88 | 84 |
+| heading source flips | 7,685 | **974** |
+
+Travelling is unchanged, which is the check that this did not simply freeze everything: a
+body walking a new way genuinely turns, and that turning survived.
+
+### What is left
+
+854 of the remaining 974 flips are bodies crossing the eight-centimetre walking threshold —
+`work↔velocity` 441, `velocity↔facing` 413. Smaller, same shape, same fix available if it
+proves visible. Not touched, because nothing has reported it from the chair.
+
+The churn itself — 3,463 activities in nine minutes that finish nothing — is untouched and is
+now known to be worth more than bookkeeping: it is the thing the eye was objecting to. It
+belongs to the jobs layer and is the obvious next candidate.
+
+### The test that was meant to stop this had excluded the cause from its own sample
+
+`AWorkingBodyDoesNotWhipAround` (§184) passed throughout, at 1.4 °/s average and 37 °/s worst,
+while the same code in a settlement sat at the 500 °/s ceiling for twenty seconds a body. The
+reason is one line:
+
+```csharp
+if (!JobSystem.IsWorking(in body)) { previous.Remove(id.Value); continue; }
+```
+
+It dropped the sample — and the remembered angle — at exactly the moment `IsWorking` went
+false, which is the moment the heading swings. It measured the calm on either side of the
+event and threw the event away. Not a loose threshold: **blind by construction**, and it would
+have gone on passing through any future regression of the same kind.
+
+Gated on arrival instead, with the memory surviving an activity opening and closing, the same
+fixture and the same 16,302 samples separate the two cleanly:
+
+| heading keyed on | mean | worst | |
+|---|---|---|---|
+| `IsWorking` (before) | 162.7 °/s | **4,900 °/s** | FAIL |
+| arrival (after) | 1.5 °/s | 37 °/s | PASS |
+
+The general lesson is the one §179 paid for in a different currency: an instrument that
+filters on the same predicate the bug lives in cannot see the bug. This one filtered on
+`IsWorking` to measure a fault caused by `IsWorking` changing.

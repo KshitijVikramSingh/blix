@@ -139,7 +139,26 @@ internal static class JobSystem
     /// </para>
     /// </remarks>
     public static bool IsAtItsPlace(in AgentState agent) =>
-        agent.Jobs.HasAssignment && agent.Jobs.Activity != ActivityKind.None && IsAtPlace(in agent);
+        HasReachedItsPlace(in agent) && agent.Jobs.Activity != ActivityKind.None;
+
+    /// <summary>
+    /// Whether this body has reached the place its assignment sent it to, open activity or not.
+    /// </summary>
+    /// <remarks>
+    /// <b>Arrival with nothing else layered on, because the view needs the slow half.</b> §212. The other
+    /// two predicates here are this one plus terms that churn: an activity opens and abandons as the jobs
+    /// layer cycles legs, so anything reading them alternates at several hertz. That is fine for the
+    /// economy, which wants to know whether labour counts this tick, and fatal for the screen, which was
+    /// swinging a body's heading between "face your work" and "keep your steering heading" every time the
+    /// activity blinked — measured at 6,473 swings in nine minutes, almost exactly twice the 3,463
+    /// activities that opened and closed without finishing anything.
+    /// <para>
+    /// A decomposition rather than a fourth predicate. Arrival is still defined exactly once, below; this
+    /// is the layer the other two are built from, exposed rather than restated.
+    /// </para>
+    /// </remarks>
+    public static bool HasReachedItsPlace(in AgentState agent) =>
+        agent.Jobs.HasAssignment && IsAtPlace(in agent);
 
     private static bool IsAtPlace(in AgentState agent)
     {

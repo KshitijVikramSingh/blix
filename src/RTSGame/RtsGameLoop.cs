@@ -5329,6 +5329,14 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
                 stallCensusDue = StallCensusInterval;
                 Console.WriteLine(stalls.Describe("as played, so far"));
                 Console.WriteLine(stalls.DescribeKeptFromWork());
+                Console.WriteLine(
+                    $"  [turning] worst body spent {worstCeilingSeconds:F1} s of the last " +
+                    $"{StallCensusInterval:F0} s turning at the {bodyFeel.TurnDegreesPerSecond:F0} deg/s " +
+                    $"ceiling (body {worstDrawnTurnBody}) — half a turn costs 0.36 s, so a body with " +
+                    "business to do banks a fraction of a second and a motorbike banks seconds");
+                worstCeilingSeconds = 0f;
+                worstDrawnTurnBody = -1;
+                Array.Clear(atCeiling);
             }
         }
 
@@ -7523,6 +7531,20 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
     private bool[] hasDrawnYaw = new bool[256];
 
     /// <summary>Moves this body's drawn heading towards <paramref name="target"/> at the turn rate.</summary>
+
+    /// <summary>Seconds each body has spent turning at the slew ceiling this window. View state.</summary>
+    /// <remarks>
+    /// <b>The instrument that finally measured the right thing, after two that did not.</b> §212: the worst
+    /// single FRAME saturates at the ceiling the moment any body turns round at all, and the longest
+    /// unbroken RUN resets on a single calm frame — so a body that turns, pauses, and turns back scored as
+    /// well behaved, which is exactly what a motorbike looks like from inside. Time spent turning is what
+    /// the eye is objecting to, however the turning is chopped up.
+    /// </remarks>
+    private float[] atCeiling = new float[256];
+
+    private float worstCeilingSeconds;
+    private int worstDrawnTurnBody = -1;
+
     private float TurnedTowards(int id, float target)
     {
         if (id < 0) return target;
@@ -7533,6 +7555,11 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             Array.Resize(ref hasDrawnYaw, grown);
         }
 
+        if (id >= atCeiling.Length) Array.Resize(ref atCeiling, Math.Max(id + 1, atCeiling.Length * 2));
+
+        // <b>Hold the target, then slew toward it.</b> Two separate things: this decides WHICH way the body
+        // has decided to face, and the slew below decides how fast it gets there. Without the hold the slew
+        // is chasing a decision that is remade every tick.
         // A body seen for the first time faces where it should, rather than turning from an invented angle.
         if (!hasDrawnYaw[id])
         {
@@ -7541,10 +7568,39 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
             return target;
         }
 
-        // Shortest way round, so a turn through north does not go the long way.
-        var delta = MathF.IEEERemainder(target - drawnYaw[id], MathF.Tau);
-        var step = bodyFeel.TurnDegreesPerSecond * MathF.PI / 180f * frameSeconds;
-        drawnYaw[id] += MathF.Abs(delta) <= step ? delta : MathF.Sign(delta) * step;
+        // Shortest way round, so a turn through north does not go the long way. The arithmetic is in
+        // BodyActions so a headless census can reproduce exactly what the screen does — §212.
+        var before = drawnYaw[id];
+        drawnYaw[id] = BodyActions.TurnedToward(
+            drawnYaw[id], target, bodyFeel.TurnDegreesPerSecond, frameSeconds);
+
+        // <b>Time spent at the ceiling, not the worst single frame.</b> §212, corrected within the run:
+        // the first cut reported the fastest frame, which saturates at the slew ceiling the instant any body
+        // makes any genuine turn — so it printed 500 of 500 and could not tell a body turning round once
+        // from a body spinning for ten seconds. Its own explanatory sentence said as much and it measured
+        // the other thing anyway.
+        //
+        // A 180-degree turn at five hundred degrees a second takes 0.36 s, so a body that wants to face
+        // the other way banks about a third of a second. A motorbike banks seconds. That is a difference
+        // the number can carry.
+        if (frameSeconds > 0f)
+        {
+            var turned = MathF.Abs(MathF.IEEERemainder(drawnYaw[id] - before, MathF.Tau)) /
+                         frameSeconds * 180f / MathF.PI;
+            // <b>Total time spinning in the window, not the longest unbroken run.</b> Third correction to
+            // this one instrument. The run-length version reset the moment a body dropped below the
+            // ceiling for a single frame — so a body that turns, pauses, and turns back reads as several
+            // short runs and scores as well behaved, which is exactly what a motorbike looks like from
+            // inside. What the eye objects to is a body that spends its time turning, however the turning
+            // is chopped up.
+            if (turned >= bodyFeel.TurnDegreesPerSecond * 0.9f) atCeiling[id] += frameSeconds;
+            if (atCeiling[id] > worstCeilingSeconds)
+            {
+                worstCeilingSeconds = atCeiling[id];
+                worstDrawnTurnBody = id;
+            }
+        }
+
         return drawnYaw[id];
     }
 
@@ -7597,9 +7653,40 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
         // a blow every ThreatSystem.SwingSeconds, a stroke every EconomySystem.StrokeSeconds.
         if (bodies is { } rig && ImpactPeriodOf(action) is { } period && rig.ImpactOf(action) > 0f)
         {
-            var through = Math.Clamp(agent.ActCharge / MathF.Max(0.0001f, period), 0f, 1f);
+            // <b>The clip runs at the speed it was authored at.</b> §211, and the first cut had this
+            // exactly backwards. It swept the WHOLE clip as the charge went nought to one, which forces
+            // every clip to last precisely one second whatever its own length — so a short reaping sweep
+            // was stretched into a second and a long felling swing was crushed into one. Reported from the
+            // chair: "our farmers are statues and our woodcutters are on cocaine", and the diagnosis with
+            // it — the timing was synced to the animation instead of the animation to the timing. Which is
+            // the wrong way round twice over, because the asset is the thing with an opinion about how fast
+            // a scythe moves and the constant is the thing that is free to be anything.
+            //
+            // So: real seconds, not a fraction of the stroke. The clip plays at 1x and all that is chosen
+            // is WHERE IN IT the body is, such that the impact frame arrives as the blow lands.
             var span = MathF.Max(0.0001f, (float)clip.Duration);
-            return ((through + rig.ImpactOf(action)) % 1f) * span;
+            var impactAt = rig.ImpactOf(action) * span;
+            var charge = Math.Clamp(agent.ActCharge, 0f, period);
+
+            // <b>Wind-up first, and the order is the whole bug.</b> §211's first cut asked about the
+            // follow-through first, and its condition is `charge <= span - impactAt` — which for a chop is
+            // 1.275 s against a charge that never exceeds the one-second period, so it was ALWAYS true. The
+            // follow-through branch swallowed the entire cycle: the clip played from the impact frame
+            // onward and snapped back to it, and the wind-up never ran at all. Reported from the chair as
+            // "each animation only plays until the impact frame and then resets".
+            //
+            // The wind-up is the branch with the deadline — it has to begin `impactAt` before the blow or
+            // the blow does not land on the impact — so it is asked first and the follow-through takes
+            // whatever is left.
+            var untilNext = period - charge;
+            if (untilNext <= impactAt) return impactAt - untilNext;
+
+            // Otherwise carry on out of the last blow at one times, through the follow-through.
+            if (charge <= span - impactAt) return impactAt + charge;
+
+            // A clip shorter than the gap between strokes leaves a pause, and a pause is what a body
+            // between swings is doing. Held on the last frame rather than snapped back to the first.
+            return span;
         }
 
         if (locomotion)

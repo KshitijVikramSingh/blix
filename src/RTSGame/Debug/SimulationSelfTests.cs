@@ -6403,9 +6403,18 @@ internal static class SimulationSelfTests
                 if (!world.Agents.Contains(id)) continue;
                 ref readonly var body = ref world.Agents.Get(id);
 
-                // Only while it is at its work, which is the state the fault appears in. A body still
-                // walking there turns as fast as it likes and should.
-                if (!JobSystem.IsWorking(in body))
+                // <b>Arrival, and the memory is NOT dropped when the activity blinks.</b> §212. This read
+                // IsWorking and cleared `previous` the moment it went false — which excluded the one event
+                // that causes the fault from its own sample. A churned activity closing and reopening is
+                // exactly when the heading swings from "face your work" to "keep your steering heading",
+                // and this test threw that frame away and then measured the calm either side of it. It
+                // reported 1.4 deg/s average and 37 deg/s worst while the same code in a settlement sat at
+                // the 500 deg/s ceiling for twenty seconds a body. It was not a loose threshold; it was
+                // blind by construction.
+                //
+                // Straddling the boundary is the whole point, so the gate is arrival — the slow fact the
+                // heading now keys on — and the memory survives an activity opening and closing.
+                if (!JobSystem.HasReachedItsPlace(in body))
                 {
                     previous.Remove(id.Value);
                     continue;

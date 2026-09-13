@@ -536,7 +536,12 @@ internal sealed class SkinnedBodies : IDisposable
         {
             var found = MeasureImpact(model, act);
             impacts[(int)act] = found;
-            report.Add(found > 0f ? $"{act}={found * 100f:F0}%" : $"{act}=free");
+            // The duration is reported beside it because §211 turned on exactly that: a clip's own length
+            // is what decides whether a stroke leaves a pause or cannot fit, and it was invisible.
+            var span = For(model, act)?.Duration ?? 0.0;
+            report.Add(found > 0f
+                ? $"{act}={found * 100f:F0}% of {span:F2}s"
+                : $"{act}=free ({span:F2}s)");
         }
 
         var impact = impacts[(int)BodyAction.Strike];
@@ -639,6 +644,26 @@ internal sealed class SkinnedBodies : IDisposable
     /// matter, and it is worth saying so given three separate bugs here came from measuring through the
     /// wrong transform.
     /// </remarks>
+    /// <summary>The clip this act resolves to on this model, by the binding's own order.</summary>
+    private static AnimationClip? For(GltfModel model, BodyAction which)
+    {
+        foreach (var (action, names, standIns) in CharacterClips.Table)
+        {
+            if (action != which) continue;
+            foreach (var wanted in names.Concat(standIns))
+            {
+                foreach (var clip in model.Animations)
+                {
+                    var bar = clip.Name.LastIndexOf('|');
+                    var bare = bar >= 0 ? clip.Name[(bar + 1)..] : clip.Name;
+                    if (bare.Equals(wanted, StringComparison.OrdinalIgnoreCase)) return clip;
+                }
+            }
+        }
+
+        return null;
+    }
+
     private static float MeasureImpact(GltfModel model, BodyAction which)
     {
         var skeleton = model.Skeleton;
