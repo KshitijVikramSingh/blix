@@ -24,16 +24,39 @@ namespace Blix.Labs.Toolchain.Viewer;
 //     consumer that wanted it.
 //   • Chassis: IUiSource panel, IInputHandler with UI capture, host-owned --frames,
 //     named views and trails.
+//   • Skeletal animation, made visible: ClipPlayer drives a pose, LabSkeletonView
+//     draws it, and RootMotion says where a clip travels. The three composition
+//     modes are three ENGINE primitives with no lab-local maths behind them —
+//     ClipPlayer, PoseBlend.Lerp, PoseDelta.LayerOnto. The last two had unit tests
+//     and no callers until this, which is its own kind of unverified.
 //
 // ── Intentionally owns ──────────────────────────────────────────────────────
 //   • Camera feel, the panel's controls, what the lab scene contains.
+//   • Which clip feeds which player, how the blend weight is driven, and whether
+//     the root delta drives the model — all policy a game would decide for itself.
 public static class Program
 {
     public static void Main(string[] args)
     {
-        // --model <path> loads a glTF. Nothing else in the tree can look at an asset; the numbers
-        // blix-cook inspect prints have always had to be trusted rather than seen.
+        // --model <path> loads a glTF as its authored NODE TREE; --rig <path> loads one as a
+        // SKELETON and its clips. Two flags rather than one that guesses, because they are two
+        // different questions about an asset and the answer to "which importer" is not something
+        // a viewer should infer from whether a file happens to contain a skin.
         var modelPath = ArgValue(args, "--model");
+        var rigPath = ArgValue(args, "--rig");
+
+        // Saves hunting through seventy-six clips on every launch when you already know which
+        // one you came to look at. Falls back to the preferred-name search when absent, and
+        // says so rather than silently playing something else when the name does not match.
+        var clipName = ArgValue(args, "--clip");
+
+        // --blend / --additive name the SECOND clip and pick the composition with it, because the
+        // mode and the clip are one decision: "blend into a run" is not two settings that happen to
+        // agree. It also means a bounded run reaches the blend path at all — without a flag, the
+        // only way in is a combo box, and a code path a headless run cannot reach is a code path
+        // nothing checks.
+        var blendClip = ArgValue(args, "--blend");
+        var additiveClip = ArgValue(args, "--additive");
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — toolchain lab",
@@ -41,7 +64,7 @@ public static class Program
             Height = 760,
         });
 
-        var loop = new ViewerLoop(modelPath);
+        var loop = new ViewerLoop(modelPath, rigPath, clipName, blendClip, additiveClip);
         using var window = new Window(loop, options);
         window.Run();
     }
@@ -69,9 +92,67 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private bool showBounds = true;
     private int selectedNode = -1;
 
-    public ViewerLoop(string? modelPath = null)
+    // ── The rig half ────────────────────────────────────────────────────────
+    // Two players rather than one, because a blend is two clips on two clocks. A single-clip
+    // view is the degenerate case of that (weight 0), not a separate mode with its own code —
+    // which is what stops "it works in single and not in blend" from being possible.
+    private readonly string? rigPath;
+    private readonly string? clipName;
+    private readonly string? secondClip;
+    private LabRig? rig;
+    private ClipPlayer? playerA;
+    private ClipPlayer? playerB;
+    private Pose? posed;
+    private BonePalette? palette;
+    private Matrix4x4[] boneWorlds = Array.Empty<Matrix4x4>();
+    private Matrix4x4[] restWorlds = Array.Empty<Matrix4x4>();
+    private Matrix4x4 rigBase = Matrix4x4.Identity;
+    private Matrix4x4 rigTransform = Matrix4x4.Identity;
+    private float rigScale = 1f;
+    private int selectedBone = -1;
+    private int clipIndexA;
+    private int clipIndexB;
+    private float blendWeight = 0.5f;
+    private PoseMode poseMode = PoseMode.Single;
+    private bool showSkeleton = true;
+    private bool showRestGhost;
+    private bool showAllBoneAxes;
+    private bool showJoints = true;
+    private bool showLeafStubs = true;
+    private bool deformBonesOnly = true;
+    private float gizmoScale = 1f;
+    private string clipFilter = string.Empty;
+
+    // Root motion, integrated. Translation only: turning a body by a clip's root ROTATION needs a
+    // pivot convention (about the root's own origin? about the body's centre?) that no consumer in
+    // this tree has asked for, and guessing one produces a rig that spins about the wrong point and
+    // looks like a maths bug. The turn is measured and reported; it is just not applied.
+    private bool driveRoot;
+    private Vector3 rootTravel;
+    private float rootTurnDegrees;
+    private readonly List<Vector3> rootPath = new();
+    private bool showRootTrail = true;
+
+    private enum PoseMode
+    {
+        Single,
+        Blend,
+        Additive,
+    }
+
+    public ViewerLoop(
+        string? modelPath = null,
+        string? rigPath = null,
+        string? clipName = null,
+        string? blendClip = null,
+        string? additiveClip = null)
     {
         this.modelPath = modelPath;
+        this.rigPath = rigPath;
+        this.clipName = clipName;
+        secondClip = blendClip ?? additiveClip;
+        if (blendClip is not null) poseMode = PoseMode.Blend;
+        else if (additiveClip is not null) poseMode = PoseMode.Additive;
     }
 
 
@@ -133,6 +214,8 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // never compiled one.
         renderer.Load(vk, Path.Combine(AppContext.BaseDirectory, "Shaders"));
 
+        LoadRig(vk);
+
         if (modelPath is null) return;
         if (!File.Exists(modelPath))
         {
@@ -161,6 +244,90 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             $"scaled x{scale:0.000}");
     }
 
+    // <b>Loaded against the renderer's skinned PROGRAM, not just its device.</b> A bone palette is a
+    // descriptor set, and a descriptor set's layout comes from the program that will read it — so a
+    // rig cannot build its set-3 buffer until it knows which shader is on the other end. That
+    // dependency is why this runs after renderer.Load rather than beside it.
+    private void LoadRig(VulkanGraphicsDevice vk)
+    {
+        if (rigPath is null) return;
+        if (!File.Exists(rigPath))
+        {
+            Console.Error.WriteLine($"No rig at {rigPath}.");
+            return;
+        }
+
+        rig = LabRig.Load(vk, rigPath, renderer.SkinnedProgram);
+        if (rig.Skeleton.BoneCount > LabRig.MaxBones)
+        {
+            // Said here rather than discovered on the GPU: past the shader's array bound the draw
+            // reads whatever follows the buffer, which renders as a character exploded across the
+            // map with no validation error to explain it.
+            Console.Error.WriteLine(
+                $"{Path.GetFileName(rigPath)} has {rig.Skeleton.BoneCount} bones; the lab's skinned " +
+                $"shader holds {LabRig.MaxBones}. Raise the bound in lab_skinned.vert.");
+        }
+
+        scene = LabScene.GroundOnly();
+        posed = rig.Skeleton.CreateRestPose();
+        palette = new BonePalette(rig.Skeleton.BoneCount);
+        boneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
+        restWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
+
+        playerA = new ClipPlayer(rig.Skeleton, rig.Clips.Count > 0 ? rig.Clips[0] : null);
+        playerB = new ClipPlayer(rig.Skeleton, rig.Clips.Count > 1 ? rig.Clips[1] : null);
+
+        // Prefer a walk on A and an idle on B when the asset has them: a blend between two named
+        // gaits is the case the weight slider was built to show, and finding it by hand in a
+        // seventy-six-clip list every launch is a tax on the thing being demonstrated.
+        clipIndexA = clipName is not null
+            ? NamedClip(rig, clipName)
+            : PreferredClip(rig, new[] { "Walking_A", "Walking", "Walk", "Running_A", "Run" }, 0);
+        clipIndexB = secondClip is not null
+            ? NamedClip(rig, secondClip)
+            : PreferredClip(rig, new[] { "Running_A", "Running", "Run", "Idle", "Unarmed_Idle" }, 1);
+        if (rig.Clips.Count > 0) playerA.Clip = rig.Clips[clipIndexA];
+        if (rig.Clips.Count > 1) playerB.Clip = rig.Clips[clipIndexB];
+
+        LabRig.ComputeBoneWorlds(rig.Skeleton, playerA.RestPose, restWorlds);
+
+        var extent = rig.LongestExtent;
+        rigScale = extent > 0.001f ? 3f / extent : 1f;
+        rigBase = Matrix4x4.CreateScale(rigScale)
+                  * Matrix4x4.CreateTranslation(0f, -rig.BoundsMin.Y * rigScale, 0f);
+        rigTransform = rigBase;
+
+        Console.WriteLine(
+            $"rig: {Path.GetFileName(rigPath)} — {rig.Skeleton.BoneCount} bone(s), {rig.Clips.Count} clip(s), " +
+            $"{rig.Parts.Count} primitive(s), {rig.VertexCount} vertices, " +
+            $"bounds {rig.BoundsMin.Y:0.00}..{rig.BoundsMax.Y:0.00} tall, scaled x{rigScale:0.000}");
+    }
+
+    private static int NamedClip(LabRig rig, string name)
+    {
+        for (var i = 0; i < rig.Clips.Count; i++)
+        {
+            if (ReferenceEquals(rig.Clips[i], rig.Clip(name))) return i;
+        }
+
+        Console.Error.WriteLine($"No clip named '{name}'; starting on {rig.Clips[0].Name}.");
+        return 0;
+    }
+
+    private static int PreferredClip(LabRig rig, string[] names, int fallback)
+    {
+        foreach (var wanted in names)
+        {
+            if (rig.Clip(wanted) is not { } found) continue;
+            for (var i = 0; i < rig.Clips.Count; i++)
+            {
+                if (ReferenceEquals(rig.Clips[i], found)) return i;
+            }
+        }
+
+        return Math.Min(fallback, Math.Max(0, rig.Clips.Count - 1));
+    }
+
     public void OnUpdate(Time time)
     {
         var eye = new Vector3(
@@ -176,7 +343,86 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             MathF.Cos(sunPitch) * MathF.Sin(sunYaw),
             MathF.Sin(sunPitch),
             MathF.Cos(sunPitch) * MathF.Cos(sunYaw)));
+
+        UpdateRig(time.Delta);
     }
+
+    /// <summary>Advances the clips, composes the pose, and integrates the root's travel.</summary>
+    /// <remarks>
+    /// <b>The three composition modes are three engine primitives, not three implementations.</b>
+    /// Single is <see cref="ClipPlayer"/> alone; Blend is <see cref="PoseBlend.Lerp"/> over two
+    /// players; Additive is <see cref="PoseDelta.LayerOnto"/> per bone with B's clip read relative to
+    /// rest. All three already existed and none had ever been looked at — <c>PoseBlend</c> and
+    /// <c>PoseDelta</c> have unit tests and zero callers outside them, which is its own kind of
+    /// unverified however many assertions cover the maths.
+    /// </remarks>
+    private void UpdateRig(double delta)
+    {
+        if (rig is null || playerA is null || playerB is null || posed is null || palette is null) return;
+
+        playerA.Advance(delta);
+
+        // B's clock runs in blend and additive modes only. Advancing it in single mode would make
+        // the blend slider jump to wherever B had drifted to, which reads as a glitch in the blend
+        // rather than as a clock nobody stopped.
+        if (poseMode != PoseMode.Single) playerB.Advance(delta);
+
+        switch (poseMode)
+        {
+            case PoseMode.Blend:
+                PoseBlend.Lerp(playerA.Pose, playerB.Pose, Math.Clamp(blendWeight, 0f, 1f), posed);
+                break;
+
+            case PoseMode.Additive:
+                // B layered ON TOP of A: B's pose is read as an offset from rest, so a clip that
+                // waves an arm waves it while A's legs keep walking. The order matters — A must be
+                // the base, because the delta is applied to whatever is already in the target.
+                for (var i = 0; i < posed.BoneCount; i++)
+                {
+                    posed.Locals[i] = PoseDelta.LayerOnto(
+                        playerA.Pose.Locals[i],
+                        playerA.RestPose.Locals[i],
+                        playerB.Pose.Locals[i],
+                        Math.Clamp(blendWeight, 0f, 1f));
+                }
+
+                break;
+
+            default:
+                posed.CopyFrom(playerA.Pose);
+                break;
+        }
+
+        rig.Skeleton.ComputeBonePalette(posed, palette);
+        LabRig.ComputeBoneWorlds(rig.Skeleton, posed, boneWorlds);
+
+        // Root travel comes from A only. A blend of two clips that travel at different speeds has no
+        // single correct delta — the honest answer is a decision (take the dominant clip's, scale
+        // both by weight, take the faster) and a lab should not invent one on a consumer's behalf.
+        rootTravel += Vector3.TransformNormal(playerA.RootDelta.Translation, rig.MeshNodeTransform);
+        rootTurnDegrees += Degrees(playerA.RootDelta.Rotation);
+
+        rigTransform = driveRoot
+            ? Matrix4x4.CreateTranslation(rootTravel * rigScale) * rigBase
+            : rigBase;
+
+        // Sampled in the space the trail is drawn in, so the line is where the body would be.
+        var where = Vector3.Transform(rootTravel * rigScale, rigBase);
+        if (rootPath.Count == 0 || Vector3.DistanceSquared(rootPath[^1], where) > 1e-6f)
+        {
+            rootPath.Add(where);
+            // Bounded, because an unbounded path is a memory leak wearing a gizmo. Long enough that
+            // several loops of a walk are visible at once, which is the length the wrap bug needs to
+            // be seen at — one cycle's worth would hide exactly the seam being looked for.
+            if (rootPath.Count > 2048) rootPath.RemoveAt(0);
+        }
+    }
+
+    // The turn's magnitude in degrees. Quaternion.W is cos(θ/2) and the sign of the axis is
+    // irrelevant to "how far did it turn", so the absolute value keeps a half-turn from reading as
+    // a full one.
+    private static float Degrees(Quaternion q) =>
+        2f * MathF.Acos(Math.Clamp(MathF.Abs(q.W), 0f, 1f)) * (180f / MathF.PI);
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
@@ -185,7 +431,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         var view = Matrix4x4.CreateLookAt(cameraPosition, new Vector3(0f, 1f, 0f), Vector3.UnitY);
         viewProjection = view * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
-        renderer.Render(commandList, scene, viewProjection, cameraPosition, model, modelTransform);
+        // Before recording, because the palette buffer is read at Execute and written here — the
+        // draw carries a descriptor set, not a copy of the matrices.
+        if (rig is not null && palette is not null) rig.UploadPalette(palette);
+
+        renderer.Render(
+            commandList, scene, viewProjection, cameraPosition, model, modelTransform, rig, rigTransform);
     }
 
     public void Debug(DebugContext debug)
@@ -215,12 +466,256 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         debug.Draw.Arrow("sun", sunFrom, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
 
         if (model is not null) DrawModelGizmos(debug);
+        if (rig is not null) DrawRigGizmos(debug);
 
         if (showTrail)
         {
             // Where the sun has been while it was being dragged.
             debug.Draw.Trail("sun/path", sunFrom, new GraphicsColor(1f, 0.75f, 0.3f, 1f), trailSeconds);
         }
+    }
+
+    // <b>The pose, drawn.</b> This is the stage the whole arc rests on: until a skeleton is visible
+    // over the mesh, "the character folded inside out" has two causes that look identical from the
+    // outside — the clip was already wrong, or the thing that read it was. With the bones drawn,
+    // they separate at a glance.
+    //
+    // The root's travel is drawn beside it as a path, because a root-motion bug has a shape: a
+    // straight line at constant spacing is right, a line that stutters once per cycle is the loop
+    // wrap handled by subtraction, and a line that drifts sideways is a delta taken in the wrong
+    // frame. None of those are visible in a number.
+    private void DrawRigGizmos(DebugContext debug)
+    {
+        if (rig is null || playerA is null) return;
+
+        using var scope = debug.Scope("rig");
+
+        if (showSkeleton)
+        {
+            LabSkeletonView.Draw(
+                debug,
+                rig.Skeleton,
+                boneWorlds,
+                rig.MeshNodeTransform * rigTransform,
+                LabSkeletonView.Options.Default with
+                {
+                    Joints = showJoints,
+                    RestGhost = showRestGhost,
+                    AllAxes = showAllBoneAxes,
+                    LeafStubs = showLeafStubs,
+                    Scale = gizmoScale,
+                },
+                selectedBone,
+                showRestGhost ? restWorlds : null,
+                deformBonesOnly ? rig.DeformBones : null);
+        }
+
+        if (!showRootTrail) return;
+
+        var head = rootPath.Count > 0 ? rootPath[^1] : Vector3.Transform(Vector3.Zero, rigBase);
+        debug.Draw.Trail("root/recent", head, new GraphicsColor(0.4f, 1f, 0.7f, 1f), trailSeconds);
+        if (rootPath.Count >= 2)
+        {
+            // The whole path, not just the last few seconds. The seam at a loop boundary is a
+            // once-per-cycle event, so a trail short enough to be tidy is a trail that expires
+            // before the thing it exists to show comes round again.
+            debug.Draw.Polyline("root/path", rootPath, new GraphicsColor(0.3f, 0.8f, 0.55f, 1f));
+        }
+    }
+
+    // The clip list, the transport, and the selected bone — the panel half of "see a pose".
+    //
+    // Seventy-six clips is past the point where a list is browsable, hence the filter box: the
+    // Rogue's are named by weapon and action, so typing "walk" or "2H" is how anyone actually finds
+    // one. A list this long without a filter is a list nobody reads.
+    private void DrawRigPanel()
+    {
+        if (rig is null || playerA is null || playerB is null) return;
+
+        ImGui.TextDisabled(
+            $"{rig.Skeleton.BoneCount} bones ({rig.DeformBoneCount} deform) · " +
+            $"{rig.Clips.Count} clips · {rig.Parts.Count} prims");
+
+        var mode = (int)poseMode;
+        if (ImGui.Combo("compose", ref mode, "single\0blend A→B\0additive B on A\0"))
+        {
+            poseMode = (PoseMode)mode;
+        }
+
+        if (poseMode != PoseMode.Single)
+        {
+            ImGui.SliderFloat(poseMode == PoseMode.Blend ? "weight" : "overlay", ref blendWeight, 0f, 1f);
+        }
+
+        DrawTransport(playerA, "A");
+        if (poseMode != PoseMode.Single) DrawTransport(playerB, "B");
+
+        ImGui.Separator();
+        ImGui.SetNextItemWidth(-60f);
+        ImGui.InputText("filter", ref clipFilter, 64);
+        ImGui.SameLine();
+        if (ImGui.SmallButton("clear")) clipFilter = string.Empty;
+
+        // Which player the list assigns to. A single list that always targets A would make picking
+        // B's clip impossible in blend mode; two lists would double the height of the panel for one
+        // extra bit of state.
+        var target = poseMode == PoseMode.Single ? 0 : ImGui.GetIO().KeyShift ? 1 : 0;
+        ImGui.TextDisabled(poseMode == PoseMode.Single
+            ? "click to play"
+            : target == 0 ? "click → A   (hold shift → B)" : "click → B");
+
+        if (ImGui.BeginChild("clips", new Vector2(0, 160), ImGuiChildFlags.Borders))
+        {
+            for (var i = 0; i < rig.Clips.Count; i++)
+            {
+                var clip = rig.Clips[i];
+                if (clipFilter.Length > 0 &&
+                    clip.Name.IndexOf(clipFilter, StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    continue;
+                }
+
+                var selected = i == clipIndexA || (poseMode != PoseMode.Single && i == clipIndexB);
+                var tag = i == clipIndexA ? "A" : i == clipIndexB && poseMode != PoseMode.Single ? "B" : " ";
+
+                // A zero-length clip is a POSE, not a fault — the Rogue ships seven of them. Marked
+                // rather than hidden: selecting one and seeing the body hold that shape is how you
+                // find out which pose it is.
+                var length = clip.Duration > 0 ? $"{clip.Duration,5:0.00}s" : "  pose";
+                if (!ImGui.Selectable($"{tag} {clip.Name}  {length}", selected)) continue;
+
+                if (target == 1)
+                {
+                    clipIndexB = i;
+                    playerB.Clip = clip;
+                }
+                else
+                {
+                    clipIndexA = i;
+                    playerA.Clip = clip;
+                    ResetRootTravel();
+                }
+            }
+        }
+
+        ImGui.EndChild();
+
+        DrawRootMotionPanel();
+        DrawBonePanel();
+    }
+
+    private void DrawTransport(ClipPlayer player, string label)
+    {
+        ImGui.PushID(label);
+        var paused = player.Paused;
+        if (ImGui.Button(paused ? $"play {label}" : $"pause {label}")) player.Paused = !paused;
+        ImGui.SameLine();
+
+        // A thirtieth of a second rather than a keyframe, because a clip's keyframes are not
+        // uniformly spaced and "one frame" in an animator's sense is a sampling rate, not a track
+        // entry. Stepping by time is also what makes the root-motion readout comparable between
+        // steps.
+        if (ImGui.Button("<")) player.Step(-1.0 / 30.0);
+        ImGui.SameLine();
+        if (ImGui.Button(">")) player.Step(1.0 / 30.0);
+        ImGui.SameLine();
+        ImGui.TextDisabled($"{player.Time,5:0.000} / {player.Duration:0.00}s");
+
+        var t = (float)player.Time;
+        ImGui.SetNextItemWidth(-70f);
+        if (ImGui.SliderFloat($"t {label}", ref t, 0f, MathF.Max(0.0001f, (float)player.Duration)))
+        {
+            // A scrub is a jump, not travel — ClipPlayer clears the root delta for exactly this, so
+            // dragging the slider does not launch the body across the map.
+            player.ScrubTo(t);
+            player.Paused = true;
+        }
+
+        var rate = player.Rate;
+        ImGui.SetNextItemWidth(-70f);
+        if (ImGui.SliderFloat($"rate {label}", ref rate, -3f, 3f)) player.Rate = rate;
+        ImGui.PopID();
+    }
+
+    private void DrawRootMotionPanel()
+    {
+        if (playerA is null) return;
+        if (!ImGui.CollapsingHeader("root motion")) return;
+
+        var perCycle = playerA.Clip is { } clip
+            ? RootMotion.PerCycle(clip, playerA.RootBone, playerA.RestPose.Locals[playerA.RootBone])
+            : RootMotion.None;
+
+        // <b>The number that says whether a clip travels at all.</b> Most authored loops are made in
+        // place — the root returns to where it started, per-cycle travel is ~0, and locomotion is the
+        // game's job. A clip with real travel reports a metre or two here, and that is the clip whose
+        // delta is worth driving anything with.
+        ImGui.Text($"per cycle  {perCycle.Translation.X:0.000}, {perCycle.Translation.Y:0.000}, {perCycle.Translation.Z:0.000}");
+        ImGui.TextDisabled($"           {perCycle.Distance:0.000} m, {Degrees(perCycle.Rotation):0.0}°");
+        ImGui.Text($"travelled  {rootTravel.X:0.000}, {rootTravel.Y:0.000}, {rootTravel.Z:0.000}");
+        ImGui.TextDisabled($"           {rootTravel.Length():0.000} m, {rootTurnDegrees:0.0}° turned");
+
+        ImGui.Checkbox("drive the model", ref driveRoot);
+        ImGui.SameLine();
+        ImGui.Checkbox("trail", ref showRootTrail);
+        if (ImGui.Button("reset travel")) ResetRootTravel();
+        ImGui.SameLine();
+        ImGui.TextDisabled($"{rootPath.Count} samples");
+    }
+
+    private void ResetRootTravel()
+    {
+        rootTravel = Vector3.Zero;
+        rootTurnDegrees = 0f;
+        rootPath.Clear();
+    }
+
+    // The selected bone, in both spaces. Local TRS is what a clip authored; world is where it ended
+    // up. Seeing them together is what separates "this bone's track is wrong" from "this bone's
+    // PARENT is wrong and it is being carried" — the single most common misreading of a bad pose.
+    private void DrawBonePanel()
+    {
+        if (rig is null || posed is null) return;
+        if (!ImGui.CollapsingHeader("bones")) return;
+
+        if (ImGui.BeginChild("bonelist", new Vector2(0, 140), ImGuiChildFlags.Borders))
+        {
+            for (var i = 0; i < rig.Skeleton.BoneCount; i++)
+            {
+                var bone = rig.Skeleton.Bones[i];
+                var indent = 0;
+                for (var p = bone.ParentIndex; p >= 0; p = rig.Skeleton.Bones[p].ParentIndex) indent++;
+                // A control bone is dimmed rather than hidden: it is still in the palette and still
+                // animated, so a reader looking for "why is nothing moving" needs to be able to find
+                // it — just not to have it shouting alongside the bones the mesh follows.
+                var deform = rig.DeformBones[i];
+                var label = new string(' ', indent * 2) + bone.Name + (deform ? string.Empty : "  ·");
+                if (!deform) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.55f, 0.55f, 0.6f, 1f));
+                if (ImGui.Selectable($"{label}##{i}", selectedBone == i)) selectedBone = i;
+                if (!deform) ImGui.PopStyleColor();
+            }
+        }
+
+        ImGui.EndChild();
+
+        if (selectedBone < 0 || selectedBone >= rig.Skeleton.BoneCount) return;
+
+        var local = posed.Locals[selectedBone];
+        var rest = playerA!.RestPose.Locals[selectedBone];
+        var world = boneWorlds[selectedBone] * rig.MeshNodeTransform * rigTransform;
+
+        ImGui.TextDisabled($"bone {selectedBone} · parent {rig.Skeleton.Bones[selectedBone].ParentIndex}");
+        ImGui.Text($"local T {local.Translation.X:0.000}, {local.Translation.Y:0.000}, {local.Translation.Z:0.000}");
+        ImGui.Text($"local R {local.Rotation.X:0.000}, {local.Rotation.Y:0.000}, {local.Rotation.Z:0.000}, {local.Rotation.W:0.000}");
+        ImGui.Text($"local S {local.Scale.X:0.000}, {local.Scale.Y:0.000}, {local.Scale.Z:0.000}");
+        ImGui.Separator();
+        ImGui.Text($"world   {world.M41:0.000}, {world.M42:0.000}, {world.M43:0.000}");
+
+        // How far this bone has moved off its rest value, which is the one number that answers
+        // "is this clip even touching this bone?" A bone a clip has no track for reads exactly 0.
+        var offset = (local.Translation - rest.Translation).Length();
+        var turned = Degrees(Quaternion.Inverse(rest.Rotation) * local.Rotation);
+        ImGui.TextDisabled($"from rest  {offset:0.000} m, {turned:0.0}°");
     }
 
     // The node tree, and what the selected one actually is.
@@ -363,8 +858,9 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // Grouped rather than one flat list of knobs. The panel grew a control at a time and had
         // become a wall — which is the same complaint about legibility that got the gizmos
         // depth-tested, one layer up.
-        if (model is not null) ImGui.TextDisabled(Path.GetFileName(model.SourcePath));
-        else ImGui.TextDisabled("no model — pass --model <path.glb>");
+        if (rig is not null) ImGui.TextDisabled(Path.GetFileName(rig.SourcePath));
+        else if (model is not null) ImGui.TextDisabled(Path.GetFileName(model.SourcePath));
+        else ImGui.TextDisabled("nothing loaded — pass --model <path.glb> or --rig <rigged.glb>");
 
         if (ImGui.CollapsingHeader("image", ImGuiTreeNodeFlags.DefaultOpen))
         {
@@ -400,6 +896,27 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
                 ImGui.Checkbox("bounds", ref showBounds);
                 if (showPivots) ImGui.Checkbox("transform-only nodes too", ref showAllPivots);
             }
+
+            if (rig is not null)
+            {
+                ImGui.Checkbox("skeleton", ref showSkeleton);
+                ImGui.SameLine();
+                ImGui.Checkbox("joints", ref showJoints);
+                ImGui.Checkbox("rest ghost", ref showRestGhost);
+                ImGui.SameLine();
+                ImGui.Checkbox("all axes", ref showAllBoneAxes);
+                ImGui.Checkbox("leaf stubs", ref showLeafStubs);
+                ImGui.SameLine();
+                // The default, because 20 of the Rogue's 41 bones are IK handles and roll controls
+                // hanging off the root, and drawing them makes a starburst at the feet.
+                ImGui.Checkbox("deform only", ref deformBonesOnly);
+                ImGui.SliderFloat("gizmo size", ref gizmoScale, 0.25f, 4f);
+            }
+        }
+
+        if (rig is not null && ImGui.CollapsingHeader("animation", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            DrawRigPanel();
         }
 
         if (model is not null && ImGui.CollapsingHeader("nodes", ImGuiTreeNodeFlags.DefaultOpen))
@@ -408,8 +925,33 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         }
 
         ImGui.Separator();
-        ImGui.TextDisabled($"drag to orbit · wheel to zoom · {frames} frames");
+        ImGui.TextDisabled(rig is not null
+            ? $"drag to orbit · wheel to zoom · space plays · ←/→ step · {frames} frames"
+            : $"drag to orbit · wheel to zoom · {frames} frames");
         ImGui.End();
+    }
+
+    // Transport on the keyboard, because scrubbing a pose means looking at the model rather than at
+    // the slider you are dragging. Space and the arrows are what every animation tool uses; a lab
+    // that invented its own would be asking to be relearned.
+    public void OnKeyDown(Key key)
+    {
+        if (playerA is null) return;
+        switch (key)
+        {
+            case Key.Space:
+                playerA.Paused = !playerA.Paused;
+                if (poseMode != PoseMode.Single && playerB is not null) playerB.Paused = playerA.Paused;
+                break;
+            case Key.Left:
+                playerA.Step(-1.0 / 30.0);
+                playerA.Paused = true;
+                break;
+            case Key.Right:
+                playerA.Step(1.0 / 30.0);
+                playerA.Paused = true;
+                break;
+        }
     }
 
     public void OnMouseDown(MouseButton button)
@@ -454,8 +996,16 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     /// </remarks>
     private void PickAt(Vector2 position)
     {
-        if (model is null || mainView is not { } view) return;
+        if (mainView is not { } view) return;
         if (ViewPicking.RayThrough(view, position) is not { } ray) return;
+
+        if (rig is not null)
+        {
+            PickBone(ray);
+            return;
+        }
+
+        if (model is null) return;
 
         var best = -1;
         var nearest = float.MaxValue;
@@ -478,6 +1028,47 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         selectedNode = best;
     }
 
+    /// <summary>Selects the joint whose drawn cross the pointer's ray enters.</summary>
+    /// <remarks>
+    /// <b>Against the cross, not against the mesh.</b> The same rule the node picking follows: what
+    /// gets picked is exactly what is drawn, so a click lands on the thing the eye was aiming at.
+    /// Picking against the skinned triangles instead would be more "accurate" and would select bones
+    /// the picture cannot explain — an elbow through a sleeve, a hip through a tunic.
+    /// <para>
+    /// Hidden bones are unpickable, which is the other half of the same rule: with the IK controls
+    /// filtered out, clicking near the feet must not silently select <c>control-heel-roll.r</c>.
+    /// </para>
+    /// </remarks>
+    private void PickBone(Ray ray)
+    {
+        if (rig is null) return;
+
+        var place = rig.MeshNodeTransform * rigTransform;
+        var span = LabSkeletonView.Span(
+            rig.Skeleton, boneWorlds, place, deformBonesOnly ? rig.DeformBones : null);
+
+        // Twice the joint cross's own arm, so a click needs to be close but not surgical — the same
+        // slack the four-pixel click/drag threshold grants the gesture one layer up.
+        var reach = MathF.Max(0.005f, span * 0.012f) * gizmoScale * 2f;
+
+        var best = -1;
+        var nearest = float.MaxValue;
+        for (var i = 0; i < rig.Skeleton.BoneCount; i++)
+        {
+            if (deformBonesOnly && !rig.DeformBones[i]) continue;
+
+            var world = boneWorlds[i] * place;
+            var at = new Vector3(world.M41, world.M42, world.M43);
+            var bounds = new Bounds3(at - new Vector3(reach), at + new Vector3(reach));
+            if (Intersection.Raycast(ray, bounds) is not { } hit) continue;
+            if (hit.Time >= nearest) continue;
+            nearest = hit.Time;
+            best = i;
+        }
+
+        selectedBone = best;
+    }
+
     public void OnMouseWheel(float offsetX, float offsetY)
     {
         distance = Math.Clamp(distance - offsetY * 0.8f, 3.5f, 40f);
@@ -490,6 +1081,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // Bulwark both take this route; this one had to crash first to join them.
     public void Dispose()
     {
+        rig?.Dispose();
         model?.Dispose();
         renderer.Dispose();
     }

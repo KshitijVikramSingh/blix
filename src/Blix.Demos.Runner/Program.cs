@@ -134,14 +134,12 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
     private MaterialHandle charSkinMaterial;       // set 2: albedo (shared, 1 material)
     private MaterialBindings charBones = null!;    // set 3: bone palette, framesInFlight
     private Skeleton charSkeleton = null!;
-    private Pose charRestPose = null!;
-    private Pose charPose = null!;
+    private ClipPlayer charPlayer = null!;
     private BonePalette charPalette = null!;
     private byte[] charPalettePayload = Array.Empty<byte>();
     private Matrix4x4 charMeshNodeTransform = Matrix4x4.Identity;
     private AnimationClip charRun = null!;
     private AnimationClip charJump = null!;
-    private double charAnimTime;
     private readonly byte[] skinnedPush = new byte[128];  // uModel + uViewProjection
     private bool charLoaded;
 
@@ -305,8 +303,7 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
         }
 
         charSkeleton = model.Skeleton;
-        charRestPose = charSkeleton.CreateRestPose();
-        charPose = charSkeleton.CreateRestPose();
+        charPlayer = new ClipPlayer(charSkeleton);
         charPalette = new BonePalette(charSkeleton.BoneCount);
         charPalettePayload = new byte[charSkeleton.BoneCount * 64];
         charMeshNodeTransform = model.MeshNodeTransform;
@@ -360,13 +357,18 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
     // run speed; airborne switches to the jump clip; game-over freezes the pose.
     private void UpdateCharacter(Time time)
     {
-        var clip = grounded ? charRun : charJump;
-        var rate = gameOver ? 0f : (grounded ? currentSpeed / BaseSpeed : 1f);
-        charAnimTime += time.Delta * rate;
-        var dur = clip.Duration > 0 ? clip.Duration : 1.0;
-        charPose.CopyFrom(charRestPose);
-        clip.Sample(charAnimTime % dur, charPose);
-        charSkeleton.ComputeBonePalette(charPose, charPalette);
+        // <b>Three lines and three fields lighter than it was.</b> The rest reset, the loop wrap and
+        // the zero-duration guard were written here by hand, and identically in Bulwark and RTSGame —
+        // one non-obvious decision (a clip writes only the channels it has tracks for, so an
+        // un-reset pose keeps last frame's values on every other bone) copied three times.
+        //
+        // Rate carries what the demo means: game over holds the pose, airborne runs the jump at
+        // authored speed, and on the ground the run cadence scales with how fast the player is
+        // actually moving. The player has no opinion about any of that — it owns a clip and a clock.
+        charPlayer.Clip = grounded ? charRun : charJump;
+        charPlayer.Rate = gameOver ? 0f : (grounded ? currentSpeed / BaseSpeed : 1f);
+        charPlayer.Advance(time.Delta);
+        charSkeleton.ComputeBonePalette(charPlayer.Pose, charPalette);
         PackPalette(charPalette, charPalettePayload);
         charBones.WriteBuffer(vk.CurrentFrameSlot, 0, charPalettePayload);
 

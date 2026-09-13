@@ -39,10 +39,27 @@ behaviour here, that test should fail first.
   parent.
 - No dirty-flag cache, no `Origin`/`Pivot`, no non-uniform scale on shared
   parents (it shears children). These are deliberate limits, documented inline.
+- **A clip sample starts from a base pose, always.** `AnimationClip.Sample`
+  writes only the channels a clip has tracks for; without resetting to the rest
+  pose first, every untouched bone keeps the *previous* frame's value. That is
+  invisible on a full clip and is a character whose legs lag its arms on a
+  partial one. `ClipPlayer` owns the reset, the loop wrap and the zero-duration
+  guard so it is made once rather than remembered three times.
+- **A palette matrix is not a joint position.** `ComputeBonePalette` produces
+  `InverseBindPose × world` — a *rest vertex's* displacement, exactly zero at
+  rest. Where a joint **is** comes from the hierarchy walk's `world` term alone.
+  Drawing a skeleton from palette translations is correct arithmetic answering
+  the wrong question, and it looks like a knot at the origin.
+- **Root motion is a delta, taken across the loop.** `RootMotion` reports the
+  travel between two clip times in the root's parent frame; `AcrossLoop` walks
+  to the end of the cycle and on from its start rather than subtracting, which
+  is the one place every implementation of this is wrong. Applying it — rotating
+  it into world, driving a body with it — stays the caller's decision.
 
 **Enforced by:** [`blix.md` §Transform3D](blix.md) (incl. *Deliberate limits*) ·
-`Blix.Test.Graphics` Sections **AH** (compose / reparent / cycle) and **AJ**
-(pose basis / `LookAt` / `WorldRotation`).
+`Blix.Test.Graphics` Sections **AH** (compose / reparent / cycle), **AJ**
+(pose basis / `LookAt` / `WorldRotation`) and **AQ** (rest reset, loop-seam
+travel, palette-vs-joint) · `Toolchain.Probe --rig`.
 
 ## 2. Matrices & the graphics backend
 

@@ -2471,6 +2471,209 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("AP.4 indirect draw owns its payload too", indirect.PushConstants![0] == 99);
 }
 
+// ============================================================================
+// Section AQ — ClipPlayer: the rest reset, and root motion across the loop.
+// ============================================================================
+//
+// Two behaviours, both of which look correct in a still frame and are wrong over time:
+//
+//   1. A partial clip sampled without resetting to rest leaves every untouched bone
+//      holding LAST frame's value. Three consumers wrote that reset by hand.
+//   2. Root travel taken as `root(t1) - root(t0)` reports a jump backwards across the
+//      whole cycle every time t1 wraps — a walk that lurches once per loop.
+//
+// The fixture is a two-bone skeleton with a clip that animates ONLY the root, which
+// makes both failures observable in one setup: bone 1 is what the reset protects, and
+// bone 0 is what travels.
+{
+    // Bind pose: root at the origin, child one unit up. InverseBindPose is the inverse
+    // of the bone's object-space bind transform, which is what Skeleton documents.
+    var bones = new[]
+    {
+        new Bone("root", -1, Matrix4x4.Identity),
+        new Bone("child", 0, Matrix4x4.CreateTranslation(0, -1, 0)),
+    };
+    var skeleton = new Skeleton(bones);
+
+    // The root walks 2 m along +X over 1 s and does NOT return — real root motion.
+    var travel = new AnimationClip("walk", new[]
+    {
+        new BoneTrack
+        {
+            BoneIndex = 0,
+            Translation = new KeyframeVector3Curve(new[]
+            {
+                new Keyframe<Vector3>(0.0, Vector3.Zero),
+                new Keyframe<Vector3>(1.0, new Vector3(2f, 0f, 0f)),
+            }),
+        },
+    });
+
+    t.ExpectClose("AQ.1 clip duration comes from its longest channel", (float)travel.Duration, 1f);
+
+    var player = new ClipPlayer(skeleton, travel);
+
+    // ── The reset ────────────────────────────────────────────────────────────
+    // Bone 1 has no track, so every sample must leave it at its rest value. Dirty the
+    // pose first: without the CopyFrom, the dirt survives and the bone is one frame — or
+    // one clip — behind forever.
+    player.Pose.Locals[1] = new BoneTransform(new Vector3(99f, 99f, 99f), Quaternion.Identity, Vector3.One);
+    player.Advance(0.25);
+    t.ExpectClose("AQ.2 an untracked bone is reset to rest, not left dirty",
+        player.Pose.Locals[1].Translation.X, 0f);
+    t.ExpectClose("AQ.2 a tracked bone follows its curve", player.Pose.Locals[0].Translation.X, 0.5f);
+
+    // ── Travel inside one pass ───────────────────────────────────────────────
+    player.ScrubTo(0.0);
+    player.Advance(0.25);
+    t.ExpectClose("AQ.3 a quarter of the clip travels a quarter of the distance",
+        player.RootDelta.Translation.X, 0.5f);
+
+    // A scrub is a jump, not travel. Integrating a scrub would teleport whatever the
+    // delta drives, which is why the player clears it rather than reporting the gap.
+    player.ScrubTo(0.9);
+    t.ExpectClose("AQ.4 a scrub reports no travel", player.RootDelta.Translation.X, 0f);
+
+    // ── The loop boundary ────────────────────────────────────────────────────
+    // Standing at 0.9 and stepping 0.2 crosses the seam: 0.1 s left in this cycle plus
+    // 0.1 s of the next, which is 0.4 m forward. The subtraction form reports
+    // root(0.1) - root(0.9) = -1.6 m, and the sign alone gives it away.
+    player.ScrubTo(0.9);
+    player.Advance(0.2);
+    t.ExpectClose("AQ.5 travel across the seam is forward, not a cycle backwards",
+        player.RootDelta.Translation.X, 0.4f);
+    t.ExpectClose("AQ.5 and the clock lands where it should", (float)player.Time, 0.1f);
+
+    // ── Many cycles in one step ──────────────────────────────────────────────
+    // A long frame (a debugger pause, a hitch) must not lose the cycles it skipped.
+    player.ScrubTo(0.0);
+    player.Advance(3.5);
+    t.ExpectClose("AQ.6 a step spanning three and a half cycles travels seven metres",
+        player.RootDelta.Translation.X, 7f);
+
+    // ── Integrated, at a step that never lands on the seam ───────────────────
+    // The property Stage C is actually about: summing the per-frame deltas over several
+    // loops equals the per-cycle travel times the number of cycles. A step chosen NOT to
+    // divide the duration puts every wrap in the middle of a frame, which is the only
+    // case the piecewise walk exists for.
+    player.ScrubTo(0.0);
+    var summed = 0f;
+    for (var i = 0; i < 100; i++)
+    {
+        player.Advance(0.03);
+        summed += player.RootDelta.Translation.X;
+    }
+
+    t.ExpectClose("AQ.7 100 steps of 0.03 s integrate to three cycles of travel", summed, 6f, 0.001f);
+
+    // ── Reverse ──────────────────────────────────────────────────────────────
+    // Negative rate takes the mirrored path (bounded by the clip's start, not its end),
+    // so it is genuinely different code and genuinely able to be wrong on its own.
+    player.ScrubTo(0.1);
+    player.Rate = -1f;
+    player.Advance(0.2);
+    t.ExpectClose("AQ.8 running backwards across the seam travels backwards",
+        player.RootDelta.Translation.X, -0.4f);
+    t.ExpectClose("AQ.8 and wraps to the end of the clip", (float)player.Time, 0.9f);
+    player.Rate = 1f;
+
+    // ── An in-place clip ─────────────────────────────────────────────────────
+    // The common case: the root returns to where it started, so a whole cycle nets zero
+    // and the game owns locomotion. It must net zero through the SAME code path that
+    // reports 2 m for the travelling clip — a wrap handler that special-cased "no travel"
+    // would pass this and fail the one above.
+    var inPlace = new AnimationClip("idle", new[]
+    {
+        new BoneTrack
+        {
+            BoneIndex = 0,
+            Translation = new KeyframeVector3Curve(new[]
+            {
+                new Keyframe<Vector3>(0.0, Vector3.Zero),
+                new Keyframe<Vector3>(0.5, new Vector3(0.3f, 0f, 0f)),
+                new Keyframe<Vector3>(1.0, Vector3.Zero),
+            }),
+        },
+    });
+
+    t.ExpectClose("AQ.9 an in-place clip reports no per-cycle travel",
+        RootMotion.PerCycle(inPlace, 0, skeleton.CreateRestPose().Locals[0]).Distance, 0f, 0.0001f);
+
+    var idlePlayer = new ClipPlayer(skeleton, inPlace);
+    var drift = 0f;
+    for (var i = 0; i < 100; i++)
+    {
+        idlePlayer.Advance(0.03);
+        drift += idlePlayer.RootDelta.Translation.X;
+    }
+
+    t.ExpectClose("AQ.9 and integrating it over three cycles drifts nowhere", drift, 0f, 0.001f);
+
+    // ── A clip with no root track at all ─────────────────────────────────────
+    // RootAt falls back to the rest value on both ends, so the delta is exactly zero
+    // rather than approximately so. Worth pinning: a fallback that returned identity
+    // instead of rest would report the rest offset as travel on the first frame.
+    var armOnly = new AnimationClip("wave", new[]
+    {
+        new BoneTrack
+        {
+            BoneIndex = 1,
+            Rotation = new KeyframeQuaternionCurve(new[]
+            {
+                new Keyframe<Quaternion>(0.0, Quaternion.Identity),
+                new Keyframe<Quaternion>(1.0, Quaternion.CreateFromAxisAngle(Vector3.UnitZ, 1f)),
+            }),
+        },
+    });
+
+    var armPlayer = new ClipPlayer(skeleton, armOnly);
+    armPlayer.Advance(0.5);
+    t.ExpectClose("AQ.10 a clip with no root track reports exactly zero travel",
+        armPlayer.RootDelta.Translation.Length(), 0f);
+
+    // ── A zero-duration pose clip ────────────────────────────────────────────
+    // The Rogue ships seven. They are poses, not faults: advancing one holds it, and the
+    // guard against dividing by a zero duration is the reason every consumer wrote
+    // `duration > 0 ? ... : 0` by hand before this existed.
+    var poseClip = new AnimationClip("t-pose", new[]
+    {
+        new BoneTrack
+        {
+            BoneIndex = 0,
+            Translation = new KeyframeVector3Curve(new[] { new Keyframe<Vector3>(0.0, new Vector3(5f, 0f, 0f)) }),
+        },
+    });
+
+    var posePlayer = new ClipPlayer(skeleton, poseClip);
+    posePlayer.Advance(2.0);
+    t.ExpectClose("AQ.11 a zero-duration pose holds, and its clock stays at zero", (float)posePlayer.Time, 0f);
+    t.ExpectClose("AQ.11 and it still writes the pose it describes",
+        posePlayer.Pose.Locals[0].Translation.X, 5f);
+    t.ExpectClose("AQ.11 with no travel to report", posePlayer.RootDelta.Translation.Length(), 0f);
+
+    // ── A palette matrix is not a joint position ─────────────────────────────
+    // The distinction that cost the lab its first skeleton overlay, pinned here because
+    // it is a fact about ComputeBonePalette rather than about the lab. At rest every
+    // palette matrix is the identity by construction (BindWorld × InverseBindPose = I),
+    // so a skeleton drawn from palette translations collapses onto the origin — correct
+    // arithmetic, wrong question. Where the joint IS comes from the hierarchy walk's
+    // `world` term alone, which is the three-line recurrence below.
+    var rest = skeleton.CreateRestPose();
+    var palette = new BonePalette(skeleton.BoneCount);
+    skeleton.ComputeBonePalette(rest, palette);
+    t.ExpectClose("AQ.12 a rest palette matrix carries no translation", palette.Matrices[1].M42, 0f);
+
+    var worlds = new Matrix4x4[skeleton.BoneCount];
+    for (var i = 0; i < skeleton.BoneCount; i++)
+    {
+        var local = rest.Locals[i].ToMatrix();
+        var parent = skeleton.Bones[i].ParentIndex;
+        worlds[i] = parent < 0 ? local : local * worlds[parent];
+    }
+
+    t.ExpectClose("AQ.12 but the bone's world transform is where the joint is", worlds[1].M42, 1f);
+}
+
 t.PrintSummary();
 return t.FailedCount;
 

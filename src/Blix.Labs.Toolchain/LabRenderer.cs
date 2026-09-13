@@ -52,9 +52,13 @@ public sealed class LabRenderer : IDisposable
     private ShaderProgramHandle litProgram;
     private ShaderProgramHandle shadowProgram;
     private ShaderProgramHandle presentProgram;
+    private ShaderProgramHandle skinnedProgram;
+    private ShaderProgramHandle skinnedShadowProgram;
     private PipelineHandle litPipeline;
     private PipelineHandle shadowPipeline;
     private PipelineHandle presentPipeline;
+    private PipelineHandle skinnedPipeline;
+    private PipelineHandle skinnedShadowPipeline;
 
     private VertexBufferHandle cubeVertices;
     private IndexBufferHandle cubeIndices;
@@ -107,6 +111,13 @@ public sealed class LabRenderer : IDisposable
         var litInterface = Reflect("lab_lit.vert", "lab_lit.frag");
         var presentInterface = Reflect("lab_present.vert", "lab_present.frag");
 
+        // The skinned pair reuses the unskinned FRAGMENT stages, so these differ from the two above
+        // by exactly one thing: a set-3 storage buffer the vertex stage reads. That is what makes
+        // the bone palette's size a reflected fact rather than a constant restated in C# — the
+        // hazard the probe exists to catch, in the one place the lab still had a hand-written number.
+        var skinnedInterface = Reflect("lab_skinned.vert", "lab_lit.frag");
+        var skinnedShadowInterface = Reflect("lab_skinned_shadow.vert", "lab_shadow.frag");
+
         // <b>A render graph, not hand-built surfaces.</b> The first cut of this used
         // CreateRenderSurface directly and failed on the first run: "RenderSurface needs at
         // least one color attachment" — which a shadow map does not have and should not be
@@ -132,6 +143,11 @@ public sealed class LabRenderer : IDisposable
             .Shader(litInterface)
             .Handle;
 
+        // The skinned pipelines draw INTO the same two passes rather than into passes of their own.
+        // A rig and a box are the same lighting question with different vertex plumbing, and giving
+        // the rig its own pass would mean a second clear, a second sort order, and two places to fix
+        // the next time the sun moves.
+
         graph.Compile();
 
                 byte[] Spv(string stage) => File.ReadAllBytes(Path.Combine(shaderDirectory, stage + ".spv"));
@@ -142,6 +158,10 @@ public sealed class LabRenderer : IDisposable
             Spv("lab_lit.vert"), Spv("lab_lit.frag"), litInterface, "lab.lit");
         presentProgram = vk.CreateShaderProgramFromSpv(
             Spv("lab_present.vert"), Spv("lab_present.frag"), presentInterface, "lab.present");
+        skinnedProgram = vk.CreateShaderProgramFromSpv(
+            Spv("lab_skinned.vert"), Spv("lab_lit.frag"), skinnedInterface, "lab.skinned");
+        skinnedShadowProgram = vk.CreateShaderProgramFromSpv(
+            Spv("lab_skinned_shadow.vert"), Spv("lab_shadow.frag"), skinnedShadowInterface, "lab.skinned.shadow");
 
         shadowPipeline = vk.CreatePipeline(new PipelineDescription(
             shadowProgram,
@@ -160,6 +180,31 @@ public sealed class LabRenderer : IDisposable
             RasterizerState.NoCulling,
             new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(litPass)), "lab.lit");
+
+        // <b>Back-face culling, unlike everything else in this lab.</b> The boxes and the ground are
+        // drawn with NoCulling so a camera inside one still shows something; a character is a closed
+        // manifold whose interior is never the subject, and culling it halves the fill on the pass
+        // that already costs the most. It also makes an inside-out rig — inverted bind matrices, a
+        // mirrored import — visible as holes rather than as a mesh that merely looks odd.
+        skinnedPipeline = vk.CreatePipeline(new PipelineDescription(
+            skinnedProgram,
+            VertexPosition3NormalTextureSkin4Tangent.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite,
+            RasterizerState.BackFaceCulling,
+            new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(litPass)), "lab.skinned");
+
+        // The caster does NOT cull: a one-sided shadow from a back-face-culled caster loses the far
+        // side of a limb, and a character's own silhouette is mostly far sides.
+        skinnedShadowPipeline = vk.CreatePipeline(new PipelineDescription(
+            skinnedShadowProgram,
+            VertexPosition3NormalTextureSkin4Tangent.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite,
+            RasterizerState.NoCulling,
+            Array.Empty<BlendState>(),
+            RenderTarget: graph.GetPassSurface(shadowPass)), "lab.skinned.shadow");
 
         presentPipeline = vk.CreatePipeline(new PipelineDescription(
             presentProgram,
@@ -205,15 +250,27 @@ public sealed class LabRenderer : IDisposable
     /// <summary>The sun's depth buffer. Exposed so a tool can look at what the caster pass produced.</summary>
     public TextureHandle ShadowDepth => graph.GetDepthTexture(shadowTarget);
 
+    /// <summary>The program the bone-palette material must be created against.</summary>
+    /// <remarks>
+    /// A <c>MaterialBindings</c> takes its descriptor layout from a program's reflected interface, so a
+    /// rig cannot build its set-3 buffer until it knows which program will read it. Handing the program
+    /// out is what keeps the buffer's size a fact from the shader rather than a constant agreed between
+    /// two files that can drift apart.
+    /// </remarks>
+    public ShaderProgramHandle SkinnedProgram => skinnedProgram;
+
     public void Render(
         RenderCommandList commandList,
         LabScene scene,
         Matrix4x4 viewProjection,
         Vector3 cameraPosition,
         LabModel? model = null,
-        Matrix4x4 modelTransform = default)
+        Matrix4x4 modelTransform = default,
+        LabRig? rig = null,
+        Matrix4x4 rigTransform = default)
     {
         if (modelTransform == default) modelTransform = Matrix4x4.Identity;
+        if (rigTransform == default) rigTransform = Matrix4x4.Identity;
 
         var sunViewProjection = scene.SunViewProjection();
 
@@ -235,6 +292,10 @@ public sealed class LabRenderer : IDisposable
 
             DrawModelParts(
                 scope, model, modelTransform, shadowPipeline, uniforms,
+                Array.Empty<ShaderTextureBinding>(), casterOnly: true);
+
+            DrawRigParts(
+                scope, rig, rigTransform, skinnedShadowPipeline, uniforms,
                 Array.Empty<ShaderTextureBinding>(), casterOnly: true);
         });
 
@@ -258,6 +319,7 @@ public sealed class LabRenderer : IDisposable
             }
 
             DrawModelParts(scope, model, modelTransform, litPipeline, uniforms, textures, casterOnly: false);
+            DrawRigParts(scope, rig, rigTransform, skinnedPipeline, uniforms, textures, casterOnly: false);
         });
 
         graph.Execute(commandList);
@@ -349,6 +411,62 @@ public sealed class LabRenderer : IDisposable
         }
     }
 
+    // The rig's primitives, all at ONE transform and all reading ONE palette.
+    //
+    // The contrast with DrawModelParts is the whole difference between a static asset and a rigged
+    // one: there, each part is placed by its node's composed world matrix, because the hierarchy IS
+    // the articulation. Here the hierarchy lives in the palette and every primitive sits at the same
+    // uModel — a skin that placed its parts individually would tear along their seams.
+    //
+    // The palette itself is bound as the rig's set-3 material, whose contents were written before
+    // this pass recorded. Push payloads are copied at record time; a descriptor set's BUFFER is not,
+    // so what the GPU reads is whatever the material holds at Execute. That is exactly right for one
+    // pose per frame and exactly wrong for two, which is why LabRig owns the material rather than
+    // this renderer.
+    private void DrawRigParts(
+        RenderPassBuilder pass,
+        LabRig? rig,
+        Matrix4x4 rigTransform,
+        PipelineHandle pipeline,
+        ShaderUniform[] uniforms,
+        ShaderTextureBinding[] textures,
+        bool casterOnly)
+    {
+        if (rig is null) return;
+
+        var model = rig.MeshNodeTransform * rigTransform;
+        foreach (var part in rig.Parts)
+        {
+            var push = casterOnly ? casterPushScratch : pushScratch;
+            PackMatrix(model, push);
+            if (!casterOnly)
+            {
+                var floats = MemoryMarshal.Cast<byte, float>(push.AsSpan());
+                floats[16] = part.BaseColour.X;
+                floats[17] = part.BaseColour.Y;
+                floats[18] = part.BaseColour.Z;
+                floats[19] = 1f;
+                floats[20] = part.Metallic;
+                floats[21] = part.Roughness;
+            }
+
+            pass.DrawIndexed(
+                vertexBuffer: part.Vertices,
+                indexBuffer: part.Indices,
+                pipeline: pipeline,
+                indexCount: part.IndexCount,
+                uniforms: uniforms,
+                // A fresh array per part for the same reason DrawModelParts builds one: texture
+                // lists are retained by reference, so a shared array gives every draw the last
+                // part's albedo.
+                textures: casterOnly
+                    ? textures
+                    : new[] { textures[0], new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1) },
+                material: rig.BoneMaterial,
+                pushConstants: push);
+        }
+    }
+
     private static void PackMatrix(Matrix4x4 m, byte[] target)
     {
         var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
@@ -422,9 +540,13 @@ public sealed class LabRenderer : IDisposable
         device.DestroyPipeline(litPipeline);
         device.DestroyPipeline(shadowPipeline);
         device.DestroyPipeline(presentPipeline);
+        device.DestroyPipeline(skinnedPipeline);
+        device.DestroyPipeline(skinnedShadowPipeline);
         device.DestroyShaderProgram(litProgram);
         device.DestroyShaderProgram(shadowProgram);
         device.DestroyShaderProgram(presentProgram);
+        device.DestroyShaderProgram(skinnedProgram);
+        device.DestroyShaderProgram(skinnedShadowProgram);
         device.DestroyVertexBuffer(cubeVertices);
         device.DestroyIndexBuffer(cubeIndices);
         device.DestroyVertexBuffer(groundVertices);

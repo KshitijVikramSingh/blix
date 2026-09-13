@@ -33,10 +33,17 @@ public readonly record struct ScissorRect(int X, int Y, int Width, int Height);
 // draw.
 //
 // NOT yet frozen: the Uniforms and Textures lists, and in particular the array inside a
-// Matrix4x4ArrayUniform — which is how a bone palette will travel. Those are shared per
-// pass rather than per draw, so copying them per draw costs far more than 128 bytes;
-// that one wants measuring before it is done, and is the next thing to settle before any
-// skeletal work.
+// Matrix4x4ArrayUniform. Those are shared per pass rather than per draw, so copying them
+// per draw costs far more than 128 bytes; that one wants measuring before it is done.
+//
+// This used to say "the next thing to settle before any skeletal work". The skeletal work
+// has since happened and did not settle it: a bone palette does NOT travel as a
+// Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, RTSGame and the toolchain lab
+// all send it as a set-3 storage buffer through MaterialBindings, one buffer per frame
+// slot — which solves the across-frames half of the hazard and leaves the within-frame
+// half untouched (two draws in one frame sharing one palette material both render the
+// second pose). So the note stands, unexercised, and the honest reason is that nothing
+// has wanted the uniform-array path rather than that it was checked.
 public sealed record DispatchCommand(
     PipelineHandle Pipeline,
     int GroupsX,
@@ -81,10 +88,17 @@ public sealed record DispatchCommand(
 // draw.
 //
 // NOT yet frozen: the Uniforms and Textures lists, and in particular the array inside a
-// Matrix4x4ArrayUniform — which is how a bone palette will travel. Those are shared per
-// pass rather than per draw, so copying them per draw costs far more than 128 bytes;
-// that one wants measuring before it is done, and is the next thing to settle before any
-// skeletal work.
+// Matrix4x4ArrayUniform. Those are shared per pass rather than per draw, so copying them
+// per draw costs far more than 128 bytes; that one wants measuring before it is done.
+//
+// This used to say "the next thing to settle before any skeletal work". The skeletal work
+// has since happened and did not settle it: a bone palette does NOT travel as a
+// Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, RTSGame and the toolchain lab
+// all send it as a set-3 storage buffer through MaterialBindings, one buffer per frame
+// slot — which solves the across-frames half of the hazard and leaves the within-frame
+// half untouched (two draws in one frame sharing one palette material both render the
+// second pose). So the note stands, unexercised, and the honest reason is that nothing
+// has wanted the uniform-array path rather than that it was checked.
 public sealed record DrawIndexedIndirectCommand(
     VertexBufferHandle VertexBuffer,
     IndexBufferHandle IndexBuffer,

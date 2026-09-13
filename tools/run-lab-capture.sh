@@ -8,6 +8,11 @@
 #
 # --frames N gives a bounded run; the HOST honours it, so this application never
 # mentions it.
+#
+# --model / --rig as the viewer. A rig capture is reproducible: --clip <name> --time <s>
+# samples once and never runs the clock, and --xray drops depth testing on gizmos so a
+# skeleton inside an opaque mesh is visible at all.
+#     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --time 0.35 --xray --out walk.png
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

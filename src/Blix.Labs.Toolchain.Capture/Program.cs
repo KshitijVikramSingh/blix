@@ -34,6 +34,23 @@ public static class Program
     {
         var output = ArgValue(args, "--out") ?? "capture.png";
         var modelPath = ArgValue(args, "--model");
+        var rigPath = ArgValue(args, "--rig");
+
+        // <b>A pose, named by a clip and a time, is a reproducible picture.</b> That pairing is what
+        // makes a capture evidence rather than a screenshot: "Walking_A at 0.35 s looked like this"
+        // can be re-rendered on any machine and diffed, where "the walk looked wrong" cannot. The
+        // frame count is fixed and nothing here reads the clock, so two runs of the same arguments
+        // produce the same bytes.
+        var clipName = ArgValue(args, "--clip");
+        var clipTime = double.TryParse(ArgValue(args, "--time"), out var parsed) ? parsed : 0.0;
+
+        // <b>--xray, because a skeleton lives inside an opaque mesh.</b> Depth-tested gizmos are the
+        // right default — they are what makes a line's position in the scene readable — but they
+        // also mean a correct skeleton overlay shows almost nothing: the first capture of the Rogue
+        // drew only the root's IK children, which radiate from the feet and read exactly like a
+        // collapsed rig. The bones were right and the picture was lying.
+        var xray = args.Contains("--xray");
+
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — lab capture",
@@ -45,7 +62,7 @@ public static class Program
         // supplies a default for when nobody said.
         if (options.ExitAfterFrames <= 0) options = options with { ExitAfterFrames = 8 };
 
-        var loop = new CaptureLoop(output, options.ExitAfterFrames, modelPath);
+        var loop = new CaptureLoop(output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray);
         using (var window = new Window(loop, options))
         {
             window.Run();
@@ -87,9 +104,30 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private LabModel? model;
     private Matrix4x4 modelTransform = Matrix4x4.Identity;
 
-    public CaptureLoop(string outputPath, int captureOnFrame, string? modelPath = null)
+    private readonly string? rigPath;
+    private readonly string? clipName;
+    private readonly double clipTime;
+    private readonly bool xray;
+    private LabRig? rig;
+    private ClipPlayer? player;
+    private BonePalette? palette;
+    private Matrix4x4[] boneWorlds = Array.Empty<Matrix4x4>();
+    private Matrix4x4 rigTransform = Matrix4x4.Identity;
+
+    public CaptureLoop(
+        string outputPath,
+        int captureOnFrame,
+        string? modelPath = null,
+        string? rigPath = null,
+        string? clipName = null,
+        double clipTime = 0.0,
+        bool xray = false)
     {
+        this.xray = xray;
         this.modelPath = modelPath;
+        this.rigPath = rigPath;
+        this.clipName = clipName;
+        this.clipTime = clipTime;
         this.outputPath = outputPath;
         this.captureOnFrame = Math.Max(1, captureOnFrame - 1);
     }
@@ -101,6 +139,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     {
         device = (VulkanGraphicsDevice)graphicsDevice;
         renderer.Load(device, Path.Combine(AppContext.BaseDirectory, "Shaders"));
+
+        LoadRig();
 
         if (modelPath is null || !File.Exists(modelPath)) return;
         model = LabModel.Load(device, modelPath);
@@ -114,16 +154,61 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             $"{model.TexturedPartCount} textured ({model.TextureCount} image(s))");
     }
 
+    // Sampled ONCE, at load, and never advanced. A capture that ran the clock would produce a
+    // different picture per run — which is precisely what a capture exists not to do.
+    private void LoadRig()
+    {
+        if (rigPath is null || !File.Exists(rigPath)) return;
+
+        rig = LabRig.Load(device, rigPath, renderer.SkinnedProgram);
+        scene = LabScene.GroundOnly();
+
+        player = new ClipPlayer(rig.Skeleton);
+        if (clipName is not null)
+        {
+            player.Clip = rig.Clip(clipName);
+            if (player.Clip is null)
+            {
+                Console.Error.WriteLine(
+                    $"No clip named '{clipName}' in {Path.GetFileName(rigPath)}; capturing the rest pose.");
+            }
+        }
+
+        player.ScrubTo(clipTime);
+        palette = new BonePalette(rig.Skeleton.BoneCount);
+        rig.Skeleton.ComputeBonePalette(player.Pose, palette);
+        boneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
+        LabRig.ComputeBoneWorlds(rig.Skeleton, player.Pose, boneWorlds);
+
+        var extent = rig.LongestExtent;
+        var scale = extent > 0.001f ? 3f / extent : 1f;
+        rigTransform = Matrix4x4.CreateScale(scale)
+                       * Matrix4x4.CreateTranslation(0f, -rig.BoundsMin.Y * scale, 0f);
+
+        Console.WriteLine(
+            $"rig: {Path.GetFileName(rigPath)} — {rig.Skeleton.BoneCount} bone(s), {rig.Clips.Count} clip(s), " +
+            $"clip '{player.Clip?.Name ?? "(rest)"}' at {player.Time:0.000}s of {player.Duration:0.00}s");
+    }
+
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
         var aspect = frame.Height > 0 ? frame.Width / (float)frame.Height : 16f / 9f;
-        // Pulled in when there is a model, so it fills the frame rather than sitting in it.
-        var eye = model is null ? new Vector3(6.4f, 4.8f, 7.6f) : new Vector3(3.4f, 2.4f, 4.2f);
-        var target = model is null ? new Vector3(0f, 1f, 0f) : new Vector3(0f, 0.7f, 0f);
+        // Pulled in when there is a subject, so it fills the frame rather than sitting in it. A rig
+        // is framed higher and closer still: a character's interesting half is above its waist.
+        var subject = model is not null || rig is not null;
+        var eye = rig is not null
+            ? new Vector3(2.6f, 2.0f, 3.4f)
+            : subject ? new Vector3(3.4f, 2.4f, 4.2f) : new Vector3(6.4f, 4.8f, 7.6f);
+        var target = rig is not null
+            ? new Vector3(0f, 1.4f, 0f)
+            : subject ? new Vector3(0f, 0.7f, 0f) : new Vector3(0f, 1f, 0f);
         var view = Matrix4x4.CreateLookAt(eye, target, Vector3.UnitY);
         viewProjection = view * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
-        renderer.Render(commandList, scene, viewProjection, eye, model, modelTransform);
+        if (rig is not null && palette is not null) rig.UploadPalette(palette);
+
+        renderer.Render(
+            commandList, scene, viewProjection, eye, model, modelTransform, rig, rigTransform);
 
         // Captured after the frame this call records has been executed — so the read
         // happens on the NEXT OnRender, when the target holds a finished picture rather
@@ -150,6 +235,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     /// </remarks>
     public void Debug(DebugContext debug)
     {
+        debug.State.DepthTestDrawing = !xray;
+
         var declaration = debug.Draw.Declare(
             "scene", viewProjection, renderer.SceneSurface,
             new Rect(0f, 0f, debug.Frame.Width, debug.Frame.Height),
@@ -161,6 +248,24 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // rendering fault rather than as two coplanar surfaces.
         debug.Draw.Grid("floor", new Vector3(0f, 0.02f, 0f), 24f, 24, new GraphicsColor(0.35f, 0.4f, 0.5f, 1f));
         debug.Draw.Arrow("sun", scene.SunDirection * 7f, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
+
+        // The skeleton, through the SAME LabSkeletonView the viewer uses. That shared call is the
+        // whole reason the lab is a library: a capture drawn by its own copy of the overlay could
+        // disagree with the window, and a picture that disagrees with the thing it documents is
+        // worse than no picture.
+        if (rig is not null && player is not null)
+        {
+            LabSkeletonView.Draw(
+                debug,
+                rig.Skeleton,
+                boneWorlds,
+                rig.MeshNodeTransform * rigTransform,
+                LabSkeletonView.Options.Default,
+                selectedBone: -1,
+                restWorlds: null,
+                include: rig.DeformBones);
+            return;
+        }
 
         // A character's collider, standing on the ground where one would. The primitive the
         // whole vocabulary exists for, and the one that drew nothing at all until recently.
@@ -201,6 +306,15 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         var hi = Vector3.Transform(model.BoundsMax, modelTransform);
         debug.Draw.Aabb("bounds", Vector3.Min(lo, hi), Vector3.Max(lo, hi),
             new GraphicsColor(0.9f, 0.85f, 0.4f, 1f));
+    }
+
+    // Rebuilt per call rather than cached, because Debug() runs a handful of times in a bounded run
+    // and a 41-matrix walk is not worth a field. Cache it the day a capture has hundreds of bones.
+    private static Matrix4x4[] RestWorlds(LabRig rig, ClipPlayer player)
+    {
+        var worlds = new Matrix4x4[rig.Skeleton.BoneCount];
+        LabRig.ComputeBoneWorlds(rig.Skeleton, player.RestPose, worlds);
+        return worlds;
     }
 
     private void Capture()
@@ -253,6 +367,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     public void Dispose()
     {
+        rig?.Dispose();
         model?.Dispose();
         renderer.Dispose();
     }

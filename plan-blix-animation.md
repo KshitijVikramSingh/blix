@@ -39,6 +39,58 @@ RTSGame's `StripRootMotion` reverts the root to its rest transform entirely. Not
 tree takes the delta a clip travels and hands it to a game. So root-driven locomotion is
 absent rather than unextracted, and the arc should not assume otherwise.
 
+## Status — A, B and C are in
+
+Shipped on `view-first-class`, in the toolchain lab and the engine:
+
+- `Blix/ClipPlayer.cs` — the extracted ritual: rest reset, loop wrap, zero-duration guard,
+  clock, and the root delta.
+- `Blix/RootMotion.cs` — travel between two clip times, correct across the loop seam.
+- `Blix.Labs.Toolchain/LabRig.cs` — a rigged glTF as skeleton + clips + a set-3 palette
+  buffer; `ComputeBoneWorlds`; `FindDeformBones`.
+- `Blix.Labs.Toolchain/LabSkeletonView.cs` — the overlay, shared by viewer and capture.
+- `Shaders/lab_skinned.vert` + `lab_skinned_shadow.vert`, both reusing the unskinned
+  fragment stages.
+- Viewer: `--rig`, transport, clip filter, blend/additive, bone panel, root-motion path.
+- Capture: `--rig --clip --time --xray`, sampled once so a run is reproducible.
+- Probe: `--rig` — hierarchy, rest-palette identity, deform census, finiteness across every
+  clip, loop-seam continuity analytically *and* by integrating the real player.
+- `Blix.Test.Graphics` Section **AQ** — 19 assertions; verified to fail (4 of them) against
+  a deliberately naive wrap.
+
+**What was found by doing it, not by planning it:**
+
+1. **A palette matrix is not a joint position.** The first overlay drew a knot at the
+   origin. `palette = InverseBindPose × world` is a displacement and is exactly zero at
+   rest; the joint is at `world` alone. Now pinned by AQ.12 and stated in conventions §1.
+2. **Half the Rogue's rig is not skinned.** 21 of 41 bones deform; the other 20 are IK
+   handles parented to the root, which is why an honest overlay looks like a starburst at
+   the feet. Only the vertex weights record the difference.
+3. **Four of 76 clips travel.** The dodges. Walk and run are authored in place — so the
+   asset the lab was built around has almost no root motion to show, which is itself the
+   answer to "should Blix drive locomotion from clips".
+4. **The probe was calling seven sound clips broken.** Zero-duration `*_Pose` clips are
+   poses. Reporting seven problems on a good file trains a reader to ignore the output.
+5. **`Matrix4x4ArrayUniform` was never the question.** The palette travels as an SSBO
+   written per frame slot through `MaterialBindings`, which is what all three existing
+   consumers do — so the uniform-array aliasing hazard recorded in `RenderCommand.cs` is
+   still open and still unexercised. Not settled: sidestepped, deliberately, and the
+   remaining hazard is named in `LabRig.Load` (two draws in one frame sharing one palette
+   material would both render the second pose).
+6. **A fixed-size SSBO array, because reflection demands it.** spirv-cross reflects
+   `mat4 m[]` as `block_size: 0`; `mat4 m[128]` reflects as 8192 bytes with a 64-byte
+   stride, which is what `MaterialBindings` needs to size the buffer. Short writes are
+   legal, so a 41-bone rig uploads 2,624 bytes.
+
+**The extraction test, answered.** Runner migrated and is three lines and three fields
+lighter. Bulwark and RTSGame did **not**: both drive many bodies off one shared pose with
+times computed from a global clock, so a per-entity `ClipPlayer` would allocate a pose per
+body and `ScrubTo` would re-sample twice per switch. Not smaller ⇒ not migrated, per §4.
+
+**Still open:** D (masks) and E (IK), both waiting on a consumer, as planned.
+
+---
+
 ## Stage A — see a pose
 
 The lab draws the skeleton of a loaded model: bone lines parent→child, joint points, optional

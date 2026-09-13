@@ -8,6 +8,13 @@
 #
 # --frames N gives a bounded run; the HOST honours it, so this application never
 # mentions it.
+#
+# --model <path.glb> loads an asset as its authored NODE TREE (pivots, bounds, picking).
+# --rig   <path.glb> loads one as a SKELETON and its clips (pose, playback, root motion).
+#     tools/run-lab.sh --rig src/Blix.Demos.Runner/Assets/models/Rogue.glb
+# --clip <name> starts on a clip; --blend <name> / --additive <name> name the second clip
+# and pick the composition with it.
+#     tools/run-lab.sh --rig .../Rogue.glb --clip Walking_A --blend Running_A
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

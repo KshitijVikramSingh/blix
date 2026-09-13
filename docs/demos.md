@@ -235,14 +235,89 @@ world rather than floating in front of it.
 
 Click a part to select it: `Blix.ViewPicking` turns the pointer into a ray through the
 named view, tested against the node bounds the viewer already draws, so what gets picked is
-exactly what is outlined. The panel shows the selected node's parent, composed pivot and
-decomposed local TRS.
+exactly what is outlined. With `--rig` the same ray picks a **joint**, against the cross the
+overlay draws rather than against the skinned triangles — picking the mesh would be more
+"accurate" and would select bones the picture cannot explain, an elbow through a sleeve.
+Hidden bones are unpickable, which is the other half of the same rule. The panel shows the
+selected node's parent, composed pivot and decomposed local TRS — or, for a rig, the bone's
+local TRS, its world position, and how far it has moved off rest in metres and degrees.
 
 Materials sample each glTF's base-colour texture, deduped per image, with a white 1×1
 stand-in where a material has none — glTF defines the factor as multiplying the texture, so
 white is the identity. Worth knowing when reading a render: `tank.glb` has **no** textures
 (material factors only), `Rogue.glb` has one palette image across twelve parts. The load
 line reports both counts.
+
+#### `--rig` — the same lab, asking a different question
+
+`--model` keeps an asset's **node hierarchy**; `--rig` keeps its **skeleton and clips**.
+Two flags rather than one that guesses, because they are two questions answered by two
+importers, and "which importer" is not something a viewer should infer from whether a file
+happens to contain a skin.
+
+```sh
+tools/run-lab.sh --rig src/Blix.Demos.Runner/Assets/models/Rogue.glb
+```
+
+**See a pose.** Bones as lines parent→child, joints as crosses, the selected bone's local
+axes, and the rest pose as a grey ghost behind the current one. Without it, *"the character
+folded inside out"* has two causes that look identical from the outside — the clip was
+already wrong, or the thing that read it was. With bones drawn over the mesh they separate
+at a glance: bones in the right places under a mangled mesh is a skinning fault, bones in
+the wrong places is a clip fault.
+
+The overlay needed **no new debug primitive** — lines, crosses and polylines were all
+already there. What was missing was that nothing had ever asked the drawing layer about a
+skeleton.
+
+Two things the first drawn skeleton taught, both of which look like bugs and are not:
+
+- **A palette matrix is not a joint position.** `palette[i] = InverseBindPose[i] × world[i]`
+  maps a *rest vertex* to where it ends up; its translation is a displacement, and at rest
+  it is exactly zero. A skeleton drawn from palette translations collapses into a knot at
+  the origin. The joint is at the hierarchy walk's `world` term on its own —
+  `LabRig.ComputeBoneWorlds`.
+- **Half a rig is not skinned.** The Rogue has 41 bones and **21 of them deform**; the other
+  20 are IK handles and roll controls (`kneeIK.l`, `control-heel-roll.r`, `handIK.l`)
+  parented straight to the root, which is why drawing all of them makes a starburst at the
+  character's feet. `LabRig.FindDeformBones` reads the vertex weights — the only place in
+  the file the difference is recorded — and the overlay defaults to deform bones only.
+
+**Play a clip.** Transport (space plays, ←/→ step a thirtieth of a second, a rate slider
+that runs backwards, a scrub that pauses), and a filter box because seventy-six clips is
+past the point where a list is browsable. Three composition modes, each one an engine
+primitive rather than lab-local maths:
+
+| mode | what runs it |
+| --- | --- |
+| single | `ClipPlayer` — the reset, the wrap, the clock |
+| blend A→B | `PoseBlend.Lerp` over two players on two clocks |
+| additive B on A | `PoseDelta.LayerOnto` per bone, B read as an offset from rest |
+
+`--clip <name>` starts on a named clip; `--blend <name>` / `--additive <name>` name the
+second clip *and* pick the composition with it, because those are one decision rather than
+two settings that happen to agree. They also mean a bounded `--frames` run reaches the
+blend and additive paths — without a flag the only way in is a combo box, and a path a
+headless run cannot reach is a path nothing checks.
+
+```sh
+tools/run-lab.sh --rig .../Rogue.glb --clip Walking_A --blend Running_A
+```
+
+`PoseBlend` and `PoseDelta` had unit tests and **no callers outside them** before this,
+which is its own kind of unverified however many assertions cover the maths.
+
+**Where a clip travels.** `RootMotion` takes the delta the root bone covers over an
+interval and hands it back; nothing in the tree did that before (RTSGame's
+`StripRootMotion` reverts the root to rest, which throws the travel away — correct for an
+RTS, and it meant root-driven locomotion was *absent* rather than unextracted). The lab
+draws the integrated delta as a path, because a root-motion bug has a shape: a straight
+line at even spacing is right, a line that stutters once per cycle is the loop wrap
+handled by subtraction, and a line that drifts sideways is a delta taken in the wrong
+frame.
+
+Worth knowing before reaching for it: of the Rogue's 76 clips, **four travel** — the
+dodges. Walk and run are authored in place, and the game owns locomotion.
 
 **The capture tool** renders the lab and writes what it rendered to a PNG. It captures
 the **HDR scene target**, not the swapchain — so the lab's render path needed no change,
@@ -251,7 +326,17 @@ curve is an offline choice rather than baked in.
 
 ```sh
 tools/run-lab-capture.sh --frames 10 --out shot.png
+tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --time 0.35 --xray --out walk.png
 ```
+
+A clip and a time make a capture **reproducible**: "Walking_A at 0.35 s looked like this"
+can be re-rendered anywhere and diffed, where "the walk looked wrong" cannot. Nothing in
+the rig path reads the clock, so two runs of the same arguments produce the same bytes.
+
+`--xray` turns off depth testing for gizmos. Depth-tested is the right default — it is what
+makes a line's place in the scene readable — but a skeleton lives *inside* an opaque mesh,
+and the first rig capture drew only the root's IK children fanning out at the feet. The
+bones were right and the picture was lying.
 
 **Which asset tool to reach for.** Two things report on assets and they answer different
 questions, deliberately kept apart:
@@ -260,6 +345,7 @@ questions, deliberately kept apart:
 | --- | --- | --- |
 | `blix-cook inspect <asset>` | *what is in this file* — node hierarchy, composed pivots, assembled bounds | always 0; it reports |
 | `Toolchain.Probe --model <asset>` | *is this asset sound* — clip lengths, skeleton, mesh-node transform | non-zero when not; it judges |
+| `Toolchain.Probe --rig <asset>` | *is this rig sound* — hierarchy, rest palette, deform census, finiteness across every clip, root-motion loop continuity | non-zero when not; it judges |
 
 They were not merged. The overlap is in subject, not in purpose, and the honest fix for
 "two tools answer the same question" is to make the questions different rather than fuse
@@ -274,6 +360,26 @@ first run died on *"payload length 96 does not match the shader's declared total
 push-constant size 64"*: a C# constant disagreeing with the SPIR-V it describes, caught
 by the device at draw time, which is late.
 
+`--rig <asset>` checks a rig, still with no device in sight. Each of these reaches the
+screen as the same thing — a character folded inside out — and on screen they are
+indistinguishable:
+
+- hierarchy order and root count;
+- **the rest pose must build the identity palette** (`BindWorld × InverseBindPose = I` by
+  construction), which is exact, needs no clip, and catches a bad export on its own;
+- the deform/control census, and whether the bone count fits the shader's palette;
+- **finiteness sampled across every clip**, not only at its ends — a NaN at t=0.7 is a body
+  folding inside out three-quarters through a swing while both endpoints read perfectly
+  finite;
+- **root-motion continuity at the loop seam**, twice: analytically (travel across the seam
+  against travel across an equal interior span) and by integration (running the real
+  `ClipPlayer` at a step chosen *not* to divide the duration, over three cycles, and
+  checking the sum).
+
+It also stopped calling a zero-duration clip a fault. The Rogue ships seven of them —
+`T-Pose`, `Lie_Pose`, four Sit/Unarmed poses — and reporting seven problems on a sound file
+is worse than reporting nothing, because it trains a reader to ignore the output.
+
 Everything here is built on the engine's shared GLSL library — `blix_cookTorranceBrdf`,
 `blix_sun_shadow`, `blix_tonemap` — with no local copy of a BRDF or a shadow lookup.
 Deliberately absent: cascades, texel snapping, bloom, IBL, MSAA, a depth pre-pass. Those
@@ -282,8 +388,10 @@ claiming to be a renderer.
 
 Proves: several executables over one lab · reflected binding off the GPU · the shared
 build targets (`BlixShaderMode=Library` + `BlixShaderReflect`) · the chassis · glTF import,
-node hierarchy and pivots · picking through a named view · depth-tested gizmos · capture.
-Owns: camera feel, the panel's controls, what the scene contains.
+node hierarchy and pivots · picking through a named view · depth-tested gizmos · capture ·
+skeletal skinning through a reflected set-3 palette · `ClipPlayer`, `PoseBlend`,
+`PoseDelta`, `RootMotion`. Owns: camera feel, the panel's controls, what the scene
+contains, which clip feeds which player.
 
 ### Chassis — application-chassis reference
 

@@ -33,6 +33,13 @@
     <GlslShader Include="Shaders\lab_lit.frag" />
     <GlslShader Include="Shaders\lab_shadow.vert" />
     <GlslShader Include="Shaders\lab_shadow.frag" />
+    <!--
+      The skinned pair. Both borrow the UNSKINNED fragment stages (lab_lit.frag /
+      lab_shadow.frag): skinning is a vertex-stage concern, so there are two vertex
+      shaders here and no new fragment shader at all.
+    -->
+    <GlslShader Include="Shaders\lab_skinned.vert" />
+    <GlslShader Include="Shaders\lab_skinned_shadow.vert" />
     <GlslShader Include="Shaders\lab_present.vert" />
     <GlslShader Include="Shaders\lab_present.frag" />
     <GlslInclude Include="..\Blix.Shaders\pbr.glsl" />
