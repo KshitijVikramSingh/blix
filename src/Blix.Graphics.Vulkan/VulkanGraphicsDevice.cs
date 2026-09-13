@@ -24,8 +24,21 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
     private readonly List<VkGpuPassTiming> pendingGpuTimings = new();
     private VkCpuFrameTiming lastCpuFrameTiming = new(0, 0, 0);
 
-    public VulkanGraphicsDevice(IVkSurface windowSurface, int initialWidth, int initialHeight)
+    /// <summary>
+    /// Whether the swapchain's depth survives its pass, so an overlay can test against it.
+    /// </summary>
+    /// <remarks>
+    /// Off unless asked for, because it is not free: storing a full-resolution depth buffer out to memory
+    /// every frame is bandwidth a tile-based GPU would otherwise never spend — the default pass discards
+    /// depth precisely because a single pass to the swapchain has no later reader. An application with no
+    /// diagnostics has no overlay to depth-test and should not pay for one.
+    /// </remarks>
+    private readonly bool preserveSwapchainDepth;
+
+    public VulkanGraphicsDevice(
+        IVkSurface windowSurface, int initialWidth, int initialHeight, bool preserveSwapchainDepth = false)
     {
+        this.preserveSwapchainDepth = preserveSwapchainDepth;
         Info = new GraphicsDeviceInfo(
             Vendor: "(initializing)",
             Renderer: "Blix.Graphics.Vulkan",

@@ -73,6 +73,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // The window's real aspect, captured where the runtime reports it.
     private float aspect = 16f / 9f;
 
+    // Mirrors DebugState.DepthTestDrawing so the panel can flip it. Applied in Debug(), which is
+    // the only place with a DebugContext to hand.
+    private bool depthTestGizmos = true;
+
     public string DebugName => "lab";
 
     public string UiName => "lab";
@@ -115,6 +119,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
     public void Debug(DebugContext debug)
     {
+        debug.State.DepthTestDrawing = depthTestGizmos;
         debug.Values.Value("frames", frames);
         debug.Values.Value("sun", scene.SunDirection);
         debug.Stats.Gauge("objects", scene.Objects.Count);
@@ -202,6 +207,9 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         var ambient = scene.AmbientStrength;
         if (ImGui.SliderFloat("ambient", ref ambient, 0f, 0.4f)) scene.AmbientStrength = ambient;
 
+        // Worth flipping rather than believing: with it off the grid and the capsule draw straight
+        // through the boxes, which is what every gizmo in Blix did until now.
+        ImGui.Checkbox("depth-test gizmos", ref depthTestGizmos);
         ImGui.Checkbox("primitive vocabulary", ref showPrimitives);
         ImGui.Checkbox("sun trail", ref showTrail);
         if (showTrail) ImGui.SliderFloat("trail seconds", ref trailSeconds, 0.25f, 8f);

@@ -128,7 +128,10 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         var fb = window.FramebufferSize;
         var w = Math.Max(fb.X > 0 ? fb.X : window.Size.X, 1);
         var h = Math.Max(fb.Y > 0 ? fb.Y : window.Size.Y, 1);
-        graphicsDevice = new VulkanGraphicsDevice(vkSurface, w, h);
+        // An application that produces diagnostics gets a swapchain depth buffer that survives its
+        // pass, so debug geometry drawn over the scene can be hidden by it. One without pays nothing.
+        graphicsDevice = new VulkanGraphicsDevice(
+            vkSurface, w, h, preserveSwapchainDepth: gameLoop is IDebuggable);
         Console.WriteLine($"Graphics: {graphicsDevice.Info.Vendor} | {graphicsDevice.Info.Renderer} | {graphicsDevice.Info.Version}");
         if (debugSystem is not null)
         {

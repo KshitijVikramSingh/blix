@@ -338,7 +338,9 @@ public sealed partial class VulkanGraphicsDevice
             Format = depthFormat,
             Samples = SampleCountFlags.Count1Bit,
             LoadOp = AttachmentLoadOp.Clear,
-            StoreOp = AttachmentStoreOp.DontCare,
+            // Discarded unless something later means to read it. An overlay that depth-tests is
+            // the only such reader today, and it is opt-in — see preserveSwapchainDepth.
+            StoreOp = preserveSwapchainDepth ? AttachmentStoreOp.Store : AttachmentStoreOp.DontCare,
             StencilLoadOp = AttachmentLoadOp.DontCare,
             StencilStoreOp = AttachmentStoreOp.DontCare,
             InitialLayout = ImageLayout.Undefined,
@@ -405,11 +407,19 @@ public sealed partial class VulkanGraphicsDevice
         {
             Format = depthFormat,
             Samples = SampleCountFlags.Count1Bit,
-            LoadOp = AttachmentLoadOp.DontCare,
+            // <b>Loaded when the scene pass kept it.</b> This was DontCare/Undefined
+            // unconditionally, so debug geometry on the swapchain tested against discarded depth
+            // and drew through everything — the gizmo floated in front of the world however
+            // carefully the depth was carried into the buffer beforehand.
+            LoadOp = preserveSwapchainDepth ? AttachmentLoadOp.Load : AttachmentLoadOp.DontCare,
             StoreOp = AttachmentStoreOp.DontCare,
             StencilLoadOp = AttachmentLoadOp.DontCare,
             StencilStoreOp = AttachmentStoreOp.DontCare,
-            InitialLayout = ImageLayout.Undefined,
+            // Must match the loadOp: LOAD from UNDEFINED is a validation error, and the
+            // contents would be meaningless anyway.
+            InitialLayout = preserveSwapchainDepth
+                ? ImageLayout.DepthStencilAttachmentOptimal
+                : ImageLayout.Undefined,
             FinalLayout = ImageLayout.DepthStencilAttachmentOptimal,
         };
         var colorRef = new AttachmentReference(0, ImageLayout.ColorAttachmentOptimal);
