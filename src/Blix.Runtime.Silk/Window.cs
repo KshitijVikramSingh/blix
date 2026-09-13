@@ -504,8 +504,41 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
                         }
 
                         break;
-                    // Plane / Capsule / Cone / MeshWireframe / Normals not
-                    // implemented yet — silent skip rather than crash.
+                    case DebugDrawPlane d: DrawPlaneLines(d.Center, d.Normal, d.Size, d.Color); break;
+                    case DebugDrawCapsule d: DrawCapsuleLines(d.A, d.B, d.Radius, d.Segments, d.Color); break;
+                    case DebugDrawCone d:
+                        DrawConeLines(d.Apex, d.Axis, d.Length, d.HalfAngleRad, d.Segments, d.Color);
+                        break;
+                    case DebugDrawMeshWireframe d:
+                        for (var e = 0; e + 1 < d.Edges.Count; e += 2)
+                        {
+                            int i0 = d.Edges[e], i1 = d.Edges[e + 1];
+                            if ((uint)i0 >= d.Vertices.Count || (uint)i1 >= d.Vertices.Count) continue;
+                            lineDrawer.Line(d.Vertices[i0], d.Vertices[i1], d.Color);
+                        }
+
+                        break;
+                    case DebugDrawNormals d:
+                        var pairs = Math.Min(d.Positions.Count, d.Normals.Count);
+                        for (var n = 0; n < pairs; n++)
+                        {
+                            lineDrawer.Line(d.Positions[n], d.Positions[n] + d.Normals[n] * d.Length, d.Color);
+                        }
+
+                        break;
+
+                    // <b>An unknown primitive is a bug, not a no-op.</b> Five commands — Plane,
+                    // Capsule, Cone, MeshWireframe, Normals — sat in this switch for their whole
+                    // lives as a comment saying "not implemented yet, silent skip rather than
+                    // crash", so calling debug.Draw.Capsule() succeeded and drew nothing. A
+                    // diagnostic that quietly does nothing is worse than one that does not exist:
+                    // it answers a question wrongly. The same call was settled the same way when a
+                    // primitive emitted outside a view was made to throw, which immediately found
+                    // six producers drawing into nowhere.
+                    default:
+                        throw new NotSupportedException(
+                            $"Debug primitive {c.GetType().Name} has no line expansion. Add one here — " +
+                            "a debug command that draws nothing is a lie about what was asked.");
                 }
             }
 
@@ -622,6 +655,113 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             lineDrawer!.Line(center + new global::System.Numerics.Vector3(ca, 0, sa), center + new global::System.Numerics.Vector3(cb, 0, sb), color);
             lineDrawer!.Line(center + new global::System.Numerics.Vector3(0, ca, sa), center + new global::System.Numerics.Vector3(0, cb, sb), color);
         }
+    }
+
+    // A square patch of the plane, plus its normal — enough to read orientation, which is
+    // the thing a plane is usually being drawn to check.
+    private void DrawPlaneLines(
+        global::System.Numerics.Vector3 center, global::System.Numerics.Vector3 normal, float size, GraphicsColor color)
+    {
+        var n = normal.LengthSquared() > 1e-8f
+            ? global::System.Numerics.Vector3.Normalize(normal)
+            : global::System.Numerics.Vector3.UnitY;
+        var (u, v) = Basis(n);
+        var h = size * 0.5f;
+        var a = center + (u * h) + (v * h);
+        var b = center - (u * h) + (v * h);
+        var cc = center - (u * h) - (v * h);
+        var d = center + (u * h) - (v * h);
+        lineDrawer!.Line(a, b, color);
+        lineDrawer.Line(b, cc, color);
+        lineDrawer.Line(cc, d, color);
+        lineDrawer.Line(d, a, color);
+        lineDrawer.Arrow(center, center + (n * (size * 0.35f)), color);
+    }
+
+    // Two end caps joined by side lines. The caps are rings in the plane perpendicular to
+    // the axis plus two arcs over the ends, which reads as a capsule rather than as two
+    // circles — the difference matters when what is being checked is a character collider.
+    private void DrawCapsuleLines(
+        global::System.Numerics.Vector3 a, global::System.Numerics.Vector3 b, float radius, int segments, GraphicsColor color)
+    {
+        if (segments < 4) segments = 4;
+        var axis = b - a;
+        var length = axis.Length();
+        var n = length > 1e-6f ? axis / length : global::System.Numerics.Vector3.UnitY;
+        var (u, v) = Basis(n);
+        var step = MathF.PI * 2f / segments;
+
+        for (var s = 0; s < segments; s++)
+        {
+            var t0 = s * step;
+            var t1 = (s + 1) * step;
+            var r0 = (u * (MathF.Cos(t0) * radius)) + (v * (MathF.Sin(t0) * radius));
+            var r1 = (u * (MathF.Cos(t1) * radius)) + (v * (MathF.Sin(t1) * radius));
+            lineDrawer!.Line(a + r0, a + r1, color);   // end rings
+            lineDrawer.Line(b + r0, b + r1, color);
+        }
+
+        // Four side lines, and four arcs per cap through the poles.
+        for (var q = 0; q < 4; q++)
+        {
+            var t = q * MathF.PI * 0.5f;
+            var r = (u * (MathF.Cos(t) * radius)) + (v * (MathF.Sin(t) * radius));
+            lineDrawer!.Line(a + r, b + r, color);
+
+            var arc = Math.Max(3, segments / 4);
+            for (var k = 0; k < arc; k++)
+            {
+                var p0 = k / (float)arc * MathF.PI * 0.5f;
+                var p1 = (k + 1) / (float)arc * MathF.PI * 0.5f;
+                var dir0 = (r * MathF.Cos(p0)) - (n * (radius * MathF.Sin(p0)));
+                var dir1 = (r * MathF.Cos(p1)) - (n * (radius * MathF.Sin(p1)));
+                lineDrawer.Line(a + dir0, a + dir1, color);
+                lineDrawer.Line(b - dir0, b - dir1, color);
+            }
+        }
+    }
+
+    // Apex, base ring, and side lines. Half-angle rather than a base radius because that is
+    // how a spotlight, a view cone and a field of view are all described.
+    private void DrawConeLines(
+        global::System.Numerics.Vector3 apex,
+        global::System.Numerics.Vector3 axis,
+        float length,
+        float halfAngleRad,
+        int segments,
+        GraphicsColor color)
+    {
+        if (segments < 3) segments = 3;
+        var n = axis.LengthSquared() > 1e-8f
+            ? global::System.Numerics.Vector3.Normalize(axis)
+            : global::System.Numerics.Vector3.UnitZ;
+        var (u, v) = Basis(n);
+        var baseCentre = apex + (n * length);
+        var radius = MathF.Tan(Math.Clamp(halfAngleRad, 0.001f, 1.55f)) * length;
+        var step = MathF.PI * 2f / segments;
+
+        for (var s = 0; s < segments; s++)
+        {
+            var t0 = s * step;
+            var t1 = (s + 1) * step;
+            var p0 = baseCentre + (u * (MathF.Cos(t0) * radius)) + (v * (MathF.Sin(t0) * radius));
+            var p1 = baseCentre + (u * (MathF.Cos(t1) * radius)) + (v * (MathF.Sin(t1) * radius));
+            lineDrawer!.Line(p0, p1, color);
+            if (s % Math.Max(1, segments / 4) == 0) lineDrawer.Line(apex, p0, color);
+        }
+    }
+
+    // Any two axes perpendicular to n. Picking the smaller component to cross against keeps
+    // the result well-conditioned when n is near an axis.
+    private static (global::System.Numerics.Vector3 U, global::System.Numerics.Vector3 V) Basis(
+        global::System.Numerics.Vector3 n)
+    {
+        var reference = MathF.Abs(n.Y) < 0.9f
+            ? global::System.Numerics.Vector3.UnitY
+            : global::System.Numerics.Vector3.UnitX;
+        var u = global::System.Numerics.Vector3.Normalize(global::System.Numerics.Vector3.Cross(reference, n));
+        var v = global::System.Numerics.Vector3.Cross(n, u);
+        return (u, v);
     }
 
     // Flat grid of lines on the XZ plane at center.Y.

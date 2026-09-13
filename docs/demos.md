@@ -260,8 +260,14 @@ day `VkImGuiRenderer` was written and was never read, so typing into an ImGui fi
 drove the game — unnoticed because the diagnostics overlay has almost no text fields.
 The loop counts every input event it receives and remembers the count when its text
 field takes focus; while focused that number must not move however much is typed, and
-the panel says so live. Key and mouse **releases** still arrive, which is deliberate: a
-press decides who owns a gesture, a release only ends one.
+the panel says so live.
+
+**Releases follow their press.** An earlier version delivered every release
+unconditionally, which fixed one bug and created its mirror — a press the UI owned still
+handed the application a release it never had a press for. `GestureOwnership` settles it
+where it was always settled in the reasoning: at the press. So typing into the field
+moves neither the down count nor the up count, while a drag begun in the world and
+finished over a panel still delivers its release.
 
 It also renders — a single clear pass whose colour walks with time, with **no shaders of
 its own**. The project file is 25 lines and declares none, against the ~80 a Blix

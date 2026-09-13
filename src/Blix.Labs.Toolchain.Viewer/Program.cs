@@ -58,6 +58,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private float sunYaw = 0.5f;
     private float sunPitch = 0.9f;
     private bool showTrail = true;
+    private bool showPrimitives = true;
 
     // Short, because this is a gizmo and not a motion study. Six seconds was the first
     // guess and reads as the arc refusing to leave; a trail that outlives the gesture that
@@ -126,10 +127,53 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         var sunFrom = scene.SunDirection * 7f;
         debug.Draw.Arrow("sun", sunFrom, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
 
+        if (showPrimitives) DrawPrimitiveVocabulary(debug);
+
         if (showTrail)
         {
             // Where the sun has been while it was being dragged.
             debug.Draw.Trail("sun/path", sunFrom, new GraphicsColor(1f, 0.75f, 0.3f, 1f), trailSeconds);
+        }
+    }
+
+    // Every debug primitive the channel offers, drawn at once.
+    //
+    // Five of these — Plane, Capsule, Cone, MeshWireframe, Normals — were exposed by the
+    // API and silently skipped by the renderer for their whole lives, so calling them
+    // succeeded and drew nothing. This is the standing check that they still arrive: if a
+    // primitive stops rendering, it is visible here rather than discovered by someone
+    // trying to debug a collider with it.
+    //
+    // The capsule is the one that matters most for what comes next. It is drawn where a
+    // character's collider would stand, because "what shape did collision actually test?"
+    // is the question a motion bug always turns into.
+    private void DrawPrimitiveVocabulary(DebugContext debug)
+    {
+        var here = new Vector3(-5.5f, 0f, 0f);
+        var white = new GraphicsColor(0.9f, 0.9f, 0.95f, 1f);
+        var warm = new GraphicsColor(1f, 0.6f, 0.35f, 1f);
+        var cool = new GraphicsColor(0.4f, 0.8f, 1f, 1f);
+
+        using (debug.Scope("vocabulary"))
+        {
+            debug.Draw.Capsule("capsule", here + new Vector3(0f, 0.4f, 0f), here + new Vector3(0f, 1.4f, 0f), 0.4f, cool);
+            debug.Draw.Plane("plane", here + new Vector3(-2f, 0.9f, 0f), new Vector3(0.3f, 1f, 0.2f), 1.6f, white);
+            debug.Draw.Cone("cone", here + new Vector3(2f, 1.8f, 0f), -Vector3.UnitY, 1.5f, 0.45f, warm);
+            debug.Draw.Sphere("sphere", here + new Vector3(2f, 0.5f, -2f), 0.45f, white);
+            debug.Draw.Aabb("aabb", here + new Vector3(-2f, 0f, -2f), here + new Vector3(-1.2f, 0.8f, -1.2f), warm);
+            debug.Draw.Cross("cross", here + new Vector3(0f, 0.05f, -2f), 0.5f, cool);
+            debug.Draw.Ray("ray", here + new Vector3(0f, 2.2f, 0f), Vector3.UnitX, 1.5f, warm);
+
+            // A triangle's edges and its vertex normals — the two that answer "what geometry
+            // was actually tested?" when a sweep disagrees with what is on screen.
+            var tri = new[]
+            {
+                here + new Vector3(3.6f, 0.05f, 1.2f),
+                here + new Vector3(4.8f, 0.05f, 1.2f),
+                here + new Vector3(4.2f, 0.05f, 2.4f),
+            };
+            debug.Draw.MeshWireframe("triangle", tri, new[] { 0, 1, 1, 2, 2, 0 }, white);
+            debug.Draw.Normals("triangle/normals", tri, new[] { Vector3.UnitY, Vector3.UnitY, Vector3.UnitY }, 0.6f, cool);
         }
     }
 
@@ -158,6 +202,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         var ambient = scene.AmbientStrength;
         if (ImGui.SliderFloat("ambient", ref ambient, 0f, 0.4f)) scene.AmbientStrength = ambient;
 
+        ImGui.Checkbox("primitive vocabulary", ref showPrimitives);
         ImGui.Checkbox("sun trail", ref showTrail);
         if (showTrail) ImGui.SliderFloat("trail seconds", ref trailSeconds, 0.25f, 8f);
         ImGui.TextDisabled($"drag to orbit · wheel to zoom · {frames} frames");

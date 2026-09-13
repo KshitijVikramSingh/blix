@@ -104,8 +104,10 @@ internal sealed class ChassisLoop : IGameLoop, IUiSource, IInputHandler
 
         // The capture test, made checkable. Remember the game's key count when the field
         // takes focus; while it is focused that number must not move, however much is
-        // typed. A release is expected to still arrive — see Window.OnKeyUp, where the
-        // asymmetry is deliberate.
+        // typed — and neither does the up count, because a release follows its press. An
+        // earlier build delivered every release unconditionally, so this panel showed ups
+        // climbing while downs stayed frozen; GestureOwnership settles ownership at the
+        // press, so a key the UI swallowed produces neither event here.
         ImGui.InputText("type here", ref typeHere, 96);
         if (ImGui.IsItemActivated()) keysAtFocus = keyDowns;
         if (ImGui.IsItemActive())
