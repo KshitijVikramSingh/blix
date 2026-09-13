@@ -47,6 +47,11 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private readonly WindowOptions options;
     private int renderedFrames;
 
+    // Who owns each in-flight press. See Blix.Core.GestureOwnership: routing a release by who wants input
+    // NOW is wrong in both directions, and the press already answered the question.
+    private readonly GestureOwnership keysHeld = new();
+    private readonly GestureOwnership buttonsHeld = new();
+
     // Lightweight perf HUD (F1): a debounced real-FPS readout drawn without the
     // DebugOverlayUi panels, so it measures actual frame rate at minimal cost.
     // FPS is averaged over a window (raw per-frame deltas are too jittery to read)
@@ -294,17 +299,16 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             debugSystem.State.ShowOverlay = !debugSystem.State.ShowOverlay;
             return;
         }
-        if (UiWantsKeyboard) return;
+        if (!keysHeld.Press((int)key, UiWantsKeyboard)) return;
         inputHandler?.OnKeyDown(MapKey(key));
     }
 
     private void OnKeyUp(IKeyboard kbd, SilkKey key, int scancode)
     {
-        // <b>Always delivered, even while the UI has focus</b> — the same asymmetry OnMouseUp documents,
-        // and for the same reason: a press decides who owns the gesture, a release only ends something,
-        // and the thing it ends belongs to whoever the press went to. Guarding this would strand a key the
-        // game believes is still held the moment focus moves to a panel mid-keypress. Applying the lesson
-        // here before it is paid for a second time.
+        // Delivered when the application owned the press, and not otherwise — see GestureOwnership. A
+        // release always reaching the application fixes the stranded-key case and creates its mirror: a
+        // key the UI swallowed handing the application an up it never had a down for.
+        if (!keysHeld.Release((int)key)) return;
         inputHandler?.OnKeyUp(MapKey(key));
     }
 
@@ -324,24 +328,28 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     private void OnMouseDown(IMouse mouse, SilkMouseButton button)
     {
-        if (UiWantsMouse) return;
+        if (!buttonsHeld.Press((int)button, UiWantsMouse)) return;
         inputHandler?.OnMouseDown(MapMouseButton(button));
     }
 
     private void OnMouseUp(IMouse mouse, SilkMouseButton button)
     {
-        // <b>A release is always delivered, even when the overlay owns the cursor, and the asymmetry with
-        // OnMouseDown above is the point.</b> A press decides who owns the gesture; a release only ends
-        // something, and the thing it ends belongs to whoever the press went to.
+        // <b>The release goes wherever the press went.</b> This was guarded on current UI capture once,
+        // which dropped the release whenever the pointer happened to be over a panel when the button came
+        // up — a drag begun in the world and finished over the panel left the game believing the button
+        // was still down, so a marquee stayed live and followed a cursor that had long left it. Reported
+        // from the chair as the mouse not lining up with the screen. Nothing about that looks like a
+        // missing event.
         //
-        // Guarded, this dropped the release whenever the pointer happened to be over a debug panel when the
-        // button came up — so a drag begun in the world and finished over the panel left the game believing the
-        // button was still down. The marquee stays live, anchored to a point the cursor has long left, and
-        // follows it around: reported from the chair as the mouse not lining up with the screen. Nothing about
-        // that looks like a missing event.
+        // Then it was unconditional, which fixes that case and creates its reflection: a press the UI owned
+        // still handing the application a release it never had a press for. Harmless if OnMouseUp only
+        // clears a held set, and not harmless if it MEANS something — a shot loosed on release, a menu
+        // opened. GestureOwnership settles it at the press, which is where it was always settled in the
+        // reasoning.
         //
-        // It costs the overlay nothing: ImGui does not learn the button state from these callbacks at all, it
-        // polls IsButtonPressed in BeginFrame. The guard was protecting something that was never listening.
+        // It costs the overlay nothing either way: ImGui never learned button state from these callbacks,
+        // it polls IsButtonPressed in BeginFrame.
+        if (!buttonsHeld.Release((int)button)) return;
         inputHandler?.OnMouseUp(MapMouseButton(button));
     }
 

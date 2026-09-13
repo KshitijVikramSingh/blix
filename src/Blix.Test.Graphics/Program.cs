@@ -2328,11 +2328,83 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectClose("AN.4 and identically to the on-screen one",
         new Vector4(offscreenRay!.Value.Direction, 0f), new Vector4(centreRay.Value.Direction, 0f));
 
+    // <b>Half-open on the far edges.</b> Two views sharing a boundary must not both claim
+    // the pixel on it, or "ask every view who owns the pointer" stops having one answer.
+    var left = views.Declare("left", camera.GetViewProjection(1f), default, new Rect(0f, 0f, 400f, 400f), new Rect(0f, 0f, 400f, 400f));
+    var right = views.Declare("right", camera.GetViewProjection(1f), default, new Rect(400f, 0f, 400f, 400f), new Rect(400f, 0f, 400f, 400f));
+    var onBoundary = new Vector2(400f, 200f);
+    var leftClaims = ViewPicking.RayThrough(left, onBoundary) is not null;
+    var rightClaims = ViewPicking.RayThrough(right, onBoundary) is not null;
+    t.ExpectTrue("AN.6 exactly one view owns a shared boundary pixel", leftClaims != rightClaims);
+    t.ExpectTrue("AN.6 and it is the one the pixel starts", rightClaims);
+    t.ExpectTrue("AN.6 the interior still belongs to the left view",
+        ViewPicking.RayThrough(left, new Vector2(399f, 200f)) is not null);
+
+    // A matrix can invert cleanly and still send a corner of the NDC cube to w = 0 — a
+    // point on the eye plane with no finite position. Infinities that survive every
+    // later test land as a ray pointing nowhere, diagnosed three hours later as "the
+    // mouse is offset".
+    var singular = new Matrix4x4(
+        1f, 0f, 0f, 0f,
+        0f, 1f, 0f, 0f,
+        0f, 0f, 1f, 1f,
+        0f, 0f, 0f, 0f);
+    var eyePlane = views.Declare("eyeplane", singular, default, panelRect, panelRect);
+    var eyeRay = ViewPicking.RayThrough(eyePlane, panelCentre);
+    t.ExpectTrue("AN.7 a view that unprojects to w=0 yields no ray rather than infinities",
+        eyeRay is null || (float.IsFinite(eyeRay.Value.Origin.X) && float.IsFinite(eyeRay.Value.Direction.X)));
+
     // A degenerate matrix must not throw; there is no ray through a view you cannot
     // invert, and callers already handle "the pointer is not over this view".
     var broken = views.Declare("broken", default, default, panelRect, panelRect);
     t.ExpectTrue("AN.5 a non-invertible view projection yields no ray",
         ViewPicking.RayThrough(broken, panelCentre) is null);
+}
+
+// ============================================================================
+// Section AO — GestureOwnership: the release goes where the press went.
+// ============================================================================
+//
+// Two bugs that are reflections of each other. Routing a release by who wants input
+// NOW drops it when focus moves mid-gesture, stranding a button the application
+// believes is still held. Delivering every release unconditionally fixes that and
+// hands the application releases for presses the UI swallowed. The press already
+// answers the question; this pins that it is asked at the right moment.
+{
+    const int A = 65, B = 66;
+
+    // The ordinary case: application owns the press, hears the release.
+    var own = new GestureOwnership();
+    t.ExpectTrue("AO.1 an uncaptured press reaches the application", own.Press(A, uiWantsInput: false));
+    t.ExpectTrue("AO.1 and its release does too", own.Release(A));
+    t.ExpectTrue("AO.1 nothing is left held", own.HeldCount == 0);
+
+    // The case unconditional delivery got wrong: the UI owned the press.
+    t.ExpectTrue("AO.2 a captured press does not reach the application", !own.Press(B, uiWantsInput: true));
+    t.ExpectTrue("AO.2 and neither does its release", !own.Release(B));
+
+    // The case the guard got wrong: pressed in the world, released over a panel. Focus
+    // at release time is not consulted at all, which is the whole point.
+    t.ExpectTrue("AO.3 a press in the world is owned", own.Press(A, uiWantsInput: false));
+    t.ExpectTrue("AO.3 its release lands even if a panel now has focus", own.Release(A));
+
+    // A release with no press — the host consumed the key for a dump or an overlay
+    // toggle, so it never reached here.
+    t.ExpectTrue("AO.4 an unmatched release is not invented", !own.Release(B));
+
+    // Two gestures at once stay independent.
+    own.Press(A, uiWantsInput: false);
+    own.Press(B, uiWantsInput: true);
+    t.ExpectTrue("AO.5 only the application's own press is held", own.HeldCount == 1);
+    t.ExpectTrue("AO.5 the captured one releases to nobody", !own.Release(B));
+    t.ExpectTrue("AO.5 the owned one still releases", own.Release(A));
+
+    // Focus loss: the releases will never arrive, and an application left believing a
+    // key is held is the original bug in a different hat.
+    own.Press(A, uiWantsInput: false);
+    own.Clear();
+    t.ExpectTrue("AO.6 clearing forgets held presses", own.HeldCount == 0);
+    t.ExpectTrue("AO.6 so a later release delivers nothing", !own.Release(A));
 }
 
 t.PrintSummary();

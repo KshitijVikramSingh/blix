@@ -111,6 +111,14 @@ Three properties are load-bearing:
   because "this thing, in *that* view, over the last N frames" needs an identity that
   outlives the declaration carrying it.
 
+**What views do not do yet.** A view's rect never reaches the renderer — it is carried
+for picking and DPI and is not applied as a viewport or scissor, so a view draws across
+its whole target. And debug passes are appended after the game's entire command list,
+so debug geometry written into a game-owned intermediate target cannot be presented
+that frame. An inspector viewport therefore is not yet achievable: picking into one
+works and is tested, rendering one does not. Both are left for a real consumer to force
+rather than guessed at.
+
 Debug primitives are emitted into a view with `using (debug.Draw.In(view))`, and each
 command stores the resolved `ViewId` — ambient at the call site, recorded in the data,
 exactly as scope-built `Path` already works. Emitting a primitive with no view in scope
@@ -122,6 +130,13 @@ a bounded, path-keyed ring of time-stamped points behind `debug.Draw.Trail(...)`
 stores and computes nothing: no smoothing, resampling or reduction. A trail samples
 once per path per frame however many views it is drawn into, so asking twice is one
 history painted twice rather than two histories drifting apart.
+
+The one place policy could walk back in: the selection highlight is painted into
+*every* declared view. That is a **local default for the single selection mechanism
+that exists**, not an engine law — "is this view an audience for overlays?" is not
+intrinsic to being a view, and a shadow cascade is not. When a second consumer
+disagrees, selection should learn which views it addresses rather than a view growing
+a kind.
 
 Frame dumps are **schema 2**: a `Views` array plus a per-command `View` name, replacing
 the single frame-wide camera matrix, and a `SchemaVersion` field that schema 1 did not

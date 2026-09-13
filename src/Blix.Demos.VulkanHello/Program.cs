@@ -376,12 +376,13 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
         // remembered per path and drawn into whichever view is in scope.
         if (!trailsOn) return;
         var corner = new Vector3(0.5f, 0.5f, 0.5f);
+        var leftCorner = Vector3.Transform(corner, leftModel);
+        var rightCorner = Vector3.Transform(corner, rightModel);
         debug.Draw.Trail(
-            "cube/left/corner", Vector3.Transform(corner, leftModel),
-            new GraphicsColor(1f, 0.55f, 0.2f, 1f), trailSeconds);
+            "cube/left/corner", leftCorner, new GraphicsColor(1f, 0.55f, 0.2f, 1f), trailSeconds);
         debug.Draw.Trail(
-            "cube/right/corner", Vector3.Transform(corner, rightModel),
-            new GraphicsColor(0.3f, 0.9f, 1f, 1f), trailSeconds);
+            "cube/right/corner", rightCorner, new GraphicsColor(0.3f, 0.9f, 1f, 1f), trailSeconds);
+
     }
 
     // --- IUiSource ----------------------------------------------------------

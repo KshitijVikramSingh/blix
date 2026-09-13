@@ -48,9 +48,13 @@ public static class ViewPicking
         var rect = view.LogicalViewport;
         if (rect.Width <= 0f || rect.Height <= 0f) return null;
 
+        // <b>Half-open on the far edges.</b> With an inclusive test two abutting views both claim the
+        // pixel on their shared boundary, which quietly contradicts the one useful thing about returning
+        // null — that asking every view answers "who owns this pointer?" with exactly one yes. [x, x+w)
+        // is also the convention every other pixel rectangle in the stack already uses.
         var localX = pointer.X - rect.X;
         var localY = pointer.Y - rect.Y;
-        if (localX < 0f || localY < 0f || localX > rect.Width || localY > rect.Height) return null;
+        if (localX < 0f || localY < 0f || localX >= rect.Width || localY >= rect.Height) return null;
 
         // Screen -> Vulkan NDC. NDC y points down, same as screen y — no flip, matching Camera3D.
         var ndcX = 2.0f * localX / rect.Width - 1.0f;
@@ -66,12 +70,22 @@ public static class ViewPicking
         var length = direction.Length();
         if (length <= float.Epsilon) return null;
 
-        return new Ray(near, direction / length);
+        // <b>Invertibility is not enough.</b> A matrix can invert cleanly and still send a particular
+        // corner of the NDC cube to w = 0 — a point on the eye plane, which has no finite position. The
+        // divide below would then hand back infinities that survive every later test and land as a ray
+        // pointing nowhere, which is exactly the shape of bug that gets diagnosed as "the mouse is
+        // offset" three hours later.
+        var ray = new Ray(near, direction / length);
+        return IsFinite(ray.Origin) && IsFinite(ray.Direction) ? ray : null;
     }
 
     private static Vector3 Unproject(Matrix4x4 inverseViewProjection, float ndcX, float ndcY, float ndcZ)
     {
         var p = Vector4.Transform(new Vector4(ndcX, ndcY, ndcZ, 1.0f), inverseViewProjection);
+        if (p.W == 0f || !float.IsFinite(p.W)) return new Vector3(float.NaN);
         return new Vector3(p.X, p.Y, p.Z) / p.W;
     }
+
+    private static bool IsFinite(Vector3 v) =>
+        float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z);
 }

@@ -1047,7 +1047,9 @@ public static Ray? ViewPicking.RayThrough(in ViewDeclaration view, Vector2 point
 ```
 
 Reads the view's **own** matrix and **own** rectangle, so a picture drawn anywhere can
-be picked anywhere, including one rendered to an off-screen texture. Returns `null`
+be picked anywhere, including one rendered to an off-screen texture. (Picking into such
+a view works today; *rendering* one as a panel does not — see the view limitations in
+[`architecture.md`](architecture.md).) Returns `null`
 when the pointer is outside the view — which is also how *"which view is the cursor
 over?"* gets answered: ask each declared view, and for a non-overlapping layout at
 most one says yes. Overlapping panels are an ordering question, which is the caller's.

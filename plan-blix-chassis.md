@@ -556,6 +556,85 @@ one view, one frame, one world, one executable or one host. What remains is ordi
 maturation inside layers whose boundaries hold — which is the difference between an
 engine that needs reshaping and one that needs filling in.
 
+### Review, reconciled
+
+An outside read of the branch found two correctness bugs and one yellow flag. All
+three were right, and one was worse than reported.
+
+**Release ownership.** Delivering every release unconditionally fixed the stranded-key
+case and created its mirror: a press the UI owned still handed the application a
+release it never had a press for. Harmless when a handler only clears a held set,
+and not harmless when the release *means* something. The reasoning had said *"a press
+decides who owns the gesture"* from the start without implementing it —
+`Blix.Core.GestureOwnership` now does, literally, and it costs one set. Section **AO**
+pins both directions, including the release the host consumed for a dump key.
+
+**Picking, two edge cases.** The containment test used `> Width`, so two abutting views
+both claimed the pixel on their shared boundary — which silently contradicts the one
+useful property of returning null, that asking every view yields exactly one yes. Now
+half-open. And `Unproject` divided by `w` unchecked: a matrix can invert cleanly and
+still send a corner of the NDC cube to `w = 0`, producing infinities that survive
+every later test and land as a ray pointing nowhere. Both pinned in **AN.6/AN.7**.
+
+**Selection into every view** was correctly flagged as policy walking back in. It is
+now documented as a *local default for the single selection mechanism that exists* —
+"is this view an audience for overlays?" is not intrinsic to being a view, and a
+shadow cascade is not one. When a second consumer disagrees, selection learns which
+views it addresses; a view does not grow a kind.
+
+**The "optional" integration proof was not optional — and it failed.** Checking before
+building it showed that **every view in the tree was `In("main", viewProj)`** — the
+whole-surface shorthand, target `Default`. No application had ever declared a second
+view or an off-screen target, so `Window`'s per-view loop and its `Target: view.Target`
+line had only ever run with one view on the swapchain.
+
+`VulkanHello` was given a second view onto the half-res buffer the cubes already
+render into. The pass routes and executes — `passes/debug:offscreen/draws: 1` — and
+the result was **invisible**, twice, for two different reasons, both found from the
+chair within a minute of looking at it.
+
+First it used an overhead camera, on the theory that a second view should look
+visibly unlike the first. The lines were misaligned, and correctly so: that buffer
+*is* the scene the present pass upscales, so the frame composited cubes seen from one
+camera with debug geometry seen from another. **A second view is free to be a second
+vantage only when it owns its own picture.**
+
+Sharing the scene's camera fixed the alignment and the toggle then changed nothing at
+all — because the pass order is `cube-offscreen` (which **clears**), `present` (which
+samples), `debug:main`, `debug:offscreen`. The second view writes into a buffer that
+present has already read and that next frame's clear destroys. Nothing ever samples
+it. The feature was removed from the demo rather than left as a control that does
+nothing.
+
+### Two limitations this uncovered, and they are the real result
+
+- **Debug passes are appended after the game's entire command list.** Debug geometry
+  written into a game-owned intermediate target can therefore never be presented that
+  frame — the game's present already happened. Only the swapchain works today.
+- **A view's rect never reaches the renderer.** `LogicalViewport`/`PhysicalViewport`
+  are carried for picking and DPI and are not applied as a viewport or scissor, so a
+  "panel" view draws across the whole target.
+
+Together: **an inspector viewport is not yet achievable**, and the earlier claim that
+an off-screen viewport "stops being a special case" overreached. It is true of
+*picking*, which is tested; it was allowed to imply rendering, which was not. Both
+limitations are concrete, both were found by use rather than by reasoning, and neither
+should be fixed speculatively — they are precisely the shape of thing a first real
+consumer should force into existence.
+
+### The inversion
+
+The premise this arc started from was *"Spear cannot meaningfully exist until Blix's
+application theory is proved."* After the branch it reads the other way round:
+
+> Blix's theory cannot be proved any further until Spear exists.
+
+Everything left on the chassis list is either policy waiting for a consumer or a
+convenience that costs nothing to add later. The vocabulary deliberately **not**
+invented here — world, editor, character controller, IK — is exactly what a first
+Spear application should be made to pressure into existence, and §10 had already
+arrived at the same conclusion about the preview world one section early.
+
 The docs were brought level with this in the same pass: `README.md`,
 `docs/architecture.md`, `docs/conventions.md` and `docs/demos.md` describe the engine
 as it now is rather than as it was before the arc.

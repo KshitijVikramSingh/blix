@@ -281,7 +281,7 @@ public sealed class DebugSystem
                     var sphereR = MathF.Min(MathF.Max(longest * 0.15f, 0.05f), 0.75f);
                     var crossSize = longest * 0.5f;
 
-                    // <b>Into every view, because system feedback is not about any one camera.</b>
+                    // <b>Into every view — and this is a local default, not an engine law.</b>
                     // The selection highlight answers "here is what you picked", and the answer is the
                     // same whichever window you look through — so a second viewport that can see the
                     // object should show it selected too. Views are already declared by here: the
@@ -290,6 +290,15 @@ public sealed class DebugSystem
                     //
                     // No views declared means the application drew nothing this frame, so there is no
                     // picture to annotate. That is not an error.
+                    //
+                    // Worth being explicit about the limit, because this is the one place in the view work
+                    // where policy could walk back in unnoticed: "is this view an audience for selection
+                    // overlays?" is NOT intrinsic to being a view. A view can be an inspector, a game
+                    // camera, a shadow cascade, a capture target — and a cascade has no business showing a
+                    // selection outline. Painting all of them is the right default for the one selection
+                    // mechanism that exists today and nothing more. Do not generalise this into "system
+                    // feedback goes into every view"; when a second consumer disagrees, the answer is for
+                    // the SELECTION to learn which views it addresses, not for a view to grow a kind.
                     var declared = Current.Draw.Views.ToArray();
                     foreach (var view in declared)
                     {
