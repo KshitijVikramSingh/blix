@@ -37,6 +37,15 @@ public sealed class LabRenderer : IDisposable
     /// <summary>Bytes the caster pushes: the model matrix, and nothing else.</summary>
     public const int CasterPushBytes = 64;
 
+    /// <summary>Bytes the SKINNED caster pushes: a vec4 whose x is the per-instance bone stride.</summary>
+    /// <remarks>
+    /// Smaller than the unskinned caster's, not larger. That one pushes a mat4 because it has to place
+    /// its object; a skinned instance's placement is already baked into its palette, so all this stage
+    /// needs is the stride. <c>lab_shadow.frag</c> declares no push block, so unlike the lit pair this
+    /// block was free to be exactly what the stage uses rather than shaped to match a fragment stage.
+    /// </remarks>
+    public const int SkinnedCasterPushBytes = 16;
+
     private const int PushBytes = LitPushBytes;
 
     private VulkanGraphicsDevice device = null!;
@@ -85,6 +94,7 @@ public sealed class LabRenderer : IDisposable
 
     private readonly byte[] pushScratch = new byte[PushBytes];
     private readonly byte[] casterPushScratch = new byte[CasterPushBytes];
+    private readonly byte[] skinnedCasterPushScratch = new byte[SkinnedCasterPushBytes];
 
     // The caster only needs the model matrix, and the reflected interface says so — 64
     // bytes against the lit pass's 96. Pushing the larger block at it is rejected by the
@@ -262,6 +272,11 @@ public sealed class LabRenderer : IDisposable
     /// </remarks>
     public ShaderProgramHandle SkinnedProgram => skinnedProgram;
 
+    /// <param name="rigInstances">
+    /// How many instances of <paramref name="rig"/> to draw, and how many palettes the caller has
+    /// already written into its bone buffer. Zero draws nothing; one is the ordinary case and takes
+    /// the same path as eight.
+    /// </param>
     public void Render(
         RenderCommandList commandList,
         LabScene scene,
@@ -270,10 +285,9 @@ public sealed class LabRenderer : IDisposable
         LabModel? model = null,
         Matrix4x4 modelTransform = default,
         LabRig? rig = null,
-        Matrix4x4 rigTransform = default)
+        int rigInstances = 1)
     {
         if (modelTransform == default) modelTransform = Matrix4x4.Identity;
-        if (rigTransform == default) rigTransform = Matrix4x4.Identity;
 
         var sunViewProjection = scene.SunViewProjection();
 
@@ -298,7 +312,7 @@ public sealed class LabRenderer : IDisposable
                 Array.Empty<ShaderTextureBinding>(), casterOnly: true);
 
             DrawRigParts(
-                scope, rig, rigTransform, skinnedShadowPipeline, uniforms,
+                scope, rig, rigInstances, skinnedShadowPipeline, uniforms,
                 Array.Empty<ShaderTextureBinding>(), casterOnly: true);
         });
 
@@ -322,7 +336,7 @@ public sealed class LabRenderer : IDisposable
             }
 
             DrawModelParts(scope, model, modelTransform, litPipeline, uniforms, textures, casterOnly: false);
-            DrawRigParts(scope, rig, rigTransform, skinnedPipeline, uniforms, textures, casterOnly: false);
+            DrawRigParts(scope, rig, rigInstances, skinnedPipeline, uniforms, textures, casterOnly: false);
         });
 
         graph.Execute(commandList);
@@ -414,36 +428,50 @@ public sealed class LabRenderer : IDisposable
         }
     }
 
-    // The rig's primitives, all at ONE transform and all reading ONE palette.
+    // The rig's primitives, drawn ONCE each for N instances out of one sliced palette.
     //
     // The contrast with DrawModelParts is the whole difference between a static asset and a rigged
     // one: there, each part is placed by its node's composed world matrix, because the hierarchy IS
-    // the articulation. Here the hierarchy lives in the palette and every primitive sits at the same
-    // uModel — a skin that placed its parts individually would tear along their seams.
+    // the articulation. Here the hierarchy lives in the palette and every primitive of an instance
+    // reads the same slice — a skin that placed its parts individually would tear along their seams.
     //
-    // The palette itself is bound as the rig's set-3 material, whose contents were written before
-    // this pass recorded. Push payloads are copied at record time; a descriptor set's BUFFER is not,
-    // so what the GPU reads is whatever the material holds at Execute. That is exactly right for one
-    // pose per frame and exactly wrong for two, which is why LabRig owns the material rather than
-    // this renderer.
+    // <b>This is where the one-palette-per-frame gap was.</b> A descriptor set's BUFFER is not copied
+    // at record time the way a push payload is, so two draws in one frame sharing one palette binding
+    // both read whatever it held at Execute — the second pose, twice. The fix is not more bindings
+    // but a wider one: every instance's matrices in a single buffer at a known stride, indexed by
+    // gl_InstanceIndex. Bulwark and RTSGame both reached the same shape; BonePaletteSet is the
+    // stride contract they were each restating.
+    //
+    // uModel goes up as IDENTITY. Each instance's placement is baked into its own palette slice,
+    // because a per-draw push constant cannot vary per instance.
     private void DrawRigParts(
         RenderPassBuilder pass,
         LabRig? rig,
-        Matrix4x4 rigTransform,
+        int instances,
         PipelineHandle pipeline,
         ShaderUniform[] uniforms,
         ShaderTextureBinding[] textures,
         bool casterOnly)
     {
-        if (rig is null) return;
+        if (rig is null || instances <= 0) return;
 
-        var model = rig.MeshNodeTransform * rigTransform;
+        var stride = (float)rig.Skeleton.BoneCount;
         foreach (var part in rig.Parts)
         {
-            var push = casterOnly ? casterPushScratch : pushScratch;
-            PackMatrix(model, push);
-            if (!casterOnly)
+            byte[] push;
+            if (casterOnly)
             {
+                push = skinnedCasterPushScratch;
+                var casterFloats = MemoryMarshal.Cast<byte, float>(push.AsSpan());
+                casterFloats[0] = stride;
+                casterFloats[1] = 0f;
+                casterFloats[2] = 0f;
+                casterFloats[3] = 0f;
+            }
+            else
+            {
+                push = pushScratch;
+                PackMatrix(Matrix4x4.Identity, push);
                 var floats = MemoryMarshal.Cast<byte, float>(push.AsSpan());
                 floats[16] = part.BaseColour.X;
                 floats[17] = part.BaseColour.Y;
@@ -451,13 +479,18 @@ public sealed class LabRenderer : IDisposable
                 floats[19] = 1f;
                 floats[20] = part.Metallic;
                 floats[21] = part.Roughness;
+                // z, where the shader reads the per-instance stride. See lab_skinned.vert for why it
+                // rides in a material slot rather than in a block of its own.
+                floats[22] = stride;
+                floats[23] = 0f;
             }
 
-            pass.DrawIndexed(
+            pass.DrawIndexedInstanced(
                 vertexBuffer: part.Vertices,
                 indexBuffer: part.Indices,
                 pipeline: pipeline,
                 indexCount: part.IndexCount,
+                instanceCount: instances,
                 uniforms: uniforms,
                 // A fresh array per part for the same reason DrawModelParts builds one: texture
                 // lists are retained by reference, so a shared array gives every draw the last
@@ -465,7 +498,7 @@ public sealed class LabRenderer : IDisposable
                 textures: casterOnly
                     ? textures
                     : new[] { textures[0], new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1) },
-                material: rig.BoneMaterial,
+                perDrawMaterial: rig.BoneMaterial,
                 pushConstants: push);
         }
     }

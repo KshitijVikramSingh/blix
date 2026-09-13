@@ -60,6 +60,13 @@ behaviour here, that test should fail first.
   applies the travel twice: double speed, and a snap back once per loop.
   `RootMotion.Strip` reverts every parentless bone to rest, and the pairing is
   the whole division — the clip says how far, the game says where.
+- **N posed bodies share ONE palette buffer, sliced at `i * BoneCount`.** A
+  descriptor set's buffer is not copied at record time, so two draws in a frame
+  sharing one palette binding both read the second pose. `BonePaletteSet` owns
+  the stride — the sentence a C# packing loop and a GLSL `gl_InstanceIndex *
+  stride` both have to mean — and deliberately owns nothing else: whether the
+  world placement is baked into the palette or carried in an instance buffer is
+  where its consumers genuinely differ.
 - **A one-shot clip finishes at the boundary in its direction of travel.**
   `Rate` may be negative, so a non-looping clip played backwards ends at `t = 0`
   as surely as a forward one ends at `Duration`. "Finished" is not "reached the
@@ -68,7 +75,8 @@ behaviour here, that test should fail first.
 **Enforced by:** [`blix.md` §Transform3D](blix.md) (incl. *Deliberate limits*) ·
 `Blix.Test.Graphics` Sections **AH** (compose / reparent / cycle), **AJ**
 (pose basis / `LookAt` / `WorldRotation`) and **AQ** (rest reset, loop-seam
-travel, palette-vs-joint) · `Toolchain.Probe --rig`.
+travel, palette-vs-joint, strip, direction-aware finish, palette stride) ·
+`Toolchain.Probe --rig` and its no-arg binding check.
 
 ## 2. Matrices & the graphics backend
 

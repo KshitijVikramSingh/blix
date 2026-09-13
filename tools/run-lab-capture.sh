@@ -16,6 +16,8 @@
 # --advance <s> runs a fixed number of fixed steps (still no wall clock) and draws the
 # integrated root path; --drive-root strips the root and moves the body by the delta.
 #     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Dodge_Forward --advance 2.0 --drive-root
+# --instances N captures N bodies at N clip phases from one draw.
+#     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --instances 3 --xray
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

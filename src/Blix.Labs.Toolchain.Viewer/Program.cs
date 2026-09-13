@@ -57,6 +57,10 @@ public static class Program
         // nothing checks.
         var blendClip = ArgValue(args, "--blend");
         var additiveClip = ArgValue(args, "--additive");
+
+        // --instances N draws N copies of the rig, each on its own clock. One is the ordinary case
+        // and takes exactly the same path as eight — there is no single-body shader.
+        var instances = int.TryParse(ArgValue(args, "--instances"), out var n) ? n : 1;
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — toolchain lab",
@@ -64,7 +68,7 @@ public static class Program
             Height = 760,
         });
 
-        var loop = new ViewerLoop(modelPath, rigPath, clipName, blendClip, additiveClip);
+        var loop = new ViewerLoop(modelPath, rigPath, clipName, blendClip, additiveClip, instances);
         using var window = new Window(loop, options);
         window.Run();
     }
@@ -103,9 +107,22 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private ClipPlayer? playerA;
     private ClipPlayer? playerB;
     private Pose? posed;
-    private BonePalette? palette;
+    private BonePaletteSet? palettes;
+
+    // <b>Every instance past the first is an ECHO of the subject, offset in time.</b> They exist to
+    // prove the poses are independent — three bodies mid-stride at three different phases in one
+    // frame — and deliberately not to be a crowd: no per-instance clip choice, no AI, no director.
+    // Naming any of that would be inventing policy the lab has no consumer for.
+    private int instanceCount = 1;
+    private ClipPlayer[] echoes = Array.Empty<ClipPlayer>();
+    private readonly List<Matrix4x4> instancePlacements = new();
     private Matrix4x4[] boneWorlds = Array.Empty<Matrix4x4>();
     private Matrix4x4[] restWorlds = Array.Empty<Matrix4x4>();
+
+    // Scratch, rewritten per echo while drawing. One array rather than one per instance: the
+    // overlay reads it and is done with it before the next echo overwrites it, which is the whole
+    // difference between a draw-time scratch and a recorded payload.
+    private Matrix4x4[] echoBoneWorlds = Array.Empty<Matrix4x4>();
     private Matrix4x4 rigBase = Matrix4x4.Identity;
     private Matrix4x4 rigTransform = Matrix4x4.Identity;
     private float rigScale = 1f;
@@ -145,11 +162,13 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         string? rigPath = null,
         string? clipName = null,
         string? blendClip = null,
-        string? additiveClip = null)
+        string? additiveClip = null,
+        int instances = 1)
     {
         this.modelPath = modelPath;
         this.rigPath = rigPath;
         this.clipName = clipName;
+        instanceCount = Math.Clamp(instances, 1, LabRig.MaxInstances);
         secondClip = blendClip ?? additiveClip;
         if (blendClip is not null) poseMode = PoseMode.Blend;
         else if (additiveClip is not null) poseMode = PoseMode.Additive;
@@ -270,9 +289,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         scene = LabScene.GroundOnly();
         posed = rig.Skeleton.CreateRestPose();
-        palette = new BonePalette(rig.Skeleton.BoneCount);
+        palettes = new BonePaletteSet(rig.Skeleton.BoneCount, LabRig.MaxInstances);
         boneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
         restWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
+        echoBoneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
+        echoes = new ClipPlayer[Math.Max(0, instanceCount - 1)];
+        for (var i = 0; i < echoes.Length; i++) echoes[i] = new ClipPlayer(rig.Skeleton);
 
         playerA = new ClipPlayer(rig.Skeleton, rig.Clips.Count > 0 ? rig.Clips[0] : null);
         playerB = new ClipPlayer(rig.Skeleton, rig.Clips.Count > 1 ? rig.Clips[1] : null);
@@ -363,7 +385,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     /// </remarks>
     private void UpdateRig(double delta)
     {
-        if (rig is null || playerA is null || playerB is null || posed is null || palette is null) return;
+        if (rig is null || playerA is null || playerB is null || posed is null || palettes is null) return;
 
         playerA.Advance(delta);
 
@@ -411,7 +433,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // the same clip driving a body in a straight line.
         if (driveRoot) RootMotion.Strip(rig.Skeleton, posed, playerA.RestPose);
 
-        rig.Skeleton.ComputeBonePalette(posed, palette);
         LabRig.ComputeBoneWorlds(rig.Skeleton, posed, boneWorlds);
 
         // <b>Scaled ONCE.</b> rootTravel is already in post-MeshNodeTransform space and rigBase
@@ -422,6 +443,8 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             ? Matrix4x4.CreateTranslation(rootTravel) * rigBase
             : rigBase;
 
+        PackInstances(delta);
+
         // Sampled in the space the trail is drawn in, so the line is where the body would be.
         var where = Vector3.Transform(rootTravel, rigBase);
         if (rootPath.Count == 0 || Vector3.DistanceSquared(rootPath[^1], where) > 1e-6f)
@@ -431,6 +454,59 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             // several loops of a walk are visible at once, which is the length the wrap bug needs to
             // be seen at — one cycle's worth would hide exactly the seam being looked for.
             if (rootPath.Count > 2048) rootPath.RemoveAt(0);
+        }
+    }
+
+    /// <summary>Writes the subject's palette and every echo's into one buffer, sliced per instance.</summary>
+    /// <remarks>
+    /// <b>The gap this closes, stated plainly.</b> One palette binding held one pose, so two draws in
+    /// a frame both read the second — fine for a lab with one subject and the first thing a game
+    /// breaks. Here each body's matrices go into its own slice and the shader multiplies
+    /// gl_InstanceIndex by the stride. Three bodies at three clip phases, one draw, one frame.
+    /// <para>
+    /// Each instance's PLACEMENT is baked into its palette rather than carried alongside, because a
+    /// per-draw push constant cannot vary per instance. Bulwark does the same; RTSGame keeps a
+    /// separate instance buffer instead. <see cref="BonePaletteSet"/> takes no view — it owns the
+    /// stride, and where the model lives stays the caller's.
+    /// </para>
+    /// <para>
+    /// The echoes are offset by a fraction of the clip rather than by a fixed number of seconds, so
+    /// the spread reads the same on a 0.4 s dodge and a 2.4 s spin. A fixed offset would put every
+    /// body on the same frame of a short clip, which looks like the instancing has failed.
+    /// </para>
+    /// </remarks>
+    private void PackInstances(double delta)
+    {
+        if (rig is null || palettes is null || posed is null || playerA is null) return;
+
+        palettes.Reset();
+        instancePlacements.Clear();
+
+        // Bodies stand in a row across the camera's view, a stride apart, centred on the origin so
+        // one body sits where one body always did.
+        var spacing = MathF.Max(1.2f, rig.LongestExtent * rigScale * 0.75f);
+        var half = (instanceCount - 1) * 0.5f;
+
+        var subject = Matrix4x4.CreateTranslation(-half * spacing, 0f, 0f) * rigTransform;
+        palettes.Add(rig.Skeleton, posed, rig.MeshNodeTransform * subject);
+        instancePlacements.Add(subject);
+
+        for (var i = 0; i < echoes.Length; i++)
+        {
+            var echo = echoes[i];
+            echo.Clip = playerA.Clip;
+            echo.Paused = playerA.Paused;
+            echo.Rate = playerA.Rate;
+            echo.Advance(delta);
+
+            // Held at a fixed phase behind the subject rather than free-running, so the spread is a
+            // property of the picture and not of how long the window has been open.
+            var offset = (i + 1) / (float)instanceCount;
+            echo.ScrubTo(playerA.Time + (offset * playerA.Duration));
+
+            var placement = Matrix4x4.CreateTranslation((i + 1 - half) * spacing, 0f, 0f) * rigTransform;
+            palettes.Add(rig.Skeleton, echo.Pose, rig.MeshNodeTransform * placement);
+            instancePlacements.Add(placement);
         }
     }
 
@@ -449,10 +525,11 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         // Before recording, because the palette buffer is read at Execute and written here — the
         // draw carries a descriptor set, not a copy of the matrices.
-        if (rig is not null && palette is not null) rig.UploadPalette(palette);
+        if (rig is not null && palettes is not null) rig.UploadPalettes(palettes);
 
         renderer.Render(
-            commandList, scene, viewProjection, cameraPosition, model, modelTransform, rig, rigTransform);
+            commandList, scene, viewProjection, cameraPosition, model, modelTransform,
+            rig, palettes?.Count ?? 0);
     }
 
     public void Debug(DebugContext debug)
@@ -508,22 +585,28 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         if (showSkeleton)
         {
-            LabSkeletonView.Draw(
-                debug,
-                rig.Skeleton,
-                boneWorlds,
-                rig.MeshNodeTransform * rigTransform,
-                LabSkeletonView.Options.Default with
-                {
-                    Joints = showJoints,
-                    RestGhost = showRestGhost,
-                    AllAxes = showAllBoneAxes,
-                    LeafStubs = showLeafStubs,
-                    Scale = gizmoScale,
-                },
-                selectedBone,
-                showRestGhost ? restWorlds : null,
-                deformBonesOnly ? rig.DeformHierarchy : null);
+            var options = LabSkeletonView.Options.Default with
+            {
+                Joints = showJoints,
+                RestGhost = showRestGhost,
+                AllAxes = showAllBoneAxes,
+                LeafStubs = showLeafStubs,
+                Scale = gizmoScale,
+            };
+
+            // <b>One skeleton per instance, and that IS the proof.</b> Three bodies mid-stride at
+            // three phases is suggestive; three SKELETONS in different shapes in one frame is
+            // conclusive — a single palette read three times would draw the same pose three times
+            // and the meshes would agree with each other.
+            //
+            // Scoped per instance so the debug names do not collide: `bone/17` means something
+            // different under `i0` than under `i2`, and trails key off the name.
+            DrawInstanceSkeleton(debug, 0, boneWorlds, options);
+            for (var i = 0; i < echoes.Length && i + 1 < instancePlacements.Count; i++)
+            {
+                LabRig.ComputeBoneWorlds(rig.Skeleton, echoes[i].Pose, echoBoneWorlds);
+                DrawInstanceSkeleton(debug, i + 1, echoBoneWorlds, options);
+            }
         }
 
         if (!showRootTrail) return;
@@ -537,6 +620,26 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             // before the thing it exists to show comes round again.
             debug.Draw.Polyline("root/path", rootPath, new GraphicsColor(0.3f, 0.8f, 0.55f, 1f));
         }
+    }
+
+    // One instance's skeleton, at its own placement. Only the subject gets a selected bone —
+    // selecting "the left wrist" on three bodies at once would highlight three joints and point at
+    // none of them.
+    private void DrawInstanceSkeleton(
+        DebugContext debug, int instance, Matrix4x4[] worlds, LabSkeletonView.Options options)
+    {
+        if (rig is null || instance >= instancePlacements.Count) return;
+
+        using var scope = debug.Scope($"i{instance}");
+        LabSkeletonView.Draw(
+            debug,
+            rig.Skeleton,
+            worlds,
+            rig.MeshNodeTransform * instancePlacements[instance],
+            options,
+            instance == 0 ? selectedBone : -1,
+            instance == 0 && showRestGhost ? restWorlds : null,
+            deformBonesOnly ? rig.DeformHierarchy : null);
     }
 
     // The clip list, the transport, and the selected bone — the panel half of "see a pose".
@@ -681,6 +784,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         ImGui.TextDisabled($"{rootPath.Count} samples");
     }
 
+    /// <summary>Where instance 0 stands. The subject is offset when there are echoes beside it.</summary>
+    private Matrix4x4 SubjectPlacement =>
+        instancePlacements.Count > 0 ? instancePlacements[0] : rigTransform;
+
     private void ResetRootTravel()
     {
         rootTravel = Vector3.Zero;
@@ -720,7 +827,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         var local = posed.Locals[selectedBone];
         var rest = playerA!.RestPose.Locals[selectedBone];
-        var world = boneWorlds[selectedBone] * rig.MeshNodeTransform * rigTransform;
+        var world = boneWorlds[selectedBone] * rig.MeshNodeTransform * SubjectPlacement;
 
         ImGui.TextDisabled($"bone {selectedBone} · parent {rig.Skeleton.Bones[selectedBone].ParentIndex}");
         ImGui.Text($"local T {local.Translation.X:0.000}, {local.Translation.Y:0.000}, {local.Translation.Z:0.000}");
@@ -1061,7 +1168,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     {
         if (rig is null) return;
 
-        var place = rig.MeshNodeTransform * rigTransform;
+        var place = rig.MeshNodeTransform * SubjectPlacement;
         var span = LabSkeletonView.Span(
             rig.Skeleton, boneWorlds, place, deformBonesOnly ? rig.DeformHierarchy : null);
 

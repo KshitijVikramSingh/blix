@@ -32,6 +32,21 @@ public sealed class LabRig : IDisposable
     /// </remarks>
     public const int MaxBones = 128;
 
+    /// <summary>How many independently posed bodies one palette buffer holds.</summary>
+    /// <remarks>
+    /// <b>The number that closes the gap this rig type used to document.</b> One palette binding
+    /// served one pose per frame, so two same-frame draws sharing it both rendered the second — fine
+    /// for a lab with one subject and the first thing a game breaks. The buffer is now
+    /// <see cref="MaxBones"/> x this, sliced by instance, which is the shape Bulwark and RTSGame
+    /// already use for their crowds.
+    /// <para>
+    /// Eight rather than a crowd: the lab's question is "are these poses independent", which three
+    /// bodies answer and three hundred only make slower. <c>MaxBones * MaxInstances * 64</c> = 64 KB,
+    /// allocated once per rig and short-written per frame.
+    /// </para>
+    /// </remarks>
+    public const int MaxInstances = 8;
+
     /// <summary>One drawable piece of the skin: every primitive shares the skeleton and the palette.</summary>
     public readonly record struct Part(
         VertexBufferHandle Vertices,
@@ -134,7 +149,7 @@ public sealed class LabRig : IDisposable
         rig.Skeleton = imported.Skeleton;
         rig.MeshNodeTransform = imported.MeshNodeTransform;
         rig.Clips = imported.Animations.OrderBy(c => c.Name, StringComparer.Ordinal).ToArray();
-        rig.palettePayload = new byte[imported.Skeleton.BoneCount * 64];
+        rig.palettePayload = new byte[MaxBones * MaxInstances * 64];
         rig.weightedBones = FindWeightedBones(imported.Skeleton, imported.Primitives);
         rig.WeightedBoneCount = rig.weightedBones.Count(b => b);
         rig.deformHierarchy = PromoteToHierarchy(imported.Skeleton, rig.weightedBones);
@@ -198,23 +213,38 @@ public sealed class LabRig : IDisposable
         return rig;
     }
 
-    /// <summary>Copies a palette into the frame's bone buffer. Call once per frame, before recording.</summary>
+    /// <summary>Copies every live instance's palette into the frame's bone buffer. Once per frame, before recording.</summary>
     /// <remarks>
     /// The 4x4s go up untransposed, exactly as conventions §2 says: GLSL reads std430 column-major,
     /// which is the transpose of the row-vector form the CPU built, so `skin * v` in the shader
     /// computes what `v_row * skin` computes here. There is no transpose in this file and there must
     /// not be one.
+    /// <para>
+    /// <b>Only the live prefix is sent.</b> The buffer holds eight instances' worth; three 41-bone
+    /// rigs are 7,872 bytes of it, and uploading the whole 64 KB to draw three bodies is how an
+    /// instance buffer comes to cost more than the draw. A short write is legal and the shader never
+    /// reads past <c>instanceCount</c>.
+    /// </para>
     /// </remarks>
-    public void UploadPalette(BonePalette palette)
+    public void UploadPalettes(BonePaletteSet palettes)
     {
-        ArgumentNullException.ThrowIfNull(palette);
-        var count = Math.Min(palette.BoneCount, Skeleton.BoneCount);
-        for (var b = 0; b < count; b++)
+        ArgumentNullException.ThrowIfNull(palettes);
+        if (palettes.BoneCount != Skeleton.BoneCount)
         {
-            MemoryMarshal.Write(palettePayload.AsSpan(b * 64, 64), in palette.Matrices[b]);
+            throw new ArgumentException(
+                $"Palette set is packed at a stride of {palettes.BoneCount}; this rig has " +
+                $"{Skeleton.BoneCount} bones. The shader multiplies by the stride, so a mismatch " +
+                $"renders other instances' poses rather than failing.",
+                nameof(palettes));
         }
 
-        bones.WriteBuffer(device.CurrentFrameSlot, 0, palettePayload);
+        var live = Math.Min(palettes.LiveMatrixCount, MaxBones * MaxInstances);
+        for (var i = 0; i < live; i++)
+        {
+            MemoryMarshal.Write(palettePayload.AsSpan(i * 64, 64), in palettes.Matrices[i]);
+        }
+
+        bones.WriteBuffer(device.CurrentFrameSlot, 0, palettePayload.AsSpan(0, live * 64));
     }
 
     /// <summary>

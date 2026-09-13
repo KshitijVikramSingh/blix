@@ -2710,6 +2710,62 @@ static ShaderInterface MinimalShader() => new(new[]
     partway.ScrubTo(0.8);
     t.ExpectTrue("AQ.14 and a reverse step short of the start keeps going", partway.Advance(0.2));
     t.ExpectClose("AQ.14 travelling backwards as it goes", partway.RootDelta.Translation.X, -0.4f);
+
+    // ── BonePaletteSet: the stride, which two languages have to agree on ─────
+    // Instance i's matrices start at i * BoneCount. That sentence is restated in a C# packing
+    // loop and in a GLSL `gl_InstanceIndex * stride`, and nothing checks the two agree — when
+    // they disagree the bodies do not vanish, they render as other bodies' poses, smeared.
+    // Bulwark and RTSGame each carry their own copy of it; this names it once.
+    {
+        var set = new BonePaletteSet(skeleton.BoneCount, capacity: 3);
+        t.ExpectTrue("AQ.15 the buffer is capacity x bone count",
+            set.Matrices.Length == 3 * skeleton.BoneCount);
+        t.ExpectTrue("AQ.15 and starts with nothing live", set.Count == 0 && set.LiveMatrixCount == 0);
+
+        // Three DIFFERENT poses, so a set that wrote them all to one slot would be caught.
+        var a = skeleton.CreateRestPose();
+        var b = skeleton.CreateRestPose();
+        var c = skeleton.CreateRestPose();
+        a.Locals[0] = a.Locals[0] with { Translation = new Vector3(1f, 0f, 0f) };
+        b.Locals[0] = b.Locals[0] with { Translation = new Vector3(2f, 0f, 0f) };
+        c.Locals[0] = c.Locals[0] with { Translation = new Vector3(3f, 0f, 0f) };
+
+        t.ExpectTrue("AQ.15 Add returns the instance index", set.Add(skeleton, a, Matrix4x4.Identity) == 0);
+        t.ExpectTrue("AQ.15 counting up", set.Add(skeleton, b, Matrix4x4.Identity) == 1);
+        t.ExpectTrue("AQ.15 and again", set.Add(skeleton, c, Matrix4x4.Identity) == 2);
+        t.ExpectTrue("AQ.15 three live instances is three strides of matrices",
+            set.LiveMatrixCount == 3 * skeleton.BoneCount);
+
+        // The root bone of each instance sits at i * BoneCount and holds THAT instance's pose.
+        // This is the assertion a shader's `base = gl_InstanceIndex * stride` has to match.
+        t.ExpectClose("AQ.15 instance 0 at offset 0", set.Matrices[0].M41, 1f);
+        t.ExpectClose("AQ.15 instance 1 one stride along", set.Matrices[skeleton.BoneCount].M41, 2f);
+        t.ExpectClose("AQ.15 instance 2 two strides along", set.Matrices[2 * skeleton.BoneCount].M41, 3f);
+        t.ExpectClose("AQ.15 and Slice agrees with the arithmetic", set.Slice(1)[0].M41, 2f);
+
+        // `post` is where a caller bakes a world placement in (Bulwark's shape) or passes identity
+        // and places the body some other way (RTSGame's). The set takes no view; it just composes.
+        set.Reset();
+        t.ExpectTrue("AQ.16 Reset makes the slots free again", set.Count == 0);
+        set.Add(skeleton, a, Matrix4x4.CreateTranslation(10f, 0f, 0f));
+        t.ExpectClose("AQ.16 post-multiply bakes a placement into the palette", set.Matrices[0].M41, 11f);
+
+        // Full is an exception, not a silent drop. A crowd that quietly stops growing at capacity
+        // shows up as "the last few enemies are invisible", which looks like anything but this.
+        set.Add(skeleton, b, Matrix4x4.Identity);
+        set.Add(skeleton, c, Matrix4x4.Identity);
+        var overflowed = false;
+        try { set.Add(skeleton, a, Matrix4x4.Identity); }
+        catch (InvalidOperationException) { overflowed = true; }
+        t.ExpectTrue("AQ.16 a fourth instance in a set of three throws", overflowed);
+
+        // A stride mismatch is the failure this type exists to make impossible, so it is loud.
+        var wrongSized = new Skeleton(new[] { new Bone("only", -1, Matrix4x4.Identity) });
+        var rejected = false;
+        try { set.Add(wrongSized, wrongSized.CreateRestPose(), Matrix4x4.Identity); }
+        catch (ArgumentException) { rejected = true; }
+        t.ExpectTrue("AQ.16 and a skeleton of the wrong bone count is refused", rejected);
+    }
 }
 
 t.PrintSummary();

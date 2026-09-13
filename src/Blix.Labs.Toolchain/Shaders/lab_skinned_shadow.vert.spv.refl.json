@@ -7,13 +7,23 @@
     ],
     "types" : {
         "_14" : {
+            "name" : "Push",
+            "members" : [
+                {
+                    "name" : "uSkin",
+                    "type" : "vec4",
+                    "offset" : 0
+                }
+            ]
+        },
+        "_30" : {
             "name" : "Bones",
             "members" : [
                 {
                     "name" : "m",
                     "type" : "mat4",
                     "array" : [
-                        128
+                        1024
                     ],
                     "array_size_is_literal" : [
                         true
@@ -24,7 +34,7 @@
                 }
             ]
         },
-        "_100" : {
+        "_121" : {
             "name" : "gl_PerVertex",
             "members" : [
                 {
@@ -57,22 +67,11 @@
                 }
             ]
         },
-        "_103" : {
+        "_124" : {
             "name" : "ShadowFrame",
             "members" : [
                 {
                     "name" : "uLightViewProjection",
-                    "type" : "mat4",
-                    "offset" : 0,
-                    "matrix_stride" : 16
-                }
-            ]
-        },
-        "_108" : {
-            "name" : "Push",
-            "members" : [
-                {
-                    "name" : "uModel",
                     "type" : "mat4",
                     "offset" : 0,
                     "matrix_stride" : 16
@@ -114,17 +113,17 @@
     ],
     "ssbos" : [
         {
-            "type" : "_14",
+            "type" : "_30",
             "name" : "Bones",
             "readonly" : true,
-            "block_size" : 8192,
+            "block_size" : 65536,
             "set" : 3,
             "binding" : 0
         }
     ],
     "ubos" : [
         {
-            "type" : "_103",
+            "type" : "_124",
             "name" : "ShadowFrame",
             "block_size" : 64,
             "set" : 0,
@@ -133,8 +132,8 @@
     ],
     "push_constants" : [
         {
-            "type" : "_108",
-            "name" : "_110",
+            "type" : "_14",
+            "name" : "_16",
             "push_constant" : true
         }
     ]

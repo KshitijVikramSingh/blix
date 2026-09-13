@@ -62,6 +62,11 @@ public static class Program
         var advance = double.TryParse(ArgValue(args, "--advance"), out var secs) ? secs : 0.0;
         var driveRoot = args.Contains("--drive-root");
 
+        // --instances N is the captured proof that N bodies hold N independent poses from one draw.
+        // One palette binding served one pose per frame until recently; three bodies in one PNG at
+        // three clip phases is the shape of that gap being closed, and a still frame carries it.
+        var instances = int.TryParse(ArgValue(args, "--instances"), out var n) ? n : 1;
+
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — lab capture",
@@ -74,7 +79,8 @@ public static class Program
         if (options.ExitAfterFrames <= 0) options = options with { ExitAfterFrames = 8 };
 
         var loop = new CaptureLoop(
-            output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray, advance, driveRoot);
+            output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray, advance,
+            driveRoot, instances);
         using (var window = new Window(loop, options))
         {
             window.Run();
@@ -127,9 +133,13 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private float rigDrawnHeight = 3f;
     private LabRig? rig;
     private ClipPlayer? player;
-    private BonePalette? palette;
+    private BonePaletteSet? palettes;
     private Matrix4x4[] boneWorlds = Array.Empty<Matrix4x4>();
     private Matrix4x4 rigTransform = Matrix4x4.Identity;
+    private readonly int instanceCount = 1;
+    private readonly List<Matrix4x4> instancePlacements = new();
+    private readonly List<Pose> instancePoses = new();
+    private float rowWidth;
 
     public CaptureLoop(
         string outputPath,
@@ -140,8 +150,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         double clipTime = 0.0,
         bool xray = false,
         double advance = 0.0,
-        bool driveRoot = false)
+        bool driveRoot = false,
+        int instances = 1)
     {
+        instanceCount = Math.Clamp(instances, 1, LabRig.MaxInstances);
         this.xray = xray;
         this.advance = advance;
         this.driveRoot = driveRoot;
@@ -228,9 +240,39 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             rigTransform = Matrix4x4.CreateTranslation(rootTravel) * rigBase;
         }
 
-        palette = new BonePalette(rig.Skeleton.BoneCount);
-        rig.Skeleton.ComputeBonePalette(player.Pose, palette);
         boneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
+
+        // <b>One palette per body, packed into one buffer at a known stride.</b> Each instance is the
+        // same clip at a different phase, which is what makes the picture evidence: three bodies in
+        // the same pose would prove only that three draws happened.
+        palettes = new BonePaletteSet(rig.Skeleton.BoneCount, LabRig.MaxInstances);
+        var spacing = MathF.Max(1.2f, rig.LongestExtent * scale * 0.75f);
+        var half = (instanceCount - 1) * 0.5f;
+        for (var i = 0; i < instanceCount; i++)
+        {
+            var pose = rig.Skeleton.CreateRestPose();
+            if (i == 0)
+            {
+                pose.CopyFrom(player.Pose);
+            }
+            else
+            {
+                // A fraction of the clip, not a fixed number of seconds: a fixed offset puts every
+                // body on the same frame of a short clip, which reads as the instancing having failed.
+                var echo = new ClipPlayer(rig.Skeleton, player.Clip);
+                echo.ScrubTo(player.Time + (i / (double)instanceCount * player.Duration));
+                if (driveRoot) RootMotion.Strip(rig.Skeleton, echo.Pose, echo.RestPose);
+                pose.CopyFrom(echo.Pose);
+            }
+
+            var placement = Matrix4x4.CreateTranslation((i - half) * spacing, 0f, 0f) * rigTransform;
+            palettes.Add(rig.Skeleton, pose, rig.MeshNodeTransform * placement);
+            instancePlacements.Add(placement);
+            instancePoses.Add(pose);
+        }
+
+        rowWidth = (instanceCount - 1) * spacing;
+
         LabRig.ComputeBoneWorlds(rig.Skeleton, player.Pose, boneWorlds);
 
         Console.WriteLine(
@@ -255,6 +297,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         var eye = rig is not null
             ? new Vector3(2.6f, 2.0f, 3.4f)
             : subject ? new Vector3(3.4f, 2.4f, 4.2f) : new Vector3(6.4f, 4.8f, 7.6f);
+
+        // A row of bodies needs a camera that can see the row. Framed on one, the third instance is
+        // cropped at the edge — and a proof that three poses are independent is worth nothing if the
+        // third one is off-screen.
+        if (rig is not null && rowWidth > 0f) eye *= 1f + (rowWidth * 0.28f);
         var target = rig is not null
             ? new Vector3(0f, 1.4f, 0f)
             : subject ? new Vector3(0f, 0.7f, 0f) : new Vector3(0f, 1f, 0f);
@@ -287,10 +334,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         var view = Matrix4x4.CreateLookAt(eye, target, Vector3.UnitY);
         viewProjection = view * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
-        if (rig is not null && palette is not null) rig.UploadPalette(palette);
+        if (rig is not null && palettes is not null) rig.UploadPalettes(palettes);
 
         renderer.Render(
-            commandList, scene, viewProjection, eye, model, modelTransform, rig, rigTransform);
+            commandList, scene, viewProjection, eye, model, modelTransform, rig, palettes?.Count ?? 0);
 
         // Captured after the frame this call records has been executed — so the read
         // happens on the NEXT OnRender, when the target holds a finished picture rather
@@ -337,15 +384,24 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // worse than no picture.
         if (rig is not null && player is not null)
         {
-            LabSkeletonView.Draw(
-                debug,
-                rig.Skeleton,
-                boneWorlds,
-                rig.MeshNodeTransform * rigTransform,
-                LabSkeletonView.Options.Default,
-                selectedBone: -1,
-                restWorlds: null,
-                include: rig.DeformHierarchy);
+            // One skeleton per instance, each scoped so `bone/17` under i0 and under i2 stay
+            // distinct. Three skeletons in three shapes is the conclusive form of the proof: three
+            // meshes could agree with each other and still be one pose drawn thrice.
+            var worlds = new Matrix4x4[rig.Skeleton.BoneCount];
+            for (var i = 0; i < instancePlacements.Count; i++)
+            {
+                using var instanceScope = debug.Scope($"i{i}");
+                LabRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[i], worlds);
+                LabSkeletonView.Draw(
+                    debug,
+                    rig.Skeleton,
+                    worlds,
+                    rig.MeshNodeTransform * instancePlacements[i],
+                    LabSkeletonView.Options.Default,
+                    selectedBone: -1,
+                    restWorlds: null,
+                    include: rig.DeformHierarchy);
+            }
 
             // The path, as a polyline. A root-motion bug has a SHAPE: straight with even spacing is
             // right, a stutter once per cycle is the loop wrap handled by subtraction, and a sideways

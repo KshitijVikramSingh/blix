@@ -70,14 +70,17 @@ public static class Program
             ("lab.lit", new[] { "lab_lit.vert", "lab_lit.frag" }, LabRenderer.LitPushBytes),
             ("lab.present", new[] { "lab_present.vert", "lab_present.frag" }, null),
 
-            // The skinned pair pushes the SAME blocks as the unskinned one — skinning adds a
-            // descriptor set, not push bytes — so both are checked against the same two constants.
-            // That is the claim worth checking: if a skinned shader ever grew a push member, the
-            // renderer would keep packing 96 bytes into a 112-byte block and the tail would be
-            // whatever was left in the scratch buffer.
+            // The skinned LIT pass pushes the same 96-byte block as the unskinned one — the stride
+            // rides in uMaterial's spare .z rather than widening it, because the block has to stay
+            // byte-identical to what lab_lit.frag declares. The skinned CASTER pushes 16: its
+            // fragment stage declares no block at all, so it was free to be exactly what the stage
+            // uses, and an instance's placement is already in its palette.
+            //
+            // Worth checking because the renderer packs to these constants: if a shader grew a push
+            // member, the tail of the payload would be whatever was left in the scratch buffer.
             ("lab.skinned", new[] { "lab_skinned.vert", "lab_lit.frag" }, LabRenderer.LitPushBytes),
             ("lab.skinned.shadow",
-                new[] { "lab_skinned_shadow.vert", "lab_shadow.frag" }, LabRenderer.CasterPushBytes),
+                new[] { "lab_skinned_shadow.vert", "lab_shadow.frag" }, LabRenderer.SkinnedCasterPushBytes),
         };
 
         var failures = 0;
@@ -154,15 +157,43 @@ public static class Program
             if (boneSlot?.BlockLayout is { } block)
             {
                 var declared = block.TotalSize / 64;
+                var expected = LabRig.MaxBones * LabRig.MaxInstances;
                 Console.WriteLine(
                     $"bone palette: set {boneSlot.Set} binding {boneSlot.Binding}, " +
-                    $"{block.TotalSize}B = {declared} matrices");
-                if (declared != LabRig.MaxBones)
+                    $"{block.TotalSize}B = {declared} matrices " +
+                    $"({LabRig.MaxInstances} instances x {LabRig.MaxBones} bones)");
+                if (declared != expected)
                 {
                     Console.Error.WriteLine(
-                        $"  MISMATCH: the shader holds {declared} bones, LabRig.MaxBones says " +
-                        $"{LabRig.MaxBones}. A rig between the two would index past the array.");
+                        $"  MISMATCH: the shader holds {declared} matrices, " +
+                        $"LabRig.MaxBones x MaxInstances says {expected}. The shader indexes " +
+                        $"gl_InstanceIndex x stride into this array; a short one reads past its end.");
                     failures++;
+                }
+
+                // <b>Both skinned stages, not just the lit one.</b> They share ONE palette material,
+                // so a caster whose array is a different size is a shadow reading a different body's
+                // pose — and the lit pass would look perfect while it happened.
+                var casterSlot = ShaderReflection
+                    .MergeStages(ShaderReflection.Load(
+                        Path.Combine(shaderDirectory, "lab_skinned_shadow.vert.spv.refl.json")))
+                    .Slots.FirstOrDefault(s => s.Type == ShaderResourceType.StorageBuffer);
+                if (casterSlot?.BlockLayout is not { } casterBlock)
+                {
+                    Console.Error.WriteLine("  the skinned caster declares no palette — it cannot cast a posed shadow.");
+                    failures++;
+                }
+                else if (casterBlock.TotalSize != block.TotalSize || casterSlot.Set != boneSlot.Set)
+                {
+                    Console.Error.WriteLine(
+                        $"  MISMATCH: the caster's palette is set {casterSlot.Set} x " +
+                        $"{casterBlock.TotalSize}B against the lit pass's set {boneSlot.Set} x " +
+                        $"{block.TotalSize}B. They share one material and must agree.");
+                    failures++;
+                }
+                else
+                {
+                    Console.WriteLine("  the skinned caster reads the same palette, same set, same size");
                 }
             }
             else

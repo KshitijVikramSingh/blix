@@ -15,6 +15,8 @@
 # --clip <name> starts on a clip; --blend <name> / --additive <name> name the second clip
 # and pick the composition with it.
 #     tools/run-lab.sh --rig .../Rogue.glb --clip Walking_A --blend Running_A
+# --instances N draws N copies of the rig, each on its own clock (max 8).
+#     tools/run-lab.sh --rig .../Rogue.glb --clip Walking_A --instances 3
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

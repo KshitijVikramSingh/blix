@@ -330,6 +330,51 @@ next to each other.
 Worth knowing before reaching for it: of the Rogue's 76 clips, **four travel** — the
 dodges. Walk and run are authored in place, and the game owns locomotion.
 
+#### Many bodies, one rig
+
+`--instances N` (viewer and capture) draws N copies of the rig, each on its own clock.
+
+```sh
+tools/run-lab.sh --rig .../Rogue.glb --clip Walking_A --instances 3
+tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --instances 3 --xray --out three.png
+```
+
+**The gap this closes.** A bone palette is a descriptor set, and a descriptor set's *buffer* is
+not copied at record time the way a push payload is — so two draws in one frame sharing one
+palette binding both read whatever it held at Execute: the second pose, twice. Fine for a lab
+with one subject, and the first thing a game breaks.
+
+The fix is not more bindings but a wider one: **every instance's matrices in a single buffer at
+a known stride, indexed by `gl_InstanceIndex`**. Bulwark and RTSGame had both already reached
+that shape independently — Bulwark packs `i * EnemyBones * 16` floats against a
+`#define BONE_COUNT 15` in two shaders (with a throw at load if the asset disagrees, because
+nothing checks earlier); RTSGame packs `count * BoneCount` against `gl_InstanceIndex * uSkin.x`.
+`Blix.BonePaletteSet` is the stride they were each restating.
+
+It names the stride and **not** where the model matrix lives, because that is the half the two
+consumers genuinely disagree about: Bulwark bakes it into the palette (world-space, no instance
+buffer at all), RTSGame keeps the palette in model space and carries `model` and `tint`
+alongside. A set that insisted on either would force one shape onto the other — the mistake
+conventions §4 names with the turret rigs. The lab takes Bulwark's, and `Add(skeleton, pose,
+post)` is where the choice is made.
+
+The lab's shader passes the stride as **data** (`uMaterial.z`) rather than a `#define`, so one
+compiled shader serves a 15-bone robot and a 41-bone rogue and the CPU packing cannot disagree
+with the GPU reading. The array bound still has to be a literal — the build's SPIR-V target
+passes no `-D` — so that number does live in two files, and the probe is what makes it safe: it
+reads the reflected block size back and fails non-zero when it stops matching
+`LabRig.MaxBones × MaxInstances`. It checks the **caster's** palette too, since both stages
+share one material and a shadow reading a different body's pose would leave the lit pass looking
+perfect.
+
+**There is no single-body path.** Drawing one rig is an instance count of one through the same
+line of code. A simpler path for the common case is how "it works with one and breaks with
+three" becomes possible.
+
+What this deliberately is not: a crowd. The echoes are the subject's clip at staggered phases —
+no per-instance clip choice, no AI, no director. Eight slots, because the question is "are these
+poses independent", which three bodies answer and three hundred only make slower.
+
 **The capture tool** renders the lab and writes what it rendered to a PNG. It captures
 the **HDR scene target**, not the swapchain — so the lab's render path needed no change,
 and the tonemap is applied on the CPU, which means a capture holds real radiance and the

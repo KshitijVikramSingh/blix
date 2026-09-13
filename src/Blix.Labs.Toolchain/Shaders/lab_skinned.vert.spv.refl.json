@@ -6,25 +6,7 @@
         }
     ],
     "types" : {
-        "_14" : {
-            "name" : "Bones",
-            "members" : [
-                {
-                    "name" : "m",
-                    "type" : "mat4",
-                    "array" : [
-                        128
-                    ],
-                    "array_size_is_literal" : [
-                        true
-                    ],
-                    "offset" : 0,
-                    "array_stride" : 64,
-                    "matrix_stride" : 16
-                }
-            ]
-        },
-        "_113" : {
+        "_15" : {
             "name" : "Push",
             "members" : [
                 {
@@ -45,7 +27,25 @@
                 }
             ]
         },
-        "_156" : {
+        "_30" : {
+            "name" : "Bones",
+            "members" : [
+                {
+                    "name" : "m",
+                    "type" : "mat4",
+                    "array" : [
+                        1024
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 0,
+                    "array_stride" : 64,
+                    "matrix_stride" : 16
+                }
+            ]
+        },
+        "_175" : {
             "name" : "gl_PerVertex",
             "members" : [
                 {
@@ -78,7 +78,7 @@
                 }
             ]
         },
-        "_159" : {
+        "_178" : {
             "name" : "Frame",
             "members" : [
                 {
@@ -162,17 +162,17 @@
     ],
     "ssbos" : [
         {
-            "type" : "_14",
+            "type" : "_30",
             "name" : "Bones",
             "readonly" : true,
-            "block_size" : 8192,
+            "block_size" : 65536,
             "set" : 3,
             "binding" : 0
         }
     ],
     "ubos" : [
         {
-            "type" : "_159",
+            "type" : "_178",
             "name" : "Frame",
             "block_size" : 176,
             "set" : 0,
@@ -181,8 +181,8 @@
     ],
     "push_constants" : [
         {
-            "type" : "_113",
-            "name" : "_115",
+            "type" : "_15",
+            "name" : "_17",
             "push_constant" : true
         }
     ]
