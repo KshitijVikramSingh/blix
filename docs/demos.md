@@ -6,7 +6,7 @@ the Vulkan backend, and each is an executable spec for an engine subsystem (see
 written up in the [README](../README.md#vulkan-sponza--capabilities-demo); everything
 else lives here.
 
-Four are complete, end-to-end playable games; one is a VFX showcase; four are focused
+Four are complete, end-to-end playable games; one is a VFX showcase; five are focused
 references. (The OpenGL backend and its four heavy demos were sunset; Pong was rebuilt
 on the Vulkan `SpriteBatch`.)
 
@@ -189,6 +189,47 @@ dotnet run --project src/Blix.Demos.VulkanGraph/Blix.Demos.VulkanGraph.csproj
 Smaller demo of the render-graph topology: `cube-offscreen → invert → present`. Validates
 resource handles, Read edges, `MatchSwapchainGraphSize` resizing, and the
 graph→imperative-command-list bridge.
+
+### Chassis — application-chassis reference
+
+```sh
+tools/run-chassis.sh              # runs until closed
+tools/run-chassis.sh --frames 60  # bounded run
+```
+
+The smallest working Blix executable, and the only one that is deliberately **not** a
+diagnostics producer. Every other application here that wants an interface is also an
+`IDebuggable`, which is precisely why none of them can answer the two questions this
+one exists for.
+
+**Does an application get a UI without producing diagnostics?** Until the chassis work,
+no: `gameLoop is IDebuggable` decided whether ImGui was created at all, so "produces
+diagnostics" and "may have an interface" were the same question. This loop implements
+`IUiSource` and not `IDebuggable`, and counts its own `DrawUi` calls — which the host
+only makes inside an ImGui frame it has built — so the answer is a log line rather than
+a pair of eyes:
+
+```
+chassis: UI drawn on 3709/3709 frame(s) with NO IDebuggable on this loop.
+```
+
+**Does UI capture actually suppress game input?** `WantCaptureKeyboard` existed from the
+day `VkImGuiRenderer` was written and was never read, so typing into an ImGui field also
+drove the game — unnoticed because the diagnostics overlay has almost no text fields.
+The loop counts every input event it receives and remembers the count when its text
+field takes focus; while focused that number must not move however much is typed, and
+the panel says so live. Key and mouse **releases** still arrive, which is deliberate: a
+press decides who owns a gesture, a release only ends one.
+
+It also renders — a single clear pass whose colour walks with time, with **no shaders of
+its own**. The project file is 25 lines and declares none, against the ~80 a Blix
+executable used to need with half of it restating how the engine compiles a shader. That
+is the point of the demo as much as the panel is: it is what starting something new
+costs now.
+
+Proves: `IUiSource` · UI input capture · host-owned `--frames` · shared shader/build
+infrastructure by declaring none of it.
+Owns: nothing — it has no gameplay, no assets and no world on purpose.
 
 ### Vulkan Hello — bring-up reference
 

@@ -1034,7 +1034,34 @@ var ray = camera.ScreenPointToRay(mouseX, mouseY, logicalW, logicalH);
 var hit = collisionWorld.Raycast(ray);
 ```
 
-**What's pickable is what the game chooses to iterate.** Picking has no engine-level "is pickable" concept — `CollisionWorld3D` holds whatever the game registers, and the per-object loop is game code. A future editor would probably want a separate `PickableRegistry<T>` (similar to `CollisionWorld3D`, distinct semantics — "click-targetable" vs "physically present"), but that doesn't exist yet and bolting it onto colliders would conflate two unrelated questions.
+### Picking through a named view
+
+`ScreenPointToRay` takes a viewport size and **recomputes** the view-projection from
+its aspect ratio. That quietly assumes two things: the view fills the window, and its
+matrix is the one the camera would derive. Neither holds for a picture drawn into a
+panel — an inspector viewport, a split screen, a second camera on the same scene —
+which is exactly what first-class views exist to allow.
+
+```csharp
+public static Ray? ViewPicking.RayThrough(in ViewDeclaration view, Vector2 pointer);
+```
+
+Reads the view's **own** matrix and **own** rectangle, so a picture drawn anywhere can
+be picked anywhere, including one rendered to an off-screen texture. Returns `null`
+when the pointer is outside the view — which is also how *"which view is the cursor
+over?"* gets answered: ask each declared view, and for a non-overlapping layout at
+most one says yes. Overlapping panels are an ordering question, which is the caller's.
+
+For a view that does fill the window it returns **exactly** what `ScreenPointToRay`
+returns; `Blix.Test.Graphics` Section **AN** pins that equality, because a picking
+routine that disagrees with the camera is worse than none.
+
+`pointer` is in logical coordinates and is compared against
+`ViewDeclaration.LogicalViewport`. A view carries both rectangles — logical for input,
+physical for the renderer — so neither is derived at a call site, which is the Retina
+bug described above, removed rather than documented.
+
+**What's pickable is what the game chooses to iterate.** Picking has no engine-level "is pickable" concept — `CollisionWorld3D` holds whatever the game registers, and the per-object loop is game code. A future editor would probably want a separate `PickableRegistry<T>` (similar to `CollisionWorld3D`, distinct semantics — "click-targetable" vs "physically present"), but that doesn't exist yet and bolting it onto colliders would conflate two unrelated questions. `ViewPicking` deliberately stops at the ray for the same reason: it answers where a click points, not what is there. What exists in a world, how it is stored, and what selecting something means stay with the application — and the two applications here that pick things already disagree about all three.
 
 ## Audio
 

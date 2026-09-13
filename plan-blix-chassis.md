@@ -462,7 +462,7 @@ bounded run whether or not it thought about one.
 
 ### `Blix.Demos.Chassis` — the executable spec
 
-A 25-line project file and 137 lines of application, declaring **no shaders at
+A 25-line project file and ~150 lines of application, declaring **no shaders at
 all**. Compare the ~80 lines a Blix executable used to need, about half of it
 restating how the engine compiles a shader.
 
@@ -528,20 +528,34 @@ Logical coordinates throughout, compared against `LogicalViewport` — the physi
 rectangle is the renderer's. A view carries both so neither is derived at a call
 site, which is the retina bug every application has had the chance to write.
 
-### What was NOT built, and why
+### What was not built, and why that is not a gap
 
 The **preview world** — a container holding models, transforms, lights and pick
-bounds for inspection — is not here. It has **no consumer**. Sponza inspects its own
-scene; RTSGame picks its own entities; the chassis app has no world at all. The two
+bounds for inspection — is not here, and calling the arc "four and a half of five"
+was the wrong way to describe that. The layering is not missing a piece. Each
+`Blix.*` matures internally as requirements arrive, and a container for things the
+engine did not create is a requirement that has not arrived: Sponza inspects its own
+scene, RTSGame picks its own entities, the chassis app has no world at all. The two
 applications in this tree that pick things already disagree about what an entity is,
 what its bounds mean and what selecting one does.
 
 That is the same argument §1 made for deferring `EditorWorld3D`, and it did not stop
-applying because this is the last item on a list:
+applying because this happened to be the last row of a table:
 
 > Removing a singular assumption is almost never wrong. Adding a policy usually is.
 
 A ray through a named view removes a constraint. A container that decides what a
-world contains is policy, and it should be written against Spear's first application
-rather than guessed at one arc early. What exists now is the half that makes such a
-container *possible* to build later without the engine having an opinion about it.
+world *contains* is policy, and it wants to be written against Spear's first
+application rather than guessed at one arc early. What exists now is what makes such
+a container buildable later without the engine having an opinion baked into it.
+
+## §11 — Where this leaves the shape
+
+The five singulars are broken as a **structural** matter: nothing in Blix now assumes
+one view, one frame, one world, one executable or one host. What remains is ordinary
+maturation inside layers whose boundaries hold — which is the difference between an
+engine that needs reshaping and one that needs filling in.
+
+The docs were brought level with this in the same pass: `README.md`,
+`docs/architecture.md`, `docs/conventions.md` and `docs/demos.md` describe the engine
+as it now is rather than as it was before the arc.

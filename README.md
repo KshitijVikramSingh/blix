@@ -6,7 +6,7 @@ An in-development engine workbench: rendering, assets, streaming, audio, physics
 
 The split is deliberate. The engine owns the reusable hard parts — cooked asset formats, background loading, progressive texture upload, mesh bundling, the typed graphics-command layer, shader interfaces, render graphs, Vulkan execution, and diagnostics. The game owns how those become a frame — which passes run, how draw groups are built, what gets culled, how LOD is chosen, how the world is represented. No single scene renderer or fixed world model is imposed on top, and there's no ECS, editor, scripting, or hot reload.
 
-The stack is Vulkan-first: `Blix.Graphics` is the typed command layer, `Blix.Graphics.Vulkan` the backend, and `Blix.Runtime.Silk` hosts the window, input, Vulkan surface, audio device, and diagnostics. Visibility is part of that surface — systems contribute debug values, controls, timers, events, overlays, stats, selections, inspectors, and live-tunable parameters, so the engine can answer practical questions while it runs: what was loaded, streamed, bundled, submitted, culled, and drawn, and where the frame time went.
+The stack is Vulkan-first: `Blix.Graphics` is the typed command layer, `Blix.Graphics.Vulkan` the backend, and `Blix.Runtime.Silk` hosts the window, input, Vulkan surface, audio device, and diagnostics. An application supplies its own interface (`IUiSource`), declares named views to draw and pick through, and gets shared shader compilation, shared arguments and bounded `--frames` runs from the host rather than restating them — `src/Blix.Demos.Chassis/` is that surface with nothing else attached. Visibility is part of that surface — systems contribute debug values, controls, timers, events, overlays, stats, selections, inspectors, and live-tunable parameters, so the engine can answer practical questions while it runs: what was loaded, streamed, bundled, submitted, culled, and drawn, and where the frame time went.
 
 Today that spans cooked binary asset formats (`.blixtex`, `.blixprobe`, `.blixmesh`), progressive texture streaming, mesh bundling, screen-space-error LOD, GPU-driven indirect drawing, per-instance instanced rendering, PBR + HDR/IBL, cascaded and cubemap shadows, volumetric fog, bloom, tonemapping, glTF skinning, OpenAL positional audio, kinematic collision, and a Vulkan `SpriteBatch`/font path — driving four complete games (2D Pong, a 3D endless runner, a tank-arena survival shooter, and a tower defense) alongside the Sponza capabilities scene.
 
@@ -21,7 +21,7 @@ Blix is still early — APIs are changing, the demos do real engine work, and so
 
 ## Demos
 
-Ten demos ship in `src/`, all on the Vulkan backend, each a standalone entry point and an
+Eleven demos ship in `src/`, all on the Vulkan backend, each a standalone entry point and an
 executable spec for an engine subsystem. **Vulkan Sponza** is the capabilities demo — the
 forward edge of what the engine can pull off, written up below. Full writeups for the rest
 live in [`docs/demos.md`](docs/demos.md).
@@ -38,9 +38,10 @@ live in [`docs/demos.md`](docs/demos.md).
 | **Lit** | *(launcher — see docs)* | Reference · the lit / shadow / PBR / IBL / bloom path |
 | **Graph** | `dotnet run --project src/Blix.Demos.VulkanGraph` | Reference · render-graph topology |
 | **Hello** | `tools/run-vulkan-hello.sh` | Reference · the narrowest known-good Vulkan call site |
+| **Chassis** | `tools/run-chassis.sh` | Reference · the application chassis — own UI without diagnostics, host-owned `--frames`, no shader boilerplate |
 
 Four are complete, end-to-end playable games (Pong, Runner, Tank Arena, Bulwark); one is a
-VFX showcase; four are focused references. (The OpenGL backend and its four heavy demos
+VFX showcase; five are focused references. (The OpenGL backend and its four heavy demos
 were sunset; Pong was rebuilt on the Vulkan `SpriteBatch`.)
 
 ### Vulkan Sponza — capabilities demo
@@ -81,6 +82,7 @@ Target framework: net8.0. The 2D physics CLI test harness lives at `src/Blix.Tes
 
 ## Platform notes
 
+- **Launchers exec the apphost, never `dotnet run`.** Homebrew's `$prefix/bin/dotnet` is a `#!/bin/bash` wrapper and `/bin/bash` is SIP-protected, so dyld strips `DYLD_*` before the app starts and Silk reports "doesn't support Vulkan on this computer" while Vulkan is fine. Every `tools/run-*.sh` exports `DOTNET_ROOT`, builds, then `exec`s the apphost — copy one when adding another. `--frames N` works for any application; the host honours it.
 - **Vulkan toolchain (one-time, macOS).** `brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc`. The `tools/run-*.sh` launchers point the loader at MoltenVK. `BLIX_VK_VALIDATE=1` enables Khronos validation layers; `BLIX_DIAG_INTERVAL=<frames>` controls the periodic console digest cadence (default 60; `BLIX_DIAG=off` disables).
 - **macOS audio requires OpenAL Soft.** Apple's bundled `OpenAL.framework` has been deprecated since macOS 10.15 and silently no-ops on most source calls (looping, playback transitions). Install via `brew install openal-soft` — `OpenALAudioDevice` probes the standard Homebrew prefixes and points the loader at the working library.
 - **Keep shaders ASCII.** Shaders are compiled offline to SPIR-V with `glslc` (Khronos), so the old Apple GL 4.1 compiler quirks no longer bite at runtime. Pure ASCII is still the portability convention for the shader library.

@@ -127,6 +127,16 @@ pose).
     continuous steering) — unifying them would force one shape onto two. The test
     isn't "is it duplicated?" but "do two consumers want the *same decision*, and
     does naming it add capability?" Often the honest answer is no.
+  - *Worked example (build infrastructure obeys the same rule):* thirteen projects
+    carried a copy of the SPIR-V compile target, and the raw count argued for one
+    shared target. They were not thirteen copies of one thing — eight were identical
+    (the app shape), two were a **library** shape building into their own source tree,
+    and two were different **algorithms** (reflection sidecars; `#define` variants).
+    The shared `BlixCompileSpirV` absorbs eleven; the other two opt out. Folding them
+    in would have produced a shader build *system*, which is policy, and policy waits
+    for a third consumer. The argument for extracting at all was never tidiness — it
+    was that copies **drift**, and one already had: a project missing `@(GlslInclude)`
+    from its `Inputs` would not rebuild when a shared `.glsl` changed.
 - **Library, not framework.** New rendering capability lands as a *primitive the
   game calls*, not a stage the engine runs for you. There is no `SceneRenderer`
   that owns read→cull→draw; demos compose engine primitives and keep their own
@@ -138,12 +148,53 @@ pose).
 
 ---
 
+## 5. Remove assumptions; let policy wait
+
+Blix spent its early life assuming **one view, one frame, one world, one executable,
+one host** — a single camera per frame, no memory across frames, no container but the
+game's own, an application that finds its own assets and builds its own shaders, and a
+host that decided from one type test what an application was allowed to have. Those
+were never designed; they were what "one of each" looks like before anything needs two.
+
+The rule that unwound them, and the one to apply next time:
+
+> **Removing a singular assumption is almost never wrong. Adding a policy usually is.**
+
+Removing a constraint changes what is *sayable* and nothing downstream has to agree
+with it — named views, trails, a project scope, a host that composes rather than
+decides. Adding policy encodes a decision two consumers can disagree about — gizmo
+semantics, an IK solver, a navigation abstraction, a container that decides what a
+world contains. The first can be done ahead of a consumer; the second cannot, and §4
+is the same rule wearing different clothes.
+
+Two corollaries worth keeping:
+
+- **An instrument that filters on the predicate a bug lives in cannot see the bug.**
+  A facing test gated on `IsWorking` discarded the exact frame the fault occurred on
+  and reported calm for a year.
+- **A green build is not evidence that a build step ran.** A shared target that
+  silently overrode two projects shipped no shaders under "Build succeeded"; only
+  rebuilding the baseline to compare caught it.
+
+**Enforced by:** the absence list below · `Blix.Test.Graphics` Section **AN**
+(picking agrees with the camera) · `Blix.Test.Diagnostics` (a primitive with no view
+throws; a view keeps its identity across frames).
+
+---
+
 ## Where the surface stands
 
 Blix now reaches across the corners it set out to cover — rendering,
 assets/streaming, animation, physics, audio, 2D, diagnostics, and the
 game-layer — each *proven by a demo or game* rather than declared. That breadth
-is the milestone worth naming. It is **not** a stability promise: the principles
+is the milestone worth naming.
+
+The **application chassis** is the more recent one: an application now gets a window,
+its own interface, named views, retained trails, picking into any of them, shared
+shader compilation, shared arguments and a bounded run without restating any of it —
+and `src/Blix.Demos.Chassis/` is the proof, at 25 lines of project file and no shaders
+of its own. The layering that made room for it is unchanged; what moved was the set of
+things a single executable was assumed to own. It is **not** a stability promise: the principles
 above are frozen, but signatures still move, a primitive may be reshaped, and a
 corner may be restructured when a real consumer shows the current shape is
 wrong. New capability lands under the extract-under-pressure rule (§4), inside
@@ -161,7 +212,13 @@ pain forces it:
 ECS · engine-owned scene graph / GameObject hierarchy · prefab system · editor /
 scenes-as-assets format · asset registry · material graph · scripting boundary ·
 constraint-solver physics · navigation · project templates · reusable
-enemy/projectile/gameplay framework.
+enemy/projectile/gameplay framework · **preview/inspection world container** · **transform
+gizmos** · **a shader build system** (as opposed to one shared compile target).
+
+The last three are recent and were declined on §5 grounds rather than for lack of
+time: the engine can hand you a ray through any view and remember where a thing has
+been, but what a world *contains* — and what selecting something in it means — is a
+decision its two would-be consumers already disagree about.
 
 The per-subsystem **Deliberate limits** blocks in [`blix.md`](blix.md) record the
 smaller versions of the same call.
