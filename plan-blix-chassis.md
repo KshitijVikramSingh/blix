@@ -409,3 +409,82 @@ slider works, which is the panel rendering and responding.
 steal, so nothing here can demonstrate that it doesn't. Nor is the non-`IDebuggable`
 path proven: every demo that wants UI is also a diagnostics producer. Both want the
 tiny custom-app executable from the next singular, which has to exist anyway.
+
+## §9 — One executable
+
+Three things were per-executable that are not properties of an executable: how to
+compile a shader, how to read the arguments every Blix application shares, and how
+to stop after N frames.
+
+### The shared shader target
+
+Thirteen projects carried a copy of `CompileSpirV`. The argument is not tidiness —
+**copies drift, and one already had**: `Blix.Demos.VulkanInstanced` omits
+`@(GlslInclude)` from its `Inputs`, so editing a shared `.glsl` would not retrigger
+its compile. Harmless only because that project includes nothing; the next one to
+add an `#include` inherits a silent staleness bug, and nothing about a stale shader
+announces itself.
+
+They were not thirteen copies of one thing. Eight are byte-identical (the app
+shape). Two are a **library** shape — `Blix.Render` and `Blix.Runtime.Silk` build
+into their own source tree so the `.spv` ships with the library. Two are different
+**algorithms**: `VulkanSponza` reflects each module into a sidecar, `Runner`
+compiles `#define` variants from item metadata. Those two opt out. Folding them in
+would make this a shader build *system*, which is policy.
+
+**The near miss.** `Directory.Build.targets` is imported *after* the project body,
+and a target redefined under the same name **replaces** the earlier one. Naming the
+shared one `CompileSpirV` silently overrode the two projects that kept their own,
+and the opt-out condition then turned the replacement into a no-op. They built clean
+and shipped no shaders — Sponza 20 modules to 6, Runner 13 to 6 — with
+"Build succeeded" over the top. Renamed `BlixCompileSpirV`, which cannot collide.
+
+> A green build is not evidence that a build step ran.
+
+Caught only by stashing the change and rebuilding the baseline to compare. The
+second trap was avoided the same way: the library copies used
+`$(MSBuildThisFileDirectory)`, which in a `.csproj` means the project directory but
+in a root-level shared file means the repo root.
+
+### Arguments and bounded runs belong to the host
+
+Six applications each carried the same loop looking for `--frames`, then threaded
+the answer into their own game loop, which counted its own frames. `VulkanHello`
+never implemented it at all — its launcher accepted `--frames` and silently ignored
+it, which is how this session came to tell the chair to expect a clean exit that was
+never going to happen.
+
+`WindowOptions.FromArgs` claims the handful of arguments that are about *being a
+Blix application* — `--frames`, `--width`, `--height`, `--title`, `--debug` — and
+ignores the rest, because an application knows its own flags and this should not
+pretend to. The host counts frames in `OnRender`, so every application gets a
+bounded run whether or not it thought about one.
+
+### `Blix.Demos.Chassis` — the executable spec
+
+A 25-line project file and 137 lines of application, declaring **no shaders at
+all**. Compare the ~80 lines a Blix executable used to need, about half of it
+restating how the engine compiles a shader.
+
+It exists to answer the two questions §8 left open, because every other application
+that wants an interface is also a diagnostics producer:
+
+**1. Does an application get a UI without being `IDebuggable`?** This loop
+deliberately is not. It counts calls to `DrawUi` — which the host only makes inside
+an ImGui frame it has built — so the answer is a log line rather than a pair of
+eyes, which matters because a loop with no diagnostics has no overlay to report pass
+stats:
+
+```
+chassis: UI drawn on 40/40 frame(s) with NO IDebuggable on this loop.
+Exiting after 40 frame(s) as asked.
+```
+
+Both halves are results: the panel drew, and the host stopped an application that
+never mentions `--frames`.
+
+**2. Does UI capture actually suppress game input?** The loop counts every input
+event it receives and remembers the count when the text field takes focus. While the
+field is focused that number must not move, however much is typed — and the panel
+says so live, in green or red. Still wants a human, but it is now checkable in one
+glance instead of being asserted.

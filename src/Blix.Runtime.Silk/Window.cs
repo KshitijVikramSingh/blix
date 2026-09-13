@@ -44,6 +44,8 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private VkImGuiRenderer? imguiRenderer;
     private float lastWheel;
     private double totalTime;
+    private readonly WindowOptions options;
+    private int renderedFrames;
 
     // Lightweight perf HUD (F1): a debounced real-FPS readout drawn without the
     // DebugOverlayUi panels, so it measures actual frame rate at minimal cost.
@@ -88,9 +90,11 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             }
             jsonDumpSink = new JsonDumpSink();
             debugSystem.AddSink(jsonDumpSink);
+            if ((options ?? BlixWindowOptions.Default).Diagnostics) debugSystem.State.Enabled = true;
         }
 
         var resolved = options ?? BlixWindowOptions.Default;
+        this.options = resolved;
         var silkOptions = SilkWindowOptions.DefaultVulkan with
         {
             Title = resolved.Title,
@@ -248,6 +252,16 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // no-op and the window stays unpainted.
 
         debugSystem?.EndFrame();
+
+        // <b>Bounded runs belong to the host.</b> Six applications counted their own frames and asked to
+        // close; one (VulkanHello) never implemented it at all, so its launcher silently ignored --frames.
+        // The host is the thing that knows what a frame is.
+        renderedFrames++;
+        if (options.ExitAfterFrames > 0 && renderedFrames >= options.ExitAfterFrames)
+        {
+            Console.WriteLine($"Exiting after {renderedFrames} frame(s) as asked.");
+            window.Close();
+        }
     }
 
     private void OnResize(Vector2D<int> size)
