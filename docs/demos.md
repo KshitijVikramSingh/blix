@@ -253,6 +253,19 @@ curve is an offline choice rather than baked in.
 tools/run-lab-capture.sh --frames 10 --out shot.png
 ```
 
+**Which asset tool to reach for.** Two things report on assets and they answer different
+questions, deliberately kept apart:
+
+| | answers | exit code |
+| --- | --- | --- |
+| `blix-cook inspect <asset>` | *what is in this file* — node hierarchy, composed pivots, assembled bounds | always 0; it reports |
+| `Toolchain.Probe --model <asset>` | *is this asset sound* — clip lengths, skeleton, mesh-node transform | non-zero when not; it judges |
+
+They were not merged. The overlap is in subject, not in purpose, and the honest fix for
+"two tools answer the same question" is to make the questions different rather than fuse
+the tools: a check that returns an exit code belongs next to the thing it gates, and a
+listing belongs next to the cookers that produce the files.
+
 **The probe** never opens a window, so it needs no launcher and no MoltenVK. It reads
 the binding model out of the sidecars and prints it — every set, binding, stage and
 std140 offset — then checks the reflected push-constant totals against the renderer's

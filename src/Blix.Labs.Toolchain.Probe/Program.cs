@@ -7,6 +7,18 @@ namespace Blix.Labs.Toolchain.Probe;
 
 // The lab's binding model, printed — and checked.
 //
+// ── Which tool answers which question ───────────────────────────────────────
+//   blix-cook inspect <asset>   LISTS what is in a file — node hierarchy, composed
+//                               pivots, assembled bounds. Always exits 0. It reports.
+//   this probe --model <asset>  CHECKS that an asset is sound — clip lengths, skeleton,
+//                               and the binding contracts below — and exits non-zero
+//                               when it is not. It judges.
+//
+// Deliberately not merged. They overlap in subject and not in purpose, and the honest
+// fix for "two tools answer the same question" is to make the questions different rather
+// than to fuse the tools: a check that returns an exit code belongs next to the thing it
+// gates, and a listing belongs next to the cookers that produce the files.
+//
 // ── Proves ──────────────────────────────────────────────────────────────────
 //   • A second executable over one lab. This project declares no shaders, owns no
 //     render code and never opens a window; the .spv sidecars and the lab's types
@@ -30,6 +42,16 @@ public static class Program
         for (var i = 0; i < args.Length - 1; i++)
         {
             if (args[i] == "--model") return InspectModel(args[i + 1]);
+        }
+
+        if (args.Contains("--help") || args.Contains("-h"))
+        {
+            Console.WriteLine("Usage: probe [--model <gltf-or-glb>]");
+            Console.WriteLine("  no args     check the lab's reflected binding model against the renderer");
+            Console.WriteLine("  --model     check an asset: clip lengths, skeleton, mesh-node transform");
+            Console.WriteLine("  Exits non-zero when something is wrong. For a plain listing of an");
+            Console.WriteLine("  asset's hierarchy and pivots, use: blix-cook inspect <path>");
+            return 0;
         }
 
         var shaderDirectory = Path.Combine(AppContext.BaseDirectory, "Shaders");
