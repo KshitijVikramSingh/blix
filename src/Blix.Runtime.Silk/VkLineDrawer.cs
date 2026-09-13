@@ -26,7 +26,7 @@ public sealed class VkLineDrawer : IDisposable
     private readonly IndexBufferHandle indexBuffer;
     private readonly ShaderProgramHandle shader;
     private readonly PipelineHandle pipeline;
-    private readonly Dictionary<RenderSurfaceHandle, PipelineHandle> pipelines = new();
+    private readonly Dictionary<(RenderSurfaceHandle Target, bool DepthTested), PipelineHandle> pipelines = new();
     private readonly byte[] uploadBuffer;
     private int vertexCount;
     private bool disposed;
@@ -65,7 +65,7 @@ public sealed class VkLineDrawer : IDisposable
         shader = device.CreateShaderProgramFromSpv(vertSpv, fragSpv, lineInterface, "debugline");
 
         // The swapchain pipeline, which is the common case and the only one there used to be.
-        pipeline = PipelineFor(RenderSurfaceHandle.Default);
+        pipeline = PipelineFor(RenderSurfaceHandle.Default, depthTested: false);
 
         uploadBuffer = new byte[MaxVertexCount * StrideBytes];
     }
@@ -171,27 +171,36 @@ public sealed class VkLineDrawer : IDisposable
     /// as there are surfaces a view draws into, which is one or two.
     /// </para>
     /// </remarks>
-    private PipelineHandle PipelineFor(RenderSurfaceHandle target)
+    private PipelineHandle PipelineFor(RenderSurfaceHandle target, bool depthTested)
     {
-        if (pipelines.TryGetValue(target, out var existing)) return existing;
+        var key = (target, depthTested);
+        if (pipelines.TryGetValue(key, out var existing)) return existing;
+
+        // <b>Tests depth, never writes it.</b> A gizmo is an annotation: it should be hidden by the
+        // geometry in front of it — drawing a collider through the model it wraps is disorienting, which
+        // is how this came up — but it has no business occluding anything else, and a line that wrote
+        // depth would shadow the very thing it describes.
+        var depth = depthTested
+            ? new DepthState(Enabled: true, WriteEnabled: false, DepthCompare.LessEqual)
+            : DepthState.Disabled;
 
         var created = device.CreatePipeline(
             new PipelineDescription(
                 shader,
                 VertexPosition3Color.Layout,
                 PrimitiveTopology.Lines,
-                DepthState.Disabled,
+                depth,
                 RasterizerState.NoCulling,
                 new[] { BlendState.AlphaBlend },
                 RenderTarget: target.Id == RenderSurfaceHandle.Default.Id ? null : target),
-            $"debugline.target{target.Id}");
-        pipelines[target] = created;
+            $"debugline.target{target.Id}{(depthTested ? ".depth" : string.Empty)}");
+        pipelines[key] = created;
         return created;
     }
 
     public void Submit(RenderPassBuilder pass, Matrix4x4 viewProjection)
     {
-        Submit(pass, viewProjection, 0, vertexCount, RenderSurfaceHandle.Default);
+        Submit(pass, viewProjection, 0, vertexCount, RenderSurfaceHandle.Default, depthTested: false);
         vertexCount = 0;
     }
 
@@ -209,7 +218,12 @@ public sealed class VkLineDrawer : IDisposable
     /// </para>
     /// </remarks>
     public void Submit(
-        RenderPassBuilder pass, Matrix4x4 viewProjection, int firstVertex, int count, RenderSurfaceHandle target)
+        RenderPassBuilder pass,
+        Matrix4x4 viewProjection,
+        int firstVertex,
+        int count,
+        RenderSurfaceHandle target,
+        bool depthTested)
     {
         if (count <= 0) return;
         var byteCount = count * StrideBytes;
@@ -220,7 +234,7 @@ public sealed class VkLineDrawer : IDisposable
         pass.DrawIndexed(
             vertexBuffer: slice.Buffer,
             indexBuffer: indexBuffer,
-            pipeline: PipelineFor(target),
+            pipeline: PipelineFor(target, depthTested),
             indexCount: count,
             uniforms: new[] { new ShaderUniform("uViewProjection", new Matrix4x4Uniform(viewProjection)) },
             textures: Array.Empty<ShaderTextureBinding>(),
@@ -243,7 +257,11 @@ public sealed class VkLineDrawer : IDisposable
     {
         if (disposed) return;
         disposed = true;
-        device.DestroyPipeline(pipeline);
+        // Every variant, not just the first. The cache grows one pipeline per (target, depth
+        // mode) the drawer is asked for, and destroying only the field it was seeded with leaked
+        // the rest — caught by BLIX_VK_VALIDATE reporting leaked objects at device teardown.
+        foreach (var created in pipelines.Values) device.DestroyPipeline(created);
+        pipelines.Clear();
         device.DestroyShaderProgram(shader);
         device.DestroyIndexBuffer(indexBuffer);
         // No vertex buffer to destroy — vertices come from the device-owned

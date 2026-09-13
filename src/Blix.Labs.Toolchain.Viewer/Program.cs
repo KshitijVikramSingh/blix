@@ -120,7 +120,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         debug.Stats.Gauge("objects", scene.Objects.Count);
 
         using var view = debug.Draw.In("main", viewProjection);
-        debug.Draw.Grid("floor", Vector3.Zero, 24f, 24, new GraphicsColor(0.2f, 0.24f, 0.3f, 1f));
+        debug.Draw.Grid("floor", new Vector3(0f, 0.02f, 0f), 24f, 24, new GraphicsColor(0.2f, 0.24f, 0.3f, 1f));
 
         // The sun, drawn where it is actually pointing — an arrow that is wrong is the
         // fastest way to notice a lighting convention has drifted.

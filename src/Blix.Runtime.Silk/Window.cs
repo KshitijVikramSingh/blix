@@ -470,6 +470,8 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         var views = ctx.Draw.Views;
         if (views.Count == 0) return;
 
+        var depthTested = debugSystem?.State.DepthTestDrawing ?? true;
+
         // One buffer for the whole frame, one span per view. Cleared here because the ranged Submit below
         // deliberately does not reset — see VkLineDrawer.
         lineDrawer.Clear();
@@ -558,7 +560,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
                     // empty clear list already selects the overlay pass; on an off-screen target this is
                     // what asks for the same thing.
                     LoadExisting: true),
-                pass => lineDrawer.Submit(pass, viewProj, first, count, view.Target));
+                pass => lineDrawer.Submit(pass, viewProj, first, count, view.Target, depthTested));
         }
     }
 

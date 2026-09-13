@@ -138,7 +138,9 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         using var view = debug.Draw.In(declaration);
 
-        debug.Draw.Grid("floor", Vector3.Zero, 24f, 24, new GraphicsColor(0.35f, 0.4f, 0.5f, 1f));
+        // Lifted a hair off the ground quad: both at y=0 z-fight, and a patchy grid reads as a
+        // rendering fault rather than as two coplanar surfaces.
+        debug.Draw.Grid("floor", new Vector3(0f, 0.02f, 0f), 24f, 24, new GraphicsColor(0.35f, 0.4f, 0.5f, 1f));
         debug.Draw.Arrow("sun", scene.SunDirection * 7f, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
 
         // A character's collider, standing on the ground where one would. The primitive the

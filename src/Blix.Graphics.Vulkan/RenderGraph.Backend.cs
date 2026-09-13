@@ -224,6 +224,14 @@ public sealed partial class RenderGraph : IDisposable
             if (p.SurfaceHandle.Id != 0) device.UnregisterExternalRenderSurface(p.SurfaceHandle);
             if (p.Framebuffer.Handle != 0) device.Vk.DestroyFramebuffer(device.Device, p.Framebuffer, null);
             if (p.RenderPass.Handle != 0) device.Vk.DestroyRenderPass(device.Device, p.RenderPass, null);
+
+            // The load-form variant too — one per graphics pass, created alongside the declared
+            // form and just as capable of outliving the device. Caught by BLIX_VK_VALIDATE, which
+            // is the only thing that ever notices a leak in a process about to exit.
+            if (p.RenderPassLoad.Handle != 0)
+            {
+                device.Vk.DestroyRenderPass(device.Device, p.RenderPassLoad, null);
+            }
         }
         BackendPasses.Clear();
 
@@ -603,16 +611,24 @@ public sealed partial class RenderGraph : IDisposable
             {
                 Format = depthResource.Format,
                 Samples = SampleCount(depthSamples),
-                LoadOp = MapLoadOp(pass.Depth.Load),
+                LoadOp = loadVariant ? AttachmentLoadOp.Load : MapLoadOp(pass.Depth.Load),
                 StoreOp = MapStoreOp(pass.Depth.Store),
                 StencilLoadOp = AttachmentLoadOp.DontCare,
                 StencilStoreOp = AttachmentStoreOp.DontCare,
                 // LoadOp.Load preserves a prior pass's depth (depth pre-pass →
                 // lit), so the initial layout must already be the depth layout —
                 // Undefined would discard it. Clear/DontCare start fresh.
-                InitialLayout = pass.Depth.Load == LoadOp.Load
-                    ? ImageLayout.DepthStencilAttachmentOptimal
-                    : ImageLayout.Undefined,
+                //
+                // The load VARIANT starts from wherever the declared form's FinalLayout below left
+                // it, which for non-MSAA depth is SHADER_READ_ONLY_OPTIMAL rather than the depth
+                // layout. Getting this wrong loads undefined depth, and undefined depth does not
+                // occlude anything — the gizmos drew straight through the scene and looked exactly
+                // as they had before the test was enabled.
+                InitialLayout = loadVariant
+                    ? (msaaDepth ? ImageLayout.DepthStencilAttachmentOptimal : ImageLayout.ShaderReadOnlyOptimal)
+                    : pass.Depth.Load == LoadOp.Load
+                        ? ImageLayout.DepthStencilAttachmentOptimal
+                        : ImageLayout.Undefined,
                 // Non-MSAA depth stays shader-readable (shadow maps); MSAA
                 // depth isn't sampled, so leave it a depth attachment.
                 FinalLayout = msaaDepth ? ImageLayout.DepthStencilAttachmentOptimal : ImageLayout.ShaderReadOnlyOptimal,

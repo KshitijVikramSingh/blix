@@ -26,10 +26,21 @@ namespace Blix.Demos.VulkanHello;
 //   • nothing gameplay — this is the minimal reference call site; keep it minimal
 public static class Program
 {
-    public static void Main()
+    public static void Main(string[] args)
     {
         var loop = new HelloLoop();
-        using var window = new Window(loop, new WindowOptions("Blix — Vulkan Cube", 1280, 720));
+        // Through FromArgs so the host's shared arguments actually reach it. This demo used to
+        // construct its options directly, which silently ignored --frames: every "bounded" run of
+        // it was really an unbounded one that something else killed, and a killed process never
+        // tears down, so it never reported a leak either. A comparison against it was measuring
+        // nothing.
+        var options = WindowOptions.FromArgs(args, WindowOptions.Default with
+        {
+            Title = "Blix — Vulkan Cube",
+            Width = 1280,
+            Height = 720,
+        });
+        using var window = new Window(loop, options);
         window.Run();
     }
 }

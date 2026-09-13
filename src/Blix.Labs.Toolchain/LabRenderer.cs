@@ -159,7 +159,12 @@ public sealed class LabRenderer : IDisposable
             presentProgram,
             VertexPosition3Texture.Layout,
             PrimitiveTopology.Triangles,
-            DepthState.Disabled,
+            // Writes depth, always passes. The blit has nothing to depth-test against; it is
+            // carrying the scene's depth onto the swapchain so that whatever draws next — the
+            // runtime's debug pass — can.
+            // LessEqual rather than Always, which the enum does not have: the swapchain depth is
+            // cleared to 1.0 and every carried value is at most that, so the test never rejects.
+            new DepthState(Enabled: true, WriteEnabled: true, DepthCompare.LessEqual),
             RasterizerState.NoCulling,
             BlendState.Disabled), "lab.present");
 
@@ -247,7 +252,11 @@ public sealed class LabRenderer : IDisposable
                 ClearDepth: true),
             pass => fullscreen.Draw(
                 pass, presentPipeline,
-                new[] { new ShaderTextureBinding("uScene", graph.GetColorTexture(sceneColourTarget), Slot: 0) },
+                new[]
+                {
+                    new ShaderTextureBinding("uScene", graph.GetColorTexture(sceneColourTarget), Slot: 0),
+                    new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(sceneDepthTarget), Slot: 1),
+                },
                 pushConstants: null,
                 uniforms: present));
     }
@@ -288,8 +297,37 @@ public sealed class LabRenderer : IDisposable
         floats[20] = item.Metallic; floats[21] = item.Roughness; floats[22] = 0f; floats[23] = 0f;
     }
 
+    /// <summary>
+    /// Releases everything this renderer made.
+    /// </summary>
+    /// <remarks>
+    /// It used to release only the fullscreen pass, leaving three pipelines, three programs and four
+    /// buffers behind — nine objects, which is exactly what <c>BLIX_VK_VALIDATE=1</c> reported at device
+    /// teardown. Nothing else notices a leak in a process that is about to exit, which is why the
+    /// validation layers are the only thing that ever will.
+    /// <para>
+    /// The graph's own resources are the graph's; the surfaces here are its targets, not ours.
+    /// </para>
+    /// </remarks>
     public void Dispose()
     {
+        // The graph owns render passes, framebuffers and offscreen images created through raw
+        // Vulkan calls, which the device's own tables know nothing about — so it must be told to
+        // let go. TankArena disposes its graph and says why; this one did not, which is what the
+        // leaked-object count was.
+        graph?.Dispose();
         fullscreen?.Dispose();
+        if (device is null) return;
+
+        device.DestroyPipeline(litPipeline);
+        device.DestroyPipeline(shadowPipeline);
+        device.DestroyPipeline(presentPipeline);
+        device.DestroyShaderProgram(litProgram);
+        device.DestroyShaderProgram(shadowProgram);
+        device.DestroyShaderProgram(presentProgram);
+        device.DestroyVertexBuffer(cubeVertices);
+        device.DestroyIndexBuffer(cubeIndices);
+        device.DestroyVertexBuffer(groundVertices);
+        device.DestroyIndexBuffer(groundIndices);
     }
 }

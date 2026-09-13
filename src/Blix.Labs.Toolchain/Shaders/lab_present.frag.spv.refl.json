@@ -37,6 +37,12 @@
             "name" : "uScene",
             "set" : 0,
             "binding" : 0
+        },
+        {
+            "type" : "sampler2D",
+            "name" : "uSceneDepth",
+            "set" : 0,
+            "binding" : 1
         }
     ],
     "ubos" : [
