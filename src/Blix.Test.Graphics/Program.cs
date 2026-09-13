@@ -2766,6 +2766,84 @@ static ShaderInterface MinimalShader() => new(new[]
         catch (ArgumentException) { rejected = true; }
         t.ExpectTrue("AQ.16 and a skeleton of the wrong bone count is refused", rejected);
     }
+
+    // ── Instancing is not phase-locked, clip-locked or state-locked ──────────
+    // The failure this guards is silent: a stride of zero, a write that always lands in slot 0, a
+    // pose object shared between bodies. None of them throws, none warps the geometry, and all of
+    // them render a row that looks entirely reasonable until you notice every body is doing the
+    // same thing. Checked in BOTH directions, because a test that only asserts "these differ"
+    // passes whenever anything differs, for any reason.
+    {
+        // A skeleton whose root is animated by two clips that disagree at every instant.
+        var bones2 = new[]
+        {
+            new Bone("root", -1, Matrix4x4.Identity),
+            new Bone("child", 0, Matrix4x4.CreateTranslation(0, -1, 0)),
+        };
+        var rig = new Skeleton(bones2);
+
+        AnimationClip Line(string name, float to) => new(name, new[]
+        {
+            new BoneTrack
+            {
+                BoneIndex = 0,
+                Translation = new KeyframeVector3Curve(new[]
+                {
+                    new Keyframe<Vector3>(0.0, Vector3.Zero),
+                    new Keyframe<Vector3>(1.0, new Vector3(to, 0f, 0f)),
+                }),
+            },
+        });
+
+        var slow = Line("slow", 1f);
+        var fast = Line("fast", 5f);
+        var set = new BonePaletteSet(rig.BoneCount, capacity: 3);
+
+        // Positive: three players, different clips, different phases, different rates.
+        var players = new[]
+        {
+            new ClipPlayer(rig, slow),
+            new ClipPlayer(rig, fast) { Rate = 2f },
+            new ClipPlayer(rig, slow) { Rate = 0.5f },
+        };
+        players[0].ScrubTo(0.1);
+        players[1].ScrubTo(0.4);
+        players[2].ScrubTo(0.8);
+        foreach (var p in players) set.Add(rig, p.Pose, Matrix4x4.Identity);
+
+        var prints = new[] { set.Fingerprint(0), set.Fingerprint(1), set.Fingerprint(2) };
+        t.ExpectTrue("AQ.17 three independently posed bodies give three fingerprints",
+            prints[0] != prints[1] && prints[1] != prints[2] && prints[0] != prints[2]);
+
+        // <b>The negative control, and it is the half that makes the other half mean anything.</b>
+        // One clip, one instant, one placement: every slot must come out bit-identical. A set that
+        // wrote every body to slot 0 would pass the positive check above and fail nothing — this is
+        // what catches it.
+        set.Reset();
+        var one = new ClipPlayer(rig, slow);
+        one.ScrubTo(0.37);
+        for (var i = 0; i < 3; i++) set.Add(rig, one.Pose, Matrix4x4.Identity);
+        t.ExpectTrue("AQ.17 and one pose in every slot comes back identical",
+            set.Fingerprint(0) == set.Fingerprint(1) && set.Fingerprint(1) == set.Fingerprint(2));
+
+        // Advancing one player must not disturb another's pose. Each ClipPlayer owns its own Pose;
+        // a shared one would make every body the last body written, which is the state-lock case.
+        players[0].ScrubTo(0.1);
+        var beforeX = players[0].Pose.Locals[0].Translation.X;
+        players[1].Advance(0.25);
+        players[2].Advance(0.25);
+        t.ExpectClose("AQ.18 advancing one body leaves another's pose alone",
+            players[0].Pose.Locals[0].Translation.X, beforeX);
+
+        // And different rates genuinely diverge — two bodies on the SAME clip must drift apart, which
+        // a frame-locked clock cannot do.
+        var a2 = new ClipPlayer(rig, slow) { Rate = 1f };
+        var b2 = new ClipPlayer(rig, slow) { Rate = 0.25f };
+        a2.Advance(0.4);
+        b2.Advance(0.4);
+        t.ExpectTrue("AQ.18 two bodies on one clip at different rates drift apart",
+            Math.Abs(a2.Time - b2.Time) > 0.2);
+    }
 }
 
 t.PrintSummary();

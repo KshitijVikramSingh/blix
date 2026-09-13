@@ -67,6 +67,10 @@ public static class Program
         // three clip phases is the shape of that gap being closed, and a still frame carries it.
         var instances = int.TryParse(ArgValue(args, "--instances"), out var n) ? n : 1;
 
+        // The negative control. Varied instances SHOULD look different; lockstep ones should differ
+        // only by where they stand. A capture that can only ever show "different" proves nothing.
+        var lockstep = args.Contains("--lockstep");
+
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — lab capture",
@@ -80,7 +84,7 @@ public static class Program
 
         var loop = new CaptureLoop(
             output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray, advance,
-            driveRoot, instances);
+            driveRoot, instances, lockstep);
         using (var window = new Window(loop, options))
         {
             window.Run();
@@ -139,6 +143,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly int instanceCount = 1;
     private readonly List<Matrix4x4> instancePlacements = new();
     private readonly List<Pose> instancePoses = new();
+    private readonly bool lockstep;
+    private readonly List<string> instanceClips = new();
     private float rowWidth;
 
     public CaptureLoop(
@@ -151,9 +157,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         bool xray = false,
         double advance = 0.0,
         bool driveRoot = false,
-        int instances = 1)
+        int instances = 1,
+        bool lockstep = false)
     {
         instanceCount = Math.Clamp(instances, 1, LabRig.MaxInstances);
+        this.lockstep = lockstep;
         this.xray = xray;
         this.advance = advance;
         this.driveRoot = driveRoot;
@@ -251,16 +259,28 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         for (var i = 0; i < instanceCount; i++)
         {
             var pose = rig.Skeleton.CreateRestPose();
+            var label = player.Clip?.Name ?? "(rest)";
             if (i == 0)
             {
                 pose.CopyFrom(player.Pose);
             }
+            else if (lockstep)
+            {
+                // Same clip, same instant. These must come out identical apart from where they stand.
+                var echo = new ClipPlayer(rig.Skeleton, player.Clip);
+                echo.ScrubTo(player.Time);
+                if (driveRoot) RootMotion.Strip(rig.Skeleton, echo.Pose, echo.RestPose);
+                pose.CopyFrom(echo.Pose);
+            }
             else
             {
-                // A fraction of the clip, not a fixed number of seconds: a fixed offset puts every
-                // body on the same frame of a short clip, which reads as the instancing having failed.
-                var echo = new ClipPlayer(rig.Skeleton, player.Clip);
-                echo.ScrubTo(player.Time + (i / (double)instanceCount * player.Duration));
+                // <b>A different CLIP, not merely a different phase.</b> Staggering one clip proves
+                // the phases are independent; it cannot prove the clips are, because there is only
+                // one. Taken in order from the rig's own list so the picture is reproducible.
+                var clip = rig.Clips.Count > 0 ? rig.Clips[ClipIndexFor(rig, player.Clip, i)] : null;
+                label = clip?.Name ?? "(rest)";
+                var echo = new ClipPlayer(rig.Skeleton, clip);
+                echo.ScrubTo(i / (double)instanceCount * echo.Duration);
                 if (driveRoot) RootMotion.Strip(rig.Skeleton, echo.Pose, echo.RestPose);
                 pose.CopyFrom(echo.Pose);
             }
@@ -269,9 +289,47 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             palettes.Add(rig.Skeleton, pose, rig.MeshNodeTransform * placement);
             instancePlacements.Add(placement);
             instancePoses.Add(pose);
+            instanceClips.Add(label);
         }
 
         rowWidth = (instanceCount - 1) * spacing;
+
+        // <b>The verdict, printed.</b> A PNG shows bodies; it cannot show whether they came from
+        // different slices or from one slice read N times that happened to look plausible.
+        //
+        // Fingerprinted WITHOUT the placement. The placement is baked into each drawn palette, so
+        // three bodies standing a metre apart have different matrices whatever their poses are — a
+        // verdict taken from the drawn slices reads "all different" even under lockstep, which makes
+        // the control useless. The question is whether the POSES differ, so the poses are what gets
+        // hashed, each at identity.
+        if (instanceCount > 1)
+        {
+            var bare = new BonePaletteSet(rig.Skeleton.BoneCount, instanceCount);
+            foreach (var p in instancePoses) bare.Add(rig.Skeleton, p, Matrix4x4.Identity);
+
+            var distinctPoses = 0;
+            var seen = new HashSet<ulong>();
+            for (var i = 0; i < bare.Count; i++)
+            {
+                if (seen.Add(bare.Fingerprint(i))) distinctPoses++;
+            }
+
+            var expectation = lockstep
+                ? distinctPoses == 1
+                    ? "one pose in every slot, as the control requires"
+                    : $"CONTROL FAILED — one clip at one instant produced {distinctPoses} poses"
+                : distinctPoses == bare.Count
+                    ? "every body holds a different pose"
+                    : $"ALIASED — {bare.Count} bodies hold only {distinctPoses} distinct pose(s)";
+
+            Console.WriteLine($"  {bare.Count} instance(s), {(lockstep ? "LOCKSTEP" : "varied")}: {expectation}");
+            for (var i = 0; i < bare.Count; i++)
+            {
+                Console.WriteLine(
+                    $"    [{i}] {instanceClips[i],-30} pose {bare.Fingerprint(i):x16}  " +
+                    $"drawn {palettes.Fingerprint(i):x16}");
+            }
+        }
 
         LabRig.ComputeBoneWorlds(rig.Skeleton, player.Pose, boneWorlds);
 
@@ -460,6 +518,21 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         var hi = Vector3.Transform(model.BoundsMax, modelTransform);
         debug.Draw.Aabb("bounds", Vector3.Min(lo, hi), Vector3.Max(lo, hi),
             new GraphicsColor(0.9f, 0.85f, 0.4f, 1f));
+    }
+
+    // Instance i's clip: i steps along the rig's own list from whichever clip the subject is on.
+    // In order rather than random, so two runs of the same arguments produce the same picture.
+    private static int ClipIndexFor(LabRig rig, AnimationClip? subject, int instance)
+    {
+        var start = 0;
+        for (var i = 0; i < rig.Clips.Count; i++)
+        {
+            if (!ReferenceEquals(rig.Clips[i], subject)) continue;
+            start = i;
+            break;
+        }
+
+        return (start + instance) % rig.Clips.Count;
     }
 
     // Rebuilt per call rather than cached, because Debug() runs a handful of times in a bounded run

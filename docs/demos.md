@@ -336,7 +336,8 @@ dodges. Walk and run are authored in place, and the game owns locomotion.
 
 ```sh
 tools/run-lab.sh --rig .../Rogue.glb --clip Walking_A --instances 3
-tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --instances 3 --xray --out three.png
+tools/run-lab-capture.sh --rig .../Rogue.glb --instances 3 --xray --out varied.png
+tools/run-lab-capture.sh --rig .../Rogue.glb --instances 3 --lockstep --xray --out control.png
 ```
 
 **The gap this closes.** A bone palette is a descriptor set, and a descriptor set's *buffer* is
@@ -371,9 +372,32 @@ perfect.
 line of code. A simpler path for the common case is how "it works with one and breaks with
 three" becomes possible.
 
-What this deliberately is not: a crowd. The echoes are the subject's clip at staggered phases —
-no per-instance clip choice, no AI, no director. Eight slots, because the question is "are these
-poses independent", which three bodies answer and three hundred only make slower.
+**How you know it is not phase-, clip-, frame- or state-locked.** Staggering one clip across three
+bodies proves the *phases* are independent and nothing else — a mechanism that forced every body
+onto one clip would pass that test by construction, because there is only one clip. So each
+instance runs its **own clip, own rate and own clock**, and the check runs in both directions:
+
+| | expectation |
+| --- | --- |
+| varied (default) | one distinct pose per body |
+| `--lockstep` | exactly **one** pose in total, repeated |
+
+The second is the negative control, and it is the half that makes the first mean anything: a set
+that quietly wrote every body into slot 0 passes "these differ" whenever anything differs.
+`BonePaletteSet.Fingerprint` is what makes both checkable rather than eyeballed — and it hashes
+the **pose**, not the drawn slice, because placement is baked into each palette and three bodies
+standing apart are never bit-identical whatever their poses are. That distinction is what turned
+the control from a formality into a test.
+
+Three places carry it: the viewer's panel prints `N/N distinct poses` beside the lockstep
+checkbox, the capture prints a per-instance pose fingerprint, and `Toolchain.Probe --rig` runs
+both directions headlessly with an exit code. `Blix.Test.Graphics` AQ.17/AQ.18 add the two
+state-lock cases — advancing one body must not disturb another's pose, and two bodies on one clip
+at different rates must drift apart.
+
+What this deliberately is not: a crowd. The clips are taken in order from the rig's own list — no
+AI, no director, no spawning. Eight slots, because the question is "are these poses independent",
+which three bodies answer and three hundred only make slower.
 
 **The capture tool** renders the lab and writes what it rendered to a PNG. It captures
 the **HDR scene target**, not the swapchain — so the lab's render path needed no change,

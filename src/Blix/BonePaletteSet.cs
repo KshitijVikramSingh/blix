@@ -104,6 +104,38 @@ public sealed class BonePaletteSet
         return Count++;
     }
 
+    /// <summary>
+    /// A stable hash of one instance's matrices — "is this body in a different pose from that one?"
+    /// </summary>
+    /// <remarks>
+    /// <b>A test that can only pass is not a test.</b> Three bodies drawn from one buffer look
+    /// independent as long as they are posed differently, and the way to be sure the mechanism works
+    /// rather than the picture flattering it is to check both directions: different clips must give
+    /// different fingerprints, and the same clip at the same time must give identical ones. The second
+    /// half is the negative control, and without it a set that quietly wrote every instance to slot 0
+    /// would pass the first half whenever the poses happened to differ.
+    /// <para>
+    /// Deliberately not a cryptographic hash and deliberately not stable across runtimes — it exists to
+    /// compare two slices in one process, not to be recorded. Bit-exact on the float pattern rather than
+    /// tolerant, because two instances that differ by a rounding error are two instances that were
+    /// computed separately, which is exactly the claim.
+    /// </para>
+    /// </remarks>
+    public ulong Fingerprint(int instance)
+    {
+        // FNV-1a over the raw float bits. Cheap, order-sensitive, and a single changed bone moves it.
+        // Read as a float span over the matrices rather than member by member: no per-bone array, and
+        // it cannot silently skip a component the way an enumerated list of sixteen names can.
+        var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<Matrix4x4, float>(Slice(instance));
+        var hash = 1469598103934665603UL;
+        foreach (var value in floats)
+        {
+            hash = (hash ^ (uint)BitConverter.SingleToInt32Bits(value)) * 1099511628211UL;
+        }
+
+        return hash;
+    }
+
     /// <summary>One instance's matrices, as a window onto the shared array.</summary>
     public Span<Matrix4x4> Slice(int instance)
     {

@@ -18,6 +18,8 @@
 #     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Dodge_Forward --advance 2.0 --drive-root
 # --instances N captures N bodies at N clip phases from one draw.
 #     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --instances 3 --xray
+# --lockstep is the negative control: every body on one clip at one instant, which must come
+# back as exactly ONE pose fingerprint. Varied must come back as N.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

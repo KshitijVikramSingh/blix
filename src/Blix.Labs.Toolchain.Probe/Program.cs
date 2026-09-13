@@ -541,9 +541,85 @@ public static class Program
             $"  {imported.Animations.Length - poses} timed clip(s), {poses} pose(s), " +
             $"{travelling} with root travel");
 
+        problems += CheckInstancing(skeleton, imported.Animations);
+
         if (problems == 0) return 0;
         Console.Error.WriteLine($"{problems} problem(s).");
         return 1;
+    }
+
+    // <b>Are N instances actually independent, or does one slice get read N times?</b>
+    //
+    // The failure this guards is silent: a stride of zero, a write that always lands in slot 0, a
+    // shader that ignores gl_InstanceIndex — none of them throw, none of them warp the geometry, and
+    // all of them render a row of bodies that looks entirely reasonable until you notice every body
+    // is doing the same thing. On a rig whose clips happen to be similar, you might not notice at all.
+    //
+    // So it is checked in BOTH directions, with no device in sight:
+    //   • different clips must produce different fingerprints — the positive claim;
+    //   • the SAME clip at the SAME time, placed identically, must produce IDENTICAL ones.
+    //
+    // The second is the control, and it is the half that makes the first mean something. A check that
+    // only ever asserts "these differ" passes trivially whenever anything differs, including for
+    // reasons that have nothing to do with the mechanism.
+    private static int CheckInstancing(Skeleton skeleton, AnimationClip[] clips)
+    {
+        var usable = clips.Where(c => c.Duration > 0.0).Take(3).ToArray();
+        if (usable.Length < 2)
+        {
+            Console.WriteLine("  instancing: fewer than two timed clips — nothing to tell apart");
+            return 0;
+        }
+
+        var problems = 0;
+        var set = new BonePaletteSet(skeleton.BoneCount, usable.Length);
+
+        // Positive: a different clip per slot, each at its own phase.
+        for (var i = 0; i < usable.Length; i++)
+        {
+            var player = new ClipPlayer(skeleton, usable[i]);
+            player.ScrubTo(i / (double)usable.Length * player.Duration);
+            set.Add(skeleton, player.Pose, Matrix4x4.Identity);
+        }
+
+        var distinct = true;
+        for (var i = 0; i < set.Count && distinct; i++)
+        {
+            for (var j = i + 1; j < set.Count; j++)
+            {
+                if (set.Fingerprint(i) != set.Fingerprint(j)) continue;
+                Console.Error.WriteLine(
+                    $"  instancing: slots {i} and {j} hold the SAME pose from different clips " +
+                    $"('{usable[i].Name}' and '{usable[j].Name}') — the slices are aliasing.");
+                distinct = false;
+                problems++;
+                break;
+            }
+        }
+
+        // Control: one clip, one instant, one placement. These must be bit-identical.
+        set.Reset();
+        var control = new ClipPlayer(skeleton, usable[0]);
+        control.ScrubTo(usable[0].Duration * 0.37);
+        for (var i = 0; i < usable.Length; i++) set.Add(skeleton, control.Pose, Matrix4x4.Identity);
+
+        var identical = true;
+        for (var i = 1; i < set.Count; i++)
+        {
+            if (set.Fingerprint(i) == set.Fingerprint(0)) continue;
+            Console.Error.WriteLine(
+                $"  instancing: the control put one pose in every slot and slot {i} came out " +
+                $"different — the packing is not deterministic.");
+            identical = false;
+            problems++;
+            break;
+        }
+
+        Console.WriteLine(
+            $"  instancing: {usable.Length} slots, " +
+            $"{(distinct ? "different clips give different poses" : "ALIASED")}; " +
+            $"{(identical ? "one clip gives one pose in every slot" : "NOT REPRODUCIBLE")}");
+        return problems;
     }
 
     private static bool SampleIsFinite(AnimationClip clip, Pose pose, Pose rest, double time, out int bone)

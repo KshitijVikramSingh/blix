@@ -109,13 +109,32 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private Pose? posed;
     private BonePaletteSet? palettes;
 
-    // <b>Every instance past the first is an ECHO of the subject, offset in time.</b> They exist to
-    // prove the poses are independent — three bodies mid-stride at three different phases in one
-    // frame — and deliberately not to be a crowd: no per-instance clip choice, no AI, no director.
-    // Naming any of that would be inventing policy the lab has no consumer for.
+    // <b>Every instance past the first runs its OWN clip on its OWN clock.</b>
+    //
+    // They were the subject's clip at staggered phases once, which proves phase independence and
+    // nothing else: a mechanism that forced every body onto one clip would pass that test by
+    // construction, because there was only one clip. A different clip, a different rate and a
+    // different phase per body is the claim actually worth making, and it is the one a still frame
+    // can carry — three bodies doing three different things.
+    //
+    // Still not a crowd: no AI, no director, no spawning. The clips are taken in order from the
+    // rig's own list starting at the subject's, which is a lab picking something to show rather than
+    // policy about what a game's bodies should be doing.
     private int instanceCount = 1;
     private ClipPlayer[] echoes = Array.Empty<ClipPlayer>();
     private readonly List<Matrix4x4> instancePlacements = new();
+
+    // <b>The negative control.</b> Lockstep puts every body on the subject's clip at the subject's
+    // time, and they must then be pixel-identical. Without it, "the bodies look different" is
+    // evidence only that the poses differ — it cannot tell a working slice from a buffer that
+    // happens to hold three different things for some other reason. Two checks that fail in
+    // opposite directions are what make either of them mean something.
+    private bool lockstep;
+
+    // Set after packing, and shown in the panel so the claim sits next to the thing it describes
+    // rather than in a log nobody opens.
+    private int distinctPoses = 1;
+    private BonePaletteSet? poseCheck;
     private Matrix4x4[] boneWorlds = Array.Empty<Matrix4x4>();
     private Matrix4x4[] restWorlds = Array.Empty<Matrix4x4>();
 
@@ -494,20 +513,58 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         for (var i = 0; i < echoes.Length; i++)
         {
             var echo = echoes[i];
-            echo.Clip = playerA.Clip;
-            echo.Paused = playerA.Paused;
-            echo.Rate = playerA.Rate;
-            echo.Advance(delta);
-
-            // Held at a fixed phase behind the subject rather than free-running, so the spread is a
-            // property of the picture and not of how long the window has been open.
-            var offset = (i + 1) / (float)instanceCount;
-            echo.ScrubTo(playerA.Time + (offset * playerA.Duration));
+            if (lockstep)
+            {
+                // The negative control: same clip, same instant. These must come out identical.
+                echo.Clip = playerA.Clip;
+                echo.ScrubTo(playerA.Time);
+            }
+            else
+            {
+                // Its own clip, its own rate, its own clock. A rate that differs per body is what
+                // separates "independently posed" from "posed once and read N times" even when two
+                // bodies happen to share a clip — they drift apart, and a frame-locked mechanism
+                // cannot make them.
+                echo.Clip = rig.Clips.Count > 0
+                    ? rig.Clips[(clipIndexA + i + 1) % rig.Clips.Count]
+                    : null;
+                echo.Paused = playerA.Paused;
+                echo.Rate = playerA.Rate * (1f + ((i + 1) * 0.17f));
+                echo.Advance(delta);
+            }
 
             var placement = Matrix4x4.CreateTranslation((i + 1 - half) * spacing, 0f, 0f) * rigTransform;
             palettes.Add(rig.Skeleton, echo.Pose, rig.MeshNodeTransform * placement);
             instancePlacements.Add(placement);
         }
+
+        distinctPoses = CountDistinctPoses();
+    }
+
+    /// <summary>How many genuinely different POSES the live instances hold.</summary>
+    /// <remarks>
+    /// <b>Placement excluded, deliberately.</b> Each drawn palette has its body's placement baked in,
+    /// so three bodies standing a metre apart hold different matrices whatever their poses are — a
+    /// count taken from the drawn slices reads "all different" even under lockstep, and the control
+    /// would then be incapable of failing. The bodies are re-posed at identity here purely to be
+    /// counted, which costs one palette build per instance on a lab-sized crowd.
+    /// <para>
+    /// Varied should give one distinct pose per body; lockstep should give exactly one in total. Those
+    /// are the two halves, and either alone proves nothing.
+    /// </para>
+    /// </remarks>
+    private int CountDistinctPoses()
+    {
+        if (rig is null || playerA is null || posed is null) return 0;
+
+        poseCheck ??= new BonePaletteSet(rig.Skeleton.BoneCount, LabRig.MaxInstances);
+        poseCheck.Reset();
+        poseCheck.Add(rig.Skeleton, posed, Matrix4x4.Identity);
+        foreach (var echo in echoes) poseCheck.Add(rig.Skeleton, echo.Pose, Matrix4x4.Identity);
+
+        var seen = new HashSet<ulong>();
+        for (var i = 0; i < poseCheck.Count; i++) seen.Add(poseCheck.Fingerprint(i));
+        return seen.Count;
     }
 
     // The turn's magnitude in degrees. Quaternion.W is cos(θ/2) and the sign of the axis is
@@ -721,8 +778,55 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         ImGui.EndChild();
 
+        DrawInstancePanel();
         DrawRootMotionPanel();
         DrawBonePanel();
+    }
+
+    // What each body is actually doing, and whether the mechanism is holding.
+    //
+    // The two rows that matter are the checkbox and the verdict beside it. Varied should read
+    // "distinct"; lockstep is the control — every body on one clip at one instant — and if THAT
+    // still shows three different walks, the slice is not doing what it claims.
+    private void DrawInstancePanel()
+    {
+        if (rig is null || playerA is null) return;
+        if (!ImGui.CollapsingHeader("instances", ImGuiTreeNodeFlags.DefaultOpen)) return;
+
+        ImGui.TextDisabled($"{instanceCount} of max {LabRig.MaxInstances} · one draw, one palette buffer");
+
+        if (instanceCount <= 1)
+        {
+            ImGui.TextDisabled("pass --instances N to draw more");
+            return;
+        }
+
+        ImGui.Checkbox("lockstep (negative control)", ref lockstep);
+
+        // Varied wants one distinct pose per body; lockstep wants exactly one in total. Stating the
+        // expectation beside the count is what makes a reader able to tell a pass from a number.
+        var want = lockstep ? 1 : instanceCount;
+        var ok = distinctPoses == want;
+        ImGui.SameLine();
+        if (ok) ImGui.TextDisabled($"{distinctPoses}/{want} distinct poses");
+        else ImGui.TextColored(new Vector4(1f, 0.4f, 0.35f, 1f), $"{distinctPoses} poses, expected {want}");
+
+        if (ImGui.BeginChild("instancelist", new Vector2(0, 96), ImGuiChildFlags.Borders))
+        {
+            ImGui.Text($"0  {playerA.Clip?.Name ?? "(rest)"}");
+            ImGui.SameLine(220f);
+            ImGui.TextDisabled($"t {playerA.Time,5:0.00}  x{playerA.Rate:0.00}");
+
+            for (var i = 0; i < echoes.Length; i++)
+            {
+                var echo = echoes[i];
+                ImGui.Text($"{i + 1}  {echo.Clip?.Name ?? "(rest)"}");
+                ImGui.SameLine(220f);
+                ImGui.TextDisabled($"t {echo.Time,5:0.00}  x{echo.Rate:0.00}");
+            }
+        }
+
+        ImGui.EndChild();
     }
 
     private void DrawTransport(ClipPlayer player, string label)
