@@ -9,4 +9,75 @@
     <BlixShaderCompilerDll>$(MSBuildThisFileDirectory)src/Blix.Tools.Shader/bin/$(Configuration)/net8.0/Blix.Tools.Shader.dll</BlixShaderCompilerDll>
   </PropertyGroup>
 
+  <!--
+    glslc: ship pre-compiled .spv at build time. Homebrew installs into
+    /opt/homebrew/bin (Apple Silicon) or /usr/local/bin (Intel); fall back to
+    PATH on Linux/Windows. Override with -p:Glslc=/path/to/glslc.
+  -->
+  <PropertyGroup>
+    <Glslc Condition="'$(Glslc)' == '' AND Exists('/opt/homebrew/bin/glslc')">/opt/homebrew/bin/glslc</Glslc>
+    <Glslc Condition="'$(Glslc)' == '' AND Exists('/usr/local/bin/glslc')">/usr/local/bin/glslc</Glslc>
+    <Glslc Condition="'$(Glslc)' == ''">glslc</Glslc>
+  </PropertyGroup>
+
+  <!--
+    ONE SPIR-V COMPILE TARGET, declared once.
+
+    Named BlixCompileSpirV, NOT CompileSpirV, and that is load-bearing. A
+    Directory.Build.targets is imported AFTER the project body, and a target
+    redefined under the same name REPLACES the earlier one — so calling this
+    CompileSpirV silently overrode the two projects that kept their own, and the
+    opt-out condition below then turned the replacement into a no-op. They built
+    clean and shipped no shaders: 20 modules to 6 for Sponza, 13 to 6 for Runner,
+    with a "Build succeeded" over the top of it. A distinct name cannot collide.
+
+    Thirteen projects carried a copy of this. Eight were byte-identical, and the
+    argument for pulling them together is not that copies are untidy — it is that
+    copies DRIFT, and one already had: Blix.Demos.VulkanInstanced omits
+    @(GlslInclude) from its Inputs, so an edit to a shared .glsl would not have
+    retriggered its compile. Harmless today only because that project happens to
+    include nothing. The next project to add an #include inherits a silent
+    staleness bug, and nothing about a stale shader announces itself.
+
+    A project declares WHAT it compiles (@(GlslShader), @(GlslInclude)) and, if it
+    is unusual, HOW (the properties below). It no longer restates the mechanism.
+
+      BlixShaderMode        App (default) — build into $(OutDir)Shaders, after the
+                            output copy. Library — build into the project's own
+                            Shaders folder, before content paths are assigned, so
+                            the .spv can ship as embedded/copied content.
+      BlixShaderCustomTarget
+                            true — this project declares its own CompileSpirV and
+                            this one stands aside. Two do: VulkanSponza reflects
+                            each module into a sidecar, Runner compiles #define
+                            variants from item metadata. Those are different
+                            algorithms, not different settings, and folding them in
+                            would make this a shader build SYSTEM — which is policy,
+                            and policy waits for a third consumer to want it.
+  -->
+  <PropertyGroup>
+    <BlixShaderMode Condition="'$(BlixShaderMode)' == ''">App</BlixShaderMode>
+
+    <!-- MSBuildPROJECTDirectory, not MSBuildThisFileDirectory. In a .csproj those
+         two agree, which is why the library copies used the latter; here, in a file
+         that lives at the repo root, the latter would quietly write every library's
+         shaders into /Shaders. -->
+    <BlixShaderOutDir Condition="'$(BlixShaderMode)' == 'Library'">$(MSBuildProjectDirectory)\Shaders\</BlixShaderOutDir>
+    <BlixShaderOutDir Condition="'$(BlixShaderOutDir)' == ''">$(OutDir)Shaders\</BlixShaderOutDir>
+
+    <BlixShaderAfterTargets Condition="'$(BlixShaderMode)' == 'App'">CopyFilesToOutputDirectory</BlixShaderAfterTargets>
+    <BlixShaderBeforeTargets Condition="'$(BlixShaderMode)' == 'Library'">AssignTargetPaths</BlixShaderBeforeTargets>
+  </PropertyGroup>
+
+  <Target Name="BlixCompileSpirV"
+          Condition="'@(GlslShader)' != '' AND '$(BlixShaderCustomTarget)' != 'true'"
+          AfterTargets="$(BlixShaderAfterTargets)"
+          BeforeTargets="$(BlixShaderBeforeTargets)"
+          Inputs="@(GlslShader);@(GlslInclude);$(BlixShaderCompilerDll)"
+          Outputs="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv')">
+    <MakeDir Directories="$(BlixShaderOutDir)" />
+    <Message Text="Compiling SPIR-V ($(BlixShaderMode)): %(GlslShader.Identity)" Importance="high" />
+    <Exec Command="dotnet &quot;$(BlixShaderCompilerDll)&quot; --glslc &quot;$(Glslc)&quot; --input &quot;%(GlslShader.FullPath)&quot; --output &quot;$(BlixShaderOutDir)%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; --include &quot;$(MSBuildProjectDirectory)/../Blix.Shaders&quot;" />
+  </Target>
+
 </Project>

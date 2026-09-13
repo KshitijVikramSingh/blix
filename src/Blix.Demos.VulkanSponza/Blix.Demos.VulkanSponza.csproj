@@ -27,6 +27,8 @@
   </ItemGroup>
 
   <PropertyGroup>
+    <!-- Declares its own CompileSpirV below; the shared one stands aside. -->
+    <BlixShaderCustomTarget>true</BlixShaderCustomTarget>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
