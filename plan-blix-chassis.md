@@ -180,3 +180,61 @@ how this project actually works.
 and 51 call sites (8 of which are the real ones). Acceptance: a single frame
 carries two views over the same geometry, both present in one dump, and a headless
 run can capture either without a window.
+
+## §6 — Built
+
+Shipped on `view-first-class`. The whole solution builds; 191/191 diagnostics,
+389/389 graphics, 43/43 physics.
+
+| Piece | Where |
+| --- | --- |
+| `ViewId`, `ViewDeclaration`, `ViewTable` | `Blix.Core/View.cs` |
+| `ViewId` on every draw command | `Blix.Diagnostics/DebugDrawCommand.cs` |
+| `In(view)` scope, `Declare(...)`, `CurrentView` that throws | `Blix.Diagnostics/DebugDrawChannel.cs` |
+| the one view table | `DebugState.Views` |
+| `Views` replacing `DrawViewProjection` | `Blix.Diagnostics/DebugFrame.cs` |
+| schema 2 — `Views[]`, per-command `View`, `SchemaVersion` | `Blix.Diagnostics/JsonDumpSink.cs` |
+| one pass per view, each to its own target | `Blix.Runtime.Silk/Window.cs` |
+| ranged submit so one buffer serves many views | `Blix.Runtime.Silk/VkLineDrawer.cs` |
+
+### What the throw found immediately
+
+Making a viewless primitive throw was supposed to replace a warning. It also
+surfaced **six producers that had been drawing into nowhere** — emitting geometry
+having never set a camera, so it went to the identity matrix, into clip space, and
+was never seen by anyone. Five were in the test suite. The sixth was the engine's
+own **selection highlight**, which asks a question the old model could not:
+
+> which view does system feedback belong to?
+
+Answer taken: **every view declared this frame**. A selected object should be
+outlined wherever it can be seen, and a second viewport showing the same object
+should show it selected too. The selection sweep already runs after every
+contributor, which is where an application declares what it drew into, so the list
+is complete by then. No views declared means the application drew no picture, and
+there is nothing to annotate — skipped, not an error.
+
+### Acceptance
+
+`Blix.Test.Diagnostics` now asserts the §5 criterion directly: two views over the
+same geometry in one frame, distinct ids, each command naming its own view, and a
+view keeping its identity across frames — which is what any trail will stand on.
+Plus schema 2 is asserted by version, by `Views`, by per-command view *name*
+(process-local ids mean nothing in a file), and by the absence of the old
+frame-wide camera.
+
+### Not verified here
+
+The GPU submission path — `Window.AppendDebugLinesPass` grouping commands per view
+and submitting one pass per view — **has not been run**. `DYLD_*` is stripped by
+dyld when the spawning shell is SIP-protected, so headed runs are not possible from
+the agent's shell; the inline-env workaround fails the same way. It compiles and
+the data feeding it is tested, but the actual draw wants one headed run:
+`tools/run-vulkan-hello.sh --frames 8` should look exactly as it did before, because
+`VulkanHello` declares a single whole-surface view.
+
+### Still open from §1
+
+The other four singulars. Nearest: time (trails and histories now have a stable view
+to hang off), then `Window`'s decomposition, which this arc has already loosened by
+taking the debug pass's single-camera assumption out of it.

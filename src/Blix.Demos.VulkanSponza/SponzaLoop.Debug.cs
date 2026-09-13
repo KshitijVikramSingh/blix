@@ -144,7 +144,9 @@ internal sealed partial class SponzaLoop
         debug.Values.Value("cpu-submit", $"{cpu.SubmitPresentMs:0.00}ms");
 
         // Spatial gizmos: sun direction + the three cascade ortho boxes.
-        debug.Draw.ViewProjection = viewProj;
+        // Every primitive below belongs to this view. Scoped rather than assigned: the old
+        // per-channel matrix meant a frame could only ever be one world seen one way.
+        using var view = debug.Draw.In("main", viewProj);
         debug.Draw.Arrow("sun/dir", -sunDirection * 6f, Vector3.Zero,
             new GraphicsColor(1f, 0.92f, 0.3f, 1f));
         var cascadeTints = new[]

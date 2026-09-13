@@ -2,6 +2,17 @@ namespace Blix.Diagnostics;
 
 public sealed class DebugState
 {
+    /// <summary>
+    /// The engine's one view table, interning names into ids that stay stable for the process.
+    /// </summary>
+    /// <remarks>
+    /// It lives on the state rather than the per-frame context because ids must outlive the declarations
+    /// that carry them: a trail is "this body, in THAT view, over the last N frames", which cannot be said
+    /// if the view's identity is rebuilt every frame. One table so there is one id space — two would drift
+    /// and "view 3" would mean two things.
+    /// </remarks>
+    public Blix.Core.ViewTable Views { get; } = new();
+
     public bool Enabled { get; set; }
 
     public bool ShowOverlay { get; set; } = true;

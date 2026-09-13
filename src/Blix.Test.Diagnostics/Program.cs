@@ -99,7 +99,7 @@ var t = new TestRunner();
     {
         debug.Controls.Toggle("On", true);
         debug.Controls.Float("Strength", 0.5f, 0.0f, 1.0f);
-        debug.Draw.ViewProjection = vp;
+        using var view = debug.Draw.In("main", vp);
         debug.Draw.Line("ray", new Vector3(0, 0, 0), new Vector3(1, 0, 0),
             new GraphicsColor(1, 0, 0, 1));
     }));
@@ -108,10 +108,78 @@ var t = new TestRunner();
     var frame = sys.LatestFrame!;
     t.ExpectTrue("Controls captured", frame.Controls.Count == 2);
     t.ExpectTrue("Draw commands captured", frame.DrawCommands.Count == 1);
-    t.ExpectTrue("Draw view-projection captured",
-        frame.DrawViewProjection.M41 == 7 &&
-        frame.DrawViewProjection.M42 == 8 &&
-        frame.DrawViewProjection.M43 == 9);
+    t.ExpectTrue("Declared view captured",
+        frame.Views.Count == 1 &&
+        frame.Views[0].Name == "main" &&
+        frame.Views[0].ViewProjection.M41 == 7 &&
+        frame.Views[0].ViewProjection.M42 == 8 &&
+        frame.Views[0].ViewProjection.M43 == 9);
+    t.ExpectTrue("Command names the view it was drawn into",
+        frame.DrawCommands[0].View == frame.Views[0].Id);
+}
+
+// -- Two views over the same geometry, in one frame ---------------------------
+// The acceptance criterion for the view arc, and the thing RTS §212 needed and could not ask for: watch
+// one body from a fixed vantage while the game camera does its own thing. It was impossible while a frame
+// carried a single matrix, and it is a second scope now.
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    sys.BeginFrame(new RenderFrameContext(Width: 8, Height: 4));
+    var game = Matrix4x4.CreateTranslation(1, 0, 0);
+    var watch = Matrix4x4.CreateTranslation(0, 50, 0);
+    sys.Run(new TestDebuggable("TwoViews", debug =>
+    {
+        var subject = new Vector3(3, 0, 3);
+        using (debug.Draw.In("game", game))
+        {
+            debug.Draw.Cross("subject", subject, 1f, new GraphicsColor(1, 1, 1, 1));
+        }
+
+        using (debug.Draw.In("overhead", watch))
+        {
+            debug.Draw.Cross("subject", subject, 1f, new GraphicsColor(1, 1, 0, 1));
+        }
+    }));
+    sys.EndFrame();
+
+    var frame = sys.LatestFrame!;
+    t.ExpectTrue("Both views declared in one frame", frame.Views.Count == 2);
+    t.ExpectTrue("Views keep distinct identities", frame.Views[0].Id != frame.Views[1].Id);
+    t.ExpectTrue("Same geometry drawn twice", frame.DrawCommands.Count == 2);
+    t.ExpectTrue("Each command names its own view",
+        frame.DrawCommands[0].View == frame.Views[0].Id &&
+        frame.DrawCommands[1].View == frame.Views[1].Id);
+
+    // Ids are interned from names, so the same name in a LATER frame is the same view — which is what any
+    // trail or history has to rely on to mean anything.
+    sys.BeginFrame(new RenderFrameContext(Width: 8, Height: 4));
+    sys.Run(new TestDebuggable("Again", debug =>
+    {
+        using var again = debug.Draw.In("overhead", watch);
+        debug.Draw.Cross("subject", Vector3.Zero, 1f, new GraphicsColor(1, 1, 0, 1));
+    }));
+    sys.EndFrame();
+    t.ExpectTrue("A view keeps its identity across frames",
+        sys.LatestFrame!.Views[0].Id == frame.Views[1].Id);
+}
+
+// -- Drawing with no view in scope is a bug, not a default --------------------
+{
+    var sys = new DebugSystem(historyCapacity: 2);
+    sys.BeginFrame(new RenderFrameContext(Width: 2, Height: 2));
+    var threw = false;
+    try
+    {
+        sys.Run(new TestDebuggable("NoView", debug =>
+            debug.Draw.Line("orphan", Vector3.Zero, Vector3.UnitX, new GraphicsColor(1, 0, 0, 1))));
+    }
+    catch (InvalidOperationException)
+    {
+        threw = true;
+    }
+
+    sys.EndFrame();
+    t.ExpectTrue("A primitive with no view throws", threw);
 }
 
 // -- Ring buffer wrap --------------------------------------------------------
@@ -864,6 +932,7 @@ var t = new TestRunner();
     var sys = new DebugSystem(historyCapacity: 4);
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     var d = sys.Current!.Draw;
+    using var primitivesView = d.In("main", Matrix4x4.Identity);
     var col = new GraphicsColor(1, 0, 0, 1);
     d.Line("L", Vector3.Zero, Vector3.UnitX, col);
     d.Aabb("A", -Vector3.One, Vector3.One, col);
@@ -903,6 +972,7 @@ var t = new TestRunner();
     {
         using (debug.Scope("aabb"))
         {
+            using var boxView = debug.Draw.In("main", Matrix4x4.Identity);
             debug.Draw.Aabb("box-3", -Vector3.One, Vector3.One,
                 new GraphicsColor(0, 1, 0, 1));
         }
@@ -949,6 +1019,7 @@ var t = new TestRunner();
 
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     var d = sys.Current!.Draw;
+    using var dumpView = d.In("overhead", Matrix4x4.CreateTranslation(0, 9, 0));
     var col = new GraphicsColor(1, 1, 1, 1);
     d.Sphere("ball", new Vector3(1, 2, 3), 0.5f, col);
     d.Arrow("vec", Vector3.Zero, Vector3.UnitX, col);
@@ -963,6 +1034,15 @@ var t = new TestRunner();
     t.ExpectTrue("JSON arrow endpoints renamed to dodge factory collision",
         json.Contains("\"FromPoint\"") && json.Contains("\"ToPoint\""));
 
+    // Schema 2. The version field is asserted because schema 1 did not have one despite the file claiming
+    // a stable contract, and an unversioned dump is only readable by guessing.
+    t.ExpectTrue("JSON declares its schema version", json.Contains("\"SchemaVersion\": 2"));
+    t.ExpectTrue("JSON carries the frame's views", json.Contains("\"Views\""));
+    t.ExpectTrue("JSON names the view by name, not by process-local id",
+        json.Contains("\"View\": \"overhead\""));
+    t.ExpectTrue("JSON no longer carries a single frame-wide camera",
+        !json.Contains("\"DrawViewProjection\""));
+
     Directory.Delete(tempDir, recursive: true);
 }
 
@@ -975,6 +1055,7 @@ var t = new TestRunner();
         emitBody:  ctx =>
         {
             order.Add("EmitGeometry");
+            using var submeshView = ctx.Draw.In("main", Matrix4x4.Identity);
             ctx.Draw.Aabb("submesh-0", -Vector3.One, Vector3.One,
                 new GraphicsColor(0, 1, 0, 1));
         });
@@ -1047,8 +1128,11 @@ var t = new TestRunner();
     var edges = new int[] { 0, 1, 1, 2, 2, 0 };
     var pos = new Vector3[] { Vector3.Zero };
     var norms = new Vector3[] { Vector3.UnitY };
-    sys.Current!.Draw.MeshWireframe("tri", verts, edges, new GraphicsColor(1, 1, 0, 1));
-    sys.Current!.Draw.Normals("vn", pos, norms, 0.5f, new GraphicsColor(0, 1, 1, 1));
+    using (sys.Current!.Draw.In("main", Matrix4x4.Identity))
+    {
+        sys.Current!.Draw.MeshWireframe("tri", verts, edges, new GraphicsColor(1, 1, 0, 1));
+        sys.Current!.Draw.Normals("vn", pos, norms, 0.5f, new GraphicsColor(0, 1, 1, 1));
+    }
     sys.EndFrame();
 
     var frame = sys.LatestFrame!;
@@ -1068,6 +1152,7 @@ var t = new TestRunner();
     var sink = new JsonDumpSink(tempDir);
 
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
+    using var meshView = sys.Current!.Draw.In("main", Matrix4x4.Identity);
     sys.Current!.Draw.MeshWireframe("m",
         new Vector3[] { Vector3.Zero, Vector3.UnitX, Vector3.UnitY },
         new int[] { 0, 1, 1, 2, 2, 0 },
@@ -1164,7 +1249,13 @@ var t = new TestRunner();
     // With selection: inspect fires + highlight aabb appears.
     sys.Select("scene/foo/sub-0", new Bounds3(new Vector3(-1), new Vector3(1)));
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
-    sys.Run();
+    // The highlight is drawn into whatever views the frame declared, so the frame needs one. A frame with
+    // no views drew no picture, and there is nothing for system feedback to annotate.
+    using (sys.Current!.Draw.In("main", Matrix4x4.Identity))
+    {
+        sys.Run();
+    }
+
     sys.EndFrame();
     t.ExpectTrue("Inspect called with selected path",
         inspectCalls.Count == 1 && inspectCalls[0] == "scene/foo/sub-0");
@@ -1205,7 +1296,11 @@ var t = new TestRunner();
     sys.Select("scene/foo", new Bounds3(new Vector3(0), new Vector3(1)));
     sys.State.LayersEnabled["selection"] = false;
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
-    sys.Run();
+    using (sys.Current!.Draw.In("main", Matrix4x4.Identity))
+    {
+        sys.Run();
+    }
+
     sys.EndFrame();
 
     t.ExpectTrue("Highlight emitted even when 'selection' layer is off",

@@ -302,7 +302,9 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
             }
         }
 
-        debug.Draw.ViewProjection = viewProj;
+        // Every primitive below belongs to this view. Scoped rather than assigned: the old
+        // per-channel matrix meant a frame could only ever be one world seen one way.
+        using var view = debug.Draw.In("main", viewProj);
         var obb = Matrix4x4.CreateScale(0.51f) * currentModel;
         debug.Draw.Obb("cube/obb", obb, new GraphicsColor(1f, 1f, 1f, 0.85f));
     }

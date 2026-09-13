@@ -340,7 +340,9 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
         // ViewProjection is what the Vulkan-side line drawer uses to project
         // these world-space coordinates onto the swapchain. Must match the
         // camera's matrix or the overlay floats away from the cube.
-        debug.Draw.ViewProjection = viewProj;
+        // Every primitive below belongs to this view. Scoped rather than assigned: the old
+        // per-channel matrix meant a frame could only ever be one world seen one way.
+        using var view = debug.Draw.In("main", viewProj);
 
         // World axes at origin (X red, Y green, Z blue). One meter long.
         // Confirms which way each axis goes after the Vulkan +Y-down flip

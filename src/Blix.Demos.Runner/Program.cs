@@ -818,7 +818,9 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
 
     public void Debug(DebugContext debug)
     {
-        debug.Draw.ViewProjection = viewProj;
+        // Every primitive below belongs to this view. Scoped rather than assigned: the old
+        // per-channel matrix meant a frame could only ever be one world seen one way.
+        using var view = debug.Draw.In("main", viewProj);
 
         var red = new GraphicsColor(0.95f, 0.30f, 0.25f, 0.9f);
         var gold = new GraphicsColor(0.95f, 0.80f, 0.25f, 0.9f);

@@ -278,9 +278,25 @@ public sealed class DebugSystem
                     var sphereR = MathF.Min(MathF.Max(longest * 0.15f, 0.05f), 0.75f);
                     var crossSize = longest * 0.5f;
 
-                    Current.Draw.Aabb(SelectedPath, bounds.Min, bounds.Max, SelectionHighlightColor);
-                    Current.Draw.Sphere(SelectedPath + "/center", center, sphereR, SelectionHighlightColor, segments: 16);
-                    Current.Draw.Cross(SelectedPath + "/marker", center, crossSize, SelectionHighlightColor);
+                    // <b>Into every view, because system feedback is not about any one camera.</b>
+                    // The selection highlight answers "here is what you picked", and the answer is the
+                    // same whichever window you look through — so a second viewport that can see the
+                    // object should show it selected too. Views are already declared by here: the
+                    // selection sweep runs after every contributor, which is where an application
+                    // declares the views it drew into.
+                    //
+                    // No views declared means the application drew nothing this frame, so there is no
+                    // picture to annotate. That is not an error.
+                    var declared = Current.Draw.Views.ToArray();
+                    foreach (var view in declared)
+                    {
+                        using (Current.Draw.In(view))
+                        {
+                            Current.Draw.Aabb(SelectedPath, bounds.Min, bounds.Max, SelectionHighlightColor);
+                            Current.Draw.Sphere(SelectedPath + "/center", center, sphereR, SelectionHighlightColor, segments: 16);
+                            Current.Draw.Cross(SelectedPath + "/marker", center, crossSize, SelectionHighlightColor);
+                        }
+                    }
                 }
 
                 foreach (var contributor in contributors)

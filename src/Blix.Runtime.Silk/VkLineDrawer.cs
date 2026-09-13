@@ -76,6 +76,9 @@ public sealed class VkLineDrawer : IDisposable
 
     public bool HasLines => vertexCount > 0;
 
+    /// <summary>Vertices accumulated so far. Callers slice this to submit one view's lines at a time.</summary>
+    public int VertexCount => vertexCount;
+
     public void Clear() => vertexCount = 0;
 
     public void Line(Vector3 a, Vector3 b, GraphicsColor color)
@@ -160,20 +163,39 @@ public sealed class VkLineDrawer : IDisposable
 
     public void Submit(RenderPassBuilder pass, Matrix4x4 viewProjection)
     {
-        if (vertexCount == 0) return;
-        var byteCount = vertexCount * StrideBytes;
+        Submit(pass, viewProjection, 0, vertexCount);
+        vertexCount = 0;
+    }
+
+    /// <summary>
+    /// Submits one contiguous run of the accumulated lines under its own view-projection.
+    /// </summary>
+    /// <remarks>
+    /// <b>Ranges rather than one drawer per view.</b> Passes are recorded as deferred lambdas that run at
+    /// execute time, long after the frame is built — so clearing this buffer between views would leave every
+    /// lambda reading whatever the LAST view left behind. Accumulating every view's lines into one buffer
+    /// and remembering each view's span keeps a single upload and costs one draw call per view.
+    /// <para>
+    /// Nothing is reset here, because a ranged caller is mid-frame by definition. The frame's owner calls
+    /// <see cref="Clear"/> once, before it starts.
+    /// </para>
+    /// </remarks>
+    public void Submit(RenderPassBuilder pass, Matrix4x4 viewProjection, int firstVertex, int count)
+    {
+        if (count <= 0) return;
+        var byteCount = count * StrideBytes;
         // Race-free per-frame vertices from the transient arena; bind at the slice
         // offset so the static base-0 index buffer addresses this frame's lines.
-        var slice = device.AllocVertices(uploadBuffer.AsSpan(0, byteCount), StrideBytes, "debugline.vb");
+        var slice = device.AllocVertices(
+            uploadBuffer.AsSpan(firstVertex * StrideBytes, byteCount), StrideBytes, "debugline.vb");
         pass.DrawIndexed(
             vertexBuffer: slice.Buffer,
             indexBuffer: indexBuffer,
             pipeline: pipeline,
-            indexCount: vertexCount,
+            indexCount: count,
             uniforms: new[] { new ShaderUniform("uViewProjection", new Matrix4x4Uniform(viewProjection)) },
             textures: Array.Empty<ShaderTextureBinding>(),
             vertexBufferByteOffset: slice.ByteOffset);
-        vertexCount = 0;
     }
 
     private void WriteVertex(int index, Vector3 position, GraphicsColor color)

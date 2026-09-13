@@ -119,7 +119,7 @@ public sealed class DebugContext
             Values.Entries.ToArray(),
             Controls.Entries.ToArray(),
             Draw.Commands.ToArray(),
-            Draw.ViewProjection,
+            Draw.Views.ToArray(),
             Stats.Entries.ToArray(),
             Timers.Entries.ToArray(),
             Events.Entries.ToArray(),

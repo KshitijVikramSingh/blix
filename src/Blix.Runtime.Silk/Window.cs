@@ -424,47 +424,55 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         var commands = ctx.Draw.Commands;
         if (commands.Count == 0) return;
 
-        for (var i = 0; i < commands.Count; i++)
+        var views = ctx.Draw.Views;
+        if (views.Count == 0) return;
+
+        // One buffer for the whole frame, one span per view. Cleared here because the ranged Submit below
+        // deliberately does not reset — see VkLineDrawer.
+        lineDrawer.Clear();
+
+        for (var v = 0; v < views.Count; v++)
         {
-            var c = commands[i];
-            switch (c)
+            var view = views[v];
+            var first = lineDrawer.VertexCount;
+
+            for (var i = 0; i < commands.Count; i++)
             {
-                case DebugDrawLine d: lineDrawer.Line(d.A, d.B, d.Color); break;
-                case DebugDrawAabb d: lineDrawer.Aabb(d.Min, d.Max, d.Color); break;
-                case DebugDrawCross d: lineDrawer.Cross(d.Center, d.Size, d.Color); break;
-                case DebugDrawArrow d: lineDrawer.Arrow(d.From, d.To, d.Color); break;
-                case DebugDrawRay d:
-                    var end = d.Origin + global::System.Numerics.Vector3.Normalize(d.Direction) * d.Length;
-                    lineDrawer.Arrow(d.Origin, end, d.Color);
-                    break;
-                case DebugDrawObb d: lineDrawer.Obb(d.Transform, d.Color); break;
-                case DebugDrawFrustum d: DrawFrustumLines(d.ViewProjection, d.Color); break;
-                case DebugDrawSphere d: DrawSphereLines(d.Center, d.Radius, d.Segments, d.Color); break;
-                case DebugDrawGrid d: DrawGridLines(d.Center, d.Size, d.Divisions, d.Color); break;
-                // Plane / Capsule / Cone / MeshWireframe / Normals not
-                // implemented yet — silent skip rather than crash.
+                var c = commands[i];
+                if (c.View != view.Id) continue;
+                switch (c)
+                {
+                    case DebugDrawLine d: lineDrawer.Line(d.A, d.B, d.Color); break;
+                    case DebugDrawAabb d: lineDrawer.Aabb(d.Min, d.Max, d.Color); break;
+                    case DebugDrawCross d: lineDrawer.Cross(d.Center, d.Size, d.Color); break;
+                    case DebugDrawArrow d: lineDrawer.Arrow(d.From, d.To, d.Color); break;
+                    case DebugDrawRay d:
+                        var end = d.Origin + global::System.Numerics.Vector3.Normalize(d.Direction) * d.Length;
+                        lineDrawer.Arrow(d.Origin, end, d.Color);
+                        break;
+                    case DebugDrawObb d: lineDrawer.Obb(d.Transform, d.Color); break;
+                    case DebugDrawFrustum d: DrawFrustumLines(d.ViewProjection, d.Color); break;
+                    case DebugDrawSphere d: DrawSphereLines(d.Center, d.Radius, d.Segments, d.Color); break;
+                    case DebugDrawGrid d: DrawGridLines(d.Center, d.Size, d.Divisions, d.Color); break;
+                    // Plane / Capsule / Cone / MeshWireframe / Normals not
+                    // implemented yet — silent skip rather than crash.
+                }
             }
+
+            var count = lineDrawer.VertexCount - first;
+            if (count == 0) continue;
+
+            // Each view lands on the surface it named. That one field is what makes an off-screen viewport
+            // ordinary rather than special: the swapchain is just the view whose target is Default.
+            var viewProj = view.ViewProjection;
+            commandList.Pass(
+                $"debug:{view.Name}",
+                new RenderPassDescription(
+                    Target: view.Target,
+                    ClearColors: Array.Empty<GraphicsColor?>(),
+                    ClearDepth: false),
+                pass => lineDrawer.Submit(pass, viewProj, first, count));
         }
-
-        if (!lineDrawer.HasLines) return;
-
-        // Footgun guard: emit-once warning when commands were issued but the
-        // game forgot to set debug.Draw.ViewProjection. Without this, lines
-        // render in clip space and are almost always invisible.
-        if (!warnedDebugIdentityVp && ctx.Draw.ViewProjection.Equals(global::System.Numerics.Matrix4x4.Identity))
-        {
-            warnedDebugIdentityVp = true;
-            Console.Error.WriteLine("[diagnostics] debug.Draw.ViewProjection is Identity; lines will render in clip space (likely invisible). Set debug.Draw.ViewProjection = viewProj.");
-        }
-
-        var viewProj = ctx.Draw.ViewProjection;
-        commandList.Pass(
-            "debug",
-            new RenderPassDescription(
-                Target: RenderSurfaceHandle.Default,
-                ClearColors: Array.Empty<GraphicsColor?>(),
-                ClearDepth: false),
-            pass => lineDrawer.Submit(pass, viewProj));
     }
 
     // Build the ImGui diagnostics panels for this frame and append a swapchain
@@ -523,7 +531,6 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             pass => imguiRenderer.Submit(pass));
     }
 
-    private bool warnedDebugIdentityVp;
 
     // Expand a view-projection into its 8 frustum corners (inverse-VP applied
     // to the NDC cube; Vulkan z ∈ [0,1]) and draw the 12 edges. The canonical
