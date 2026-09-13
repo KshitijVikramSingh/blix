@@ -514,8 +514,14 @@ static UniformBlockLayout Mat4Block() => new(
     var bytes = new byte[64];
     bytes[0] = 0xAB; bytes[63] = 0xCD;
     var withPush = baseCmd with { PushConstants = bytes };
-    t.ExpectTrue("H.1 with-update preserves PushConstants reference",
-        ReferenceEquals(withPush.PushConstants, bytes));
+
+    // <b>The contract inverted here, deliberately.</b> This asserted that a with-update
+    // PRESERVED the caller's reference, which is the aliasing the record now exists to
+    // prevent: a recorded command is read at Execute, long after the caller may have
+    // reused its buffer. The payload must survive; the reference must not. See Section AP
+    // and Blix.Graphics/RenderCommand.cs.
+    t.ExpectTrue("H.1 with-update COPIES the payload rather than aliasing the caller's array",
+        !ReferenceEquals(withPush.PushConstants, bytes));
     t.ExpectClose("H.1 PushConstants[0] preserved", withPush.PushConstants![0], 0xAB);
     t.ExpectClose("H.1 PushConstants[63] preserved", withPush.PushConstants![63], 0xCD);
 }
@@ -2405,6 +2411,64 @@ static ShaderInterface MinimalShader() => new(new[]
     own.Clear();
     t.ExpectTrue("AO.6 clearing forgets held presses", own.HeldCount == 0);
     t.ExpectTrue("AO.6 so a later release delivers nothing", !own.Release(A));
+}
+
+// ============================================================================
+// Section AP — recorded commands own their push payload.
+// ============================================================================
+//
+// A pass body records; the GPU work happens at Execute. A command that kept a
+// reference to the caller's scratch array therefore read it long after the caller
+// had moved on — and a caller reusing one array across draws gave every draw the
+// array's final contents. VkLineDrawer hit it, LabRenderer hit it (seven objects at
+// the seventh's transform, six apparently missing, draw counts perfectly healthy),
+// and the index-offset DrawIndexed overload exists because it bit vertex buffers.
+{
+    var scratch = new byte[8];
+
+    scratch[0] = 1;
+    var first = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), 3,
+        Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(),
+        PushConstants: scratch);
+
+    // The caller reuses its buffer for the next draw, exactly as a renderer packing
+    // per-object data does.
+    scratch[0] = 2;
+    var second = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), 3,
+        Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(),
+        PushConstants: scratch);
+
+    t.ExpectTrue("AP.1 the first command kept what it was recorded with",
+        first.PushConstants is { } a && a[0] == 1);
+    t.ExpectTrue("AP.1 the second kept its own",
+        second.PushConstants is { } b && b[0] == 2);
+    t.ExpectTrue("AP.1 neither is the caller's array",
+        !ReferenceEquals(first.PushConstants, scratch) && !ReferenceEquals(second.PushConstants, scratch));
+
+    // And mutating the caller's buffer after recording changes nothing, which is the
+    // property the whole thing turns on.
+    scratch[0] = 99;
+    t.ExpectTrue("AP.2 a later mutation cannot reach a recorded command",
+        first.PushConstants![0] == 1 && second.PushConstants![0] == 2);
+
+    t.ExpectTrue("AP.3 a null payload stays null",
+        new DrawIndexedCommand(
+            new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), 3,
+            Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>()).PushConstants is null);
+
+    // The other two command families record payloads the same way.
+    var dispatch = new DispatchCommand(
+        new PipelineHandle(2), 1, 1, 1,
+        Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), scratch);
+    var indirect = new DrawIndexedIndirectCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1),
+        new IndirectBufferHandle(1), 0, 1,
+        Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), null, scratch);
+    scratch[0] = 7;
+    t.ExpectTrue("AP.4 compute dispatch owns its payload too", dispatch.PushConstants![0] == 99);
+    t.ExpectTrue("AP.4 indirect draw owns its payload too", indirect.PushConstants![0] == 99);
 }
 
 t.PrintSummary();

@@ -30,8 +30,9 @@ Blix.Demos.Chassis             ← application-chassis spec (no diagnostics, own
 Blix.Labs.Toolchain            ← LAB library: lit scene + render graph + shaders,
                                   reflected binding (shipped as library content)
    ↑        ↑
-Viewer    Probe                ← two executables over one lab; neither declares a shader
-                                  nor contains render code. Probe opens no window.
+Viewer  Probe  Capture        ← three executables over one lab; none declares a shader
+                                  nor contains render code. Probe opens no window;
+                                  Capture reads the HDR target back and writes a PNG.
         ↑
 Blix.Runtime.Silk              ← Vulkan window/runtime adapter
                                   (Silk.NET window + IVkSurface + MoltenVK bootstrap,
@@ -146,6 +147,34 @@ a kind.
 Frame dumps are **schema 2**: a `Views` array plus a per-command `View` name, replacing
 the single frame-wide camera matrix, and a `SchemaVersion` field that schema 1 did not
 have.
+
+## Reading a frame back
+
+`VulkanGraphicsDevice.ReadTexture` copies a rendered colour texture to CPU bytes. It is
+the first *pull* in an otherwise push-only device, and Blix had none — colour attachments
+were created without `TransferSrcBit`, so they were not legal copy sources and capture
+was impossible **at the point the image was made**, not at the point somebody asked.
+
+The absence had already shaped the project: TankArena fits its tank model by eye through
+the overlay, with a comment reading "Screenshots don't work", and three rendering bugs in
+the view and lab arcs were each caught only because a person looked at a picture while
+green bounded runs, zero validation errors and healthy draw counts said nothing.
+
+It is **synchronous** — submit, wait the queue idle, map, copy. Milliseconds, which is
+wrong for a per-frame path and right for a tool taking one picture; an asynchronous ring
+belongs to whoever first needs a capture every frame. `Blix.Graphics.Images.PngWriter`
+encodes the result, hand-rolled with stored-deflate blocks so no encoder dependency is
+added — the files are larger than real deflate would make them, and they are screenshots,
+not assets.
+
+**What capture cannot do yet.** Debug geometry can be aimed at any surface now — the line
+drawer bakes a pipeline per render target, where it used to have exactly one against the
+default pass, making debug drawing silently swapchain-only. But an off-screen surface has
+no `LoadOp.Load` render pass variant, so a pass aimed at one **clears it**. Debug lines
+drawn into a scene target therefore land on a freshly cleared image rather than over the
+scene. `RenderGraph` already models load ops explicitly on `.Target(handle, LoadOp, StoreOp)`;
+what is missing is a way for an externally-routed `commandList.Pass` to ask for the Load
+form of a graph-owned surface.
 
 ## Host contracts
 

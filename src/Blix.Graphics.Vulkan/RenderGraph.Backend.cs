@@ -58,7 +58,11 @@ public sealed partial class RenderGraph : IDisposable
                 width: bpass.Width,
                 height: bpass.Height,
                 hasDepth: bpass.HasDepth,
-                samples: passSamples);
+                samples: passSamples,
+                // How many colour attachments this pass's render pass has. A graph pass can
+                // have none — a depth-only shadow caster — and anything routing a
+                // commandList.Pass at this surface needs the real number, not a guess.
+                colorAttachmentCount: gpass?.ColorTargets.Count ?? 0);
         }
     }
 

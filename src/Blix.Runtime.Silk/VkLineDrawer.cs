@@ -26,6 +26,7 @@ public sealed class VkLineDrawer : IDisposable
     private readonly IndexBufferHandle indexBuffer;
     private readonly ShaderProgramHandle shader;
     private readonly PipelineHandle pipeline;
+    private readonly Dictionary<RenderSurfaceHandle, PipelineHandle> pipelines = new();
     private readonly byte[] uploadBuffer;
     private int vertexCount;
     private bool disposed;
@@ -63,13 +64,8 @@ public sealed class VkLineDrawer : IDisposable
         });
         shader = device.CreateShaderProgramFromSpv(vertSpv, fragSpv, lineInterface, "debugline");
 
-        pipeline = device.CreatePipeline(new PipelineDescription(
-            shader,
-            VertexPosition3Color.Layout,
-            PrimitiveTopology.Lines,
-            DepthState.Disabled,
-            RasterizerState.NoCulling,
-            BlendState.AlphaBlend), "debugline");
+        // The swapchain pipeline, which is the common case and the only one there used to be.
+        pipeline = PipelineFor(RenderSurfaceHandle.Default);
 
         uploadBuffer = new byte[MaxVertexCount * StrideBytes];
     }
@@ -161,9 +157,41 @@ public sealed class VkLineDrawer : IDisposable
         Line(corners[2], corners[6], color); Line(corners[3], corners[7], color);
     }
 
+    /// <summary>
+    /// The line pipeline for a given render target, baked on first use.
+    /// </summary>
+    /// <remarks>
+    /// <b>Debug geometry used to be swapchain-only, and nothing said so.</b> This pipeline was created
+    /// once with no RenderTarget, which bakes it against the default render pass — so pointing a debug view
+    /// at an off-screen surface was render-pass incompatible, and the view arc's promise that a view could
+    /// name any target quietly did not extend to the lines drawn into it. Found by trying to capture debug
+    /// geometry into an HDR target, which is exactly the case a collider capture needs.
+    /// <para>
+    /// Cached per target because a pipeline is bound to its pass's attachment formats; there are as many
+    /// as there are surfaces a view draws into, which is one or two.
+    /// </para>
+    /// </remarks>
+    private PipelineHandle PipelineFor(RenderSurfaceHandle target)
+    {
+        if (pipelines.TryGetValue(target, out var existing)) return existing;
+
+        var created = device.CreatePipeline(
+            new PipelineDescription(
+                shader,
+                VertexPosition3Color.Layout,
+                PrimitiveTopology.Lines,
+                DepthState.Disabled,
+                RasterizerState.NoCulling,
+                new[] { BlendState.AlphaBlend },
+                RenderTarget: target.Id == RenderSurfaceHandle.Default.Id ? null : target),
+            $"debugline.target{target.Id}");
+        pipelines[target] = created;
+        return created;
+    }
+
     public void Submit(RenderPassBuilder pass, Matrix4x4 viewProjection)
     {
-        Submit(pass, viewProjection, 0, vertexCount);
+        Submit(pass, viewProjection, 0, vertexCount, RenderSurfaceHandle.Default);
         vertexCount = 0;
     }
 
@@ -180,7 +208,8 @@ public sealed class VkLineDrawer : IDisposable
     /// <see cref="Clear"/> once, before it starts.
     /// </para>
     /// </remarks>
-    public void Submit(RenderPassBuilder pass, Matrix4x4 viewProjection, int firstVertex, int count)
+    public void Submit(
+        RenderPassBuilder pass, Matrix4x4 viewProjection, int firstVertex, int count, RenderSurfaceHandle target)
     {
         if (count <= 0) return;
         var byteCount = count * StrideBytes;
@@ -191,7 +220,7 @@ public sealed class VkLineDrawer : IDisposable
         pass.DrawIndexed(
             vertexBuffer: slice.Buffer,
             indexBuffer: indexBuffer,
-            pipeline: pipeline,
+            pipeline: PipelineFor(target),
             indexCount: count,
             uniforms: new[] { new ShaderUniform("uViewProjection", new Matrix4x4Uniform(viewProjection)) },
             textures: Array.Empty<ShaderTextureBinding>(),

@@ -71,6 +71,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Labs.Toolchain.Viewer"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Labs.Toolchain.Probe", "src\Blix.Labs.Toolchain.Probe\Blix.Labs.Toolchain.Probe.csproj", "{D699079B-AB1D-430B-9444-D6DCCB0140FD}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Labs.Toolchain.Capture", "src\Blix.Labs.Toolchain.Capture\Blix.Labs.Toolchain.Capture.csproj", "{E2C8D473-A162-4798-B5D4-67E22F9E57C9}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -212,6 +214,10 @@ Global
 		{D699079B-AB1D-430B-9444-D6DCCB0140FD}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D699079B-AB1D-430B-9444-D6DCCB0140FD}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D699079B-AB1D-430B-9444-D6DCCB0140FD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E2C8D473-A162-4798-B5D4-67E22F9E57C9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E2C8D473-A162-4798-B5D4-67E22F9E57C9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E2C8D473-A162-4798-B5D4-67E22F9E57C9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E2C8D473-A162-4798-B5D4-67E22F9E57C9}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{08594E40-7628-4DEF-B48B-A5F7305FEA22} = {3B3A88A9-9354-470A-A0C5-9CF4E0EB69F5}
@@ -247,5 +253,6 @@ Global
 		{476EC2D0-50A9-4804-ADC0-9ADB2E86FED5} = {3B3A88A9-9354-470A-A0C5-9CF4E0EB69F5}
 		{592C72EB-7629-4F83-86A6-FF9EB05C3049} = {3B3A88A9-9354-470A-A0C5-9CF4E0EB69F5}
 		{D699079B-AB1D-430B-9444-D6DCCB0140FD} = {3B3A88A9-9354-470A-A0C5-9CF4E0EB69F5}
+		{E2C8D473-A162-4798-B5D4-67E22F9E57C9} = {3B3A88A9-9354-470A-A0C5-9CF4E0EB69F5}
 	EndGlobalSection
 EndGlobal

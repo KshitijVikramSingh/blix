@@ -554,7 +554,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
                     Target: view.Target,
                     ClearColors: Array.Empty<GraphicsColor?>(),
                     ClearDepth: false),
-                pass => lineDrawer.Submit(pass, viewProj, first, count));
+                pass => lineDrawer.Submit(pass, viewProj, first, count, view.Target));
         }
     }
 

@@ -63,19 +63,18 @@ public sealed class LabRenderer : IDisposable
     private int cubeIndexCount;
     private int groundIndexCount;
 
-    // <b>One buffer per draw, not one buffer reused.</b> A pass body RECORDS; the GPU work
-    // happens later, at Execute. A push payload handed over as a shared array is therefore
-    // read after every draw has written it, so all of them get the last one's — which on
-    // screen is seven boxes stacked in one place and six apparently missing. Caught from
-    // the chair in a screenshot, and it is the same deferred-recording aliasing that the
-    // debug line drawer hit one arc earlier.
+    // <b>One scratch buffer, reused across draws — which is safe now and was not.</b>
+    // This started as a pool of one array per recorded draw, because a recorded command
+    // held the caller's array by reference and read it at Execute: seven objects rendered
+    // at the seventh's transform, six apparently missing, draw counts perfectly healthy.
     //
-    // Pooled and reused across frames rather than allocated per draw: the aliasing is
-    // between draws WITHIN a frame, and the pool is reset once per frame.
-    private readonly List<byte[]> litPushPool = new();
-    private readonly List<byte[]> casterPushPool = new();
-    private int litPushUsed;
-    private int casterPushUsed;
+    // The workaround is gone because the API stopped needing it. DrawIndexedCommand copies
+    // its push payload at record time, so a renderer may pack into one buffer per draw
+    // exactly as the obvious code does. Keeping the pool would have left a local remedy
+    // standing in for an engine contract, and the next renderer would have had to
+    // rediscover it.
+    private readonly byte[] pushScratch = new byte[PushBytes];
+    private readonly byte[] casterPushScratch = new byte[CasterPushBytes];
 
     // The caster only needs the model matrix, and the reflected interface says so — 64
     // bytes against the lit pass's 96. Pushing the larger block at it is rejected by the
@@ -178,6 +177,16 @@ public sealed class LabRenderer : IDisposable
     /// <summary>The HDR colour the scene is lit into, before tonemapping. For anything that wants to sample it.</summary>
     public TextureHandle SceneColour => graph.GetColorTexture(sceneColourTarget);
 
+    /// <summary>
+    /// The surface the lit pass draws into, for a view that wants to draw alongside the scene.
+    /// </summary>
+    /// <remarks>
+    /// Debug geometry aimed at this rather than at the swapchain lands IN the picture the capture tool
+    /// reads back — which is the difference between a screenshot of a scene and a screenshot of what the
+    /// engine thinks is in it.
+    /// </remarks>
+    public RenderSurfaceHandle SceneSurface => graph.GetPassSurface(litPass);
+
     /// <summary>The sun's depth buffer. Exposed so a tool can look at what the caster pass produced.</summary>
     public TextureHandle ShadowDepth => graph.GetDepthTexture(shadowTarget);
 
@@ -185,8 +194,6 @@ public sealed class LabRenderer : IDisposable
         RenderCommandList commandList, LabScene scene, Matrix4x4 viewProjection, Vector3 cameraPosition)
     {
         var sunViewProjection = scene.SunViewProjection();
-        litPushUsed = 0;
-        casterPushUsed = 0;
 
         // Pass 1 — the sun's depth. No colour attachment at all, which is the thing the
         // raw surface path could not express.
@@ -253,7 +260,7 @@ public sealed class LabRenderer : IDisposable
         ShaderTextureBinding[] textures,
         bool casterOnly = false)
     {
-        var push = Rent(casterOnly);
+        var push = casterOnly ? casterPushScratch : pushScratch;
         PackPush(item, push);
         pass.DrawIndexed(
             vertexBuffer: item.IsGround ? groundVertices : cubeVertices,
@@ -268,15 +275,6 @@ public sealed class LabRenderer : IDisposable
     // mat4 model, vec4 base colour, vec4 (metallic, roughness, _, _) — 96 bytes, inside the
     // 128-byte floor every Vulkan implementation guarantees, which is why there is no
     // per-object descriptor set in this lab at all.
-    private byte[] Rent(bool casterOnly)
-    {
-        var pool = casterOnly ? casterPushPool : litPushPool;
-        var used = casterOnly ? casterPushUsed++ : litPushUsed++;
-        var size = casterOnly ? 64 : PushBytes;
-        while (pool.Count <= used) pool.Add(new byte[size]);
-        return pool[used];
-    }
-
     private static void PackPush(in LabObject item, byte[] target)
     {
         var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());

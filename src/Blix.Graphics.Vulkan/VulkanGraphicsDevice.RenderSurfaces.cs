@@ -41,6 +41,14 @@ public sealed partial class VulkanGraphicsDevice
         // per-pass VkRenderPass + Framebuffer. The destruction path
         // (DestroyAllRenderSurfaces) skips those entries.
         public bool IsExternal;
+
+        // <b>How many colour attachments this surface's render pass actually has.</b>
+        // Not derivable from ColorAttachments, which is deliberately empty for external
+        // (graph-owned) entries — and a pass whose clear list is empty then computed a
+        // colour count of zero and wrote the DEPTH clear into colour slot 0. Reinterpreted
+        // through the union that is float32[4] = {1, 0, 0, 0}: the target cleared to pure
+        // red and whatever was in it was destroyed.
+        public int ColorAttachmentCount;
     }
 
     public unsafe RenderSurface CreateRenderSurface(RenderSurfaceDescription description)
@@ -72,7 +80,14 @@ public sealed partial class VulkanGraphicsDevice
             var (image, memory, view) = AllocateAttachmentImage(
                 width, height,
                 format,
-                ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.SampledBit,
+                // TransferSrcBit so a colour attachment can be READ BACK. Without it the
+                // image cannot be a copy source and capture is impossible at the point the
+                // image is made, not at the point somebody asks — which is why Blix had no
+                // screenshot path at all and TankArena's model fit was dialled in by eye
+                // instead. The flag costs nothing on an attachment that is already
+                // device-local and sampleable.
+                ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.SampledBit
+                    | ImageUsageFlags.TransferSrcBit,
                 ImageAspectFlags.ColorBit,
                 $"{description.Name}.color[{i}]");
 
@@ -98,6 +113,7 @@ public sealed partial class VulkanGraphicsDevice
             colorHandles[i] = new TextureHandle(id);
         }
         entry.ColorAttachments = colorHandles;
+        entry.ColorAttachmentCount = colorHandles.Length;
         entry.ColorFormat = colorFormat;
 
         // --- Depth attachment --------------------------------------------------
@@ -164,7 +180,8 @@ public sealed partial class VulkanGraphicsDevice
         Framebuffer framebuffer,
         uint width, uint height,
         bool hasDepth,
-        SampleCountFlags samples = SampleCountFlags.Count1Bit)
+        SampleCountFlags samples = SampleCountFlags.Count1Bit,
+        int colorAttachmentCount = 1)
     {
         var entry = new VkRenderSurfaceEntry
         {
@@ -176,6 +193,7 @@ public sealed partial class VulkanGraphicsDevice
             HasDepth = hasDepth,
             Samples = samples,
             IsExternal = true,
+            ColorAttachmentCount = colorAttachmentCount,
             // Color/depth attachment ownership stays with the caller.
             ColorAttachments = Array.Empty<TextureHandle>(),
         };

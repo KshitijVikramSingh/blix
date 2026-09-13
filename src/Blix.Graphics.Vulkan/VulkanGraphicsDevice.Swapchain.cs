@@ -638,7 +638,16 @@ public sealed partial class VulkanGraphicsDevice
             // its depth clear at index 0 — getting this wrong clears depth
             // to 0.0 (reinterpreted ClearColorValue zero) and every fragment
             // reads back near-plane depth from the "shadow map".
-            var colorCount = customSurface is null ? 1 : pass.Description.ClearColors.Count;
+            // <b>The surface's own attachment count, not the caller's clear list.</b> This read
+            // ClearColors.Count, so a pass with an EMPTY clear list on a custom surface computed
+            // colorCount = 0 — and then wrote the depth clear into clearValues[0], i.e. into
+            // colour attachment 0. A ClearDepthStencilValue{depth = 1.0f} reinterpreted through
+            // the union is float32[4] = {1, 0, 0, 0}, so the target cleared to PURE RED and the
+            // scene in it was destroyed. Found by capturing a frame and looking at it; no
+            // validation error, no exception, healthy draw counts.
+            //
+            // It is the same fault the comment above warns about, running the other way.
+            var colorCount = customSurface is null ? 1 : customSurface.ColorAttachmentCount;
             var hasDepthAttachment = customSurface is null ? true : customSurface.HasDepth;
             for (var i = 0; i < colorCount; i++)
             {

@@ -960,6 +960,24 @@ public sealed partial class VulkanGraphicsDevice
             srcStage = PipelineStageFlags.TopOfPipeBit;
             dstStage = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit;
         }
+        else if (oldLayout == ImageLayout.ShaderReadOnlyOptimal && newLayout == ImageLayout.TransferSrcOptimal)
+        {
+            // Readback (ReadTexture): let the sampled reads that produced this picture
+            // finish before the copy walks the image.
+            srcAccess = AccessFlags.ShaderReadBit;
+            dstAccess = AccessFlags.TransferReadBit;
+            srcStage = PipelineStageFlags.FragmentShaderBit;
+            dstStage = PipelineStageFlags.TransferBit;
+        }
+        else if (oldLayout == ImageLayout.TransferSrcOptimal && newLayout == ImageLayout.ShaderReadOnlyOptimal)
+        {
+            // And put it back, or the next frame's sample is a layout error rather than a
+            // picture. A capture must leave the frame exactly as it found it.
+            srcAccess = AccessFlags.TransferReadBit;
+            dstAccess = AccessFlags.ShaderReadBit;
+            srcStage = PipelineStageFlags.TransferBit;
+            dstStage = PipelineStageFlags.FragmentShaderBit;
+        }
         else
         {
             throw new InvalidOperationException($"Unsupported layout transition {oldLayout} → {newLayout}.");

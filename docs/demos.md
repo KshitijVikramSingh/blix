@@ -203,7 +203,7 @@ tools/run-lab.sh                      # the viewer
 dotnet run --project src/Blix.Labs.Toolchain.Probe   # the probe; no window, no launcher
 ```
 
-One library and two executables. The library owns the scene, the renderer and the
+One library and three executables. The library owns the scene, the renderer and the
 shaders; **neither executable declares a shader or contains render code**. The `.spv`
 and their reflection sidecars are compiled once and arrive through content propagation —
 the mechanism `Blix.Render` already used for `SpriteBatch`, now carrying a whole
@@ -213,6 +213,15 @@ pipeline.
 varied metallic/roughness, one sun with a 2048² shadow map, HDR target, tonemapped
 present — plus its own ImGui panel, orbit input with UI capture, host-owned `--frames`,
 and a named view carrying a grid, a sun arrow and the sun's trail.
+
+**The capture tool** renders the lab and writes what it rendered to a PNG. It captures
+the **HDR scene target**, not the swapchain — so the lab's render path needed no change,
+and the tonemap is applied on the CPU, which means a capture holds real radiance and the
+curve is an offline choice rather than baked in.
+
+```sh
+tools/run-lab-capture.sh --frames 10 --out shot.png
+```
 
 **The probe** never opens a window, so it needs no launcher and no MoltenVK. It reads
 the binding model out of the sidecars and prints it — every set, binding, stage and
