@@ -365,6 +365,21 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
         debug.Draw.Obb("cube/left/obb", leftObb, new GraphicsColor(1f, 1f, 1f, 0.85f));
         var rightObb = Matrix4x4.CreateScale(0.51f) * rightModel;
         debug.Draw.Obb("cube/right/obb", rightObb, new GraphicsColor(1f, 1f, 1f, 0.85f));
+
+        // <b>The one primitive with a memory.</b> A corner of each cube, remembered for two seconds, so a
+        // spinning cube draws the arc its corner has just travelled. Every other call in this method
+        // describes this instant; these two describe the recent past, which nothing in diagnostics could
+        // express before — a draw command could not outlive the frame that made it.
+        //
+        // Trails are also the cheapest possible demonstration that the two axes compose: the points are
+        // remembered per path and drawn into whichever view is in scope.
+        var corner = new Vector3(0.5f, 0.5f, 0.5f);
+        debug.Draw.Trail(
+            "cube/left/corner", Vector3.Transform(corner, leftModel),
+            new GraphicsColor(1f, 0.55f, 0.2f, 1f), seconds: 2f);
+        debug.Draw.Trail(
+            "cube/right/corner", Vector3.Transform(corner, rightModel),
+            new GraphicsColor(0.3f, 0.9f, 1f, 1f), seconds: 2f);
     }
 
     private static (VertexPosition3Texture[] Vertices, ushort[] Indices) BuildCube()

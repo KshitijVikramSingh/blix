@@ -64,6 +64,9 @@ public sealed class DebugSystem
 
     public DebugState State { get; } = new();
 
+    /// <summary>How long a trail survives after its producer stops asking for it.</summary>
+    private const float TrailStaleSeconds = 30f;
+
     public DebugFrameHistory History { get; }
 
     // The live, mutable builder for the in-flight frame. Null between
@@ -329,6 +332,11 @@ public sealed class DebugSystem
         var frameTicks = Stopwatch.GetTimestamp() - frameStartTicks;
         var frameMs = frameTicks * (1000.0 / Stopwatch.Frequency);
         Current.Timers.AppendCompleted(FrameTimerName, scope: string.Empty, frameMs);
+
+        // Trails whose producer has gone quiet are dropped, or every entity that ever had one would keep
+        // its dictionary entry forever — the points age to empty on their own, the key does not. A leak
+        // guard, deliberately far longer than any sensible trail duration, not a visual parameter.
+        State.Trails.Expire(clock.Elapsed.TotalMilliseconds, TrailStaleSeconds);
 
         var snapshot = Current.Snapshot(clock.Elapsed.TotalMilliseconds, SelectedPath);
         History.Push(snapshot);

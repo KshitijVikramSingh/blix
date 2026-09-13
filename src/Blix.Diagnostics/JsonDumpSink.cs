@@ -241,6 +241,10 @@ internal sealed record JsonDrawCommand(
     // array per frame would make dumps unusable. The producer's
     // identification path (DebugDrawCommand.Path) is enough for a
     // consumer to correlate back to a specific submesh.
+    // A polyline's points are the thing being reported — a motion question is unanswerable from a count —
+    // so unlike the mesh primitives these are written out. Bounded by DebugTrails.MaxPointsPerTrail.
+    JsonVec3[]? Points = null,
+    int? PointCount = null,
     int? VertexCount = null,
     int? EdgeCount = null,
     int? NormalCount = null,
@@ -279,6 +283,8 @@ internal sealed record JsonDrawCommand(
                 Length: x.Length, HalfAngleRad: x.HalfAngleRad, Segments: x.Segments),
             DebugDrawArrow x => new(kind, x.Path, view, color,
                 FromPoint: JsonVec3.From(x.From), ToPoint: JsonVec3.From(x.To)),
+            DebugDrawPolyline x => new(kind, x.Path, view, color,
+                Points: x.Points.Select(JsonVec3.From).ToArray(), PointCount: x.Points.Count),
             DebugDrawMeshWireframe x => new(kind, x.Path, view, color,
                 VertexCount: x.Vertices.Count, EdgeCount: x.Edges.Count / 2),
             DebugDrawNormals x => new(kind, x.Path, view, color,

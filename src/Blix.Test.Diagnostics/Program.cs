@@ -182,6 +182,110 @@ var t = new TestRunner();
     t.ExpectTrue("A primitive with no view throws", threw);
 }
 
+// -- Trails: the one thing in diagnostics that remembers ----------------------
+// Tested against DebugTrails directly, because it takes the current time as an argument rather than
+// reading a clock. Anything that ages out is untestable if it can only be asked "what time is it?"
+{
+    var trails = new DebugTrails();
+
+    var a = trails.Append("body/7", new Vector3(0, 0, 0), nowMs: 0, seconds: 1f, frameNumber: 1);
+    t.ExpectTrue("A fresh trail holds the one point", a.Count == 1);
+
+    trails.Append("body/7", new Vector3(1, 0, 0), nowMs: 200, seconds: 1f, frameNumber: 2);
+    var grown = trails.Append("body/7", new Vector3(2, 0, 0), nowMs: 400, seconds: 1f, frameNumber: 3);
+    t.ExpectTrue("A trail grows across calls", grown.Count == 3);
+
+    // 1500ms later with a 1s window: the first two points are older than the window and go.
+    // At t=1500 with a 1s window the point from t=400 is 1100ms old, so only the new one survives.
+    var aged = trails.Append("body/7", new Vector3(3, 0, 0), nowMs: 1500, seconds: 1f, frameNumber: 4);
+    t.ExpectTrue("Points older than the window age out", aged.Count == 1);
+    t.ExpectTrue("The surviving point is the recent one", aged[0] == new Vector3(3, 0, 0));
+
+    t.ExpectTrue("Trails are kept per path", trails.Count == 1);
+    trails.Append("body/8", Vector3.Zero, nowMs: 1500, seconds: 1f, frameNumber: 4);
+    t.ExpectTrue("A second path is a second trail", trails.Count == 2);
+
+    // A producer that goes quiet must not leak its key forever. The points age to nothing on their own;
+    // the dictionary entry is what Expire is for.
+    trails.Expire(nowMs: 60_000, staleSeconds: 30f);
+    t.ExpectTrue("Trails nobody has touched are forgotten", trails.Count == 0);
+
+    t.ExpectTrue("Forget returns false for a path that is not there", !trails.Forget("body/7"));
+
+    // Asking twice in one frame is one sample: a trail is a fact about the frame, not about how many
+    // times somebody wanted to look at it.
+    var twice = new DebugTrails();
+    twice.Append("b", new Vector3(0, 0, 0), nowMs: 0, seconds: 10f, frameNumber: 1);
+    var second = twice.Append("b", new Vector3(9, 9, 9), nowMs: 0, seconds: 10f, frameNumber: 1);
+    t.ExpectTrue("A repeat call in the same frame does not re-sample", second.Count == 1);
+    var nextFrame = twice.Append("b", new Vector3(1, 0, 0), nowMs: 16, seconds: 10f, frameNumber: 2);
+    t.ExpectTrue("The next frame samples again", nextFrame.Count == 2);
+}
+
+// -- A trail drawn across frames, through the channel -------------------------
+{
+    var sys = new DebugSystem(historyCapacity: 8);
+    var seen = new List<int>();
+    for (var i = 0; i < 3; i++)
+    {
+        var step = i;
+        sys.BeginFrame(new RenderFrameContext(Width: 4, Height: 4));
+        sys.Run(new TestDebuggable("Mover", debug =>
+        {
+            using var view = debug.Draw.In("main", Matrix4x4.Identity);
+            debug.Draw.Trail("body", new Vector3(step, 0, 0), new GraphicsColor(1, 1, 1, 1), seconds: 60f);
+        }));
+        sys.EndFrame();
+        var line = (DebugDrawPolyline)sys.LatestFrame!.DrawCommands.First(c => c is DebugDrawPolyline);
+        seen.Add(line.Points.Count);
+    }
+
+    t.ExpectTrue("A trail lengthens frame over frame",
+        seen.Count == 3 && seen[0] == 1 && seen[1] == 2 && seen[2] == 3);
+
+    // The subtle one. The store rewrites its list every frame, so a command holding it BY REFERENCE would
+    // make an already-sealed frame change under a sink still reading it — the same fault the per-frame
+    // view declarations exist to prevent.
+    var first = sys.History.EnumerateLatestFirst().Last();
+    var firstLine = (DebugDrawPolyline)first.DrawCommands.First(c => c is DebugDrawPolyline);
+    t.ExpectTrue("An old frame still reports the trail it actually had", firstLine.Points.Count == 1);
+}
+
+// -- One history, seen from two views -----------------------------------------
+// Where the two singulars meet: a trail is keyed by path and drawn into whichever view is in scope, so
+// asking for it twice is one history painted twice, not two histories diverging.
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    for (var i = 0; i < 2; i++)
+    {
+        var step = i;
+        sys.BeginFrame(new RenderFrameContext(Width: 4, Height: 4));
+        sys.Run(new TestDebuggable("Mover", debug =>
+        {
+            var here = new Vector3(step, 0, 0);
+            using (debug.Draw.In("game", Matrix4x4.Identity))
+            {
+                debug.Draw.Trail("body", here, new GraphicsColor(1, 1, 1, 1), seconds: 60f);
+            }
+
+            using (debug.Draw.In("overhead", Matrix4x4.CreateTranslation(0, 20, 0)))
+            {
+                debug.Draw.Trail("body", here, new GraphicsColor(1, 1, 0, 1), seconds: 60f);
+            }
+        }));
+        sys.EndFrame();
+    }
+
+    var lines = sys.LatestFrame!.DrawCommands.OfType<DebugDrawPolyline>().ToArray();
+    t.ExpectTrue("The trail is drawn once per view", lines.Length == 2);
+    t.ExpectTrue("Each copy goes to its own view", lines[0].View != lines[1].View);
+
+    // Four calls over two frames against ONE remembered path: if the store keyed on view as well, each
+    // view would hold half the history and both would be wrong.
+    t.ExpectTrue("Both views show the same single history — sampled per frame, not per call",
+        lines[0].Points.Count == 2 && lines[1].Points.Count == 2);
+}
+
 // -- Ring buffer wrap --------------------------------------------------------
 {
     var sys = new DebugSystem(historyCapacity: 3);

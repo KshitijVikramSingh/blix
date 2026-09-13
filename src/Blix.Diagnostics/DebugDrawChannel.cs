@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Blix.Core;
 using Blix.Graphics;
 using System.Numerics;
@@ -23,13 +24,15 @@ namespace Blix.Diagnostics;
 public sealed class DebugDrawChannel
 {
     private readonly DebugContext context;
+    private readonly Stopwatch clock;
     private readonly List<DebugDrawCommand> commands = new();
     private readonly List<ViewDeclaration> views = new();
     private readonly Stack<ViewId> scopes = new();
 
-    internal DebugDrawChannel(DebugContext context)
+    internal DebugDrawChannel(DebugContext context, Stopwatch clock)
     {
         this.context = context;
+        this.clock = clock;
     }
 
     public IReadOnlyList<DebugDrawCommand> Commands => commands;
@@ -174,6 +177,40 @@ public sealed class DebugDrawChannel
     public void Obb(string name, Matrix4x4 transform, GraphicsColor color)
     {
         commands.Add(new DebugDrawObb(context.BuildPath(name), color, CurrentView, transform));
+    }
+
+    /// <summary>
+    /// Records where this thing is now, and draws everywhere it has been for the last few seconds.
+    /// </summary>
+    /// <remarks>
+    /// <b>The one primitive with a memory.</b> Every other call here describes this instant; a trail is a
+    /// standing question — "where has this been going?" — which nothing in diagnostics could ask, because
+    /// a command could not outlive its frame.
+    /// <para>
+    /// Call it every frame with the current position. It only draws on frames where it is called, so a
+    /// producer that stops asking stops painting, and nothing emits behind the caller's back. The points
+    /// are remembered on <see cref="DebugState.Trails"/> keyed by path, so the same trail drawn in two
+    /// views is one history seen twice rather than two histories.
+    /// </para>
+    /// </remarks>
+    public void Trail(string name, Vector3 point, GraphicsColor color, float seconds = 3f)
+    {
+        var path = context.BuildPath(name);
+        var remembered = context.State.Trails.Append(
+            path, point, clock.Elapsed.TotalMilliseconds, seconds, context.FrameNumber);
+
+        // Copied, because the store rewrites that list next frame and a snapshot must not change under a
+        // sink that is already holding it.
+        var points = new Vector3[remembered.Count];
+        for (var i = 0; i < points.Length; i++) points[i] = remembered[i];
+        commands.Add(new DebugDrawPolyline(path, color, CurrentView, points));
+    }
+
+    /// <summary>Draws an explicit path through space, remembering nothing.</summary>
+    public void Polyline(string name, IReadOnlyList<Vector3> points, GraphicsColor color)
+    {
+        ArgumentNullException.ThrowIfNull(points);
+        commands.Add(new DebugDrawPolyline(context.BuildPath(name), color, CurrentView, points));
     }
 
     public void Cross(string name, Vector3 center, float size, GraphicsColor color)

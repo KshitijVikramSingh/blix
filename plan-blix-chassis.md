@@ -257,3 +257,75 @@ Bulwark headed runs worked and this demo had apparently never run.
 The other four singulars. Nearest: time (trails and histories now have a stable view
 to hang off), then `Window`'s decomposition, which this arc has already loosened by
 taking the debug pass's single-camera assumption out of it.
+
+## §7 — Time, and the part of it that already worked
+
+The second singular, and it turned out to be half-broken already.
+
+**Scalar history exists and always did.** `DebugFrameHistory` is a ring of finished
+frames, and `DebugOverlayUi` already draws sparklines over it for every stat and
+timer via a path-keyed selector. Cross-frame *aggregates* are computable from that
+ring by any consumer — which is exactly what the sparkline selector is. So most of
+"improve scalar histories and plots" was a request for something already built, and
+building it again would have been the near-synonym fault with a graph attached.
+
+**What was genuinely impossible: a draw command outliving its frame.** Channels
+clear on `BeginFrame`, so geometry is discarded every frame and a trail could not be
+built on top of anything. That is a real constraint, it is small, and a path through
+space is the commonest temporal question there is about anything that moves —
+which is Spear's entire domain.
+
+### Evidence, and its weakness
+
+Stated honestly: the pressure here is **thin**. Sweeping the tree for hand-rolled
+cross-frame accumulation finds essentially one real consumer — RTSGame's
+`StallCensus` — with the other hits (`SimulationWorld`, `EconomySystem`,
+`FactionKnowledge`) being game state that legitimately accumulates and is nobody
+else's business. One consumer is not the repeated pressure `docs/conventions.md` §4
+asks for before extracting.
+
+So the scope is deliberately the constraint removal and nothing else:
+`DebugTrails` **stores points and computes nothing**. No smoothing, no resampling,
+no summarising, no reductions. Remembering removes a constraint; deciding what a
+path MEANS is policy, and policy waits for a second consumer to disagree with the
+first.
+
+### What was built
+
+| Piece | Where |
+| --- | --- |
+| bounded, path-keyed, time-stamped point store | `Blix.Diagnostics/DebugTrails.cs` |
+| `Trail(name, point, colour, seconds)` and `Polyline(...)` | `DebugDrawChannel` |
+| `DebugDrawPolyline` | `DebugDrawCommand.cs` |
+| the store, on state that survives a frame | `DebugState.Trails` |
+| stale-trail expiry once a frame | `DebugSystem.EndFrame` |
+| polyline rendering | `Window.AppendDebugLinesPass` |
+| points written out, not counted | `JsonDumpSink` |
+
+`DebugTrails.Append` takes the current time **as an argument** rather than reading a
+clock, which is the only reason anything that ages out is testable at all.
+
+### What the tests found
+
+Drawing one trail into two views **sampled it twice a frame**, so the two views
+disagreed about the body's history by one point. A trail is where something has
+been — a fact about the frame, not about how many times somebody asked to look at
+it. Now sampled once per path per frame however often it is drawn, which is what
+makes "one history seen twice" true rather than nearly true.
+
+The subtler test asserts that a sealed frame still reports the trail it *actually*
+had: the store rewrites its list every frame, so the command copies. Same rule as
+the view declarations, same reason — `Freeze()` holds frames past the builder.
+
+### Verified
+
+206/206 diagnostics, 389/389 graphics, 43/43 physics. Headed, with two trails added
+to `VulkanHello`'s spinning cube corners, the debug pass climbs from ~93 triangles
+to a steady **~340** and plateaus — points accruing until the two-second window
+fills, then ageing out as fast as they arrive.
+
+### Caps are not silent
+
+`MaxPointsPerTrail` is a memory guard, not a tuning knob, and when it bites the
+trail is shorter than the duration asked for. It says so once per path rather than
+returning a truncated answer that looks complete.

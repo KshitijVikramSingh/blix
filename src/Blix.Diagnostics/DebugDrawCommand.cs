@@ -94,6 +94,22 @@ public sealed record DebugDrawMeshWireframe(
     IReadOnlyList<int> Edges)
     : DebugDrawCommand(Path, Color, View);
 
+// An open path through space: consecutive points joined by segments. The
+// primitive a trail renders as, and the one the line family was missing —
+// everything else here is a closed shape or a single segment.
+//
+// Points are COPIED by the producer, not held by reference like
+// MeshWireframe: a trail's backing store is rewritten every frame, and a
+// DebugFrame snapshot that pointed at it would silently change after the
+// fact. That is the same rule the view declarations follow, and for the
+// same reason — Freeze() holds frames past the builder's lifetime.
+public sealed record DebugDrawPolyline(
+    string Path,
+    GraphicsColor Color,
+    ViewId View,
+    IReadOnlyList<Vector3> Points)
+    : DebugDrawCommand(Path, Color, View);
+
 // Per-vertex normals visualisation. Each (position, normal) pair becomes
 // a single line from position to position + normal*Length. Length is the
 // world-space draw length, not a per-normal magnitude (normals are

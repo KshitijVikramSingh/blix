@@ -13,6 +13,15 @@ public sealed class DebugState
     /// </remarks>
     public Blix.Core.ViewTable Views { get; } = new();
 
+    /// <summary>
+    /// Where things have been. The one part of diagnostics that remembers anything across frames.
+    /// </summary>
+    /// <remarks>
+    /// On the state for the same reason the view table is: channels clear every BeginFrame, and a memory
+    /// that cleared with them would not be one. See <see cref="DebugTrails"/>.
+    /// </remarks>
+    public DebugTrails Trails { get; } = new();
+
     public bool Enabled { get; set; }
 
     public bool ShowOverlay { get; set; } = true;

@@ -454,6 +454,13 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
                     case DebugDrawFrustum d: DrawFrustumLines(d.ViewProjection, d.Color); break;
                     case DebugDrawSphere d: DrawSphereLines(d.Center, d.Radius, d.Segments, d.Color); break;
                     case DebugDrawGrid d: DrawGridLines(d.Center, d.Size, d.Divisions, d.Color); break;
+                    case DebugDrawPolyline d:
+                        for (var p = 1; p < d.Points.Count; p++)
+                        {
+                            lineDrawer.Line(d.Points[p - 1], d.Points[p], d.Color);
+                        }
+
+                        break;
                     // Plane / Capsule / Cone / MeshWireframe / Normals not
                     // implemented yet — silent skip rather than crash.
                 }
