@@ -1,6 +1,7 @@
 using System.Numerics;
 using Blix;
 using Blix.Assets;
+using Blix.Core;
 using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
@@ -2258,6 +2259,80 @@ static ShaderInterface MinimalShader() => new(new[]
         cycleDetected = exception.Message.Contains("Circular #include", StringComparison.Ordinal);
     }
     t.ExpectTrue("AM.4 pragma ownership does not weaken include-cycle detection", cycleDetected);
+}
+
+// ============================================================================
+// Section AN — ViewPicking: a ray through a named view, panel or not.
+// ============================================================================
+//
+// Camera3D.ScreenPointToRay recomputes the view-projection from a viewport aspect
+// ratio, which assumes the view fills the window and that its matrix is the one the
+// camera would derive. Neither holds for a view drawn into a panel, which is what
+// views were made first-class to allow. ViewPicking reads the view's OWN matrix and
+// rectangle instead.
+//
+// The first test is the important one: for a full-window view the two paths must
+// agree exactly, which pins the new one against the old one that Section X already
+// covers. A picking routine that disagrees with the camera is worse than none.
+{
+    var camera = new Camera3D();
+    const float W = 1600f, H = 900f;
+    var views = new ViewTable();
+    var full = views.Declare(
+        "main", camera.GetViewProjection(W / H), default, (int)W, (int)H);
+
+    var pointer = new Vector2(1180f, 300f);
+    var fromCamera = camera.ScreenPointToRay(pointer.X, pointer.Y, W, H);
+    var fromView = ViewPicking.RayThrough(full, pointer);
+
+    t.ExpectTrue("AN.1 a full-window view yields a ray", fromView is not null);
+    t.ExpectClose("AN.1 and it is the camera's ray, exactly",
+        new Vector4(fromView!.Value.Direction, 0f), new Vector4(fromCamera.Direction, 0f));
+    t.ExpectClose("AN.1 from the same origin",
+        new Vector4(fromView.Value.Origin, 1f), new Vector4(fromCamera.Origin, 1f));
+
+    // A panel: same camera, but the picture occupies a rectangle offset into the
+    // window. The centre of THAT rectangle must give the view's centre ray — which is
+    // precisely what passing the full window width/height to ScreenPointToRay cannot
+    // express, because it has nowhere to put the offset.
+    var panelRect = new Rect(400f, 100f, 800f, 450f);
+    var panel = views.Declare(
+        "inspector", camera.GetViewProjection(panelRect.Width / panelRect.Height),
+        default, panelRect, panelRect);
+
+    var panelCentre = new Vector2(panelRect.X + panelRect.Width / 2f, panelRect.Y + panelRect.Height / 2f);
+    var centreRay = ViewPicking.RayThrough(panel, panelCentre);
+    var cameraCentre = camera.ScreenPointToRay(
+        panelRect.Width / 2f, panelRect.Height / 2f, panelRect.Width, panelRect.Height);
+    t.ExpectTrue("AN.2 a panel view yields a ray at its own centre", centreRay is not null);
+    t.ExpectClose("AN.2 and it is the centre ray, offset and all",
+        new Vector4(centreRay!.Value.Direction, 0f), new Vector4(cameraCentre.Direction, 0f));
+
+    // Outside the rectangle is not a miss on the scene — it is not this view's pointer
+    // at all, which is how "which view is under the cursor" gets answered.
+    t.ExpectTrue("AN.3 a pointer left of the panel belongs to no view",
+        ViewPicking.RayThrough(panel, new Vector2(panelRect.X - 1f, panelCentre.Y)) is null);
+    t.ExpectTrue("AN.3 a pointer below the panel belongs to no view",
+        ViewPicking.RayThrough(panel, new Vector2(panelCentre.X, panelRect.Y + panelRect.Height + 1f)) is null);
+    t.ExpectTrue("AN.3 the window pointer that hit the full view misses the panel",
+        ViewPicking.RayThrough(panel, new Vector2(50f, 50f)) is null);
+
+    // The target is not consulted. A view rendered to an off-screen texture picks
+    // exactly like one on the swapchain — which is the whole reason an inspector
+    // viewport stops being a special case.
+    var offscreen = views.Declare(
+        "offscreen", camera.GetViewProjection(panelRect.Width / panelRect.Height),
+        new RenderSurfaceHandle(7), panelRect, panelRect);
+    var offscreenRay = ViewPicking.RayThrough(offscreen, panelCentre);
+    t.ExpectTrue("AN.4 an off-screen view picks at all", offscreenRay is not null);
+    t.ExpectClose("AN.4 and identically to the on-screen one",
+        new Vector4(offscreenRay!.Value.Direction, 0f), new Vector4(centreRay.Value.Direction, 0f));
+
+    // A degenerate matrix must not throw; there is no ray through a view you cannot
+    // invert, and callers already handle "the pointer is not over this view".
+    var broken = views.Declare("broken", default, default, panelRect, panelRect);
+    t.ExpectTrue("AN.5 a non-invertible view projection yields no ray",
+        ViewPicking.RayThrough(broken, panelCentre) is null);
 }
 
 t.PrintSummary();

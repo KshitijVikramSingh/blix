@@ -488,3 +488,60 @@ event it receives and remembers the count when the text field takes focus. While
 field is focused that number must not move, however much is typed — and the panel
 says so live, in green or red. Still wants a human, but it is now checkable in one
 glance instead of being asserted.
+
+## §10 — One world, and the half of it that has no consumer
+
+The last singular, and the one where the honest answer is "part of this is not ready
+to be built."
+
+### What was genuinely blocked
+
+`IDebugSelectable` carried its own reason in its header:
+
+> The runtime never picks for the demo — it doesn't know about cameras or screen
+> space. Picking math lives where the camera lives.
+
+True when written. **The view arc retired it.** A `ViewDeclaration` is exactly a
+camera and a screen rectangle with a name on it.
+
+`Camera3D.ScreenPointToRay(x, y, width, height)` exists and is used in four places,
+so picking was never missing — but it takes a viewport size and **recomputes** the
+view-projection from its aspect ratio, which quietly assumes the view fills the
+window and that its matrix is the one the camera would derive. Neither holds for a
+view drawn into a panel, which is what views were made first-class to allow.
+
+`Blix.ViewPicking.RayThrough(view, pointer)` reads the view's **own** matrix and its
+**own** rectangle. Section AN pins it:
+
+- for a full-window view it returns **exactly** the camera's ray — a picking routine
+  that disagrees with the camera is worse than none, so the new path is tested
+  against the old one Section X already covers;
+- a panel view picks at its own centre, offset and all — the case
+  `ScreenPointToRay` cannot express, because it has nowhere to put the offset;
+- a pointer outside the rectangle yields **no ray**, which is how "which view is the
+  cursor over?" gets answered;
+- an off-screen target picks identically to an on-screen one, which is the whole
+  reason an inspector viewport stops being a special case;
+- a non-invertible matrix yields no ray rather than throwing.
+
+Logical coordinates throughout, compared against `LogicalViewport` — the physical
+rectangle is the renderer's. A view carries both so neither is derived at a call
+site, which is the retina bug every application has had the chance to write.
+
+### What was NOT built, and why
+
+The **preview world** — a container holding models, transforms, lights and pick
+bounds for inspection — is not here. It has **no consumer**. Sponza inspects its own
+scene; RTSGame picks its own entities; the chassis app has no world at all. The two
+applications in this tree that pick things already disagree about what an entity is,
+what its bounds mean and what selecting one does.
+
+That is the same argument §1 made for deferring `EditorWorld3D`, and it did not stop
+applying because this is the last item on a list:
+
+> Removing a singular assumption is almost never wrong. Adding a policy usually is.
+
+A ray through a named view removes a constraint. A container that decides what a
+world contains is policy, and it should be written against Spear's first application
+rather than guessed at one arc early. What exists now is the half that makes such a
+container *possible* to build later without the engine having an opinion about it.
