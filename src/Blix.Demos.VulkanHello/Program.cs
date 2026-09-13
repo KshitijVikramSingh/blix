@@ -6,6 +6,7 @@ using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Render;
 using Blix.Runtime.Silk;
+using ImGuiNET;
 
 namespace Blix.Demos.VulkanHello;
 
@@ -33,7 +34,7 @@ public static class Program
     }
 }
 
-internal sealed class HelloLoop : IGameLoop, IDebuggable
+internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
 {
     public string DebugName => "vulkan-cube";
 
@@ -373,13 +374,47 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
         //
         // Trails are also the cheapest possible demonstration that the two axes compose: the points are
         // remembered per path and drawn into whichever view is in scope.
+        if (!trailsOn) return;
         var corner = new Vector3(0.5f, 0.5f, 0.5f);
         debug.Draw.Trail(
             "cube/left/corner", Vector3.Transform(corner, leftModel),
-            new GraphicsColor(1f, 0.55f, 0.2f, 1f), seconds: 2f);
+            new GraphicsColor(1f, 0.55f, 0.2f, 1f), trailSeconds);
         debug.Draw.Trail(
             "cube/right/corner", Vector3.Transform(corner, rightModel),
-            new GraphicsColor(0.3f, 0.9f, 1f, 1f), seconds: 2f);
+            new GraphicsColor(0.3f, 0.9f, 1f, 1f), trailSeconds);
+    }
+
+    // --- IUiSource ----------------------------------------------------------
+    //
+    // An application's own panel, drawn into the same ImGui frame as the diagnostics overlay rather than
+    // instead of it. Before this, the only interface a Blix application could have WAS the overlay: ImGui
+    // existed only for an IDebuggable loop and the frame was hard-wired to the diagnostics panels.
+    //
+    // The text field is here deliberately. ImGui has always reported WantCaptureKeyboard and Blix never
+    // read it, so typing used to reach the game as well as the field — invisible while the overlay was
+    // the only UI, because it has hardly any text fields.
+
+    private bool trailsOn = true;
+    private float trailSeconds = 2f;
+    private string note = "type here — keys must not reach the game";
+
+    public string UiName => "hello";
+
+    public void DrawUi()
+    {
+        ImGui.SetNextWindowSize(new Vector2(340, 150), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowPos(new Vector2(20, 220), ImGuiCond.FirstUseEver);
+        if (!ImGui.Begin("Hello"))
+        {
+            ImGui.End();
+            return;
+        }
+
+        ImGui.Checkbox("corner trails", ref trailsOn);
+        ImGui.SliderFloat("seconds", ref trailSeconds, 0.25f, 8f);
+        ImGui.InputText("note", ref note, 128);
+        ImGui.TextDisabled($"{(trailsOn ? "tracing" : "off")} · {trailSeconds:0.0}s");
+        ImGui.End();
     }
 
     private static (VertexPosition3Texture[] Vertices, ushort[] Indices) BuildCube()

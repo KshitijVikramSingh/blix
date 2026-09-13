@@ -32,6 +32,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private readonly IWindow window;
     private readonly IGameLoop gameLoop;
     private readonly IInputHandler? inputHandler;
+    private readonly IUiSource? uiSource;
     private readonly IRuntimeDiagnosticsSink? diagnostics;
     private readonly DebugSystem? debugSystem;
     private readonly DiagnosticsFrameRecorder? frameRecorder;
@@ -66,6 +67,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
         this.gameLoop = gameLoop;
         this.inputHandler = gameLoop as IInputHandler;
+        this.uiSource = gameLoop as IUiSource;
         this.diagnostics = diagnostics;
 
         if (gameLoop is IDebuggable)
@@ -125,8 +127,13 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             // line-pipeline draw on the OverlayRenderPass. Only allocate when
             // diagnostics are live (no IDebuggable game loop → no overlay).
             lineDrawer = new VkLineDrawer(graphicsDevice);
-            // VkImGuiRenderer draws the on-screen diagnostics panels (the
-            // shared DebugOverlayUi). Toggle with the ` key.
+        }
+
+        // <b>Built for anyone who wants a frame, not only for IDebuggable.</b> This used to live inside
+        // the branch above, which is what made "does this application have an interface?" the same
+        // question as "does it produce diagnostics?" — two unrelated things decided by one type test.
+        if (debugSystem is not null || uiSource is not null)
+        {
             imguiRenderer = new VkImGuiRenderer(graphicsDevice);
         }
 
@@ -260,6 +267,8 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     private void OnKeyDown(IKeyboard kbd, SilkKey key, int scancode)
     {
+        // The runtime's own bindings answer first, so a UI with focus cannot swallow the dump key or the
+        // overlay toggle — the two things most needed exactly when something has gone wrong.
         if (key == SilkKey.F12 && TryDumpCurrentFrame()) return;
         if (key == SilkKey.F1)
         {
@@ -271,25 +280,37 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             debugSystem.State.ShowOverlay = !debugSystem.State.ShowOverlay;
             return;
         }
+        if (UiWantsKeyboard) return;
         inputHandler?.OnKeyDown(MapKey(key));
     }
 
     private void OnKeyUp(IKeyboard kbd, SilkKey key, int scancode)
     {
+        // <b>Always delivered, even while the UI has focus</b> — the same asymmetry OnMouseUp documents,
+        // and for the same reason: a press decides who owns the gesture, a release only ends something,
+        // and the thing it ends belongs to whoever the press went to. Guarding this would strand a key the
+        // game believes is still held the moment focus moves to a panel mid-keypress. Applying the lesson
+        // here before it is paid for a second time.
         inputHandler?.OnKeyUp(MapKey(key));
     }
 
-    // True when the diagnostics overlay is up and ImGui is hovering/dragging a
-    // panel — mouse input then drives the UI, not the game (so opening a panel
-    // doesn't also swing the camera).
-    private bool OverlayWantsMouse =>
-        imguiRenderer is { } r &&
-        debugSystem is { State.Enabled: true, State.ShowOverlay: true } &&
-        r.WantCaptureMouse;
+    // True once an ImGui frame has actually been built, which is when WantCapture* mean anything.
+    private bool uiFrameBuilt;
+
+    // <b>Whether the UI wants the pointer — any UI, not the diagnostics overlay specifically.</b> This
+    // used to require debugSystem.State.ShowOverlay, so an application's own panels could be clicked
+    // straight through into the game beneath them.
+    private bool UiWantsMouse => imguiRenderer is { } r && uiFrameBuilt && r.WantCaptureMouse;
+
+    // <b>Keyboard capture was defined and never once honoured.</b> VkImGuiRenderer has exposed
+    // WantCaptureKeyboard since it was written and nothing read it, so typing into any ImGui text field
+    // also drove the game — every keystroke arriving at both. Nothing had noticed because the only UI
+    // that existed was the diagnostics overlay, which has almost no text fields.
+    private bool UiWantsKeyboard => imguiRenderer is { } r && uiFrameBuilt && r.WantCaptureKeyboard;
 
     private void OnMouseDown(IMouse mouse, SilkMouseButton button)
     {
-        if (OverlayWantsMouse) return;
+        if (UiWantsMouse) return;
         inputHandler?.OnMouseDown(MapMouseButton(button));
     }
 
@@ -316,7 +337,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     {
         var delta = position - lastMousePosition;
         lastMousePosition = position;
-        if (OverlayWantsMouse) return;
+        if (UiWantsMouse) return;
         inputHandler?.OnMouseMove(position.X, position.Y, delta.X, delta.Y);
     }
 
@@ -325,7 +346,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // Feed the wheel to ImGui every time (consumed next BeginFrame); only
         // forward to the game when the overlay isn't capturing the mouse.
         lastWheel += wheel.Y;
-        if (OverlayWantsMouse) return;
+        if (UiWantsMouse) return;
         inputHandler?.OnMouseWheel(wheel.X, wheel.Y);
     }
 
@@ -482,34 +503,20 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         }
     }
 
-    // Build the ImGui diagnostics panels for this frame and append a swapchain
-    // overlay pass that draws them on top of the scene. Gated on the overlay
-    // toggle (` key) so the panels only render when asked for. Mirrors the GL
-    // backend's overlay hook; the panel content comes from the shared
-    // DebugOverlayUi inside VkImGuiRenderer.
+    // <b>One ImGui frame, composed from whoever wants to be in it.</b> This was two mutually exclusive
+    // paths — the diagnostics panels OR the perf HUD — each with its own copy of the IO setup, and an
+    // application had no way into either. The frame is now built once and filled by everyone who has
+    // something to draw, which is what lets an application's panels coexist with the diagnostics panels
+    // instead of replacing them.
     private void AppendImGuiPass(RenderCommandList commandList, RenderFrameContext frame, float deltaTime)
     {
+        uiFrameBuilt = false;
         if (imguiRenderer is null) return;
-        var overlayUp = debugSystem is { State.Enabled: true, State.ShowOverlay: true };
 
-        // Perf HUD: only when the full overlay is NOT up (the panels already show
-        // frame time, and the point of the HUD is a minimal-cost measurement).
-        if (!overlayUp)
-        {
-            if (!perfHudVisible) return;
-            var (w, h) = LogicalSize;
-            imguiRenderer.BeginFramePerfHud(
-                w, h, frame.Width, frame.Height, deltaTime,
-                $"{fpsDisplay:0} FPS  ({frameMsDisplay:0.0} ms)");
-            commandList.Pass(
-                "perf-hud",
-                new RenderPassDescription(
-                    Target: RenderSurfaceHandle.Default,
-                    ClearColors: Array.Empty<GraphicsColor?>(),
-                    ClearDepth: false),
-                pass => imguiRenderer.Submit(pass));
-            return;
-        }
+        var overlayUp = debugSystem is { State.Enabled: true, State.ShowOverlay: true };
+        var hudUp = perfHudVisible && !overlayUp;
+        var appUi = uiSource;
+        if (!overlayUp && !hudUp && appUi is null) return;
 
         var (logicalW, logicalH) = LogicalSize;
         var mousePos = global::System.Numerics.Vector2.Zero;
@@ -522,12 +529,26 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             right = m.IsButtonPressed(SilkMouseButton.Right);
             middle = m.IsButtonPressed(SilkMouseButton.Middle);
         }
+
         var wheel = lastWheel;
         lastWheel = 0f;
 
+        var hudText = $"{fpsDisplay:0} FPS  ({frameMsDisplay:0.0} ms)";
         imguiRenderer.BeginFrame(
             logicalW, logicalH, frame.Width, frame.Height, deltaTime,
-            mousePos, left, right, middle, wheel, debugSystem!); // overlayUp ⇒ non-null
+            mousePos, left, right, middle, wheel,
+            content: () =>
+            {
+                // The application first, then the engine's own panels. ImGui decides stacking itself, so
+                // this is an ordering of construction rather than of depth — but it keeps a misbehaving
+                // application from being able to prevent the diagnostics panels being built at all.
+                appUi?.DrawUi();
+                if (overlayUp) imguiRenderer.LayoutDiagnostics(debugSystem!);
+                else if (hudUp) imguiRenderer.DrawPerfHudText(hudText);
+            });
+
+        // Only now do WantCaptureMouse / WantCaptureKeyboard describe anything real.
+        uiFrameBuilt = true;
 
         commandList.Pass(
             "imgui",
@@ -537,7 +558,6 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
                 ClearDepth: false),
             pass => imguiRenderer.Submit(pass));
     }
-
 
     // Expand a view-projection into its 8 frustum corners (inverse-VP applied
     // to the NDC cube; Vulkan z ∈ [0,1]) and draw the 12 edges. The canonical

@@ -329,3 +329,83 @@ fills, then ageing out as fast as they arrive.
 `MaxPointsPerTrail` is a memory guard, not a tuning knob, and when it bites the
 trail is shorter than the duration asked for. It says so once per path rather than
 returning a truncated answer that looks complete.
+
+## §8 — One host
+
+`Window` decided what an application was allowed to have, from a single type test.
+
+```csharp
+if (gameLoop is IDebuggable) { ... imguiRenderer = new VkImGuiRenderer(...); }
+```
+
+That one line made two unrelated questions into the same question: *does this
+application produce diagnostics?* and *may it have an interface?* An application
+wanting a panel of its own had two options, neither good — pretend to be a
+diagnostics producer, or go without. And the frame itself was hard-wired:
+`VkImGuiRenderer.BeginFrame` called `ui.Layout(debugSystem)` directly, so even with
+ImGui alive the only thing that could ever be in it was the diagnostics overlay.
+
+### What changed
+
+`IUiSource` lands in `Blix.Core` with **no UI types in its signature** — just
+`string UiName` and `void DrawUi()`. ImGui is an immediate-mode global, so an
+implementation calls it inside the method and Core never takes a dependency on a UI
+library on an application's behalf. The demo adds its own `ImGui.NET` package
+reference, which is the design working rather than a wart: same discipline as a
+`ViewDeclaration` knowing a surface handle and never a renderer.
+
+`VkImGuiRenderer` is a renderer again rather than a renderer of one particular
+thing. There were two near-identical copies of the IO setup — one that drew the
+overlay panels, one that drew the perf HUD — differing only in what happened
+between `NewFrame` and `Render`. That difference now belongs to the caller:
+
+```csharp
+BeginFrame(..., content: () => {
+    appUi?.DrawUi();
+    if (overlayUp) imguiRenderer.LayoutDiagnostics(debugSystem!);
+    else if (hudUp) imguiRenderer.DrawPerfHudText(hudText);
+});
+```
+
+One frame, filled by everyone with something to draw, instead of two mutually
+exclusive paths neither of which an application could enter.
+
+### The bug the decomposition found
+
+**`WantCaptureKeyboard` had been defined since `VkImGuiRenderer` was written and was
+never once read.** Typing into any ImGui text field also drove the game — every
+keystroke arriving twice. It had gone unnoticed because the only interface that
+existed was the diagnostics overlay, which has almost no text fields; the moment an
+application can have its own panel, it has fields.
+
+Mouse capture had a narrower version of the same fault: `OverlayWantsMouse` required
+`debugSystem.State.ShowOverlay`, so an application's panels could be clicked
+straight through into the game beneath them.
+
+Both are now `UiWants*` — about whether *a* UI wants the input, not about which UI
+it is — and gated on an ImGui frame having actually been built, which is the only
+point at which those flags describe anything.
+
+Key **release** is always delivered, even while the UI has focus. That is the
+asymmetry `OnMouseUp` already documents and paid for: a press decides who owns a
+gesture, a release only ends one, and the thing it ends belongs to whoever got the
+press. Guarding it would strand a key the game believes is still held the moment
+focus moves to a panel mid-keypress. Applied here before it was paid for twice.
+
+The runtime's own bindings (F12 dump, `` ` `` overlay) answer before capture, so a
+focused text field cannot swallow the two keys most needed exactly when something
+has gone wrong.
+
+### Verified, and what is not
+
+206/206 diagnostics, 389/389 graphics, 43/43 physics. Headed, `VulkanHello` now
+carries its own panel and the `imgui` pass records 2 draws alongside the trails.
+
+**Interactively confirmed from the chair**: dragging the Hello panel's `seconds`
+slider works, which is the panel rendering and responding.
+
+**Not proven, and stated as such**: neither capture fix is exercised, because
+`HelloLoop` is not an `IInputHandler` at all — there is no game input for a UI to
+steal, so nothing here can demonstrate that it doesn't. Nor is the non-`IDebuggable`
+path proven: every demo that wants UI is also a diagnostics producer. Both want the
+tiny custom-app executable from the next singular, which has to exist anyway.
