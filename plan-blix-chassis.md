@@ -223,15 +223,34 @@ Plus schema 2 is asserted by version, by `Views`, by per-command view *name*
 (process-local ids mean nothing in a file), and by the absence of the old
 frame-wide camera.
 
-### Not verified here
+### Verified on the GPU, after fixing the thing that hid it
 
-The GPU submission path — `Window.AppendDebugLinesPass` grouping commands per view
-and submitting one pass per view — **has not been run**. `DYLD_*` is stripped by
-dyld when the spawning shell is SIP-protected, so headed runs are not possible from
-the agent's shell; the inline-env workaround fails the same way. It compiles and
-the data feeding it is tested, but the actual draw wants one headed run:
-`tools/run-vulkan-hello.sh --frames 8` should look exactly as it did before, because
-`VulkanHello` declares a single whole-surface view.
+`Window.AppendDebugLinesPass` groups commands per view and submits one pass per
+view, to that view's own target. A headed run reports:
+
+```
+passes/debug:main/draws: 1
+passes/debug:main/triangles: 21
+passes/debug:main/instances: 1
+```
+
+`debug:main` is the pass named for the declared view — so the routing works, and a
+single-view application reduces to exactly what it did before.
+
+Getting there needed a launcher fix that had nothing to do with this arc and had
+been hiding in plain sight. `tools/run-vulkan-hello.sh` set
+`DYLD_FALLBACK_LIBRARY_PATH` and the app never saw it, because Homebrew's
+`$prefix/bin/dotnet` is a **`#!/bin/bash` wrapper script** and `/bin/bash` is
+SIP-protected: dyld strips `DYLD_*` from the environment of any protected binary it
+execs, so the muxer laundered the variable away before the app started. Silk.NET
+then reported "doesn't support Vulkan on this computer" — about as misleading as an
+error gets, since Vulkan was installed and fine.
+
+Every other launcher in `tools/` already execs the apphost directly and says why in
+its header. This was the last one still on `dotnet run`, which is why RTS, Tank and
+Bulwark headed runs worked and this demo had apparently never run.
+
+(`VulkanHello` also does not parse `--frames`; it runs until closed.)
 
 ### Still open from §1
 
