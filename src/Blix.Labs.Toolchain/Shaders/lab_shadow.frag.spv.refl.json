@@ -1,0 +1,8 @@
+{
+    "entryPoints" : [
+        {
+            "name" : "main",
+            "mode" : "frag"
+        }
+    ]
+}

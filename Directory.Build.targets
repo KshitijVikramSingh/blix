@@ -69,6 +69,18 @@
     <BlixShaderBeforeTargets Condition="'$(BlixShaderMode)' == 'Library'">AssignTargetPaths</BlixShaderBeforeTargets>
   </PropertyGroup>
 
+  <!--
+    spirv-cross, for projects that reflect their binding model out of the compiled
+    SPIR-V rather than hand-declaring a ShaderInterface. Hand-declaration is fine for a
+    small demo and does not scale: the interface has to be restated every time a shader
+    gains a binding, and nothing checks the restatement against the shader.
+  -->
+  <PropertyGroup>
+    <SpirvCross Condition="'$(SpirvCross)' == '' AND Exists('/opt/homebrew/bin/spirv-cross')">/opt/homebrew/bin/spirv-cross</SpirvCross>
+    <SpirvCross Condition="'$(SpirvCross)' == '' AND Exists('/usr/local/bin/spirv-cross')">/usr/local/bin/spirv-cross</SpirvCross>
+    <SpirvCross Condition="'$(SpirvCross)' == ''">spirv-cross</SpirvCross>
+  </PropertyGroup>
+
   <Target Name="BlixCompileSpirV"
           Condition="'@(GlslShader)' != '' AND '$(BlixShaderCustomTarget)' != 'true'"
           AfterTargets="$(BlixShaderAfterTargets)"
@@ -78,6 +90,29 @@
     <MakeDir Directories="$(BlixShaderOutDir)" />
     <Message Text="Compiling SPIR-V ($(BlixShaderMode)): %(GlslShader.Identity)" Importance="high" />
     <Exec Command="dotnet &quot;$(BlixShaderCompilerDll)&quot; --glslc &quot;$(Glslc)&quot; --input &quot;%(GlslShader.FullPath)&quot; --output &quot;$(BlixShaderOutDir)%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; --include &quot;$(MSBuildProjectDirectory)/../Blix.Shaders&quot;" />
+  </Target>
+
+  <!--
+    Reflect each compiled module into a sidecar the runtime loads at program creation
+    (descriptor sets + std140 UBO offsets + push ranges), for projects that set
+    BlixShaderReflect.
+
+    A SEPARATE target rather than another Exec inside the compile, which matters for
+    two reasons: its Inputs are the .spv files and its Outputs the sidecars, so
+    incrementality is right without the compile target having to claim outputs it does
+    not write; and a project can be moved onto reflection without touching how its
+    shaders compile.
+
+    Extracted when a second consumer wanted it (conventions §4) — VulkanSponza had
+    carried a bespoke copy since it was written, and the toolchain lab is the second.
+  -->
+  <Target Name="BlixReflectSpirV"
+          Condition="'@(GlslShader)' != '' AND '$(BlixShaderReflect)' == 'true'"
+          AfterTargets="BlixCompileSpirV"
+          Inputs="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv')"
+          Outputs="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv.refl.json')">
+    <Message Text="Reflecting SPIR-V: %(GlslShader.Identity)" Importance="high" />
+    <Exec Command="&quot;$(SpirvCross)&quot; &quot;$(BlixShaderOutDir)%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; --reflect --output &quot;$(BlixShaderOutDir)%(GlslShader.Filename)%(GlslShader.Extension).spv.refl.json&quot;" />
   </Target>
 
 </Project>

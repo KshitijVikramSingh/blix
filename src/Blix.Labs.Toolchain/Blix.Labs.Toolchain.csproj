@@ -1,0 +1,62 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    THE LAB, as a library rather than an executable.
+
+    Its reason for existing is the sentence "several sibling executables share one
+    project's shaders and scene", which nothing in the tree had ever done — every
+    application owned its own shaders outright. A viewer, a probe and a capture tool
+    should be three thin entry points onto one lab, not three copies of it.
+
+    BlixShaderMode=Library builds the .spv into this project's own Shaders folder and
+    the <None> glob below propagates them (and their reflection sidecars) into every
+    consuming executable's output. Same mechanism Blix.Render already uses for
+    SpriteBatch.
+  -->
+  <PropertyGroup>
+    <BlixShaderMode>Library</BlixShaderMode>
+    <BlixShaderReflect>true</BlixShaderReflect>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
+    <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
+    <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
+    <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
+    <ProjectReference Include="..\Blix.Tools.Shader\Blix.Tools.Shader.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <GlslShader Include="Shaders\lab_lit.vert" />
+    <GlslShader Include="Shaders\lab_lit.frag" />
+    <GlslShader Include="Shaders\lab_shadow.vert" />
+    <GlslShader Include="Shaders\lab_shadow.frag" />
+    <GlslShader Include="Shaders\lab_present.vert" />
+    <GlslShader Include="Shaders\lab_present.frag" />
+    <GlslInclude Include="..\Blix.Shaders\pbr.glsl" />
+    <GlslInclude Include="..\Blix.Shaders\shadow.glsl" />
+    <GlslInclude Include="..\Blix.Shaders\tonemap.glsl" />
+    <GlslInclude Include="..\Blix.Shaders\fullscreen.glsl" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Shaders\*.spv">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Shaders\%(Filename)%(Extension)</Link>
+    </None>
+    <None Include="Shaders\*.refl.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Shaders\%(Filename)%(Extension)</Link>
+    </None>
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Blix.Labs.Toolchain</RootNamespace>
+  </PropertyGroup>
+
+</Project>
