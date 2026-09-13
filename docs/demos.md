@@ -190,6 +190,48 @@ Smaller demo of the render-graph topology: `cube-offscreen → invert → presen
 resource handles, Read edges, `MatchSwapchainGraphSize` resizing, and the
 graph→imperative-command-list bridge.
 
+## Labs
+
+A **lab** is not a demo. Demos are executable specs for an engine subsystem; a lab is a
+testbed for *shape* — the toolchain, the pipeline layering, and how several executables
+sit over one body of work.
+
+### Toolchain lab — `Blix.Labs.Toolchain`
+
+```sh
+tools/run-lab.sh                      # the viewer
+dotnet run --project src/Blix.Labs.Toolchain.Probe   # the probe; no window, no launcher
+```
+
+One library and two executables. The library owns the scene, the renderer and the
+shaders; **neither executable declares a shader or contains render code**. The `.spv`
+and their reflection sidecars are compiled once and arrive through content propagation —
+the mechanism `Blix.Render` already used for `SpriteBatch`, now carrying a whole
+pipeline.
+
+**The viewer** is a lit scene with the chassis conventions: ground and seven boxes at
+varied metallic/roughness, one sun with a 2048² shadow map, HDR target, tonemapped
+present — plus its own ImGui panel, orbit input with UI capture, host-owned `--frames`,
+and a named view carrying a grid, a sun arrow and the sun's trail.
+
+**The probe** never opens a window, so it needs no launcher and no MoltenVK. It reads
+the binding model out of the sidecars and prints it — every set, binding, stage and
+std140 offset — then checks the reflected push-constant totals against the renderer's
+own constants and exits non-zero when they disagree. That check exists because the lab's
+first run died on *"payload length 96 does not match the shader's declared total
+push-constant size 64"*: a C# constant disagreeing with the SPIR-V it describes, caught
+by the device at draw time, which is late.
+
+Everything here is built on the engine's shared GLSL library — `blix_cookTorranceBrdf`,
+`blix_sun_shadow`, `blix_tonemap` — with no local copy of a BRDF or a shadow lookup.
+Deliberately absent: cascades, texel snapping, bloom, IBL, MSAA, a depth pre-pass. Those
+are earned in TankArena and VulkanSponza; a lab that grew them by default would be
+claiming to be a renderer.
+
+Proves: several executables over one lab · reflected binding off the GPU · the shared
+build targets (`BlixShaderMode=Library` + `BlixShaderReflect`) · the chassis.
+Owns: camera feel, the panel's controls, what the scene contains.
+
 ### Chassis — application-chassis reference
 
 ```sh

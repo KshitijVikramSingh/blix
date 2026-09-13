@@ -27,6 +27,11 @@ Blix.Demos.Bulwark             ← 3D game: tower defense (picking + multi-front
                                   skinned-mesh instancing, sun-shadow + HDR graph)
 Blix.Demos.Chassis             ← application-chassis spec (no diagnostics, own ImGui panel,
                                   host-owned --frames; 25-line csproj, no shaders)
+Blix.Labs.Toolchain            ← LAB library: lit scene + render graph + shaders,
+                                  reflected binding (shipped as library content)
+   ↑        ↑
+Viewer    Probe                ← two executables over one lab; neither declares a shader
+                                  nor contains render code. Probe opens no window.
         ↑
 Blix.Runtime.Silk              ← Vulkan window/runtime adapter
                                   (Silk.NET window + IVkSurface + MoltenVK bootstrap,

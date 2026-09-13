@@ -26,7 +26,18 @@ public sealed class LabRenderer : IDisposable
     /// <summary>Square shadow map, matching the texel size the lit shader offsets by.</summary>
     public const int ShadowMapSize = 2048;
 
-    private const int PushBytes = 96;   // mat4 model (64) + vec4 colour (16) + vec4 material (16)
+    /// <summary>Bytes the lit pass pushes: mat4 model (64) + vec4 colour (16) + vec4 material (16).</summary>
+    /// <remarks>
+    /// Public so a tool can check it against what the shader actually declares. The one number in this
+    /// file that can silently disagree with the SPIR-V — and did, on the first run, when the caster was
+    /// handed the lit pass's block.
+    /// </remarks>
+    public const int LitPushBytes = 96;
+
+    /// <summary>Bytes the caster pushes: the model matrix, and nothing else.</summary>
+    public const int CasterPushBytes = 64;
+
+    private const int PushBytes = LitPushBytes;
 
     private VulkanGraphicsDevice device = null!;
     private FullscreenPass fullscreen = null!;
