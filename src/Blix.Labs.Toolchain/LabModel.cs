@@ -49,8 +49,12 @@ public sealed class LabModel : IDisposable
         Vector3 BoundsMin,
         Vector3 BoundsMax);
 
+    /// <summary>One image the asset actually ships, with enough to label it in a panel.</summary>
+    public readonly record struct Image(string Name, TextureHandle Texture, int Width, int Height);
+
     private VulkanGraphicsDevice device = null!;
     private readonly List<TextureHandle> ownedTextures = new();
+    private readonly List<Image> images = new();
     private readonly Dictionary<GltfTexture, TextureHandle> uploaded = new();
     private TextureHandle white;
     private readonly List<Part> parts = new();
@@ -59,6 +63,9 @@ public sealed class LabModel : IDisposable
     public IReadOnlyList<Part> Parts => parts;
 
     public IReadOnlyList<Node> Nodes => nodes;
+
+    /// <summary>The distinct base-colour images this asset uploaded. See LabRig.Images for why.</summary>
+    public IReadOnlyList<Image> Images => images;
 
     /// <summary>Assembled bounds across every mesh-bearing node, in model space.</summary>
     public Vector3 BoundsMin { get; private set; } = new(float.MaxValue);
@@ -195,6 +202,9 @@ public sealed class LabModel : IDisposable
             $"lab.albedo.{texture.Name}");
         uploaded[texture] = handle;
         ownedTextures.Add(handle);
+        images.Add(new Image(
+            string.IsNullOrEmpty(texture.Name) ? $"albedo {images.Count}" : texture.Name,
+            handle, texture.Width, texture.Height));
         return handle;
     }
 
@@ -229,6 +239,7 @@ public sealed class LabModel : IDisposable
 
         foreach (var texture in ownedTextures) device.DestroyTexture(texture);
         ownedTextures.Clear();
+        images.Clear();
         uploaded.Clear();
         parts.Clear();
         nodes.Clear();

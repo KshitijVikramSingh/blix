@@ -57,9 +57,13 @@ public sealed class LabRig : IDisposable
         float Roughness,
         TextureHandle Albedo);
 
+    /// <summary>One image the asset actually ships, with enough to label it in a panel.</summary>
+    public readonly record struct Image(string Name, TextureHandle Texture, int Width, int Height);
+
     private VulkanGraphicsDevice device = null!;
     private readonly List<Part> parts = new();
     private readonly List<TextureHandle> ownedTextures = new();
+    private readonly List<Image> images = new();
     private MaterialBindings bones = null!;
     private byte[] palettePayload = Array.Empty<byte>();
 
@@ -69,6 +73,15 @@ public sealed class LabRig : IDisposable
     public IReadOnlyList<AnimationClip> Clips { get; private set; } = Array.Empty<AnimationClip>();
 
     public IReadOnlyList<Part> Parts => parts;
+
+    /// <summary>The distinct base-colour images this asset uploaded, deduped per source texture.</summary>
+    /// <remarks>
+    /// <b>What an asset viewer could never show.</b> The lab has reported texture COUNTS since it
+    /// learned to load a model — "1 image across 12 parts" — and a count is the least interesting
+    /// fact about a texture. Which image, at what size, and whether it is the one you meant are all
+    /// answerable by looking, and until the UI layer could draw a texture there was nowhere to look.
+    /// </remarks>
+    public IReadOnlyList<Image> Images => images;
 
     /// <summary>The skin node's ancestor chain, composed. Goes into uModel BEFORE the user transform.</summary>
     public Matrix4x4 MeshNodeTransform { get; private set; } = Matrix4x4.Identity;
@@ -309,6 +322,9 @@ public sealed class LabRig : IDisposable
             $"lab.rig.albedo.{texture.Name}");
         uploaded[texture] = handle;
         ownedTextures.Add(handle);
+        images.Add(new Image(
+            string.IsNullOrEmpty(texture.Name) ? $"albedo {images.Count}" : texture.Name,
+            handle, texture.Width, texture.Height));
         return handle;
     }
 
@@ -435,6 +451,7 @@ public sealed class LabRig : IDisposable
 
         foreach (var texture in ownedTextures) device.DestroyTexture(texture);
         ownedTextures.Clear();
+        images.Clear();
         parts.Clear();
         device.DestroyMaterial(bones.Handle);
     }

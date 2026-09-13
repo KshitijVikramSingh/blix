@@ -36,6 +36,18 @@ public sealed class VkImGuiRenderer : IDisposable
     private readonly PipelineHandle pipeline;
     private readonly TextureHandle fontTexture;
 
+    // <b>Every drawable texture, the font included.</b> ImGui carries an opaque ImTextureID on
+    // each draw command; this renderer used to ignore it and bind the font atlas unconditionally,
+    // which meant a panel could show text and nothing else — no rendered scene, no shadow map, no
+    // image of any kind.
+    //
+    // The font is registered like anything else rather than special-cased, so there is ONE lookup
+    // and no "is this the font?" branch to get wrong. Ids start at 1 because ImGui's default
+    // TextureId is zero and a zero id must not silently resolve to a real texture.
+    private readonly Dictionary<nint, TextureHandle> uiTextures = new();
+    private readonly Dictionary<TextureHandle, nint> uiTextureIds = new();
+    private nint nextTextureId = 1;
+
     // Reused per frame so the overlay doesn't allocate two big arrays each
     // render. Sized to the max buffers above.
     private readonly byte[] vtxScratch = new byte[MaxVertices * VertexStride];
@@ -56,6 +68,11 @@ public sealed class VkImGuiRenderer : IDisposable
         io.BackendFlags |= ImGuiBackendFlags.RendererHasVtxOffset;
 
         fontTexture = CreateFontTexture();
+
+        // The atlas takes id 1 and ImGui is told about it, so every text draw arrives carrying a
+        // real id rather than a default that has to be guessed at.
+        var fontId = RegisterTexture(fontTexture);
+        io.Fonts.SetTexID(fontId);
 
         // Dynamic vertex + index buffers, pre-sized; re-uploaded each frame.
         var layout = new VertexLayout(VertexStride, new[]
@@ -206,8 +223,14 @@ public sealed class VkImGuiRenderer : IDisposable
         MemoryMarshal.Write(push.AsSpan(0, 8), in scale);
         MemoryMarshal.Write(push.AsSpan(8, 8), in translate);
 
-        var fontBinding = new[] { new ShaderTextureBinding("uFont", fontTexture, Slot: 0) };
         var clipOff = drawData.DisplayPos;
+
+        // One binding array per distinct texture in the frame, not per draw: a panel showing two
+        // images plus text needs three, and a fresh array per command would allocate once per
+        // glyph batch. Texture lists are retained by reference until Execute, so these must not be
+        // mutated after being handed over — hence a cache keyed by handle rather than one array
+        // rewritten in place.
+        var bindings = new Dictionary<nint, ShaderTextureBinding[]>();
 
         for (var i = 0; i < drawData.CmdListsCount; i++)
         {
@@ -236,6 +259,18 @@ public sealed class VkImGuiRenderer : IDisposable
                     (int)clipMinX, (int)clipMinY,
                     (int)(clipMaxX - clipMinX), (int)(clipMaxY - clipMinY));
 
+                var id = cmd.TextureId;
+                if (!bindings.TryGetValue(id, out var binding))
+                {
+                    // An id nobody registered falls back to the atlas rather than skipping the
+                    // draw. A panel that quietly renders nothing is a bug you go looking for in
+                    // the wrong place; a rectangle of font atlas is unmistakably "wrong texture
+                    // here", and neither can crash.
+                    var texture = uiTextures.TryGetValue(id, out var found) ? found : fontTexture;
+                    binding = new[] { new ShaderTextureBinding("uFont", texture, Slot: 0) };
+                    bindings[id] = binding;
+                }
+
                 pass.DrawIndexed(
                     vertexBuffer: vertexBuffer,
                     indexBuffer: indexBuffer,
@@ -243,11 +278,30 @@ public sealed class VkImGuiRenderer : IDisposable
                     indexCount: (int)cmd.ElemCount,
                     indexOffset: listIdxBase[i] + (int)cmd.IdxOffset,
                     vertexOffset: listVtxBase[i] + (int)cmd.VtxOffset,
-                    textures: fontBinding,
+                    textures: binding,
                     pushConstants: push,
                     scissor: scissor);
             }
         }
+    }
+
+    /// <summary>Give a texture an id ImGui can carry. Idempotent per handle.</summary>
+    public nint RegisterTexture(TextureHandle texture)
+    {
+        if (uiTextureIds.TryGetValue(texture, out var existing)) return existing;
+        var id = nextTextureId++;
+        uiTextures[id] = texture;
+        uiTextureIds[texture] = id;
+        return id;
+    }
+
+    /// <summary>Forget an id. The font's own id is kept — dropping it would un-draw every panel.</summary>
+    public void ReleaseTexture(nint id)
+    {
+        if (!uiTextures.TryGetValue(id, out var texture)) return;
+        if (texture.Equals(fontTexture)) return;
+        uiTextures.Remove(id);
+        uiTextureIds.Remove(texture);
     }
 
     private unsafe TextureHandle CreateFontTexture()

@@ -349,6 +349,17 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     /// whether it still has focus.
     /// </para>
     /// </remarks>
+    /// <summary>Makes a texture drawable inside a UI panel. See <see cref="IRenderHost"/>.</summary>
+    /// <remarks>
+    /// Returns 0 when there is no UI renderer — an application with no panels and no diagnostics
+    /// never builds one. Zero is ImGui's own "no texture", so a panel that draws it gets the atlas
+    /// fallback rather than a crash, which is the right shape for "there was nowhere to show this".
+    /// </remarks>
+    public nint RegisterUiTexture(TextureHandle texture) =>
+        imguiRenderer?.RegisterTexture(texture) ?? 0;
+
+    public void ReleaseUiTexture(nint id) => imguiRenderer?.ReleaseTexture(id);
+
     private void OnFocusChanged(bool focused)
     {
         if (focused) return;

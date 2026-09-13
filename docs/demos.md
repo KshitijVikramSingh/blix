@@ -399,6 +399,26 @@ What this deliberately is not: a crowd. The clips are taken in order from the ri
 AI, no director, no spawning. Eight slots, because the question is "are these poses independent",
 which three bodies answer and three hundred only make slower.
 
+#### The images window
+
+Every distinct base-colour image the asset uploaded, drawn, plus the sun's depth buffer.
+
+The lab has reported texture **counts** since it learned to load a model — *"1 image across 12
+parts"* — and a count is the least interesting fact about a texture. Which image, at what size,
+and whether it is the one you meant are all answerable by looking, and until the UI layer could
+read `cmd.TextureId` there was nowhere to look: `VkImGuiRenderer` bound the font atlas on every
+draw, so a panel could show text and nothing else.
+
+`IRenderHost.RegisterUiTexture` turns a `TextureHandle` into the opaque id `ImGui.Image` takes.
+The font atlas is registered the same way (id 1) rather than special-cased, so there is one
+lookup and no "is this the font?" branch to get wrong. This is **stage A of the view arc** — see
+`plan-blix-view.md`; an embedded 3D viewport is a textured quad in a panel, so nothing downstream
+was possible until this moved.
+
+The sun's depth buffer reads **red-scale**, which is the format and not a fault: a single-channel
+depth image sampled by a colour shader is `(d, 0, 0, 1)`. It answers the coarse question — is the
+caster pass drawing anything, and does the sun's frustum cover the subject.
+
 **The capture tool** renders the lab and writes what it rendered to a PNG. It captures
 the **HDR scene target**, not the swapchain — so the lab's render path needed no change,
 and the tonemap is applied on the CPU, which means a capture holds real radiance and the

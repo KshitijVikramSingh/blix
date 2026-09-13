@@ -239,6 +239,14 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // the only place with a DebugContext to hand.
     private bool depthTestGizmos = true;
 
+    // ── Stage A of the view arc ─────────────────────────────────────────────
+    // Ids the HOST gave us for textures the UI can draw. Registered once at load rather than per
+    // frame: an id is a dictionary entry, and minting one every frame would grow that dictionary
+    // forever for a picture that never changed.
+    private readonly List<(string Label, nint Id, int Width, int Height)> uiImages = new();
+    private nint shadowMapId;
+    private float thumbnailScale = 1f;
+
     public string DebugName => "lab";
 
     public string UiName => "lab";
@@ -251,6 +259,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // Shaders arrive from the lab library's content propagation — this executable
         // never compiled one.
         renderer.Load(vk, Path.Combine(AppContext.BaseDirectory, "Shaders"));
+
+        // The sun's depth buffer, registered so it can be looked at. A depth image sampled by a
+        // colour shader arrives as (d, 0, 0, 1) — a red-scale map, not a mistake — and the useful
+        // question it answers is coarse: is the caster pass drawing anything at all, and does the
+        // sun's frustum cover the subject? Both are visible in red.
+        shadowMapId = host.RegisterUiTexture(renderer.ShadowDepth);
 
         LoadRig(vk);
 
@@ -273,6 +287,11 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         var scale = extent > 0.001f ? 3f / extent : 1f;
         modelTransform = Matrix4x4.CreateScale(scale)
                          * Matrix4x4.CreateTranslation(0f, -model.BoundsMin.Y * scale, 0f);
+
+        foreach (var image in model.Images)
+        {
+            uiImages.Add((image.Name, host.RegisterUiTexture(image.Texture), image.Width, image.Height));
+        }
 
         Console.WriteLine(
             $"model: {Path.GetFileName(modelPath)} — {model.Nodes.Count} node(s), {model.Parts.Count} part(s), " +
@@ -337,6 +356,11 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         rigBase = Matrix4x4.CreateScale(rigScale)
                   * Matrix4x4.CreateTranslation(0f, -rig.BoundsMin.Y * rigScale, 0f);
         rigTransform = rigBase;
+
+        foreach (var image in rig.Images)
+        {
+            uiImages.Add((image.Name, host!.RegisterUiTexture(image.Texture), image.Width, image.Height));
+        }
 
         Console.WriteLine(
             $"rig: {Path.GetFileName(rigPath)} — {rig.Skeleton.BoneCount} bone(s), {rig.Clips.Count} clip(s), " +
@@ -1153,6 +1177,8 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             DrawNodeList();
         }
 
+        DrawImagePanel();
+
         ImGui.Separator();
         ImGui.TextDisabled(rig is not null
             ? $"drag to orbit · wheel to zoom · space plays · ←/→ step · {frames} frames"
@@ -1163,6 +1189,66 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // Transport on the keyboard, because scrubbing a pose means looking at the model rather than at
     // the slider you are dragging. Space and the arrows are what every animation tool uses; a lab
     // that invented its own would be asking to be relearned.
+    // <b>The asset's own textures, drawn.</b> Stage A of the view arc, and the first thing in this
+    // engine to put a non-font image on screen.
+    //
+    // The lab has reported texture COUNTS since it learned to load a model — "1 image across 12
+    // parts" — and a count is the least interesting fact about a texture. Which image, at what
+    // size, and whether it is the one you meant are all answerable by looking, and until the UI
+    // layer could read `cmd.TextureId` there was nowhere to look.
+    private void DrawImagePanel()
+    {
+        if (uiImages.Count == 0 && shadowMapId == 0) return;
+
+        // <b>Its own window, not a section of the lab panel.</b> It was a collapsing header at the
+        // bottom of a panel that already holds image, sun, gizmo, animation, instance and node
+        // sections — and it drew nothing, because ImGui clips items scrolled out of a window and
+        // emits no draw for them. The draw count said 3 before and 3 after, which is what a
+        // correct feature looks like when nothing can see it.
+        //
+        // A picture also wants room a sidebar cannot give it, and Stage B of the view arc needs a
+        // window to put a viewport in. This is that window, arriving early.
+        ImGui.SetNextWindowSize(new Vector2(320, 420), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowPos(new Vector2(480, 20), ImGuiCond.FirstUseEver);
+        if (!ImGui.Begin("images"))
+        {
+            ImGui.End();
+            return;
+        }
+
+        ImGui.SliderFloat("thumb", ref thumbnailScale, 0.25f, 3f);
+
+        foreach (var (label, id, width, height) in uiImages)
+        {
+            ImGui.TextDisabled($"{label}  {width}x{height}");
+
+            // Fitted to the panel rather than drawn at native size: a 1024px atlas in a 340px
+            // panel would push everything else off the edge, and the aspect has to be kept or the
+            // thing being inspected is not the thing that shipped.
+            var available = MathF.Max(64f, ImGui.GetContentRegionAvail().X);
+            var side = MathF.Min(available, 160f * thumbnailScale);
+            var scale = height > 0 ? side / width : side;
+            ImGui.Image(id, new Vector2(side, MathF.Max(16f, height * scale)));
+        }
+
+        if (shadowMapId == 0)
+        {
+            ImGui.End();
+            return;
+        }
+
+        ImGui.Separator();
+        ImGui.TextDisabled($"sun depth  {LabRenderer.ShadowMapSize}x{LabRenderer.ShadowMapSize}");
+
+        // Red-scale, and that is the format rather than a fault: a single-channel depth image
+        // sampled by a colour shader is (d, 0, 0, 1). It answers a coarse question — is the caster
+        // drawing, and does the sun cover the subject — and a shader that knew it was depth is a
+        // second pipeline the arc has not earned yet.
+        var shadowSide = MathF.Min(MathF.Max(64f, ImGui.GetContentRegionAvail().X), 160f * thumbnailScale);
+        ImGui.Image(shadowMapId, new Vector2(shadowSide, shadowSide));
+        ImGui.End();
+    }
+
     public void OnKeyDown(Key key)
     {
         if (playerA is null) return;
