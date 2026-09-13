@@ -23,6 +23,24 @@ public sealed class InstancedBatch
     private int count;
     private bool inBatch;
 
+    /// <summary>
+    /// Whether the current push array has already been handed to a recorded draw.
+    /// </summary>
+    /// <remarks>
+    /// <b>A recorded draw keeps the reference, not a copy, so re-Begin cannot write over it.</b> The command
+    /// record holds <c>byte[] PushConstants</c>, and Begin used to copy new bytes into this same array whenever
+    /// the length matched — which was invisible while every batch was begun once per frame, and wrong the
+    /// moment one was begun twice. Cascaded shadows are the first caller to do that: three passes over one
+    /// batch, each with its own light matrix, and all three draws ended up pointing at the last matrix written.
+    /// The symptom is a shadow map rasterised with one projection and sampled with another — shadows detached
+    /// from their casters, at the wrong scale, which reads as "shadows are broken" and not as "a batch aliased
+    /// its push constants".
+    /// <para>
+    /// Allocating only when a batch is genuinely re-begun within a frame keeps the common path allocation-free.
+    /// </para>
+    /// </remarks>
+    private bool pushHandedOff;
+
     public InstancedBatch(Mesh mesh, PipelineHandle pipeline, InstanceBuffer buffer)
     {
         ArgumentNullException.ThrowIfNull(mesh);
@@ -45,9 +63,10 @@ public sealed class InstancedBatch
         {
             throw new InvalidOperationException("InstancedBatch.Begin called while a batch is already active. Call End first.");
         }
-        if (this.pushConstants.Length != pushConstants.Length)
+        if (pushHandedOff || this.pushConstants.Length != pushConstants.Length)
         {
             this.pushConstants = new byte[pushConstants.Length];
+            pushHandedOff = false;
         }
         pushConstants.CopyTo(this.pushConstants);
         count = 0;
@@ -85,7 +104,20 @@ public sealed class InstancedBatch
     // Records the instanced draw. `textures` are frame-global samplers the pipeline's
     // shader declares (e.g. a shadow map) — forwarded verbatim, mirroring
     // ParticleBatch.Draw; the batch stays agnostic to what they mean. Null = none.
-    public void End(RenderPassBuilder pass, IReadOnlyList<ShaderTextureBinding>? textures = null)
+    /// <summary>Records the draw. <paramref name="extra"/> binds a caller-owned material alongside it.</summary>
+    /// <remarks>
+    /// <b>What <paramref name="extra"/> is for, and why it does not make this batch less generic.</b> An
+    /// instanced draw has two material slots: the instance buffer's own (set 3) and one more the engine
+    /// leaves to the caller. Skinned bodies need that second one for a bone palette — but the batch is not
+    /// told that, and must not be. It receives an opaque handle and binds it, exactly as it already receives
+    /// an opaque pipeline and opaque push bytes without knowing they mean lighting and fog. The rule this
+    /// primitive keeps is that geometry is all it knows; a caller bringing its own buffer is that rule
+    /// working, not an exception to it.
+    /// </remarks>
+    public void End(
+        RenderPassBuilder pass,
+        IReadOnlyList<ShaderTextureBinding>? textures = null,
+        MaterialHandle? extra = null)
     {
         ArgumentNullException.ThrowIfNull(pass);
         if (!inBatch)
@@ -105,6 +137,8 @@ public sealed class InstancedBatch
             Array.Empty<ShaderUniform>(),
             textures ?? Array.Empty<ShaderTextureBinding>(),
             perDrawMaterial: buffer.Material,
-            pushConstants: pushConstants);
+            pushConstants: pushConstants,
+            material: extra);
+        pushHandedOff = true;
     }
 }

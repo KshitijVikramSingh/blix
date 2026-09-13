@@ -1,5 +1,10 @@
 #pragma once
 
+// #pragma once is owned by Blix's build-time preprocessor, which consumes the
+// directive before glslc sees the expanded source. world.frag reaches this both
+// directly and through veil.glsl; that diamond is the regression case that
+// makes this line a contract rather than documentation.
+
 // Hash + value-noise primitives. Cheap, deterministic, no texture lookups.
 // Use these for procedural detail (fire, dust, dithering) and for cheap
 // per-pixel randomness (jitter, decorrelation).

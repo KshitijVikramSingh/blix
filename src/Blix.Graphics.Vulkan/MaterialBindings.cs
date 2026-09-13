@@ -245,10 +245,20 @@ public sealed class MaterialBindings
             throw new InvalidOperationException(
                 $"MaterialBindings '{Name}' binding {binding} is {slot.Type}, not a buffer slot.");
         }
-        if (payload.Length != block.TotalSize)
+        // <b>A short payload writes only what it brought, and that is the point rather than a leniency.</b>
+        // Demanding the exact block size forced every caller with a variable-length array to upload its whole
+        // capacity: an instance buffer holds 16,384 instances at 80 bytes, so drawing <em>one</em> copied
+        // 1.31 MB. Measured on the ground coats, which are one instance each — 35 microseconds a layer, 85
+        // layers on a hilly map, 3.0 ms a frame to upload 111 MB of nothing.
+        //
+        // Larger than the block is still a fault: that is a caller who has miscounted, and the bytes have
+        // nowhere to go. Smaller is a caller who knows how much of the array is live, which is the normal case
+        // for anything instanced — the shader reads instanceCount entries and never looks past them, so what
+        // is left in the tail is last frame's data and is never read.
+        if (payload.Length > block.TotalSize)
         {
             throw new ArgumentException(
-                $"MaterialBindings '{Name}' binding {binding} expects {block.TotalSize} bytes, got {payload.Length}.",
+                $"MaterialBindings '{Name}' binding {binding} holds {block.TotalSize} bytes, got {payload.Length}.",
                 nameof(payload));
         }
 

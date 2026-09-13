@@ -2171,6 +2171,95 @@ static ShaderInterface MinimalShader() => new(new[]
         MathF.Abs(far.X) > 1f || MathF.Abs(far.Y) > 1f);
 }
 
+// ============================================================================
+// Section AM — GLSL include ownership: pragma-once is real before glslc.
+// ============================================================================
+//
+// glslc warns about #pragma once and does not honour it. The build used to hand
+// source files directly to glslc, so the engine preprocessor's apparent support
+// was irrelevant to offline SPIR-V compilation. These cases pin the semantics
+// the build tool now uses: consume the directive, deduplicate by stable source
+// identity, preserve ordinary repeatable snippets, resolve from the requesting
+// source, and keep cycle detection.
+{
+    var sources = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["/shader/a.glsl"] = "#pragma once\n#include \"shared.glsl\"\nfloat fromA;",
+        ["/shader/b.glsl"] = "#pragma once\n#include \"shared.glsl\"\nfloat fromB;",
+        ["/shader/shared.glsl"] = "#pragma once\nfloat sharedMarker;",
+    };
+    var root = new GlslSource(
+        "/shader/root.frag", "/shader/root.frag",
+        "#version 450\n#include \"a.glsl\"\n#include \"b.glsl\"");
+    var result = GlslPreprocessor.PreprocessDetailed(root, Resolve);
+
+    t.ExpectTrue("AM.1 pragma-once diamond emits the shared file once",
+        result.ExpandedSource.Split("sharedMarker", StringSplitOptions.None).Length - 1 == 1);
+    t.ExpectTrue("AM.1 pragma-once directive is consumed before glslc",
+        !result.ExpandedSource.Contains("#pragma once", StringComparison.Ordinal));
+    t.ExpectTrue("AM.1 both branches of the diamond remain",
+        result.ExpandedSource.Contains("fromA", StringComparison.Ordinal) &&
+        result.ExpandedSource.Contains("fromB", StringComparison.Ordinal));
+
+    GlslSource Resolve(GlslSource requesting, string name)
+    {
+        var directory = requesting.Identity[..requesting.Identity.LastIndexOf('/')];
+        var identity = directory + "/" + name;
+        return new GlslSource(identity, identity, sources[identity]);
+    }
+}
+
+{
+    // Two spellings, one file. The include token is not an identity: file
+    // resolvers canonicalise it before the once-set sees it.
+    var root = new GlslSource(
+        "/shader/root.frag", "/shader/root.frag",
+        "#include \"alias-a.glsl\"\n#include \"alias-b.glsl\"");
+    var result = GlslPreprocessor.PreprocessDetailed(
+        root,
+        (_, name) => new GlslSource(
+            "/shader/shared.glsl",
+            name,
+            "#pragma once\nfloat aliasMarker;"));
+    t.ExpectTrue("AM.2 pragma-once compares canonical identity, not include spelling",
+        result.ExpandedSource.Split("aliasMarker", StringSplitOptions.None).Length - 1 == 1);
+}
+
+{
+    var root = new GlslSource(
+        "/shader/root.frag", "/shader/root.frag",
+        "#include \"snippet.glsl\"\n#include \"snippet.glsl\"");
+    var result = GlslPreprocessor.PreprocessDetailed(
+        root,
+        (_, _) => new GlslSource(
+            "/shader/snippet.glsl",
+            "/shader/snippet.glsl",
+            "float repeatableMarker;"));
+    t.ExpectTrue("AM.3 a snippet without pragma-once remains repeatable",
+        result.ExpandedSource.Split("repeatableMarker", StringSplitOptions.None).Length - 1 == 2);
+}
+
+{
+    var root = new GlslSource(
+        "/shader/root.frag", "/shader/root.frag",
+        "#include \"loop.glsl\"");
+    var cycleDetected = false;
+    try
+    {
+        GlslPreprocessor.PreprocessDetailed(
+            root,
+            (_, _) => new GlslSource(
+                "/shader/loop.glsl",
+                "/shader/loop.glsl",
+                "#include \"loop.glsl\""));
+    }
+    catch (InvalidOperationException exception)
+    {
+        cycleDetected = exception.Message.Contains("Circular #include", StringComparison.Ordinal);
+    }
+    t.ExpectTrue("AM.4 pragma ownership does not weaken include-cycle detection", cycleDetected);
+}
+
 t.PrintSummary();
 return t.FailedCount;
 

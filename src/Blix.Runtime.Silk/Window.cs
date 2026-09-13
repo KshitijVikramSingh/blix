@@ -295,7 +295,18 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     private void OnMouseUp(IMouse mouse, SilkMouseButton button)
     {
-        if (OverlayWantsMouse) return;
+        // <b>A release is always delivered, even when the overlay owns the cursor, and the asymmetry with
+        // OnMouseDown above is the point.</b> A press decides who owns the gesture; a release only ends
+        // something, and the thing it ends belongs to whoever the press went to.
+        //
+        // Guarded, this dropped the release whenever the pointer happened to be over a debug panel when the
+        // button came up — so a drag begun in the world and finished over the panel left the game believing the
+        // button was still down. The marquee stays live, anchored to a point the cursor has long left, and
+        // follows it around: reported from the chair as the mouse not lining up with the screen. Nothing about
+        // that looks like a missing event.
+        //
+        // It costs the overlay nothing: ImGui does not learn the button state from these callbacks at all, it
+        // polls IsButtonPressed in BeginFrame. The guard was protecting something that was never listening.
         inputHandler?.OnMouseUp(MapMouseButton(button));
     }
 
@@ -366,6 +377,9 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     public (int Width, int Height) LogicalSize => (window.Size.X, window.Size.Y);
 
     public void SetVSync(bool enabled) => window.VSync = enabled;
+
+    /// <summary>The refresh rate of the monitor this window is on, if the platform reports one.</summary>
+    public int? DisplayRefreshHz => window.Monitor?.VideoMode.RefreshRate;
 
     // IAudioHost facet. Returns the live OpenAL device. Throws if accessed
     // before OnLoad runs or when no audio backend is available (Game captures
@@ -590,6 +604,20 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         SilkKey.ControlRight => BlixKey.RightControl,
         SilkKey.SuperLeft => BlixKey.LeftSuper,
         SilkKey.SuperRight => BlixKey.RightSuper,
+        SilkKey.ShiftLeft => BlixKey.LeftShift,
+        SilkKey.ShiftRight => BlixKey.RightShift,
+        // Both rows to the same value. Which physical key produced a digit is a fact about the keyboard,
+        // and no caller has ever wanted it: a control group is bound to "4", not to "the 4 above the R".
+        SilkKey.Number0 or SilkKey.Keypad0 => BlixKey.Number0,
+        SilkKey.Number1 or SilkKey.Keypad1 => BlixKey.Number1,
+        SilkKey.Number2 or SilkKey.Keypad2 => BlixKey.Number2,
+        SilkKey.Number3 or SilkKey.Keypad3 => BlixKey.Number3,
+        SilkKey.Number4 or SilkKey.Keypad4 => BlixKey.Number4,
+        SilkKey.Number5 or SilkKey.Keypad5 => BlixKey.Number5,
+        SilkKey.Number6 or SilkKey.Keypad6 => BlixKey.Number6,
+        SilkKey.Number7 or SilkKey.Keypad7 => BlixKey.Number7,
+        SilkKey.Number8 or SilkKey.Keypad8 => BlixKey.Number8,
+        SilkKey.Number9 or SilkKey.Keypad9 => BlixKey.Number9,
         _ => BlixKey.Unknown,
     };
 

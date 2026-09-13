@@ -1,0 +1,5 @@
+{
+  "assets": [
+    { "id": "fonts/hud", "importer": "font.json", "source": "fonts/BowlbyOne-Regular.font.json" }
+  ]
+}

@@ -1,0 +1,82 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
+    <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
+    <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
+    <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
+    <ProjectReference Include="..\Blix.Runtime.Silk\Blix.Runtime.Silk.csproj" />
+    <ProjectReference Include="..\Blix.Tools.Shader\Blix.Tools.Shader.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>RTSGame</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Glslc Condition="'$(Glslc)' == '' AND Exists('/opt/homebrew/bin/glslc')">/opt/homebrew/bin/glslc</Glslc>
+    <Glslc Condition="'$(Glslc)' == '' AND Exists('/usr/local/bin/glslc')">/usr/local/bin/glslc</Glslc>
+    <Glslc Condition="'$(Glslc)' == ''">glslc</Glslc>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- CC0 art: 15 low-poly models + one OBJ body, untextured, position+normal only,
+         with a flat base colour per material. No cook step and no texture memory. -->
+    <None Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The nature kit: glTF geometry only. Its textures are palette sheets the flat-shaded prop pipeline
+         has no use for, so they are not shipped and each material's colour is authored in SettlementArt. -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Blix.Assets\Blix.Assets.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <GlslShader Include="Shaders\world.vert" />
+    <GlslShader Include="Shaders\world.frag" />
+    <GlslShader Include="Shaders\shadow_caster.vert" />
+    <!-- The skinned pair: bodies with a rig. Same fragment stages as their unskinned twins. -->
+    <GlslShader Include="Shaders\world_skinned.vert" />
+    <GlslShader Include="Shaders\world_skinned.frag" />
+    <GlslShader Include="Shaders\shadow_caster_skinned.vert" />
+    <GlslShader Include="Shaders\shadow_caster.frag" />
+    <GlslShader Include="Shaders\contact.vert" />
+    <GlslShader Include="Shaders\selection.vert" />
+    <GlslShader Include="Shaders\selection.frag" />
+    <GlslShader Include="Shaders\contact.frag" />
+    <GlslShader Include="Shaders\smoke.vert" />
+    <GlslShader Include="Shaders\smoke.frag" />
+    <GlslShader Include="Shaders\sky.vert" />
+    <GlslShader Include="Shaders\sky.frag" />
+    <GlslShader Include="Shaders\present.vert" />
+    <GlslShader Include="Shaders\present.frag" />
+    <!-- Shared GLSL library (src/Blix.Shaders), resolved by Blix.Tools.Shader; listed so
+         editing a lib file retriggers the cook. -->
+    <GlslInclude Include="..\Blix.Shaders\shadow.glsl" />
+    <GlslInclude Include="..\Blix.Shaders\tonemap.glsl" />
+    <GlslInclude Include="..\Blix.Shaders\noise.glsl" />
+    <!-- The game's own shared GLSL, resolved relative to the including file. -->
+    <GlslInclude Include="Shaders\materials.glsl" />
+    <GlslInclude Include="Shaders\lean.glsl" />
+    <GlslInclude Include="Shaders\veil.glsl" />
+    <GlslInclude Include="Shaders\world_push.glsl" />
+    <GlslInclude Include="Shaders\world_varyings.glsl" />
+    <GlslInclude Include="Shaders\world_shade.glsl" />
+  </ItemGroup>
+
+  <Target Name="CompileSpirV"
+          AfterTargets="CopyFilesToOutputDirectory"
+          Inputs="@(GlslShader);@(GlslInclude);$(BlixShaderCompilerDll)"
+          Outputs="@(GlslShader -> '$(OutDir)Shaders\%(Filename)%(Extension).spv')">
+    <MakeDir Directories="$(OutDir)Shaders" />
+    <Message Text="Compiling SPIR-V: %(GlslShader.Identity)" Importance="high" />
+    <Exec Command="dotnet &quot;$(BlixShaderCompilerDll)&quot; --glslc &quot;$(Glslc)&quot; --input &quot;%(GlslShader.FullPath)&quot; --output &quot;$(OutDir)Shaders\%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; --include &quot;$(MSBuildProjectDirectory)/../Blix.Shaders&quot;" />
+  </Target>
+
+</Project>

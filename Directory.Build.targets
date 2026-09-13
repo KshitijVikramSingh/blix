@@ -1,0 +1,12 @@
+<Project>
+
+  <!--
+    Shader-bearing projects reference Blix.Tools.Shader as a build-only project.
+    This shared path keeps their Exec targets identical without shipping the
+    compiler tool alongside a game.
+  -->
+  <PropertyGroup>
+    <BlixShaderCompilerDll>$(MSBuildThisFileDirectory)src/Blix.Tools.Shader/bin/$(Configuration)/net8.0/Blix.Tools.Shader.dll</BlixShaderCompilerDll>
+  </PropertyGroup>
+
+</Project>

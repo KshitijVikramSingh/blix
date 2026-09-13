@@ -270,12 +270,26 @@ public static class GraphicsMatrices
     // construction (eye placement, up-vector degeneracy guard, ortho) is the shared
     // technique — pair it with the GLSL blix_sun_shadow() lookup (Blix.Shaders/shadow.glsl).
     public static Matrix4x4 SunShadowViewProjection(
-        Vector3 sunDirToward, float distance, float orthoExtent, float nearPlane, float farPlane)
+        Vector3 sunDirToward, float distance, float orthoExtent, float nearPlane, float farPlane) =>
+        SunShadowViewProjection(sunDirToward, Vector3.Zero, distance, orthoExtent, nearPlane, farPlane);
+
+    // As above, but the light looks at `center` rather than the origin. A scene larger than
+    // one crisp shadow map can cover has to spend its texels where the camera is looking:
+    // a 2048 map over a 600 m world is 0.3 m per texel and every shadow edge is a staircase,
+    // while the same map over a 180 m box around the camera focus is 11 texels per metre.
+    // The caller is then responsible for moving `center` with the view.
+    public static Matrix4x4 SunShadowViewProjection(
+        Vector3 sunDirToward,
+        Vector3 center,
+        float distance,
+        float orthoExtent,
+        float nearPlane,
+        float farPlane)
     {
         var dir = Vector3.Normalize(sunDirToward);
-        var eye = dir * distance;
+        var eye = center + dir * distance;
         var up = MathF.Abs(dir.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
-        var view = CreateLookAt(eye, Vector3.Zero, up);
+        var view = CreateLookAt(eye, center, up);
         var ortho = CreateOrthographicVulkan(orthoExtent, orthoExtent, nearPlane, farPlane);
         return view * ortho;
     }

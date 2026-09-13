@@ -2,8 +2,8 @@ namespace Blix.Graphics;
 
 // Convenience loader that bundles disk read + #include resolution + ShaderSources
 // construction. Most callers want exactly this combination; using it ensures the
-// source map for each stage is wired through to the OpenGL compile-error
-// formatter (see ShaderSource.SourceMap / BuildCompileError).
+// source map for each stage is wired through to compile diagnostics
+// (see ShaderSource.SourceMap / BuildCompileError).
 //
 // Resolution order for `#include "name"`:
 //   1. Adjacent to the requesting file's directory.
@@ -39,17 +39,31 @@ public static class ShaderLoader
         string path,
         IReadOnlyList<string> includeDirs,
         IReadOnlyDictionary<string, string>? defines)
+        => PreprocessFile(path, includeDirs, defines);
+
+    /// <summary>
+    /// Reads and preprocesses one shader file using quoted-include semantics:
+    /// relative to the file containing the directive first, then the shared
+    /// include directories. Canonical paths make <c>#pragma once</c> hold even
+    /// when the same file is reached through two different relative spellings.
+    /// </summary>
+    public static GlslPreprocessResult PreprocessFile(
+        string path,
+        IReadOnlyList<string>? includeDirs = null,
+        IReadOnlyDictionary<string, string>? defines = null)
     {
-        var source = File.ReadAllText(path);
+        var fullPath = Path.GetFullPath(path);
+        var source = File.ReadAllText(fullPath);
         if (defines is { Count: > 0 })
         {
             source = InjectDefines(source, defines);
         }
-        var ownDir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? string.Empty;
+        var dirs = (includeDirs ?? Array.Empty<string>())
+            .Select(Path.GetFullPath)
+            .ToArray();
         return GlslPreprocessor.PreprocessDetailed(
-            source,
-            Path.GetFileName(path),
-            name => ResolveInclude(name, ownDir, includeDirs));
+            new GlslSource(fullPath, fullPath, source),
+            (requesting, name) => ResolveInclude(name, requesting.Identity, dirs));
     }
 
     private static string InjectDefines(string source, IReadOnlyDictionary<string, string> defines)
@@ -85,20 +99,27 @@ public static class ShaderLoader
         return string.Join('\n', head.Concat(defineLines).Concat(tail));
     }
 
-    private static string ResolveInclude(
+    private static GlslSource ResolveInclude(
         string name,
-        string requestingDir,
+        string requestingPath,
         IReadOnlyList<string> includeDirs)
     {
+        var requestingDir = Path.GetDirectoryName(requestingPath) ?? string.Empty;
         var local = Path.Combine(requestingDir, name);
-        if (File.Exists(local)) return File.ReadAllText(local);
+        if (File.Exists(local)) return ReadSource(local);
         foreach (var dir in includeDirs)
         {
             var candidate = Path.Combine(dir, name);
-            if (File.Exists(candidate)) return File.ReadAllText(candidate);
+            if (File.Exists(candidate)) return ReadSource(candidate);
         }
         throw new FileNotFoundException(
             $"Shader include '{name}' not found. Looked next to the requesting file ({requestingDir}) " +
             $"and in {includeDirs.Count} include dir(s): {string.Join(", ", includeDirs)}");
+    }
+
+    private static GlslSource ReadSource(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        return new GlslSource(fullPath, fullPath, File.ReadAllText(fullPath));
     }
 }

@@ -12,6 +12,7 @@
          content propagation. -->
     <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
     <ProjectReference Include="..\Blix.Runtime.Silk\Blix.Runtime.Silk.csproj" />
+    <ProjectReference Include="..\Blix.Tools.Shader\Blix.Tools.Shader.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -35,7 +36,7 @@
   <!--
     Shader cook list. Optional per-item metadata declares a #define variant:
       Variant - filename infix (world.frag -> world.FOG.frag.spv); empty = base.
-      Defines - the glslc -D macro for that variant.
+      Defines - the macro Blix injects after #version for that variant.
     A base entry (no Variant) plus one entry per variant cooks every permutation.
     Variants MUST expand here: the Vulkan backend consumes precompiled SPIR-V only
     (no runtime glslc). Runtime selects a variant by ShaderVariantPath.
@@ -59,13 +60,10 @@
       <GlslShader Condition="'%(GlslShader.Variant)' != ''">
         <VariantStem>%(GlslShader.Filename).%(GlslShader.Variant)</VariantStem>
       </GlslShader>
-      <GlslShader Condition="'%(GlslShader.Defines)' != ''">
-        <DefineFlags>-D%(GlslShader.Defines)</DefineFlags>
-      </GlslShader>
     </ItemGroup>
     <MakeDir Directories="$(OutDir)Shaders" />
     <Message Text="Compiling SPIR-V: %(GlslShader.Identity) [%(GlslShader.VariantStem)]" Importance="high" />
-    <Exec Command="&quot;$(Glslc)&quot; %(GlslShader.DefineFlags) -o &quot;$(OutDir)Shaders\%(GlslShader.VariantStem)%(GlslShader.Extension).spv&quot; &quot;%(GlslShader.Identity)&quot;" />
+    <Exec Command="dotnet &quot;$(BlixShaderCompilerDll)&quot; --glslc &quot;$(Glslc)&quot; --input &quot;%(GlslShader.FullPath)&quot; --output &quot;$(OutDir)Shaders\%(GlslShader.VariantStem)%(GlslShader.Extension).spv&quot; --include &quot;$(MSBuildProjectDirectory)/../Blix.Shaders&quot; --define &quot;%(GlslShader.Defines)&quot;" />
   </Target>
 
 </Project>

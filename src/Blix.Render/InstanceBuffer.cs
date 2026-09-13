@@ -77,9 +77,15 @@ public sealed class InstanceBuffer : IDisposable
             throw new ArgumentException(
                 $"InstanceBuffer holds at most {MaxInstances} instances; got {instances.Length}.", nameof(instances));
         }
-        var dst = MemoryMarshal.Cast<byte, InstanceData>(scratch.AsSpan(0, instances.Length * Stride));
+        var live = instances.Length * Stride;
+        var dst = MemoryMarshal.Cast<byte, InstanceData>(scratch.AsSpan(0, live));
         instances.CopyTo(dst);
-        ssbo.WriteBuffer(device.CurrentFrameSlot, binding: Slot.Binding, scratch);
+        // <b>Only the live instances, not the whole capacity.</b> This uploaded all 16,384 slots however many
+        // were in use, so a batch drawing one instance copied 1.31 MB every frame. The ground coats are one
+        // instance each and there are 85 of them on a hilly map: 3.0 ms a frame, all of it memcpy of stale
+        // tail. The shader reads instanceCount entries and never looks further, so the tail was never data —
+        // it was just being paid for.
+        ssbo.WriteBuffer(device.CurrentFrameSlot, binding: Slot.Binding, scratch.AsSpan(0, live));
     }
 
     public void Dispose()

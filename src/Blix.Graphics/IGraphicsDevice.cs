@@ -103,6 +103,22 @@ public interface IGraphicsDevice : IDisposable
     // undefined until it has been uploaded.
     void UploadTextureMip(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes);
 
+    // The same upload for data that changes EVERY frame, recorded with the
+    // frame's own commands instead of submitted on its own and waited for.
+    //
+    // UploadTextureMip ends in a full queue drain, which is what makes it safe
+    // to sample on the caller's next line and ruinous in a frame loop: CPU and
+    // GPU stop overlapping, so the frame costs CPU + GPU rather than
+    // max(CPU, GPU). Measured on a per-frame fog mask, the drain was 20 ms of a
+    // 28 ms frame, and the frames that happened to skip the upload ran at 7.
+    //
+    // The bytes are copied into a staging ring immediately, so the caller's
+    // buffer is free on return; the copy lands before the frame's first render
+    // pass. The contents are NOT resident until that frame executes, so anything
+    // that must read the data back — or sample it in the same breath — wants
+    // UploadTextureMip instead.
+    void QueueTextureUpload(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes);
+
     // Allocates a multi-mip texture with all storage reserved but no pixel
     // data uploaded -- every level's contents are undefined until filled via
     // UploadTextureMip. Used by the streamed-upload path: ResourceUploader

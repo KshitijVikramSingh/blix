@@ -181,11 +181,29 @@ static int CookMesh(string[] args)
             }
         }
         var sw = Stopwatch.StartNew();
+        // <b>Borders are locked only when there are seams to protect.</b> LockBorder pins every
+        // mesh-boundary vertex, and it is there so that spatially split chunks stay watertight where they
+        // meet — which matters when --split is on and is meaningless when it is off, because a whole
+        // primitive has no seam with anything.
+        //
+        // It is not a free precaution. On a model made of many open shells — a stylised tree, whose leaf
+        // clusters are separate pieces — nearly every vertex is a border vertex, so locking them forbids
+        // the simplifier from collapsing anything at all: measured, a 4,345 triangle tree reduced to 3,975
+        // and stopped, while the same simplifier takes a closed grid from 8,192 to 818. A model that cannot
+        // be decimated is then drawn at full detail on every horizon, which is where that afternoon went.
+        // <b>And pruning, which is what finally moves a tree.</b> Unlocking the borders took a blade of
+        // grass from 326/224 to 326/162/81/40 and left a tree at 4,345/3,939, because the two fail for
+        // different reasons: a tree's canopy is hundreds of small disconnected clusters, and a simplifier
+        // that may not delete a component can only thin each one until it would vanish, which is almost
+        // immediately. Prune lets whole components go — which for foliage is not a compromise but the
+        // correct behaviour, since what a canopy looks like from further away is fewer, larger masses.
+        var options = Blix.Tools.Cook.MeshoptNative.Options.Prune;
+        if (splitBudget > 0) options |= Blix.Tools.Cook.MeshoptNative.Options.LockBorder;
         var count = Blix.GltfStaticImporter.CookToBlixMesh(src, outPath, flipV, tangents,
             simplify: (positions, indices, vertexCount, ratio) =>
             {
                 var reduced = Blix.Tools.Cook.MeshoptNative.Simplify(indices, positions, vertexCount, 3, ratio,
-                    targetError: 1.0f, Blix.Tools.Cook.MeshoptNative.Options.LockBorder, out var relError);
+                    targetError: 1.0f, options, out var relError);
                 // meshopt's resultError is relative to the mesh extent; scale to
                 // world units so the runtime can project it to screen pixels.
                 var scale = Blix.Tools.Cook.MeshoptNative.SimplifyScale(positions, vertexCount, 3);

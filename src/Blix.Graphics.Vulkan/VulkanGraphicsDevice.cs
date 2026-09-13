@@ -270,6 +270,25 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
         $"{m.M31:0.##} {m.M32:0.##} {m.M33:0.##} {m.M34:0.##}\n" +
         $"{m.M41:0.##} {m.M42:0.##} {m.M43:0.##} {m.M44:0.##}";
 
+    // <b>A non-draining accumulator beside the draining queue, because two consumers cannot share one
+    // drain.</b> The Silk runtime already calls ConsumeAvailableGpuTimings every frame to feed the overlay's
+    // gpu/passes scope, so anything else asking for them gets an empty list — which is how a game measuring
+    // itself ends up reporting that the GPU costs nothing. Totals are cumulative and never cleared; a caller
+    // wanting a window takes a snapshot and subtracts, which is exact and needs no ownership.
+    private readonly Dictionary<string, (double TotalMs, long Samples)> gpuPassTotals = new();
+
+    /// <summary>Cumulative resolved GPU time per pass, and how many resolutions it is over.</summary>
+    public IReadOnlyDictionary<string, (double TotalMs, long Samples)> GpuPassTotals => gpuPassTotals;
+
+    /// <summary>Whether the device resolves timestamp queries at all. False = every total stays empty.</summary>
+    public bool GpuTimestampsSupported => timestampsSupported;
+
+    private void AccumulateGpuPassTotal(string pass, double elapsedMs)
+    {
+        var current = gpuPassTotals.TryGetValue(pass, out var found) ? found : (0.0, 0L);
+        gpuPassTotals[pass] = (current.Item1 + elapsedMs, current.Item2 + 1);
+    }
+
     // Drains GPU timings that the device has finished resolving since the
     // last call. Empty until VkQueryPool wiring lands.
     public IReadOnlyList<VkGpuPassTiming> ConsumeAvailableGpuTimings()

@@ -41,5 +41,22 @@ public enum Key
     LeftControl,
     RightControl,
     LeftSuper,
-    RightSuper
+    RightSuper,
+
+    // Appended rather than slotted in beside the letters, because these are enum values a backend maps
+    // against and renumbering LeftControl to make the list read nicely is not worth anything to anyone.
+    LeftShift,
+    RightShift,
+
+    /// <summary>The number row. Keypad digits map here too; a game wants the digit, not the key.</summary>
+    Number0,
+    Number1,
+    Number2,
+    Number3,
+    Number4,
+    Number5,
+    Number6,
+    Number7,
+    Number8,
+    Number9
 }
