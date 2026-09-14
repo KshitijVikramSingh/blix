@@ -165,7 +165,17 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // looks like a maths bug. The turn is measured and reported; it is just not applied.
     private bool driveRoot;
     private Vector3 rootTravel;
-    private float rootTurnDegrees;
+
+    // <b>Composed, not summed.</b> This was a running total of per-frame turn MAGNITUDES, which is
+    // an angular path length and not a turn: a root that wobbles a degree each way reports two
+    // degrees a frame and climbs forever. Left running on a clip with a 25-degree-per-cycle root it
+    // read "2010.4 degrees turned", which sounds like five and a half revolutions and describes a
+    // body that ended up facing where it started.
+    //
+    // Composing the deltas gives the NET turn, which is what the word means — and the path is kept
+    // beside it, because "wobbled a lot and went nowhere" is also worth being able to see.
+    private Quaternion rootTurn = Quaternion.Identity;
+    private float rootTurnPathDegrees;
     private readonly List<Vector3> rootPath = new();
     private bool showRootTrail = true;
 
@@ -467,7 +477,8 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // single correct delta — the honest answer is a decision (take the dominant clip's, scale
         // both by weight, take the faster) and a lab should not invent one on a consumer's behalf.
         rootTravel += Vector3.TransformNormal(playerA.RootDelta.Translation, rig.MeshNodeTransform);
-        rootTurnDegrees += Degrees(playerA.RootDelta.Rotation);
+        rootTurn = Quaternion.Normalize(rootTurn * playerA.RootDelta.Rotation);
+        rootTurnPathDegrees += Degrees(playerA.RootDelta.Rotation);
 
         // <b>Driving means the clip stops moving the body and the transform starts.</b> Leaving the
         // root animated AND applying the delta moves a travelling clip twice and snaps it back once
@@ -739,7 +750,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             $"{rig.DeformHierarchyCount} drawn) · {rig.Clips.Count} clips · {rig.Parts.Count} prims");
 
         var mode = (int)poseMode;
-        if (ImGui.Combo("compose", ref mode, "single\0blend A→B\0additive B on A\0"))
+        if (ImGui.Combo("compose", ref mode, "single\0blend A to B\0additive B on A\0"))
         {
             poseMode = (PoseMode)mode;
         }
@@ -753,8 +764,11 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         if (poseMode != PoseMode.Single) DrawTransport(playerB, "B");
 
         ImGui.Separator();
-        ImGui.SetNextItemWidth(-60f);
-        ImGui.InputText("filter", ref clipFilter, 64);
+        // ##-prefixed id, so ImGui draws no label. The visible "filter" label sat between the
+        // field and the button and squeezed "clear" down to "c" — a row that reads as a rendering
+        // fault and is a layout one.
+        ImGui.SetNextItemWidth(-56f);
+        ImGui.InputText("##filter", ref clipFilter, 64);
         ImGui.SameLine();
         if (ImGui.SmallButton("clear")) clipFilter = string.Empty;
 
@@ -764,7 +778,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         var target = poseMode == PoseMode.Single ? 0 : ImGui.GetIO().KeyShift ? 1 : 0;
         ImGui.TextDisabled(poseMode == PoseMode.Single
             ? "click to play"
-            : target == 0 ? "click → A   (hold shift → B)" : "click → B");
+            : target == 0 ? "click -> A   (hold shift -> B)" : "click -> B");
 
         if (ImGui.BeginChild("clips", new Vector2(0, 160), ImGuiChildFlags.Borders))
         {
@@ -902,7 +916,9 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         ImGui.Text($"per cycle  {perCycle.Translation.X:0.000}, {perCycle.Translation.Y:0.000}, {perCycle.Translation.Z:0.000}");
         ImGui.TextDisabled($"           {perCycle.Distance:0.000} m, {Degrees(perCycle.Rotation):0.0}°");
         ImGui.Text($"travelled  {rootTravel.X:0.000}, {rootTravel.Y:0.000}, {rootTravel.Z:0.000}");
-        ImGui.TextDisabled($"           {rootTravel.Length():0.000} m, {rootTurnDegrees:0.0}° turned");
+        ImGui.TextDisabled(
+            $"           {rootTravel.Length():0.000} m net, {Degrees(rootTurn):0.0}° net turn");
+        ImGui.TextDisabled($"           {rootTurnPathDegrees:0.0}° of turning done to get there");
 
         ImGui.Checkbox("drive the model", ref driveRoot);
         ImGui.SameLine();
@@ -919,7 +935,8 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private void ResetRootTravel()
     {
         rootTravel = Vector3.Zero;
-        rootTurnDegrees = 0f;
+        rootTurn = Quaternion.Identity;
+        rootTurnPathDegrees = 0f;
         rootPath.Clear();
     }
 
@@ -1181,7 +1198,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         ImGui.Separator();
         ImGui.TextDisabled(rig is not null
-            ? $"drag to orbit · wheel to zoom · space plays · ←/→ step · {frames} frames"
+            ? $"drag to orbit · wheel to zoom · space plays · left/right step · {frames} frames"
             : $"drag to orbit · wheel to zoom · {frames} frames");
         ImGui.End();
     }
