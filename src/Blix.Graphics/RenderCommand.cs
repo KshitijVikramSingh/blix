@@ -32,18 +32,32 @@ public readonly record struct ScissorRect(int X, int Y, int Width, int Height);
 // bounded by the Vulkan minimum of 128 bytes, so this is a memcpy of at most that per
 // draw.
 //
-// NOT yet frozen: the Uniforms and Textures lists, and in particular the array inside a
-// Matrix4x4ArrayUniform. Those are shared per pass rather than per draw, so copying them
-// per draw costs far more than 128 bytes; that one wants measuring before it is done.
+// MEASURED AND SPLIT, rather than left open. This note used to say the Uniforms and
+// Textures lists were "not yet frozen" and that the arrays inside them "want measuring
+// before it is done". The measurement was taken (RenderCommandDiagnostics, 120 frames of
+// each application under BLIX_VK_VALIDATE) and it separates the two halves cleanly:
 //
-// This used to say "the next thing to settle before any skeletal work". The skeletal work
-// has since happened and did not settle it: a bone palette does NOT travel as a
-// Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, RTSGame and the toolchain lab
-// all send it as a set-3 storage buffer through MaterialBindings, one buffer per frame
-// slot — which solves the across-frames half of the hazard and leaves the within-frame
-// half untouched (two draws in one frame sharing one palette material both render the
-// second pose). So the note stands, unexercised, and the honest reason is that nothing
-// has wanted the uniform-array path rather than that it was checked.
+//   THE VALUES ARE FROZEN NOW. Every scalar and vector uniform always held its value by
+//   struct copy and was never at risk; the three ARRAY variants were the only payload a
+//   caller could change under a recorded command, and they copy on construction as of the
+//   character arc's prologue. Cost, measured: 0 B/frame in the toolchain lab, TankArena,
+//   Bulwark, VulkanParticles and RTSGame — none of them uses the uniform-array path at
+//   all. Sponza's cascade view-projections are the tree's only consumer, at 4 matrices a
+//   pass. The worry that copying "costs far more than 128 bytes" was about a shape no
+//   application here has.
+//
+//   THE LISTS ARE DETECTED, NOT COPIED. A reused List<ShaderUniform> can still be
+//   rewritten between two draws. Freezing that is one allocation per draw, and the tree
+//   cannot say what that costs at scale: every game measured passes ZERO inline uniforms
+//   (push constants and materials instead), and only the lab uses the path at all, at ~88
+//   entries a frame. A number from a draw-heavy consumer beats a guess, so the list waits
+//   for one — and until then a record-time fingerprint, re-checked at execute, throws
+//   naming the uniform and the pass wherever validation is on.
+//
+// The skeletal work did not settle any of this and was never going to: a bone palette
+// does NOT travel as a Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, RTSGame
+// and the toolchain lab all send it as a set-3 storage buffer through MaterialBindings.
+// What settled it was a consumer asking — see plan-blix-character.md, prologue.
 public sealed record DispatchCommand(
     PipelineHandle Pipeline,
     int GroupsX,
@@ -54,6 +68,40 @@ public sealed record DispatchCommand(
     byte[]? PushConstants = null) : RenderCommand
 {
     private readonly byte[]? pushConstants = PushConstants is null ? null : PushConstants.AsSpan().ToArray();
+
+    private readonly IReadOnlyList<ShaderUniform> uniforms = Uniforms;
+    private readonly ulong[]? uniformFingerprint = RenderCommandDiagnostics.Fingerprint(Uniforms);
+    private readonly IReadOnlyList<ShaderTextureBinding> textures = Textures;
+    private readonly ulong[]? textureFingerprint = RenderCommandDiagnostics.Fingerprint(Textures);
+
+    /// <summary>The uniforms this draw writes. NOT copied — see <see cref="RenderCommandDiagnostics"/>.</summary>
+    public IReadOnlyList<ShaderUniform> Uniforms
+    {
+        get => uniforms;
+        init
+        {
+            uniforms = value;
+            uniformFingerprint = RenderCommandDiagnostics.Fingerprint(value);
+        }
+    }
+
+    /// <summary>The textures this draw binds. NOT copied — see <see cref="RenderCommandDiagnostics"/>.</summary>
+    public IReadOnlyList<ShaderTextureBinding> Textures
+    {
+        get => textures;
+        init
+        {
+            textures = value;
+            textureFingerprint = RenderCommandDiagnostics.Fingerprint(value);
+        }
+    }
+
+    /// <summary>Per-entry fingerprint of <see cref="Uniforms"/> as recorded, or null when the check is off.</summary>
+    public ulong[]? UniformFingerprint => uniformFingerprint;
+
+    /// <summary>Per-entry fingerprint of <see cref="Textures"/> as recorded, or null when the check is off.</summary>
+    public ulong[]? TextureFingerprint => textureFingerprint;
+
 
     /// <summary>The push payload, copied at record time so a caller may reuse its scratch buffer.</summary>
     public byte[]? PushConstants
@@ -87,18 +135,32 @@ public sealed record DispatchCommand(
 // bounded by the Vulkan minimum of 128 bytes, so this is a memcpy of at most that per
 // draw.
 //
-// NOT yet frozen: the Uniforms and Textures lists, and in particular the array inside a
-// Matrix4x4ArrayUniform. Those are shared per pass rather than per draw, so copying them
-// per draw costs far more than 128 bytes; that one wants measuring before it is done.
+// MEASURED AND SPLIT, rather than left open. This note used to say the Uniforms and
+// Textures lists were "not yet frozen" and that the arrays inside them "want measuring
+// before it is done". The measurement was taken (RenderCommandDiagnostics, 120 frames of
+// each application under BLIX_VK_VALIDATE) and it separates the two halves cleanly:
 //
-// This used to say "the next thing to settle before any skeletal work". The skeletal work
-// has since happened and did not settle it: a bone palette does NOT travel as a
-// Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, RTSGame and the toolchain lab
-// all send it as a set-3 storage buffer through MaterialBindings, one buffer per frame
-// slot — which solves the across-frames half of the hazard and leaves the within-frame
-// half untouched (two draws in one frame sharing one palette material both render the
-// second pose). So the note stands, unexercised, and the honest reason is that nothing
-// has wanted the uniform-array path rather than that it was checked.
+//   THE VALUES ARE FROZEN NOW. Every scalar and vector uniform always held its value by
+//   struct copy and was never at risk; the three ARRAY variants were the only payload a
+//   caller could change under a recorded command, and they copy on construction as of the
+//   character arc's prologue. Cost, measured: 0 B/frame in the toolchain lab, TankArena,
+//   Bulwark, VulkanParticles and RTSGame — none of them uses the uniform-array path at
+//   all. Sponza's cascade view-projections are the tree's only consumer, at 4 matrices a
+//   pass. The worry that copying "costs far more than 128 bytes" was about a shape no
+//   application here has.
+//
+//   THE LISTS ARE DETECTED, NOT COPIED. A reused List<ShaderUniform> can still be
+//   rewritten between two draws. Freezing that is one allocation per draw, and the tree
+//   cannot say what that costs at scale: every game measured passes ZERO inline uniforms
+//   (push constants and materials instead), and only the lab uses the path at all, at ~88
+//   entries a frame. A number from a draw-heavy consumer beats a guess, so the list waits
+//   for one — and until then a record-time fingerprint, re-checked at execute, throws
+//   naming the uniform and the pass wherever validation is on.
+//
+// The skeletal work did not settle any of this and was never going to: a bone palette
+// does NOT travel as a Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, RTSGame
+// and the toolchain lab all send it as a set-3 storage buffer through MaterialBindings.
+// What settled it was a consumer asking — see plan-blix-character.md, prologue.
 public sealed record DrawIndexedIndirectCommand(
     VertexBufferHandle VertexBuffer,
     IndexBufferHandle IndexBuffer,
@@ -112,6 +174,40 @@ public sealed record DrawIndexedIndirectCommand(
     byte[]? PushConstants = null) : RenderCommand
 {
     private readonly byte[]? pushConstants = PushConstants is null ? null : PushConstants.AsSpan().ToArray();
+
+    private readonly IReadOnlyList<ShaderUniform> uniforms = Uniforms;
+    private readonly ulong[]? uniformFingerprint = RenderCommandDiagnostics.Fingerprint(Uniforms);
+    private readonly IReadOnlyList<ShaderTextureBinding> textures = Textures;
+    private readonly ulong[]? textureFingerprint = RenderCommandDiagnostics.Fingerprint(Textures);
+
+    /// <summary>The uniforms this draw writes. NOT copied — see <see cref="RenderCommandDiagnostics"/>.</summary>
+    public IReadOnlyList<ShaderUniform> Uniforms
+    {
+        get => uniforms;
+        init
+        {
+            uniforms = value;
+            uniformFingerprint = RenderCommandDiagnostics.Fingerprint(value);
+        }
+    }
+
+    /// <summary>The textures this draw binds. NOT copied — see <see cref="RenderCommandDiagnostics"/>.</summary>
+    public IReadOnlyList<ShaderTextureBinding> Textures
+    {
+        get => textures;
+        init
+        {
+            textures = value;
+            textureFingerprint = RenderCommandDiagnostics.Fingerprint(value);
+        }
+    }
+
+    /// <summary>Per-entry fingerprint of <see cref="Uniforms"/> as recorded, or null when the check is off.</summary>
+    public ulong[]? UniformFingerprint => uniformFingerprint;
+
+    /// <summary>Per-entry fingerprint of <see cref="Textures"/> as recorded, or null when the check is off.</summary>
+    public ulong[]? TextureFingerprint => textureFingerprint;
+
 
     /// <summary>The push payload, copied at record time so a caller may reuse its scratch buffer.</summary>
     public byte[]? PushConstants
@@ -175,6 +271,40 @@ public sealed record DrawIndexedCommand(
     ulong VertexBufferByteOffset = 0) : RenderCommand
 {
     private readonly byte[]? pushConstants = PushConstants is null ? null : PushConstants.AsSpan().ToArray();
+
+    private readonly IReadOnlyList<ShaderUniform> uniforms = Uniforms;
+    private readonly ulong[]? uniformFingerprint = RenderCommandDiagnostics.Fingerprint(Uniforms);
+    private readonly IReadOnlyList<ShaderTextureBinding> textures = Textures;
+    private readonly ulong[]? textureFingerprint = RenderCommandDiagnostics.Fingerprint(Textures);
+
+    /// <summary>The uniforms this draw writes. NOT copied — see <see cref="RenderCommandDiagnostics"/>.</summary>
+    public IReadOnlyList<ShaderUniform> Uniforms
+    {
+        get => uniforms;
+        init
+        {
+            uniforms = value;
+            uniformFingerprint = RenderCommandDiagnostics.Fingerprint(value);
+        }
+    }
+
+    /// <summary>The textures this draw binds. NOT copied — see <see cref="RenderCommandDiagnostics"/>.</summary>
+    public IReadOnlyList<ShaderTextureBinding> Textures
+    {
+        get => textures;
+        init
+        {
+            textures = value;
+            textureFingerprint = RenderCommandDiagnostics.Fingerprint(value);
+        }
+    }
+
+    /// <summary>Per-entry fingerprint of <see cref="Uniforms"/> as recorded, or null when the check is off.</summary>
+    public ulong[]? UniformFingerprint => uniformFingerprint;
+
+    /// <summary>Per-entry fingerprint of <see cref="Textures"/> as recorded, or null when the check is off.</summary>
+    public ulong[]? TextureFingerprint => textureFingerprint;
+
 
     /// <summary>
     /// The push payload, copied at record time so a caller may reuse its scratch buffer.

@@ -15,6 +15,10 @@
 # --clip <name> starts on a clip; --blend <name> / --additive <name> name the second clip
 # and pick the composition with it.
 #     tools/run-lab.sh --rig .../Rogue.glb --clip Walking_A --blend Running_A
+# --mask <clip> composes that clip onto the first through a bone mask, and --mask-from <bone>
+# names the mask's root (default: the rig's own spine, guessed). The Mask panel moves the root and
+# the falloff live, and the drawn skeleton is coloured by the weights.
+#     tools/run-lab.sh --rig .../Rogue.glb --clip Walking_A --mask Unarmed_Melee_Attack_Punch_A
 # --instances N draws N copies of the rig, each on its own clock (max 8).
 #     tools/run-lab.sh --rig .../Rogue.glb --clip Walking_A --instances 3
 set -euo pipefail

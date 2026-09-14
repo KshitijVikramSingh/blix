@@ -84,6 +84,23 @@ public static class Program
         // produce the same files, which is what makes a regression diffable rather than arguable.
         var sequence = int.TryParse(ArgValue(args, "--frames-out"), out var sq) ? Math.Max(0, sq) : 0;
 
+        // --mask-from paints a mask onto the skeleton overlay. It changes no pose: the question it
+        // answers is "which bones does a layer rooted here reach, and how softly does it stop", and
+        // that is a picture of the MASK rather than of anything the mask was used for.
+        // --skeleton-only draws the rig's bones and not its mesh. A mask lives INSIDE a body, and a
+        // picture of one through an opaque character is a picture of a character — --xray puts the
+        // lines in front of the mesh but does not stop the mesh being the thing you look at.
+        var skeletonOnly = args.Contains("--skeleton-only");
+
+        // A mask is a per-bone colour on a skeleton, and at the default framing a wrist is four
+        // pixels. Pulling the eye toward the target is the difference between "the legs are grey"
+        // being readable and being asserted — so the one camera knob this tool has is the one the
+        // mask needed.
+        var zoom = float.TryParse(ArgValue(args, "--zoom"), out var zf) && zf > 0.05f ? zf : 1f;
+
+        var maskRoot = ArgValue(args, "--mask-from");
+        var maskFalloff = int.TryParse(ArgValue(args, "--mask-falloff"), out var mf) ? Math.Max(0, mf) : 0;
+
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — lab capture",
@@ -105,7 +122,8 @@ public static class Program
 
         var loop = new CaptureLoop(
             output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray, advance,
-            driveRoot, instances, lockstep, viewport, sequence);
+            driveRoot, instances, lockstep, viewport, sequence, maskRoot, maskFalloff, skeletonOnly,
+            zoom);
         using (var window = new Window(loop, options))
         {
             window.Run();
@@ -158,6 +176,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private float rigDrawnHeight = 3f;
     private LabRig? rig;
     private ClipPlayer? player;
+    private readonly bool skeletonOnly;
+    private readonly float zoom;
+    private readonly string? maskRoot;
+    private readonly int maskFalloff;
+    private BoneMask? mask;
     private BonePaletteSet? palettes;
     private Matrix4x4[] boneWorlds = Array.Empty<Matrix4x4>();
     private Matrix4x4 rigTransform = Matrix4x4.Identity;
@@ -190,8 +213,16 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         int instances = 1,
         bool lockstep = false,
         bool viewport = false,
-        int sequence = 0)
+        int sequence = 0,
+        string? maskRoot = null,
+        int maskFalloff = 0,
+        bool skeletonOnly = false,
+        float zoom = 1f)
     {
+        this.skeletonOnly = skeletonOnly;
+        this.zoom = zoom;
+        this.maskRoot = maskRoot;
+        this.maskFalloff = maskFalloff;
         this.viewport = viewport;
         this.sequence = sequence;
         instanceCount = Math.Clamp(instances, 1, LabRig.MaxInstances);
@@ -239,6 +270,24 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         scene = LabScene.GroundOnly();
 
         player = new ClipPlayer(rig.Skeleton);
+
+        if (maskRoot is not null)
+        {
+            try
+            {
+                mask = BoneMask.Subtree(rig.Skeleton, maskRoot, 1f, maskFalloff);
+                Console.WriteLine(
+                    $"mask from '{maskRoot}' falloff {maskFalloff}: reaches {mask.Reach()} of " +
+                    $"{rig.Skeleton.BoneCount} bones, {mask.Reach(0.999f)} fully");
+            }
+            catch (ArgumentException ex)
+            {
+                // Loud rather than an empty overlay: a capture of a mask that silently covered
+                // nothing is a picture of a skeleton, and it looks like a working one.
+                Console.Error.WriteLine(ex.Message);
+                Environment.Exit(1);
+            }
+        }
         if (clipName is not null)
         {
             player.Clip = rig.Clip(clipName);
@@ -397,8 +446,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // cropped at the edge — and a proof that three poses are independent is worth nothing if the
         // third one is off-screen.
         if (rig is not null && rowWidth > 0f) eye *= 1f + (rowWidth * 0.28f);
+        // The rig's OWN half-height, not a constant that happened to suit one asset. A hardcoded
+        // 1.4 m aims over the head of anything shorter, and --zoom then magnifies empty air: the
+        // first mask capture centred on the sky with the skeleton falling off the bottom edge.
         var target = rig is not null
-            ? new Vector3(0f, 1.4f, 0f)
+            ? new Vector3(0f, rigDrawnHeight * 0.5f, 0f)
             : subject ? new Vector3(0f, 0.7f, 0f) : new Vector3(0f, 1f, 0f);
 
         // <b>A travelling body needs a camera that knows where it went.</b> Framed on the character,
@@ -426,6 +478,9 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                 : new Vector3(0.6f, 0f, 0.8f);
             eye = target + (across * reach) + new Vector3(0f, reach * 0.45f, 0f);
         }
+        // Applied LAST, so it composes with every framing rule above rather than replacing one.
+        eye = target + ((eye - target) / zoom);
+
         var view = Matrix4x4.CreateLookAt(eye, target, Vector3.UnitY);
         viewProjection = view * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
@@ -438,7 +493,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                         * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
         renderer.Render(
-            commandList, scene, viewProjection, eye, model, modelTransform, rig, palettes?.Count ?? 0,
+            commandList, scene, viewProjection, eye, model, modelTransform,
+            skeletonOnly ? null : rig, palettes?.Count ?? 0,
             viewport ? panelView : null, panelEye);
 
         // Debug() runs BEFORE this in the frame, so it annotates with whatever was stored last time
@@ -588,7 +644,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                     LabSkeletonView.Options.Default,
                     selectedBone: -1,
                     restWorlds: null,
-                    include: rig.DeformHierarchy);
+                    include: rig.DeformHierarchy,
+                    mask: mask);
             }
 
             // The path, as a polyline. A root-motion bug has a SHAPE: straight with even spacing is

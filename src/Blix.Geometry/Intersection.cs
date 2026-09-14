@@ -296,12 +296,44 @@ public static class Intersection
     // interior). The closest pair determines the contact; if distance <
     // capsule.Radius, we have an overlap.
     //
-    // Eight candidate pairs evaluated:
+    // NINE candidate pairs evaluated:
     //   2 segment endpoints vs triangle (closest-point-on-triangle)
     //   3 triangle vertices vs segment (closest-point-on-segment)
     //   3 triangle edges vs segment    (closest-points-on-two-segments)
+    //   1 the segment's crossing of the triangle's PLANE
     // The minimum-distance pair is the contact.
-    private static CollisionHit? TestCapsuleTriangle(Capsule capsule, Triangle tri)
+    //
+    // <b>The ninth was missing, and it is the impaled case.</b> A segment that passes clean through
+    // the middle of a triangle is as intersected as anything can be, and the distance between them
+    // is zero — but no endpoint, vertex or edge candidate is anywhere near it. For the unit triangle
+    // in Blix.Test.Physics3D every one of the original eight sat a metre away, so the test returned
+    // null for a capsule with a triangle through its waist.
+    //
+    // It shipped in the initial commit and was never exercised: nothing in this tree had ever
+    // constructed a Capsule or a TriangleMesh3D outside Blix.Geometry until the character lab. The
+    // failure mode it would have produced is the memorable kind — a body that clips into a wall
+    // reports no contact at all once its axis is past the surface, so it neither stops nor pushes
+    // out, and it drifts through.
+    //
+    // The crossing point is added as a candidate rather than special-cased: when it lands inside the
+    // triangle the pair is (p, p) and the distance is zero, and when it lands outside it is simply
+    // another point whose distance the minimum ignores.
+    /// <summary>
+    /// The closest pair between a capsule's SEGMENT and a triangle: squared distance, the point on
+    /// the segment, and the point on the triangle.
+    /// </summary>
+    /// <remarks>
+    /// Split out because the discrete test and the sweep below need exactly the same answer at
+    /// different moments — one at rest, one at a proposed time — and two copies of a nine-candidate
+    /// search is two places for the ninth to go missing again.
+    /// <para>
+    /// Note this is the segment's distance, not the capsule's: the capsule's surface is this minus
+    /// the radius. Callers subtract, because a sweep wants the signed gap and a test wants the
+    /// overlap, and those are the same number with opposite signs.
+    /// </para>
+    /// </remarks>
+    private static (float DistanceSquared, Vector3 OnSegment, Vector3 OnTriangle) ClosestPair(
+        Capsule capsule, Triangle tri)
     {
         var bestSegPoint = capsule.PointA;
         var bestTriPoint = tri.V0;
@@ -327,6 +359,24 @@ public static class Intersection
         Consider(ClosestPointOnSegment(tri.V1, capsule.PointA, capsule.PointB), tri.V1);
         Consider(ClosestPointOnSegment(tri.V2, capsule.PointA, capsule.PointB), tri.V2);
 
+        // The segment's crossing of the triangle's plane — the case the other eight cannot see.
+        var faceNormal = tri.NormalRaw;
+        var faceLengthSq = faceNormal.LengthSquared();
+        if (faceLengthSq > 1e-18f)
+        {
+            var unit = faceNormal / MathF.Sqrt(faceLengthSq);
+            var da = Vector3.Dot(unit, capsule.PointA - tri.V0);
+            var db = Vector3.Dot(unit, capsule.PointB - tri.V0);
+
+            // Strictly opposite sides. A segment that merely touches the plane is already covered by
+            // the endpoint candidates, and dividing by (da - db) when both are zero is not.
+            if ((da < 0f && db > 0f) || (da > 0f && db < 0f))
+            {
+                var crossing = Vector3.Lerp(capsule.PointA, capsule.PointB, da / (da - db));
+                Consider(crossing, ClosestPointOnTriangle(crossing, tri.V0, tri.V1, tri.V2));
+            }
+        }
+
         // 3 triangle edges vs segment
         var (s01, t01) = ClosestPointsOnSegments(capsule.PointA, capsule.PointB, tri.V0, tri.V1);
         Consider(s01, t01);
@@ -334,6 +384,13 @@ public static class Intersection
         Consider(s12, t12);
         var (s20, t20) = ClosestPointsOnSegments(capsule.PointA, capsule.PointB, tri.V2, tri.V0);
         Consider(s20, t20);
+
+        return (bestDistSq, bestSegPoint, bestTriPoint);
+    }
+
+    private static CollisionHit? TestCapsuleTriangle(Capsule capsule, Triangle tri)
+    {
+        var (bestDistSq, bestSegPoint, bestTriPoint) = ClosestPair(capsule, tri);
 
         if (bestDistSq >= capsule.Radius * capsule.Radius) return null;
 
@@ -345,9 +402,24 @@ public static class Intersection
         }
         else
         {
-            // Segment passes through triangle exactly — fall back to the triangle's
-            // face normal as a stable push-out direction.
-            normal = tri.Normal;
+            // The segment crosses the face: there is no direction between the closest pair, because
+            // they are the same point. The triangle's OUTWARD normal is the answer, unsigned.
+            //
+            // <b>Signing it toward an endpoint is wrong, and the resolver found that out.</b> The
+            // first version pointed it toward whichever side PointA was on — which for a body
+            // sinking into a floor is the side UNDERNEATH, so depenetration pushed it further in.
+            // A winding is not a tie-break; for a closed solid it already says which side is
+            // outside, which is exactly what a body that is inside needs to be told.
+            //
+            // That relies on the mesh being closed and outward-wound. Blix.Labs.Character's probe
+            // checks both for every solid in its room, which is where that check earns its keep:
+            // it is not tidiness, it is the precondition for getting an impaled body out.
+            //
+            // The Depth here is the radius, which UNDERSTATES an impaled capsule — the true minimum
+            // translation also has to carry the axis back out. Stated rather than papered over, and
+            // it is why a resolver runs depenetration more than once: each pass gets the body
+            // shallower until the ordinary closest-pair case takes over and finishes the job.
+            normal = Vector3.Normalize(tri.NormalRaw);
         }
         return new CollisionHit
         {
@@ -1109,6 +1181,223 @@ public static class Intersection
     // natural "step length" so an absolute distance is more useful for picking,
     // line-of-sight, and similar consumers. Pass maxDistance = float.PositiveInfinity
     // (the default) for unbounded rays. Ray.Direction is expected to be unit length.
+
+    // -- Swept capsule ------------------------------------------------------------
+    //
+    // The character-controller primitive, and the one this whole family did not have: before the
+    // character arc there was no capsule sweep of any kind and Sweep had ZERO callers outside this
+    // file. Everything above sweeps spheres and boxes against planes and boxes, which is what a
+    // projectile wants; a body that walks needs a capsule against a triangle mesh.
+
+    /// <summary>
+    /// A capsule moving by <paramref name="motion"/> against an infinite plane. Exact.
+    /// </summary>
+    /// <remarks>
+    /// Both endpoints translate at the same rate, so the capsule's nearest approach to the plane is
+    /// a linear function of time and there is nothing to iterate: the contact is one division. This
+    /// exists as much to be the sweep against a TRIANGLE's reference as for its own sake — the
+    /// triangle sweep converges on an answer, and the only honest way to say how close it gets is to
+    /// point it at a case whose answer is known in closed form.
+    /// </remarks>
+    public static CollisionHit? Sweep(Capsule capsule, Vector3 motion, Plane plane)
+    {
+        // Already touching: a discrete hit at Time 0, which is the convention CollisionHit states.
+        if (Test(capsule, plane) is { } overlap) return overlap;
+
+        var rate = Vector3.Dot(motion, plane.Normal);
+
+        // Receding or travelling parallel to the plane. Not "no contact ever" — no contact during
+        // THIS step, which is what a sweep is asked about.
+        if (rate >= -1e-9f) return null;
+
+        var nearest = MathF.Min(plane.SignedDistance(capsule.PointA), plane.SignedDistance(capsule.PointB));
+        var time = (capsule.Radius - nearest) / rate;
+        if (time < 0f || time > 1f) return null;
+
+        var lowest = plane.SignedDistance(capsule.PointA) <= plane.SignedDistance(capsule.PointB)
+            ? capsule.PointA
+            : capsule.PointB;
+        var touch = lowest + (motion * time);
+
+        return new CollisionHit
+        {
+            Time = time,
+            Point = touch - (plane.Normal * capsule.Radius),
+            Normal = plane.Normal,
+            Depth = 0f,
+        };
+    }
+
+    /// <summary>
+    /// A capsule moving by <paramref name="motion"/> against one triangle.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Conservative advancement, not a closed form.</b> The exact time of impact between a moving
+    /// capsule and a triangle is a root of a piecewise system — the closest FEATURES change as the
+    /// capsule slides along, so each pairing has its own polynomial and the answer is the earliest
+    /// root of whichever is active at the time. Engines that do it analytically decompose into
+    /// sphere-vs-face, three swept-cylinder edge tests and three swept-sphere vertex tests, and the
+    /// edge cases between those regions are where they get it wrong.
+    /// </para>
+    /// <para>
+    /// Advancement instead: measure the gap, step forward by the most the capsule could travel
+    /// without closing it, measure again. Each step is exact and the sequence only ever
+    /// UNDERSHOOTS, so the answer is always at or before the true contact. For a body that walks,
+    /// erring early means stopping a hair short of a wall; erring late means standing inside it.
+    /// </para>
+    /// <para>
+    /// <b>It cannot tunnel</b>, which is the property that matters and the one a discrete test
+    /// cannot offer at any speed. The iteration cap is a budget, not a correctness condition: run
+    /// out of iterations and the time returned is still a time before contact, so the body stops
+    /// short rather than passing through. That is why exhaustion reports a hit rather than a miss.
+    /// </para>
+    /// </remarks>
+    public static CollisionHit? Sweep(Capsule capsule, Vector3 motion, Triangle tri, float tolerance = 1e-4f)
+    {
+        var speed = motion.Length();
+
+        // A capsule that is not moving cannot have a time of impact; the question collapses to the
+        // discrete one, and answering it here rather than dividing by zero below.
+        if (speed < 1e-9f) return TestCapsuleTriangle(capsule, tri);
+
+        var time = 0f;
+        for (var iteration = 0; iteration < MaxSweepIterations; iteration++)
+        {
+            var moved = new Capsule(
+                capsule.PointA + (motion * time),
+                capsule.PointB + (motion * time),
+                capsule.Radius);
+
+            var (distanceSquared, onSegment, onTriangle) = ClosestPair(moved, tri);
+            var gap = MathF.Sqrt(distanceSquared) - capsule.Radius;
+
+            if (gap <= tolerance)
+            {
+                var separation = onSegment - onTriangle;
+                var length = separation.Length();
+
+                // At a grazing contact the closest pair has all but collapsed, so the direction
+                // between them is noise. The outward face normal is the stable answer — the same
+                // choice the discrete test makes when a segment lies in the plane, and for the same
+                // reason: a winding says which side is outside, and a body arriving from outside a
+                // closed solid wants to be pushed back the way it came.
+                var normal = length > 1e-6f
+                    ? separation / length
+                    : OutwardNormal(tri);
+
+                // <b>A surface you are not moving INTO does not obstruct you.</b> A body resting on
+                // the floor is in contact with it at time zero for ever, so without this a sweep
+                // answers "the floor, now" to every horizontal step — and a resolver spends its
+                // whole iteration budget deflecting a motion that was already tangential, arriving
+                // nowhere. That is exactly how it failed: a walk of 200 steps that never moved, and
+                // a graze along a wall that travelled 0.000 m.
+                //
+                // The rule is the one CollisionResponse already applies to velocity ("when it's
+                // already moving away, no change"), applied one layer earlier to the query. At a
+                // contact found part-way through a step the motion is approaching by construction,
+                // so this only ever fires on a contact the body is already in.
+                //
+                // Overlap is a different question and is not filtered here: a body INSIDE something
+                // has to be pushed out whichever way it happens to be moving, and that is what the
+                // discrete test is for — a resolver depenetrates before it sweeps.
+                if (Vector3.Dot(motion, normal) >= -1e-5f * speed) return null;
+
+                return new CollisionHit
+                {
+                    Time = time,
+                    Point = onTriangle,
+                    Normal = normal,
+                    Depth = 0f,
+                };
+            }
+
+            // The most the capsule can advance without any part of it closing the gap. Exact,
+            // because no point of a rigid body moves faster than the body does.
+            time += gap / speed;
+            if (time > 1f) return null;
+        }
+
+        // Out of budget while still separated. The time is a lower bound on contact, so reporting it
+        // stops the body short of the surface rather than letting it continue into one.
+        return new CollisionHit
+        {
+            Time = MathF.Min(time, 1f),
+            Point = capsule.PointA + (motion * time),
+            Normal = OutwardNormal(tri),
+            Depth = 0f,
+        };
+    }
+
+    /// <summary>
+    /// A capsule moving by <paramref name="motion"/> against a whole mesh. The EARLIEST contact.
+    /// </summary>
+    /// <remarks>
+    /// Earliest rather than deepest, which is the opposite of what the discrete
+    /// <see cref="Test(Capsule, TriangleMesh3D)"/> reports — and correctly so. A discrete test is
+    /// asked "how far in am I", where the worst overlap is the one to resolve; a sweep is asked
+    /// "what do I hit first", where anything after the first contact is a question about a step the
+    /// body will not get to take.
+    /// <para>
+    /// The broad phase is the swept AABB: the capsule's bounds unioned with the same bounds at the
+    /// end of the motion. No BVH — this tree has never measured n² hurting, and the room the lab
+    /// sweeps against is 748 triangles. When something measures it, the internals change and this
+    /// signature does not.
+    /// </para>
+    /// </remarks>
+    public static CollisionHit? Sweep(Capsule capsule, Vector3 motion, TriangleMesh3D mesh, float tolerance = 1e-4f)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+
+        var start = capsule.Bounds;
+        var swept = new Bounds3(
+            Vector3.Min(start.Min, start.Min + motion),
+            Vector3.Max(start.Max, start.Max + motion));
+
+        if (Test(swept, mesh.Bounds) is null) return null;
+
+        CollisionHit? earliest = null;
+        foreach (var tri in mesh.Triangles)
+        {
+            var triMin = Vector3.Min(tri.V0, Vector3.Min(tri.V1, tri.V2));
+            var triMax = Vector3.Max(tri.V0, Vector3.Max(tri.V1, tri.V2));
+            if (Test(swept, new Bounds3(triMin, triMax)) is null) continue;
+
+            if (Sweep(capsule, motion, tri, tolerance) is not { } hit) continue;
+            if (earliest is null || hit.Time < earliest.Value.Time) earliest = hit;
+
+            // A contact at the very start of the step is as early as anything can be; nothing later
+            // in the mesh can beat it, and an overlapping start wants resolving before a sweep means
+            // anything anyway.
+            if (earliest.Value.Time <= 0f) break;
+        }
+
+        return earliest;
+    }
+
+    /// <summary>
+    /// How many times a sweep may measure and advance before it gives up and stops short.
+    /// </summary>
+    /// <remarks>
+    /// Advancement converges geometrically away from tangency and slowly along it — a capsule
+    /// skimming a surface at a shallow angle closes the gap by a little each step. 32 is where the
+    /// room's own cases land well inside the budget; it is a cost ceiling rather than an accuracy
+    /// claim, and the accuracy claim is made by the plane sweep it is checked against.
+    /// </remarks>
+    private const int MaxSweepIterations = 32;
+
+    /// <summary>The triangle's outward normal, or up for a degenerate one.</summary>
+    /// <remarks>
+    /// Degenerate triangles have no normal at all, and a collider full of them reports contacts with
+    /// NaN normals — which propagate into a position and end a run somewhere no number can describe.
+    /// Up is arbitrary and finite, which is the property that matters.
+    /// </remarks>
+    private static Vector3 OutwardNormal(Triangle tri)
+    {
+        var raw = tri.NormalRaw;
+        var lengthSquared = raw.LengthSquared();
+        return lengthSquared < 1e-18f ? Vector3.UnitY : raw / MathF.Sqrt(lengthSquared);
+    }
 
     public static CollisionHit? Raycast(Ray ray, BoundingSphere sphere, float maxDistance = float.PositiveInfinity)
     {

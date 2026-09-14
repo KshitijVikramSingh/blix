@@ -362,10 +362,15 @@ public sealed partial class VulkanGraphicsDevice
 
     private static bool ShouldEnableValidation()
     {
-        // Opt-in via env var so release runs don't pay validation cost
-        // by default. BLIX_VK_VALIDATE=1 lights it up.
-        var env = Environment.GetEnvironmentVariable("BLIX_VK_VALIDATE");
-        return env == "1" || string.Equals(env, "true", StringComparison.OrdinalIgnoreCase);
+        // Opt-in via env var so release runs don't pay validation cost by default.
+        // BLIX_VK_VALIDATE=1 lights it up.
+        //
+        // Read from RenderCommandDiagnostics rather than parsed again here. The record-time
+        // fingerprint has to be taken in Blix.Graphics — a command is fingerprinted where it is
+        // built, which is a layer below this one — so that type owns the switch, and one question
+        // keeps one answer. Two readers of one variable is how a process ends up half-enabled,
+        // which for a record/execute check means reporting a mismatch about itself.
+        return RenderCommandDiagnostics.Enabled;
     }
 
     private static unsafe uint DebugCallback(

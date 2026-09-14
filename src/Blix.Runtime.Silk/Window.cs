@@ -260,6 +260,12 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // calls vkQueuePresentKHR through the device. Until then this is a
         // no-op and the window stays unpainted.
 
+        // ARMED BEFORE EndFrame, so the sink catches the frame being closed rather than the next one.
+        // The counter is the one below, which has not been advanced yet — so --dump-frame 30 is the
+        // thirtieth frame in the same counting --frames uses, and the two agree by construction
+        // rather than by a comment asking the reader to add one.
+        if (options.DumpOnFrame > 0 && renderedFrames + 1 == options.DumpOnFrame) jsonDumpSink?.RequestDump();
+
         debugSystem?.EndFrame();
 
         // <b>Bounded runs belong to the host.</b> Six applications counted their own frames and asked to

@@ -338,6 +338,13 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
     {
         if (disposed) return;
         disposed = true;
+
+        // The measurement RenderCommand.cs asked for before freezing these payloads, printed where
+        // every run already looks: what a record-time copy would have cost this process. Taken by
+        // the fingerprint walk rather than by a second instrument, so the number and the check
+        // cannot disagree about which bytes they mean.
+        if (RenderCommandDiagnostics.Enabled) Console.WriteLine($"[blix] {RenderCommandDiagnostics.Report()}");
+
         if (Vk is not null && Device.Handle != 0) Vk.DeviceWaitIdle(Device);
         DestroyUniformArena();
         DestroyAllResources();

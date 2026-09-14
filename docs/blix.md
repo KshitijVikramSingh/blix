@@ -944,7 +944,7 @@ The mesh raycast does a single AABB early-out, then Möller-Trumbore per triangl
 
 ### Intersection2D
 
-Sibling static class with all-pairs tests + per-primitive raycasts for the 2D primitives. Mirrors the 3D pattern. Pressure-tested by the `Blix.Test.Physics2D` CLI harness (43 cases).
+Sibling static class with all-pairs tests + per-primitive raycasts for the 2D primitives. Mirrors the 3D pattern. Pressure-tested by the `Blix.Test.Physics2D` CLI harness (43 cases). The 3D original it mirrors had **no suite at all** until the character arc; it has one now (`Blix.Test.Physics3D`), and the asymmetry is worth remembering — the mirror was tested for years while the thing it mirrored was not.
 
 ### CollisionWorld3D + CollisionWorld2D
 
@@ -1128,6 +1128,7 @@ State-based push, once per frame. Game code calls `audioListener.Sync(device)` a
 - **Mesh / materials / shaders / render passes** — game code reads `obj.Mesh` and `obj.Material` (a `MaterialHandle`) and records them into the Vulkan `RenderGraph`. See `src/Blix.Demos.VulkanLit/` and `src/Blix.Demos.VulkanSponza/` for the render setup, and [`architecture.md`](architecture.md#the-vulkan-binding-model) for the backend's binding model.
 - **`IDebuggable` / `DebugContext` / debug draw** — game code implements `IDebuggable` to contribute UI/values/draw commands; the diagnostics system lives in `Blix.Diagnostics`.
 - **2D physics test harness** — `Blix.Test.Physics2D` is a 43-case CLI test runner exercising every `Intersection2D` overload. Pressure-tests the 2D primitives without a visual demo.
+- **3D physics test harness** — `Blix.Test.Physics3D`, its twin, opened by the character arc because the 3D math had never had one. Covers the capsule: the nine-candidate closest pair (including the impaled case the original eight could not see), the exact plane sweep, and the converging triangle/mesh sweep checked against it — plus tunnelling at 100 m/s with the discrete test as its control.
 
 ## Roadmap
 

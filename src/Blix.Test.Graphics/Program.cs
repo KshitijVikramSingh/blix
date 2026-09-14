@@ -35,6 +35,13 @@ using VkAccessFlags = Silk.NET.Vulkan.AccessFlags;
 // Tests below assert these invariants. Run against current code: should
 // fail loudly. Run after migration: should pass.
 
+// <b>Before anything builds a render command.</b> RenderCommandDiagnostics reads its switch once
+// and a process cannot half-enable it — a command fingerprinted at record must be verifiable at
+// execute — so the suite opts in here rather than depending on the developer's environment.
+// Section AT asserts the switch actually took, because a fingerprint check that is off would
+// report every case below as passing without reading a byte.
+Environment.SetEnvironmentVariable("BLIX_VK_VALIDATE", "1");
+
 var t = new TestRunner();
 
 // ============================================================================
@@ -2953,8 +2960,241 @@ static ShaderInterface MinimalShader() => new(new[]
         !small.TryAlloc(176, 256, out _));
 }
 
+// ============================================================================
+// Section AT — a recorded command's payload, fingerprinted.
+// ============================================================================
+//
+// A pass body RECORDS; the backend reads uniforms at Execute. PushConstants is copied into the
+// command for exactly that reason and the Uniforms/Textures lists are not — so a caller that
+// refills one scratch array between two draws hands both the array's FINAL contents. The per-draw
+// uniform arena does not help: it fixed the DESTINATION (a slice per distinct block) while this is
+// the SOURCE.
+//
+// What is genuinely at risk is narrower than the old comment implied, and AT.2 is the half that
+// says so: scalar and vector uniforms hold a struct by value and cannot be changed by whoever built
+// them. Only the array uniforms and a reused list can move.
+{
+    // The negative control for the whole section. Every assertion below asserts a THROW; if the
+    // check were off, Fingerprint would return null, VerifyUniforms would return early, and all of
+    // them would pass having read nothing at all.
+    t.ExpectTrue("AT.0 the record/execute check is on for this process", RenderCommandDiagnostics.Enabled);
+
+    var palette = new[] { Matrix4x4.CreateTranslation(1f, 0f, 0f), Matrix4x4.Identity };
+    var uniforms = new List<ShaderUniform> { new("uBones", new Matrix4x4ArrayUniform(palette)) };
+    var cmd = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), 3,
+        uniforms, Array.Empty<ShaderTextureBinding>());
+
+    t.ExpectTrue("AT.1 a recorded command carries one fingerprint per uniform",
+        cmd.UniformFingerprint is { Length: 1 });
+
+    // Unchanged: the ordinary case, which must stay silent however many times it is verified.
+    t.ExpectTrue("AT.1 an untouched payload verifies clean",
+        NoThrow(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", cmd.Uniforms, cmd.UniformFingerprint)));
+
+    // THE HAZARD, and the half that is now closed. The caller refills its scratch array between
+    // draws — which used to hand every draw the final contents, because the backend reads uniforms
+    // at Execute. The array uniform copies on construction now, so the command keeps what it was
+    // recorded with and the mutation simply does not reach it.
+    palette[0] = Matrix4x4.CreateTranslation(99f, 0f, 0f);
+    t.ExpectTrue("AT.2 a caller's array is copied into the uniform, not referenced",
+        !ReferenceEquals(((Matrix4x4ArrayUniform)cmd.Uniforms[0].Value).Value, palette));
+    t.ExpectTrue("AT.2 so mutating it after record changes nothing the draw will read",
+        ((Matrix4x4ArrayUniform)cmd.Uniforms[0].Value).Value[0].M41 == 1f);
+    t.ExpectTrue("AT.2 and the fingerprint still verifies clean",
+        NoThrow(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", cmd.Uniforms, cmd.UniformFingerprint)));
+
+    // And the half that cannot happen, stated as a test so the narrowing is pinned rather than
+    // remembered: a Matrix4x4Uniform holds its matrix by value.
+    var byValue = Matrix4x4.CreateTranslation(1f, 2f, 3f);
+    var valueCmd = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), 3,
+        new List<ShaderUniform> { new("uModel", new Matrix4x4Uniform(byValue)) },
+        Array.Empty<ShaderTextureBinding>());
+    byValue = Matrix4x4.CreateTranslation(9f, 9f, 9f);
+    t.ExpectTrue("AT.3 a scalar/vector uniform cannot be mutated behind a recorded command",
+        NoThrow(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", valueCmd.Uniforms, valueCmd.UniformFingerprint)));
+
+    // A reused LIST is the half the copy does NOT close: the values inside a command are frozen,
+    // but the list they sit in is still the caller's. Deliberate — P2 measured the freeze cost of
+    // the VALUES as zero bytes per frame across every runnable app, and the list's cost is one
+    // allocation per draw in a tree whose games pass no inline uniforms at all. That number wants
+    // a draw-heavy consumer rather than a guess, so the list stays detected rather than copied.
+    uniforms[0] = new ShaderUniform("uBones", new Matrix4x4ArrayUniform(new[] { Matrix4x4.Identity }));
+    t.ExpectTrue("AT.4 a list rewritten after record is caught",
+        Throws(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", cmd.Uniforms, cmd.UniformFingerprint)));
+
+    uniforms.Add(new ShaderUniform("uExtra", new FloatUniform(1f)));
+    t.ExpectTrue("AT.5 a list that grew after record is caught by count",
+        Throws(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", cmd.Uniforms, cmd.UniformFingerprint)));
+
+    // `with` must re-fingerprint rather than carry the original's. A copy constructor does not
+    // re-run field initialisers, so the init accessor is what makes this true — and a stale
+    // fingerprint would make the check fire on correct code, which is worse than not checking.
+    var swapped = cmd with
+    {
+        Uniforms = new List<ShaderUniform> { new("uBones", new Matrix4x4ArrayUniform(new[] { Matrix4x4.Identity })) },
+    };
+    t.ExpectTrue("AT.6 `with` re-fingerprints the new list",
+        NoThrow(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", swapped.Uniforms, swapped.UniformFingerprint)));
+
+    // Textures travel the same way: the list is read at Execute.
+    var bindings = new List<ShaderTextureBinding> { new("uAlbedo", new TextureHandle(7), 0) };
+    var texCmd = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), 3,
+        Array.Empty<ShaderUniform>(), bindings);
+    bindings[0] = new ShaderTextureBinding("uAlbedo", new TextureHandle(8), 0);
+    t.ExpectTrue("AT.7 a texture binding rewritten after record is caught",
+        Throws(() => RenderCommandDiagnostics.VerifyTextures("draw", "p", texCmd.Textures, texCmd.TextureFingerprint)));
+
+    // An empty list has nothing to print, and a null fingerprint must read as "nothing to check"
+    // rather than as a fault — the shape every draw with no uniforms takes.
+    t.ExpectTrue("AT.8 a command with no uniforms carries no fingerprint",
+        texCmd.UniformFingerprint is null);
+    t.ExpectTrue("AT.8 and verifying it is silent",
+        NoThrow(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", texCmd.Uniforms, texCmd.UniformFingerprint)));
+}
+
+// ============================================================================
+// Section AU — bone masks, and a blend that reads one.
+// ============================================================================
+//
+// The animation arc deferred masks "until a consumer asks", with three questions attached: which
+// bones, resolved how, blended in what space. The character arc asked, with a body playing a
+// one-shot chop at 0.868 m/s and its legs frozen mid-swing because one pose source cannot do both.
+//
+// The answers pinned here: a subtree named by its ROOT (not indices, which move when a rig is
+// re-exported), a per-bone weight multiplied by the caller's, and local space.
+{
+    // pelvis and spine both hang off a root; the arms hang off the chest; the legs off the pelvis.
+    // Parents precede children, which Skeleton's own constructor requires and BoneMask relies on.
+    var bones = new[]
+    {
+        new Bone("root", -1, Matrix4x4.Identity),
+        new Bone("pelvis", 0, Matrix4x4.Identity),
+        new Bone("spine", 1, Matrix4x4.Identity),
+        new Bone("chest", 2, Matrix4x4.Identity),
+        new Bone("armL", 3, Matrix4x4.Identity),
+        new Bone("armR", 3, Matrix4x4.Identity),
+        new Bone("legL", 1, Matrix4x4.Identity),
+        new Bone("legR", 1, Matrix4x4.Identity),
+    };
+    var skeleton = new Skeleton(bones);
+    var mask = BoneMask.Subtree(skeleton, "spine");
+
+    // ── Which bones ──────────────────────────────────────────────────────────────────────────────
+    t.ExpectTrue("AU.1 a subtree covers its root and everything beneath it",
+        mask[2] == 1f && mask[3] == 1f && mask[4] == 1f && mask[5] == 1f);
+    t.ExpectTrue("AU.1 and nothing above or beside it",
+        mask[0] == 0f && mask[1] == 0f && mask[6] == 0f && mask[7] == 0f);
+    t.ExpectTrue("AU.1 which is four bones of eight", mask.Reach() == 4);
+
+    // A name that is not in the rig is a typo, and a typo that yields a layer which quietly changes
+    // nothing is the worst shape a bug can take — so it throws, and names what is there.
+    t.ExpectTrue("AU.2 a mask over a bone that does not exist throws rather than covering nothing",
+        ThrowsArgument(() => BoneMask.Subtree(skeleton, "spien")));
+
+    // ── The falloff: the question the deferral did not name ──────────────────────────────────────
+    // A hard boundary puts the whole discontinuity in one joint. Fading UP the chain spreads it, and
+    // how far is a number nobody can derive — hence a parameter, and hence the tooling.
+    {
+        var faded = BoneMask.Subtree(skeleton, "spine", falloff: 2);
+        t.ExpectClose("AU.3 the parent of the root takes two thirds", faded[1], 2f / 3f);
+        t.ExpectClose("AU.3 its parent takes one third", faded[0], 1f / 3f);
+        t.ExpectTrue("AU.3 and the subtree itself is untouched by the fade", faded[2] == 1f && faded[4] == 1f);
+        t.ExpectTrue("AU.3 while the legs stay out of it", faded[6] == 0f && faded[7] == 0f);
+    }
+
+    // ── Two halves that sum to exactly one ───────────────────────────────────────────────────────
+    {
+        var lower = mask.Inverted();
+        var exact = true;
+        for (var i = 0; i < skeleton.BoneCount; i++) exact &= mask[i] + lower[i] == 1f;
+        t.ExpectTrue("AU.4 a mask and its inverse sum to exactly one at every bone", exact);
+    }
+
+    // ── Resolved how: one multiplication, and the exactness that follows ─────────────────────────
+    {
+        // FAR-APART ROTATIONS, and what trying to make them matter established. These cases pin
+        // BEHAVIOUR — a masked blend leaves unmasked bones alone — which is worth pinning however it
+        // is achieved. What they cannot pin is the shortcut that skips blending at the ends: deleting
+        // it turns nothing red, with identity rotations OR with a pair 150° apart on Slerp's
+        // trigonometric branch. Vector3.Lerp and Quaternion.Slerp both return their input exactly at
+        // 0 and at 1, so the shortcut is a COST decision and not a precision one, and the comment in
+        // PoseBlend that said otherwise has been corrected.
+        var near = Quaternion.CreateFromAxisAngle(Vector3.Normalize(new Vector3(0.3f, 1f, 0.2f)), 0.2f);
+        var far = Quaternion.CreateFromAxisAngle(Vector3.Normalize(new Vector3(-0.7f, 0.4f, 1f)), 2.6f);
+
+        BoneTransform Bone(float x, Quaternion r) => new(new Vector3(x, 0f, 0f), r, Vector3.One);
+
+        var walking = new Pose(skeleton.BoneCount);
+        var swinging = new Pose(skeleton.BoneCount);
+        for (var i = 0; i < skeleton.BoneCount; i++)
+        {
+            walking.Locals[i] = Bone(1f, near);
+            swinging.Locals[i] = Bone(2f, far);
+        }
+
+        var result = new Pose(skeleton.BoneCount);
+        PoseBlend.Lerp(walking, swinging, 1f, mask, result);
+
+        // THE CLAIM THE WHOLE STAGE EXISTS FOR: the upper body takes the swing, the legs keep
+        // walking, and the legs are untouched BIT FOR BIT rather than approximately.
+        t.ExpectTrue("AU.5 the masked bones take the second pose exactly",
+            result.Locals[2] == swinging.Locals[2] && result.Locals[4] == swinging.Locals[4]);
+        t.ExpectTrue("AU.5 and the unmasked bones keep the first, bit for bit",
+            result.Locals[6] == walking.Locals[6] && result.Locals[7] == walking.Locals[7] &&
+            result.Locals[0] == walking.Locals[0]);
+
+        // THE CONTROL. Without the mask the same blend moves the legs too — which is what says the
+        // mask did the work rather than the poses happening to agree.
+        var unmasked = new Pose(skeleton.BoneCount);
+        PoseBlend.Lerp(walking, swinging, 1f, unmasked);
+        t.ExpectTrue("AU.5 the control: unmasked, the same blend moves the legs as well",
+            unmasked.Locals[6] != walking.Locals[6]);
+
+        // The caller's weight multiplies the mask's, which is the whole of "resolved how".
+        var half = new Pose(skeleton.BoneCount);
+        PoseBlend.Lerp(walking, swinging, 0.5f, mask, half);
+        t.ExpectClose("AU.6 a half-weight layer reaches a masked bone halfway", half.Locals[2].Translation.X, 1.5f);
+        t.ExpectTrue("AU.6 and an unmasked bone not at all", half.Locals[6] == walking.Locals[6]);
+
+        // A zero-weight layer is not a cheap no-op by accident; it is exact by construction, because
+        // a bone whose effective weight is zero is COPIED rather than interpolated toward itself.
+        var off = new Pose(skeleton.BoneCount);
+        PoseBlend.Lerp(walking, swinging, 0f, mask, off);
+        var untouched = true;
+        for (var i = 0; i < skeleton.BoneCount; i++) untouched &= off.Locals[i] == walking.Locals[i];
+        t.ExpectTrue("AU.7 a layer at zero weight changes nothing at all, bit for bit", untouched);
+
+        // A mask belongs to the skeleton it was built from, and saying so beats a silent half-blend.
+        t.ExpectTrue("AU.8 a mask sized for another skeleton is refused",
+            ThrowsArgument(() => PoseBlend.Lerp(walking, swinging, 1f, BoneMask.All(3), result)));
+    }
+}
+
 t.PrintSummary();
 return t.FailedCount;
+
+// Did the action throw? Section AT asserts on the record/execute check firing, and a bare
+// try/catch at each site would bury the assertion it exists to make.
+static bool Throws(Action action)
+{
+    try { action(); return false; }
+    catch (InvalidOperationException) { return true; }
+}
+
+static bool NoThrow(Action action) => !Throws(action);
+
+// A refusal that names a bad ARGUMENT rather than a bad state — a mask over a bone that is not
+// there, or one sized for another skeleton. Kept separate from Throws above because which kind of
+// refusal a call makes is part of what is being pinned: an argument fault is the caller's typo and
+// an invalid-operation fault is the engine's invariant.
+static bool ThrowsArgument(Action action)
+{
+    try { action(); return false; }
+    catch (ArgumentException) { return true; }
+}
 
 // Calls Validate() on a ShaderInterface and returns the thrown exception
 // (or null on success). Lets test cases assert *which* failure occurred

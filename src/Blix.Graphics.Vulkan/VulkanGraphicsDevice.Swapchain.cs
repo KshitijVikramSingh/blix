@@ -964,9 +964,15 @@ public sealed partial class VulkanGraphicsDevice
         var ib = GetIndexBuffer(d.IndexBuffer);
         var prog = shaderProgramTable[pipe.ShaderProgram.Id];
 
-        // Per-draw uniforms still share the program's per-frame UBO bytes —
-        // two draws sharing a program but writing different uniforms will
-        // race. Push constants / dynamic-offset UBOs are the next step.
+        // Sets 0-1 are per-DRAW: each distinct block gets its own slice of the frame's uniform arena,
+        // bound with a dynamic offset, so two draws sharing a program and disagreeing is correct now.
+        // Sets 2-3 are material-owned and still per-consumer; NoteUniformWrite guards those.
+        //
+        // What neither of those covers is the SOURCE: this runs at Execute, so the lists and arrays
+        // below are read long after the draw was recorded. The fingerprint is what notices.
+        RenderCommandDiagnostics.VerifyUniforms(nameof(DrawIndexedCommand), currentPassName, d.Uniforms, d.UniformFingerprint);
+        RenderCommandDiagnostics.VerifyTextures(nameof(DrawIndexedCommand), currentPassName, d.Textures, d.TextureFingerprint);
+
         if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
 
         Vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, pipe.Pipeline);
@@ -1054,6 +1060,9 @@ public sealed partial class VulkanGraphicsDevice
         var ib = GetIndexBuffer(d.IndexBuffer);
         var prog = shaderProgramTable[pipe.ShaderProgram.Id];
 
+        RenderCommandDiagnostics.VerifyUniforms(nameof(DrawIndexedIndirectCommand), currentPassName, d.Uniforms, d.UniformFingerprint);
+        RenderCommandDiagnostics.VerifyTextures(nameof(DrawIndexedIndirectCommand), currentPassName, d.Textures, d.TextureFingerprint);
+
         if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
 
         Vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, pipe.Pipeline);
@@ -1136,6 +1145,9 @@ public sealed partial class VulkanGraphicsDevice
                     $"Dispatch in compute pass '{pass.Name}' bound a graphics pipeline '{pipe.Name}'. Use a compute pipeline (CreateComputePipeline).");
             }
             var prog = shaderProgramTable[pipe.ShaderProgram.Id];
+
+            RenderCommandDiagnostics.VerifyUniforms(nameof(DispatchCommand), pass.Name, d.Uniforms, d.UniformFingerprint);
+            RenderCommandDiagnostics.VerifyTextures(nameof(DispatchCommand), pass.Name, d.Textures, d.TextureFingerprint);
 
             for (var i = 0; i < d.Textures.Count; i++)
             {

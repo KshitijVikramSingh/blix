@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What Blix Ships</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --paper:#F1F4F5; --surface:#FDFEFE; --sunk:#E7ECEE;
+  --ink:#111A1F; --body:#33454E; --muted:#677C86;
+  --rule:#C6D2D7; --hair:#DDE5E8;
+  --span:#0D5F6E; --span-soft:#0d5f6e14;
+  --pack:#6B4A9E; --pack-soft:#6b4a9e14;
+  --warm:#A55228; --warm-soft:#a5522814;
+  --signal:#A2172F;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --paper:#0C1216; --surface:#141D22; --sunk:#101820;
+  --ink:#E6EDEF; --body:#B4C4CA; --muted:#7D919A;
+  --rule:#26363D; --hair:#1D2A31;
+  --span:#4FB6C6; --span-soft:#4fb6c61c;
+  --pack:#A88FD6; --pack-soft:#a88fd61c;
+  --warm:#DE9760; --warm-soft:#de97601c;
+  --signal:#E96A83;
+}}
+:root[data-theme="dark"]{
+  --paper:#0C1216; --surface:#141D22; --sunk:#101820;
+  --ink:#E6EDEF; --body:#B4C4CA; --muted:#7D919A;
+  --rule:#26363D; --hair:#1D2A31;
+  --span:#4FB6C6; --span-soft:#4fb6c61c;
+  --pack:#A88FD6; --pack-soft:#a88fd61c;
+  --warm:#DE9760; --warm-soft:#de97601c;
+  --signal:#E96A83;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--paper);color:var(--body);
+  font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  font-size:15px;line-height:1.62;margin:0;padding-block:0 76px;padding-inline:20px;-webkit-font-smoothing:antialiased}
+.sheet{max-width:1150px;margin:0 auto}
+h1,h2,h3,h4{font-family:Archivo,"Helvetica Neue",Arial,sans-serif;color:var(--ink);text-wrap:balance;margin:0}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+p{margin:0}
+.masthead{padding-block:56px 30px;border-bottom:2px solid var(--ink)}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+h1{font-size:clamp(34px,6.2vw,58px);font-weight:800;letter-spacing:-.023em;line-height:1.02;margin-top:10px}
+.standfirst{max-width:64ch;margin-top:18px;font-size:17px}
+.toc{display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:26px;font-family:"IBM Plex Mono",monospace;font-size:12px}
+.toc a{color:var(--muted);text-decoration:none;border-bottom:1px solid transparent;padding-bottom:1px}
+.toc a:hover{color:var(--ink);border-bottom-color:var(--span)}
+section{padding-block:48px;border-bottom:1px solid var(--hair)}
+h2{font-size:clamp(22px,3.1vw,30px);font-weight:700;letter-spacing:-.016em;margin-top:6px}
+h3{font-size:17px;font-weight:700;margin-top:30px}
+.lede{max-width:70ch;margin-top:13px;font-size:16px}
+p.t{max-width:72ch;margin-top:13px}
+.note{max-width:74ch;margin-top:16px;font-size:13.5px;color:var(--muted)}
+.note b,p.t b{color:var(--ink)}
+.pull{max-width:58ch;margin-top:26px;padding-left:20px;border-left:3px solid var(--span);
+  font-family:Archivo,sans-serif;font-size:20px;line-height:1.38;font-weight:600;color:var(--ink);letter-spacing:-.012em}
+
+.dead{display:flex;flex-direction:column;gap:1px;background:var(--hair);border:1px solid var(--hair);margin-top:24px}
+.d{background:var(--surface);padding:16px 20px;display:grid;grid-template-columns:150px 1fr;gap:20px;align-items:start}
+.d .was{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--signal);text-decoration:line-through;
+  text-decoration-thickness:1px;line-height:1.5}
+.d p{font-size:13.5px;max-width:72ch}
+.d p b{color:var(--ink)}
+
+.ships{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:1px;background:var(--hair);
+  border:1px solid var(--hair);margin-top:24px}
+.sh{background:var(--surface);padding:17px 19px}
+.sh .w{font-family:Archivo,sans-serif;font-size:17px;font-weight:700;color:var(--ink)}
+.sh p{margin-top:8px;font-size:13px}
+.sh .ex{margin-top:9px;font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--muted);line-height:1.6}
+
+/* span chart */
+.chartwrap{overflow-x:auto;margin-top:24px;border:1px solid var(--hair);background:var(--surface)}
+.chart{min-width:900px;padding:18px 20px 20px}
+.ptrow{display:grid;grid-template-columns:186px repeat(9,1fr) 78px;gap:3px;align-items:end;
+  font-family:"IBM Plex Mono",monospace;font-size:9.5px;color:var(--muted);letter-spacing:.02em;
+  padding-bottom:8px;border-bottom:1px solid var(--rule)}
+.ptrow div{line-height:1.25}
+.ptrow div:first-child,.ptrow div:last-child{color:var(--ink);font-size:10px}
+.ptrow div:last-child{text-align:right}
+.trow{display:grid;grid-template-columns:186px repeat(9,1fr) 78px;gap:3px;align-items:center;
+  padding:5px 0;border-bottom:1px solid var(--hair)}
+.trow:last-child{border-bottom:0}
+.tname{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cell{height:16px;background:var(--sunk)}
+.cell.on{background:var(--span)}
+.cell.on.cheap{background:var(--pack)}
+.cost{font-family:"IBM Plex Mono",monospace;font-size:11px;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+.cost.big{color:var(--signal);font-weight:600}
+.chartkey{display:flex;flex-wrap:wrap;gap:8px 22px;margin-top:14px;font-size:12px;color:var(--muted)}
+.sw{display:inline-block;width:11px;height:11px;vertical-align:-1px;margin-right:6px}
+
+.needs{display:flex;flex-direction:column;gap:1px;background:var(--hair);border:1px solid var(--hair);margin-top:24px}
+.need{background:var(--surface);padding:16px 20px;display:grid;grid-template-columns:58px 1fr;gap:18px;align-items:start}
+.need .n{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--span);font-weight:600;padding-top:2px}
+.need h4{font-size:15px;font-weight:600;font-family:"IBM Plex Sans",sans-serif;color:var(--ink)}
+.need p{margin-top:6px;font-size:13.5px;max-width:72ch}
+.need .today{margin-top:7px;font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted)}
+
+pre{background:var(--surface);border:1px solid var(--hair);padding:16px 18px;overflow-x:auto;margin-top:18px;
+  font-family:"IBM Plex Mono",monospace;font-size:12.5px;line-height:1.7;color:var(--body)}
+pre b{color:var(--ink);font-weight:600}
+pre i{font-style:normal;color:var(--muted)}
+pre u{text-decoration:none;color:var(--pack);font-weight:600}
+
+.qs{display:flex;flex-direction:column;gap:1px;background:var(--hair);border:1px solid var(--hair);margin-top:24px}
+.q{background:var(--surface);padding:17px 20px}
+.q h4{font-size:15.5px;font-weight:600;font-family:"IBM Plex Sans",sans-serif;color:var(--ink);max-width:70ch}
+.q p{margin-top:7px;font-size:13.5px;max-width:74ch}
+.q .mine{margin-top:9px;font-size:13.5px;border-left:2px solid var(--span);padding-left:12px;max-width:70ch}
+.st{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+  padding:2px 6px;margin-right:9px;vertical-align:2px;border:1px solid var(--rule);color:var(--muted)}
+.st.settled{border-color:var(--span);color:var(--span)}
+.st.open{border-color:var(--signal);color:var(--signal)}
+footer{padding-top:34px;font-size:12.5px;color:var(--muted);max-width:76ch}
+a{color:var(--span)}
+@media (max-width:720px){ .d{grid-template-columns:1fr;gap:8px} .need{grid-template-columns:1fr;gap:6px} }
+</style>
+</head>
+<body>
+<div class="sheet">
+
+<header class="masthead">
+  <div class="eyebrow">revision 2 · supersedes blix-workbench.html · 2026-09-15</div>
+  <h1>What Blix Ships</h1>
+  <p class="standfirst">Not an editor, not a game, not a lab. Tools, formats, pipelines, conventions,
+  and a substrate deep enough that you can pick any two points in the stack and build a CLI or UI
+  tool between them.</p>
+  <nav class="toc">
+    <a href="#dead">01 what died</a>
+    <a href="#ships">02 the five things</a>
+    <a href="#subjects">03 pack and frame</a>
+    <a href="#points">04 pick any two points</a>
+    <a href="#needs">05 what the substrate owes</a>
+    <a href="#open">06 settled and open</a>
+  </nav>
+</header>
+
+<section id="dead">
+  <div class="eyebrow">01 — corrections</div>
+  <h2>What died in the last draft</h2>
+  <p class="lede">Three of them were the centrepiece, so this is not a revision so much as a
+  different argument that happens to reuse some numbers.</p>
+
+  <div class="dead">
+    <div class="d">
+      <div class="was">the workbench<br>one app, many subjects</div>
+      <div><p><b>There is no central application.</b> Blix does not ship one thing you open. It ships
+      the parts, and a project builds its own tools out of them — which is what the character lab and
+      RTSGame were already doing, correctly. What was wrong was never that they built their own; it
+      was that building one cost two thousand lines of apparatus first.</p></div>
+    </div>
+    <div class="d">
+      <div class="was">room · controller · world<br>as subjects</div>
+      <div><p><b>Those are project content, not Blix things.</b> A room is something the character lab
+      made up. Blix has no opinion about rooms and should not learn one. The things Blix actually has
+      are the artifacts it defines and the frames it draws.</p></div>
+    </div>
+    <div class="d">
+      <div class="was">a subject contract<br>content · state · panels · checks</div>
+      <div><p><b>That list should have ended at "anything, or nothing".</b> Four required things is a
+      framework, and a framework is exactly the thing that imposes opinions downstream. Whatever a
+      caller has, it hands over; whatever it does not have, it does not.</p></div>
+    </div>
+    <div class="d">
+      <div class="was">tool · lab · game<br>as categories</div>
+      <div><p><b>Dropped.</b> They were categories of project, and projects are not the unit. A
+      project is <em>many</em> bespoke tools and games at once — RTSGame is a game plus 35 headless
+      scenario runners plus a tuning UI, in one project, and that is the right shape rather than a
+      confusion to tidy up.</p></div>
+    </div>
+    <div class="d">
+      <div class="was">headless is the same<br>subject without a window</div>
+      <div><p><b>Probably false, and dropped as an assumption.</b> A headed tool and a headless one
+      share a library and nothing else. Three programs over one library is the shape that already
+      works; forcing them into one mode switch would have been the framework again.</p></div>
+    </div>
+  </div>
+
+  <p class="note">Two objections I raised were also answered and I accept both. <b>On monolith:</b>
+  size is not the fault — the Vulkan layer is 8,267 lines and is good engineering, because its job is
+  well defined, it is boxed in one place, and it imposes nothing on what comes after. That is the
+  test, not line count. <b>On cost:</b> this tree already replaced its entire graphics backend once.
+  Restructuring is not the risk.</p>
+</section>
+
+<section id="ships">
+  <div class="eyebrow">02 — the statement</div>
+  <h2>The five things, and the one sentence</h2>
+  <p class="pull">Blix does not ship an editor, or a game, or a lab. It ships tools and formats and
+  pipelines and conventions and a substrate big enough that you can pick any two points and build a
+  CLI or UI tool around it.</p>
+
+  <div class="ships">
+    <div class="sh">
+      <div class="w">Formats</div>
+      <p>The file types Blix defines and owns end to end — written, read, listed and judged by its
+      own code.</p>
+      <div class="ex">.blixmesh · .blixtex · .blixprobe<br>+ what glTF becomes on import</div>
+    </div>
+    <div class="sh">
+      <div class="w">Pipelines</div>
+      <p>The transformations between them. Deterministic, re-runnable, and reporting what they did
+      rather than only that they finished.</p>
+      <div class="ex">cook textures · cook meshes<br>clip merge · LOD chains · spatial split</div>
+    </div>
+    <div class="sh">
+      <div class="w">Tools</div>
+      <p>The small number of things Blix itself invokes over its own formats. Everything else is a
+      project's own business.</p>
+      <div class="ex">inspect · check · cook · open · shot</div>
+    </div>
+    <div class="sh">
+      <div class="w">Conventions</div>
+      <p>The rules that make a bespoke tool recognisable as a Blix tool without any shared code
+      at all.</p>
+      <div class="ex">OK/FAIL + exit code · negative controls<br>proves/owns blocks · the §-numbered index</div>
+    </div>
+    <div class="sh">
+      <div class="w">Substrate</div>
+      <p>The stack itself, with seams you can enter and leave at. The subject of the rest of this
+      document.</p>
+      <div class="ex">bytes → import → cooked → CPU<br>→ GPU → draw → graph → device → image</div>
+    </div>
+  </div>
+
+  <p class="t">The consequence worth stating plainly: <b>"each project is many editors and many games
+  in one project"</b> is not a description of a mess, it is the target. A project builds the bespoke
+  tools its own content needs — a map tuner, a fight bench, a determinism check, a room viewer — and
+  Blix's job is to make each of those cost the thing it is about and nothing else.</p>
+</section>
+
+<section id="subjects">
+  <div class="eyebrow">03 — the artifacts</div>
+  <h2>Two things Blix actually has</h2>
+  <p class="lede">Once room, controller and world are gone, the list is short — and it gets shorter
+  still when the first three collapse into one.</p>
+
+  <h3>A pack — content at rest</h3>
+  <p class="t"><b>A named set of content that travels together.</b> A <code>.glb</code> is a pack: it
+  carries meshes, a skeleton, clips, materials and textures in one file. A cooked Sponza directory is
+  a pack. So <em>model</em> and <em>rig</em> are not separate subjects — they are packs whose contents
+  differ, and the tools should discover what is inside rather than be told by a flag.</p>
+  <p class="t">That collapses the flag problem directly: today <code>--model</code> and
+  <code>--rig</code> are two switches meaning "which of my two code paths to take", set by a person
+  who already knows the answer. A pack knows what it contains. <code>blix open rogue.glb</code> should
+  need no flag, and the panels that appear should be the panels its contents justify.</p>
+
+  <h3>A frame — content in motion</h3>
+  <p class="t">The other real thing, and the one Blix uniquely owns: passes, targets, draws,
+  uniforms, bindings, timings. It is not a pack and it is not on disk. It already has the beginnings
+  of tooling — <code>--dump-frame</code>, <code>BLIX_VK_VALIDATE=1</code>, the record-time
+  fingerprints, the overlay — all of which exist in different places with different shapes.</p>
+
+  <h3>And the verbs re-read</h3>
+  <pre><b>blix inspect</b> &lt;pack&gt;          <i>list what is in it. exits 0. reports.</i>
+<b>blix check</b>   &lt;pack&gt;          <i>judge what is in it. exits non-zero. judges.</i>
+<b>blix cook</b>    &lt;pack&gt;          <i>transform it into Blix's own formats</i>
+<b>blix open</b>    &lt;pack&gt;          <i>look at it</i>
+<b>blix shot</b>    &lt;pack&gt;          <i>look at it, without looking</i>
+
+<b>blix frame</b>   --dump | --validate | --bench     <i>the other subject, barely tooled</i></pre>
+  <p class="note">The <code>inspect</code>/<code>check</code> distinction is already in the tree and
+  already deliberate — <code>blix-cook inspect</code> lists and always exits 0, the probes judge and
+  do not. That is a convention worth keeping exactly as it is; it just needs one noun to apply to.</p>
+</section>
+
+<section id="points">
+  <div class="eyebrow">04 — the substrate</div>
+  <h2>Pick any two points</h2>
+  <p class="lede">Nine points from bytes on disk to an image you can look at. Every tool in the tree
+  is a span between two of them. Charting the spans against what each cost says exactly where the
+  substrate is thin — and it is not where I have been looking.</p>
+
+  <div class="chartwrap">
+  <div class="chart">
+    <div class="ptrow">
+      <div>tool</div>
+      <div>P0<br>bytes</div>
+      <div>P1<br>import</div>
+      <div>P2<br>cooked</div>
+      <div>P3<br>CPU data</div>
+      <div>P4<br>GPU</div>
+      <div>P5<br>draws</div>
+      <div>P6<br>graph</div>
+      <div>P7<br>device</div>
+      <div>P8<br>image</div>
+      <div>cost</div>
+    </div>
+
+    <div class="trow"><div class="tname">blix-cook inspect</div>
+      <div class="cell on cheap"></div><div class="cell on cheap"></div><div class="cell"></div><div class="cell"></div>
+      <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+      <div class="cost">~300</div></div>
+
+    <div class="trow"><div class="tname">blix-cook textures</div>
+      <div class="cell on cheap"></div><div class="cell on cheap"></div><div class="cell on cheap"></div><div class="cell"></div>
+      <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+      <div class="cost">~690</div></div>
+
+    <div class="trow"><div class="tname">character probe</div>
+      <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell on cheap"></div>
+      <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+      <div class="cost">830</div></div>
+
+    <div class="trow"><div class="tname">RTS scenarios ×35</div>
+      <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell on cheap"></div>
+      <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+      <div class="cost">—</div></div>
+
+    <div class="trow"><div class="tname">Test.Physics3D</div>
+      <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell on cheap"></div>
+      <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+      <div class="cost">277</div></div>
+
+    <div class="trow"><div class="tname">toolchain probe</div>
+      <div class="cell on"></div><div class="cell on"></div><div class="cell"></div><div class="cell on"></div>
+      <div class="cell on"></div><div class="cell"></div><div class="cell"></div><div class="cell on"></div><div class="cell"></div>
+      <div class="cost">774</div></div>
+
+    <div class="trow"><div class="tname">frame dump / validate</div>
+      <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+      <div class="cell"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell"></div>
+      <div class="cost">~400</div></div>
+
+    <div class="trow"><div class="tname">character room</div>
+      <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell on"></div>
+      <div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div>
+      <div class="cost big">1,097</div></div>
+
+    <div class="trow"><div class="tname">character capture</div>
+      <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell on"></div>
+      <div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div>
+      <div class="cost big">808</div></div>
+
+    <div class="trow"><div class="tname">toolchain viewer</div>
+      <div class="cell on"></div><div class="cell on"></div><div class="cell"></div><div class="cell on"></div>
+      <div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div>
+      <div class="cost big">2,388</div></div>
+
+    <div class="trow"><div class="tname">toolchain capture</div>
+      <div class="cell on"></div><div class="cell on"></div><div class="cell"></div><div class="cell on"></div>
+      <div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div>
+      <div class="cost big">1,507</div></div>
+  </div>
+  </div>
+  <div class="chartkey" style="padding-inline:20px">
+    <span><span class="sw" style="background:var(--pack)"></span>span that stops before the GPU</span>
+    <span><span class="sw" style="background:var(--span)"></span>span that reaches the screen</span>
+    <span>cost = the tool's own lines plus its share of the library written for it</span>
+  </div>
+
+  <p class="pull">Every tool that stops before P4 costs a few hundred lines. Every tool that reaches
+  P8 costs one to two thousand. The stack is thin in exactly one place, and it is the place between
+  having data and seeing it.</p>
+
+  <p class="t">That is a much narrower diagnosis than "the labs hold things that should be shared". It
+  says: <b>P0→P3 is already good substrate</b> — an importer you can call, CPU data you can hold, and
+  a convention (OK/FAIL, exit code) that makes a 277-line tool complete. Five tools in this chart are
+  cheap for exactly that reason, and three of them are not even in a lab.</p>
+
+  <p class="t">And it says <b>P4→P8 is not substrate at all.</b> It is a thing each tool builds from
+  scratch: a render graph, a set of shaders, a camera, a window or a readback path. Nobody has ever
+  spanned to the screen cheaply, which is why so few tools do, and why the ones that do are the most
+  expensive artifacts in the tree.</p>
+</section>
+
+<section id="needs">
+  <div class="eyebrow">05 — what is owed</div>
+  <h2>What the substrate has to provide, derived from the chart</h2>
+  <p class="lede">Five things, all of them in the P4→P8 gap, none of them a framework. The test each
+  has to pass is yours: a well-defined job, boxed in one place, a stable surface, and no opinion
+  imposed on what comes after.</p>
+
+  <div class="needs">
+    <div class="need">
+      <div class="n">P4</div>
+      <div>
+        <h4>Residency — data on the GPU without a draw attached</h4>
+        <p>Vertex and index buffers, textures, material scalars, bounds, from CPU data or straight
+        from a pack. It names no shader, no material set, no pass and no instance count, because the
+        moment it does it has an opinion about how you will draw.</p>
+        <div class="today">today: six implementations, the two engine-side ones stranded at one consumer each</div>
+      </div>
+    </div>
+    <div class="need">
+      <div class="n">P6</div>
+      <div>
+        <h4>A scene that can show a thing</h4>
+        <p>Shadow → lit → present, a grid, a sun, a camera. Not "the lab scene" — a default that a
+        tool takes when it has no opinion, and replaces entirely when it does.</p>
+        <div class="today">today: the same graph written twice, differing by a string prefix and one pass</div>
+      </div>
+    </div>
+    <div class="need">
+      <div class="n">P8</div>
+      <div>
+        <h4>Readback as a call, not a program</h4>
+        <p>Render n frames, hand back an image. The capability arrived this year — colour attachments
+        were not legal copy sources before it — and it currently exists as two 300-line programs
+        rather than as something you can call.</p>
+        <div class="today">today: Capture/Program.cs, twice, incl. camera framing and argument parsing</div>
+      </div>
+    </div>
+    <div class="need">
+      <div class="n">UI</div>
+      <div>
+        <h4>A window with panels, without an application</h4>
+        <p>The chassis already gives a window, input, a loop and ImGui. What is missing is everything
+        above it: docking, the embedded viewport, picking — which exist, and are inside one
+        executable where nothing can reach them.</p>
+        <div class="today">today: ViewerPanels.cs 717 + LabSelection.cs 129, in an .exe</div>
+      </div>
+    </div>
+    <div class="need">
+      <div class="n">P0–P2</div>
+      <div>
+        <h4>The formats as first-class citizens</h4>
+        <p>Three formats are defined and written — <code>.blixmesh</code>, <code>.blixtex</code>,
+        <code>.blixprobe</code> — and the only way to see inside one is a cooker subcommand. Each
+        should be listable, judgeable and openable, because a format you cannot inspect is a format
+        you debug by printf.</p>
+        <div class="today">today: blix-cook inspect, and nothing for .blixtex or .blixprobe</div>
+      </div>
+    </div>
+  </div>
+
+  <p class="t">Nothing in that list is a host, a plugin system or a contract a caller has to satisfy.
+  They are five pieces you can call, in the gap the chart points at. <b>A tool that spans P3→P8 should
+  cost what a P3 tool costs</b> — a few hundred lines, most of them about its subject.</p>
+</section>
+
+<section id="open">
+  <div class="eyebrow">06 — state</div>
+  <h2>Settled, and still open</h2>
+
+  <div class="qs">
+    <div class="q">
+      <h4><span class="st settled">settled</span>Blix ships no editor, no game, no lab</h4>
+      <p>It ships formats, pipelines, tools over its own formats, conventions, and substrate. A
+      project builds its own bespoke tools and games together, as RTSGame already does. The editor
+      question dissolves: there is no application to become one.</p>
+    </div>
+    <div class="q">
+      <h4><span class="st settled">settled</span>Size is not the monolith test</h4>
+      <p>Well-defined job, boxed in one place, stable surface, no opinion imposed downstream. The
+      Vulkan layer passes it at 8,267 lines. Each of the five pieces above has to pass the same test
+      individually, which is mostly a constraint on their surfaces rather than their size.</p>
+    </div>
+    <div class="q">
+      <h4><span class="st settled">settled</span>Headed and headless do not unify</h4>
+      <p>Three programs over one library, which is the shape that already works. Dropping this also
+      removes the main reason the last draft wanted a contract.</p>
+    </div>
+    <div class="q">
+      <h4><span class="st open">open</span>Where the window and the loop sit</h4>
+      <p>You said take them a layer up if required. The chassis owns them now and a tool takes them
+      by being an application. The question is whether "a window with panels" is something a tool
+      <em>calls</em> or something it <em>is</em> — and that is the difference between a UI tool costing
+      50 lines and costing 600.</p>
+      <p class="mine">The thing I would want to settle first, because the UI piece of the substrate
+      cannot be designed until it is answered, and it is the piece you said matters most.</p>
+    </div>
+    <div class="q">
+      <h4><span class="st open">open</span>Does a pack know what it is?</h4>
+      <p>Dropping <code>--model</code> and <code>--rig</code> means a pack reports its own contents
+      and tools react. That is clearly right for glTF, where the file says. It is less obvious for a
+      cooked directory, and it decides whether "pack" is a real type in the code or only a word in
+      the CLI.</p>
+      <p class="mine">Leaning real type, small — a manifest and a content list, nothing more.</p>
+    </div>
+    <div class="q">
+      <h4><span class="st open">open</span>What the frame subject actually is</h4>
+      <p>It is the one thing here Blix uniquely owns and the least tooled: a dump flag, an
+      environment variable, a fingerprint, an overlay, all differently shaped. Whether that becomes
+      one addressable subject or stays a set of habits is undecided, and I have not thought about it
+      as hard as the pack side.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  Revision 2. Supersedes <code>docs/blix-workbench.html</code> (a central application — wrong) and
+  <code>docs/blix-tooling-design.html</code> (what had earned the right to move — the wrong question).
+  <code>docs/blix-topology.html</code> still stands: it is the counted graph. Costs in §04 are each
+  tool's own lines plus its share of the library written for it, at <code>935f7a6</code>; the shares
+  are a judgement call and the chart is worth disputing on that basis.
+</footer>
+
+</div>
+</body>
+</html>

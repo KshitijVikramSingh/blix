@@ -324,10 +324,24 @@ internal static class JsonDumpSink_CaptureBridge
     // deliberately don't reach back into JsonDumpSink.SerializerOptions
     // (it would couple this static to that one's initialization order);
     // duplication here is tiny and stable.
+    // <b>IncludeFields, and the one word it used to be.</b> With fields excluded, every
+    // System.Numerics value published through Values.Value(...) serialised as `{}` — Vector2,
+    // Vector3, Vector4, Quaternion and Matrix4x4 all expose their components as FIELDS, not
+    // properties. So a dump carried the NAME of every position and direction an application
+    // reported and none of the numbers, which is the one thing a dump exists for.
+    //
+    // It had been that way since the dump existed and was invisible because the draw commands —
+    // which are what a dump is usually read for — go through explicit JsonVec3 records and were
+    // always fine. It surfaced the first time an application published its whole state as values
+    // and someone read the file.
+    //
+    // Additive rather than a schema break: payloads that were empty gain contents, and payloads of
+    // types with no public fields are unchanged. No version bump, by the rule at the top of this
+    // file — add fields rather than rename or restructure.
     private static readonly JsonSerializerOptions Options = new()
     {
         WriteIndented = false,
-        IncludeFields = false,
+        IncludeFields = true,
         Converters = { new JsonStringEnumConverter() }
     };
 

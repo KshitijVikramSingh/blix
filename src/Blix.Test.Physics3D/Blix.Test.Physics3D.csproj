@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The 3D collision math's first test suite.
+
+    A FOURTH suite, deliberately. The engine's rule is "pin behaviour with a Blix.Test.Graphics
+    section", and collision math is not graphics — Blix.Test.Physics2D already exists for exactly
+    this reason and this is its missing twin. The asymmetry was the finding that opened the arc:
+    Intersection2D has 43 cases and Intersection, which docs/blix.md says it "mirrors", had one
+    call in the whole tree.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Blix.Test.Physics3D</RootNamespace>
+    <AssemblyName>Blix.Test.Physics3D</AssemblyName>
+  </PropertyGroup>
+
+</Project>
