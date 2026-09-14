@@ -96,8 +96,13 @@ public sealed class Room
 
     public int TriangleCount => Positions.Length / 3;
 
-    /// <summary>Where a body should start: on the floor, clear of everything.</summary>
-    public static Vector3 SpawnPoint => new(-8f, 0f, 6f);
+    /// <summary>Where a body should start: on the floor, clear of everything, facing the ramp fan.</summary>
+    /// <remarks>
+    /// Moved once already, by the probe rather than by eye: turning the ramp fan around put its foot
+    /// where the old spawn stood. A spawn point inside a solid is a bug that looks exactly like a
+    /// resolver bug on the first frame of every run, which is why it is a claim the probe checks.
+    /// </remarks>
+    public static Vector3 SpawnPoint => new(-12.8f, 0f, 0f);
 
     public static Room Build()
     {
@@ -132,14 +137,23 @@ public sealed class Room
         // THE RAMP FAN. One run, five rises — so the angles are exact ratios rather than the result of
         // rounding a tangent, and the pair that straddles a plausible slope limit (30 and 45) sit beside
         // each other where one run can try both.
-        const float rampRun = 3f;
+        //
+        // <b>The foot faces the open floor, and the first layout had it the other way.</b> A ramp rises
+        // along +X, so its walkable face looks west — and with the fan against the west wall that face
+        // was a metre from it, approachable by nothing. Found by looking at a capture: the fan showed
+        // five vertical BACKS and not one inclined surface, which is exactly what a ramp you cannot
+        // reach looks like. The probe could not have caught it; every claim it checks was true.
+        //
+        // The run is 2.5 m because the rise is what it costs: at 60° a 3 m run stands 5.2 m tall, over
+        // the walls and out of the room.
+        const float rampRun = 2.5f;
         const float rampWidth = 2.2f;
         foreach (var (degrees, zCentre) in new[] { (5f, -7.2f), (15f, -3.6f), (30f, 0f), (45f, 3.6f), (60f, 7.2f) })
         {
             var rise = rampRun * MathF.Tan(degrees * MathF.PI / 180f);
             var z = zCentre;
             Part($"ramp-{degrees:00}", RampColour(degrees),
-                () => builder.Ramp(-13f, -13f + rampRun, z - rampWidth * 0.5f, z + rampWidth * 0.5f, 0f, rise),
+                () => builder.Ramp(-11f, -11f + rampRun, z - rampWidth * 0.5f, z + rampWidth * 0.5f, 0f, rise),
                 slope: degrees);
         }
 
@@ -153,8 +167,8 @@ public sealed class Room
             {
                 for (var step = 1; step <= 6; step++)
                 {
-                    var x0 = -6f + (step - 1) * 0.35f;
-                    builder.Box(new(x0, 0f, z - 1f), new(-6f + 6 * 0.35f, step * r, z + 1f));
+                    var x0 = -4.5f + (step - 1) * 0.35f;
+                    builder.Box(new(x0, 0f, z - 1f), new(-4.5f + 6 * 0.35f, step * r, z + 1f));
                 }
             }, riser: r);
         }

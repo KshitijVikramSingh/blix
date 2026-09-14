@@ -179,6 +179,33 @@ Test.Graphics section pins the detector's fingerprint, not the rendering.
 
 ## Room — contact, with nothing else in the picture
 
+### Status — R-A is in
+
+`Blix.Labs.Character` (the library, its own shaders and renderer), `.Room` (the viewer), `.Probe`
+(headless, 24 checks) and `.Capture` (reproducible PNGs). 748 triangles, 14 parts, 33 closed solids.
+`tools/run-room.sh`, `tools/run-room-capture.sh`.
+
+**The instrument R-A produced** is the slope tint: every surface shaded by the normal the *collider*
+reads, unlit, so the same slope is the same colour in sun and in shadow. The ramp fan comes out as a
+monotone gradient at 5/15/30/45/60°, the stairs as green treads and red risers, and the dome as a
+continuous sweep from green at the apex to orange at its foot.
+
+**Found by building it, in the order found:**
+
+1. **Closure is a property of a SOLID, not a part.** Asked per part it called the walls open — the
+   four wall boxes share a vertical edge at each hall corner, so that edge has four triangles on it.
+2. **The dome's seam was a hairline crack**: `cos(tau)` and `cos(0)` are different floats.
+3. **A facet's slope is bracketed by its corners**, not measured against a tolerance. Two earlier
+   versions used the centroid (which sits *inside* the sphere, so the error was one-sided) and then
+   the mean corner radius (which the apex ring, reaching from the pole, failed by 3.6°).
+4. **The ramps faced a wall.** Every probe check passed and the fan was unusable: its walkable faces
+   looked west with one metre of floor in front of them. Found in a capture — five vertical backs
+   and not one inclined surface. **The probe cannot catch a room that is merely useless.**
+5. **The tint was multiplied by the lighting**, so the same slope read differently in shadow. A gauge
+   whose reading depends on where the sun is is not a gauge; it replaces the shading now.
+6. **The spawn point moved, by the probe rather than by eye** — turning the fan around put its foot
+   where the spawn stood, which would have started every run of stage R-C inside a solid.
+
 **R-A — a room whose ground truth is analytic.** Built, not imported: a flat floor, a ramp
 fan (5°, 15°, 30°, 45°, 60°), stairs at 0.1 / 0.2 / 0.3 m risers, a ledge, a low beam, a
 narrow gap, a curved bowl. Every answer is known in closed form before anything runs.

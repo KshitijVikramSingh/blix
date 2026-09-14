@@ -22,6 +22,30 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <GlslShader Include="Shaders\room_lit.vert" />
+    <GlslShader Include="Shaders\room_lit.frag" />
+    <GlslShader Include="Shaders\room_shadow.vert" />
+    <GlslShader Include="Shaders\room_shadow.frag" />
+    <GlslShader Include="Shaders\room_present.vert" />
+    <GlslShader Include="Shaders\room_present.frag" />
+    <GlslInclude Include="..\Blix.Shaders\pbr.glsl" />
+    <GlslInclude Include="..\Blix.Shaders\shadow.glsl" />
+    <GlslInclude Include="..\Blix.Shaders\tonemap.glsl" />
+    <GlslInclude Include="..\Blix.Shaders\fullscreen.glsl" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Shaders\*.spv">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Shaders\%(Filename)%(Extension)</Link>
+    </None>
+    <None Include="Shaders\*.refl.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Shaders\%(Filename)%(Extension)</Link>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Blix\Blix.csproj" />
     <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
