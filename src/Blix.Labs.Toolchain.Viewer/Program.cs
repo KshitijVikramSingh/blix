@@ -1256,6 +1256,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
                 if (showPivots) ImGui.Checkbox("transform-only nodes too", ref showAllPivots);
             }
 
+            // A closed window needs a way back, and the X is the only way out. Here rather than in
+            // a menu bar the lab does not have.
+            ImGui.Checkbox("viewport panel", ref viewportOpen);
+
             if (rig is not null)
             {
                 ImGui.Checkbox("skeleton", ref showSkeleton);
@@ -1316,6 +1320,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private void DrawViewportPanel()
     {
         if (viewportId == 0) return;
+
+        // <b>ImGui does not close a window for you.</b> Begin(name, ref open) draws the X and sets
+        // the flag; NOT calling Begin next frame is what actually closes it. Calling it regardless
+        // left the window on screen while the render was switched off — so the X looked like it
+        // froze the picture, which is a considerably worse thing for a button to appear to do.
+        if (!viewportOpen) return;
 
         ImGui.SetNextWindowSize(new Vector2(520, 340), ImGuiCond.FirstUseEver);
         ImGui.SetNextWindowPos(new Vector2(480, 470), ImGuiCond.FirstUseEver);

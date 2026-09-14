@@ -430,12 +430,16 @@ can be drawn (stage A did that) and nothing about views.
 
 Three things it settled:
 
-- **The viewport needs no pipelines of its own.** Two render passes whose attachments match in
-  format and sample count are render-pass *compatible*, so every lit and skinned pipeline baked
-  against the scene pass is legal in the viewport pass. The cost of sharing formats is that the
-  panel holds untonemapped HDR — the curve lives in the present pass and a panel has none, so
-  anything over 1.0 clips. Written down rather than fixed; two pipeline families is a lot to pay
-  before the clipping is in the way.
+- **A second camera needs its own shader PROGRAM, not just its own target.** The passes are
+  render-pass compatible, so sharing the scene's pipelines is legal — and it rendered both
+  pictures through one camera. A program owns one per-frame uniform buffer per frame slot; two
+  passes sharing a program share that buffer, and since every host write happens during recording
+  while the GPU reads at execution, the last `uViewProjection` written wins for *every* draw in
+  the frame. Clean validation, correct draw counts, and two captures that each looked right —
+  because each read one target and both held the same camera. What found it was a person saying
+  "the two cameras seem in sync". The target's format is still shared with the scene's, which
+  means the panel holds untonemapped HDR and anything over 1.0 clips; written down rather than
+  fixed.
 - **The panel's rect is one frame old.** UI layout runs *after* views are declared and after the
   scene is recorded, so this frame's picture is drawn at last frame's size and a resize shows one
   frame of stale aspect. That is what every immediate-mode editor does; the alternative is

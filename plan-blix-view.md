@@ -68,11 +68,20 @@ its own graph pass, shown by an ImGui `Image`. Capture reads it back with `--vie
 
 **Found by doing it:**
 
-- **The viewport needed no pipelines of its own.** Two render passes whose attachments match in
-  format and sample count are render-pass *compatible*, so every lit and skinned pipeline baked
-  against the scene pass is legal in the viewport pass. Giving the panel an `Rgba8` target — the
-  obvious choice, since a panel wants display-referred colour — would have doubled the pipeline
-  families for a picture that is the same picture from a different chair.
+- **The viewport needs its own PROGRAMS, and I got this wrong first.** Two render passes whose
+  attachments match are render-pass *compatible*, so sharing the scene's pipelines is legal — and
+  it rendered both pictures through one camera. A program owns **one per-frame uniform buffer per
+  frame slot**; two passes sharing a program share that buffer; every host write happens during
+  recording while the GPU reads at execution, so the last `uViewProjection` written wins for every
+  draw in the frame. That is the hazard `TranslateDrawIndexed` names in as many words, and the
+  viewport walked into it.
+  <br>Worse, **every instrument was blind to it.** Validation was clean. The draw counts were
+  right. A `--viewport` capture showed the panel camera and a plain capture showed the main one —
+  both correct-looking, because each read only one target and both targets held the same camera.
+  It took reading the *scene* target while the viewport pass was active to see it, and a person
+  saying "the two cameras seem in sync".
+  <br>The fix is a second program from the same SPIR-V (and pipelines against it). Per-pass UBO
+  instances or dynamic offsets are the real one, and that is engine work with no second consumer.
 - **The cost of that is untonemapped HDR.** The curve lives in the present pass and a panel has
   no present pass; ImGui samples a texture and draws it. Anything over 1.0 clips. Accepted and
   written down — the fix is a fragment stage that tonemaps, and it is not worth two pipeline
