@@ -24,6 +24,7 @@ namespace Blix.Labs.Character.CaptureApp;
 // radiance, and the curve below is the same one the present shader runs.
 public static class Program
 {
+    [BlixApp("room-shot", Summary = "render the room to a PNG", Headed = true)]
     public static void Main(string[] args)
     {
         var output = ArgValue(args, "--out") ?? "room.png";

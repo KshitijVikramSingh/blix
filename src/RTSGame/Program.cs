@@ -1,3 +1,4 @@
+using Blix.Core;
 using Blix.Runtime.Silk;
 using RTSGame.Debug;
 
@@ -7,6 +8,14 @@ public static class Program
 {
     public static void Main(string[] args)
     {
+        // <b>Declared apps first, and this is how the chain below gets shorter.</b> Three of these
+        // branches were `if (args.Contains("--selftest")) Environment.Exit(...)` and are now a
+        // [BlixApp] on the scenario itself — `blix run rts:selftest`. Dispatch returns null when no
+        // app was named, so everything not yet declared keeps working exactly as it did, which is
+        // what makes 726 lines of hand-written dispatch removable one scenario at a time rather
+        // than in one commit nobody wants to review.
+        if (BlixApps.Dispatch(args) is { } appCode) Environment.Exit(appCode);
+
         // <b>Every number this program prints is a measurement, so it is printed the same everywhere.</b>
         // Without this the machine's own digit grouping gets in: the forest line read "8,65,710 wood" on
         // this one, which is correct for the local convention and useless in a report you compare against
@@ -49,21 +58,6 @@ public static class Program
         {
             Simulation.FactionKnowledge.Enabled = false;
             Console.WriteLine("  faction knowledge is not gathered (--no-knowledge) — measurement only");
-        }
-
-        if (args.Contains("--selftest"))
-        {
-            Environment.Exit(SimulationSelfTests.Run());
-        }
-
-        if (args.Contains("--fightbench"))
-        {
-            Environment.Exit(FightBenchmarks.Run());
-        }
-
-        if (args.Contains("--benchmark"))
-        {
-            Environment.Exit(MovementBenchmarks.Run());
         }
 
         if (args.Contains("--scale"))

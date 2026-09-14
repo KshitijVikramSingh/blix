@@ -28,10 +28,10 @@
     <GlslShader Include="Shaders\room_shadow.frag" />
     <GlslShader Include="Shaders\room_present.vert" />
     <GlslShader Include="Shaders\room_present.frag" />
-    <GlslInclude Include="..\Blix.Shaders\pbr.glsl" />
-    <GlslInclude Include="..\Blix.Shaders\shadow.glsl" />
-    <GlslInclude Include="..\Blix.Shaders\tonemap.glsl" />
-    <GlslInclude Include="..\Blix.Shaders\fullscreen.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\pbr.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\shadow.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\tonemap.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\fullscreen.glsl" />
   </ItemGroup>
 
   <ItemGroup>
@@ -47,13 +47,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Blix\Blix.csproj" />
-    <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
-    <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
-    <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />
-    <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
-    <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
-    <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
-    <ProjectReference Include="..\Blix.Tools.Shader\Blix.Tools.Shader.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
+    <ProjectReference Include="..\..\Blix.Core\Blix.Core.csproj" />
+    <ProjectReference Include="..\..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
+    <ProjectReference Include="..\..\Blix.Geometry\Blix.Geometry.csproj" />
+    <ProjectReference Include="..\..\Blix.Graphics\Blix.Graphics.csproj" />
+    <ProjectReference Include="..\..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="..\..\Blix.Render\Blix.Render.csproj" />
+    <ProjectReference Include="..\..\Blix.Tools.Shader\Blix.Tools.Shader.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
   </ItemGroup>
 
   <PropertyGroup>

@@ -56,6 +56,13 @@
                             and policy waits for a third consumer to want it.
   -->
   <PropertyGroup>
+    <!-- Absolute, from THIS file, not relative to the project. A relative
+         "$(MSBuildProjectDirectory)/../Blix.Shaders" quietly assumed every project sits
+         exactly one level under src/ — true of all 39 until the character lab became a
+         folder holding four of them, and then silently wrong. The shared include
+         directory has one location; it should be named from the one file that knows it. -->
+    <BlixShaderIncludeDir Condition="'$(BlixShaderIncludeDir)' == ''">$(MSBuildThisFileDirectory)src/Blix.Shaders</BlixShaderIncludeDir>
+
     <BlixShaderMode Condition="'$(BlixShaderMode)' == ''">App</BlixShaderMode>
 
     <!-- MSBuildPROJECTDirectory, not MSBuildThisFileDirectory. In a .csproj those
@@ -89,7 +96,7 @@
           Outputs="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv')">
     <MakeDir Directories="$(BlixShaderOutDir)" />
     <Message Text="Compiling SPIR-V ($(BlixShaderMode)): %(GlslShader.Identity)" Importance="high" />
-    <Exec Command="dotnet &quot;$(BlixShaderCompilerDll)&quot; --glslc &quot;$(Glslc)&quot; --input &quot;%(GlslShader.FullPath)&quot; --output &quot;$(BlixShaderOutDir)%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; --include &quot;$(MSBuildProjectDirectory)/../Blix.Shaders&quot;" />
+    <Exec Command="dotnet &quot;$(BlixShaderCompilerDll)&quot; --glslc &quot;$(Glslc)&quot; --input &quot;%(GlslShader.FullPath)&quot; --output &quot;$(BlixShaderOutDir)%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; --include &quot;$(BlixShaderIncludeDir)&quot;" />
   </Target>
 
   <!--

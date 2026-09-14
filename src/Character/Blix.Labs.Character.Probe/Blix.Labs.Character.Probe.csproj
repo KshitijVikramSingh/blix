@@ -5,7 +5,7 @@
     GPU at all — and a check that needs no GPU is one that can run wherever the geometry changes.
   -->
   <ItemGroup>
-    <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />
+    <ProjectReference Include="..\..\Blix.Geometry\Blix.Geometry.csproj" />
     <ProjectReference Include="..\Blix.Labs.Character\Blix.Labs.Character.csproj" />
   </ItemGroup>
 

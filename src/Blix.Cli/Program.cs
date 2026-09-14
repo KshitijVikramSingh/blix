@@ -84,6 +84,19 @@ public static class Program
             "blix.project marker, a solution, or a repository in it.");
     }
 
+    /// <summary>The nearest project marker at or above <paramref name="from"/>, stopping at the root.</summary>
+    private static string? OwningProject(DirectoryInfo? from, DirectoryInfo root)
+    {
+        for (var dir = from; dir is not null; dir = dir.Parent)
+        {
+            var marker = Path.Combine(dir.FullName, "blix.project");
+            if (File.Exists(marker)) return ProjectName(dir);
+            if (string.Equals(dir.FullName, root.FullName, StringComparison.Ordinal)) break;
+        }
+
+        return null;
+    }
+
     private static string ProjectName(DirectoryInfo root)
     {
         var marker = Path.Combine(root.FullName, "blix.project");
@@ -99,9 +112,15 @@ public static class Program
     private static List<App> Discover(DirectoryInfo root)
     {
         var apps = new List<App>();
+        var rootName = ProjectName(root);
 
         foreach (var file in root.EnumerateFiles("*.blixapps.json", SearchOption.AllDirectories))
         {
+            // Which project this app belongs to: the nearest marker ABOVE it, or the
+            // root's own name when there is none. This is what makes the marker do real
+            // work rather than only scope a listing — two projects may both declare
+            // "selftest", and `rts:selftest` is how you say which.
+            var project = OwningProject(file.Directory, root) ?? rootName;
             Index? index;
             try
             {
@@ -136,7 +155,7 @@ public static class Program
                     // simply runs. Only an assembly carrying SEVERAL apps has to be told
                     // which one, and only those callers need BlixApps.Dispatch at all.
                     apps.Add(new App(
-                        app.Name, app.Summary, app.Headed, host, assembly,
+                        project, app.Name, app.Summary, app.Headed, host, assembly,
                         app.IsEntryPoint ? null : app.Name, stale, Declared: true));
                 }
             }
@@ -152,12 +171,34 @@ public static class Program
             if (index.HasEntryPoint && !index.Apps.Any(a => a.IsEntryPoint))
             {
                 var name = Path.GetFileNameWithoutExtension(index.Assembly);
-                apps.Add(new App(name, null, false, host, assembly, null, stale, Declared: false));
+                apps.Add(new App(project, name, null, false, host, assembly, null, stale, Declared: false));
             }
         }
 
-        return apps;
+        return Deduplicate(apps);
     }
+
+    /// <summary>
+    /// One app per (project, name, assembly), however many output directories hold it.
+    /// </summary>
+    /// <remarks>
+    /// A RID-specific build writes its outputs twice — <c>bin/Debug/net8.0</c> and
+    /// <c>bin/Debug/net8.0/osx-arm64</c> — so the same assembly gets two sidecars and
+    /// every app in it looked ambiguous with itself. The key includes the assembly file
+    /// name deliberately: two DIFFERENT assemblies in one project claiming one name is a
+    /// real ambiguity and must still be reported.
+    /// <para>
+    /// The copy with a working apphost wins, then the shallower path, so the answer does
+    /// not depend on directory enumeration order.
+    /// </para>
+    /// </remarks>
+    private static List<App> Deduplicate(List<App> apps) => apps
+        .GroupBy(a => (a.Project, a.Name, Assembly: Path.GetFileName(a.Assembly)))
+        .Select(g => g
+            .OrderByDescending(a => a.AppHost is not null && File.Exists(a.AppHost))
+            .ThenBy(a => a.Assembly.Length)
+            .First())
+        .ToList();
 
     // ── verbs ───────────────────────────────────────────────────────────────
 
@@ -176,12 +217,13 @@ public static class Program
             return 0;
         }
 
-        Console.WriteLine();
-        var declared = apps.Where(a => a.Declared).OrderBy(a => a.Name, StringComparer.Ordinal).ToArray();
-        var byConvention = apps.Where(a => !a.Declared).OrderBy(a => a.Name, StringComparer.Ordinal).ToArray();
-
-        Print("declared", declared);
-        Print("by convention", byConvention);
+        foreach (var group in apps.GroupBy(a => a.Project).OrderBy(g => g.Key, StringComparer.Ordinal))
+        {
+            Console.WriteLine();
+            Console.WriteLine($"  {group.Key}");
+            Print(group.Where(a => a.Declared).OrderBy(a => a.Name, StringComparer.Ordinal).ToArray());
+            Print(group.Where(a => !a.Declared).OrderBy(a => a.Name, StringComparer.Ordinal).ToArray());
+        }
 
         if (apps.Any(a => a.Stale))
         {
@@ -192,19 +234,18 @@ public static class Program
         return 0;
     }
 
-    private static void Print(string heading, App[] apps)
+    private static void Print(App[] apps)
     {
         if (apps.Length == 0) return;
 
-        Console.WriteLine($"  {heading}");
         var width = apps.Max(a => a.Name.Length);
         foreach (var app in apps)
         {
             var mark = app.Stale ? "*" : " ";
             var kind = app.Headed ? "  [window]" : string.Empty;
-            Console.WriteLine($"   {mark} {app.Name.PadRight(width)}  {app.Summary ?? string.Empty}{kind}");
+            var summary = app.Summary is null ? string.Empty : $"  {app.Summary}";
+            Console.WriteLine($"   {mark} {app.Name.PadRight(width)}{summary}{kind}");
         }
-        Console.WriteLine();
     }
 
     private static int Run(string[] args)
@@ -215,16 +256,31 @@ public static class Program
         var wanted = args[0];
         var rest = args.Skip(1).ToArray();
 
-        // project:app addresses across folders; a bare name means this project. Both
-        // resolve the same way, which is what keeps "I am standing in it" from being a
-        // different mechanism than "I am not".
+        // project:app addresses across folders; a bare name means "anywhere below here",
+        // which from inside a project folder is that project and from the repository root
+        // is everything. Both resolve the same way, which is what keeps "I am standing in
+        // it" from being a different mechanism than "I am not".
+        var candidates = Discover(root);
         if (wanted.Contains(':'))
         {
             var parts = wanted.Split(':', 2);
+            var project = parts[0];
             wanted = parts[1];
+
+            var scoped = candidates
+                .Where(a => string.Equals(a.Project, project, StringComparison.OrdinalIgnoreCase)).ToList();
+
+            if (scoped.Count == 0)
+            {
+                var known = candidates.Select(a => a.Project).Distinct().Order(StringComparer.Ordinal);
+                throw new BlixCliException(
+                    $"no project '{project}' below {root.FullName}. There is: {string.Join(", ", known)}");
+            }
+
+            candidates = scoped;
         }
 
-        var app = Resolve(Discover(root), wanted);
+        var app = Resolve(candidates, wanted);
 
         if (app.Stale)
         {
@@ -294,7 +350,8 @@ public static class Program
         if (candidates.Length > 1)
         {
             throw new BlixCliException(
-                $"'{wanted}' is ambiguous: {string.Join(", ", candidates.Select(c => c.Name).Order())}");
+                $"'{wanted}' is ambiguous — say which: " +
+                string.Join(", ", candidates.Select(c => $"{c.Project}:{c.Name}").Order(StringComparer.Ordinal)));
         }
 
         var known = apps.Select(a => a.Name).Order(StringComparer.Ordinal).ToArray();
@@ -342,7 +399,7 @@ public static class Program
     /// <param name="Selector">The name to pass as <c>--blix-app</c>, or null when the app IS the
     /// executable and its entry point needs no selecting.</param>
     private sealed record App(
-        string Name, string? Summary, bool Headed, string? AppHost, string Assembly,
+        string Project, string Name, string? Summary, bool Headed, string? AppHost, string Assembly,
         string? Selector, bool Stale, bool Declared);
 
     private sealed class BlixCliException(string message) : Exception(message);

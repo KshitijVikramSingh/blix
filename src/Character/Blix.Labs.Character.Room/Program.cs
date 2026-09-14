@@ -29,6 +29,7 @@ namespace Blix.Labs.Character.RoomApp;
 //     had a character in it could not tell you whether a fault was the room's.
 public static class Program
 {
+    [BlixApp("room", Summary = "walk the character lab's room — contact, with nothing else in the picture", Headed = true)]
     public static void Main(string[] args)
     {
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
