@@ -1358,6 +1358,18 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         viewportImageSize = fitted;
         ImGui.Image(viewportId, fitted);
 
+        // <b>An Image is not an interactive item, and IsItemActive on one is always false.</b>
+        // ImGui.Image calls ItemAdd with a bounding box — enough for IsItemHovered — but it runs no
+        // ButtonBehavior and mints no id, so nothing can ever hold it "active". Dragging on the
+        // picture therefore did nothing at all: the wheel worked, a click picked, and the one
+        // gesture a viewport exists for was silently inert.
+        //
+        // An InvisibleButton over the same rectangle is the idiom. It gives the picture an id and
+        // real press/drag state, and the Image underneath still draws — the button is placed back
+        // at the image's own origin rather than after it.
+        ImGui.SetCursorScreenPos(viewportImageMin);
+        ImGui.InvisibleButton("##viewport-surface", fitted, ImGuiButtonFlags.MouseButtonLeft);
+
         // ── Stage C: driving a view from inside the widget ───────────────────
         // <b>Not through IInputHandler, and that is forced rather than chosen.</b> The viewport is
         // an ImGui window, so ImGui captures the pointer over it, GestureOwnership hands the press
@@ -1392,10 +1404,14 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             }
         }
 
+        // The frame counter sits next to the picture on purpose: if the numbers advance while the
+        // image does not, the freeze is in what the UI samples rather than in what the camera does,
+        // and those are two completely different bugs to go looking for.
         var pointer = ImGui.GetMousePos();
         ImGui.TextDisabled(hovered
             ? $"pointer {pointer.X - viewportImageMin.X:0}, {pointer.Y - viewportImageMin.Y:0} in view"
             : "drag to orbit · wheel to zoom · click to pick");
+        ImGui.TextDisabled($"frame {frames} · yaw {viewportYaw:0.00} · {fitted.X:0}x{fitted.Y:0}");
         ImGui.End();
     }
 
