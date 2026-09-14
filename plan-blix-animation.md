@@ -141,11 +141,72 @@ or stuttering trail, which is a thing you can see.
 *Acceptance:* a walk clip's delta integrates to a straight line at constant speed across
 several loops, with no step at the wrap.
 
-## Stage D — pose composition
+## Stage D — pose composition — **RESUMED 2026-09-15, the consumer asked**
 
-Bone masks and layered poses — aim the upper body while the legs walk. **Deferred until a
-consumer asks.** Masks are policy: which bones, resolved how, blended in what space. Nothing
-in the tree wants it yet, and guessing produces an API that fits nothing.
+Bone masks and layered poses — aim the upper body while the legs walk. Deferred since the arc
+shipped, on the grounds that masks are policy — *which bones, resolved how, blended in what space* —
+and that guessing produces an API that fits nothing.
+
+### The consumer, and exactly what it asked
+
+The character arc's Motion stage, and the ask arrived as a dump rather than an opinion. A body in the
+lab at frame 11,373: playing a one-shot chop, `speed: 0.868` at the same instant, **legs frozen
+mid-swing** because a single pose source cannot walk and swing at once. That is this stage's sentence
+— "aim the upper body while the legs walk" — with a number attached.
+
+### The three questions, answered with the case in front of us
+
+- **Which bones** — a subtree, named by its root and read from the skeleton's hierarchy. Not a list
+  of indices, which would be an asset's private numbering leaking into a game's source.
+- **Resolved how** — a per-bone weight in [0, 1], multiplied by the layer's own weight. One
+  multiplication, no modes.
+- **In what space** — local, per bone, which is what `PoseBlend.Lerp` already does.
+
+Plus one the deferral did not name and the lab will have to find: **the falloff**. A hard subtree
+boundary kinks at the waist, and softening it over a few bones up the chain is a number nobody can
+derive — which makes it a dial, and the reason there is a tool.
+
+### Weights only. The engine learns no structure at all
+
+`Blix` composes poses from **explicit weights and masks** and knows nothing about states, links,
+conditions or durations. A crossfade is the caller moving a weight; the engine never asks who decided
+it or why.
+
+This is a deliberate refusal, and it is the lesson of the character arc's M-A. That stage built a
+discrete state machine modelled on RTSGame's, shipped it, and its own dump killed it in two minutes —
+because §4 evidence about a *failure mode* had been allowed to choose a *model*, and the two
+consumers' problems are not the same shape at all. The mechanical half — interpolate between poses
+given explicit weights — has one right answer and belongs here. The contested half — which pose,
+when, why — has at least two, so it waits, exactly as the resolver and these masks did.
+
+**Whether "a state machine" is a thing Blix ever defines is not decided.** It may be data, it may be
+each game's own code, it may be nothing. None of that has to be answered for this to be built.
+
+### D1 — the mask, and the blend that reads it
+
+`BoneMask` built from a subtree root, with an optional falloff up the chain; `PoseBlend.Lerp` gaining
+a masked overload where the effective per-bone weight is `weight × mask[i]`. Pinned by a
+`Blix.Test.Graphics` section: a mask that covers a subtree covers exactly that subtree, a weight of 0
+or 1 reproduces one input exactly, and a masked blend leaves unmasked bones untouched bit for bit.
+
+### D2 — the tooling, in the toolchain lab
+
+Masks, layers and blends become things you can **see and check**, in
+`Blix.Labs.Toolchain` — where `LabRig`, `LabSkeletonView` and `RigSession` already are, where the
+probe already judges clips, and where a rig viewer already exists. Building a second one elsewhere
+was the mistake the character arc caught itself about to make.
+
+The instrument that matters: **the mask drawn on the skeleton**, bones coloured by weight. "Which
+bones" is a question no amount of arithmetic answers as well as a picture, and the falloff is a
+number you tune by looking.
+
+New sibling executables rather than more flags, on the principle that already split `blix-cook
+inspect` from the probe: name the question each tool answers.
+
+### What stage D will not build
+
+State machines · transitions · durations · blend trees · an authoring format · retargeting. The
+engine gets weights; the lab gets the tools to see them; the structure waits for a consumer.
 
 ## Stage E — analytic IK
 

@@ -447,110 +447,29 @@ Section AQ.
 
 ---
 
-## Motion — a pose pipeline, not a state selector
+## Motion — moved, and deliberately halved
 
-**Restarted 2026-09-15, from scratch, after M-A shipped and was driven for two minutes.**
+**Reframed 2026-09-15.** What M-A tried to be was two different things wearing one name, and they
+belong in different places:
 
-### What M-A got wrong, and how its own dump said so
+- **Interpolation** — given explicit weights and masks, produce a pose. One right answer, mechanical,
+  testable. This is `Blix`'s, and it is `plan-blix-animation.md` **stage D**, which deferred exactly
+  this until a consumer asked. M-A's dump is the consumer asking.
+- **Selection** — which pose, when, why. At least two right answers, as this arc has already
+  demonstrated at its own expense. **Not decided, and not this stage's problem.** Whether Blix ever
+  defines "a state machine" is open; it may be data, it may be each game's code, it may be nothing.
 
-A dump from the running lab at frame 11,373: `state: act`, **`time-in-state: 23.7 s`**, clip
-`1H_Melee_Attack_Chop` — a one-shot. It finished in under a second and the body stood frozen on its
-last frame for twenty-four seconds. `speed: 0.868` at the same moment, so it was walking and
-swinging at once, the act won, and the legs were locked mid-chop. 164 state changes in 147 seconds.
+And the tooling half is not a lab at all — it is **another toolchain app**. `Blix.Labs.Toolchain`
+already loads rigs, plays and blends clips, draws skeletons and judges clips headlessly; masks and
+layers are the missing half of that same subject, and building a second rig viewer in the character
+lab to hold them was a mistake this arc caught itself about to make twice.
 
-Three failures, none of them a tuning problem:
+### What this leaves the character arc
 
-- **Logic** — a one-shot with no concept of *finishing*, and two things that obviously co-occur that
-  structurally could not.
-- **Vocabulary** — "state" was conflating *what the character is doing* with *which single clip is
-  playing*. A character does several things at once; the word cannot carry that.
-- **Visualisation** — the panel read "act, held 23.72s" and looked perfectly healthy. Nothing said
-  the clip had ended 23 seconds earlier.
-
-**The mistake underneath all three:** §4 evidence about a FAILURE MODE was allowed to choose the
-MODEL. RTSGame's comments are excellent evidence that animation selection flickers when it reads
-fast facts. They were never evidence that a flat priority list over discrete single-clip states is
-the right shape for a character — and the solution was imported along with the problem.
-
-The two problems are not the same shape. RTSGame drives hundreds of bodies, seen from forty metres,
-each doing one thing, from a simulation's discrete assignments; its hard problems are don't flicker,
-don't sync, place the impact frame. One pose source per body chosen by priority is *correct for
-that*. A third-person character is one body, seen from four metres, doing several things at once,
-driven by continuous input; its hard problems are blend continuously, layer, and cancel.
-
-### The finding worth keeping is the opposite of what was built
-
-**The flicker was self-inflicted.** `idle`, `walk` and `run` are not three things a character does —
-they are three samples of one continuous thing. A blend over speed has no threshold to sit on, so
-there is nothing to flicker, and both the dwell and the hysteresis band were machinery to paper over
-having discretised a continuous parameter. (The finding about RTSGame stands: it really does have
-that bug, and a band really would fix it. It was a finding about the RTS.)
-
-### The model
-
-**Parameters** — continuous, named, the only thing anything reads. `speed`, `grounded`,
-`verticalSpeed`. Critically, an attack is an **event**, not a level: half of what the dump shows is a
-boolean that nothing ever cleared.
-
-**Sources** — things that produce a pose. A clip; a **blend over a parameter**; an additive.
-
-**Layers** — an ordered stack, each with a source, a weight that fades, and a **mask**. A base layer
-running locomotion; an upper-body layer running actions.
-
-**Actions** — with a real lifecycle: start, play, blend out on completion, and a named cancel window.
-"Finished" becomes a fact the machine holds rather than something nobody noticed for 23 seconds.
-
-**Links** — transitions with a DURATION. Nothing cuts.
-
-What is left of the state machine is small: per layer, which source is active and the crossfade
-between them. Most of M-A does not get fixed; it stops existing.
-
-### The clocks survive, in a better home
-
-The three phase sources — wall time with an offset, distance against a measured stride, an act's
-charge against a measured impact frame — are properties of a **source**, not of a state. Distance
-phase belongs to the locomotion blend; impact phase belongs to an action. That is a better home than
-the one the old plan gave them, and it is why they were worth keeping.
-
-### What this needs from the engine
-
-**A masked blend, which Blix deliberately does not have.** The animation arc deferred it in as many
-words: *"Masks are policy: which bones, resolved how, blended in what space. Nothing in the tree
-wants it yet, and guessing produces an API that fits nothing."* An upper body swinging over a walking
-base is the consumer it was waiting for, and the lab answers its three questions with a real case in
-front of it:
-
-- **which bones** — a subtree named by its root, read from the skeleton's hierarchy;
-- **resolved how** — a per-bone weight in [0, 1], multiplied by the layer's own weight;
-- **in what space** — local, which is what `PoseBlend.Lerp` already does per bone.
-
-### Stages
-
-Every stage lands with its instrument, not before one. That is R's lesson and M-A is a second
-demonstration of it: the panel that could not say "this clip finished" is the reason the fault lived
-for two minutes.
-
-**M1 — parameters and a locomotion blend.** No states at all: one blend over `speed`. The instrument
-is the blend axis drawn — the parameter's position, the two clips either side, and their weights.
-Acceptance: there is no threshold in it, so there is nothing to flicker, and the dwell machinery is
-not replaced but *absent*.
-
-**M2 — the action layer, and the mask.** A masked blend in the engine; an upper-body one-shot with a
-lifecycle. Instrument: the mask drawn ON the skeleton, bones coloured by weight, and a phase bar per
-source with its duration, so a finished clip is unmissable. Acceptance: walk and swing at once, and
-the swing ends on its own.
-
-**M3 — ground and air, with durations.** The small selection that remains, and every link a
-crossfade rather than a cut.
-
-**M4 — a scripted parameter track.** A list of (time, parameter) with no wall clock, so a capture
-sequence of a transition is byte-diffable. Unchanged from the old plan and still the instrument
-RTSGame never had.
-
-### What this stage will not build
-
-A graph editor · blend trees beyond one dimension · retargeting · IK · authored animation events ·
-state machines as an asset format · anything that needs the room.
+The **Controller** stage, unchanged, once composition exists: a body that walks through the room with
+an upper body doing something else. The character lab carries no rig code and no animation model of
+its own — it consumes what stage D produces, and whatever selection it needs, it owns itself until a
+second consumer disagrees with it.
 
 ## Controller — the two together
 
