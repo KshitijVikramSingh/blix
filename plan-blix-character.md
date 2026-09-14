@@ -449,36 +449,84 @@ Section AQ.
 
 ## Motion — states and clips, on flat ground
 
-**M-A — a state graph as data.** States (idle, walk, run, jump, fall, land, act) and
-transitions whose conditions read a small input struct. The §4 question is *not* whether
-the graph is engine-worthy — the three existing consumers disagree about where conditions
-come from, which is the shape §4 names with the turret rigs. What they agree on is
-underneath: **dwell, interrupts, blend-over-duration and the clock a clip runs on.**
+**Settled before building, 2026-09-14.**
 
-**M-B — transitions that blend.** Cross-fade over a duration via the existing
-`PoseBlend.Lerp`. Instrument: the blend weight plotted while it happens, because "it
-looked like a pop" and "it was a 0.05 s blend" are different bugs.
+### What the §4 evidence actually contains
 
-**M-C — clocks, named.** The RTS's hardest-won knowledge, extracted from a 7,000-line
-file: a **phase source** is *wall time with a per-body offset*, *distance against the
-clip's own measured stride*, or *an act's charge placed against a measured impact frame*.
-§211's two bugs are the acceptance test, stated as a rule: **a clip plays at the rate it
-was authored at, and all that is chosen is where in it the body is.**
+Re-reading RTSGame's animation code, the valuable part is not the state machine. It is the
+**ordering**, and every rule in it is a bug report written into a comment. `BodyActions.For` is a
+priority chain:
 
-**M-D — the state graph you can see.** Current state, time in state, the last transition
-*and which condition fired it*, live blend weights, and each active clip's clock and
-phase — plus a scrolling history of the last N transitions, which `DebugTrails` already
-makes possible because it survives across frames.
+1. **Flinch first** — a body taking a hit is the most urgent thing on screen.
+2. The builder exception, read from **the project, never the activity**: "a builder's activity opens
+   and abandons as the jobs layer cycles its legs hunting for timber, so any pose derived from it
+   alternates at several hertz" — *reported three times, patched twice from the wrong end*.
+3. **The act before the movement**: "a body at its place is nudged constantly by its neighbours and
+   by depenetration, and those nudges cross the walking threshold for single frames".
 
-**M-E — a scripted input track.** No wall clock: a list of (time, input) so a capture
-sequence of a transition is byte-diffable frame to frame. This is `--frames-out` pointed
-at state instead of at motion, and it is the instrument the RTS never had.
+One rule underneath all three: **read slow facts, not fast ones.** Geometry rather than velocity;
+assignment rather than activity. Then a **dwell** on top (`heldAction` / `heldUntil`), **interrupts**
+that bypass it (`Flinch`, `Fall`), and **three clocks** for phase.
 
-**Negative control:** a state machine with dwell disabled must be *shown* to flicker —
-transitions per second measured at a condition boundary — or the dwell test passes by
-construction.
+So the lab's job is not to invent a state machine. It is to make each of those failures reproducible
+on demand — a flickering pose should be a switch, not an anecdote.
 
----
+### Three decisions taken up front
+
+- **Written against the ENGINE's types**, not the toolchain lab's. `GltfImporter`, `Skeleton`,
+  `ClipPlayer`, `PoseBlend`, `PoseDelta`, `BonePaletteSet` are all there; most of `LabRig` is
+  plumbing between those and *one* renderer's shaders, and the character lab has its own. Reaching
+  across would couple two labs and drag a second lab's shaders into every executable here through
+  content propagation. If something turns out genuinely non-trivial to redo, THAT is the evidence
+  for a shared lab library — not the anticipation of it.
+- **The graph and the view of it land together.** Stage R's lesson was that four faults in five were
+  legibility, and a state machine you cannot see is exactly the thing that gets reported as "the
+  animation glitches" and patched from the wrong end — three times, in the RTS's own comments.
+- **All three clocks**, including the hard one. §211's two chair-reported bugs ("our farmers are
+  statues and our woodcutters are on cocaine"; "each animation only plays until the impact frame and
+  then resets") both live in the act clock, and the Rogue has attack clips to measure.
+
+### M-A — the graph, and the panel that shows it
+
+A state graph as data: states and transitions whose conditions read a small input struct, with
+**dwell** and an **interrupt** set. Plus, in the same stage, the panel — current state, time in
+state, the last transition *and which condition fired it*, and a scrolling history of the last N.
+
+**The negative control**: dwell off must be *shown* to flicker — transitions per second measured at
+a condition boundary — or the dwell test passes by construction.
+
+### M-B — transitions that blend
+
+Cross-fade over a duration through the existing `PoseBlend.Lerp`. The instrument is the blend weight
+plotted while it happens, because "it looked like a pop" and "it was a 0.05 s blend" are different
+bugs with the same report.
+
+### M-C — clocks, named
+
+A **phase source** is one of: wall time with a per-body offset; distance against the clip's own
+measured stride; or an act's charge placed against a measured impact frame. Stated as a rule and
+pinned as a test: **a clip plays at the rate it was authored at, and all that is chosen is where in
+it the body is.**
+
+### M-D — a scripted input track
+
+A list of (time, input) with no wall clock anywhere, so a capture sequence of a transition is
+byte-diffable frame to frame. `--frames-out` pointed at state instead of at motion — the instrument
+the RTS never had.
+
+### What crosses into the engine
+
+**Held open deliberately**, exactly as R-C held the resolver open. The graph itself almost certainly
+does not: the three consumers disagree about where conditions come from, which is the shape §4 names
+with the turret rigs. What might is the machinery underneath — dwell, interrupts, blend-over-duration
+and the phase clocks — and the decision belongs to whatever second consumer asks, not to this plan.
+
+### What this stage will not build
+
+State machines as an asset format · a graph editor · blend trees · retargeting · IK · authored
+animation events · anything that needs the room. Motion is flat ground and synthetic input on
+purpose: a body that walks badly and animates well should be diagnosable without the two being in
+the same picture.
 
 ## Controller — the two together
 
