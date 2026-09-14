@@ -276,6 +276,11 @@ public sealed partial class VulkanGraphicsDevice
         {
             Vk.GetPhysicalDeviceProperties(PhysicalDevice, out var props);
             MaxAnisotropy = props.Limits.MaxSamplerAnisotropy;
+
+            // Every dynamic offset handed to vkCmdBindDescriptorSets must be a multiple of this.
+            // Read rather than assumed: 256 on plenty of hardware, 16 on some, and a hard-coded
+            // guess is either wasteful or invalid with no middle ground.
+            uniformOffsetAlignment = (int)System.Math.Max(1ul, props.Limits.MinUniformBufferOffsetAlignment);
         }
 
         // multiDrawIndirect: one vkCmdDrawIndexedIndirect issuing drawCount>1

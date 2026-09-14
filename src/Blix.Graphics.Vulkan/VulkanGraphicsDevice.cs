@@ -339,6 +339,7 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
         if (disposed) return;
         disposed = true;
         if (Vk is not null && Device.Handle != 0) Vk.DeviceWaitIdle(Device);
+        DestroyUniformArena();
         DestroyAllResources();
         DestroyVulkan();
     }

@@ -2917,6 +2917,42 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("AR.5 exactly one of two abutting views claims the shared pixel", claims == 1);
 }
 
+// ============================================================================
+// Section AS — the uniform arena's allocation rule.
+// ============================================================================
+//
+// A dynamic offset handed to vkCmdBindDescriptorSets must be a multiple of the device's
+// minUniformBufferOffsetAlignment. BumpSlot is what enforces that, and it already had Section AD —
+// but AD tests it against a VERTEX stride, where the alignment happens to equal the element size.
+// A uniform block's size and its required alignment are unrelated numbers, which is the case that
+// can be got wrong without AD noticing.
+{
+    // A 176-byte block (the lab's Frame) at 256-byte alignment: every slice must start on 256.
+    var slot = new BumpSlot(4096);
+    slot.TryAlloc(176, 256, out var a);
+    slot.TryAlloc(176, 256, out var b);
+    slot.TryAlloc(176, 256, out var c);
+    t.ExpectClose("AS.1 first block starts at zero", a, 0);
+    t.ExpectTrue("AS.1 every offset is a multiple of the alignment",
+        a % 256 == 0 && b % 256 == 0 && c % 256 == 0);
+    t.ExpectTrue("AS.1 and they do not overlap", b >= a + 176 && c >= b + 176);
+
+    // The alignment can be SMALLER than the block, which is the common case (16 on this machine).
+    // Packing must still not overlap — an alignment is a floor on the start, not on the stride.
+    var tight = new BumpSlot(4096);
+    tight.TryAlloc(176, 16, out var t0);
+    tight.TryAlloc(176, 16, out var t1);
+    t.ExpectTrue("AS.2 a sub-block alignment still packs without overlap", t1 >= t0 + 176);
+    t.ExpectTrue("AS.2 and still lands on the alignment", t1 % 16 == 0);
+
+    // Exhaustion must fail rather than hand back an offset past the end — the arena turns this
+    // into a named exception, and a silently wrapped offset would be memory corruption instead.
+    var small = new BumpSlot(256);
+    small.TryAlloc(176, 256, out _);
+    t.ExpectTrue("AS.3 a second 256-aligned block does not fit in 256 bytes",
+        !small.TryAlloc(176, 256, out _));
+}
+
 t.PrintSummary();
 return t.FailedCount;
 

@@ -67,23 +67,6 @@ public sealed class LabRenderer : IDisposable
     private ShaderProgramHandle skinnedProgram;
     private ShaderProgramHandle skinnedShadowProgram;
 
-    // <b>The viewport's own programs, from the SAME SPIR-V, and the reason is not obvious.</b>
-    // A program owns one per-frame uniform buffer per frame slot. Two PASSES that share a program
-    // therefore share that buffer — and every host write happens while commands are recorded, while
-    // the GPU reads at execution, so the last uViewProjection written wins for every draw in the
-    // frame. Two cameras sharing lab.lit's program rendered both pictures through whichever was
-    // recorded second.
-    //
-    // That is the hazard TranslateDrawIndexed names in as many words ("two draws sharing a program
-    // but writing different uniforms will race"), and it is invisible to anything that looks at one
-    // target: both pictures were internally consistent and both were the same camera.
-    //
-    // A second program is the fix the engine's shape allows today. Per-pass UBO instances or
-    // dynamic offsets are the real one, and that is engine work with no second consumer yet.
-    private ShaderProgramHandle viewportProgram;
-    private ShaderProgramHandle viewportSkinnedProgram;
-    private PipelineHandle viewportLitPipeline;
-    private PipelineHandle viewportSkinnedPipeline;
     private PipelineHandle litPipeline;
     private PipelineHandle shadowPipeline;
     private PipelineHandle presentPipeline;
@@ -198,9 +181,16 @@ public sealed class LabRenderer : IDisposable
             .Shader(litInterface)
             .Handle;
 
-        // Same shader interface as the lit pass and the same Read edge on the shadow map — the
-        // viewport is the lit pass pointed somewhere else, which is exactly what makes it a view
-        // rather than a second renderer.
+        // Same shader interface as the lit pass, the same Read edge on the shadow map, and the same
+        // PIPELINES — the viewport is the lit pass pointed somewhere else, which is exactly what
+        // makes it a view rather than a second renderer.
+        //
+        // <b>It needed its own programs until the engine grew dynamic uniform offsets.</b> A program
+        // used to own one uniform buffer per frame slot, so two passes sharing one shared the buffer
+        // and the last uViewProjection written won for both — two cameras, one picture. The fix was
+        // a duplicate program; the real fix was per-draw uniform storage, and now that it exists the
+        // duplicate is gone. Two render passes whose attachments match are render-pass compatible,
+        // so one pipeline serves both.
         viewportPass = graph.GraphicsPass("lab.viewport")
             .Target(viewportColourTarget, LoadOp.Clear, StoreOp.Store)
             .Depth(viewportDepthTarget, LoadOp.Clear, StoreOp.Store)
@@ -227,10 +217,7 @@ public sealed class LabRenderer : IDisposable
             Spv("lab_skinned.vert"), Spv("lab_lit.frag"), skinnedInterface, "lab.skinned");
         skinnedShadowProgram = vk.CreateShaderProgramFromSpv(
             Spv("lab_skinned_shadow.vert"), Spv("lab_shadow.frag"), skinnedShadowInterface, "lab.skinned.shadow");
-        viewportProgram = vk.CreateShaderProgramFromSpv(
-            Spv("lab_lit.vert"), Spv("lab_lit.frag"), litInterface, "lab.viewport");
-        viewportSkinnedProgram = vk.CreateShaderProgramFromSpv(
-            Spv("lab_skinned.vert"), Spv("lab_lit.frag"), skinnedInterface, "lab.viewport.skinned");
+
 
         shadowPipeline = vk.CreatePipeline(new PipelineDescription(
             shadowProgram,
@@ -278,27 +265,6 @@ public sealed class LabRenderer : IDisposable
         // FullscreenPass.Layout, not a vertex format: lab_present.vert builds its triangle from
         // gl_VertexIndex and declares no inputs at all, so any attribute here is a promise the shader
         // does not keep — and the validation layers said so on every run.
-        // Against the viewport's own programs, so the second camera gets its own Frame UBO. The
-        // render target could have been shared — the passes are format-compatible — but the UNIFORM
-        // buffer could not, and that is the thing a pipeline carries along with it.
-        viewportLitPipeline = vk.CreatePipeline(new PipelineDescription(
-            viewportProgram,
-            VertexPosition3NormalTexture.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.LessEqualWrite,
-            RasterizerState.NoCulling,
-            new[] { BlendState.Disabled },
-            RenderTarget: graph.GetPassSurface(viewportPass)), "lab.viewport.lit");
-
-        viewportSkinnedPipeline = vk.CreatePipeline(new PipelineDescription(
-            viewportSkinnedProgram,
-            VertexPosition3NormalTextureSkin4Tangent.Layout,
-            PrimitiveTopology.Triangles,
-            DepthState.LessEqualWrite,
-            RasterizerState.BackFaceCulling,
-            new[] { BlendState.Disabled },
-            RenderTarget: graph.GetPassSurface(viewportPass)), "lab.viewport.skinned");
-
         presentPipeline = vk.CreatePipeline(new PipelineDescription(
             presentProgram,
             FullscreenPass.Layout,
@@ -447,13 +413,13 @@ public sealed class LabRenderer : IDisposable
 
                 foreach (var item in scene.Objects)
                 {
-                    DrawObject(scope, item, viewportLitPipeline, uniforms, textures);
+                    DrawObject(scope, item, litPipeline, uniforms, textures);
                 }
 
                 DrawModelParts(
-                    scope, model, modelTransform, viewportLitPipeline, uniforms, textures, casterOnly: false);
+                    scope, model, modelTransform, litPipeline, uniforms, textures, casterOnly: false);
                 DrawRigParts(
-                    scope, rig, rigInstances, viewportSkinnedPipeline, uniforms, textures, casterOnly: false);
+                    scope, rig, rigInstances, skinnedPipeline, uniforms, textures, casterOnly: false);
             });
         }
 
@@ -696,15 +662,11 @@ public sealed class LabRenderer : IDisposable
         device.DestroyPipeline(presentPipeline);
         device.DestroyPipeline(skinnedPipeline);
         device.DestroyPipeline(skinnedShadowPipeline);
-        device.DestroyPipeline(viewportLitPipeline);
-        device.DestroyPipeline(viewportSkinnedPipeline);
         device.DestroyShaderProgram(litProgram);
         device.DestroyShaderProgram(shadowProgram);
         device.DestroyShaderProgram(presentProgram);
         device.DestroyShaderProgram(skinnedProgram);
         device.DestroyShaderProgram(skinnedShadowProgram);
-        device.DestroyShaderProgram(viewportProgram);
-        device.DestroyShaderProgram(viewportSkinnedProgram);
         device.DestroyVertexBuffer(cubeVertices);
         device.DestroyIndexBuffer(cubeIndices);
         device.DestroyVertexBuffer(groundVertices);

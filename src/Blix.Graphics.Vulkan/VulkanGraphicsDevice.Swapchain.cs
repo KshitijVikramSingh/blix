@@ -113,6 +113,7 @@ public sealed partial class VulkanGraphicsDevice
         CreateGpuTimingPool();
         CreateTransientDescriptorPools();
         CreateTransientArena();
+        CreateUniformArena();
     }
 
     private unsafe void CreateDepthBuffer()
@@ -804,6 +805,10 @@ public sealed partial class VulkanGraphicsDevice
         // newly-current slot (GPU-complete) so next frame's AllocVertices starts
         // clean. Same race-free reasoning as the indirect ring.
         AdvanceArenaSlot();
+
+        // The uniform ring shares the vertex ring's slot index, so it must be rewound AFTER the
+        // advance — same slot, same GPU-completeness argument.
+        ResetUniformArenaSlot();
         AdvanceTextureUploadSlot();
         return defaultPasses > 0;
     }
@@ -1094,6 +1099,17 @@ public sealed partial class VulkanGraphicsDevice
 
     // Per-frame record of what each uniform member was written with, and by which pass. Only
     // populated under validation — see NoteUniformWrite for why this exists at all.
+    // Per-frame dynamic-uniform state: the CPU shadow of each block, and where that block's bytes
+    // currently live in the arena. Both cleared per frame.
+    private readonly Dictionary<(string Program, int Set, int Binding), byte[]> uniformShadows = new();
+    private readonly Dictionary<(string Program, int Set, int Binding), (Silk.NET.Vulkan.Buffer Buffer, uint Offset, byte[] Bytes)> uniformUploaded = new();
+    private readonly List<(int Set, int Binding)> uniformTouched = new();
+
+    // Scratch for one set's dynamic offsets. A set with more than this many dynamic uniform blocks
+    // does not exist in this tree (the busiest has one), and the array is per-set rather than
+    // per-frame so its size is a property of a shader, not of a scene.
+    private readonly uint[] dynamicOffsetScratch = new uint[8];
+
     private readonly Dictionary<(string Program, int Set, int Binding, int Offset), byte[]> uniformWritesThisFrame = new();
     private readonly Dictionary<(string Program, int Set, int Binding, int Offset), string> uniformWriteOwners = new();
     private string currentPassName = "<none>";
@@ -1192,10 +1208,29 @@ public sealed partial class VulkanGraphicsDevice
         uniformMappedPtrs.Clear();
         uniformMappedBuffers.Clear();
 
+        // Which (set, binding) blocks this draw touched, so the dynamic ones can be uploaded once
+        // at the end rather than per member.
+        uniformTouched.Clear();
+
         foreach (var u in uniforms)
         {
             if (!FindBufferMember(prog, u.Name, out var setIdx, out var binding, out var member)) continue;
-            var buf = prog.Sets[setIdx]!.BuffersPerBinding[binding][frameSlot];
+            var slot = prog.Sets[setIdx]!;
+
+            // ── The dynamic path: sets 0-1, program-owned blocks ────────────
+            // Written into a CPU shadow, uploaded to a fresh arena slice at the end of the draw.
+            // The shadow persists across draws in a frame, so a draw that writes only SOME members
+            // keeps the rest — which is the behaviour the program-owned buffer had, minus the
+            // aliasing.
+            if (FindDynamicSlot(slot, binding) is { } dynamicSlot)
+            {
+                var shadow = ShadowFor(prog, setIdx, binding, dynamicSlot.BlockLayout!.TotalSize);
+                WriteUniformValue(shadow.AsSpan(member.Offset, member.Size), u.Value);
+                uniformTouched.Add((setIdx, binding));
+                continue;
+            }
+
+            var buf = slot.BuffersPerBinding[binding][frameSlot];
             if (!uniformMappedPtrs.TryGetValue((setIdx, binding), out var ptr))
             {
                 void* raw;
@@ -1207,16 +1242,66 @@ public sealed partial class VulkanGraphicsDevice
                 uniformMappedBuffers.Add(buf);
             }
             var dst = new Span<byte>((void*)ptr, (int)buf.Size);
-            var slice = dst.Slice(member.Offset, member.Size);
-            WriteUniformValue(slice, u.Value);
-            if (detectUniformConflicts) NoteUniformWrite(prog, setIdx, binding, member, u.Name, slice);
+            var memberSlice = dst.Slice(member.Offset, member.Size);
+            WriteUniformValue(memberSlice, u.Value);
+
+            // Only the STATIC path can still alias — a dynamic slot gets its own slice per distinct
+            // value, so two draws disagreeing there is now correct rather than a fault.
+            if (detectUniformConflicts) NoteUniformWrite(prog, setIdx, binding, member, u.Name, memberSlice);
         }
 
         foreach (var buf in uniformMappedBuffers) Vk.UnmapMemory(Device, buf.Memory);
+
+        // <b>One slice per DISTINCT block, not per draw.</b> The common shape is a per-pass block
+        // handed to every draw in the pass; re-uploading it hundreds of times would burn the arena
+        // for nothing. A memcmp against what is already up there turns that into one allocation.
+        foreach (var (setIdx, binding) in uniformTouched)
+        {
+            var key = (prog.Name, setIdx, binding);
+            var shadow = uniformShadows[key];
+            if (uniformUploaded.TryGetValue(key, out var live) && live.Bytes.AsSpan().SequenceEqual(shadow))
+            {
+                continue;
+            }
+
+            var (buffer, offset) = AllocUniformBlock(shadow, $"{prog.Name}.set{setIdx}.binding{binding}");
+            uniformUploaded[key] = (buffer, offset, shadow.AsSpan().ToArray());
+        }
+    }
+
+    // The declared slot at this binding, if its uniforms are arena-allocated. Null for a static
+    // slot (a material set, or a storage buffer).
+    private static DescriptorSetSlot? FindDynamicSlot(VkShaderSetResources set, int binding)
+    {
+        foreach (var s in set.Slots)
+        {
+            if (s.Binding != binding) continue;
+            return IsDynamicUniformSlot(set.Set, s) ? s : null;
+        }
+
+        return null;
+    }
+
+    // The CPU-side copy of a dynamic block, kept for the frame. Zeroed on first use, which is also
+    // what the program-owned buffer effectively gave: its contents were per frame SLOT, so anything
+    // written once and not re-written was already wrong on every other slot.
+    private byte[] ShadowFor(VkShaderProgramEntry prog, int setIdx, int binding, int size)
+    {
+        var key = (prog.Name, setIdx, binding);
+        if (uniformShadows.TryGetValue(key, out var existing) && existing.Length == size) return existing;
+        var made = new byte[size];
+        uniformShadows[key] = made;
+        return made;
     }
 
     private void BeginUniformConflictFrame()
     {
+        // <b>Cleared every frame regardless of the detector.</b> The shadows and slices are the
+        // dynamic path's working state, not diagnostics: a slice from last frame points into a ring
+        // slot that is about to be rewound.
+        uniformShadows.Clear();
+        uniformUploaded.Clear();
+
         if (!detectUniformConflicts) return;
         uniformWritesThisFrame.Clear();
         uniformWriteOwners.Clear();
@@ -1265,10 +1350,11 @@ public sealed partial class VulkanGraphicsDevice
             throw new InvalidOperationException(
                 $"Uniform '{name}' on program '{prog.Name}' (set {setIdx}, binding {binding}) was " +
                 $"written with two different values in one frame — first by {was}, then again here. " +
-                $"A program owns ONE uniform buffer per frame slot, so both draws will read the " +
-                $"second value and the first picture will be silently wrong.\n" +
-                $"Fix it by giving the second consumer its own shader program, or by moving the " +
-                $"value into push constants (copied per draw, up to 128 bytes). See " +
+                $"This set's buffers are owned by the PROGRAM, one per frame slot — so both draws " +
+                $"will read the second value and the first picture will be silently wrong.\n" +
+                $"Sets 0-1 are per-draw (uniform arena + dynamic offsets) and do not have this " +
+                $"problem; this is a material-owned or storage-buffer slot. Move the value to a " +
+                $"set 0-1 uniform, to push constants, or give the consumer its own program. See " +
                 $"docs/conventions.md §2.");
         }
 
@@ -1316,9 +1402,54 @@ public sealed partial class VulkanGraphicsDevice
             var ds = AllocateTransientSet(frameSlot, sr.Layout);
             var writeIdx = 0;
 
-            foreach (var slot in sr.Slots)
+            // <b>Dynamic offsets, in ASCENDING BINDING ORDER.</b> Vulkan does not label them: it
+            // consumes the array in the order the set's dynamic descriptors appear by binding
+            // number. Handing them over in declaration order instead would compile, validate and
+            // silently swap two blocks between bindings.
+            var dynamicCount = 0;
+
+            foreach (var slot in sr.Slots.OrderBy(x => x.Binding))
             {
                 if (slot.BlockLayout is not { } block) continue;
+
+                if (IsDynamicUniformSlot(setIdx, slot))
+                {
+                    // The descriptor names the arena buffer and the block's SIZE; the dynamic offset
+                    // supplied at bind time says which slice. A draw that wrote nothing this frame
+                    // reuses whatever the last writer left, which is the behaviour the program-owned
+                    // buffer had — minus the aliasing, because a differing write gets its own slice.
+                    var key = (prog.Name, setIdx, slot.Binding);
+                    if (!uniformUploaded.TryGetValue(key, out var live))
+                    {
+                        // Nothing has written this block this frame. Upload the zeroed shadow so the
+                        // descriptor points somewhere real rather than at a stale ring slot.
+                        var zeroed = ShadowFor(prog, setIdx, slot.Binding, block.TotalSize);
+                        var fresh = AllocUniformBlock(zeroed, $"{prog.Name}.set{setIdx}.binding{slot.Binding}");
+                        live = (fresh.Buffer, fresh.Offset, zeroed.AsSpan().ToArray());
+                        uniformUploaded[key] = live;
+                    }
+
+                    bufInfos[writeIdx] = new DescriptorBufferInfo
+                    {
+                        Buffer = live.Buffer,
+                        Offset = 0,
+                        Range = (ulong)block.TotalSize,
+                    };
+                    writes[writeIdx] = new WriteDescriptorSet
+                    {
+                        SType = StructureType.WriteDescriptorSet,
+                        DstSet = ds,
+                        DstBinding = (uint)slot.Binding,
+                        DstArrayElement = 0,
+                        DescriptorType = DescriptorType.UniformBufferDynamic,
+                        DescriptorCount = 1,
+                        PBufferInfo = &bufInfos[writeIdx],
+                    };
+                    dynamicOffsetScratch[dynamicCount++] = live.Offset;
+                    writeIdx++;
+                    continue;
+                }
+
                 if (!sr.BuffersPerBinding.TryGetValue(slot.Binding, out var buffers)) continue;
                 var buf = buffers[frameSlot];
                 bufInfos[writeIdx] = new DescriptorBufferInfo
@@ -1382,15 +1513,18 @@ public sealed partial class VulkanGraphicsDevice
                 Vk.UpdateDescriptorSets(Device, (uint)writeIdx, writes, 0, default(CopyDescriptorSet*));
             }
 
-            Vk.CmdBindDescriptorSets(
-                cmd,
-                bindPoint,
-                pipeLayout,
-                firstSet: (uint)setIdx,
-                descriptorSetCount: 1,
-                &ds,
-                dynamicOffsetCount: 0,
-                pDynamicOffsets: null);
+            fixed (uint* offsets = dynamicOffsetScratch)
+            {
+                Vk.CmdBindDescriptorSets(
+                    cmd,
+                    bindPoint,
+                    pipeLayout,
+                    firstSet: (uint)setIdx,
+                    descriptorSetCount: 1,
+                    &ds,
+                    dynamicOffsetCount: (uint)dynamicCount,
+                    pDynamicOffsets: dynamicCount > 0 ? offsets : null);
+            }
         }
     }
 

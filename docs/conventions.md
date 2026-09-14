@@ -94,21 +94,24 @@ travel, palette-vs-joint, strip, direction-aware finish, palette stride) ·
 - **Gotcha:** the hand-built *projection* matrices (`CreatePerspectiveVulkan`,
   the orthographics) are authored directly in shader-space (column form). Don't
   pattern-match off them when reasoning about *model* matrices.
-- **A `ShaderUniform` is per-PROGRAM-per-frame, never per-draw.** Its value lands
-  in a buffer the *program* owns, indexed by frame slot — so two draws in a frame
-  that share a program and write different values for the same member collide,
-  and because writes happen at record time while the GPU reads at execute, the
-  **last writer wins for both**. Not a race: deterministic aliasing, producing a
-  picture that is internally consistent and wrong.
-  - Anything that varies **per draw or per pass** goes in **push constants**
-    (copied per draw, up to the guaranteed 128 bytes). Every renderer here already
-    did this — Sponza's three cascade passes pass their view-projection as push
-    bytes — but it was never written down, and the two places that broke it broke
-    within an hour of each other.
-  - A block too large for push constants needs its **own program** per consumer.
+- **A `ShaderUniform` on sets 0–1 is per-DRAW.** Its block is bump-allocated from
+  a per-frame uniform arena and bound with a **dynamic offset**, so two draws in a
+  frame — or two passes sharing one program — may hold different values. A draw
+  that writes nothing reuses the last writer's slice; a draw whose bytes are
+  unchanged reuses it too, so the common "one per-pass block, handed to every
+  draw" shape costs one allocation, not one per draw.
+  - This was **not** true until the uniform arena landed. A program owned one
+    buffer per frame slot, so the last writer won for every draw in the frame —
+    deterministic aliasing, producing a picture internally consistent and wrong.
+    It cost two bugs in one session and no instrument saw either.
+  - **Sets 2–3 are still per-program-per-frame.** Materials own their buffers
+    through `MaterialBindings`, which is already per-consumer and cannot alias;
+    making them dynamic would put an offset at ~33 call sites for no gain.
   - Under `BLIX_VK_VALIDATE=1` the device **throws** when two draws disagree about
-    a uniform member in one frame, naming both passes. Two draws writing the *same*
-    value is normal and does not fire.
+    a uniform member *on the static path*, naming both passes. Two draws writing
+    the same value is normal and does not fire.
+  - Push constants remain the right home for small per-draw payloads (copied at
+    record time, up to the guaranteed 128 bytes) — they need no descriptor at all.
 - **Vulkan is the sole backend.** There is no cross-backend parity promise; new
   rendering capability is allowed to be Vulkan-shaped. The binding model *can be
   derived* — SPIR-V reflection → `ShaderInterface` (`spirv-cross --reflect` →
