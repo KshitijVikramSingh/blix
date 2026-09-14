@@ -291,6 +291,43 @@ overlapped (single-pass is already a documented limit of the engine's response l
 **Lab-local.** `CollisionResponse.RemoveNormalComponent` is the deflection primitive and
 already exists; the *loop* is policy until something else wants it.
 
+### Status — R-D is in
+
+`CharacterMotor` in the lab: ground probe, slope limit, step up and down, slide, and a fall that
+does not deflect. Every number is a slider in the viewer rather than a constant. `BodyResolver`
+grows a `Deflect` seam so the caller says what a contact MEANS while the resolver keeps the loop.
+
+**Rest is exact, and by construction rather than tolerance.** A body on a walkable slope does not
+move a micrometre in ten seconds, because **gravity is resolved with a STOP rather than a slide**.
+A fall deflected along a surface is downhill motion applied every frame for ever; that is the
+micro-slide, and it is not a small number to be tuned away — a body at rest is at rest because
+nothing moved it.
+
+**Four things found by running it, three of them mine:**
+
+1. **"Blocked" cannot be read from what is left over.** A wall deflection leaves exactly zero
+   remaining motion, so the first step-up never fired and a body walked into every flight in the
+   room and stopped. It is measured as ground not covered along the intended direction, and the
+   retry is the whole original motion from a lifted position.
+2. **A capsule must land its AXIS on the tread.** Stepping forward by one frame's 5.8 cm leaves a
+   0.35 m body balanced on the step's edge, where the contact normal reads 56.6° on a flat tread and
+   is rejected as unstandable — correctly, since it would slide straight back off. The step reaches
+   a radius instead, which costs a small hop onto each tread.
+3. **A tread must be deeper than the body is wide.** The room's stairs had 0.35 m treads and the
+   body a 0.35 m radius, so a capsule landing on a tread was already touching the next riser and
+   *no* step attempt could succeed. That is a property of the pair, not of either; the treads are
+   0.7 m now, and games build stairs deeper than buildings do for this exact reason.
+4. **The slope limit and the step rule are load-bearing together.** With no step allowance the
+   flights become walls — because a lip shorter than the body's radius is met on its top EDGE, where
+   the normal tilts upward and an ordinary slide would carry the body over it. What stops that is the
+   slope limit clamping the upward component away, precisely so "walk up anything with a corner" is
+   not a way around it. The step rule then grants the exception.
+
+**The controls** change the RULE against fixed geometry: raise the limit past 60° and the sliding
+body stands still; remove the step allowance and the same flight stops it dead; raise the step
+allowance above the ledge and the same ledge is climbed. The first attempt at the step control was
+ill-posed (a 0.25 m allowance against a 0.30 m riser) and the room's own geometry defeated it.
+
 **R-D — rest, and the numbers only a lab can find.** Slope limit, step up and step down,
 ledge behaviour, and the classic: a body on a slope below the limit must come to **actual
 rest**, not micro-slide forever. These are policy — the engine says it holds no opinion —

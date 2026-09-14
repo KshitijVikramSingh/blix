@@ -58,23 +58,16 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     private bool orbiting;
     private bool panning;
 
-    // ── The body, and the loop that moves it ────────────────────────────────
-    // <b>The lab owns the policy; the resolver owns the sliding.</b> How fast a body walks, how hard
-    // it falls and whether it can jump are decisions a game makes — BodyResolver is told a motion and
-    // reports where that motion got to. What is deliberately absent here is a GROUND STATE: nothing
-    // asks "am I standing", nothing limits a slope, nothing steps up. Those are stage R-D, and
-    // guessing them now would bake them into the thing that is supposed to find them.
-    private readonly BodyResolver resolver = new();
-    private Vector3 bodyFeet = Blix.Labs.Character.Room.SpawnPoint;
-    private const float BodyRadius = 0.35f;
-    private const float BodyHeight = 1.8f;
-    private float walkSpeed = 3.5f;
-    private float fallSpeed = 6f;
+    // ── The body ────────────────────────────────────────────────────────────
+    // <b>This owns the input and nothing else.</b> Where the body ends up is BodyResolver's, and
+    // what it does about ground, slopes and steps is CharacterMotor's — and every number behind
+    // that is on the panel, because the numbers are what a lab is for and one that hard-codes them
+    // can only confirm the guess it was built with.
+    private readonly CharacterMotor motor = new();
     private bool bodyEnabled = true;
     // On by default: since R-C the body IS the subject, and a lab that opens looking at empty floor
     // makes you find its subject before you can use it.
     private bool followBody = true;
-    private MoveResult lastMove;
     private readonly HashSet<Key> held = new();
 
     private int selected = -1;
@@ -93,6 +86,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         this.host = host;
+        motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
         var vk = (VulkanGraphicsDevice)graphicsDevice;
         renderer.Load(vk, Path.Combine(AppContext.BaseDirectory, "Shaders"), room);
 
@@ -104,22 +98,12 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     {
         renderer.SlopeTint = slopeTint;
         if (bodyEnabled) MoveBody((float)time.Delta);
-        if (followBody) camera.Target = bodyFeet + new Vector3(0f, 0.9f, 0f);
+        if (followBody) camera.Target = motor.Feet + new Vector3(0f, 0.9f, 0f);
     }
 
-    /// <summary>One step of the lab's own movement policy, resolved against the room.</summary>
-    /// <remarks>
-    /// Camera-relative input, because a body driven in world axes is unplayable the moment the
-    /// camera turns — and an instrument nobody can steer is one nobody points at the interesting
-    /// corner. The fall is a constant rate rather than an acceleration: R-C is about whether the
-    /// deflection is right, and a body that accelerates makes every frame a different experiment.
-    /// </remarks>
+    /// <summary>Gather the frame's intent and hand it to the motor.</summary>
     private void MoveBody(float deltaSeconds)
     {
-        var dt = MathF.Min(deltaSeconds, 1f / 30f);   // a hitch must not teleport the body through a wall
-
-        // The camera's basis, not a second derivation of it — see RoomCamera.GroundBasis for what
-        // having two of these cost.
         var (forward, right) = camera.GroundBasis;
 
         var wish = Vector3.Zero;
@@ -127,21 +111,12 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         if (held.Contains(Key.S)) wish -= forward;
         if (held.Contains(Key.D)) wish += right;
         if (held.Contains(Key.A)) wish -= right;
-        if (wish.LengthSquared() > 1e-6f) wish = Vector3.Normalize(wish);
 
-        var motion = (wish * walkSpeed * dt) + new Vector3(0f, -fallSpeed * dt, 0f);
+        motor.Step(wish, deltaSeconds, room.Collider);
 
-        var body = new Capsule(
-            bodyFeet + new Vector3(0f, BodyRadius, 0f),
-            bodyFeet + new Vector3(0f, BodyHeight - BodyRadius, 0f),
-            BodyRadius);
-
-        lastMove = resolver.Move(body, motion, room.Collider);
-        bodyFeet += lastMove.Position;
-
-        // A body that leaves the room has found a hole, and chasing it off into the void is a worse
-        // way to learn that than being put back where it can be watched.
-        if (bodyFeet.Y < -4f) bodyFeet = Blix.Labs.Character.Room.SpawnPoint;
+        // A body that leaves the room has found a hole, and chasing it into the void is a worse way
+        // to learn that than being put back where it can be watched.
+        if (motor.Feet.Y < -4f) motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
     }
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
@@ -159,9 +134,9 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         debug.Values.Value("camera", camera.Target);
         debug.Stats.Gauge("triangles", room.TriangleCount);
         debug.Stats.Gauge("solids", room.SolidStarts.Count);
-        debug.Values.Value("body", bodyFeet);
-        debug.Stats.Gauge("deflections", lastMove.Iterations);
-        debug.Stats.Gauge("depenetrations", lastMove.Depenetrations);
+        debug.Values.Value("body", motor.Feet);
+        debug.Values.Value("ground", motor.Grounded ? motor.GroundSlopeDegrees : -1f);
+        debug.Stats.Gauge("contacts", motor.Contacts.Count);
 
         var (logicalW, logicalH) = host?.LogicalSize ?? (debug.Frame.Width, debug.Frame.Height);
         var declaration = debug.Draw.Declare(
@@ -202,17 +177,28 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
             // gap the arithmetic believes in.
             if (bodyEnabled)
             {
+                // Blue standing, amber when the ground is too steep to stand on and it is sliding.
+                // A slope limit is a number in a panel until it changes the colour of the thing you
+                // are driving.
+                var body = motor.Body;
                 debug.Draw.Capsule(
-                    "body",
-                    bodyFeet + new Vector3(0f, BodyRadius, 0f),
-                    bodyFeet + new Vector3(0f, BodyHeight - BodyRadius, 0f),
-                    BodyRadius,
-                    new GraphicsColor(0.35f, 0.85f, 1f, 1f));
+                    "body", body.PointA, body.PointB, body.Radius,
+                    motor.Standing
+                        ? new GraphicsColor(0.35f, 0.85f, 1f, 1f)
+                        : new GraphicsColor(1f, 0.7f, 0.2f, 1f));
+
+                // The ground normal, which is what every slope decision actually reads.
+                if (motor.Grounded)
+                {
+                    debug.Draw.Arrow(
+                        "ground-normal", motor.Feet, motor.Feet + (motor.GroundNormal * 0.8f),
+                        new GraphicsColor(0.5f, 1f, 0.6f, 1f));
+                }
 
                 // Each contact the move ran into, with the normal it deflected along. An arrow
                 // pointing INTO a surface is the fault this whole stage can produce, and it is the
                 // one thing a position alone never shows.
-                foreach (var contact in lastMove.Contacts)
+                foreach (var contact in motor.Contacts)
                 {
                     debug.Draw.Arrow(
                         "contact", contact.Point, contact.Point + (contact.Normal * 0.6f),
@@ -221,7 +207,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
 
                 // Where it has been. A trail is the cheapest way to see a body juddering against a
                 // surface it should be sliding along, which is invisible frame by frame.
-                debug.Draw.Trail("body-path", bodyFeet, new GraphicsColor(0.4f, 1f, 0.7f, 1f), 4f);
+                debug.Draw.Trail("body-path", motor.Feet, new GraphicsColor(0.4f, 1f, 0.7f, 1f), 4f);
             }
 
             // Where a body starts. Drawn now because the spawn point is
@@ -269,27 +255,32 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
             ImGui.SameLine();
             ImGui.Checkbox("camera follows", ref followBody);
 
-            ImGui.SliderFloat("walk m/s", ref walkSpeed, 0.5f, 12f);
-            ImGui.SliderFloat("fall m/s", ref fallSpeed, 0f, 30f);
+            // EVERY ONE OF THESE IS A DECISION, which is why none of them is a constant. The ramp
+            // fan exists so the slope limit can be dragged across 30, 45 and 60 and the consequence
+            // watched rather than argued about.
+            var walk = motor.WalkSpeed;
+            if (ImGui.SliderFloat("walk m/s", ref walk, 0.5f, 12f)) motor.WalkSpeed = walk;
 
-            var iterations = resolver.MaxIterations;
-            if (ImGui.SliderInt("deflections", ref iterations, 0, 8)) resolver.MaxIterations = iterations;
+            var gravity = motor.Gravity;
+            if (ImGui.SliderFloat("gravity m/s2", ref gravity, 0f, 40f)) motor.Gravity = gravity;
 
-            // THE NEGATIVE CONTROL, on a checkbox. With it off the body stops dead at whatever it
-            // first touches instead of sliding along it — which is what every invariant in the probe
-            // is measured against, and worth being able to feel rather than only read.
-            var deflecting = resolver.Enabled;
-            if (ImGui.Checkbox("deflect (off = stop dead)", ref deflecting)) resolver.Enabled = deflecting;
+            var limit = motor.SlopeLimitDegrees;
+            if (ImGui.SliderFloat("slope limit deg", ref limit, 0f, 89f)) motor.SlopeLimitDegrees = limit;
 
-            ImGui.Text($"feet {bodyFeet.X:0.00}, {bodyFeet.Y:0.00}, {bodyFeet.Z:0.00}");
-            ImGui.Text($"contacts {lastMove.Contacts?.Count ?? 0} · deflections {lastMove.Iterations} · pushes {lastMove.Depenetrations}");
+            var step = motor.StepHeight;
+            if (ImGui.SliderFloat("step height m", ref step, 0f, 1.5f)) motor.StepHeight = step;
 
-            // Residual is the interesting number: motion the resolver could not spend is a body
-            // wedged somewhere, and it reads as sticking long before it reads as a bug.
-            var residual = lastMove.Residual.Length();
-            ImGui.Text(residual > 1e-5f ? $"residual {residual:0.0000} m — wedged" : "residual none");
+            var slide = motor.SlideSpeed;
+            if (ImGui.SliderFloat("slide m/s", ref slide, 0f, 15f)) motor.SlideSpeed = slide;
 
-            if (ImGui.Button("respawn")) bodyFeet = Blix.Labs.Character.Room.SpawnPoint;
+            ImGui.Separator();
+            ImGui.Text($"feet {motor.Feet.X:0.00}, {motor.Feet.Y:0.00}, {motor.Feet.Z:0.00}");
+            ImGui.Text(motor.Grounded
+                ? $"{(motor.Standing ? "standing" : "SLIDING")} on {motor.GroundSlopeDegrees:0.#} deg"
+                : "airborne");
+            ImGui.Text($"contacts {motor.Contacts.Count}{(motor.SteppedUp ? " - stepped up" : string.Empty)}");
+
+            if (ImGui.Button("respawn")) motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
         }
 
         if (ImGui.CollapsingHeader("parts", ImGuiTreeNodeFlags.DefaultOpen))
@@ -370,7 +361,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         if (key == Key.G) showGrid = !showGrid;
         if (key == Key.T) slopeTint = slopeTint > 0.5f ? 0f : 1f;
         if (key == Key.F) followBody = !followBody;
-        if (key == Key.R) bodyFeet = Blix.Labs.Character.Room.SpawnPoint;
+        if (key == Key.R) motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
     }
 
     public void OnKeyUp(Key key) => held.Remove(key);

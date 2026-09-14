@@ -82,6 +82,23 @@ public sealed class BodyResolver
     /// </remarks>
     public bool Enabled { get; set; } = true;
 
+    /// <summary>
+    /// What a contact means: given the motion left and the surface's normal, what is still owed.
+    /// </summary>
+    /// <remarks>
+    /// <b>The seam between the loop and the policy.</b> Null is the plain slide —
+    /// <see cref="CollisionResponse.RemoveNormalComponent"/>, the engine's own primitive. A caller
+    /// that knows more substitutes its own: <see cref="CharacterMotor"/> passes one that treats a
+    /// surface too steep to stand on as a wall, so gravity cannot deflect a body UP a cliff, and a
+    /// different one for the fall, because gravity that slides is a body that never comes to rest.
+    /// <para>
+    /// It lives here rather than the policies living here: the loop is the same loop whatever a
+    /// contact means, and putting a slope limit in the resolver would make the stage that finds the
+    /// right limit unable to change it without changing this.
+    /// </para>
+    /// </remarks>
+    public Func<Vector3, Vector3, Vector3>? Deflect { get; set; }
+
     private readonly List<MoveContact> contacts = new();
 
     /// <summary>Slide <paramref name="body"/> by <paramref name="motion"/> through <paramref name="world"/>.</summary>
@@ -145,7 +162,9 @@ public sealed class BodyResolver
             // surface, keep the rest. A body walking into a wall at an angle keeps the along-wall
             // half of its speed, which is the difference between sliding past a doorframe and
             // sticking to it.
-            remaining = CollisionResponse.RemoveNormalComponent(remaining, hit.Normal);
+            remaining = Deflect is { } policy
+                ? policy(remaining, hit.Normal)
+                : CollisionResponse.RemoveNormalComponent(remaining, hit.Normal);
             contacts.Add(new MoveContact(hit.Point, hit.Normal, hit.Time, before, remaining));
         }
 

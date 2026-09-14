@@ -283,8 +283,8 @@ foreach (var part in room.Parts)
         ("the ledge's top", 3.5f, -5f, 1.2f),
         ("the beam's top", 4f, 2.4f, 1.6f),
         ("the dome's apex", 11f, -4f, 3f),
-        ("the top tread of the 0.30 m flight", -5.1f, 2f, 1.8f),
-        ("the top tread of the 0.10 m flight", -5.1f, -6f, 0.6f),
+        ("the top tread of the 0.30 m flight", -7.05f, 2f, 1.8f),
+        ("the top tread of the 0.10 m flight", -7.05f, -6f, 0.6f),
     })
     {
         var body = new Capsule(new(x, dropFrom, z), new(x, dropFrom + 1f, z), radius);
@@ -453,6 +453,153 @@ foreach (var part in room.Parts)
         var b = resolver.Move(body, new Vector3(1f, 0f, 1f), room.Collider);
         t.Expect("the resolver is deterministic", a.Position == b.Position,
             $"{a.Position} then {b.Position}");
+    }
+}
+
+// ── Standing, sliding, and climbing ─────────────────────────────────────────────────────────────
+//
+// The numbers only a lab can find, and the checks that say whether they were found or guessed. Each
+// one is paired with the SAME situation under a changed RULE rather than changed geometry — if a
+// body stops sliding when the slope limit moves, the limit is what stopped it.
+{
+    // Drop a body at (x, z) and let it settle before asking it anything.
+    static CharacterMotor Settle(TriangleMesh3D world, float x, float z, Action<CharacterMotor>? tune = null)
+    {
+        var motor = new CharacterMotor();
+        tune?.Invoke(motor);
+        motor.Teleport(new Vector3(x, 4f, z));
+
+        // Until it lands, not for a fixed time. A body dropped on ground too steep to stand on
+        // starts sliding the moment it touches, so settling it for four seconds settles it at the
+        // BOTTOM of the ramp — where it is standing on the floor, which is the opposite of what the
+        // steep cases mean to ask about.
+        for (var i = 0; i < 600 && !motor.Grounded; i++) motor.Step(Vector3.Zero, 1f / 60f, world);
+        return motor;
+    }
+
+    // The ramp fan's feet are at x = -8.5 and it rises toward -X, so x = -9.75 is the middle of
+    // every ramp's face.
+    const float rampMiddle = -9.75f;
+
+    // ── At rest on ground it can stand on, and STILL at rest ten seconds later ───────────────────
+    foreach (var (name, z, expectedSlope) in new[] { ("15°", -3.6f, 15f), ("30°", 0f, 30f), ("45°", 3.6f, 45f) })
+    {
+        var motor = Settle(room.Collider, rampMiddle, z);
+
+        t.Expect($"a body settles onto the {name} ramp and calls it standable",
+            motor.Standing && MathF.Abs(motor.GroundSlopeDegrees - expectedSlope) < 0.5f,
+            $"grounded {motor.Grounded}, slope {motor.GroundSlopeDegrees:0.##}°");
+
+        var settled = motor.Feet;
+        for (var i = 0; i < 600; i++) motor.Step(Vector3.Zero, 1f / 60f, room.Collider);
+        var drift = (motor.Feet - settled).Length();
+
+        // EXACTLY at rest, not nearly. A micro-slide is not a tolerance to be tuned down — it is
+        // gravity being deflected along the surface every frame, and the fix is that gravity does
+        // not deflect at all. A body that creeps 1 mm a second has crossed the room in an hour.
+        t.Expect($"and has not moved a millimetre after ten more seconds on the {name} ramp",
+            drift < 1e-3f, $"drifted {drift * 1000f:0.###} mm");
+    }
+
+    // ── Too steep to stand on, and it goes DOWNHILL ──────────────────────────────────────────────
+    {
+        var motor = Settle(room.Collider, rampMiddle, 7.2f);
+        t.Expect("a body on the 60° ramp is grounded but not standing",
+            motor.Grounded && !motor.Standing, $"grounded {motor.Grounded}, standing {motor.Standing}");
+
+        var from = motor.Feet;
+        for (var i = 0; i < 30; i++) motor.Step(Vector3.Zero, 1f / 60f, room.Collider);
+        var travelled = motor.Feet - from;
+
+        t.Expect("and slides", travelled.Length() > 0.05f, $"moved {travelled.Length():0.0000} m");
+
+        // Downhill on a ramp rising toward -X means +X, and downward.
+        t.Expect("downhill rather than in some other direction",
+            travelled.X > 0f && travelled.Y < 0f, $"went {travelled}");
+
+        // THE CONTROL. Same ramp, same body, same gravity — a slope limit that permits 60° and the
+        // slide stops. If it did not, the limit is not what was holding anything up.
+        var permissive = Settle(room.Collider, rampMiddle, 7.2f, m => m.SlopeLimitDegrees = 89f);
+        var held = permissive.Feet;
+        for (var i = 0; i < 30; i++) permissive.Step(Vector3.Zero, 1f / 60f, room.Collider);
+        t.Expect("the control: raise the limit past 60° and the same body stands still",
+            (permissive.Feet - held).Length() < 1e-3f,
+            $"still moved {(permissive.Feet - held).Length():0.0000} m");
+    }
+
+    // ── Climbing a step, and refusing one ────────────────────────────────────────────────────────
+    //
+    // Each flight is met from the open (east) side and climbed westward. Walking is the only way to
+    // test this: a step rule that is never blocked is never exercised.
+    // The HIGHEST it got, not where it ended up. The first version returned the final height and
+    // reported that nothing climbed anything — the body was crossing all six treads, walking off the
+    // top of the flight, and coming back down to the floor well inside the step budget. A trace
+    // showed it at 0.589 m on a 0.60 m tread at step 60 and back at 0.005 by step 80. "Did it climb"
+    // is a question about the journey.
+    static float WalkWest(TriangleMesh3D world, CharacterMotor motor, int steps)
+    {
+        var highest = motor.Feet.Y;
+        for (var i = 0; i < steps; i++)
+        {
+            motor.Step(-Vector3.UnitX, 1f / 60f, world);
+            highest = MathF.Max(highest, motor.Feet.Y);
+        }
+        return highest;
+    }
+
+    foreach (var (name, z, topTread) in new[] { ("0.10 m", -6f, 0.6f), ("0.20 m", -2f, 1.2f), ("0.30 m", 2f, 1.8f) })
+    {
+        var motor = Settle(room.Collider, -2.2f, z);
+        var top = WalkWest(room.Collider, motor, 120);
+
+        t.Expect($"a body walks up the {name} flight", top > topTread - 0.05f,
+            $"reached {top:0.000} of {topTread:0.000}");
+    }
+
+    {
+        // THE CONTROL FOR THE RULE ITSELF: no step allowance, same stairs, and the flight becomes a
+        // wall. Worth stating because it is not obvious that it would be — a capsule is round
+        // underneath, and a lip shorter than its radius is met on its top EDGE rather than its face,
+        // where the contact normal tilts upward and an ordinary slide would carry the body over it.
+        // What stops that is the slope limit: an edge that steep is deflected as a wall, with its
+        // upward component clamped away, precisely so that "walk up anything with a corner on it"
+        // is not a way around the limit. So the two rules are load-bearing together — the limit
+        // refuses the climb and the step rule grants the exception.
+        var noStepRule = Settle(room.Collider, -2.2f, 2f, m => m.StepHeight = 0f);
+        t.Expect("the control: with no step allowance the same flight stops the body dead",
+            WalkWest(room.Collider, noStepRule, 120) < 0.35f, "it climbed without a step rule");
+    }
+
+    {
+        // SO THE RULE IS TESTED WHERE ROLLING CANNOT HELP: a 1.2 m face, four times the radius.
+        // Raised allowance climbs it, default refuses it — same geometry, changed rule.
+        var vaulter = Settle(room.Collider, 8.5f, -6.5f, m => m.StepHeight = 1.5f);
+        t.Expect("the control: a step allowance taller than the ledge climbs it",
+            WalkWest(room.Collider, vaulter, 180) > 1.1f, "even 1.5 m of step allowance did not");
+    }
+
+    {
+        // And at the default allowance a ledge is not a step. 1.2 m against 0.35.
+        // Clear of the dome, which reaches further than its footprint suggests: a capsule at
+        // (8, -5) is 3.16 m from the dome's axis and its 0.35 m radius puts its flank inside the
+        // 3 m cap, so it settled a metre up the dome's side and the test measured that instead.
+        var motor = Settle(room.Collider, 8.5f, -6.5f);
+        var reached = WalkWest(room.Collider, motor, 180);
+        t.Expect("a body cannot climb the 1.2 m ledge by walking at it",
+            reached < 0.35f, $"reached {reached:0.000}");
+    }
+
+    // ── Walking off a ledge falls; walking down stairs does not ─────────────────────────────────
+    {
+        // Standing on the ledge, walking east off its edge: there is nothing within a step, so the
+        // snap finds nothing and gravity takes over.
+        var motor = Settle(room.Collider, 3.5f, -5f);
+        t.Expect("a body settles on the ledge", motor.Standing && motor.Feet.Y > 1.1f,
+            $"at y {motor.Feet.Y:0.000}");
+
+        for (var i = 0; i < 180; i++) motor.Step(Vector3.UnitX, 1f / 60f, room.Collider);
+        t.Expect("and walking off its edge drops it to the floor", motor.Feet.Y < 0.05f,
+            $"ended at y {motor.Feet.Y:0.000}");
     }
 }
 

@@ -175,7 +175,15 @@ public sealed class Room
                 // shorter than the last — so every tread below the top stays exposed instead of being
                 // buried under the step above it. Climbs west, like the ramps, and is met from the
                 // open hall.
-                const float tread = 0.35f;
+                //
+                // <b>0.7 m deep, which is DOUBLE a real stair's tread and the point of the number.</b>
+                // The first version used 0.35 — the same as the body's radius — and no body could
+                // climb it: a capsule that lands its axis on such a tread is already touching the
+                // next riser, so every step attempt ended perched on an edge at 75° and was rejected
+                // as unstandable. A tread has to be deeper than the body is wide or there is nowhere
+                // on it to stand, and that is a property of the pair rather than of either. Games
+                // build stairs deeper than buildings do for exactly this reason.
+                const float tread = 0.7f;
                 const float foot = -3.2f;
                 for (var step = 1; step <= 6; step++)
                 {
