@@ -696,6 +696,10 @@ public sealed partial class VulkanGraphicsDevice
             if (!canTimePass) startIndex = endIndex = uint.MaxValue;
             else nextQueryIndex += 2;
 
+            // Named so a uniform-conflict message can say WHICH two passes disagreed, which is the
+            // difference between "something wrote this twice" and "lab.lit and lab.viewport did".
+            currentPassName = pass.Name;
+
             Vk.CmdBeginRenderPass(f.CommandBuffer, in rpBegin, SubpassContents.Inline);
             // Timestamps INSIDE the pass — MoltenVK resolves counter samplers
             // at draw boundaries; ColorAttachmentOutputBit pairs naturally.
@@ -1088,6 +1092,12 @@ public sealed partial class VulkanGraphicsDevice
     private readonly Dictionary<(int Set, int Binding), nint> uniformMappedPtrs = new();
     private readonly List<VkBufferEntry> uniformMappedBuffers = new();
 
+    // Per-frame record of what each uniform member was written with, and by which pass. Only
+    // populated under validation — see NoteUniformWrite for why this exists at all.
+    private readonly Dictionary<(string Program, int Set, int Binding, int Offset), byte[]> uniformWritesThisFrame = new();
+    private readonly Dictionary<(string Program, int Set, int Binding, int Offset), string> uniformWriteOwners = new();
+    private string currentPassName = "<none>";
+
     // Record a compute pass: a single dispatch with the storage-image barriers
     // it needs. Runs outside any render pass (the pass loop ends the prior
     // render pass before this). Storage-image targets are transitioned to
@@ -1197,10 +1207,73 @@ public sealed partial class VulkanGraphicsDevice
                 uniformMappedBuffers.Add(buf);
             }
             var dst = new Span<byte>((void*)ptr, (int)buf.Size);
-            WriteUniformValue(dst.Slice(member.Offset, member.Size), u.Value);
+            var slice = dst.Slice(member.Offset, member.Size);
+            WriteUniformValue(slice, u.Value);
+            if (detectUniformConflicts) NoteUniformWrite(prog, setIdx, binding, member, u.Name, slice);
         }
 
         foreach (var buf in uniformMappedBuffers) Vk.UnmapMemory(Device, buf.Memory);
+    }
+
+    private void BeginUniformConflictFrame()
+    {
+        if (!detectUniformConflicts) return;
+        uniformWritesThisFrame.Clear();
+        uniformWriteOwners.Clear();
+    }
+
+    /// <summary>
+    /// Throws when two draws in one frame write DIFFERENT values to the same uniform member.
+    /// </summary>
+    /// <remarks>
+    /// <b>The invariant this makes loud.</b> A ShaderUniform lands in a buffer owned by the PROGRAM,
+    /// indexed by frame slot — so its granularity is (program, frame), not (program, draw). Every
+    /// host write happens while commands are recorded and the GPU reads at execution, so when two
+    /// draws disagree the LAST one wins for both. It is not a race; it is deterministic aliasing,
+    /// and it produces a picture that is internally consistent and wrong.
+    /// <para>
+    /// It cost two bugs in one session to learn this — a second camera whose pass shared the lit
+    /// program, then every debug view sharing the line drawer's — and not one existing instrument
+    /// saw either. Validation was clean, draw counts were right, and a capture of either target
+    /// alone looked exactly as it should, because both targets held the same camera and neither
+    /// picture could contradict the other. A person looking at the screen found both.
+    /// </para>
+    /// <para>
+    /// <b>Why throwing rather than warning.</b> The device already refuses a push payload whose
+    /// length disagrees with the shader; this is the same class of fault — a binding-model promise
+    /// the caller is not keeping — and the same answer. Two draws writing the SAME value is normal
+    /// and common (a per-pass matrix, drawn many times), so this cannot fire on correct code.
+    /// </para>
+    /// <para>
+    /// Gated on the validation flag: free in an ordinary run, and on wherever the layers are.
+    /// </para>
+    /// </remarks>
+    private void NoteUniformWrite(
+        VkShaderProgramEntry prog,
+        int setIdx,
+        int binding,
+        UniformBlockMember member,
+        string name,
+        ReadOnlySpan<byte> written)
+    {
+        var key = (prog.Name, setIdx, binding, member.Offset);
+        if (uniformWritesThisFrame.TryGetValue(key, out var previous))
+        {
+            if (previous.AsSpan().SequenceEqual(written)) return;
+
+            var was = uniformWriteOwners.TryGetValue(key, out var owner) ? owner : "an earlier draw";
+            throw new InvalidOperationException(
+                $"Uniform '{name}' on program '{prog.Name}' (set {setIdx}, binding {binding}) was " +
+                $"written with two different values in one frame — first by {was}, then again here. " +
+                $"A program owns ONE uniform buffer per frame slot, so both draws will read the " +
+                $"second value and the first picture will be silently wrong.\n" +
+                $"Fix it by giving the second consumer its own shader program, or by moving the " +
+                $"value into push constants (copied per draw, up to 128 bytes). See " +
+                $"docs/conventions.md §2.");
+        }
+
+        uniformWritesThisFrame[key] = written.ToArray();
+        uniformWriteOwners[key] = $"pass '{currentPassName}'";
     }
 
     // Allocates a fresh transient set per non-material declared set, batches

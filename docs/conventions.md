@@ -94,6 +94,21 @@ travel, palette-vs-joint, strip, direction-aware finish, palette stride) ·
 - **Gotcha:** the hand-built *projection* matrices (`CreatePerspectiveVulkan`,
   the orthographics) are authored directly in shader-space (column form). Don't
   pattern-match off them when reasoning about *model* matrices.
+- **A `ShaderUniform` is per-PROGRAM-per-frame, never per-draw.** Its value lands
+  in a buffer the *program* owns, indexed by frame slot — so two draws in a frame
+  that share a program and write different values for the same member collide,
+  and because writes happen at record time while the GPU reads at execute, the
+  **last writer wins for both**. Not a race: deterministic aliasing, producing a
+  picture that is internally consistent and wrong.
+  - Anything that varies **per draw or per pass** goes in **push constants**
+    (copied per draw, up to the guaranteed 128 bytes). Every renderer here already
+    did this — Sponza's three cascade passes pass their view-projection as push
+    bytes — but it was never written down, and the two places that broke it broke
+    within an hour of each other.
+  - A block too large for push constants needs its **own program** per consumer.
+  - Under `BLIX_VK_VALIDATE=1` the device **throws** when two draws disagree about
+    a uniform member in one frame, naming both passes. Two draws writing the *same*
+    value is normal and does not fire.
 - **Vulkan is the sole backend.** There is no cross-backend parity promise; new
   rendering capability is allowed to be Vulkan-shaped. The binding model *can be
   derived* — SPIR-V reflection → `ShaderInterface` (`spirv-cross --reflect` →

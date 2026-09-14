@@ -160,6 +160,10 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
         ThrowIfDisposed();
         currentGpuFrameNumber++;
 
+        // The uniform-conflict record is per FRAME, because the aliasing it catches is per frame:
+        // one program's uniform buffer, written by every draw that recorded this time round.
+        BeginUniformConflictFrame();
+
         // Drive the Vulkan per-frame flow: wait/acquire/record/submit/present.
         // Returns false if swapchain needed recreating (this frame produced
         // nothing visible) — the metadata packet below still describes the
