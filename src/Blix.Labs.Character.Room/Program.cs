@@ -66,6 +66,19 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     private readonly CharacterMotor motor = new();
     private float bodyFacing;
     private Vector3 lastTravel;
+
+    /// <summary>
+    /// Whether the body turns toward where it is GOING or toward where the camera is LOOKING.
+    /// </summary>
+    /// <remarks>
+    /// <b>Two different games, and the lab should not have to pick one.</b> Facing the travel
+    /// direction is the Zelda/Mario model: press right and the character turns right. Facing the
+    /// camera is the over-the-shoulder shooter model: the character always points away from the
+    /// camera and strafes sideways. They are identical while walking straight forward and disagree
+    /// completely the moment you strafe — which is exactly when "the body's facing looks wrong
+    /// relative to the camera" gets reported, and neither answer is a bug.
+    /// </remarks>
+    private bool faceCamera = true;
     // Fast enough that the drawn facing keeps up with a camera being swung about: at 12 rad/s a
     // steady drag left the arrow a constant 15-20° behind where the body was actually going, which
     // reads as the facing being wrong rather than as lag. The slider stays, because dialling it
@@ -125,7 +138,13 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         // nothing it computes depends on a facing — but a camera behind the shoulder needs one, and
         // so will every clip the Motion lab plays. Turned toward the walk rather than snapped, at a
         // rate that is a lab dial like everything else here.
-        if (wish.LengthSquared() > 1e-6f)
+        // Facing the camera is a standing decision, not a moving one — a shooter's character points
+        // away from the camera whether or not it is walking.
+        if (faceCamera)
+        {
+            bodyFacing = camera.Yaw;
+        }
+        else if (wish.LengthSquared() > 1e-6f)
         {
             var wanted = MathF.Atan2(-wish.X, -wish.Z);
             var delta = MathF.IEEERemainder(wanted - bodyFacing, MathF.Tau);
@@ -325,8 +344,17 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         if (ImGui.CollapsingHeader("body", ImGuiTreeNodeFlags.DefaultOpen))
         {
             ImGui.Checkbox("body", ref bodyEnabled);
-            ImGui.SameLine();
-            ImGui.SliderFloat("turn rad/s", ref turnRate, 1f, 30f);
+
+            // WHICH WAY THE BODY POINTS is a game's decision, not a physics one — and the two models
+            // are indistinguishable until you strafe.
+            ImGui.Checkbox("face the camera (off = face travel)", ref faceCamera);
+            if (!faceCamera) ImGui.SliderFloat("turn rad/s", ref turnRate, 1f, 30f);
+
+            // The number behind "the facing looks wrong": how far the body is turned from where the
+            // camera looks. Facing the camera holds it at 0; facing travel swings it to 90 on a pure
+            // strafe, which is the model working rather than failing.
+            var offset = MathF.IEEERemainder(bodyFacing - camera.Yaw, MathF.Tau) * 180f / MathF.PI;
+            ImGui.Text($"facing is {offset:+0.0;-0.0;0.0} deg from the camera");
 
             // EVERY ONE OF THESE IS A DECISION, which is why none of them is a constant. The ramp
             // fan exists so the slope limit can be dragged across 30, 45 and 60 and the consequence
