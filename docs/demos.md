@@ -472,7 +472,16 @@ tools/run-lab-capture.sh --frames 10 --out shot.png
 tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --time 0.35 --xray --out walk.png
 tools/run-lab-capture.sh --rig .../Rogue.glb --clip Dodge_Forward --advance 2.0 --drive-root --out travel.png
 tools/run-lab-capture.sh --rig .../Rogue.glb --instances 3 --viewport --xray --out panel.png
+tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --frames-out 24 --out walk.png
 ```
+
+`--frames-out N` writes **N files**, one per fixed 17 ms step — `walk.000.png`, `walk.001.png`,
+zero-padded so they sort in play order. A still frame answers *"is this pose right"*; it cannot
+answer *"is this motion right"*, which is a question about how one frame follows another. Nothing
+reads a wall clock, so the Nth file of a run is the Nth file of every run with those arguments —
+which is what makes a regression diffable rather than arguable. Every instance advances on its own
+clock, so a sequence of a three-body scene shows three bodies moving, not one moving and two
+frozen.
 
 `--viewport` reads back the **panel camera's** target rather than the main scene's, and aims the
 debug geometry at it too. The panel is an ImGui window and this tool draws no UI, so without it

@@ -18,6 +18,9 @@
 #     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Dodge_Forward --advance 2.0 --drive-root
 # --instances N captures N bodies at N clip phases from one draw.
 #     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --instances 3 --xray
+# --viewport reads back the PANEL camera's target instead of the main scene's.
+# --frames-out N writes N files, one per fixed 17ms step (out.000.png, out.001.png, ...).
+#     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --frames-out 24 --out walk.png
 # --lockstep is the negative control: every body on one clip at one instant, which must come
 # back as exactly ONE pose fingerprint. Varied must come back as N.
 set -euo pipefail

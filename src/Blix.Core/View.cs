@@ -67,6 +67,21 @@ public readonly record struct ViewId(int Id)
 /// would mean two different things and the two would drift — the near-synonym fault this codebase has paid
 /// for more than once. Rendering and input take their ids from this same table when they need them.
 /// <para>
+/// <b>You do not need a table to have a view.</b> The one instance in this engine lives on
+/// <c>DebugState</c>, which reads as "views are a diagnostics concept" and is not what it means. An id is
+/// only ever used to GROUP things across frames — which debug commands belong to which picture, and which
+/// trail remembers which points. Everything else about a view is in the <see cref="ViewDeclaration"/>
+/// value: <c>ViewPicking.RayThrough</c> takes one and never looks at the id, and
+/// <c>Blix.Test.Graphics</c> Section AR picks through declarations built by hand with no table in sight.
+/// </para>
+/// <para>
+/// So: build a declaration yourself to point at a picture; intern a name when you want the engine to
+/// route debug geometry into it. That split was settled by the toolchain lab's embedded viewport — two
+/// stages of a real consumer, and the table's location caused it no friction at all. What DID bite was
+/// timing (a view is declared before UI layout and consumed during it), which moving the table would not
+/// have helped. See <c>plan-blix-view.md</c> stage D.
+/// </para>
+/// <para>
 /// Not thread-safe, and not meant to be: views are declared from the frame that draws them.
 /// </para>
 /// </remarks>

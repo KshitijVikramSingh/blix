@@ -106,16 +106,33 @@ Section **AR** pins what a full-window view could never exercise: an offset rect
 far edge, two abutting views claiming a shared pixel exactly once, and the Retina invariant —
 the same logical pointer must give the same ray when the physical extent doubles.
 
-## Stage D — who owns a view
+## Stage D — who owns a view — **DECIDED: nothing moves**
 
-Only after B and C. The question is not "should the table move out of `DebugState`" — it is
-*what the substrate needs*, and two stages of a real consumer is the evidence. Candidates: a
-host-owned `ViewTable`, a view registry beside the graphics device, or leaving it where it is
-and admitting that views are a diagnostics concept with one game-facing accessor.
+The evidence from B and C, which is what this stage was waiting for:
 
-**Resist moving it before then.** The table is currently reachable and correct; relocating it on
-principle would be a refactor with no consumer behind it, which is the thing conventions §4
-warns about.
+- `ViewTable` has **one** instance in the whole engine, on `DebugState`. Every reader of
+  `.Views` is diagnostics or the runtime's debug-line routing.
+- A `ViewId` is used for exactly one thing: **grouping across frames** — which debug commands
+  belong to which picture, and which trail remembers which points. Nothing else reads it.
+- `ViewPicking.RayThrough` takes a `ViewDeclaration` and never touches the table or the id.
+  Section **AR** picks through declarations built by hand, with no table anywhere.
+- Two stages of a real consumer — an embedded viewport that renders, orbits, picks, draws gizmos
+  and captures — and **the table's location caused no friction at all**.
+
+So the premise was wrong. It looked like "views are diagnostics-owned"; it is actually "a view is
+a `Blix.Core` value anyone can build, and interning its name is how you ask diagnostics to route
+geometry into it". Moving the table would have been a refactor with nothing behind it, and would
+have fixed none of what B and C actually hit.
+
+**What did bite is timing, not ownership.** A view is declared in `Debug(ctx)` and consumed during
+UI layout, so the application stashes the declaration in a field between the two. Relocating the
+table does nothing about that. The real options are the one-frame lag (taken, in stage B) or
+splitting layout from submission — and that is a question about who owns the frame, which wants
+its own consumer asking.
+
+The change this stage produced is therefore a **sentence, not a refactor**: `ViewTable`'s own
+documentation now says you do not need one to have a view, and why. Conventions §4's worked
+examples say the honest answer to "should this be extracted/moved" is often no; this is one.
 
 ## Stage E — `PhysicalViewport` in the backend
 

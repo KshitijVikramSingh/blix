@@ -77,6 +77,13 @@ public static class Program
         // kind of "verified by eye, once" the capture tool exists to replace.
         var viewport = args.Contains("--viewport");
 
+        // <b>--frames-out N writes N PNGs, one per fixed step.</b> A still frame answers "is this
+        // pose right"; it cannot answer "is this MOTION right", which is a question about how one
+        // frame follows another. A sequence at a fixed timestep is the smallest thing that can —
+        // and because the step is fixed and nothing reads a clock, two runs of the same arguments
+        // produce the same files, which is what makes a regression diffable rather than arguable.
+        var sequence = int.TryParse(ArgValue(args, "--frames-out"), out var sq) ? Math.Max(0, sq) : 0;
+
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — lab capture",
@@ -88,9 +95,17 @@ public static class Program
         // supplies a default for when nobody said.
         if (options.ExitAfterFrames <= 0) options = options with { ExitAfterFrames = 8 };
 
+        // A sequence needs a frame per file plus the two the read-back lag costs. Raising the bound
+        // here rather than making the caller compute it: "--frames-out 30" should write thirty
+        // files, not twenty-eight and a silent truncation.
+        if (sequence > 0 && options.ExitAfterFrames < sequence + 4)
+        {
+            options = options with { ExitAfterFrames = sequence + 4 };
+        }
+
         var loop = new CaptureLoop(
             output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray, advance,
-            driveRoot, instances, lockstep, viewport);
+            driveRoot, instances, lockstep, viewport, sequence);
         using (var window = new Window(loop, options))
         {
             window.Run();
@@ -151,6 +166,14 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly List<Pose> instancePoses = new();
     private readonly bool lockstep;
     private readonly bool viewport;
+    private readonly int sequence;
+    private int sequenceWritten;
+    private readonly List<ClipPlayer> sequencePlayers = new();
+
+    // The same 17 ms --advance uses, and off-rate for the same reason: the Rogue's clips are
+    // authored at 30 fps, so a sixtieth divides most of them and every loop seam would land exactly
+    // on a frame boundary — the one case a wrap bug cannot show itself in.
+    private const double SequenceStep = 0.017;
     private readonly List<string> instanceClips = new();
     private float rowWidth;
 
@@ -166,9 +189,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         bool driveRoot = false,
         int instances = 1,
         bool lockstep = false,
-        bool viewport = false)
+        bool viewport = false,
+        int sequence = 0)
     {
         this.viewport = viewport;
+        this.sequence = sequence;
         instanceCount = Math.Clamp(instances, 1, LabRig.MaxInstances);
         this.lockstep = lockstep;
         this.xray = xray;
@@ -272,6 +297,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             if (i == 0)
             {
                 pose.CopyFrom(player.Pose);
+                sequencePlayers.Add(player);
             }
             else if (lockstep)
             {
@@ -280,6 +306,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                 echo.ScrubTo(player.Time);
                 if (driveRoot) RootMotion.Strip(rig.Skeleton, echo.Pose, echo.RestPose);
                 pose.CopyFrom(echo.Pose);
+                sequencePlayers.Add(echo);
             }
             else
             {
@@ -292,6 +319,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                 echo.ScrubTo(i / (double)instanceCount * echo.Duration);
                 if (driveRoot) RootMotion.Strip(rig.Skeleton, echo.Pose, echo.RestPose);
                 pose.CopyFrom(echo.Pose);
+                sequencePlayers.Add(echo);
             }
 
             var placement = Matrix4x4.CreateTranslation((i - half) * spacing, 0f, 0f) * rigTransform;
@@ -423,7 +451,80 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // happens on the NEXT OnRender, when the target holds a finished picture rather
         // than one being built.
         frames++;
+
+        // <b>A sequence advances the clip between frames; a single capture never does.</b> Same
+        // fixed step --advance uses, for the same reason: nothing here reads a wall clock, so the
+        // Nth file of a run is the Nth file of every run with those arguments.
+        //
+        // It starts at frame 2 rather than at captureOnFrame. That field means "the LAST frame of
+        // the run", which is the right moment for one picture and the wrong one for many — deriving
+        // the sequence's start from it wrote nothing at all, because the run ended on the frame the
+        // first file was due.
+        if (sequence > 0 && sequenceWritten < sequence)
+        {
+            // Read back the frame BEFORE this one — the target holds a finished picture only after
+            // its pass has executed, which is the same reason a single capture fires one frame late.
+            if (frames >= 2) CaptureSequenceFrame();
+            AdvanceSequence();
+            return;
+        }
+
         if (frames == captureOnFrame + 1 && Written is null) Capture();
+    }
+
+    // One step of the sequence: move every clock on by the fixed step and re-pose every instance.
+    // The placements are rebuilt too, so a driven root moves the body between files.
+    private void AdvanceSequence()
+    {
+        if (rig is null || player is null || palettes is null) return;
+
+        player.Advance(SequenceStep);
+        rootTravel += Vector3.TransformNormal(player.RootDelta.Translation, rig.MeshNodeTransform);
+
+        palettes.Reset();
+        for (var i = 0; i < instancePoses.Count; i++)
+        {
+            var pose = instancePoses[i];
+            if (i == 0)
+            {
+                pose.CopyFrom(player.Pose);
+            }
+            else
+            {
+                // Echoes advance on their own clocks, exactly as they do in the viewer — a sequence
+                // where only the subject moved would show the instancing frozen and read as a bug.
+                sequencePlayers[i].Advance(SequenceStep);
+                pose.CopyFrom(sequencePlayers[i].Pose);
+            }
+
+            if (driveRoot) RootMotion.Strip(rig.Skeleton, pose, player.RestPose);
+            var placement = driveRoot && i == 0
+                ? Matrix4x4.CreateTranslation(rootTravel) * instancePlacements[i]
+                : instancePlacements[i];
+            palettes.Add(rig.Skeleton, pose, rig.MeshNodeTransform * placement);
+        }
+
+        LabRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[0], boneWorlds);
+    }
+
+    private void CaptureSequenceFrame()
+    {
+        var path = SequencePath(sequenceWritten);
+        if (!WriteImage(path)) return;
+        sequenceWritten++;
+        Written ??= path;
+        if (sequenceWritten >= sequence) Console.WriteLine($"wrote {sequenceWritten} frame(s)");
+    }
+
+    // "walk.png" + 3 -> "walk.003.png". Zero-padded so the files sort in play order in every tool
+    // that lists them, which is the only reason a sequence is easier to read than a folder of names.
+    private string SequencePath(int index)
+    {
+        var directory = Path.GetDirectoryName(outputPath);
+        var stem = Path.GetFileNameWithoutExtension(outputPath);
+        var extension = Path.GetExtension(outputPath);
+        var name = $"{stem}.{index:000}{extension}";
+        return string.IsNullOrEmpty(directory) ? name : Path.Combine(directory, name);
     }
 
     public string DebugName => "capture";
@@ -575,6 +676,18 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     private void Capture()
     {
+        if (WriteImage(outputPath)) Written = Path.GetFullPath(outputPath);
+    }
+
+    /// <summary>Reads the target back, tonemaps it, and writes a PNG. False when the read was not usable.</summary>
+    /// <remarks>
+    /// Shared by the single capture and every frame of a sequence, because a sequence whose frames
+    /// were encoded by a second copy of this could disagree with the still — same scene, different
+    /// curve — and the whole value of a sequence is that its frames are comparable with each other
+    /// and with everything else the tool has ever written.
+    /// </remarks>
+    private bool WriteImage(string path)
+    {
         // The viewport target is half the swapchain's size and holds the SECOND camera's picture.
         // Same format as the scene target — deliberately, so both take this one read-back path and
         // the tonemap below applies to either.
@@ -583,7 +696,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         if (format != TextureFormat.Rgba16F)
         {
             Console.Error.WriteLine($"Expected an Rgba16F scene target, got {format}.");
-            return;
+            return false;
         }
 
         var rgba = new byte[width * height * 4];
@@ -607,8 +720,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             rgba[dst + 3] = 255;
         }
 
-        PngWriter.WriteRgba8(outputPath, rgba, width, height);
-        Written = Path.GetFullPath(outputPath);
+        PngWriter.WriteRgba8(path, rgba, width, height);
+        return true;
     }
 
     private static float Aces(float x)

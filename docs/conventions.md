@@ -176,6 +176,16 @@ pose).
   that owns read→cull→draw; demos compose engine primitives and keep their own
   draw groups, pass routing, and policy.
 
+- **A view is a value, not a registration.** `ViewDeclaration` — a camera, a
+  target and two rectangles — is all anything needs to render into a picture or
+  turn a pointer into a ray through it; `ViewPicking.RayThrough` never reads the
+  id. The one `ViewTable` lives on `DebugState` and exists to **group across
+  frames**: which debug commands belong to which picture, which trail remembers
+  which points. Build a declaration to point at a picture; intern a name only to
+  ask diagnostics to route geometry into it. (Settled by the toolchain lab's
+  embedded viewport — two stages of a real consumer, no friction from the
+  table's location. `plan-blix-view.md` §D.)
+
 **Enforced by:** [`architecture.md` §"Library, not framework"](architecture.md)
 · the *Proves / Owns* header block on each `src/Blix.Demos.*/Program.cs` · the
 *Deliberate limits* sections throughout [`blix.md`](blix.md).
